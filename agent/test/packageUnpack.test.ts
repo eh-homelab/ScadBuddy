@@ -93,6 +93,9 @@ describe('a zip', () => {
     expect(await refusal(zip([{ name: 'bomb', data: 'x', deflate: true, claimedSize: 2 ** 31 }]))).toMatch(/larger than/)
     const many = Array.from({ length: UNPACK_MAX_FILES + 1 }, (_, i) => ({ name: `f${i}`, data: 'x' }))
     expect(await refusal(zip(many))).toMatch(/more than/)
+    // Directories count too: an archive of empty directories cannot make one per entry.
+    const dirs = Array.from({ length: UNPACK_MAX_FILES + 1 }, (_, i) => ({ name: `d${i}/` }))
+    expect(await refusal(zip(dirs))).toMatch(/more than/)
   })
 })
 
@@ -122,6 +125,28 @@ describe('a tar', () => {
     expect(await refusal(tar([{ name: 'PaxHeader', type: 'x', data: paxPath('../out.md') }, { name: 'short', data: 'x' }]))).toMatch(
       /leaves the archive/,
     )
+  })
+
+  it('takes a GNU long name, and reads no prefix from a GNU header', async () => {
+    const long = `skills/${'n'.repeat(120)}/SKILL.md`
+    const dest = path.join(dir, 'out')
+    // GNU tar's magic is `ustar  \0`, and bytes 345..500 of its header are not a prefix
+    // (they hold atime, ctime and sparse data).
+    const gnu = { magic: 'ustar  \0', field345: '12345670123\0' }
+    await unpackArchive(tar([{ name: '././@LongLink', type: 'L', data: `${long}\0`, ...gnu }, { name: long.slice(0, 100), data: SKILL, ...gnu }]), dest)
+    expect(await readFile(path.join(dest, long), 'utf8')).toBe(SKILL)
+    const other = path.join(dir, 'other')
+    await unpackArchive(tar([{ name: 'plain.md', data: 'x', ...gnu }]), other)
+    expect(await readFile(path.join(other, 'plain.md'), 'utf8')).toBe('x')
+    // A ustar prefix is still the start of the name.
+    const ustar = path.join(dir, 'ustar')
+    await unpackArchive(tar([{ name: 'name.md', data: 'y', field345: 'package/deep' }]), ustar)
+    expect(await readFile(path.join(ustar, 'package/deep/name.md'), 'utf8')).toBe('y')
+  })
+
+  it('counts directories toward the file cap', async () => {
+    const dirs = Array.from({ length: UNPACK_MAX_FILES + 1 }, (_, i) => ({ name: `d${i}/`, type: '5' }))
+    expect(await refusal(tar(dirs))).toMatch(/more than/)
   })
 
   it('refuses symbolic links, hard links and devices', async () => {

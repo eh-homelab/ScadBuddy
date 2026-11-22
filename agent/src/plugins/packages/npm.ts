@@ -7,8 +7,9 @@ import type { PackageSource } from './source.js'
 // tarball with the registry's version document, `GET <registry>/<name>/<version or tag>`
 // (https://github.com/npm/registry/blob/main/docs/REGISTRY-API.md, "Getting a single
 // version"), and the tarball is checked against the document's `dist.integrity` (SRI,
-// https://www.w3.org/TR/SRI/), or its `dist.shasum` when it has none. A tarball link is
-// fetched as it is. Nothing is installed and no script runs: the tarball is only
+// https://www.w3.org/TR/SRI/), or its `dist.shasum` (SHA-1, hex) when it has none; a
+// document with neither is refused, so no registry tarball is taken unchecked. A tarball
+// link is fetched as it is (its sha256 is the pin either way). Nothing is installed and no script runs: the tarball is only
 // unpacked (unpack.ts), as Claude Code does ("unpacked without running install
 // scripts", https://code.claude.com/docs/en/plugins/marketplace-reference.md).
 
@@ -46,11 +47,14 @@ export async function fetchNpmTarball(
   }
   const dist = (parsed as { dist?: { tarball?: unknown; integrity?: unknown; shasum?: unknown } } | null)?.dist
   if (typeof dist?.tarball !== 'string') throw new PluginError(`the npm registry has no tarball for ${source.url} ${source.ref}`, 502)
+  if (typeof dist.integrity !== 'string' && typeof dist.shasum !== 'string') {
+    throw new PluginError(`the npm registry's document for ${source.url} ${source.ref} has neither an integrity nor a shasum`, 502)
+  }
   const tarball = await download(dist.tarball, { what: 'npm tarball', ...ARCHIVE_LIMITS, signal })
   if (typeof dist.integrity === 'string') {
     if (!integrityMatches(tarball.bytes, dist.integrity)) throw new PluginError('the npm tarball does not match the registry\'s integrity', 502)
-  } else if (typeof dist.shasum === 'string') {
-    if (createHash('sha1').update(tarball.bytes).digest('hex') !== dist.shasum.toLowerCase()) {
+  } else {
+    if (createHash('sha1').update(tarball.bytes).digest('hex') !== String(dist.shasum).toLowerCase()) {
       throw new PluginError('the npm tarball does not match the registry\'s shasum', 502)
     }
   }

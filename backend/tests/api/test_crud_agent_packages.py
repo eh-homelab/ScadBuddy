@@ -361,10 +361,11 @@ OTHER_SHA = hashlib.sha256(OTHER).hexdigest()
 OCTETS = {"content-type": "application/octet-stream"}
 
 
-def _mirror(client: TestClient, agent: dict[str, str], data: bytes) -> str:
+def _mirror(client: TestClient, agent: dict[str, str], data: bytes, name: str = "greeter") -> str:
     sha = hashlib.sha256(data).hexdigest()
-    put = client.put(f"{MIRRORS}/{sha}", content=data, headers={**agent, **OCTETS})
-    assert put.status_code == 204, put.text
+    sent = client.post(f"{MIRRORS}/{name}", content=data, headers={**agent, **OCTETS})
+    assert sent.status_code == 200, sent.text
+    assert sent.json() == {"bytes_sha256": sha}
     return sha
 
 
@@ -397,19 +398,57 @@ def _age_holds(db: Any) -> None:
     )
 
 
-def test_a_mirror_is_kept_by_its_sha256_and_read_back(
+def test_a_mirror_is_read_back_only_by_a_package_that_names_it(
     client: TestClient, agent: dict[str, str], db: Any
 ) -> None:
-    assert client.get(f"{MIRRORS}/{ZIP_SHA}", headers=agent).status_code == 404
-    wrong = client.put(f"{MIRRORS}/{OTHER_SHA}", content=ZIP, headers={**agent, **OCTETS})
-    assert wrong.status_code == 422, wrong.text
     _mirror(client, agent, ZIP)
-    got = client.get(f"{MIRRORS}/{ZIP_SHA}", headers=agent)
-    assert (got.status_code, got.content) == (200, ZIP)
     assert _held(db) == [ZIP_SHA]
+    # Kept, but no package names it yet.
+    unnamed = client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent)
+    assert (unnamed.status_code, unnamed.json()["reason"]) == (404, "mirror-not-found")
+    client.post(BASE, json=_archive(), headers=agent)
+    got = client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent)
+    assert (got.status_code, got.content) == (200, ZIP)
+    # Another package's name, or bytes the package does not name, are not served.
+    assert client.get(f"{MIRRORS}/other/{ZIP_SHA}", headers=agent).status_code == 404
+    _mirror(client, agent, OTHER)
+    assert client.get(f"{MIRRORS}/greeter/{OTHER_SHA}", headers=agent).status_code == 404
+    assert (
+        client.post(f"{MIRRORS}/-bad", content=ZIP, headers={**agent, **OCTETS}).status_code == 422
+    )
     for caller in ("print", "projects"):
-        refused = client.get(f"{MIRRORS}/{ZIP_SHA}", headers=token(client, caller))
-        assert refused.status_code == 403
+        other = token(client, caller)
+        assert client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=other).status_code == 403
+        sent = client.post(f"{MIRRORS}/greeter", content=ZIP, headers={**other, **OCTETS})
+        assert sent.status_code == 403
+    # Gone with the package, though the blob may still be in the store.
+    client.post(f"{BASE}/greeter/delete", headers=agent)
+    assert client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent).status_code == 404
+
+
+def test_a_pending_repin_reads_its_mirror(client: TestClient, agent: dict[str, str]) -> None:
+    _mirror(client, agent, ZIP)
+    client.post(BASE, json=_archive(), headers=agent)
+    client.post(
+        f"{BASE}/greeter/approve",
+        json={"bytes_sha256": ZIP_SHA, "content_hash": H1},
+        headers=agent,
+    )
+    _mirror(client, agent, OTHER)
+    pending = {
+        **_pending(),
+        "ref": "",
+        "fetch_url": "https://files.test/greeter.zip",
+        "fetch_path": "greeter-1.0",
+        "pin_kind": "bytes",
+        "bytes_sha256": OTHER_SHA,
+    }
+    del pending["commit_sha"]
+    staged = client.post(f"{BASE}/greeter/pending", json=pending, headers=agent)
+    assert staged.status_code == 200, staged.text
+    for sha, data in ((ZIP_SHA, ZIP), (OTHER_SHA, OTHER)):
+        got = client.get(f"{MIRRORS}/greeter/{sha}", headers=agent)
+        assert (got.status_code, got.content) == (200, data)
 
 
 def test_a_bytes_pin_is_stored_only_with_its_mirror(

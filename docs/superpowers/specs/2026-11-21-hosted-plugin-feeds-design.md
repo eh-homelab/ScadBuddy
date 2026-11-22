@@ -313,8 +313,12 @@ Pinning non-git sources:
 - `ai_plugin_packages` gets `pin_kind` (`commit`, `bytes` or `version`) and
   `bytes_sha256`.
 - Unpacking: zip and tar only. Refuse symlinks, hard links, absolute paths, `..`, and
-  device files. Use the caps from 6.2 for the unpacked tree, and 256 MiB for the download
-  (Claude Code's limit).
+  device files. Use the caps from 6.2 for the unpacked tree. Cap the download at the
+  unpacked total cap plus 1 MiB (21 MiB), not Claude Code's 256 MiB: an archive
+  compresses its files, so one larger than that cannot unpack within the cap. It fails
+  early, and the agent pod never holds 256 MiB (ruling on #6935's review). An archive
+  that does not compress and is near 20 MiB then fails with the download's message, not
+  the unpacking one.
 
 ### 6.7 Outside plugins in the feed
 

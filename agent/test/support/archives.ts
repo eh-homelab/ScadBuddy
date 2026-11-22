@@ -69,6 +69,10 @@ export type TarEntry = {
   type?: string
   mode?: number
   linkname?: string
+  /** Bytes 257..264: `ustar\0` + `00` (POSIX) by default; GNU tar writes `ustar  \0`. */
+  magic?: string
+  /** Bytes 345..500: a POSIX header's name prefix, or what a GNU header keeps there. */
+  field345?: string
 }
 
 function header(e: TarEntry, size: number): Buffer {
@@ -82,8 +86,8 @@ function header(e: TarEntry, size: number): Buffer {
   block.write('        ', 148, 'ascii')
   block.write(e.type ?? '0', 156, 'ascii')
   if (e.linkname) block.write(e.linkname, 157, 100, 'utf8')
-  block.write('ustar\0', 257, 'ascii')
-  block.write('00', 263, 'ascii')
+  block.write(e.magic ?? 'ustar\x0000', 257, 'ascii')
+  if (e.field345) block.write(e.field345, 345, 155, 'utf8')
   let sum = 0
   for (const b of block) sum += b
   block.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'ascii')

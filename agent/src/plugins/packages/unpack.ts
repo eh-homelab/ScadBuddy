@@ -18,8 +18,11 @@ import { crc32, gunzipSync, inflateRawSync } from 'node:zlib'
 //   - zip: stored or deflated only, not encrypted, no zip64, each entry's size and CRC-32
 //     checked against what it inflates to;
 //   - tar: ustar or GNU headers with valid checksums, a pax `path` or GNU long name
-//     taken as the name, sizes in octal only;
-//   - the caps of a hosted plugin's draft (spec §6.2): `UNPACK_MAX_FILES` files,
+//     taken as the name, the name prefix (bytes 345..500) only in a POSIX ustar header
+//     (magic `ustar\0`, version `00`: a GNU header keeps other fields there), sizes in
+//     octal only;
+//   - the caps of a hosted plugin's draft (spec §6.2): `UNPACK_MAX_FILES` entries
+//     (directories count, so an archive cannot make one directory per header),
 //     `UNPACK_MAX_FILE_BYTES` per file and `UNPACK_MAX_TOTAL_BYTES` in all, checked
 //     before a byte is inflated, so a zip bomb never grows past them.
 //
@@ -48,8 +51,11 @@ export function entryPath(raw: string): string {
 class Caps {
   private files = 0
   private total = 0
-  file(name: string, size: number): void {
+  dir(): void {
     if (++this.files > UNPACK_MAX_FILES) throw new UnpackError(`the archive has more than ${UNPACK_MAX_FILES} files`)
+  }
+  file(name: string, size: number): void {
+    this.dir()
     if (size > UNPACK_MAX_FILE_BYTES) throw new UnpackError(`${name} is larger than ${UNPACK_MAX_FILE_BYTES} bytes`)
     this.total += size
     if (this.total > UNPACK_MAX_TOTAL_BYTES) throw new UnpackError(`the archive unpacks to more than ${UNPACK_MAX_TOTAL_BYTES} bytes`)
@@ -112,6 +118,7 @@ function zipEntries(buf: Buffer): Entry[] {
     const dir = type === S_IFDIR || (type === 0 && (rawName.endsWith('/') || (madeBy === 0 && (external & 0x10) !== 0)))
     const rel = entryPath(rawName)
     if (dir) {
+      caps.dir()
       entries.push({ path: rel, dir: true, executable: false })
       continue
     }
@@ -183,7 +190,8 @@ function tarEntries(buf: Buffer): Entry[] {
     const stored = octal(block, 148, 8, 'a tar header')
     if (stored !== sum) throw new UnpackError('a tar header checksum does not match')
     const flag = String.fromCharCode(block[156]!)
-    const prefix = text(block, 257, 6).startsWith('ustar') ? text(block, 345, 155) : ''
+    const posix = block.subarray(257, 263).toString('latin1') === 'ustar\0' && block.subarray(263, 265).toString('latin1') === '00'
+    const prefix = posix ? text(block, 345, 155) : ''
     const headerName = prefix ? `${prefix}/${text(block, 0, 100)}` : text(block, 0, 100)
     const name = longName ?? headerName
     const size = octal(block, 124, 12, name)
@@ -207,6 +215,7 @@ function tarEntries(buf: Buffer): Entry[] {
     if (flag === '3' || flag === '4' || flag === '6') throw new UnpackError(`${name}: a device or FIFO; a package holds regular files only`)
     const rel = entryPath(name)
     if (flag === '5') {
+      caps.dir()
       entries.push({ path: rel, dir: true, executable: false })
       continue
     }

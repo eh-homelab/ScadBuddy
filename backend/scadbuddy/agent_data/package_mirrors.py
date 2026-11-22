@@ -33,10 +33,10 @@ from scadbuddy.store.content_models import BlobScope
 HOLDER = "plugin_package_mirror"
 #: The one file in a mirror's blob directory.
 BLOB_FILE = "file"
-#: The largest mirror: Claude Code's own limit for an archive download
-#: (https://code.claude.com/docs/en/plugins/host-marketplace.md, "Stay within the
-#: download limits for hosted files": 256 MiB).
-MAX_MIRROR_BYTES = 256 * 1024 * 1024
+#: The largest mirror: the largest file the agent downloads, its ``ARCHIVE_MAX_BYTES``
+#: (``agent/src/plugins/packages/download.ts``: the unpacked cap of 20 MiB plus 1 MiB;
+#: spec 2026-11-21 §6.6).
+MAX_MIRROR_BYTES = 21 * 1024 * 1024
 #: How long a hold no package names is kept: far longer than an install's run (300 s).
 UNNAMED_GRACE = "1 day"
 

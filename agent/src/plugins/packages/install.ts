@@ -378,7 +378,7 @@ export class PackageInstaller {
       const { tree, review } = await this.vetTree(await this.hashed(pkg), pkg, fallbackName)
       const sha = sha256Hex(bytes)
       // Only a package that passed is mirrored: a refused one leaves nothing behind.
-      await mirror.put(sha, bytes, signal)
+      await mirror.put(review.name, sha, bytes, signal)
       const prepared: PreparedPackage = {
         source,
         fetchUrl: target.url,
@@ -696,7 +696,7 @@ export class PackageInstaller {
 
   /** A bytes pin's mirrored file unpacked, its `fetchPath` hashed (and vetted) against the pin, and placed in the cache. */
   private async fromMirror(pin: PackagePin, sha: string, options: { vet?: boolean }): Promise<void> {
-    const bytes = await this.mirror().get(sha)
+    const bytes = await this.mirror().get(pin.name, sha)
     const tmp = await this.tempDir()
     try {
       const unpacked = path.join(tmp, 'unpacked')

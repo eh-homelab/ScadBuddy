@@ -513,7 +513,7 @@ function entryOf(source: PackageSource): string | null {
 }
 
 /** The name a package may have (the table's CHECK): any other is never sent to the API. */
-const PACKAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+export const PACKAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 /** A row as the API answers it: every column, its times as ISO text. */
 type WireRow = Omit<Row, 'approved_at' | 'created_at' | 'updated_at'> & {

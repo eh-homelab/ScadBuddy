@@ -1,3 +1,4 @@
+import { isLoopbackHost } from '../../http/egress.js'
 import { PluginError } from '../registry.js'
 
 // Where a plugin package comes from (issue #297, "Installing a plugin":
@@ -67,9 +68,12 @@ const NPM_REFUSED_HOSTS = new Set(['github.com', 'gist.github.com', 'gitlab.com'
  * A URL: https (http to loopback or a private address is decided by the egress check,
  * `assertEndpointAllowed`), no credentials, no fragment, no `$`; a query only when
  * `query` allows it (never for a repository: git would read it). ssh, git://, file://
- * and `ext::` are refused: nothing would reach them through the egress check.
+ * and `ext::` are refused: nothing would reach them through the egress check. With
+ * `loopbackHttp` (every file ScadBuddy downloads itself: a bare marketplace URL, an
+ * archive, an npm registry or tarball, spec §6.6 "https only"), plain http is taken for a
+ * loopback host only.
  */
-export function normaliseUrl(raw: string, what = 'source url', options: { query?: boolean } = {}): string {
+export function normaliseUrl(raw: string, what = 'source url', options: { query?: boolean; loopbackHttp?: boolean } = {}): string {
   let url: URL
   try {
     url = new URL(raw.trim())
@@ -78,6 +82,9 @@ export function normaliseUrl(raw: string, what = 'source url', options: { query?
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
     throw new PluginError(`${what} must be https (or http to loopback), not ${url.protocol}//`, 400)
+  }
+  if (options.loopbackHttp && url.protocol === 'http:' && !isLoopbackHost(url.hostname)) {
+    throw new PluginError(`${what} must be https (plain http is allowed for loopback only)`, 400)
   }
   if (url.username || url.password) throw new PluginError(`${what} must not carry credentials`, 400)
   if ((url.search && !options.query) || url.hash) {
@@ -150,7 +157,7 @@ export function validateNpmVersion(raw: string | undefined): string {
 
 /** An https tarball link of an npm source, refused where Claude Code refuses it. */
 function npmTarballUrl(raw: string): string {
-  const url = new URL(normaliseUrl(raw, 'npm package link', { query: true }))
+  const url = new URL(normaliseUrl(raw, 'npm package link', { query: true, loopbackHttp: true }))
   const host = url.hostname.toLowerCase()
   if (NPM_REFUSED_HOSTS.has(host) && !(host === 'gitlab.com' && url.pathname.startsWith('/api/v4/'))) {
     throw new PluginError(`a tarball link on ${host} is refused; use a github, url or git-subdir source for a repository`, 400)
@@ -175,14 +182,14 @@ export function npmSource(pkg: string, version?: string, registry?: string): Ext
     throw new PluginError(`npm package "${pkg}" is not a registry package name or an https tarball link`, 400)
   }
   if (inline !== undefined && version !== undefined) throw new PluginError('name the npm version once', 400)
-  const base = normaliseUrl(registry ?? NPM_REGISTRY, 'npm registry').replace(/\/+$/, '')
+  const base = normaliseUrl(registry ?? NPM_REGISTRY, 'npm registry', { loopbackHttp: true }).replace(/\/+$/, '')
   return { kind: 'npm', url: `${base}/${name.replace('/', '%2f')}`, ref: validateNpmVersion(inline ?? version) }
 }
 
 /** An npm source as stored (`url`, `ref`), checked again: a registry package or a tarball link. */
 function storedNpm(url: string, ref: string): Extract<PackageSource, { kind: 'npm' }> {
   if (ref === '') return { kind: 'npm', url: npmTarballUrl(url), ref: '' }
-  const parsed = new URL(normaliseUrl(url, 'npm package'))
+  const parsed = new URL(normaliseUrl(url, 'npm package', { loopbackHttp: true }))
   const slash = parsed.pathname.lastIndexOf('/')
   const name = decodeURIComponent(parsed.pathname.slice(slash + 1))
   const registry = `${parsed.origin}${parsed.pathname.slice(0, slash)}`
@@ -229,14 +236,14 @@ export function validateSource(input: SourceInput): PackageSource {
       if (input.entry === undefined) throw new PluginError('a marketplace source needs the entry to install', 400)
       return {
         kind: 'marketplace-url',
-        url: normaliseUrl(url(), 'marketplace url', { query: true }),
+        url: normaliseUrl(url(), 'marketplace url', { query: true, loopbackHttp: true }),
         ref: '',
         entry: validateEntryName(input.entry),
       }
     case 'archive': {
       only(['sha256', 'ref'])
       if (input.sha256 !== undefined && input.ref !== undefined) throw new PluginError('name the archive sha256 once', 400)
-      return { kind: 'archive', url: normaliseUrl(url(), 'archive url', { query: true }), ref: validateArchiveSha(input.sha256 ?? input.ref) }
+      return { kind: 'archive', url: normaliseUrl(url(), 'archive url', { query: true, loopbackHttp: true }), ref: validateArchiveSha(input.sha256 ?? input.ref) }
     }
     case 'npm':
       if (input.package !== undefined) {

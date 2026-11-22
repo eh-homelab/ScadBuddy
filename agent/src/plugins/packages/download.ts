@@ -2,14 +2,16 @@ import type { LookupAddress } from 'node:dns'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { isIP } from 'node:net'
-import { EgressError, type Resolver, systemResolver } from '../../http/egress.js'
-import { plainAddress } from '../../http/origins.js'
+import { EgressError, isLoopbackHost, type Resolver, systemResolver } from '../../http/egress.js'
+import { isLoopbackPeer, plainAddress } from '../../http/origins.js'
 import { assertEndpointAllowed, PluginError } from '../registry.js'
+import { UNPACK_MAX_TOTAL_BYTES } from './unpack.js'
 
 // Downloading a plugin package's file (#6935, spec 2026-11-21 §6.6): a `marketplace.json`
-// from a bare URL, an `archive` zip, an npm registry document or tarball. EVERY HOP goes
-// through the egress check (`assertEndpointAllowed`: https, or http to a loopback or
-// private address; never a link-local or cloud metadata host), and the connection is
+// from a bare URL, an `archive` zip, an npm registry document or tarball. EVERY HOP is
+// https, or http to loopback only (a loopback host whose addresses are all loopback;
+// spec §6.6 says https only, and loopback is for tests), and goes through the egress
+// check (`assertEndpointAllowed`: never a link-local or cloud metadata host), and the connection is
 // pinned to the addresses that check passed, so a name re-pointed between the check and
 // the connect (DNS rebinding) cannot reach a refused address (as http/egress.ts
 // `egressGetJson`). A redirect is followed only to a URL that passes the same check, at
@@ -18,11 +20,16 @@ import { assertEndpointAllowed, PluginError } from '../registry.js'
 //
 // Claude Code's own limits (https://code.claude.com/docs/en/plugins/host-marketplace.md,
 // "Stay within the download limits for hosted files"): a `marketplace.json` at most
-// 5 MiB in 10 s; an archive at most 256 MiB in 120 s, with at most five redirects.
+// 5 MiB in 10 s; an archive at most 256 MiB in 120 s, with at most five redirects. The
+// archive cap here is lower, `ARCHIVE_MAX_BYTES` (spec §6.6): an archive compresses its
+// files, so one larger than the unpacked cap (`UNPACK_MAX_TOTAL_BYTES`) plus room for its
+// headers cannot unpack within that cap, and is refused before the agent holds 256 MiB.
 
 export const MAX_REDIRECTS = 5
+/** The largest archive or npm tarball downloaded: the unpacked cap plus 1 MiB of headers. */
+export const ARCHIVE_MAX_BYTES = UNPACK_MAX_TOTAL_BYTES + 1024 * 1024
 export const MARKETPLACE_LIMITS = { maxBytes: 5 * 1024 * 1024, timeoutMs: 10_000 }
-export const ARCHIVE_LIMITS = { maxBytes: 256 * 1024 * 1024, timeoutMs: 120_000 }
+export const ARCHIVE_LIMITS = { maxBytes: ARCHIVE_MAX_BYTES, timeoutMs: 120_000 }
 
 export type DownloadOptions = {
   /** Names the file in errors: "the marketplace", "archive". */
@@ -143,6 +150,10 @@ export const egressDownload: Downloader = async (start, options) => {
     } catch (err) {
       if (err instanceof EgressError) throw new EgressError(`${options.what}: ${err.message}`)
       throw err
+    }
+    // After the egress check, so a refused host is named as such; before any connection.
+    if (url.protocol === 'http:' && !(isLoopbackHost(url.hostname) && addresses.every((a) => isLoopbackPeer(a)))) {
+      throw new EgressError(`${options.what}: ${url.href} must use https (plain http is allowed for loopback only)`)
     }
     const answer = await hop(url, addresses, options, signal)
     if (answer.bytes) return { bytes: answer.bytes, url: url.href }

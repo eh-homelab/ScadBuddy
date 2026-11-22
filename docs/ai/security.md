@@ -670,7 +670,11 @@ so it is pinned to the SHA-256 of the file fetched at install (`pin_kind` `bytes
 keeps a copy in the blob store through the API's CRUD area `package-mirrors`
 ([`agent/src/plugins/packages/mirror.ts`](../../agent/src/plugins/packages/mirror.ts),
 [`backend/scadbuddy/agent_data/package_mirrors.py`](../../backend/scadbuddy/agent_data/package_mirrors.py)).
-The API stores a bytes pin only while that copy is held (409 `mirror-missing`). A cache
+The agent sends the file for the package it installs (`POST …/package-mirrors/{name}`,
+answered with the SHA-256 the API kept it under). The API stores a bytes pin only while
+that copy is held (409 `mirror-missing`), and serves the copy back
+(`GET …/package-mirrors/{name}/{sha256}`) only while that package's pin or pending re-pin
+names the SHA-256, so no other package and no released pin can read it. A cache
 miss unpacks the mirrored copy, checked against `bytes_sha256` and then against
 `content_hash`, and never fetches the upstream URL, so a file that upstream changed or
 deleted cannot replace what the admin approved. A re-pin fetches upstream again and is
@@ -680,20 +684,27 @@ approved anew after its diff.
 unzip or tar binary. Zip and tar (plain or gzipped) only. Symbolic links, hard links,
 devices and FIFOs, absolute paths, backslashes, NULs, `..` segments, a path given twice,
 encrypted and zip64 entries, and an entry whose size or CRC-32 does not match are
-refused, and nothing of the archive is written. The caps are those of a hosted plugin's
-draft (spec §6.2): 500 files, 2 MiB per file and 20 MiB in all, checked before a byte is
-inflated.
+refused, and nothing of the archive is written. A tar name prefix is read only from a
+POSIX ustar header (magic `ustar\0`, version `00`); a GNU header keeps other fields there.
+The caps are those of a hosted plugin's draft (spec §6.2): 500 entries (directories
+count), 2 MiB per file and 20 MiB in all, checked before a byte is inflated.
 
 **Downloading** (`download.ts`, `npm.ts`). Every hop of a download, redirects included,
-goes through the egress check (`assertEndpointAllowed()`), and the connection is pinned
+is https, or plain http to a loopback host whose addresses are all loopback (spec §6.6
+says https only; loopback is for tests). Every hop goes through the egress check
+(`assertEndpointAllowed()`), and the connection is pinned
 to the addresses the check passed, so a name re-pointed after the check cannot reach a
-refused address. At most five redirects are followed. The limits are Claude Code's own
+refused address. At most five redirects are followed. Claude Code's own limits
 ([host-marketplace](https://code.claude.com/docs/en/plugins/host-marketplace.md), "Stay
-within the download limits for hosted files"): 256 MiB in 120 s for an archive or
-tarball, 5 MiB in 10 s for a `marketplace.json`. No credential is sent. An archive
+within the download limits for hosted files") are 256 MiB in 120 s for an archive and
+5 MiB in 10 s for a `marketplace.json`. ScadBuddy takes the `marketplace.json` limit, and
+caps an archive or tarball lower, at the unpacked cap plus 1 MiB (21 MiB, in 120 s;
+`ARCHIVE_MAX_BYTES`): a larger file cannot unpack within 20 MiB, so it is refused before
+the agent holds it. No credential is sent. An archive
 entry's `sha256` must match. An npm package is fetched at an exact version or a
 dist-tag (a range is refused), and its tarball must match the registry's
-`dist.integrity`. A tarball link on github.com, gist.github.com, gitlab.com (outside
+`dist.integrity`, or its `dist.shasum` (SHA-1) when the document has no integrity; a
+version document with neither is refused. A tarball link on github.com, gist.github.com, gitlab.com (outside
 `/api/v4/`), bitbucket.org or git.sr.ht is refused, as Claude Code refuses it. Nothing in
 an npm package is installed or run.
 

@@ -27,10 +27,12 @@ an archive or npm package, or a marketplace entry of either, pinned to the sha25
 file the agent fetched). A bytes pin is stored only while its mirror is held (409
 ``mirror-missing``); the agent sends the file first to area ``package-mirrors``:
 
-- ``PUT …/package-mirrors/{sha256}`` the raw bytes, at most `MAX_MIRROR_BYTES`, named by
-  their sha256 (422 otherwise), kept as a blob and held (`agent_data/package_mirrors.py`);
-  204;
-- ``GET …/package-mirrors/{sha256}`` the bytes, or 404 ``mirror-not-found``.
+- ``POST …/package-mirrors/{name}`` the raw bytes of a file for the package ``name``, at
+  most `MAX_MIRROR_BYTES`, kept as a blob and held under their sha256
+  (`agent_data/package_mirrors.py`); answers ``{bytes_sha256}``;
+- ``GET …/package-mirrors/{name}/{sha256}`` the bytes, only while a row of ``name`` has that
+  sha256 as its ``bytes_sha256`` or ``pending_bytes_sha256``; else 404
+  ``mirror-not-found``, even while the blob is still in the store.
 
 Every package write also releases the holds of mirrors no pin names, past their grace.
 
@@ -115,10 +117,10 @@ def pin_fits(source_kind: str, pin_kind: str) -> bool:
             return pin_kind in ("commit", "bytes")
 
 
-#: For ``main.py``'s `BodySizeGate`: a mirror's PUT, whatever its content type, refused on
+#: For ``main.py``'s `BodySizeGate`: a mirror's upload, whatever its content type, refused on
 #: its Content-Length or, without one, as the body streams.
 MIRROR_ROUTE_LIMIT = RouteLimit(
-    "PUT",
+    "POST",
     re.compile(r"^/api/v1/internal/crud/agent/package-mirrors/"),
     MAX_MIRROR_BYTES,
     "a plugin package's archive",
@@ -180,6 +182,10 @@ class Packages(BaseModel):
 
 class Done(BaseModel):
     done: bool
+
+
+class Mirrored(BaseModel):
+    bytes_sha256: str
 
 
 async def _in_tx[T](state: Any, fn: Callable[[psycopg.Connection[Any]], T]) -> T:
@@ -591,12 +597,11 @@ async def plugin_package_delete(name: Name, state: StateDep) -> Done:
     return Done(done=await _in_tx(state, run))
 
 
-@router.put(
-    "/package-mirrors/{sha256}",
-    name="crud_agent_package_mirror_put",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
-async def package_mirror_put(sha256: Sha256, request: Request, state: StateDep) -> None:
+@router.post("/package-mirrors/{name}", name="crud_agent_package_mirror_post")
+async def package_mirror_post(name: Name, request: Request, state: StateDep) -> Mirrored:
+    """The raw bytes of a file the agent fetched for the package ``name``, kept and held
+    under their sha256, which the answer names. A load reads them back only once a pin of
+    ``name`` names that sha256 (`package_mirror`)."""
     too_large = ApiError(
         status.HTTP_413_CONTENT_TOO_LARGE,
         f"a plugin package's archive is at most {MAX_MIRROR_BYTES} bytes",
@@ -613,10 +618,7 @@ async def package_mirror_put(sha256: Sha256, request: Request, state: StateDep) 
                 raise too_large
             digest.update(chunk)
             await asyncio.to_thread(spool.write, chunk)
-        if digest.hexdigest() != sha256:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, "a mirror's name is its bytes' sha256"
-            )
+        sha256 = digest.hexdigest()
         await package_mirrors.keep(state.store.blobs, spool, sha256)
 
     def run(conn: psycopg.Connection[Any]) -> None:
@@ -624,20 +626,37 @@ async def package_mirror_put(sha256: Sha256, request: Request, state: StateDep) 
         package_mirrors.release_unnamed(conn)
 
     await _in_tx(state, run)
+    return Mirrored(bytes_sha256=sha256)
 
 
 @router.get(
-    "/package-mirrors/{sha256}",
+    "/package-mirrors/{name}/{sha256}",
     name="crud_agent_package_mirror",
     response_class=FileResponse,
     responses={200: {"content": {"application/octet-stream": {}}}},
 )
-async def package_mirror(sha256: Sha256, state: StateDep) -> FileResponse:
+async def package_mirror(name: Name, sha256: Sha256, state: StateDep) -> FileResponse:
+    """The kept bytes of ``sha256``, only while the package ``name``'s pin or pending re-pin
+    names them: a hold released, or another package's file, is not served."""
+    not_found = ApiError(
+        status.HTTP_404_NOT_FOUND,
+        f"no mirror of the bytes {sha256} is kept for {name}",
+        reason=MIRROR_NOT_FOUND,
+    )
+
+    def named(conn: psycopg.Connection[Any]) -> bool:
+        return (
+            conn.execute(
+                "SELECT 1 FROM ai_plugin_packages WHERE name = %s"
+                " AND (bytes_sha256 = %s OR pending_bytes_sha256 = %s)",
+                (name, sha256, sha256),
+            ).fetchone()
+            is not None
+        )
+
+    if not await _in_tx(state, named):
+        raise not_found
     path = await package_mirrors.path_of(state.store.blobs, sha256)
     if path is None:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND,
-            f"no mirror of the bytes {sha256} is kept",
-            reason=MIRROR_NOT_FOUND,
-        )
+        raise not_found
     return FileResponse(path, media_type="application/octet-stream")
