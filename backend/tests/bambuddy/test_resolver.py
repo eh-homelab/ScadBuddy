@@ -688,6 +688,36 @@ def test_a_spool_less_slot_takes_its_given_colour() -> None:
     assert priced.filament_colours == ["#123456", "#0000FF", "#112233"]
 
 
+def test_a_given_colour_is_normalised_and_never_stands_in_for_a_spool() -> None:
+    """#6710: a given colour reaches the slicer as ``#RRGGBB`` (the only form the native
+    slicer takes): an ``#RRGGBBAA`` one loses its alpha, and one that is not a colour
+    leaves the file's own. A colour gives a slot no filament: a slot in neither
+    ``slot_presets`` nor the plan still needs a spool."""
+    built = FilamentOptions(
+        library_file_id=41,
+        slots=[
+            SlotNeed(slot_id=1, colour="#FF0000"),
+            SlotNeed(slot_id=2, colour="#0000FF"),
+            SlotNeed(slot_id=3, colour="#00FF00"),
+        ],
+        spools=[],
+    )
+    pla = [_preset("0.4", "GFSA00_22")]
+    colours = {1: "#abcdef80", 2: "not a colour", 3: "#123456"}
+    choices = PrintChoices(nozzles=[NozzleChoice(size="0.4")])
+    priced = resolve(
+        built,
+        FilamentPlan(),
+        choices,
+        recorded(),
+        {},
+        slot_presets={1: pla, 2: pla},
+        slot_colours=colours,
+    )
+    assert priced.filament_colours == ["#ABCDEF", "#0000FF", "#123456"]
+    assert [(e.kind, e.slot_id) for e in priced.errors] == [("no-choice", 3)]
+
+
 async def test_each_plate_takes_the_given_colours() -> None:
     """#6710: ``resolve_plates`` hands ``slot_colours`` to every plate's ``resolve``."""
     built = FilamentOptions(
