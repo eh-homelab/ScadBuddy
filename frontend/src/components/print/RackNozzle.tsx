@@ -31,7 +31,7 @@ export function RackNozzleLine({ rack, algorithm }: { rack: RackPickView | null 
           {rack.unchecked.map((slot) => (
             <li key={slot.slot_id} data-testid="rack-glow-unchecked">
               {uncheckedText(slot)}
-              {slot.reason === 'not_in_inventory' && (
+              {(slot.reason === 'not_in_inventory' || slot.reason === 'no_type') && (
                 <>
                   {' '}
                   <Link to={filamentLinks.spools} className="text-foreground underline underline-offset-4">
@@ -60,6 +60,11 @@ function uncheckedText(slot: RackUncheckedSlot): string {
       return `Slot ${slot.slot_id}${what ? ` (${what})` : ''} has no spool chosen, ${end}`
     case 'empty_tray':
       return `Slot ${slot.slot_id}: ${slot.tray ?? 'its tray'} has no spool in it, ${end}`
+    // R-6876-6 — an SB spool with no type names no material to test.
+    case 'no_type':
+      if (slot.spool_number != null) return `Slot ${slot.slot_id}: spool #${slot.spool_number} has no type, ${end}`
+      if (slot.tray) return `Slot ${slot.slot_id}: the spool in ${slot.tray} has no type, ${end}`
+      return `Slot ${slot.slot_id}: its spool has no type, ${end}`
     default:
       if (slot.spool_number != null) return `Slot ${slot.slot_id}: spool #${slot.spool_number} is not in the inventory, ${end}`
       if (slot.tray) return `Slot ${slot.slot_id}: the ${what ? `${what} ` : 'spool '}in ${slot.tray} is not in the inventory, ${end}`

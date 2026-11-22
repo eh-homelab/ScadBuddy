@@ -463,6 +463,23 @@ def test_a_tray_that_holds_no_sb_spool_leaves_glow_unchecked() -> None:
     assert not found.abrasive and found.glow_unchecked
 
 
+def test_a_tray_whose_sb_spool_has_no_type_leaves_glow_unchecked() -> None:
+    """R-6876-6: the SB spool has no material, so the tray's ``PLA`` alone would judge it."""
+    [found] = rack_groups(
+        [requirement(1)], {1: _tray_choice(0, 0, sb=7)}, chosen={1: tray_spool_id(0, 0)}
+    )
+    assert not found.abrasive and found.glow_unchecked
+    assert found.unchecked == (
+        UncheckedSlot(slot_id=1, reason="no_type", spool_id=tray_spool_id(0, 0)),
+    )
+    picks = rank_rack([found], [slot(2)], "least_used", {}, {})
+    [warning] = rack_warnings([found], [slot(2)], "least_used", picks, {})
+    assert warning.message == (
+        "Glow could not be checked for group 0, so it was ranked by its type alone: "
+        "filament 1's spool in AMS-A slot 1 has no type."
+    )
+
+
 def _ams(*trays: AmsTray) -> PrinterStatus:
     return PrinterStatus(id=1, name="H2C", connected=True, ams=[AmsUnit(id=0, tray=list(trays))])
 

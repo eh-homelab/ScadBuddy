@@ -70,9 +70,10 @@ class Usage:
 
 
 #: Why a rack-side slot's spool could not be checked for Glow (#6872, #6876): the plan
-#: chose no spool for it; it chose a tray that holds none; or the spool it names (an SB
-#: number, or the spool in a tray chosen for itself) is not in the inventory.
-UncheckedReason = Literal["no_spool", "empty_tray", "not_in_inventory"]
+#: chose no spool for it; it chose a tray that holds none; the spool it names (an SB
+#: number, or the spool in a tray chosen for itself) is not in the inventory; or that SB
+#: spool has no type, so no material to test (R-6876-6).
+UncheckedReason = Literal["no_spool", "empty_tray", "not_in_inventory", "no_type"]
 
 
 @dataclass(frozen=True)
@@ -224,8 +225,16 @@ def glow_or_abrasive_spool(spool: SpoolOption) -> bool:
 
 def _checked(spool: SpoolOption | None) -> bool:
     """A spool Glow can be tested on: an inventory spool, or a tray choice that holds an
-    SB spool. A tray choice with none says only what the AMS reports (#6876)."""
-    return spool is not None and not (spool.tray_only and spool.sb_number is None)
+    SB spool. A tray choice with none says only what the AMS reports (#6876), and so does
+    one whose SB spool has no type, which names no material (R-6876-6)."""
+    if spool is None or (spool.tray_only and spool.sb_number is None):
+        return False
+    return not _untyped(spool)
+
+
+def _untyped(spool: SpoolOption) -> bool:
+    """An SB spool with no type: no material name to test (R-6876-6)."""
+    return spool.sb_number is not None and spool.sb_material is None
 
 
 def rack_color(raw: str) -> str | None:
@@ -266,7 +275,7 @@ def rack_groups(
             continue
         spools = [spools_by_slot.get(member.slot_id) for member in members]
         unchecked = [
-            member.slot_id
+            (member.slot_id, spool)
             for member, spool in zip(members, spools, strict=True)
             if not _checked(spool)
         ]
@@ -282,18 +291,25 @@ def rack_groups(
                 glow_unchecked=bool(unchecked),
                 unchecked=()
                 if chosen is None
-                else tuple(_unchecked_slot(slot_id, chosen, status) for slot_id in unchecked),
+                else tuple(
+                    _unchecked_slot(slot_id, spool, chosen, status) for slot_id, spool in unchecked
+                ),
             )
         )
     return groups
 
 
 def _unchecked_slot(
-    slot_id: int, chosen: Mapping[int, int], status: PrinterStatus | None
+    slot_id: int,
+    spool: SpoolOption | None,
+    chosen: Mapping[int, int],
+    status: PrinterStatus | None,
 ) -> UncheckedSlot:
     spool_id = chosen.get(slot_id)
     if spool_id is None:
         return UncheckedSlot(slot_id=slot_id, reason="no_spool")
+    if spool is not None and _untyped(spool):
+        return UncheckedSlot(slot_id=slot_id, reason="no_type", spool_id=spool_id)
     return UncheckedSlot(
         slot_id=slot_id, reason=unfound_reason(spool_id, status), spool_id=spool_id
     )
@@ -479,6 +495,10 @@ def _unchecked_text(item: UncheckedSlot) -> str:
     where = tray_of_spool_id(item.spool_id) if item.spool_id is not None else None
     if item.reason == "no_spool":
         return f"filament {item.slot_id} has no spool chosen"
+    if item.reason == "no_type":
+        if where is None:
+            return f"filament {item.slot_id}'s spool has no type"
+        return f"filament {item.slot_id}'s spool in {tray_label(*where)} has no type"
     if where is None:
         return f"filament {item.slot_id}'s spool is not in the inventory"
     if item.reason == "empty_tray":
