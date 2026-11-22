@@ -1,6 +1,7 @@
 """The printer path a print import may read (#4698 review)."""
 
 import asyncio
+from typing import Any
 
 import httpx
 import pytest
@@ -157,10 +158,12 @@ class _Operations:
 
     def __init__(self, first: object) -> None:
         self.first = first
-        self.asked: list[tuple[str, str, str]] = []
+        self.asked: list[tuple[str, str, str, dict[str, Any] | None]] = []
 
-    async def keyed_operation(self, kind: str, subject: str, key: str) -> object:
-        self.asked.append((kind, subject, key))
+    async def keyed_operation(
+        self, kind: str, subject: str, key: str, *, sent: dict[str, Any] | None = None
+    ) -> object:
+        self.asked.append((kind, subject, key, sent))
         return self.first
 
 
@@ -240,7 +243,12 @@ def test_a_resend_gets_the_first_model_and_reads_no_print_again() -> None:
     )
 
     assert isinstance(made, ModelRecord) and made.slug == "trophy"
-    assert ops.store.asked == [("mesh_model_create", "trophy", "k1")]  # type: ignore[attr-defined]
+    origin = {
+        "archive_id": ARCHIVE,
+        "source": {"kind": "printer", "library_file_id": None, "path": "/cache/demo_elan.3mf"},
+    }
+    sent = {"name": "Trophy", "description": "", "source": {"origin": origin}}
+    assert ops.store.asked == [("mesh_model_create", "trophy", "k1", sent)]  # type: ignore[attr-defined]
     assert not respx.calls
 
 
