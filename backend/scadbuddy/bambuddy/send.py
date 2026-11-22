@@ -1101,7 +1101,7 @@ async def _supersede_unprinted(
     folder: int | None,
     uploaded: LibraryFile,
     *,
-    version: str | None = None,
+    version: str | None,
 ) -> str:
     """Replace ``key``'s other copies of ``version`` in the project's ``folder`` that
     nothing printed from with ``uploaded`` (#2476); its file name, which takes theirs.

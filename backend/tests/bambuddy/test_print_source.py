@@ -1631,12 +1631,13 @@ async def test_a_held_copy_and_a_live_copy_are_never_taken_for_each_other(
     assert (await _print(other, bambuddy)).id == 103
 
 
-async def test_a_held_copy_in_a_project_folder_never_supersedes_a_live_one(
-    tmp_path: Path,
+@pytest.mark.parametrize("held_first", [False, True], ids=["held-after-live", "live-after-held"])
+async def test_a_held_copy_and_a_live_one_never_supersede_each_other_in_a_project_folder(
+    tmp_path: Path, held_first: bool
 ) -> None:
     """#6710 review: in a project's folder an upload supersedes the key's unprinted
     copies; a held copy and a live copy are of other versions, so neither replaces the
-    other there either."""
+    other there, whichever was filed first."""
     live_bytes = _scadbuddy_3mf(tmp_path)
     bambuddy, uploads = _Bambuddy(live_bytes), _Copies()
     bambuddy.deleted = []  # type: ignore[attr-defined]
@@ -1650,11 +1651,15 @@ async def test_a_held_copy_in_a_project_folder_never_supersedes_a_live_one(
 
     bambuddy.delete_library_file = delete_library_file  # type: ignore[attr-defined]
     bambuddy.rename_library_file = rename_library_file  # type: ignore[attr-defined]
-    live = await _print(_library(uploads), bambuddy, project_id=5)
     held = await _load_held(ORIGIN, _held_reads(_sliced_3mf()), bambuddy, uploads)
-    copied = await _print(held, bambuddy, project_id=5)
+    if held_first:
+        first = await _print(held, bambuddy, project_id=5)
+        second = await _print(_library(uploads), bambuddy, project_id=5)
+    else:
+        first = await _print(_library(uploads), bambuddy, project_id=5)
+        second = await _print(held, bambuddy, project_id=5)
 
-    assert (live.id, copied.id) == (101, 102)
+    assert (first.id, second.id) == (101, 102)
     assert bambuddy.deleted == []  # type: ignore[attr-defined]
     assert {copy.id for copy in uploads.copies["library:41"]} == {101, 102}
 
