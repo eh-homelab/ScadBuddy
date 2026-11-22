@@ -258,12 +258,32 @@ export function validateSource(input: SourceInput): PackageSource {
   }
 }
 
+/** The `reason` of a re-pin refused by `RepinFixedError`. */
+export const REPIN_FIXED = 'repin-fixed-sha256'
+
+/**
+ * An archive installed with its `sha256`: a re-pin fetches the same URL and must find the
+ * same bytes, so it could only answer "already pinned" or a sha256 mismatch. Refused 409
+ * `repin-fixed-sha256` before anything is fetched.
+ */
+export class RepinFixedError extends PluginError {
+  override name = 'RepinFixedError'
+  constructor() {
+    super(
+      'this archive was installed with its sha256, so a re-pin could only fetch the same file; remove the package and install the new file',
+      409,
+    )
+  }
+}
+
 /**
  * `current` with the ref a re-pin asks for: a branch, tag or commit for a repository
  * source, a version or dist-tag for a registry npm package. The other kinds have no ref
- * to move: a re-pin fetches their URL again.
+ * to move: a re-pin fetches their URL again, except an archive installed with its sha256
+ * (`RepinFixedError`).
  */
 export function withRepinRef(current: PackageSource, ref: string | undefined): PackageSource {
+  if (current.kind === 'archive' && current.ref !== '') throw new RepinFixedError()
   if (isGitSource(current)) return { ...current, ref: validateRef(ref ?? current.ref) }
   if (current.kind === 'npm' && current.ref !== '') return { ...current, ref: validateNpmVersion(ref ?? current.ref) }
   if (ref !== undefined) throw new PluginError(`a ${current.kind === 'npm' ? 'tarball link' : current.kind} source has no ref to re-pin to`, 400)

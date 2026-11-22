@@ -193,6 +193,27 @@ describe('PluginPackagesPanel', () => {
     expect(within(card).getByText('Approved, disabled')).toBeInTheDocument()
   })
 
+  it('offers no re-pin for an archive installed with its sha256, and does for one without', async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await user.click(screen.getByLabelText('Archive'))
+    await user.type(screen.getByLabelText('Archive URL'), 'https://files.example/greeter-1.0.0.zip')
+    await user.type(screen.getByLabelText('Expected SHA-256 (optional)'), 'f'.repeat(64))
+    await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    expect(within(card).queryByRole('button', { name: 'Fetch re-pin' })).not.toBeInTheDocument()
+    expect(within(card).getByText(/Installed with its file’s SHA-256, so it always loads that file/)).toBeInTheDocument()
+
+    await user.click(within(card).getByRole('button', { name: 'Remove' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Remove package' }))
+    await screen.findByText('No plugin packages installed.')
+    await user.click(screen.getByLabelText('Archive'))
+    await user.type(screen.getByLabelText('Archive URL'), 'https://files.example/greeter-1.0.0.zip')
+    await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
+    const open = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    expect(within(open).getByRole('button', { name: 'Fetch re-pin' })).toBeInTheDocument()
+  })
+
   it('shows the server refusing an approval', async () => {
     server.use(
       http.post('/api/v1/ai/plugin-packages/:name/approve', () =>

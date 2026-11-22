@@ -43,7 +43,10 @@ ALTER TABLE ai_plugin_packages
   -- A marketplace kind names its entry; no other kind does.
   ADD CONSTRAINT ai_plugin_packages_entry_check
     CHECK ((source_kind IN ('marketplace', 'marketplace-url')) = (marketplace_entry IS NOT NULL)),
-  -- The pin's one column is set, and the others are not.
+  -- The pin's one column is set, and the others are not. The previous build's approve of
+  -- a re-pin copies pending_commit_sha into commit_sha and leaves pin_kind alone: on a
+  -- commit-pinned row (every row it can know) that stays a commit pin and passes; on a
+  -- bytes-pinned row it would leave two pins, so it is refused and writes nothing.
   ADD CONSTRAINT ai_plugin_packages_pin_check CHECK (
     (pin_kind = 'commit') = (commit_sha IS NOT NULL) AND
     (pin_kind = 'bytes') = (bytes_sha256 IS NOT NULL) AND
@@ -61,24 +64,38 @@ ALTER TABLE ai_plugin_packages
       ELSE pin_kind IN ('commit', 'bytes')
     END
   ),
-  -- A re-pin waiting for approval: all of its columns, or none.
+  -- A re-pin waiting for approval: all of its columns, or none. pending_content_hash
+  -- says whether there is one. The previous build's API (pods still serving while this
+  -- build rolls out) writes a commit re-pin without pending_pin_kind and clears one
+  -- (discard, approve) without clearing it, so a re-pin's kind is pending_pin_kind or, when
+  -- that is NULL, 'commit' for a pending_commit_sha; with no re-pin, pending_pin_kind may
+  -- be left over and means nothing. The API reads the kind the same way
+  -- (crud_agent_packages.py PENDING_KIND).
   ADD CONSTRAINT ai_plugin_packages_pending_check CHECK (
-    (pending_pin_kind IS NULL) = (pending_content_hash IS NULL) AND
-    (pending_pin_kind IS NULL) = (pending_files IS NULL) AND
-    (pending_pin_kind IS NULL) = (pending_review IS NULL) AND
-    (pending_pin_kind IS NULL) = (pending_ref IS NULL) AND
-    (pending_pin_kind IS NULL) = (pending_fetch_url IS NULL) AND
-    (pending_pin_kind IS NULL) = (pending_fetch_path IS NULL) AND
-    coalesce(pending_pin_kind = 'commit', false) = (pending_commit_sha IS NOT NULL) AND
-    coalesce(pending_pin_kind = 'bytes', false) = (pending_bytes_sha256 IS NOT NULL) AND
-    coalesce(pending_pin_kind = 'version', false) = (pending_version IS NOT NULL)
+    (pending_content_hash IS NULL) = (pending_files IS NULL) AND
+    (pending_content_hash IS NULL) = (pending_review IS NULL) AND
+    (pending_content_hash IS NULL) = (pending_ref IS NULL) AND
+    (pending_content_hash IS NULL) = (pending_fetch_url IS NULL) AND
+    (pending_content_hash IS NULL) = (pending_fetch_path IS NULL) AND
+    CASE WHEN pending_content_hash IS NULL THEN
+      pending_commit_sha IS NULL AND pending_bytes_sha256 IS NULL AND pending_version IS NULL
+    ELSE
+      coalesce(pending_pin_kind, CASE WHEN pending_commit_sha IS NOT NULL THEN 'commit' END) IS NOT NULL AND
+      (coalesce(pending_pin_kind, CASE WHEN pending_commit_sha IS NOT NULL THEN 'commit' END) = 'commit')
+        = (pending_commit_sha IS NOT NULL) AND
+      (coalesce(pending_pin_kind, CASE WHEN pending_commit_sha IS NOT NULL THEN 'commit' END) = 'bytes')
+        = (pending_bytes_sha256 IS NOT NULL) AND
+      (coalesce(pending_pin_kind, CASE WHEN pending_commit_sha IS NOT NULL THEN 'commit' END) = 'version')
+        = (pending_version IS NOT NULL)
+    END
   ),
   ADD CONSTRAINT ai_plugin_packages_pending_source_pin_check CHECK (
-    pending_pin_kind IS NULL OR CASE source_kind
-      WHEN 'git' THEN pending_pin_kind = 'commit'
-      WHEN 'archive' THEN pending_pin_kind = 'bytes'
-      WHEN 'npm' THEN pending_pin_kind = 'bytes'
-      WHEN 'hosted' THEN pending_pin_kind = 'version'
-      ELSE pending_pin_kind IN ('commit', 'bytes')
+    pending_content_hash IS NULL OR
+    CASE source_kind
+      WHEN 'git' THEN coalesce(pending_pin_kind, 'commit') = 'commit'
+      WHEN 'archive' THEN coalesce(pending_pin_kind, 'commit') = 'bytes'
+      WHEN 'npm' THEN coalesce(pending_pin_kind, 'commit') = 'bytes'
+      WHEN 'hosted' THEN coalesce(pending_pin_kind, 'commit') = 'version'
+      ELSE coalesce(pending_pin_kind, 'commit') IN ('commit', 'bytes')
     END
   );

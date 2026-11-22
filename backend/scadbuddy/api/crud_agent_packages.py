@@ -24,11 +24,11 @@ hashes a package; the API stores the pin it was given.
 
 A pin is a commit (``pin_kind`` ``commit``, a repository source) or bytes (``bytes``, #6935:
 an archive or npm package, or a marketplace entry of either, pinned to the sha256 of the
-file the agent fetched). A bytes pin is stored only while its mirror is held (409
+file the agent fetched). A bytes pin is stored only while the package holds its mirror (409
 ``mirror-missing``); the agent sends the file first to area ``package-mirrors``:
 
 - ``POST …/package-mirrors/{name}`` the raw bytes of a file for the package ``name``, at
-  most `MAX_MIRROR_BYTES`, kept as a blob and held under their sha256
+  most `MAX_MIRROR_BYTES`, kept as a blob under their sha256 and held for ``name``
   (`agent_data/package_mirrors.py`); answers ``{bytes_sha256}``;
 - ``GET …/package-mirrors/{name}/{sha256}`` the bytes, only while a row of ``name`` has that
   sha256 as its ``bytes_sha256`` or ``pending_bytes_sha256``; else 404
@@ -206,8 +206,31 @@ async def _in_tx[T](state: Any, fn: Callable[[psycopg.Connection[Any]], T]) -> T
     return await asyncio.to_thread(run)
 
 
+def _pending_kind(row: Any) -> str | None:
+    """The re-pin's kind, as the migration's ``ai_plugin_packages_pending_check`` reads it.
+
+    The previous build's API (still serving during a roll) writes a commit re-pin without
+    ``pending_pin_kind`` and leaves the column set when it clears a re-pin, so the column
+    alone is not the kind: with no re-pin (``pending_content_hash`` NULL) there is none, and
+    a NULL column with a ``pending_commit_sha`` is a commit.
+    """
+    if row["pending_content_hash"] is None:
+        return None
+    kind = row["pending_pin_kind"]
+    if kind is None and row["pending_commit_sha"] is not None:
+        return "commit"
+    return kind  # type: ignore[no-any-return]
+
+
+def _read(row: Any) -> dict[str, Any]:
+    """A row as every route reads it: the re-pin's kind as `_pending_kind` gives it."""
+    out = dict(row)
+    out["pending_pin_kind"] = _pending_kind(row)
+    return out
+
+
 def _row(row: Any) -> PackageRow:
-    return PackageRow.model_validate(dict(row))
+    return PackageRow.model_validate(_read(row))
 
 
 def _not_found(name: str) -> ApiError:
@@ -234,9 +257,10 @@ def _pin_id(row: Any, prefix: str = "") -> str | None:
     return None
 
 
-def _mirror_held(conn: psycopg.Connection[Any], body: Pin) -> None:
-    """A bytes pin is stored only while its mirror is held: a load reads that copy."""
-    if body.bytes_sha256 is not None and not package_mirrors.held(conn, body.bytes_sha256):
+def _mirror_held(conn: psycopg.Connection[Any], name: str, body: Pin) -> None:
+    """A bytes pin is stored only while the package's mirror is held: a load reads that
+    copy."""
+    if body.bytes_sha256 is not None and not package_mirrors.held(conn, name, body.bytes_sha256):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"no mirror of the bytes {body.bytes_sha256} is kept; send them first",
@@ -257,7 +281,7 @@ def _locked(conn: psycopg.Connection[Any], name: str) -> Any:
     ).fetchone()
     if row is None:
         raise _not_found(name)
-    return row
+    return _read(row)
 
 
 @router.get("/plugin-packages", name="crud_agent_plugin_packages")
@@ -343,7 +367,7 @@ async def plugin_package_install(body: Install, state: StateDep) -> PackageRow:
         )
 
     def run(conn: psycopg.Connection[Any]) -> PackageRow:
-        _mirror_held(conn, body)
+        _mirror_held(conn, body.name, body)
         row = conn.execute(
             "INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref,"
             " marketplace_entry, fetch_url, fetch_path, pin_kind, commit_sha, bytes_sha256,"
@@ -406,7 +430,7 @@ async def plugin_package_pending(name: Name, body: Pending, state: StateDep) -> 
             )
         if kind in REF_KINDS and not body.ref:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"a {kind} source names its ref")
-        _mirror_held(conn, body)
+        _mirror_held(conn, name, body)
         if (
             current["pin_kind"] == body.pin_kind
             and _pin_id(current) == pin_id
@@ -531,7 +555,7 @@ async def plugin_package_approve(name: Name, body: Approve, state: StateDep) -> 
             row = conn.execute(
                 "UPDATE ai_plugin_packages SET enabled = enabled AND NOT %s,"
                 " source_ref = pending_ref, fetch_url = pending_fetch_url,"
-                " fetch_path = pending_fetch_path, pin_kind = pending_pin_kind,"
+                " fetch_path = pending_fetch_path, pin_kind = %s,"
                 " commit_sha = pending_commit_sha, bytes_sha256 = pending_bytes_sha256,"
                 " version = pending_version,"
                 " content_hash = pending_content_hash, files = pending_files,"
@@ -542,7 +566,7 @@ async def plugin_package_approve(name: Name, body: Approve, state: StateDep) -> 
                 " pending_content_hash = NULL,"
                 " pending_files = NULL, pending_review = NULL, updated_at = now()"
                 " WHERE name = %s RETURNING *",
-                (moved, allow, name),
+                (moved, current["pending_pin_kind"], allow, name),
             ).fetchone()
             assert row is not None
             prune_stale_rows(conn, name, row["review"])
@@ -607,9 +631,10 @@ async def plugin_package_delete(name: Name, state: StateDep) -> Done:
 
 @router.post("/package-mirrors/{name}", name="crud_agent_package_mirror_post")
 async def package_mirror_post(name: Name, request: Request, state: StateDep) -> Mirrored:
-    """The raw bytes of a file the agent fetched for the package ``name``, kept and held
-    under their sha256, which the answer names. A load reads them back only once a pin of
-    ``name`` names that sha256 (`package_mirror`)."""
+    """The raw bytes of a file the agent fetched for the package ``name``, kept under
+    their sha256, which the answer names, and held for ``name`` (`package_mirrors.hold`):
+    only a pin of ``name`` may then name that sha256, and a load reads them back only once
+    one does (`package_mirror`)."""
     too_large = ApiError(
         status.HTTP_413_CONTENT_TOO_LARGE,
         f"a plugin package's archive is at most {MAX_MIRROR_BYTES} bytes",
@@ -630,7 +655,7 @@ async def package_mirror_post(name: Name, request: Request, state: StateDep) -> 
         await package_mirrors.keep(state.store.blobs, spool, sha256)
 
     def run(conn: psycopg.Connection[Any]) -> None:
-        package_mirrors.hold(conn, sha256)
+        package_mirrors.hold(conn, name, sha256)
         package_mirrors.release_unnamed(conn)
 
     await _in_tx(state, run)

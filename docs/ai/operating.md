@@ -1055,8 +1055,9 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   The cache can be the same `emptyDir` as the rest of the state directory.
 - **A bytes pin loads from its mirror.** The file of an archive or npm package is kept in
   the blob store through the API's CRUD area `package-mirrors` (blob
-  `plugin-mirror-<sha256>`, held in `blob_refs` while a pin or pending re-pin names it;
-  a hold no pin names goes after a day). Its cache directory is
+  `plugin-mirror-<sha256>`, held in `blob_refs` for the package it was sent for, holder
+  `<name>/<sha256>`, while that package's pin or pending re-pin names it; a hold no pin
+  names goes after a day). Its cache directory is
   `<name>/b<first 40 of the sha256>-<hash prefix>`, and a cache miss unpacks the mirrored
   copy, never the upstream URL. The area is one of `STORE_AREAS`, so the agent is not ready
   (its data routes answer 503) until the API lists it.
@@ -1095,7 +1096,7 @@ other Settings writes
 | `GET /:name/files`, `GET /:name/file?path=` (each with `pending=true` for the re-pin's) | Every file of the pin with its size, and one file's content for Settings to show before approval (#1029). Only a path in the pin's own file list is read, from the cached copy that hashes to the pin (fetched again when it does not; never vetted for loading, so a refused package can be read). Text is cut at 64 KiB unless `full=true`; a file that is not UTF-8 is `binary` with no `content`. A built-in's files are read from the image. |
 | `POST /:name/approve` with `{ "commit_sha" or "bytes_sha256", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
 | `PATCH /:name` | Gone (#4828). A package's switch is `PUT /api/v1/ai/capabilities/package:<name>` (#4757), which Settings uses; it enables an approved pin only, and the table enforces this with a `CHECK` too. |
-| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin (for an npm package, `ref` is a version or dist-tag; an archive, a tarball link or a bare marketplace URL takes none and is fetched again). The current pin keeps loading until the pending one is approved. |
+| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin (for an npm package, `ref` is a version or dist-tag; an archive, a tarball link or a bare marketplace URL takes none and is fetched again; an archive installed with its `sha256` is refused 409 `repin-fixed-sha256`, since it could only find the same file). The current pin keeps loading until the pending one is approved. |
 | `DELETE /:name/pending`, `DELETE /:name` | Drop the pending re-pin; uninstall and evict the cache. |
 
 Plugins are never updated automatically (issue #297). At most two fetches run at a

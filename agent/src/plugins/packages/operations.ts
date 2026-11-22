@@ -2,7 +2,7 @@ import { EgressError } from '../../http/egress.js'
 import { type OperationKind, OperationRefusal, refusal } from '../../operations/kinds.js'
 import { PluginError } from '../registry.js'
 import { BuiltInPluginError, PackageRefusedError, type PackageInstaller } from './install.js'
-import { type PackageSource, validateSource, withRepinRef } from './source.js'
+import { type PackageSource, REPIN_FIXED, RepinFixedError, validateSource, withRepinRef } from './source.js'
 import type { PackageRepo } from './store.js'
 
 // Installing and re-pinning a plugin package as commands (spec 2026-10-01 §4.1, §4.3
@@ -28,6 +28,7 @@ export type PackageKindDeps = {
 function asRefusal(err: unknown): unknown {
   if (err instanceof BuiltInPluginError) return refusal(409, err.message, { built_in: true })
   if (err instanceof PackageRefusedError) return refusal(422, 'the plugin package is refused', { problems: err.problems })
+  if (err instanceof RepinFixedError) return refusal(409, err.message, { reason: REPIN_FIXED })
   if (err instanceof PluginError) return refusal(err.status, err.message)
   if (err instanceof EgressError) return refusal(400, err.message)
   return err

@@ -183,7 +183,7 @@ function packageFor(url: string, ref: string, kind: PluginPackage['source']['kin
     if (url !== ARCHIVE_URL) return undefined
     return {
       ...(packageFor('https://git.example/greeter.git', 'HEAD', 'git') as PluginPackage),
-      source: { kind: 'archive', url, ref: '', plugin_path: 'greeter-1.0.0' },
+      source: { kind: 'archive', url, ref: ref.startsWith('sha256:') ? ref : '', plugin_path: 'greeter-1.0.0' },
       pin_kind: 'bytes',
       commit_sha: null,
       bytes_sha256: ARCHIVE_SHA,
@@ -448,9 +448,13 @@ export const aiPluginHandlers = [
   http.post(`${base}/plugin-packages`, async ({ request }) => {
     await delay(150)
     const { source } = (await request.json()) as {
-      source: { kind: PluginPackage['source']['kind']; url?: string; ref?: string; path?: string; entry?: string; package?: string }
+      source: { kind: PluginPackage['source']['kind']; url?: string; ref?: string; path?: string; entry?: string; package?: string; sha256?: string }
     }
     if (source.kind === 'npm') return detail(502, `npm registry: no package ${source.package ?? ''} in the demo`)
+    if (source.kind === 'archive' && source.sha256 !== undefined) {
+      if (source.sha256 !== ARCHIVE_SHA) return detail(422, `the archive's sha256 is ${ARCHIVE_SHA}, not ${source.sha256}`)
+      source.ref = `sha256:${source.sha256}`
+    }
     source.url ??= ''
     if (!/^https?:\/\//.test(source.url)) return detail(400, 'source url must be https (or http to loopback)')
     if (source.url === 'https://git.example/scadbuddy.git' || source.entry === 'scadbuddy') {
@@ -516,6 +520,11 @@ export const aiPluginHandlers = [
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
     const { ref } = (await request.json()) as { ref?: string }
+    if (pkg.source.kind === 'archive' && pkg.source.ref.startsWith('sha256:')) {
+      return detail(409, 'this archive was installed with its sha256, so a re-pin could only fetch the same file', {
+        reason: 'repin-fixed-sha256',
+      })
+    }
     const entry = pkg.source.kind === 'marketplace' || pkg.source.kind === 'marketplace-url' ? pkg.source.entry : undefined
     const found = packageFor(pkg.source.url, ref || pkg.source.ref, pkg.source.kind, entry)
     if (!found || Array.isArray(found)) return detail(502, 'git fetch failed')

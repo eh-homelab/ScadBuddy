@@ -12,6 +12,7 @@ from typing import Any
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 from scadbuddy.agent_data import packages
 from tests.api.test_crud_agent_cost import token
@@ -402,7 +403,7 @@ def test_a_mirror_is_read_back_only_by_a_package_that_names_it(
     client: TestClient, agent: dict[str, str], db: Any
 ) -> None:
     _mirror(client, agent, ZIP)
-    assert _held(db) == [ZIP_SHA]
+    assert _held(db) == [f"greeter/{ZIP_SHA}"]
     # Kept, but no package names it yet.
     unnamed = client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent)
     assert (unnamed.status_code, unnamed.json()["reason"]) == (404, "mirror-not-found")
@@ -561,9 +562,137 @@ def test_a_mirror_no_pin_names_is_released_after_its_grace(
     client.post(BASE, json=_archive(), headers=agent)
     _age_holds(db)
     client.post(BASE, json=_install("other"), headers=agent)
-    assert _held(db) == [ZIP_SHA]
+    assert _held(db) == [f"greeter/{ZIP_SHA}"]
     # Released once the package that named it is gone.
     client.post(f"{BASE}/greeter/delete", headers=agent)
     _age_holds(db)
     client.post(f"{BASE}/other/delete", headers=agent)
     assert _held(db) == []
+
+
+def test_a_mirror_is_held_for_the_package_it_was_sent_for(
+    client: TestClient, agent: dict[str, str]
+) -> None:
+    # Sent for "other": "greeter" cannot pin it until it is sent for "greeter" too.
+    _mirror(client, agent, ZIP, name="other")
+    refused = client.post(BASE, json=_archive(), headers=agent)
+    assert (refused.status_code, refused.json()["reason"]) == (409, "mirror-missing")
+    _mirror(client, agent, ZIP)
+    assert client.post(BASE, json=_archive(), headers=agent).status_code == 201
+
+
+# The previous build's statements (origin/main before #6935,
+# `api/crud_agent_packages.py`), word for word: during a roll its API pods run them against
+# the table this file's migration changed.
+OLD_PENDING = (
+    "UPDATE ai_plugin_packages SET pending_ref = %s, pending_fetch_url = %s,"
+    " pending_fetch_path = %s, pending_commit_sha = %s, pending_content_hash = %s,"
+    " pending_files = %s, pending_review = %s, updated_at = now()"
+    " WHERE name = %s RETURNING *"
+)
+OLD_DISCARD = (
+    "UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL,"
+    " pending_fetch_path = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,"
+    " pending_files = NULL, pending_review = NULL, updated_at = now()"
+    " WHERE name = %s RETURNING *"
+)
+OLD_APPROVE = (
+    "UPDATE ai_plugin_packages SET enabled = enabled AND NOT %s,"
+    " source_ref = pending_ref, fetch_url = pending_fetch_url,"
+    " fetch_path = pending_fetch_path, commit_sha = pending_commit_sha,"
+    " content_hash = pending_content_hash, files = pending_files,"
+    " review = pending_review, approved_at = now(), allow_refused = %s,"
+    " pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,"
+    " pending_commit_sha = NULL, pending_content_hash = NULL,"
+    " pending_files = NULL, pending_review = NULL, updated_at = now()"
+    " WHERE name = %s RETURNING *"
+)
+
+
+def _old_pending(db: Any, name: str = "greeter") -> None:
+    body = _pending(name)
+    db.execute(
+        OLD_PENDING,
+        (
+            body["ref"],
+            body["fetch_url"],
+            body["fetch_path"],
+            body["commit_sha"],
+            body["content_hash"],
+            Jsonb(body["files"]),
+            Jsonb(body["review"]),
+            name,
+        ),
+    )
+
+
+def test_the_previous_builds_repin_discard_and_approve_pass_the_checks(
+    client: TestClient, agent: dict[str, str], db: Any
+) -> None:
+    client.post(BASE, json=_install(), headers=agent)
+    # An old pod's re-pin: no pending_pin_kind. This build reads it as a commit re-pin.
+    _old_pending(db)
+    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
+    assert (row["pending_pin_kind"], row["pending_commit_sha"]) == ("commit", C2)
+    # An old pod's discard of it, and of one this build stored (pending_pin_kind set).
+    db.execute(OLD_DISCARD, ("greeter",))
+    assert client.post(f"{BASE}/greeter/pending", json=_pending(), headers=agent).status_code == 200
+    db.execute(OLD_DISCARD, ("greeter",))
+    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
+    # A kind left over with no re-pin means nothing.
+    assert (row["pending_pin_kind"], row["pending_content_hash"]) == (None, None)
+    # An old pod's re-pin over the leftover kind, then its approve.
+    _old_pending(db)
+    db.execute(OLD_APPROVE, (False, False, "greeter"))
+    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
+    assert (row["pin_kind"], row["commit_sha"], row["content_hash"]) == ("commit", C2, H2)
+    assert row["pending_pin_kind"] is None
+    # This build approves an old pod's re-pin by its commit, and writes the kind itself.
+    _old_pending(db, "greeter")
+    db.execute(
+        "UPDATE ai_plugin_packages SET pending_commit_sha = %s, pending_content_hash = %s"
+        " WHERE name = 'greeter'",
+        (C1, H1),
+    )
+    approved = client.post(
+        f"{BASE}/greeter/approve", json={"commit_sha": C1, "content_hash": H1}, headers=agent
+    )
+    assert approved.status_code == 200, approved.text
+    assert (approved.json()["pin_kind"], approved.json()["commit_sha"]) == ("commit", C1)
+
+
+def test_the_previous_builds_approve_never_leaves_a_bytes_pin_with_a_commit(
+    client: TestClient, agent: dict[str, str], db: Any
+) -> None:
+    # A marketplace-url entry pinned to bytes, with a commit re-pin an old pod stored.
+    _mirror(client, agent, ZIP)
+    url_entry = {
+        **_archive(),
+        "source_kind": "marketplace-url",
+        "source_url": "https://plugins.test/marketplace.json",
+        "marketplace_entry": "greeter",
+    }
+    assert client.post(BASE, json=url_entry, headers=agent).status_code == 201
+    _old_pending(db)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        db.execute(OLD_APPROVE, (False, False, "greeter"))
+    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
+    assert (row["pin_kind"], row["bytes_sha256"], row["commit_sha"]) == ("bytes", ZIP_SHA, None)
+    # This build approves it as the commit pin it is.
+    approved = client.post(
+        f"{BASE}/greeter/approve", json={"commit_sha": C2, "content_hash": H2}, headers=agent
+    )
+    assert approved.status_code == 200, approved.text
+    assert (approved.json()["pin_kind"], approved.json()["bytes_sha256"]) == ("commit", None)
+    # An old pod's discard of a bytes re-pin would leave its sha256 behind: refused.
+    _mirror(client, agent, OTHER)
+    pending = {
+        **_pending(),
+        "ref": "",
+        "pin_kind": "bytes",
+        "bytes_sha256": OTHER_SHA,
+    }
+    del pending["commit_sha"]
+    assert client.post(f"{BASE}/greeter/pending", json=pending, headers=agent).status_code == 200
+    with pytest.raises(psycopg.errors.CheckViolation):
+        db.execute(OLD_DISCARD, ("greeter",))

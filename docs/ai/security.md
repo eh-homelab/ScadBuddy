@@ -671,14 +671,16 @@ keeps a copy in the blob store through the API's CRUD area `package-mirrors`
 ([`agent/src/plugins/packages/mirror.ts`](../../agent/src/plugins/packages/mirror.ts),
 [`backend/scadbuddy/agent_data/package_mirrors.py`](../../backend/scadbuddy/agent_data/package_mirrors.py)).
 The agent sends the file for the package it installs (`POST …/package-mirrors/{name}`,
-answered with the SHA-256 the API kept it under). The API stores a bytes pin only while
-that copy is held (409 `mirror-missing`), and serves the copy back
+answered with the SHA-256 the API kept it under), and the API holds the copy for that
+package (`blob_refs` holder `<name>/<sha256>`). The API stores a bytes pin only while
+that package holds the copy (409 `mirror-missing`), and serves the copy back
 (`GET …/package-mirrors/{name}/{sha256}`) only while that package's pin or pending re-pin
 names the SHA-256, so no other package and no released pin can read it. A cache
 miss unpacks the mirrored copy, checked against `bytes_sha256` and then against
 `content_hash`, and never fetches the upstream URL, so a file that upstream changed or
 deleted cannot replace what the admin approved. A re-pin fetches upstream again and is
-approved anew after its diff.
+approved anew after its diff; an archive installed with its `sha256` has nothing to move
+to, so its re-pin is refused 409 `repin-fixed-sha256` before any fetch.
 
 **Unpacking** (`unpack.ts`). The archive is read entry by entry from memory, never by an
 unzip or tar binary. Zip and tar (plain or gzipped) only. Symbolic links, hard links,

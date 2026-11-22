@@ -384,6 +384,14 @@ function repinTakesRef(pkg: PluginPackage): boolean {
   return kind === 'git' || kind === 'marketplace' || (kind === 'npm' && pkg.source.ref !== '')
 }
 
+/**
+ * An archive installed with its SHA-256: a re-pin fetches the same URL and must find the
+ * same file, so there is nothing to move to (the agent refuses it, `repin-fixed-sha256`).
+ */
+function repinFixed(pkg: PluginPackage): boolean {
+  return pkg.source.kind === 'archive' && pkg.source.ref.startsWith('sha256:')
+}
+
 type InstallKind = PackageInstall['kind']
 
 const INSTALL_KINDS: { kind: InstallKind; label: string }[] = [
@@ -816,6 +824,11 @@ function PackageCard({
                 </Button>
               </div>
             </div>
+          ) : repinFixed(pkg) ? (
+            <p className="mt-3 text-xs text-muted-foreground">
+              Installed with its file&rsquo;s SHA-256, so it always loads that file. To use a new file, remove this
+              package and install the new one.
+            </p>
           ) : (
             <form
               className="mt-3 flex items-end gap-2"

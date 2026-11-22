@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ARCHIVE_LIMITS, egressDownload, MARKETPLACE_LIMITS } from '../src/plugins/packages/download.js'
 import { marketplaceTarget, PackageInstaller, PackageRefusedError } from '../src/plugins/packages/install.js'
 import type { PackageMirror } from '../src/plugins/packages/mirror.js'
-import { validateSource, withRepinRef } from '../src/plugins/packages/source.js'
+import { RepinFixedError, validateSource, withRepinRef } from '../src/plugins/packages/source.js'
 import { UNPACK_MAX_TOTAL_BYTES } from '../src/plugins/packages/unpack.js'
 import type { PackagePin, PreparedPackage } from '../src/plugins/packages/store.js'
 import { PluginError } from '../src/plugins/registry.js'
@@ -177,6 +177,9 @@ describe('sources', () => {
   it('re-pins an npm package to a version, and refuses a ref for an archive', () => {
     expect(withRepinRef({ kind: 'npm', url: 'https://registry.npmjs.org/p', ref: '1.0.0' }, '1.1.0').ref).toBe('1.1.0')
     expect(() => withRepinRef({ kind: 'archive', url: 'https://files.test/p.zip', ref: '' }, 'main')).toThrow(/no ref/)
+    // An archive installed with its sha256 can only find the same file again.
+    const fixed = { kind: 'archive' as const, url: 'https://files.test/p.zip', ref: `sha256:${'a'.repeat(64)}` }
+    expect(() => withRepinRef(fixed, undefined)).toThrow(RepinFixedError)
   })
 })
 
