@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
 import { seedPart } from '../mocks/features/orders/parts'
+import { entityMock } from '../mocks/features/entities'
 import { renderPage } from '../test/utils'
 import { PartsPage } from './PartsPage'
 
@@ -110,5 +111,24 @@ describe('PartsPage (#5543)', () => {
 
     expect(within(rules).getByRole('button', { name: 'Save rule' })).toBeDisabled()
     expect(within(rules).getByText(/Open coaster's rule first/)).toBeInTheDocument()
+  })
+
+  it("opens a part's files and links under the table (#6950)", async () => {
+    const hook = seedPart({ name: 'Silver hook', pack_size: 100, pack_price_minor: 500, on_hand: 100 })
+    const { user } = renderPage(<PartsPage />)
+
+    const toggle = await screen.findByRole('button', { name: 'Files and links of Silver hook' })
+    await user.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    const panel = await screen.findByRole('region', { name: 'Silver hook: files and links' })
+    expect(await within(panel).findByText('No files yet.')).toBeInTheDocument()
+    expect(await within(panel).findByText('No links yet.')).toBeInTheDocument()
+    await user.type(within(panel).getByLabelText('Link address'), 'https://example.com/hook')
+    await user.click(within(panel).getByRole('button', { name: 'Add link' }))
+    expect(await within(panel).findByRole('link', { name: 'example.com' })).toBeInTheDocument()
+    expect(entityMock.links.get(`part:${hook.id}`)).toHaveLength(1)
+
+    await user.click(within(panel).getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('region', { name: 'Silver hook: files and links' })).not.toBeInTheDocument()
   })
 })

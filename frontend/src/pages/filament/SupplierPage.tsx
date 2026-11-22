@@ -1,6 +1,8 @@
 import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
+import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
+import { LinksPanel } from '../../components/entities/LinksPanel'
 import { ApiError } from '../../api/client'
 import { listTypes, type SpoolType } from '../../api/filament'
 import {
@@ -242,6 +244,14 @@ export function SupplierPage() {
         <h2 className="text-sm font-semibold tracking-tight">Price sheet</h2>
         <p className="text-[12px] text-muted-foreground">The newest and the previous price of each product. Prices are per pack with tax in and shipping out; the change is in the price per kg.</p>
         <PriceSheet rows={data.sheet} types={typeMap} money={money} />
+      </section>
+
+      <section aria-label="Files and links" className="mt-8 flex flex-col gap-2">
+        <h2 className="text-sm font-semibold tracking-tight">Files and links</h2>
+        <div className="grid gap-6 lg:grid-cols-2">
+          <AttachmentsPanel entity={`supplier:${supplier.id}`} />
+          <LinksPanel entity={`supplier:${supplier.id}`} />
+        </div>
       </section>
 
       {adding && (

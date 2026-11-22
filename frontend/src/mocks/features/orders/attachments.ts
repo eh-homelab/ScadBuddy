@@ -1,6 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { OrderAttachment, OrderAttachmentPatch, OrderAttachmentRole } from '../../../api/types'
-import { SHOWN_IMAGES, THUMBNAILED } from '../../../components/orders/attachmentMedia'
+import { SHOWN_IMAGES, THUMBNAILED } from '../../../components/entities/attachmentMedia'
 import { event, itemOf, lock, refused, transition } from './orders'
 import { BROWSER, fieldProblem, newId, now, problem, Refused, state } from './state'
 
@@ -15,7 +15,7 @@ const ROLES = new Set<OrderAttachmentRole>(['reference', 'issue', 'finished', 'p
 const REVISION_ROLES = new Set<OrderAttachmentRole>(['render', 'test_print'])
 
 /** `orders/attachments.py` `sniff`, over the first bytes. */
-function sniff(head: Uint8Array, name: string): [OrderAttachment['kind'], string] {
+export function sniff(head: Uint8Array, name: string): [OrderAttachment['kind'], string] {
   const at = (offset: number, text: string) => [...text].every((c, i) => head[offset + i] === c.charCodeAt(0))
   if (head[0] === 0x89 && at(1, 'PNG')) return ['image', 'image/png']
   if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return ['image', 'image/jpeg']
@@ -29,7 +29,7 @@ function sniff(head: Uint8Array, name: string): [OrderAttachment['kind'], string
   return ['other', (extension && byName[extension]) || 'application/octet-stream']
 }
 
-async function sha256(blob: Blob): Promise<string> {
+export async function sha256(blob: Blob): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
@@ -42,7 +42,7 @@ type Part = { name: string; filename: string | null; bytes: Uint8Array<ArrayBuff
  * becomes one character (never `TextDecoder('latin1')`, which is windows-1252 and moves
  * 0x80-0x9F), so a file's bytes come through as they were sent.
  */
-async function parts(request: Request): Promise<Part[]> {
+export async function parts(request: Request): Promise<Part[]> {
   const boundary = /boundary=(?:"([^"]+)"|([^;]+))/.exec(request.headers.get('content-type') ?? '')
   if (!boundary) return []
   const bytes = new Uint8Array(await request.arrayBuffer())

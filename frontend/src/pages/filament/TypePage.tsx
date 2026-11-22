@@ -1,6 +1,8 @@
 import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ExternalLinkIcon, ShoppingCartIcon, SlidersHorizontalIcon } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
+import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
+import { LinksPanel } from '../../components/entities/LinksPanel'
 import { api, ApiError } from '../../api/client'
 import {
   getType,
@@ -643,6 +645,16 @@ export function TypePage() {
         <p className="text-[12px] text-muted-foreground">Pressure advance, by printer, extruder and nozzle.</p>
         <KValueTable rows={draft.k_values} onChange={(rows) => set('k_values', rows)} printers={lists.printers} saved={new Map((saved?.k_values ?? []).map((row) => [keyOf(row), row]))} />
       </section>
+
+      {!creating && (
+        <section aria-label="Files and links" className="mt-6 flex flex-col gap-2">
+          <h2 className="text-sm font-semibold tracking-tight">Files and links</h2>
+          <div className="grid gap-6 lg:grid-cols-2">
+            <AttachmentsPanel entity={`spool_type:${madeId ?? id}`} />
+            <LinksPanel entity={`spool_type:${madeId ?? id}`} />
+          </div>
+        </section>
+      )}
 
       {!creating && (
         <section aria-label="Spools" className="mt-6 flex flex-col gap-2">
