@@ -2,7 +2,7 @@
  * #6262 — the Filament section's client for `/api/v1/filament/*`
  * (`backend/scadbuddy/api/filament.py`), typed from the generated `schema.d.ts`.
  */
-import { request } from './client'
+import { command, request } from './client'
 import type { components, operations } from './schema'
 
 type Schemas = components['schemas']
@@ -94,7 +94,7 @@ export type CatalogKind = keyof CatalogRows
  * carry, so this is the row's own fields, all optional, and `archived`.
  */
 export type CatalogInput<K extends CatalogKind> = Partial<
-  Omit<CatalogRows[K], 'id' | 'created_at' | 'updated_at' | 'archived_at' | 'bb_catalog_id' | 'aliases'>
+  Omit<CatalogRows[K], 'id' | 'created_at' | 'updated_at' | 'archived_at' | 'bb_catalog_id' | 'aliases' | 'source' | 'synced_at' | 'bb_colour_id'>
 > & { archived?: boolean }
 
 /**
@@ -326,8 +326,21 @@ export const getProfileFetch = (typeId: string) => request<ProfileFetchStatus>(`
 
 // -- catalogs, locations ----------------------------------------------------------------
 
-export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeArchived?: boolean } = {}) =>
-  request<CatalogRows[K][]>(`${BASE}/catalog/${seg(kind)}${query({ include_archived: options.includeArchived || undefined })}`)
+/** A catalog in sort order; `q` keeps the rows where every word matches some text (a colour's maker, material and hex too, #6907). */
+export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeArchived?: boolean; q?: string } = {}) =>
+  request<CatalogRows[K][]>(`${BASE}/catalog/${seg(kind)}${query({ include_archived: options.includeArchived || undefined, q: options.q?.trim() || undefined })}`)
+
+// -- the colour catalog's syncs (#6907) -------------------------------------------------
+
+export type ColourSync = Schemas['ColourSync']
+export type ColourSyncSource = ColourSync['source']
+
+/** Each source's newest run, with its progress while it runs. */
+export const listColourSyncs = () => request<ColourSync[]>(`${BASE}/colour-syncs`)
+
+/** Runs a sync as a command (followed past its 202); a failed read is a run with `state: 'failed'`, not an error. */
+export const startColourSync = (source: ColourSyncSource, force = false) =>
+  command<ColourSync>(`${BASE}/colour-syncs`, json('POST', { source, force }))
 
 /** Adds a row, or with `id` changes one (only the fields sent). */
 /** Replace a row's aliases; a key another name or alias holds is a 409 that names the holder. */

@@ -25,9 +25,17 @@ from scadbuddy.core import settings as core_settings
 from scadbuddy.core.cancel import CancelToken, check, watched
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bambuddy_usage, sensors
-from scadbuddy.filament.bambuddy_pull import ACTOR, links_elsewhere, parse_rows, pull
+from scadbuddy.filament.bambuddy_pull import (
+    ACTOR,
+    links_elsewhere,
+    parse_rows,
+    pull,
+    record_instance,
+)
 from scadbuddy.filament.bb_pull_models import (
     FILAMENT_BB_PULL_WORKFLOW,
+    ColoursApplied,
+    ColoursBody,
     HaBody,
     PullApplied,
     PullBody,
@@ -40,6 +48,7 @@ from scadbuddy.filament.bb_pull_models import (
     UsageBooked,
 )
 from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.colour_catalog import bambuddy_rows, upsert_colours
 from scadbuddy.filament.component import Filament
 from scadbuddy.library.settings_store import StoredSettings
 
@@ -167,6 +176,26 @@ class LocalBbPull:
             return len(self.filament.inventory.reconcile_trays(body.assignments))
 
         return await asyncio.to_thread(run)
+
+    async def colours(self, body: ColoursBody) -> ColoursApplied:
+        return await asyncio.to_thread(self._colours, body)
+
+    def _colours(self, body: ColoursBody) -> ColoursApplied:
+        """Bambuddy's colour catalog into SB's (#6907, `colour_catalog.upsert_colours`): a
+        row is linked by its Bambuddy id, and a row a person made or edited stays theirs. It
+        links rows, so the links' instance stops it as it stops the spools."""
+        self._check(body.instance)
+        rows, bad = bambuddy_rows(body.colours)
+        with self.filament.spools.transaction() as conn:
+            counts = upsert_colours(conn, rows, "bambuddy")
+            record_instance(conn, body.instance)
+        return ColoursApplied(
+            added=counts.added,
+            updated=counts.updated,
+            unchanged=counts.unchanged,
+            kept=counts.kept,
+            skipped=counts.skipped + bad,
+        )
 
 
 #: How long a kept actor may stay: a row left behind, because the read did not answer in

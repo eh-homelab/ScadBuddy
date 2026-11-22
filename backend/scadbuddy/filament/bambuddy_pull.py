@@ -284,6 +284,7 @@ ANY_LINK = (
     " OR EXISTS (SELECT 1 FROM filament_locations WHERE bb_location_id IS NOT NULL)"
     " OR EXISTS (SELECT 1 FROM filament_insert_types WHERE bb_catalog_id IS NOT NULL)"
     " OR EXISTS (SELECT 1 FROM filament_spool_types WHERE bb_filament_id IS NOT NULL)"
+    " OR EXISTS (SELECT 1 FROM filament_colours WHERE bb_colour_id IS NOT NULL)"
 )
 
 

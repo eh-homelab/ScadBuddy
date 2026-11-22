@@ -248,6 +248,8 @@ from scadbuddy.filament import print_uses, sensors
 from scadbuddy.filament.bb_pull_apply import LocalBbPull
 from scadbuddy.filament.bb_pull_models import (
     INSTANCE_CHANGED,
+    ColoursApplied,
+    ColoursBody,
     HaBody,
     PullApplied,
     PullBody,
@@ -307,12 +309,12 @@ from scadbuddy.store.content_models import content_index_key
 
 logger = logging.getLogger(__name__)
 
-#: For ``main.py``'s `BodySizeGate` (#6861): the Bambuddy pull's four routes, whatever the
+#: For ``main.py``'s `BodySizeGate` (#6861): the Bambuddy pull's five routes (#6907), whatever the
 #: content type. The gate counts only a type in its table, and FastAPI reads a body with
 #: no Content-Type as JSON, so without this a header left out would skip the cap.
 PULL_ROUTE_LIMIT = RouteLimit(
     "POST",
-    re.compile(rf"^{re.escape(BASE)}/filament/pull(?:/usage|/ha-states|/trays)?$"),
+    re.compile(rf"^{re.escape(BASE)}/filament/pull(?:/usage|/ha-states|/trays|/colours)?$"),
     MAX_TEXT_BODY_BYTES,
     "a Bambuddy pull",
     "fixed, api/limits.py MAX_TEXT_BODY_BYTES",
@@ -2107,6 +2109,22 @@ async def filament_pull_ha_states(body: HaBody, sync: PullDep) -> None:
 async def filament_pull_trays(body: TraysBody, sync: PullDep) -> TraysReconciled:
     """Natural: a tray already set right is left alone."""
     return TraysReconciled(moved=await _for_configured(sync.reconcile_trays(body)))
+
+
+@router.post(
+    "/filament/pull/colours",
+    name="crud_print_filament_pull_colours",
+    summary="Fill the colour catalog from Bambuddy's",
+    description=(
+        "Bambuddy's colour catalog (`GET /inventory/colors`) the worker read, written into"
+        " SB's (#6907, `filament/colour_catalog.py`): each entry linked by its Bambuddy id,"
+        " else matched by maker, name and material; a row a person made or edited is left"
+        " as it is. 409 `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_colours(body: ColoursBody, sync: PullDep) -> ColoursApplied:
+    """Natural: the same entries write nothing the first did not."""
+    return await _for_configured(sync.colours(body))
 
 
 # -- a sensor's alert notifications (area ``sensor-notify``, #6646) ----------------------

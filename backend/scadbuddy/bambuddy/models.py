@@ -1360,6 +1360,24 @@ class SpoolCatalogEntry(BambuddyModel):
     weight: int | float
 
 
+class BbColour(BambuddyModel):
+    """``GET /api/v1/inventory/colors`` — one entry of Bambuddy's colour catalog
+    (``ColorEntryResponse`` in ``backend/app/api/routes/inventory.py``, lines 470-481 at
+    https://github.com/maziggy/bambuddy/tree/b7d894b57c0a373f66dc0de49680865b02b3aae5; its
+    OpenAPI in 1.2.6b1 names the route only). ``hex_color`` is ``#RRGGBB`` or
+    ``#RRGGBBAA``; ``extra_colors`` is BB's comma-separated hex stops. The pull fills the
+    colour catalog from it (#6907)."""
+
+    id: int
+    manufacturer: str
+    color_name: str
+    hex_color: str
+    material: str | None = None
+    is_default: bool = False
+    extra_colors: str | None = None
+    effect_type: str | None = None
+
+
 class SpoolAssignment(BambuddyModel):
     """``GET /api/v1/inventory/assignments`` — which spool sits in which tray.
 

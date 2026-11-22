@@ -497,20 +497,29 @@ class LinksResetCounts(BaseModel, extra="forbid"):
     (`filament_bb_links`), the supplier, location, insert type and spool type links (each
     row's Bambuddy id, its hashes and its seen copy), the open create intents
     (`filament_bb_creates`), the error rows (`filament_bb_push_errors`) and the Bambuddy
-    spools the pull ignores (`filament_bb_ignored`). No ScadBuddy row is deleted."""
+    spools the pull ignores (`filament_bb_ignored`), and the colour catalog's links to
+    Bambuddy's colour entries (``colours``, #6907). No ScadBuddy row is deleted."""
 
     spools: int = 0
     suppliers: int = 0
     locations: int = 0
     insert_types: int = 0
     filaments: int = 0
+    colours: int = 0
     intents: int = 0
     errors: int = 0
     ignored: int = 0
 
     def links(self) -> int:
         """Every link of every kind."""
-        return self.spools + self.suppliers + self.locations + self.insert_types + self.filaments
+        return (
+            self.spools
+            + self.suppliers
+            + self.locations
+            + self.insert_types
+            + self.filaments
+            + self.colours
+        )
 
 
 class LinksResetPreview(BaseModel, extra="forbid"):

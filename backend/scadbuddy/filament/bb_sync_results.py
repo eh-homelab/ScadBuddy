@@ -691,6 +691,10 @@ def _reset_counts(conn: Conn) -> LinksResetCounts:
             f"SELECT count(*) AS n FROM {table} WHERE {column} IS NOT NULL"
         ).fetchone()
         counts[name] = row["n"] if row is not None else 0
+    row = conn.execute(
+        "SELECT count(*) AS n FROM filament_colours WHERE bb_colour_id IS NOT NULL"
+    ).fetchone()
+    counts["colours"] = row["n"] if row is not None else 0
     return LinksResetCounts(**counts)
 
 
@@ -844,6 +848,10 @@ def reset_links(
                 f" bb_seen_at = NULL WHERE {column} IS NOT NULL OR bb_seen IS NOT NULL"
                 " OR bb_pushed <> '{}'"
             )
+        # A colour's link only: the pull never pushes a colour, so it has no hashes (#6907).
+        conn.execute(
+            "UPDATE filament_colours SET bb_colour_id = NULL WHERE bb_colour_id IS NOT NULL"
+        )
         conn.execute("UPDATE filament_bb_sync_state SET instance = NULL")
     logger.info("the Bambuddy links were reset", extra={"instance": instance})
     return LinksResetDone(instance=instance, kept=False, deleted=counts)

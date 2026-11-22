@@ -31,6 +31,7 @@ from scadbuddy.filament import bambuddy_usage
 from scadbuddy.filament.bambuddy_pull import ACTOR, Pulls
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, forget_actor, remember_actor
 from scadbuddy.filament.bb_pull_models import (
+    ColoursBody,
     HaBody,
     PullBody,
     PullInstanceChangedError,
@@ -55,7 +56,7 @@ BB = "https://bambuddy.test"
 INSTANCE = instance_for(BB)
 PULL_ID = f"filament-bb-pull-{'b' * 32}"
 PULL = f"{BASE}/filament/pull"
-PATHS = (PULL, f"{PULL}/usage", f"{PULL}/ha-states", f"{PULL}/trays")
+PATHS = (PULL, f"{PULL}/usage", f"{PULL}/ha-states", f"{PULL}/trays", f"{PULL}/colours")
 SPOOL = {
     "id": 7,
     "material": "PLA",
@@ -248,6 +249,7 @@ async def test_a_read_of_another_bambuddy_is_409_and_writes_nothing(
                 f"{PULL}/usage": {"instance": INSTANCE, "pull_id": PULL_ID, "usage": []},
                 f"{PULL}/ha-states": {"instance": INSTANCE, "states": None},
                 f"{PULL}/trays": {"instance": INSTANCE, "assignments": []},
+                f"{PULL}/colours": {"instance": INSTANCE, "colours": []},
             }[path]
             await crud.request("POST", path, json=body)
         assert (refused.value.status, refused.value.problem["reason"]) == (
@@ -356,6 +358,33 @@ async def test_the_ha_and_trays_routes_answer_as_in_process(
         await api.ha_states(HaBody(instance=INSTANCE, states={"sensor.a": "18"}))
         await api.ha_states(HaBody(instance=INSTANCE, states=None))
         assert await api.reconcile_trays(TraysBody(instance=INSTANCE, assignments=[])) == 0
+
+
+COLOUR = {
+    "id": 9,
+    "manufacturer": "Bambu Lab",
+    "color_name": "Jade White",
+    "hex_color": "#ffffff",
+    "material": "PLA Basic",
+}
+
+
+@pg
+async def test_the_colours_route_fills_the_catalog_as_in_process(
+    store: SettingsStore, crud: CrudClient
+) -> None:
+    """#6907: Bambuddy's colour catalog through the route, linked by its id; the same
+    entries again change nothing, and a bad colour is skipped."""
+    body = ColoursBody.model_validate(
+        {"instance": INSTANCE, "colours": [COLOUR, COLOUR | {"id": 10, "hex_color": "bad"}]}
+    )
+    applied = await RemoteBbPull(crud).colours(body)
+    assert (applied.added, applied.skipped) == (1, 1)
+    again = await _local(store).colours(body)
+    assert (again.added, again.unchanged) == (0, 1)
+    with store.pool.connection() as conn:
+        row = conn.execute("SELECT bb_colour_id, rgba FROM filament_colours").fetchone()
+    assert row == {"bb_colour_id": 9, "rgba": "#FFFFFFFF"}
 
 
 @pg

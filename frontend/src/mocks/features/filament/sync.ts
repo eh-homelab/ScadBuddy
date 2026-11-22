@@ -57,6 +57,9 @@ let changedSincePull = false
 /** #6845 — the configured Bambuddy cannot be read. */
 let unreadable = false
 
+/** #6907 — the links left are only colours' links to Bambuddy's colour catalog. */
+let onlyColours = false
+
 /**
  * #6905 — `GET /api/v1/filament/sync/passes`: the pass history, newest first. The seed holds
  * 14 passes ending at the seed's last pass: clean ones on the timer, one that failed on
@@ -94,7 +97,8 @@ function seedPasses(): S['SyncPass'][] {
 let passes = seedPasses()
 
 /** What the seed's links number when they belong to another Bambuddy. */
-const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, intents: 1, ignored: 0 }
+const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, colours: 5, intents: 1, ignored: 0 }
+const NO_LINKS = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, colours: 0, intents: 0, errors: 0, ignored: 0 }
 
 export function reset() {
   lastPassAt = FIRST_PASS
@@ -107,7 +111,13 @@ export function reset() {
   sameBambuddy = false
   changedSincePull = false
   unreadable = false
+  onlyColours = false
   passes = seedPasses()
+}
+
+/** #6907 — the other Bambuddy's links are only colours' links (its spools and the rest were unlinked). */
+export function leaveOnlyColourLinks() {
+  onlyColours = true
 }
 
 /**
@@ -157,7 +167,8 @@ function linksInstance(): string | null {
 }
 
 function resetCounts(): S['LinksResetCounts'] {
-  if (unlinked) return { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
+  if (unlinked) return NO_LINKS
+  if (onlyColours) return { ...NO_LINKS, colours: SEED_LINKS.colours }
   return { ...SEED_LINKS, errors: errors.length }
 }
 
@@ -276,8 +287,7 @@ export const handlers = [
       otherInstance = null
       sameBambuddy = false
       running ??= READS_TO_LAND
-      const none = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
-      return HttpResponse.json({ instance, kept: true, configured_instance: configured(), deleted: none } satisfies S['LinksResetDone'])
+      return HttpResponse.json({ instance, kept: true, configured_instance: configured(), deleted: NO_LINKS } satisfies S['LinksResetDone'])
     }
     const deleted = resetCounts()
     otherInstance = null
