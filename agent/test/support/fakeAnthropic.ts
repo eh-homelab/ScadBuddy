@@ -52,9 +52,10 @@ export const REPLY_COST_USD = (REPLY_TOKENS.input * INPUT_USD_PER_MTOK + REPLY_T
 export const STALL = { stall: 'Once upon a time', usage: { input_tokens: 100_000 } } satisfies Reply
 
 /**
- * The cost of the request `STALL` cuts off. Claude Code prices it at nothing;
- * the manager prices it from the stream, estimating "Once upon a time" at 4
- * output tokens.
+ * The cost of the request `STALL` cuts off: what Claude Code prices it at once
+ * it closed it after an interrupt (SDK 0.3.327, sessions/unpricedSpend.ts), and
+ * what the manager prices it at from the stream when nothing closed it: the
+ * input, and "Once upon a time" estimated at 4 output tokens.
  */
 export const STALL_COST_USD = (STALL.usage.input_tokens * INPUT_USD_PER_MTOK + 4 * OUTPUT_USD_PER_MTOK) / 1_000_000
 

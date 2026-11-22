@@ -95,9 +95,10 @@ describe('a DurableSession conversation under the TypeScript CLI (plan Step 7.1)
     const durableTypes = new Set(entries.map((e) => e.type))
     expect([...new Set(written.map((e) => e.type))].filter((t) => !durableTypes.has(t))).toEqual(['cost-state'])
     // The transcript entries carry the same fields, but those a newer Claude Code adds
-    // to an assistant entry (2.1.310 over 2.1.292), which a resume does not need.
+    // to an assistant entry (2.1.310 over 2.1.292; `madeBy` and `promptCacheRequested`
+    // by 2.1.327), which a resume does not need.
     for (const type of ['user', 'attachment', 'last-prompt']) expect(keysOf(entries, type), type).toEqual(keysOf(written, type))
-    expect(keysOf(written, 'assistant').filter((k) => !keysOf(entries, 'assistant').includes(k))).toEqual(['requestRef', 'requestedModel'])
+    expect(keysOf(written, 'assistant').filter((k) => !keysOf(entries, 'assistant').includes(k))).toEqual(['madeBy', 'promptCacheRequested', 'requestRef', 'requestedModel'])
     expect(keysOf(entries, 'assistant').filter((k) => !keysOf(written, 'assistant').includes(k))).toEqual([])
     // The durable conversation is one session, ending at the workflow's checkpoint.
     expect(new Set(entries.map((e) => e.sessionId))).toEqual(new Set([meta.session_id]))

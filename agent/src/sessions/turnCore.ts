@@ -243,7 +243,7 @@ export class CoreTurn {
     let failureShown: string | undefined
     /** Each move to another credential (#3710), logged before the next attempt's messages. */
     const fallbacks: ServerEvent[] = []
-    /** The model request the turn is cut off in, if it is: Claude Code never prices it (#991). */
+    /** The model request the turn is cut off in, if no message_stop closed it: Claude Code never prices it (#991). */
     const unpriced = this.#unpriced
     /** The failed model request the turn ended on, as fallback.ts judged it (`onRefused`). */
     let refused: Refused | undefined
