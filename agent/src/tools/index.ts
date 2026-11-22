@@ -6,6 +6,7 @@ import { authoringTools } from './authoring.js'
 import { browserTools } from './browser.js'
 import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
+import { entityTools } from './entities.js'
 import { farmTools } from './farm.js'
 import { printerTools } from './printers.js'
 import { fileTools } from './files.js'
@@ -80,6 +81,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...flowTools,
   ...flowTriggerTools,
   ...orderTools,
+  ...entityTools,
   ...storefrontTools,
 ]
 
