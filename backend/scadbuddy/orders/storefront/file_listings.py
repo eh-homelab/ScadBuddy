@@ -3,7 +3,7 @@ its uploaded pictures and its plate pictures.
 
 Publish keeps a copy of the file in the content store, ``listing-file-<sha256>``, held under
 (`KEPT_HOLDER`, listing id), and that copy is the version the listing sells: a later change
-of the library file changes nothing (§5.3). The pin (`ListedFile.pinned`) names it. Only a
+of the library file changes nothing (§5.3). The pin (`ListingFile.pinned`) names it. Only a
 first publish, a new file picked, or a ``repin`` request reads the library (§5.1 rows 1 to
 4); any other publish reads the held copy. From the copy's bytes publish reads the file's
 slots (the dialog's own reader), one held GLB of each plate with each part's slot
