@@ -5,6 +5,7 @@ import {
   isBuiltIn,
   isBuiltInAnswer,
   packageFetch,
+  pinId,
   refusalProblems,
   repinMoves,
   type FileDiff,
@@ -264,8 +265,12 @@ function ApproveDialog({
   const [error, setError] = useState<string | null>(null)
   if (!target) return null
   const { pkg, pending } = target
-  const pin = pending && pkg.pending ? pkg.pending : { commit_sha: pkg.commit_sha, content_hash: pkg.content_hash, review: pkg.review }
+  const pin =
+    pending && pkg.pending
+      ? pkg.pending
+      : { pin_kind: pkg.pin_kind, commit_sha: pkg.commit_sha, bytes_sha256: pkg.bytes_sha256, content_hash: pkg.content_hash, review: pkg.review }
   const refused = pin.review.refused ?? []
+  const named = pinLabel(pin)
 
   const close = () => {
     setConfirmed(false)
@@ -277,7 +282,7 @@ function ApproveDialog({
     setBusy(true)
     setError(null)
     try {
-      const saved = await aiPlugins.approvePackage(pkg.name, pin.commit_sha, pin.content_hash, refused.length > 0 && allowRefused)
+      const saved = await aiPlugins.approvePackage(pkg.name, pinId(pin), pin.content_hash, refused.length > 0 && allowRefused)
       setConfirmed(false)
       setAllowRefused(false)
       onApproved(saved)
@@ -294,14 +299,14 @@ function ApproveDialog({
         <DialogHeader>
           <DialogTitle>{pending ? `Approve the re-pin of ${pkg.name}` : `Approve ${pkg.name}`}</DialogTitle>
           <DialogDescription>
-            Only this commit, with exactly these files, will load. Anything else needs a new approval.
+            Only this {named.thing}, with exactly these files, will load. Anything else needs a new approval.
           </DialogDescription>
         </DialogHeader>
         <div className="min-w-0 space-y-3 text-sm">
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-            <dt className="text-muted-foreground">Commit</dt>
+            <dt className="text-muted-foreground">{named.label}</dt>
             <dd className="sb-num break-all" data-testid="approve-commit">
-              {pin.commit_sha}
+              {named.value}
             </dd>
             <dt className="text-muted-foreground">Content hash</dt>
             <dd className="sb-num break-all" data-testid="approve-hash">
@@ -322,7 +327,7 @@ function ApproveDialog({
               className="mt-0.5"
             />
             <Label htmlFor="approve-reviewed" className="block leading-snug font-normal">
-              I reviewed commit <span className="sb-num">{pin.commit_sha.slice(0, 12)}</span> and content hash{' '}
+              I reviewed {named.thing} <span className="sb-num">{named.value.slice(0, 12)}</span> and content hash{' '}
               <span className="sb-num">{pin.content_hash.slice(0, 19)}…</span>
             </Label>
           </div>
@@ -366,12 +371,46 @@ function ApproveDialog({
   )
 }
 
+/** How a pin is named: a commit, or the sha256 of an archive or npm package's file (#6935). */
+function pinLabel(pin: Pick<PluginPackage, 'pin_kind' | 'commit_sha' | 'bytes_sha256'>): { label: string; thing: string; value: string } {
+  return pin.pin_kind === 'bytes'
+    ? { label: 'File SHA-256', thing: 'file', value: pin.bytes_sha256 ?? '' }
+    : { label: 'Commit', thing: 'commit', value: pin.commit_sha ?? '' }
+}
+
+/** Whether a re-pin can name where to move: a repository's ref, or a registry package's version. */
+function repinTakesRef(pkg: PluginPackage): boolean {
+  const kind = pkg.source.kind
+  return kind === 'git' || kind === 'marketplace' || (kind === 'npm' && pkg.source.ref !== '')
+}
+
+type InstallKind = PackageInstall['kind']
+
+const INSTALL_KINDS: { kind: InstallKind; label: string }[] = [
+  { kind: 'git', label: 'Git repository' },
+  { kind: 'marketplace', label: 'Marketplace repository' },
+  { kind: 'marketplace-url', label: 'Marketplace URL' },
+  { kind: 'archive', label: 'Zip archive' },
+  { kind: 'npm', label: 'npm package' },
+]
+
+const URL_LABEL: Record<Exclude<InstallKind, 'npm'>, { label: string; placeholder: string }> = {
+  git: { label: 'Repository URL', placeholder: 'https://github.com/owner/repo.git' },
+  marketplace: { label: 'Marketplace repository URL', placeholder: 'https://github.com/owner/repo.git' },
+  'marketplace-url': { label: 'marketplace.json URL', placeholder: 'https://plugins.example.com/marketplace.json' },
+  archive: { label: 'Zip URL', placeholder: 'https://files.example.com/plugin-1.0.0.zip' },
+}
+
 function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => void }) {
-  const [kind, setKind] = useState<'git' | 'marketplace'>('git')
+  const [kind, setKind] = useState<InstallKind>('git')
   const [url, setUrl] = useState('')
   const [ref, setRef] = useState('')
   const [path, setPath] = useState('')
   const [entry, setEntry] = useState('')
+  const [sha256, setSha256] = useState('')
+  const [pkgName, setPkgName] = useState('')
+  const [version, setVersion] = useState('')
+  const [registry, setRegistry] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [problems, setProblems] = useState<string[]>([])
@@ -383,16 +422,22 @@ function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => voi
     setError(null)
     setProblems([])
     setNotice(null)
+    const given = (value: string) => value.trim() || undefined
+    const only = <T extends object>(value: T) =>
+      Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as T
     const source: PackageInstall =
       kind === 'git'
-        ? { kind, url: url.trim(), ...(ref.trim() ? { ref: ref.trim() } : {}), ...(path.trim() ? { path: path.trim() } : {}) }
-        : { kind, url: url.trim(), entry: entry.trim(), ...(ref.trim() ? { ref: ref.trim() } : {}) }
+        ? only({ kind, url: url.trim(), ref: given(ref), path: given(path) })
+        : kind === 'marketplace'
+          ? only({ kind, url: url.trim(), entry: entry.trim(), ref: given(ref) })
+          : kind === 'marketplace-url'
+            ? { kind, url: url.trim(), entry: entry.trim() }
+            : kind === 'archive'
+              ? only({ kind, url: url.trim(), sha256: given(sha256) })
+              : only({ kind, package: pkgName.trim(), version: given(version), registry: given(registry) })
     try {
       const pkg = await aiPlugins.installPackage(source)
-      setUrl('')
-      setRef('')
-      setPath('')
-      setEntry('')
+      for (const clear of [setUrl, setRef, setPath, setEntry, setSha256, setPkgName, setVersion, setRegistry]) clear('')
       onInstalled(pkg)
     } catch (caught) {
       if (isBuiltInAnswer(caught)) {
@@ -413,51 +458,106 @@ function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => voi
         <RadioGroup
           name="pkg-kind"
           value={kind}
-          onValueChange={(next) => setKind(next as 'git' | 'marketplace')}
-          className="flex flex-wrap gap-4"
+          onValueChange={(next) => setKind(next as InstallKind)}
+          className="flex flex-wrap gap-x-4 gap-y-2"
         >
-          <div className="flex items-center gap-2">
-            <RadioGroupItem id="pkg-kind-git" value="git" />
-            <Label htmlFor="pkg-kind-git" className="font-normal">
-              Git repository
-            </Label>
-          </div>
-          <div className="flex items-center gap-2">
-            <RadioGroupItem id="pkg-kind-marketplace" value="marketplace" />
-            <Label htmlFor="pkg-kind-marketplace" className="font-normal">
-              Marketplace entry
-            </Label>
-          </div>
+          {INSTALL_KINDS.map((k) => (
+            <div key={k.kind} className="flex items-center gap-2">
+              <RadioGroupItem id={`pkg-kind-${k.kind}`} value={k.kind} />
+              <Label htmlFor={`pkg-kind-${k.kind}`} className="font-normal">
+                {k.label}
+              </Label>
+            </div>
+          ))}
         </RadioGroup>
       </fieldset>
-      <div>
-        <Label htmlFor="pkg-url" className="mb-1.5 font-normal">
-          {kind === 'git' ? 'Repository URL' : 'Marketplace repository URL'}
-        </Label>
-        <Input
-          id="pkg-url"
-          type="url"
-          required
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
-          placeholder="https://github.com/owner/repo.git"
-          className="sb-num"
-        />
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2">
+      {kind === 'npm' ? (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="sm:col-span-2">
+            <Label htmlFor="pkg-npm" className="mb-1.5 font-normal">
+              Package name or https tarball link
+            </Label>
+            <Input
+              id="pkg-npm"
+              required
+              value={pkgName}
+              onChange={(event) => setPkgName(event.target.value)}
+              placeholder="@owner/plugin"
+              className="sb-num"
+            />
+          </div>
+          <div>
+            <Label htmlFor="pkg-version" className="mb-1.5 font-normal">
+              Version or tag
+            </Label>
+            <Input
+              id="pkg-version"
+              value={version}
+              onChange={(event) => setVersion(event.target.value)}
+              placeholder="latest"
+              className="sb-num"
+            />
+          </div>
+          <div>
+            <Label htmlFor="pkg-registry" className="mb-1.5 font-normal">
+              Registry
+            </Label>
+            <Input
+              id="pkg-registry"
+              type="url"
+              value={registry}
+              onChange={(event) => setRegistry(event.target.value)}
+              placeholder="https://registry.npmjs.org"
+              className="sb-num"
+            />
+          </div>
+        </div>
+      ) : (
         <div>
-          <Label htmlFor="pkg-ref" className="mb-1.5 font-normal">
-            Branch, tag or commit
+          <Label htmlFor="pkg-url" className="mb-1.5 font-normal">
+            {URL_LABEL[kind].label}
           </Label>
           <Input
-            id="pkg-ref"
-            value={ref}
-            onChange={(event) => setRef(event.target.value)}
-            placeholder="HEAD"
+            id="pkg-url"
+            type="url"
+            required
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            placeholder={URL_LABEL[kind].placeholder}
             className="sb-num"
           />
         </div>
-        {kind === 'git' ? (
+      )}
+      <div className="grid gap-3 sm:grid-cols-2">
+        {(kind === 'git' || kind === 'marketplace') && (
+          <div>
+            <Label htmlFor="pkg-ref" className="mb-1.5 font-normal">
+              Branch, tag or commit
+            </Label>
+            <Input
+              id="pkg-ref"
+              value={ref}
+              onChange={(event) => setRef(event.target.value)}
+              placeholder="HEAD"
+              className="sb-num"
+            />
+          </div>
+        )}
+        {kind === 'archive' && (
+          <div className="sm:col-span-2">
+            <Label htmlFor="pkg-sha256" className="mb-1.5 font-normal">
+              Expected SHA-256 (optional)
+            </Label>
+            <Input
+              id="pkg-sha256"
+              value={sha256}
+              onChange={(event) => setSha256(event.target.value)}
+              placeholder="refuse a zip with any other digest"
+              className="sb-num"
+            />
+          </div>
+        )}
+        {kind === 'npm' || kind === 'archive' ? null : kind === 'git' ? (
           <div>
             <Label htmlFor="pkg-path" className="mb-1.5 font-normal">
               Directory in the repository
@@ -658,11 +758,13 @@ function PackageCard({
             <dd className="break-all">
               <ExternalLink href={fetched.url}>{fetched.url}</ExternalLink>
               {fetched.kind === 'git' && fetched.path && <span className="sb-num"> · {fetched.path}</span>}
-              {fetched.kind === 'marketplace' && <span className="sb-num"> · entry {fetched.entry}</span>}
-              <span className="sb-num text-muted-foreground"> @ {fetched.ref}</span>
+              {(fetched.kind === 'marketplace' || fetched.kind === 'marketplace-url') && (
+                <span className="sb-num"> · entry {fetched.entry}</span>
+              )}
+              {fetched.ref && !fetched.ref.startsWith('sha256:') && <span className="sb-num text-muted-foreground"> @ {fetched.ref}</span>}
             </dd>
-            <dt className="text-muted-foreground">Commit</dt>
-            <dd className="sb-num break-all">{pkg.commit_sha}</dd>
+            <dt className="text-muted-foreground">{pinLabel(pkg).label}</dt>
+            <dd className="sb-num break-all">{pinLabel(pkg).value}</dd>
             <dt className="text-muted-foreground">Content hash</dt>
             <dd className="sb-num break-all">{pkg.content_hash}</dd>
           </dl>
@@ -685,9 +787,13 @@ function PackageCard({
           {shadowed ? null : pkg.pending ? (
             <div className="mt-3 rounded-lg bg-primary/8 p-3 ring-1 ring-primary/40" aria-label="Pending re-pin">
               <p className="text-xs">
-                Re-pin to <span className="sb-num">{pkg.pending.ref}</span> at{' '}
-                <span className="sb-num break-all">{pkg.pending.commit_sha}</span>. The current pin keeps loading until you
-                approve this one.
+                Re-pin{pkg.pending.ref && (
+                  <>
+                    {' '}to <span className="sb-num">{pkg.pending.ref}</span>
+                  </>
+                )}{' '}
+                at <span className="sb-num break-all">{pinLabel(pkg.pending).value}</span>. The current pin keeps loading
+                until you approve this one.
               </p>
               <div className="mt-2">
                 <MovedNotice pkg={pkg} />
@@ -719,18 +825,22 @@ function PackageCard({
               }}
               {...USER_ONLY}
             >
-              <div className="grow">
-                <Label htmlFor={`repin-${pkg.name}`} className="mb-1.5 text-xs font-normal text-muted-foreground">
-                  Re-pin to branch, tag or commit
-                </Label>
-                <Input
-                  id={`repin-${pkg.name}`}
-                  value={repinRef}
-                  onChange={(event) => setRepinRef(event.target.value)}
-                  placeholder={fetched.ref}
-                  className="sb-num"
-                />
-              </div>
+              {repinTakesRef(pkg) ? (
+                <div className="grow">
+                  <Label htmlFor={`repin-${pkg.name}`} className="mb-1.5 text-xs font-normal text-muted-foreground">
+                    {fetched.kind === 'npm' ? 'Re-pin to version or tag' : 'Re-pin to branch, tag or commit'}
+                  </Label>
+                  <Input
+                    id={`repin-${pkg.name}`}
+                    value={repinRef}
+                    onChange={(event) => setRepinRef(event.target.value)}
+                    placeholder={fetched.ref}
+                    className="sb-num"
+                  />
+                </div>
+              ) : (
+                <p className="grow text-xs text-muted-foreground">Fetch the file again to see what changed.</p>
+              )}
               <Button size="sm" variant="outline" type="submit" disabled={busy !== null} aria-busy={busy === 'repin'} {...USER_ONLY}>
                 {busy === 'repin' && <Spinner />}
                 Fetch re-pin

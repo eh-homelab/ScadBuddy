@@ -163,7 +163,9 @@ describe('the "/" skill menu (#1920)', () => {
           {
             name: 'greeter',
             source: { kind: 'git', url: 'https://git.example/greeter.git', ref: 'main', path: '' },
+            pin_kind: 'commit',
             commit_sha: 'a'.repeat(40),
+            bytes_sha256: null,
             content_hash: 'sha256:x',
             review: { name: 'greeter', description: null, version: null, skills: ['greeter:hello'], commands: [], agents: [], hooks: [], mcp_servers: [], files: [] },
             approved: true,

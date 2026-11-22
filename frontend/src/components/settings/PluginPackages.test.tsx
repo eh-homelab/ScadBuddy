@@ -61,7 +61,7 @@ describe('PluginPackagesPanel', () => {
   it('answers an install of ScadBuddy\'s own plugin with a notice, not a refusal', async () => {
     const { user } = renderPage(<PluginPackagesPanel />)
     await screen.findByText('No plugin packages installed.')
-    await user.click(screen.getByLabelText('Marketplace entry'))
+    await user.click(screen.getByLabelText('Marketplace repository'))
     await user.type(screen.getByLabelText('Marketplace repository URL'), 'https://github.com/eh-homelab/ScadBuddy')
     await user.type(screen.getByLabelText('Plugin name in the marketplace'), 'scadbuddy')
     await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
@@ -91,7 +91,7 @@ describe('PluginPackagesPanel', () => {
   it('installs a marketplace entry', async () => {
     const { user } = renderPage(<PluginPackagesPanel />)
     await screen.findByText('No plugin packages installed.')
-    await user.click(screen.getByLabelText('Marketplace entry'))
+    await user.click(screen.getByLabelText('Marketplace repository'))
     await user.type(screen.getByLabelText('Marketplace repository URL'), 'https://git.example/market.git')
     await user.type(screen.getByLabelText('Plugin name in the marketplace'), 'greeter')
     await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
@@ -163,6 +163,36 @@ describe('PluginPackagesPanel', () => {
     expect(await within(card).findByText('Approved, disabled')).toBeInTheDocument()
   })
 
+  // #6935: an archive is pinned to its file's sha256, and approved by it.
+  it('installs a zip archive and approves its file by sha256', async () => {
+    let installed: unknown
+    let approved: unknown
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/approve')) void request.clone().json().then((b) => (approved = b))
+      else if (request.method === 'POST' && request.url.endsWith('/plugin-packages')) void request.clone().json().then((b) => (installed = b))
+    })
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await user.click(screen.getByLabelText('Zip archive'))
+    expect(screen.queryByLabelText('Branch, tag or commit')).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('Zip URL'), 'https://files.example/greeter-1.0.0.zip')
+    await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    expect(installed).toEqual({ source: { kind: 'archive', url: 'https://files.example/greeter-1.0.0.zip' } })
+    expect(within(card).getByText('File SHA-256')).toBeInTheDocument()
+    expect(within(card).queryByLabelText('Re-pin to branch, tag or commit')).not.toBeInTheDocument()
+
+    await user.click(within(card).getByRole('button', { name: 'Approve…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Approve greeter' })
+    expect(within(dialog).getByText('File SHA-256')).toBeInTheDocument()
+    expect(within(dialog).getByTestId('approve-commit')).toHaveTextContent('f'.repeat(64))
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(within(dialog).getByRole('button', { name: 'Approve this pin' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(approved).toEqual({ bytes_sha256: 'f'.repeat(64), content_hash: GREETER_V1.hash })
+    expect(within(card).getByText('Approved, disabled')).toBeInTheDocument()
+  })
+
   it('shows the server refusing an approval', async () => {
     server.use(
       http.post('/api/v1/ai/plugin-packages/:name/approve', () =>
@@ -215,7 +245,7 @@ describe('PluginPackagesPanel', () => {
   it('flags a re-pin that moved to another repository, and approving it leaves the package disabled', async () => {
     const { user } = renderPage(<PluginPackagesPanel />)
     await screen.findByText('No plugin packages installed.')
-    await user.click(screen.getByLabelText('Marketplace entry'))
+    await user.click(screen.getByLabelText('Marketplace repository'))
     await user.type(screen.getByLabelText('Marketplace repository URL'), 'https://git.example/market.git')
     await user.type(screen.getByLabelText('Plugin name in the marketplace'), 'greeter')
     await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
