@@ -14,7 +14,7 @@
 
 - Display form of a code: `<PREFIX>-<number>`, prefix upper case. Parse accepts any case, with or without the dash (`l12`, `L12`, `L-12`, ` L-12 `). Prefixes now: `L` (location), `S` (spool).
 - QR payload of a location label: `<base>/x/L-<number>`, with `<base>` an https origin and no trailing slash.
-- `filament_label_base_url`: an https origin (`core/urls.py` `https_origin`), at most 64 characters, live. Unset falls back to `public_url`, then to the page's own origin.
+- `filament_label_base_url`: an https origin (`core/urls.py` `https_origin`), at most 64 characters, live. Unset falls back to `public_url` (reduced to its https origin, else dropped), then to the page's own origin.
 - The QR on a 50 x 25 mm label stays 19.8 mm square (`QR_MM`), level M, and its module is at least 0.5 mm: at most QR version 5 (37 modules), so the payload is at most 84 bytes.
 - Numbers are never reused. An archived thing still resolves, with `archived` set.
 - Spool labels keep `scadbuddy:spool:<id>` (plan 2026-11-17 Decision 12). Do not change them.
@@ -80,6 +80,7 @@ Expected: PASS.
 **Interfaces:**
 - Consumes: the `Printer` kind (Task 1), `bambuddy/trays.py` `EXTERNAL`.
 - Produces: `LocationStore.ensure_printer_on(conn: Conn, printer_id: UUID) -> UUID` (static) and `LocationStore.ensure_printer(self, printer_id: UUID) -> UUID`. The place is keyed by `printer_id` with `ams_id IS NULL AND tray_id IS NULL`, named as the printer, of the first unarchived kind named `Printer` (`NoPrinterKindError` when none, a `ValueError` like `NoAmsKindError`), `CatalogRefError` for an unknown printer.
+- As built (ledger ruling I2): the root is the row with `printer_root` true (a new column), not `ams_id IS NULL AND tray_id IS NULL`, so "beside the printer" places never clash with it. The kind is found by the flag `filament_location_kinds.printer`, not by the name `Printer`. The unique index is `(printer_id) WHERE printer_root AND archived_at IS NULL`. Both migrations were edited in place before merge.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -104,6 +105,8 @@ Expected: FAIL (`ensure_printer` not defined).
 - [ ] **Step 3: Implement `ensure_printer_on`, then call it from `ensure_ams_unit_on` (set `parent_id` on insert, and on a found unit place whose `parent_id` is null) and from `ensure_ams_on` for the external holder**
 
 The insert uses `ON CONFLICT ... DO NOTHING` then reads again, as `ensure_ams_unit_on` does. Add a partial unique index in a new migration for the root: `(printer_id) WHERE ams_id IS NULL AND tray_id IS NULL AND printer_id IS NOT NULL AND archived_at IS NULL`. In `repoint_printer_locations`, the join on `ams_id`/`tray_id` already matches the roots with `IS NOT DISTINCT FROM`; check that the `ams_id` comparison also uses `IS NOT DISTINCT FROM`, so the two roots (both `ams_id` null) clash and the merged root is archived.
+
+As built: the merge lets a root clash only with a root (`printer_root` is compared), and no `IS NOT DISTINCT FROM` on `ams_id` decides it.
 
 - [ ] **Step 4: Run the filament tests**
 
@@ -168,6 +171,7 @@ Expected: PASS.
 
 **Interfaces:**
 - Produces: setting `filament_label_base_url: str | None = None`; the helper `label_base_url(settings_read) -> str | None` in `backend/scadbuddy/filament/labels.py`, giving the setting, else `public_url`, else `None`.
+- As built: Task 4 created `filament/labels.py` and Task 5 added to it. The fallback reduces `public_url` to its https origin, or `None` (round 1 of Task 8; the frontend `httpsOrigin` does the same).
 - Copy for `setting_docs.py`: label "Label address", help "The address that location labels open, such as https://scadbuddy.example.com. Keep it stable: a printed label keeps the address it was printed with. Empty uses ScadBuddy's public URL. At most 64 characters."
 
 - [ ] **Step 1: Write the failing tests**
@@ -200,6 +204,7 @@ Same commands. Expected: PASS.
 
 **Files:**
 - Create: `backend/scadbuddy/filament/labels.py` (with Task 4's helper)
+- As built: Task 4 already created `labels.py`; Task 5 modified it (`printer_labels`).
 - Modify: `backend/scadbuddy/filament/locations.py` (`detail`), `backend/scadbuddy/filament/models.py`, `backend/scadbuddy/api/filament.py`
 - Test: `backend/tests/filament/test_location_detail.py`, `backend/tests/api/test_filament_printer_labels.py`
 

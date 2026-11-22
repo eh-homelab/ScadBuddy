@@ -66,6 +66,14 @@ these labels, so a label printed now must stay valid.
    places hang under it; an existing unit place with no parent is moved under it. The
    external holder's tray place hangs under the printer place. A printer with no place
    gets one when a label is asked for and when capture next runs.
+   As built: the root is the row with `printer_root` true, and the kind is the one with the
+   flag `filament_location_kinds.printer` (seeded on "Printer"), not found by name. One
+   unarchived root per printer (unique index). A "beside the printer" place is not a root. A
+   unit place whose parent is empty or archived is moved under the root. In the printer merge
+   a root clashes only with a root. The labels route calls `ensure_printer_on`, and so does capture
+   when it makes an AMS unit or the external holder (`_printer_parent`; a missing printer kind
+   leaves the place with no parent and never fails a capture). A printer with no AMS trays yet
+   gets its place only from the labels route.
 3. **Code format.** `<prefix>-<number>`, prefixes upper case. The parser accepts any case,
    with or without the dash: `l12`, `L12`, `L-12`. This piece registers `L` (location) and
    `S` (spool). A registry maps a prefix to a lookup and a page, so later prefixes (types,
@@ -80,6 +88,9 @@ these labels, so a label printed now must stay valid.
 7. **Setting.** `filament_label_base_url` in Settings → Printing → Filament: an https origin,
    checked like `storefront_public_url`. Unset, it falls back to `public_url`, then to the
    page's own origin. The labels page shows which one it uses.
+   As built: `public_url` is reduced to its https origin (a path is dropped; an http scheme, or no host,
+   gives `None`) in `filament/labels.py` `label_base_url` and in the frontend `httpsOrigin`.
+   A label payload over 84 bytes is refused, so a long origin cannot reach a QR.
 8. **Labels page, "Printers" mode.** Pick one printer or all. One label each for the printer,
    each AMS unit, each slot and the external holder, in tree order. Each label: the code in
    large type, the name ("H2C AMS-A slot 3"), and the QR of `<base>/x/L-<n>`. The same

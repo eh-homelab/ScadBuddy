@@ -983,6 +983,28 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   "profile-fetch")`, area `runs`: `PUT …/runs/{run_id}/files/{sha256}`, `POST …/runs/{run_id}/import`
   and `…/failed`). The public routes are `POST` and `GET /filament/types/{id}/profile-fetch`
   (`api/filament.py`). Invoice confirm starts a fetch for each new type with a `tdfp_id`.
+- `backend/scadbuddy/filament/` labels and printer places (#6955, plan
+  `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
+  (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).
+  A printer's own place is the row with `printer_root` true; its kind is the one flagged
+  `filament_location_kinds.printer` (seeded on "Printer"; the flag finds it, never the name;
+  migration `20261122T0700Z_filament_printer_place.sql`). A unique index allows one unarchived
+  root per printer. `LocationStore.ensure_printer_on` makes or finds the root (409
+  `no_printer_kind` through `NoPrinterKindError` when no kind has the flag) and moves the
+  printer's AMS unit places and external holder under it when they have no parent or an archived
+  one. A "beside the printer" place keeps `printer_root` false and is not touched. In
+  `repoint_printer_locations` (the printer merge) a root clashes only with a root.
+  `filament/labels.py`: `label_base_url` (setting `filament_label_base_url`, else `public_url`
+  reduced to its https origin, else `None`) and `printer_labels` (root, units with slots, external
+  holder; not "beside" places). Routes in `api/filament.py`: `GET /filament/locations/{id}`
+  (`LocationDetail`) and `POST /filament/printer-labels` (a POST because it may make a root; 422
+  for an unknown printer). Agent tools: `filament_code_resolve`, `filament_location_get`,
+  `filament_printer_labels` (all `read`).
+- `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
+  (`L-12`, `S-142`; any case, dash optional, number 1 to 2^31-1), `resolve.py` `PREFIXES`
+  (`L` is `filament_locations`, `S` is `filament_spools`) and `resolve` (`{kind, id, code, name,
+  archived}`; an archived row still resolves). Route `GET /api/v1/codes/{code}` (`api/codes.py`,
+  404 `code_unknown`). A new prefix is one entry in `PREFIXES`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

@@ -1443,6 +1443,62 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_code_resolve',
+    label: 'Resolve a label code',
+    description:
+      'What a typed label code names: `L-12` is a place, `S-142` a spool. Any case, with or without the dash. ' +
+      'Returns the kind, the id, the name and `archived`; an archived thing still resolves. 404 `code_unknown` ' +
+      'for a code that names nothing.',
+    input: z.object({ code: z.string().min(1).describe('A label code, such as `L-12` or `s142`') }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/codes/{code}'],
+    handler: async ({ code }, { backend }) =>
+      json(await ok(backend.GET('/api/v1/codes/{code}', { params: { path: { code } } }), `resolve code ${code}`)),
+  }),
+
+  defineTool({
+    name: 'filament_location_get',
+    label: 'Get a filament location',
+    description:
+      'One place with its code, its path, its children and its spools. 404 for no such place. ' +
+      '`location_id` is a place `id` from filament_location_list.',
+    input: z.object({ location_id: z.string().uuid() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/locations/{location_id}'],
+    handler: async ({ location_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/locations/{location_id}', { params: { path: { location_id } } }),
+          `get location ${location_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_printer_labels',
+    label: 'List printer label codes',
+    description:
+      "The label of each printer's own place, each AMS unit with its slots, and the external holder, each with its " +
+      '`code`, `name` and `depth` (0 printer, 1 unit or external holder, 2 slot), and the `base_url` a QR opens. ' +
+      '`printer_ids` limits it; omit for every printer. It may create a printer\'s own place: that is derived data ' +
+      'that the next spool capture would make anyway, so this tool is `read` tier. 409 `no_printer_kind` when no ' +
+      'location kind is marked as a printer.',
+    input: z.object({ printer_ids: z.array(z.string().uuid()).optional() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/printer-labels'],
+    handler: async ({ printer_ids }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/printer-labels', { body: { printer_ids: printer_ids ?? null } }),
+          'list the printer labels',
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_location_upsert',
     label: 'Add or edit a filament location',
     description:

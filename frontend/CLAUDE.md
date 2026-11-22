@@ -230,6 +230,12 @@ same way, `vite.config.ts`).
 - `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
   2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
   Catalog, Metrics, Shopping list and Ledger.
+  Codes and labels (#6955): `/x/:code` (`pages/CodePage.tsx`) asks `GET /api/v1/codes/{code}` and opens
+  the spool or place; `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page. The
+  Locations tab's name opens that page, its count badge opens the spools filter, and "Print printer
+  labels" opens the labels page with `?printers=`. The labels page also takes `?locations=` (`LocationLabel`;
+  `labelSheet.ts` `httpsOrigin`, `labelBase` and `locationPayload`: the QR is `<base>/x/L-<n>`, and a
+  payload over 84 bytes is refused with an alert).
   History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
   the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
   `charts/LineChart`) and metrics panel (`SpoolMetricsPanel`); the Metrics tab (`pages/filament/MetricsTab.tsx`:
