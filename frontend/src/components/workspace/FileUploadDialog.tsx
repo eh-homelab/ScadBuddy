@@ -33,38 +33,17 @@ interface Props {
 /**
  * #4703 — one file into a target that has no other choices to offer: dropped, chosen from
  * disk, or picked from an assistant session's workspace (`WorkspacePickButton`, shown only
- * with the assistant). The output thumbnail, a library upload and a mesh import use it.
+ * with the assistant). The output thumbnail and a library upload use it; a mesh import
+ * uses its drop zone (`FileDropZone`) beside its other sources (#6916).
  */
 export function FileUploadDialog({ open, title, description, onClose, accept, hint, onFile, workspace }: Props) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [dragging, setDragging] = useState(false)
-  const input = useRef<HTMLInputElement>(null)
 
   function close() {
     if (busy) return
     setError(null)
     onClose()
-  }
-
-  async function take(file: File) {
-    setBusy(true)
-    setError(null)
-    try {
-      await onFile(file)
-      setBusy(false)
-      onClose()
-    } catch (caught) {
-      setBusy(false)
-      setError(failure(caught))
-    }
-  }
-
-  function onDrop(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault()
-    setDragging(false)
-    const file = event.dataTransfer.files[0]
-    if (file && !busy) void take(file)
   }
 
   return (
@@ -74,51 +53,17 @@ export function FileUploadDialog({ open, title, description, onClose, accept, hi
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
-        <div
-          data-testid="file-upload-drop"
-          onDragOver={(event) => {
-            event.preventDefault()
-            setDragging(true)
+        <FileDropZone
+          accept={accept}
+          hint={hint}
+          workspace={workspace}
+          onBusy={setBusy}
+          onError={setError}
+          onFile={async (file) => {
+            await onFile(file)
+            onClose()
           }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={onDrop}
-          className={cn(
-            'flex flex-wrap items-center gap-3 rounded-xl border-2 border-dashed px-3 py-2.5 transition-colors',
-            dragging ? 'border-primary bg-primary/10' : 'bg-muted/40',
-          )}
-        >
-          <div className="min-w-0 flex-1 text-xs">
-            <span className="block text-foreground">{busy ? 'Uploading…' : 'Drop a file here, or choose one'}</span>
-            <span className="text-muted-foreground">{hint}</span>
-          </div>
-          <input
-            ref={input}
-            type="file"
-            className="sr-only"
-            accept={accept}
-            aria-label="Upload a file"
-            onChange={(event) => {
-              const file = event.target.files?.[0]
-              event.target.value = ''
-              if (file) void take(file)
-            }}
-          />
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => input.current?.click()}>
-            {busy ? <Spinner /> : <UploadIcon />}
-            Upload…
-          </Button>
-          <WorkspacePickButton
-            disabled={busy}
-            resource={workspace.resource}
-            resourceLabel={workspace.label}
-            accept={accept}
-            onFile={async (file) => {
-              await onFile(file)
-              setError(null)
-              onClose()
-            }}
-          />
-        </div>
+        />
         {error && (
           <p role="alert" className="text-xs text-destructive">
             {error}
@@ -131,5 +76,99 @@ export function FileUploadDialog({ open, title, description, onClose, accept, hi
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/**
+ * The drop zone, "Upload…" and "From a session…": one file taken by `onFile`. Its wait is
+ * told to `onBusy`, and what it throws to `onError` (null when a file is taken again).
+ */
+export function FileDropZone({
+  accept,
+  hint,
+  workspace,
+  onFile,
+  onBusy,
+  onError,
+  disabled = false,
+}: Pick<Props, 'accept' | 'hint' | 'workspace' | 'onFile'> & {
+  onBusy: (busy: boolean) => void
+  onError: (error: string | null) => void
+  disabled?: boolean
+}) {
+  const [busy, setBusy] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const input = useRef<HTMLInputElement>(null)
+  const off = busy || disabled
+
+  function wait(on: boolean) {
+    setBusy(on)
+    onBusy(on)
+  }
+
+  async function take(file: File) {
+    wait(true)
+    onError(null)
+    try {
+      await onFile(file)
+      wait(false)
+    } catch (caught) {
+      wait(false)
+      onError(failure(caught))
+    }
+  }
+
+  function onDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    setDragging(false)
+    const file = event.dataTransfer.files[0]
+    if (file && !off) void take(file)
+  }
+
+  return (
+    <div
+      data-testid="file-upload-drop"
+      onDragOver={(event) => {
+        event.preventDefault()
+        setDragging(true)
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={onDrop}
+      className={cn(
+        'flex flex-wrap items-center gap-3 rounded-xl border-2 border-dashed px-3 py-2.5 transition-colors',
+        dragging ? 'border-primary bg-primary/10' : 'bg-muted/40',
+      )}
+    >
+      <div className="min-w-0 flex-1 text-xs">
+        <span className="block text-foreground">{busy ? 'Uploading…' : 'Drop a file here, or choose one'}</span>
+        <span className="text-muted-foreground">{hint}</span>
+      </div>
+      <input
+        ref={input}
+        type="file"
+        className="sr-only"
+        accept={accept}
+        aria-label="Upload a file"
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          event.target.value = ''
+          if (file) void take(file)
+        }}
+      />
+      <Button size="sm" variant="outline" disabled={off} onClick={() => input.current?.click()}>
+        {busy ? <Spinner /> : <UploadIcon />}
+        Upload…
+      </Button>
+      <WorkspacePickButton
+        disabled={off}
+        resource={workspace.resource}
+        resourceLabel={workspace.label}
+        accept={accept}
+        onFile={async (file) => {
+          await onFile(file)
+          onError(null)
+        }}
+      />
+    </div>
   )
 }

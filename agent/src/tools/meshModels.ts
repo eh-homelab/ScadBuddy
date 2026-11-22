@@ -57,7 +57,10 @@ export const meshModelTools: Tool[] = [
     label: 'Open a mesh as an editable model',
     description:
       'Open a mesh as an editable model: a Bambuddy library file (library_file_id, from list_library), an output ' +
-      '(output_id), or a 3MF/STL in your workspace (workspace_path with its workspace_sha256). Each object becomes a ' +
+      '(output_id), a print\'s file (archive_id with archive_source, one place get_print_sources lists as available: ' +
+      '`{kind: archive}`, `{kind: archive_source}`, `{kind: library, library_file_id}` or `{kind: printer, path}`; a ' +
+      'sliced file has no meshes and is refused, and a `printer` source reaches the printer, so that call waits for a ' +
+      "person's approval), or a 3MF/STL in your workspace (workspace_path with its workspace_sha256). Each object becomes a " +
       'scene object you can cut, join with a peg and socket, lay flat, add to or subtract from with edit_scene, then ' +
       'render and print like any template. Nothing is written to Bambuddy. ' + BYTES_NEVER_AN_ARGUMENT,
     input: z
@@ -66,24 +69,40 @@ export const meshModelTools: Tool[] = [
         description: z.string().max(10_000).optional(),
         library_file_id: z.number().int().positive().optional(),
         output_id: z.string().regex(/^[0-9a-f]{32}$/).optional(),
+        archive_id: z.number().int().positive().optional().describe("A Bambuddy archive's id, as list_print_archives returns it"),
+        archive_source: z
+          .object({
+            kind: z.enum(['archive', 'archive_source', 'library', 'printer']),
+            library_file_id: z.number().int().min(1).optional(),
+            path: z.string().min(1).max(1024).optional(),
+          })
+          .optional()
+          .describe("Where the print's 3MF is read from, as get_print_sources lists it"),
         filename: z.string().min(1).max(255).optional().describe('The upload\'s name, ending .3mf or .stl; the workspace file\'s own name by default'),
         workspace_path: workspacePathInput.optional(),
         workspace_sha256: workspaceShaInput.optional(),
       })
       .strict(),
     risk: 'write',
+    // Only a print's file on the printer needs the last one (pinnedOutward.ts parks that call).
+    bambuddyScope: ['Read Status', 'Control Printer'],
     routes: ['POST /api/v1/models/from-mesh', 'POST /api/v1/models/from-mesh/upload'],
     title: ({ name }) => `Open a mesh as the model "${name}"`,
-    handler: async ({ name, description, library_file_id, output_id, filename, workspace_path, workspace_sha256 }, ctx) => {
-      if ([library_file_id !== undefined, output_id !== undefined, workspace_path !== undefined].filter(Boolean).length !== 1) {
-        throw new ToolError('give exactly one source: library_file_id, output_id, or workspace_path')
+    handler: async ({ name, description, library_file_id, output_id, archive_id, archive_source, filename, workspace_path, workspace_sha256 }, ctx) => {
+      if ((archive_id === undefined) !== (archive_source === undefined)) {
+        throw new ToolError('`archive_id` and `archive_source` go together')
+      }
+      if ([library_file_id !== undefined, output_id !== undefined, archive_id !== undefined, workspace_path !== undefined].filter(Boolean).length !== 1) {
+        throw new ToolError('give exactly one source: library_file_id, output_id, archive_id with archive_source, or workspace_path')
       }
       if (workspace_path === undefined) {
         if (workspace_sha256 !== undefined) throw new ToolError('`workspace_sha256` goes with `workspace_path` only')
         const body =
           library_file_id !== undefined
             ? { name, description: description ?? '', library_file_id }
-            : { name, description: description ?? '', output_id: output_id! }
+            : archive_id !== undefined
+              ? { name, description: description ?? '', archive_id, archive_source: archive_source! }
+              : { name, description: description ?? '', output_id: output_id! }
         return json(await command(ctx, `open ${name}`, (headers) => ctx.backend.POST('/api/v1/models/from-mesh', { body, headers })))
       }
       if (workspace_sha256 === undefined) {

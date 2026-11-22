@@ -32,7 +32,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.api.deps import CatalogueDep, PrintLinksDep, SettingsStoreDep, UploadsDep
-from scadbuddy.api.mesh_models import MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, create_mesh_model
+from scadbuddy.api.mesh_models import MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, create_from_read
 from scadbuddy.api.models import _slug_from_name, require_model_exists
 from scadbuddy.api.operations import (
     KEY_REQUIRED_DETAIL,
@@ -49,6 +49,7 @@ from scadbuddy.bambuddy.print_import import (
     ModelSuggestion,
     SourceChoice,
     SourceFile,
+    archive_detail,
     chosen,
     find_sources,
     forget_copy,
@@ -71,7 +72,6 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
-from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
@@ -183,17 +183,6 @@ def _owner(link: LinkedPrint) -> PrintOwner:
     )
 
 
-async def _archive(client: BambuddyClient, archive_id: int) -> ArchiveDetail:
-    try:
-        return await client.archive(archive_id)
-    except ApiError as error:
-        if error.status == status.HTTP_404_NOT_FOUND:
-            raise ApiError(
-                status.HTTP_404_NOT_FOUND, f"Bambuddy has no archive {archive_id}"
-            ) from None
-        raise
-
-
 async def _file_suggestions(
     library: PrintLibrary, archive: ArchiveDetail
 ) -> list[LibraryFileSuggestion]:
@@ -250,7 +239,7 @@ async def get_sources(
     ] = False,
 ) -> PrintSources:
     async with client_for(store.load()) as client:
-        archive = await _archive(client, archive_id)
+        archive = await archive_detail(client, archive_id)
         await link_archive(client, uploads, links, archive)
         linked = await links.linked(archive_id)
         sources = await find_sources(client, archive, printer=printer)
@@ -582,7 +571,7 @@ async def import_print(
     # One import of an archive at a time, from the owner check to the record: two at once
     # never both make a model or keep a printer file (#4698 review).
     async with _one_import(links, archive_id), client_for(settings) as client:
-        archive = await _archive(client, archive_id)
+        archive = await archive_detail(client, archive_id)
         # A print ScadBuddy made is linked to its run here, if no read linked it yet.
         await link_archive(client, uploads, links, archive)
         owner = await links.linked(archive_id)
@@ -717,21 +706,16 @@ async def _new_model(
     new_model: NewModel,
     read: SourceFile,
 ) -> str | JSONResponse:
-    """Make the mesh model from the bytes read, as an upload is made one
-    (`create_mesh_model`); its slug, or the 202 while it is still being made."""
-
-    async def claim(claims: ClaimStore) -> Held:
-        return await asyncio.to_thread(claims.hold, read.data)
-
-    made = await create_mesh_model(
+    """Make the mesh model from the bytes read (`create_from_read`); its slug, or the 202
+    while it is still being made."""
+    made = await create_from_read(
         ops,
         response,
         catalogue,
         idempotency_key,
         name=new_model.name,
         description=new_model.description,
-        source={"kind": "upload", "claim": read.sha256, "name": read.name},
-        claim=claim,
+        read=read,
         # A retry reads its source again, and a printer overwrites its files: a model the
         # first read made is no longer this file's, so it is named, never linked.
         changed=lambda first, made: _source_changed(

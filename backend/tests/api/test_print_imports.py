@@ -998,3 +998,108 @@ def test_one_target_only(client: TestClient, model: str) -> None:
     )
 
     assert both.status_code == 422
+
+
+# --- a mesh model from a print's file (#6916) ----------------------------------------
+
+
+def from_mesh(client: TestClient, body: dict[str, Any], **headers: str) -> httpx.Response:
+    response: httpx.Response = client.post(
+        "/api/v1/models/from-mesh", json=body, headers=headers or None
+    )
+    return response
+
+
+@pytest.mark.requires_git
+@respx.mock
+def test_a_print_s_slicer_project_opens_as_a_mesh_model(client: TestClient, model: str) -> None:
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    bambuddy(source_3mf_path="archive/x/source/demo_elan.3mf")
+    respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
+        return_value=httpx.Response(200, content=painted_3mf())
+    )
+    body = {"name": "Trophy", "archive_id": ARCHIVE, "archive_source": {"kind": "archive_source"}}
+    key = press()
+
+    made = from_mesh(client, body, **key)
+
+    assert made.status_code == 201, made.text
+    assert made.json()["slug"] == "trophy"
+    assert client.get("/api/v1/models/trophy/scene").status_code == 200
+    # The model is no print of the archive: nothing links it.
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
+    again = from_mesh(client, body, **key)
+    assert (again.status_code, again.json()["slug"]) == (201, "trophy")
+
+
+@pytest.mark.requires_git
+@respx.mock
+def test_a_printer_file_opens_as_a_mesh_model_and_is_not_kept(
+    client: TestClient, model: str
+) -> None:
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    bambuddy(
+        printer_files={
+            "path": "/cache",
+            "files": [{"name": "demo_elan.3mf", "path": "/cache/demo_elan.3mf", "size": 10}],
+            "warnings": [],
+        }
+    )
+    download = respx.get(
+        f"{API}/printers/1/files/download", params={"path": "/cache/demo_elan.3mf"}
+    ).mock(return_value=httpx.Response(200, content=painted_3mf()))
+    upload = respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(500, json={"detail": "no upload expected"})
+    )
+    body = {
+        "name": "From the printer",
+        "archive_id": ARCHIVE,
+        "archive_source": {"kind": "printer", "path": "/cache/demo_elan.3mf"},
+    }
+
+    made = from_mesh(client, body, **press())
+
+    assert made.status_code == 201, made.text
+    assert download.called and not upload.called
+    assert made.json()["mesh_source"]["name"] == "demo_elan.3mf"
+
+
+@respx.mock
+def test_a_print_s_sliced_file_does_not_open_as_a_mesh_model(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    bambuddy()
+    body = {"name": "Trophy", "archive_id": ARCHIVE, "archive_source": {"kind": "archive"}}
+
+    without_key = from_mesh(client, body)
+    sliced = from_mesh(client, body, **press())
+
+    assert without_key.status_code == 428
+    assert sliced.status_code == 422, sliced.text
+    assert "sliced file" in sliced.json()["detail"]
+    assert not [call for call in respx.calls if "/download" in call.request.url.path]
+
+
+@respx.mock
+def test_a_mesh_model_names_one_source_and_a_print_with_its_place(client: TestClient) -> None:
+    configure(client)
+
+    no_place = from_mesh(client, {"name": "T", "archive_id": ARCHIVE}, **press())
+    no_print = from_mesh(client, {"name": "T", "archive_source": {"kind": "archive"}}, **press())
+    two = from_mesh(
+        client,
+        {
+            "name": "T",
+            "archive_id": ARCHIVE,
+            "archive_source": {"kind": "archive"},
+            "library_file_id": 7,
+        },
+        **press(),
+    )
+
+    assert (no_place.status_code, no_print.status_code, two.status_code) == (422, 422, 422)

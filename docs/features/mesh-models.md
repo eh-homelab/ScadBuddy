@@ -14,8 +14,10 @@ Design: the [mesh-models spec](../superpowers/specs/2026-10-11-mesh-models-desig
 
 ## Code
 
-- Routes: `backend/scadbuddy/api/mesh_models.py` (`POST /models/from-mesh` `:143`, upload
-  `:179`, scene read, edits, eject).
+- Routes: `backend/scadbuddy/api/mesh_models.py` (`POST /models/from-mesh` `:232`: a
+  library file, an output or a print's file (#6916); upload `:293`; scene read, edits, eject).
+- The catalogue's "Open a mesh as a model": `frontend/src/components/MeshSourceDialog.tsx`.
+  It picks a print's file with Import print's picker, `components/prints/PrintSourceChoice.tsx`.
 - Scene and compile: `backend/scadbuddy/meshmodel/scene.py`, `compile.py:160`,
   `ingest.py:76`, `edits.py`, `paint.py`.
 - Operations: `backend/scadbuddy/meshmodel/operations.py:405-421` (`mesh_model_create`,
