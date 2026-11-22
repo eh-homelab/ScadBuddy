@@ -52,6 +52,8 @@ let otherInstance: string | null = null
 let unlinked = false
 /** #6845 — the configured Bambuddy holds the linked spools: a reset keeps the links. */
 let sameBambuddy = false
+/** #6845 — every linked spool with a time on both sides changed in Bambuddy since the last pull: no proof, so no keep. */
+let changedSincePull = false
 /** #6845 — the configured Bambuddy cannot be read. */
 let unreadable = false
 
@@ -67,22 +69,41 @@ export function reset() {
   otherInstance = null
   unlinked = false
   sameBambuddy = false
+  changedSincePull = false
   unreadable = false
 }
 
 /**
  * #6773 — the links now belong to `instance`, not the configured Bambuddy, so the sync is stopped.
  * #6845 — `same`: the configured Bambuddy is that one at a new address, so a reset keeps the links;
- * `unreadable`: the configured Bambuddy cannot be read.
+ * `unreadable`: the configured Bambuddy cannot be read; `changed`: it holds every linked spool but each one
+ * with a time on both sides changed since the last pull, so nothing proves it the links' own.
  */
 export function linkOtherBambuddy(
   instance = '0ld0ld0ld0ld',
-  { same = false, unreadable: down = false }: { same?: boolean; unreadable?: boolean } = {},
+  { same = false, unreadable: down = false, changed = false }: { same?: boolean; unreadable?: boolean; changed?: boolean } = {},
 ) {
   otherInstance = instance
   unlinked = false
   sameBambuddy = same && !down
+  changedSincePull = changed && !same && !down
   unreadable = down
+}
+
+/**
+ * An e2e test puts the links on another Bambuddy before the page loads: this `sessionStorage` key holds
+ * `{ instance?, same?, unreadable?, changed? }` (`linkOtherBambuddy`'s arguments), read once at load.
+ */
+export const LINK_OTHER_SEED_KEY = 'scadbuddy.mock.filament-sync-link-other'
+
+try {
+  const raw = typeof sessionStorage === 'undefined' ? null : sessionStorage.getItem(LINK_OTHER_SEED_KEY)
+  if (raw) {
+    const { instance, ...options } = JSON.parse(raw) as { instance?: string; same?: boolean; unreadable?: boolean; changed?: boolean }
+    linkOtherBambuddy(instance, options)
+  }
+} catch {
+  // Storage blocked or a bad seed: the mock starts on the configured Bambuddy.
 }
 
 /** #6845 — the configured Bambuddy changed after the dry run: it no longer proves the links' own. */
@@ -168,6 +189,7 @@ export const handlers = [
       configured_instance: configured(),
       counts: resetCounts(),
       same_bambuddy: sameBambuddy && otherInstance !== null,
+      changed_since_pull: changedSincePull && otherInstance !== null,
       bambuddy_unreadable: unreadable,
     } satisfies S['LinksResetPreview']),
   ),
@@ -188,13 +210,13 @@ export const handlers = [
       sameBambuddy = false
       running ??= READS_TO_LAND
       const none = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
-      return HttpResponse.json({ instance, kept: true, deleted: none } satisfies S['LinksResetDone'])
+      return HttpResponse.json({ instance, kept: true, configured_instance: configured(), deleted: none } satisfies S['LinksResetDone'])
     }
     const deleted = resetCounts()
     otherInstance = null
     unlinked = true
     errors = []
     running ??= READS_TO_LAND
-    return HttpResponse.json({ instance, kept: false, deleted } satisfies S['LinksResetDone'])
+    return HttpResponse.json({ instance, kept: false, configured_instance: null, deleted } satisfies S['LinksResetDone'])
   }),
 ]
