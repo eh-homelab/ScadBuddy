@@ -24,9 +24,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import Request, status
+from psycopg import errors
 
 from scadbuddy.api.limits import _client_hung_up
-from scadbuddy.core.cancel import CancelToken
+from scadbuddy.core.cancel import CancelledError, CancelToken
 from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,14 @@ CALLER_GONE = "caller_gone"
 
 
 def _read_end(future: asyncio.Future[Any]) -> None:
-    """Read a future nobody awaits, so its exception is not logged as never retrieved."""
-    if not future.cancelled():
-        future.exception()
+    """Read a future nobody awaits, so its exception is not logged as never retrieved.
+    The cancel's own ends (`CancelledError`, ``QueryCanceled``) are expected; any other
+    error, such as a cancel that could not reach the server, is logged (#6957 review)."""
+    if future.cancelled():
+        return
+    error = future.exception()
+    if error is not None and not isinstance(error, CancelledError | errors.QueryCanceled):
+        logger.warning("work a shutdown left behind failed", exc_info=error)
 
 
 async def until_disconnect[T](request: Request, work: Callable[[CancelToken], Awaitable[T]]) -> T:
