@@ -74,6 +74,8 @@ export function backendDropped(error: unknown): boolean {
 /** Waits `ms`, or rejects with `signal`'s reason once it aborts. */
 function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
   return new Promise((resolve, reject) => {
+    // Already aborted (the deadline fired in the try): its abort event has gone, so it never comes.
+    if (signal?.aborted) return reject(signal.reason)
     const done = () => {
       clearTimeout(timer)
       reject(signal!.reason)
