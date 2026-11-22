@@ -216,14 +216,14 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`approvals aga
     // canUseTool as soon as Claude Code does. Hold the turn's append of the call
     // until the entry exists, or 3 s have passed if it never will before the call.
     const append = m.events.append.bind(m.events)
-    m.events.append = async (sessionId, events, tx) => {
-      if (tx === undefined && events.some((e) => e.type === 'tool.call')) {
+    m.events.append = async (sessionId, events) => {
+      if (events.some((e) => e.type === 'tool.call')) {
         const deadline = performance.now() + 3000
         while (performance.now() < deadline && (await db.sql`SELECT 1 FROM ai_pending_input WHERE session_id = ${sessionId}`).length === 0) {
           await new Promise((r) => setTimeout(r, 50))
         }
       }
-      return append(sessionId, events, tx)
+      return append(sessionId, events)
     }
     const { session, turn, requestId } = await parked(m)
     expect(await respond(m, browser, requestId, { kind: 'approval', decision: 'approve' })).toMatchObject({ outcome: 'approved' })

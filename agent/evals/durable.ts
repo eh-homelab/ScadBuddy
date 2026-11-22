@@ -10,7 +10,8 @@ import { bundleWorkflowCode } from '@temporalio/worker'
 import { createBackendClient } from '../src/api/backend.js'
 import { approvalHashKey } from '../src/approvals/service.js'
 import { AuditLog } from '../src/audit/log.js'
-import { type Credential, SettingsStore } from '../src/credentials.js'
+import type { Credential } from '../src/credentials.js'
+import { sqlSettings } from '../test/support/sql/settings.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { PgEventListener } from '../test/support/pgListener.js'
 import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
@@ -23,14 +24,15 @@ import { respond } from '../src/routes/pendingInput.js'
 import { queuesPolled } from '../src/runtime/health.js'
 import { roleParts } from '../src/runtime/role.js'
 import { kekFromBase64 } from '../src/secrets.js'
-import { SessionBlobs } from '../src/sessions/blobs.js'
+import { SessionBlobs } from '../test/support/sql/sessionBlobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
 import { type QueryRunner, SessionManager, SETTING_MODEL, SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { readRuntimeSettings } from '../src/sessions/runtimeSettings.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
-import { FilePayloadStore, PgPayloadKeys, subjectDataConverter } from '../src/temporal/payloadCodec.js'
+import { FilePayloadStore, subjectDataConverter } from '../src/temporal/payloadCodec.js'
+import { PgPayloadKeys } from '../test/support/sql/payloadKeys.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
@@ -218,7 +220,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
     const client = new Client({ connection: env.connection, namespace: 'default', dataConverter })
 
     // What a session's turn reads: the model and the budget, in Settings.
-    const stored = new SettingsStore(db.sql)
+    const stored = sqlSettings(db.sql)
     if (options.model) await stored.set(SETTING_MODEL, options.model)
     await stored.set(SETTING_SESSION_BUDGET_USD, options.maxBudgetUsd ?? 0.5)
     for (const [key, value] of Object.entries(options.turn ?? evalTurnSettings())) await stored.set(key, value)
@@ -244,7 +246,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
       await ensureStateDirs({ stateDir })
       const pool: Database = connectDatabase(url, { searchPath: schema })
       const listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
-      const settings = new SettingsStore(pool.sql)
+      const settings = sqlSettings(pool.sql)
       const audit = new AuditLog({ sql: pool.sql, settings: () => settings, hashKey })
       const p: AgentProcess = { spawned: 0 } as AgentProcess
       const run: QueryRunner = (spawn) => {

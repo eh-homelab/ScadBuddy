@@ -3,7 +3,7 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { WebSocket } from 'ws'
-import { AttachmentStore } from '../src/attachments/store.js'
+import { AttachmentStore } from './support/sql/attachments.js'
 import { connectDatabase, type Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier } from '../src/harness/permissions.js'
@@ -89,7 +89,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the chat so
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       tierOf: (name) => tiers[name],
       mcpServers: () => ({ stub: stubServer() }),
-      approvalHashKey: Buffer.alloc(32, 7),
+      approvalHashKey: () => Buffer.alloc(32, 7),
     })
   }
 

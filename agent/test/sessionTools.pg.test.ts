@@ -1,4 +1,4 @@
-import { AttachmentStore } from '../src/attachments/store.js'
+import { AttachmentStore } from './support/sql/attachments.js'
 import { AuditLog } from '../src/audit/log.js'
 import { ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -10,19 +10,19 @@ import { PgEventListener } from './support/pgListener.js'
 import { ResourceHub } from '../src/resources/hub.js'
 import { BROWSER_USER } from '../src/routes/approvals.js'
 import { followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
-import { PgPublisher } from '../src/sessions/publish.js'
 import type { SessionManager, TurnPrincipal } from '../src/sessions/manager.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool } from '../src/tools/registry.js'
-import { connect, connectWatching, firstText, services, testApp } from './helpers/mcp.js'
+import { connect, connectWatching, firstText, services, testApp, BACKEND } from './helpers/mcp.js'
 import { InMemoryTokenStore } from './support/memoryTokens.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { collectUntil, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { createBackendClient } from '../src/api/backend.js'
 import type { ToolServices } from '../src/tools/registry.js'
-import { BACKEND } from './helpers/mcp.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, withoutTemporal } from './support/agentSessions.js'
+import { PgPublisher } from './support/sql/publisher.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // The `sessions_*` tools (#300) end to end: real /mcp clients with bearer
 // tokens, a real SessionManager on Postgres (with a scripted stand-in for the
@@ -393,7 +393,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
     })
 
     it('records a fork made through sessions_fork as a resource row on the child (#2159)', async () => {
-      const audit = new AuditLog({ sql: db.sql })
+      const audit = sqlAuditLog(db.sql)
       const { agent, sessions } = await setup(undefined, {}, { audit })
       const a = await agent('write')
       const { session } = ok<{ session: { id: string } }>(

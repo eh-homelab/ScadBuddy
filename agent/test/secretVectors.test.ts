@@ -1,7 +1,8 @@
 import { createCipheriv, createHash } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { credentialAad, LEGACY_FORMAT_MESSAGE, openCredential, type CredentialKind } from '../src/credentials.js'
+import { credentialAad, LEGACY_FORMAT_MESSAGE, type CredentialKind } from '../src/credentials.js'
+import { openCredential } from './support/memoryCredentials.js'
 import { kekFromBase64, openSecret, sealSecret, type RandomSource } from '../src/secrets.js'
 
 // The one source of truth for the sealed format (spec 2026-10-01 §6.2, "Test

@@ -2,7 +2,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { AuditLog, type AuditRecord } from '../src/audit/log.js'
-import { SettingsStore } from '../src/credentials.js'
+import { type SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import type { CredentialSource, PooledCredential } from '../src/harness/fallback.js'
 import type { HarnessRun } from '../src/harness/run.js'
@@ -14,11 +14,13 @@ import {
   type SessionManager,
 } from '../src/sessions/manager.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // #790: the session limits in Settings (routes/sessionLimits.ts), raising one
 // session's budget (POST /api/v1/ai/sessions/:id/budget, manager.ts
@@ -48,8 +50,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session bud
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     failures.length = 0
-    audit = new AuditLog({ sql: db.sql, settings: () => settings, onError: (err) => failures.push(err) })
-    settings = new SettingsStore(db.sql, audit)
+    audit = sqlAuditLog(db.sql, { settings: () => settings, onError: (err) => failures.push(err) })
+    settings = sqlSettings(db.sql, audit)
     next = { reply: 'hello there', costUsd: 0.4 }
     const { runner, runs: made, prompts: pushed } = scriptedRunner(() => next)
     runs = made

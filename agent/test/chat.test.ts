@@ -35,7 +35,7 @@ function deps(overrides: Partial<AppDeps> = {}): AppDeps {
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
     kek: { ok: true, kek },
-    credentials: new MemoryCredentials(),
+    credentials: new MemoryCredentials(kek),
     testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
     remoteAddress: () => '10.0.0.7',
     origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
@@ -99,8 +99,8 @@ describe('client messages', () => {
 
 describe('GET /api/v1/ai/status', () => {
   it('is available when AI is enabled and the chat socket exists', async () => {
-    const credentials = new MemoryCredentials()
-    await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-status-test-0000' }, kek)
+    const credentials = new MemoryCredentials(kek)
+    await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-status-test-0000' })
     expect(await status(createApp(deps({ credentials })))).toEqual({ available: true, state: 'enabled', ai: 'enabled' })
   })
 
@@ -116,7 +116,7 @@ describe('GET /api/v1/ai/status', () => {
       state: 'disabled',
       reason: expect.stringMatching(/SCADBUDDY_DATABASE_URL/),
     })
-    expect(await status(createApp(deps({ kek: { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' } })))).toMatchObject({
+    expect(await status(createApp(deps({ kek: { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' }, credentials: new MemoryCredentials() })))).toMatchObject({
       state: 'disabled',
       reason: expect.stringMatching(/key-encryption key.*SCADBUDDY_SECRET_KEY_FILE is not set/),
     })
@@ -137,8 +137,8 @@ describe('GET /api/v1/ai/status', () => {
   })
 
   it('is not available without the chat socket, even with AI enabled', async () => {
-    const credentials = new MemoryCredentials()
-    await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-status-test-0000' }, kek)
+    const credentials = new MemoryCredentials(kek)
+    await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-status-test-0000' })
     expect(await status(createApp(deps({ credentials, upgradeWebSocket: undefined })))).toMatchObject({
       available: false,
       state: 'enabled',
@@ -147,8 +147,8 @@ describe('GET /api/v1/ai/status', () => {
   })
 
   it('says the socket would be refused for a page not opened at the public HTTPS URL', async () => {
-    const credentials = new MemoryCredentials()
-    await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-status-test-0000' }, kek)
+    const credentials = new MemoryCredentials(kek)
+    await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-status-test-0000' })
     const app = createApp(deps({ credentials }))
     const plainHttp = await status(app, { host: 'scadbuddy.example', 'x-forwarded-proto': 'http' })
     expect(plainHttp).toMatchObject({ available: false, state: 'enabled', chat: 'refused' })

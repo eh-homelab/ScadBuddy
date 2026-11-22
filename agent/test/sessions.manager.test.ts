@@ -3,36 +3,29 @@ import { BUILTIN_SERVER } from '../src/builtins/server.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from './support/database.js'
-import { CredentialStore, SettingsStore } from '../src/credentials.js'
+import { SqlCredentials } from './support/sql/credentials.js'
 import { CONTINUE_PROMPT, CredentialPool, NoUsableCredentialError } from '../src/harness/fallback.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../src/harness/run.js'
 import { BUILTIN_SOURCES } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { AccessStore } from '../src/access/store.js'
+import { SqlAccessRows } from './support/sql/access.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME } from '../src/harness/httpRequest.js'
 import { userMessage } from '../src/harness/inbox.js'
 import { sessionWorkDir } from '../src/harness/stateDirs.js'
-import {
-  BROWSER_TOOLS_GUIDE,
-  listQuery,
-  SessionError,
-  SETTING_SESSION_BUDGET_USD,
-  SETTING_SESSION_MAX_TURNS,
-  TITLE_MAX,
-  systemAppend,
-  titleFrom,
-  type TurnOutcome,
-} from '../src/sessions/manager.js'
+import { BROWSER_TOOLS_GUIDE, SessionError, SETTING_SESSION_BUDGET_USD, SETTING_SESSION_MAX_TURNS, TITLE_MAX, systemAppend, titleFrom, type TurnOutcome } from '../src/sessions/manager.js'
 import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
-import { AuditLog } from '../src/audit/log.js'
 import { drainRetains, SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hindsight.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
 import { warmHarness } from './support/warm.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { listQuery } from './support/sql/sessionRows.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 /** `text` as a regular expression that matches only itself. */
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -122,7 +115,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
     it('starts a session with limits from ai_settings, and defaults without them', async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ reply: 'hi' }))
-      const m = manager({ sql: db.sql, paths, run: runner, settings: new SettingsStore(db.sql) })
+      const m = manager({ sql: db.sql, paths, run: runner, settings: sqlSettings(db.sql) })
       const { session: plain } = await m.start(agentA, { origin: 'mcp', title: 'plain' })
       expect(plain).toMatchObject({
         origin: 'mcp',
@@ -135,7 +128,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         costUsd: 0,
         turns: 0,
       })
-      const settings = new SettingsStore(db.sql)
+      const settings = sqlSettings(db.sql)
       await settings.set(SETTING_SESSION_MAX_TURNS, 7)
       await settings.set(SETTING_SESSION_BUDGET_USD, 0.5)
       const { session: capped } = await m.start(agentA, { origin: 'chat' })
@@ -234,7 +227,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           yield { type: 'system', subtype: 'init', mcp_servers: inits.shift(), plugins: [] } as unknown as SDKMessage
           yield* scripted.runner(run)
         })()
-      const m = manager({ sql: db.sql, paths, run: runner, settings: new SettingsStore(db.sql), httpRequest: {} })
+      const m = manager({ sql: db.sql, paths, run: runner, settings: sqlSettings(db.sql), httpRequest: {} })
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
       await turn!.done
       // Only a spawn reports an init: the warm process is let go before each later turn.
@@ -485,7 +478,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         }
         const remotePlugins = (): Promise<PluginsForRun> =>
           Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
-        const settings = new SettingsStore(db.sql)
+        const settings = sqlSettings(db.sql)
         const m = manager({ sql: db.sql, paths, run: runner, remotePlugins, settings, memory: { hookConfig: { autoRetain: false } } })
         // Each turn's process fires the recall (test/support/sessions.ts); a changed cap is
         // in the fingerprint, so each change spawns a process with the new one (warm.ts).
@@ -514,7 +507,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         }
         const remotePlugins = (): Promise<PluginsForRun> =>
           Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
-        const audit = new AuditLog({ sql: db.sql })
+        const audit = sqlAuditLog(db.sql)
         const pooled = (id: string, secret: string) => ({
           id,
           epoch: 0,
@@ -656,12 +649,12 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
     it('puts the credential names in the session events only: no logged line, audit row or outcome has them (#5779)', async () => {
       const paths = await tempPaths()
       const kek = kekFromBase64(randomBytes(32).toString('base64'))
-      const store = new CredentialStore(db.sql)
-      await store.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-first-key-aaaa', name: 'Personal Max' }, kek)
-      await store.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-second-key-bbbb', name: 'Team Work' }, kek)
-      const audit = new AuditLog({ sql: db.sql })
+      const store = new SqlCredentials(db.sql, kek)
+      await store.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-first-key-aaaa', name: 'Personal Max' })
+      await store.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-second-key-bbbb', name: 'Team Work' })
+      const audit = sqlAuditLog(db.sql)
       const logged: string[] = []
-      const credentials = new CredentialPool({ repo: store, kek: { ok: true, kek }, audit, log: (line) => logged.push(line) })
+      const credentials = new CredentialPool({ repo: store, audit, log: (line) => logged.push(line) })
       // Both credentials are refused: the first after its init, the second at once.
       let attempts = 0
       const runner = (run: HarnessRun): AsyncIterable<SDKMessage> => {
@@ -726,7 +719,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         const remotePlugins = (): Promise<PluginsForRun> =>
           Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
         const failures: unknown[] = []
-        const audit = new AuditLog({ sql: db.sql, onError: (err) => failures.push(err) })
+        const audit = sqlAuditLog(db.sql, { onError: (err) => failures.push(err) })
         const m = manager({ sql: db.sql, paths, run: runner, remotePlugins, audit })
         // The scripted process fires the hooks as Claude Code does (test/support/sessions.ts).
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box' })
@@ -800,7 +793,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
 
     it('refuses sends once the session budget is spent, and passes what is left to the SDK', async () => {
       const paths = await tempPaths()
-      const settings = new SettingsStore(db.sql)
+      const settings = sqlSettings(db.sql)
       await settings.set(SETTING_SESSION_BUDGET_USD, 0.05)
       const { runner, runs } = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.03 }))
       const m = manager({ sql: db.sql, paths, run: runner, settings })
@@ -831,7 +824,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
 
     it('reads tool search and the system prompt per turn, ScadBuddy text first whatever the user wrote (#5221, #5222)', async () => {
       const paths = await tempPaths()
-      const settings = new SettingsStore(db.sql)
+      const settings = sqlSettings(db.sql)
       const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
       const m = manager({ sql: db.sql, paths, run: runner, settings })
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'one' })
@@ -849,7 +842,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
 
     it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {
       const paths = await tempPaths()
-      const access = new AccessStore(db.sql)
+      const access = new AccessStore(new SqlAccessRows(db.sql))
       const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
       const m = manager({ sql: db.sql, paths, run: runner, access: new AccessResolver(access), httpRequest: {} })
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'fetch' })
@@ -1125,7 +1118,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
 
       it('a changed setting spawns a new process for the next turn', async () => {
         const paths = await tempPaths()
-        const settings = new SettingsStore(db.sql)
+        const settings = sqlSettings(db.sql)
         const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
         const m = manager({ sql: db.sql, paths, run: runner, settings })
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'one' })

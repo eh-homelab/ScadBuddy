@@ -1,93 +1,14 @@
 import { readFile } from 'node:fs/promises'
-import type { Sql } from 'postgres'
 import type { Middleware } from 'openapi-fetch'
-import { type Kek, openSecret } from '../secrets.js'
 import { backendNotUp } from './backendUp.js'
 
 // #4975 phase 4 (spec 2026-11-01 §7.1, §7.2): the agent's service credential on every call
-// to the backend: the openapi-fetch client (`serviceCredentialMiddleware`) and the workspace
-// blob routes' plain fetches (`withServiceCredential`). The backend issues and rotates it; the agent reads the newest live one
-// from `service_credentials_agent` (the view its own Postgres role alone is granted, when the
-// deployment made one), unseals it under the KEK, and reads again every hour. Without the KEK
-// or a credential it sends none, which `SCADBUDDY_AUTH_MODE=off` still serves.
+// to the backend: the openapi-fetch client (`serviceCredentialMiddleware`), the CRUD routes and
+// the workspace blob routes' plain fetches (`withServiceCredential`). It is exchanged for the
+// proof the pod mounts (`ExchangeCredential`, below); the agent has no database view to read a
+// sealed one from (#5299 step 12), so a proof is required (`config.ts` `serviceProof`).
 
-export const REREAD_MS = 60 * 60 * 1000
-/** How soon it reads again while it has no token (review of #5211): started before the API minted one, or a failed read. */
-export const RETRY_MS = 60 * 1000
-
-/** The AAD binding a sealed token to its row (`backend/scadbuddy/auth/service_credentials.py` `aad`). */
-export function credentialAad(id: string, caller: string, scopes: readonly string[]): string {
-  return `service_credentials|${id}|${caller}|${[...scopes].sort().join(',')}`
-}
-
-type Row = {
-  id: string
-  caller: string
-  scopes: string[]
-  secret_sealed: Buffer
-  dek_sealed: Buffer
-  kek_id: string
-}
-
-export class ServiceCredential implements CredentialSource {
-  private token: string | undefined
-  private readAt: number | undefined
-  private reading: Promise<string | undefined> | undefined
-
-  private readonly sql: Sql
-  private readonly kek: Kek | undefined
-  private readonly now: () => number
-  private readonly log: (message: string) => void
-
-  constructor(
-    sql: Sql,
-    kek: Kek | undefined,
-    now: () => number = Date.now,
-    log: (message: string) => void = (message) => console.error(message),
-  ) {
-    this.sql = sql
-    this.kek = kek
-    this.now = now
-    this.log = log
-  }
-
-  async current(): Promise<string | undefined> {
-    if (this.kek === undefined) return undefined
-    const wait = this.token === undefined ? RETRY_MS : REREAD_MS
-    if (this.readAt !== undefined && this.now() - this.readAt < wait) return this.token
-    this.reading ??= this.read(this.kek).finally(() => {
-      this.reading = undefined
-    })
-    return this.reading
-  }
-
-  /** Nothing: a sealed credential is replaced by the backend's rotation, read within the hour. */
-  invalidate(_token: string): void {}
-
-  private async read(kek: Kek): Promise<string | undefined> {
-    try {
-      const rows = await this.sql<Row[]>`
-        SELECT id, caller, scopes, secret_sealed, dek_sealed, kek_id
-        FROM service_credentials_agent ORDER BY expires_at DESC, created_at DESC, id DESC LIMIT 1`
-      const row = rows[0]
-      this.token =
-        row === undefined
-          ? undefined
-          : openSecret(
-              kek,
-              { secretSealed: row.secret_sealed, dekSealed: row.dek_sealed, kekId: row.kek_id },
-              credentialAad(row.id, row.caller, row.scopes),
-            )
-    } catch (error) {
-      // Keep the last token: it stays good through the seven days' overlap.
-      this.log(`could not read the agent's service credential (${(error as Error).name})`)
-    }
-    this.readAt = this.now()
-    return this.token
-  }
-}
-
-/** Where the agent's credential comes from: its view (`ServiceCredential`) or the exchange (`ExchangeCredential`). */
+/** Where the agent's credential comes from: the exchange (`ExchangeCredential`); tests give a fixed one. */
 export type CredentialSource = {
   current(): Promise<string | undefined>
   /** The backend answered 401 to `token`. */
@@ -97,7 +18,7 @@ export type CredentialSource = {
 // #5494 (spec 2026-11-05 §6.2, §6.3, §8 step 1): with SCADBUDDY_SERVICE_TOKEN_FILE (the projected
 // ServiceAccount token, audience `scadbuddy`) or SCADBUDDY_SERVICE_BOOTSTRAP_FILE, the agent exchanges
 // its proof at the backend's POST /api/v1/auth/service-token for a 15-minute credential with no
-// sealed copy, instead of reading its view. Mirrors `backend/scadbuddy/auth/service_credentials.py`
+// sealed copy. Mirrors `backend/scadbuddy/auth/service_credentials.py`
 // `ExchangeReader`.
 
 export const EXCHANGE_PATH = '/api/v1/auth/service-token'

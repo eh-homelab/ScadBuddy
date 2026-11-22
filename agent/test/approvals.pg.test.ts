@@ -12,7 +12,6 @@ import {
   summariseInput,
   sweepErrorText,
 } from '../src/approvals/service.js'
-import { SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
@@ -25,6 +24,7 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { agentA, agentB, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 import { respond } from '../src/routes/pendingInput.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { sqlAuditLog, TEST_HASH_KEY } from './support/sql/audit.js'
 import { SqlApprovals } from './support/sql/approvals.js'
 
@@ -143,7 +143,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   it('reads the expiry window from ai_settings, within bounds', async () => {
     expect(await m.approvals.expirySeconds()).toBe(DEFAULT_APPROVAL_EXPIRY_SECONDS)
-    const settings = new SettingsStore(db.sql)
+    const settings = sqlSettings(db.sql)
     const service = new ApprovalService({ routes: new SqlApprovals(db.sql), events: m.events, settings, hashKey: () => TEST_HASH_KEY })
     await settings.set(SETTING_APPROVAL_EXPIRY_SECONDS, 120)
     expect(await service.expirySeconds()).toBe(120)
@@ -223,12 +223,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     const boom = new Error('invalid input syntax for type uuid: "f"')
     const append = m.events.append.bind(m.events)
     let failed = false
-    m.events.append = async (sessionId, events, tx) => {
+    m.events.append = async (sessionId, events) => {
       if (sessionId === first.session.id && !failed) {
         failed = true
         throw boom
       }
-      return append(sessionId, events, tx)
+      return append(sessionId, events)
     }
     await expect(m.approvals.expireDue()).rejects.toBe(boom)
     const decisions = async () =>
@@ -249,9 +249,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${later.approval.id}`
     const failing = new Set(stuck.map((o) => o.session.id))
     const append = m.events.append.bind(m.events)
-    m.events.append = async (sessionId, events, tx) => {
+    m.events.append = async (sessionId, events) => {
       if (sessionId && failing.has(sessionId)) throw new Error('boom')
-      return append(sessionId, events, tx)
+      return append(sessionId, events)
     }
     const thrown = await m.approvals.expireDue(2).then(
       () => undefined,
@@ -370,12 +370,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     // `approval.required` is written: the fastest possible decision.
     let raced: unknown
     const events = Object.create(m.events) as EventLog
-    events.append = async (sessionId, batch, tx) => {
+    events.append = async (sessionId, batch) => {
       const required = batch.find((e) => e.type === 'approval.required')
       if (required && 'id' in required) {
         raced = await service.decide(browser, String(required.id), false).catch((err: unknown) => err)
       }
-      return m.events.append(sessionId, batch, tx)
+      return m.events.append(sessionId, batch)
     }
     const service = new ApprovalService({ routes: new SqlApprovals(db.sql), events, hashKey: () => TEST_HASH_KEY })
     const approval = await service.create({

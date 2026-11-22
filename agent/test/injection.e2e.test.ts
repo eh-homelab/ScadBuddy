@@ -19,6 +19,7 @@ import { mswFetch } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // Prompt injection replayed end to end (#258, spec §8.6): a session turn on
 // the real Agent SDK and its bundled Claude Code (pointed at the local fake
@@ -102,7 +103,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`prompt inje
     stop = new AbortController()
     const paths = await tempPaths()
     await ensureStateDirs(paths)
-    audit = new AuditLog({ sql: db.sql, hashKey: HASH_KEY, onError: (err) => console.error(err) })
+    audit = sqlAuditLog(db.sql, { hashKey: () => HASH_KEY, onError: (err) => console.error(err) })
     const services = {
       backend: createBackendClient(BACKEND, mswFetch),
       pending: new PendingActionStore(),
@@ -118,7 +119,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`prompt inje
       mcpServers: () => ({
         [SERVER_NAME]: createHarnessServer(ALL_TOOLS, services, { id: 'browser', kind: 'browser', tiers: tiersUpTo('outward') }),
       }),
-      approvalHashKey: HASH_KEY,
+      approvalHashKey: () => HASH_KEY,
       audit,
     })
   })

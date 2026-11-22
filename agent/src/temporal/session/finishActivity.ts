@@ -1,8 +1,7 @@
-import type { Sql } from 'postgres'
 import type { SessionImages } from '../../sessions/blobs.js'
 import type { EventLog } from '../../sessions/eventLog.js'
 import { event, type ServerEvent } from '../../sessions/protocol.js'
-import { type Logged, type NextClaim, PgTurnRows, type TurnRows } from '../../sessions/turnRows.js'
+import type { Logged, NextClaim, TurnRows } from '../../sessions/turnRows.js'
 import {
   type BeginOutcome,
   type BeginTurnInput,
@@ -74,12 +73,8 @@ function headClaim(sessionId: string, next: QueuedMessage): NextClaim {
 /** What a turn's end reports after it is written (sessions/orderCosts.ts `OrderCosts`); never throws. */
 export type TurnEndReports = { report(sessionId: string): Promise<void> }
 
-/**
- * The activities over `turns`, the row's writes (sessions/turnRows.ts: `PgTurnRows` on `sql` when
- * omitted; gated to the API's routes in main.ts, #6449).
- */
-export function sessionFinishActivities(sql: Sql, events: EventLog, costs?: TurnEndReports, blobs?: Pick<SessionImages, 'delete'>, turns?: TurnRows) {
-  const rows = turns ?? new PgTurnRows(sql)
+/** The activities over `rows`, the row's writes on the API's routes (sessions/turnRows.ts, #6449). */
+export function sessionFinishActivities(rows: TurnRows, events: EventLog, costs?: TurnEndReports, blobs?: Pick<SessionImages, 'delete'>) {
   const told = (sessionId: string, logged: Logged | undefined) => {
     if (logged?.events.length) events.committed(sessionId, logged.events, logged.seqs)
   }

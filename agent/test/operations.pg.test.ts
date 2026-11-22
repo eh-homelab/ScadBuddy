@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from './support/database.js'
 import { canonicalJson, operationKey, OperationStore } from '../src/operations/store.js'
+import { SqlOperations } from './support/sql/operations.js'
 import { until } from './support/until.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
@@ -24,7 +25,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`ai_operations${TEST_DATABASE_URL ? '' : ` (
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    store = new OperationStore(db.sql)
+    store = new OperationStore(new SqlOperations(db.sql))
   })
   afterEach(async () => {
     await drop()

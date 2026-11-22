@@ -10,6 +10,7 @@ import { BACKGROUND_WORKFLOW, BackgroundTasks, backgroundWorkflowId } from '../s
 import { eventNotice } from '../src/background/monitor.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { BackgroundTaskStore, DELIVER_MAX_CHARS } from '../src/background/store.js'
+import { SqlBackgroundTasks } from './support/sql/backgroundTasks.js'
 import { temporalTaskRunner } from '../src/background/temporal.js'
 import type { Database } from './support/database.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
@@ -46,7 +47,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    store = new BackgroundTaskStore(db.sql)
+    store = new BackgroundTaskStore(new SqlBackgroundTasks(db.sql))
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
     sessionId = (await m.start(browser, { origin: 'chat' })).session.id
     sent.length = 0

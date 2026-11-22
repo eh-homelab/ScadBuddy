@@ -12,14 +12,15 @@ import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { loadPackagesForRun, PackageInstaller } from '../src/plugins/packages/install.js'
 import { validateSource } from '../src/plugins/packages/source.js'
-import { grantAad, PluginOAuth } from '../src/plugins/oauthStore.js'
-import { PluginStore } from '../src/plugins/registry.js'
+import { PluginOAuth } from '../src/plugins/oauthStore.js'
+import { grantAad, SqlOAuthRows } from './support/sql/oauth.js'
+import { PostgresPluginStore } from './support/sql/plugins.js'
 import { toolSecrets } from '../src/plugins/secrets.js'
 import { kekFromBase64, sealSecret } from '../src/secrets.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
-import { SessionFiles } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { gitMissing, gitRepo, GREETER, localFetcher, resolver } from './support/gitRepo.js'
@@ -49,19 +50,19 @@ describe.skipIf(skip !== undefined)(`a non-durable turn's uploads${skip ? ` (ski
   let m: SessionManager
   let files: SessionFiles
   let oauth: PluginOAuth
-  let plugins: PluginStore
+  let plugins: PostgresPluginStore
   let credentials: MemoryCredentials
 
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     files = new SessionFiles(db.sql)
-    oauth = new PluginOAuth(db.sql)
-    plugins = new PluginStore(db.sql, { oauth })
-    credentials = new MemoryCredentials()
-    await credentials.create({ kind: 'anthropic_api_key', secret: SAVED }, kek)
+    oauth = new PluginOAuth(new SqlOAuthRows(db.sql, kek))
+    plugins = new PostgresPluginStore(db.sql, kek, { oauth })
+    credentials = new MemoryCredentials(kek)
+    await credentials.create({ kind: 'anthropic_api_key', secret: SAVED })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner, workspace: files })
-    await plugins.create({ name: 'drive', url: 'https://drive.example/mcp' }, kek)
+    await plugins.create({ name: 'drive', url: 'https://drive.example/mcp' })
     const grant = {
       plugin: 'drive',
       plugin_url: 'https://drive.example/mcp',
@@ -85,7 +86,7 @@ describe.skipIf(skip !== undefined)(`a non-durable turn's uploads${skip ? ` (ski
 
   /** The in-process server a turn without Temporal calls, wired as main.ts wires `toolServices.secrets`. */
   async function turn(session: string) {
-    const wired = harnessTools(services({ workspace: files, secrets: toolSecrets({ kek, credentials, plugins, oauth }).secrets }))
+    const wired = harnessTools(services({ workspace: files, secrets: toolSecrets({ credentials, plugins, oauth }).secrets }))
     const servers = wired.mcpServers({ id: session, owner: browser }, undefined, { secrets: () => [UNSAVED_HEADER] })
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
     await servers[SERVER_NAME]!.instance.connect(serverSide)
@@ -144,7 +145,7 @@ describe.skipIf(skip !== undefined)(`a non-durable turn's uploads${skip ? ` (ski
       expect(loaded.loaded).toEqual([])
       expect(loaded.problems.join()).toMatch(/MCP server "mem"/)
       // As main.ts wires it.
-      const agentSecrets = toolSecrets({ kek, credentials, plugins, oauth, packages: { store, installer } })
+      const agentSecrets = toolSecrets({ credentials, plugins, oauth, packages: { store, installer } })
 
       const { session } = await m.start(browser, { origin: 'chat' })
       const ws = { kind: 'session' as const, sessionId: session.id }

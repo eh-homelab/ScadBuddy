@@ -6,20 +6,21 @@ import { ApprovalService } from '../src/approvals/service.js'
 import { type AuditFilter, type AuditLog, DEFAULT_AUDIT_RETENTION_DAYS, SETTING_AUDIT_RETENTION_DAYS, SYSTEM_ACTOR } from '../src/audit/log.js'
 import { TurnAuditor } from '../src/audit/turn.js'
 import { auditedTokenStore, UI_ACTOR } from '../src/audit/writes.js'
-import { SettingsStore } from '../src/credentials.js'
+import { type SettingsStore } from '../src/credentials.js'
+import { PostgresTokenStore } from './support/sql/tokens.js'
 import type { Database } from './support/database.js'
 import { MemoryEventSource } from '../src/events/bus.js'
 import type { ApprovalVerdict } from '../src/harness/permissions.js'
 import { ResourceHub } from '../src/resources/hub.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { event } from '../src/sessions/protocol.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { BACKEND, connect, firstText, services, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser } from './support/sessions.js'
 import { sqlAuditLog } from './support/sql/audit.js'
 import { SqlApprovals } from './support/sql/approvals.js'
 import { PgEventRows } from './support/sql/eventRows.js'
-import { PostgresTokenStore } from './support/sql/tokens.js'
 
 // The audit log (#258, src/audit/log.ts) against Postgres: what is recorded,
 // that the table is append-only, retention, and the read route.
@@ -44,7 +45,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
     expect(await db.ready()).toBe(true)
     failures.length = 0
     audit = sqlAuditLog(db.sql, { settings: () => settings, hashKey: () => HASH_KEY, onError: (err) => failures.push(err) })
-    settings = new SettingsStore(db.sql, audit)
+    settings = sqlSettings(db.sql, audit)
   })
   afterEach(async () => {
     expect(failures).toEqual([])

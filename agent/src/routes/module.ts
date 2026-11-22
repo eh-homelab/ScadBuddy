@@ -18,9 +18,9 @@ export type RouteModule = {
   register(app: Hono, deps: AppDeps, shutdown: AbortSignal): void
 }
 
-/** The database's `ready`, or always-false with no database: the routes then answer 503. */
+/** Whether the API serves every CRUD area the agent wants (api/dataHealth.ts): the routes answer 503 until then. */
 export function ready(deps: AppDeps): Probe {
-  return deps.database ? deps.database.ready : () => Promise.resolve(false)
+  return deps.database.ready
 }
 
 /** How /mcp is authenticated, read per request; the default with no /mcp endpoint. */

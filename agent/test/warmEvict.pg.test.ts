@@ -1,16 +1,19 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AccessStore } from '../src/access/store.js'
-import { CredentialStore, SettingsStore } from '../src/credentials.js'
+import { SqlCredentials } from './support/sql/credentials.js'
+import { SqlAccessRows } from './support/sql/access.js'
 import type { Database } from './support/database.js'
 import { TOOL_LOADING_KEY } from '../src/harness/toolSearch.js'
 import { SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hindsight.js'
-import { PluginStore } from '../src/plugins/registry.js'
+import { PostgresPluginStore } from './support/sql/plugins.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
+import { sqlForget } from './support/sql/forget.js'
 import { SETTING_MODEL, SETTING_SESSION_BUDGET_USD, type SessionManager } from '../src/sessions/manager.js'
 import { evictOnNotify, evictsWarmOnWrite, WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
 import { TURN_KEYS } from '../src/sessions/turnSettings.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
@@ -79,25 +82,25 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`warm evicti
   })
 
   it('a credential write tells every replica to evict everything', async () => {
-    const store = new CredentialStore(db.sql)
-    await store.put({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-first' }, kek)
+    const store = new SqlCredentials(db.sql, kek)
+    await store.put({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-first' })
     await expect.poll(() => received).toContain('*')
   })
 
   it('a plugin registry write tells every replica to evict everything', async () => {
-    const store = new PluginStore(db.sql)
-    await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+    const store = new PostgresPluginStore(db.sql, kek)
+    await store.create({ name: 'mem', url: 'https://hs.example/mcp' })
     await expect.poll(() => received).toContain('*')
   })
 
   it('a Settings write a turn is assembled by tells every replica to evict everything', async () => {
-    const settings = new SettingsStore(db.sql)
+    const settings = sqlSettings(db.sql)
     await settings.set(SETTING_MODEL, 'claude-opus-5')
     await expect.poll(() => received).toContain('*')
   })
 
   it('an ai_access write tells every cache', async () => {
-    const access = new AccessStore(db.sql)
+    const access = new AccessStore(new SqlAccessRows(db.sql))
     await access.setItem('builtin:scadbuddy', 'get_model', 'read')
     await expect.poll(() => received).toContain('*')
     received.length = 0
@@ -145,7 +148,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`warm evicti
 
   it('forgetting a session names it to every replica', async () => {
     const id = randomUUID()
-    await forgetSubject({ sql: db.sql }, `session-${id}`)
+    await forgetSubject(sqlForget(db.sql), `session-${id}`)
     await expect.poll(() => received).toContain(id)
   })
 

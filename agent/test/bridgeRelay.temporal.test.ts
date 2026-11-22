@@ -13,13 +13,14 @@ import { TabHub, type TabConnection } from '../src/bridge/hub.js'
 
 /** The wall-clock bound on one status read or call across replicas (#5862's regression took 3.4 s). */
 const ROUTING_BOUND_MS = 3_000
-import { PostgresPairingStore } from '../src/bridge/pairings.js'
+import { PostgresPairingStore } from './support/sql/pairings.js'
 import type { AgentFrame, CallOutcome } from '../src/bridge/protocol.js'
 import { ACK_TIMEOUT_MS, BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, TemporalTabRelay } from '../src/bridge/relay.js'
-import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
-import { PostgresTabOwnerStore } from '../src/bridge/tabOwners.js'
+import { PostgresSessionTabStore } from './support/sql/bridgeTabs.js'
+import { PostgresTabOwnerStore } from './support/sql/bridgeTabs.js'
 import type { Database } from './support/database.js'
-import { dropPayloadKey, FilePayloadStore, type PgPayloadKeys, subjectDataConverter } from '../src/temporal/payloadCodec.js'
+import { FilePayloadStore, subjectDataConverter } from '../src/temporal/payloadCodec.js'
+import { dropPayloadKey, type PgPayloadKeys } from './support/sql/payloadKeys.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
@@ -536,7 +537,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       await owned(TAB, b.queue)
       a.hub.pairSession('s1', TAB)
       const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
-      expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/SCADBUDDY_SECRET_KEY_FILE/) } })
+      expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/data keys the API releases/) } })
       expect(onB.calls).toHaveLength(0)
       expect(started).toHaveLength(0)
     })

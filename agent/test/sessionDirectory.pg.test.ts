@@ -8,15 +8,18 @@ import type { Database } from './support/database.js'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { BG_MONITOR_COMMAND, backgroundActivities } from '../src/background/activities.js'
 import { ensureSessionDir } from '../src/harness/stateDirs.js'
-import { SessionBlobs } from '../src/sessions/blobs.js'
 import { forgetSubject } from '../src/sessions/forget.js'
-import { PgSessionPresence } from '../src/sessions/presence.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
+import { sqlForget } from './support/sql/forget.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
 import { SessionDirectory } from '../src/workspace/directory.js'
-import { SessionFiles, WorkspaceError, type WorkspaceRef } from '../src/workspace/store.js'
+import { WorkspaceError, type WorkspaceRef } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner } from './support/sessions.js'
+import { PgSessionPresence } from './support/sql/sessionPresence.js'
+import { hostStores } from './support/agentSessions.js'
 
 // A session's working directory as a working copy of its workspace (plan 2026-10-13 Step 9.5,
 // decision Q5, workspace/directory.ts): SessionFiles is the record; a placement fills the
@@ -283,7 +286,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       await writeFile(path.join(placed.dir, 'f.txt'), id)
       dirs.done(placed)
     }
-    await forgetSubject({ sql: db.sql, sessionDirs: (id) => dirs.remove(id) }, `session-${forgotten}`)
+    await forgetSubject(sqlForget(db.sql, { sessionDirs: (id) => dirs.remove(id) }), `session-${forgotten}`)
     expect(existsSync(dirs.dirOf(forgotten))).toBe(false)
 
     await db.sql`DELETE FROM ai_sessions WHERE id = ${deleted}`
@@ -455,7 +458,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     const interrupt = new AbortController()
     const timer = options.stopAfterMs === undefined ? undefined : setTimeout(() => interrupt.abort(), options.stopAfterMs)
     try {
-      const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: options.dirCheckMs, ...(options.dirWalkTimeoutMs === undefined ? {} : { dirWalkTimeoutMs: options.dirWalkTimeoutMs }) })
+      const host = new TurnHost({ core: m.turnCore, ...hostStores(db.sql), images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: options.dirCheckMs, ...(options.dirWalkTimeoutMs === undefined ? {} : { dirWalkTimeoutMs: options.dirWalkTimeoutMs }) })
       const result = await host.run(
         { sessionId: started.id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'go', images: [], system_append: null } },
         { heartbeat: () => {}, cancelled: interrupt.signal, cancelReason: () => 'interrupt' },
@@ -750,7 +753,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       warned.push(line)
     }
     try {
-      const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: 20 })
+      const host = new TurnHost({ core: m.turnCore, ...hostStores(db.sql), images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: 20 })
       const result = await host.run(
         { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'fill the disk', images: [], system_append: null } },
         { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
@@ -787,7 +790,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
       WHERE id = ${id}`
     const directory = new SessionDirectory(files, sessionsDir)
-    const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory })
+    const host = new TurnHost({ core: m.turnCore, ...hostStores(db.sql), images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory })
     const result = await host.run(
       { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'save it', images: [], system_append: null } },
       { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },

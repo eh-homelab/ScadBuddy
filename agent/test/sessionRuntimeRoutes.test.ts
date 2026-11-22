@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuditLog } from '../src/audit/log.js'
-import { SettingsStore } from '../src/credentials.js'
+import { type SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { registerSessionRuntimeRoutes, SESSION_RUNTIME_PATH } from '../src/routes/sessionRuntime.js'
@@ -17,7 +17,9 @@ import {
 import { WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
 import { readTurnSettings, SYSTEM_PROMPT_APPEND_MAX, TURN_DEFAULTS } from '../src/sessions/turnSettings.js'
 import { systemAppend } from '../src/sessions/turnShared.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // /api/v1/ai/settings/session-runtime (unified runtime spec 2026-10-13 §13,
 // plan Task 2.5): the four runtime settings, their bounds, the audit rows, and
@@ -44,8 +46,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the session runtime settings${TEST_DATABASE
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    audit = new AuditLog({ sql: db.sql })
-    store = new SettingsStore(db.sql, audit)
+    audit = sqlAuditLog(db.sql)
+    store = sqlSettings(db.sql, audit)
     app = new Hono()
     registerSessionRuntimeRoutes(app, {
       settings: store,

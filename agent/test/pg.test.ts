@@ -1,10 +1,8 @@
-import { randomBytes } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished } from 'vitest'
-import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import { APPLICATION_NAME, connectDatabase, type Database } from './support/database.js'
 import postgres from 'postgres'
 import {
@@ -18,11 +16,8 @@ import {
   MigrationLedgerError,
   MIGRATIONS,
 } from './support/migrations.js'
-import { kekFromBase64, SealError } from '../src/secrets.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
-const kek = kekFromBase64(randomBytes(32).toString('base64'))
-const SECRET = 'sk-ant-api03-postgres-test-secret-5b5b'
 
 /**
  * Holds MIGRATION_LOCK on another connection until the test finishes, standing in
@@ -358,147 +353,6 @@ describe.skipIf(!TEST_DATABASE_URL)(
           db.sql`INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, last4)
                  VALUES ('x', 0, 'bedrock', NULL, ${bytes}, ${bytes}, 'k', '')`,
         ).rejects.toThrow(/check constraint/)
-      })
-    })
-
-    describe('CredentialStore', () => {
-      beforeEach(async () => {
-        await migrate(db.sql)
-      })
-
-      it('seals the secret, reads back only the summary, and reveals with the KEK', async () => {
-        const store = new CredentialStore(db.sql)
-        expect(await store.get()).toBeUndefined()
-        const saved = await store.put({ kind: 'anthropic_api_key', secret: SECRET }, kek)
-        expect(saved).toMatchObject({ kind: 'anthropic_api_key', base_url: null, last4: '5b5b', kekId: kek.id })
-        expect(JSON.stringify(await store.get())).not.toContain(SECRET)
-        expect(await store.reveal(kek)).toEqual({ kind: 'anthropic_api_key', secret: SECRET })
-
-        const [raw] = await db.sql<{ secret_sealed: Buffer; dek_sealed: Buffer }[]>`
-          SELECT secret_sealed, dek_sealed FROM ai_credentials`
-        expect(raw?.secret_sealed.includes(Buffer.from(SECRET))).toBe(false)
-        const dump = await db.sql`SELECT * FROM ai_credentials`
-        expect(JSON.stringify(dump)).not.toContain(SECRET)
-      })
-
-      it('stores and reveals a Claude Code OAuth token', async () => {
-        const store = new CredentialStore(db.sql)
-        await store.put({ kind: 'claude_oauth_token', secret: SECRET }, kek)
-        expect(await store.reveal(kek)).toEqual({ kind: 'claude_oauth_token', secret: SECRET })
-      })
-
-      it('keeps the stored secret on a PUT without one, and replaces it on a PUT with one', async () => {
-        const store = new CredentialStore(db.sql)
-        await store.put({ kind: 'gateway', base_url: 'https://llm.example/', secret: 'gw-token-aaaaaaaa1111' }, kek)
-        const before = await db.sql`SELECT secret_sealed FROM ai_credentials`
-        await store.put({ kind: 'gateway', base_url: 'https://llm.example' }, kek)
-        expect(await db.sql`SELECT secret_sealed FROM ai_credentials`).toEqual(before)
-        await store.put({ kind: 'gateway', base_url: 'https://llm.example', secret: 'gw-token-bbbbbbbb2222' }, kek)
-        expect(await store.reveal(kek)).toEqual({
-          kind: 'gateway',
-          baseUrl: 'https://llm.example',
-          secret: 'gw-token-bbbbbbbb2222',
-        })
-        expect(await db.sql`SELECT id FROM ai_credentials`).toHaveLength(1)
-      })
-
-      it('detects a tampered row and a different KEK', async () => {
-        const store = new CredentialStore(db.sql)
-        await store.put({ kind: 'anthropic_api_key', secret: SECRET }, kek)
-        await expect(store.reveal(kekFromBase64(randomBytes(32).toString('base64')))).rejects.toThrow(SealError)
-        await db.sql`UPDATE ai_credentials SET secret_sealed = set_byte(secret_sealed, 40, get_byte(secret_sealed, 40) # 1)`
-        await expect(store.reveal(kek)).rejects.toThrow(SealError)
-      })
-
-      it('binds kind and base_url: a row re-pointed in the database does not decrypt (finding 2)', async () => {
-        const store = new CredentialStore(db.sql)
-        await store.put({ kind: 'gateway', base_url: 'https://llm.example', secret: 'gw-token-aaaaaaaa1111' }, kek)
-        await db.sql`UPDATE ai_credentials SET base_url = 'https://attacker.example'`
-        await expect(store.reveal(kek)).rejects.toThrow(SealError)
-        // Even a base URL that differs only in a trailing slash is a different binding.
-        await db.sql`UPDATE ai_credentials SET base_url = 'https://llm.example/'`
-        await expect(store.reveal(kek)).rejects.toThrow(SealError)
-        await db.sql`UPDATE ai_credentials SET base_url = 'https://llm.example'`
-        expect(await store.reveal(kek)).toMatchObject({ baseUrl: 'https://llm.example' })
-        // Turning the gateway token into an Anthropic API key fails too.
-        await db.sql`UPDATE ai_credentials SET kind = 'anthropic_api_key', base_url = NULL`
-        await expect(store.reveal(kek)).rejects.toThrow(SealError)
-      })
-
-      it('reports a #354-format (v1) row as legacy and refuses to open it', async () => {
-        const store = new CredentialStore(db.sql)
-        await store.put({ kind: 'anthropic_api_key', secret: SECRET }, kek)
-        await db.sql`UPDATE ai_credentials SET secret_sealed = set_byte(secret_sealed, 0, 1)`
-        expect(await store.get()).toMatchObject({ legacyFormat: true })
-        await expect(store.reveal(kek)).rejects.toThrow(/older format/)
-      })
-
-      it('re-wraps rows sealed under the previous key, and only those (finding 4)', async () => {
-        const store = new CredentialStore(db.sql)
-        const previous = kekFromBase64(randomBytes(32).toString('base64'))
-        await store.put({ kind: 'gateway', base_url: 'https://llm.example', secret: 'gw-token-rotate-9999' }, previous)
-        const [before] = await db.sql<{ secret_sealed: Buffer; updated_at: Date }[]>`
-          SELECT secret_sealed, updated_at FROM ai_credentials`
-
-        expect(await store.rewrapFrom(previous, kek)).toEqual({ rewrapped: 1, failed: 0 })
-        const [after] = await db.sql<{ secret_sealed: Buffer; updated_at: Date; kek_id: string }[]>`
-          SELECT secret_sealed, updated_at, kek_id FROM ai_credentials`
-        expect(after?.kek_id).toBe(kek.id)
-        expect(after?.secret_sealed.equals(before!.secret_sealed)).toBe(true)
-        expect(after?.updated_at).toEqual(before?.updated_at)
-        expect(await store.reveal(kek)).toMatchObject({ secret: 'gw-token-rotate-9999' })
-        await expect(store.reveal(previous)).rejects.toThrow(SealError)
-
-        // Nothing left to do on the next start, and the same key twice is a no-op.
-        expect(await store.rewrapFrom(previous, kek)).toEqual({ rewrapped: 0, failed: 0 })
-        expect(await store.rewrapFrom(kek, kek)).toEqual({ rewrapped: 0, failed: 0 })
-      })
-
-      it('leaves a row the previous key cannot open, and counts it', async () => {
-        const store = new CredentialStore(db.sql)
-        const previous = kekFromBase64(randomBytes(32).toString('base64'))
-        await store.put({ kind: 'anthropic_api_key', secret: SECRET }, previous)
-        await db.sql`UPDATE ai_credentials SET dek_sealed = set_byte(dek_sealed, 40, get_byte(dek_sealed, 40) # 1)`
-        expect(await store.rewrapFrom(previous, kek)).toEqual({ rewrapped: 0, failed: 1 })
-        expect(await store.get()).toMatchObject({ kekId: previous.id })
-      })
-
-      it('rotates as part of ready(), after migrations', async () => {
-        const previous = kekFromBase64(randomBytes(32).toString('base64'))
-        await new CredentialStore(db.sql).put({ kind: 'anthropic_api_key', secret: SECRET }, previous)
-        const rotating = connectDatabase(TEST_DATABASE_URL!, {
-          searchPath: schema,
-          afterMigrate: async (sql) => {
-            await new CredentialStore(sql).rewrapFrom(previous, kek)
-          },
-        })
-        try {
-          expect(await rotating.ready()).toBe(true)
-          expect(await new CredentialStore(db.sql).get()).toMatchObject({ kekId: kek.id })
-        } finally {
-          await rotating.close()
-        }
-      })
-
-      it('deletes', async () => {
-        const store = new CredentialStore(db.sql)
-        await store.put({ kind: 'anthropic_api_key', secret: SECRET }, kek)
-        expect(await store.delete()).toBe(true)
-        expect(await store.delete()).toBe(false)
-        expect(await store.get()).toBeUndefined()
-      })
-    })
-
-    describe('SettingsStore', () => {
-      it('stores JSON values by key', async () => {
-        await migrate(db.sql)
-        const settings = new SettingsStore(db.sql)
-        expect(await settings.get('model')).toBeUndefined()
-        await settings.set('model', 'claude-sonnet-4-5')
-        await settings.set('budget', { per_session_usd: 2 })
-        await settings.set('model', 'claude-opus-4-1')
-        expect(await settings.get('model')).toBe('claude-opus-4-1')
-        expect(await settings.get('budget')).toEqual({ per_session_usd: 2 })
       })
     })
   },

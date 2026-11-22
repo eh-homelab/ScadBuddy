@@ -5,8 +5,8 @@ import { sessionPath } from './rows.js'
 import type { AppendFence, TranscriptHead, TranscriptRows } from './store.js'
 
 // A session's transcript over the API's CRUD routes (#5299 step 9, part b; backend
-// api/crud_agent_transcripts.py, area `transcripts`): `PgTranscriptRows` method for method, each
-// one route and one transaction. The API seals and opens every entry with the session's data key
+// api/crud_agent_transcripts.py, area `transcripts`): each `TranscriptRows` method is one route
+// and one transaction. The API seals and opens every entry with the session's data key
 // (#5299 D5): an entry travels as its JSON text, so what comes back is deep-equal to what went in
 // (the SDK's one invariant, store.ts). A session id goes into a path only as `sessionPath` makes
 // it; a subpath and a project key travel in the query or the body.
@@ -61,7 +61,7 @@ export class CrudTranscriptRows implements TranscriptRows {
         ...(init.timeoutMs === undefined ? {} : { timeoutMs: init.timeoutMs }),
       })
     } catch (error) {
-      // As the store's key lookup answers a forgotten session over SQL.
+      // A forgotten session: as a payload key's lookup answers one.
       if (forgotten(error)) throw new SubjectForgotten(`session transcript: ${(error as CrudReadError).detail || 'the session was forgotten'}`)
       throw error
     }

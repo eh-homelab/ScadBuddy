@@ -6,8 +6,9 @@ import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { HarnessPaths } from '../src/harness/options.js'
 import { ensureStateDirs, sessionWorkDir } from '../src/harness/stateDirs.js'
 import { forgetSubject } from '../src/sessions/forget.js'
+import { sqlForget } from './support/sql/forget.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { chainRows, PostgresSessionStore } from '../src/sessions/store.js'
+import { TranscriptStore } from '../src/sessions/store.js'
 import { DIRECTORY_NOTE_MARK, directoryNote } from '../src/sessions/directoryNote.js'
 import { SealError } from '../src/secrets.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
@@ -15,6 +16,7 @@ import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { chainRows, PgTranscriptRows } from './support/sql/transcriptRows.js'
 
 // A fork is copy-on-write for the transcript (plan 2026-10-13 Step 6.5, decision Q8, #4212):
 // the child records where it cut its parent's transcript, and the store reads the parent's
@@ -166,20 +168,20 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`forks are cop
     const before = await m.store.load({ projectKey: '', sessionId: child.id })
     const keys = testPayloadKeys(db.sql)
 
-    await forgetSubject({ sql: db.sql, keys }, `session-${parent}`)
+    await forgetSubject(sqlForget(db.sql, { keys }), `session-${parent}`)
     expect(await ownRows(parent)).toEqual([])
     expect(await link(child.id)).toEqual({ parent: null, cut: null })
     const rows = await ownRows(child.id)
     expect(rows.filter((r) => r.inherited).length).toBeGreaterThan(0)
     // Inherited rows first, the child's own after them, whatever their ids: the same transcript.
-    const asChild = new PostgresSessionStore(db.sql, { keys })
+    const asChild = new TranscriptStore(new PgTranscriptRows(db.sql, keys))
     expect(await asChild.load({ projectKey: '', sessionId: child.id })).toEqual(before)
     const sealed = await db.sql<{ sealed: boolean; plain: boolean }[]>`
       SELECT sealed IS NOT NULL AS sealed, entry IS NOT NULL AS plain FROM ai_session_entries WHERE session_id = ${child.id}`
     expect(sealed.every((r) => r.sealed && !r.plain)).toBe(true)
     // Under any other session's key they do not open.
     const other = `session-${randomUUID()}`
-    const asOther = new PostgresSessionStore(db.sql, { keys: { keyFor: () => keys.keyFor(other, true) } })
+    const asOther = new TranscriptStore(new PgTranscriptRows(db.sql, { keyFor: () => keys.keyFor(other, true) }))
     await expect(asOther.load({ projectKey: '', sessionId: child.id })).rejects.toBeInstanceOf(SealError)
 
     // A replica that never saw either resumes the child with everything it had.
@@ -222,7 +224,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`forks are cop
     expect(sent).not.toContain('turn:right')
 
     // The root forgotten: the middle takes its range, and the leaf still reads through the middle.
-    await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${root}`)
+    await forgetSubject(sqlForget(db.sql, { keys: testPayloadKeys(db.sql) }), `session-${root}`)
     expect(await link(middle.id)).toEqual({ parent: null, cut: null })
     expect(await link(leaf.id)).toMatchObject({ parent: middle.id })
     const again = await turn(await replica(), leaf.id, 'again')
@@ -236,7 +238,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`forks are cop
     const m = await replica()
     const parent = await started(m, 'box')
     const child = await m.fork(parent, browser)
-    await expect(forgetSubject({ sql: db.sql }, `session-${parent}`)).rejects.toThrow(/SCADBUDDY_SECRET_KEY_FILE/)
+    await expect(forgetSubject(sqlForget(db.sql), `session-${parent}`)).rejects.toThrow(/SCADBUDDY_SECRET_KEY_FILE/)
     expect((await ownRows(parent)).length).toBeGreaterThan(0)
     expect(await link(child.id)).toMatchObject({ parent })
     expect(await db.sql`SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${`session-${parent}`}`).toHaveLength(0)

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from './support/database.js'
 import { migrate, MIGRATIONS } from './support/migrations.js'
-import { PluginStore } from '../src/plugins/registry.js'
+import { PostgresPluginStore } from './support/sql/plugins.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // #4828: the migration that drops #2171's mirror triggers and deletes the four old settings keys.
@@ -86,6 +86,6 @@ describe.skipIf(skip !== '')(`the mirror-drop migration${skip}`, () => {
     expect(await db.sql`SELECT * FROM ai_access`).toHaveLength(0)
     // The rest, so today's store can read the row (#780's tables are later files).
     await migrate(db.sql, MIGRATIONS)
-    expect((await new PluginStore(db.sql).enabled(undefined)).plugins).toEqual([])
+    expect((await new PostgresPluginStore(db.sql, undefined).enabled()).plugins).toEqual([])
   })
 })

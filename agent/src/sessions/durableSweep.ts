@@ -1,9 +1,8 @@
 import { type Client, WorkflowNotFoundError } from '@temporalio/client'
-import type { Sql } from 'postgres'
 import { sessionWorkflowId } from '../gate/durable.js'
 import type { EventLog } from './eventLog.js'
 import { event, type ServerEvent } from './protocol.js'
-import { PgTurnRows, type TurnRows } from './turnRows.js'
+import type { TurnRows } from './turnRows.js'
 
 // The sweep of sessions left `running` (#2001, plan 5c Ruling 16). A turn takes no lease
 // (plan Step 6.3: every session is an AgentSession); its end is finish_turn's, run by
@@ -84,9 +83,8 @@ export async function endLostTurn(
 }
 
 export type DurableRunningSweepDeps = {
-  sql: Sql
-  /** The rows' reads and writes (turnRows.ts): `PgTurnRows` on `sql` when omitted; gated in main.ts (#6449). */
-  turns?: TurnRows
+  /** The rows' reads and writes (turnRows.ts, #6449). */
+  turns: TurnRows
   events: EventLog
   describe: DescribeSession
   /** A row written to within this long is not described (default RUNNING_GRACE_MS). */
@@ -116,7 +114,7 @@ export class DurableRunningSweep {
     this.#graceMs = deps.graceMs ?? RUNNING_GRACE_MS
     this.#batch = deps.batch ?? BATCH
     this.#describeTimeoutMs = deps.describeTimeoutMs ?? DESCRIBE_DEADLINE_MS + 1_000
-    this.#turns = deps.turns ?? new PgTurnRows(deps.sql)
+    this.#turns = deps.turns
   }
 
   /** One pass; returns the sessions reset. */

@@ -3,14 +3,15 @@
 A fetch's ``allow_host`` lets one host off the allowlist through, so it must come from a
 person's approval, not from whoever can reach the route. The agent's ``fetch_asset`` is
 the one way to ask for it: that call is always parked for a person (agent
-`tools/pinnedOutward.ts`), and only once it runs, after its approval, does the agent
-mint this grant (`tools/fetchGrant.ts`) and send it in :data:`FETCH_GRANT_HEADER`.
+`tools/pinnedOutward.ts`), and only once it runs, after its approval, does the agent ask
+the API to mint this grant (`api/crud_agent_keys.py`, #5299 step 12: the agent holds no
+KEK) and send it in :data:`FETCH_GRANT_HEADER`.
 
 A grant is MACed under a key derived from the KEK, as `auth/run_tokens.py` derives its
 own, and names the host, a SHA-256 of the URL exactly as sent, an expiry and a nonce.
 The route checks all of them against what it will fetch and spends the nonce
-(`AssetStore.spend_fetch_grant`), so one grant serves one fetch. The format, fixed on
-both sides:
+(`AssetStore.spend_fetch_grant`), so one grant serves one fetch. The format (the
+agent minted the same before #5299 step 12):
 ``b64url("asset-fetch-once\\n<host>\\n<sha256 hex>\\n<expiry seconds>\\n<nonce hex>")
 + "." + b64url(HMAC-SHA256)``, unpadded. A grant is a bearer secret: never log one.
 """
@@ -34,7 +35,7 @@ from scadbuddy.core.secrets import Kek
 FETCH_GRANT_HEADER: Final = "x-scadbuddy-fetch-grant"
 #: The HKDF label of :func:`fetch_grant_key`.
 FETCH_GRANT_KEY_INFO: Final = b"scadbuddy:assets:fetch-once:v1"
-#: The agent's (`fetchGrant.ts` `FETCH_GRANT_TTL_SECONDS`), for :func:`mint`.
+#: How long a grant :func:`mint` makes is good for: the fetch is sent as soon as it is minted.
 FETCH_GRANT_TTL_SECONDS: Final = 600
 _PURPOSE = "asset-fetch-once"
 _NONCE = re.compile(r"^[0-9a-f]{32}$")
@@ -74,7 +75,7 @@ def _digest(url: str) -> str:
 
 
 def mint(key: bytes, host: str, url: str, *, now: datetime) -> str:
-    """A grant as the agent mints one: for tests, and the format's one Python spelling."""
+    """A grant for one fetch of ``url`` from ``host`` (`api/crud_agent_keys.py`)."""
     expires = int(now.timestamp()) + FETCH_GRANT_TTL_SECONDS
     body = f"{_PURPOSE}\n{host}\n{_digest(url)}\n{expires}\n{secrets.token_hex(16)}".encode()
     return f"{_b64(body)}.{_b64(_mac(key, body))}"

@@ -14,6 +14,7 @@ import { createTurnSlot } from '../src/sessions/turnSlot.js'
 import { RESERVATION_HOLD_MS, type WarmQuery, WarmSessions } from '../src/sessions/warm.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
 import { ACQUIRE_WORKER_ACTIVITY, NO_CAPACITY, RELEASE_WORKER_ACTIVITY, SHUTTING_DOWN_FAILURE } from '../src/temporal/session/names.js'
+import { hostStores } from './support/agentSessions.js'
 
 // WarmSessions' places for AgentSession (spec 2026-10-13 §5.2): `reserve` is acquire_worker's,
 // `release` release_worker's. A full replica gives up its least recently used idle process or
@@ -293,7 +294,7 @@ describe('WarmSessions.reserve and release', () => {
     const two = await running('two')
     // Nothing of the turn is read or written before the refusal: no database is reached.
     const sql = (() => Promise.reject(new Error('the refused turn touched the database'))) as unknown as Sql
-    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], ...hostStores(sql), images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
     const control = { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const }
     await expect(host.run({ sessionId: 'kept', turnId: 't1', attempt: 'run:0' }, control)).rejects.toMatchObject({ type: NO_CAPACITY })
     expect(spawned.has('kept')).toBe(false)
@@ -311,7 +312,7 @@ describe('WarmSessions.reserve and release', () => {
     const { warm, spawned } = cache(1)
     // The claim's read fails: the turn ends before anything is spawned.
     const sql = (() => Promise.reject(new Error('the database is gone'))) as unknown as Sql
-    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], ...hostStores(sql), images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
     const control = { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const }
     await expect(host.run({ sessionId: 'gone', turnId: 't1', attempt: 'run:0' }, control)).rejects.toThrow('the database is gone')
     expect(spawned.has('gone')).toBe(false)
@@ -324,7 +325,7 @@ describe('WarmSessions.reserve and release', () => {
     // Each claim waits until the test fails it: the older placement is still claiming when the newer arrives.
     const claims: ((err: Error) => void)[] = []
     const sql = (() => new Promise((_resolve, reject) => claims.push(reject))) as unknown as Sql
-    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], ...hostStores(sql), images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
     const control = () => ({ heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const })
     const older = host.run({ sessionId: 's', turnId: 't1', attempt: 'run:0' }, control())
     await vi.waitFor(() => expect(claims).toHaveLength(1))
@@ -345,7 +346,7 @@ describe('WarmSessions.reserve and release', () => {
     const idle = await running('idle')
     idle.left()
     const sql = (() => Promise.reject(new Error('the refused turn touched the database'))) as unknown as Sql
-    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], sql, images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
+    const host = new TurnHost({ core: { warm } as unknown as TurnHostDeps['core'], ...hostStores(sql), images: { get: vi.fn(), putIf: vi.fn() }, hostQueue: 'agent-sessions.r' })
     host.drain()
     const control = { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' as const }
     await expect(host.run({ sessionId: 'late', turnId: 't1', attempt: 'run:0' }, control)).rejects.toMatchObject({ type: SHUTTING_DOWN_FAILURE })
