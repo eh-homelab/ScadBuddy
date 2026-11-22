@@ -814,7 +814,8 @@ and a new attempt returns it to `approved`.
 
 A new table `attachments`, keyed by subject, is the "attach media to X" facility F9
 says does not exist. (As built it is `order_attachments`, renamed by #4678 so it does
-not read as a print's `print_attachments`.)
+not read as a print's `print_attachments`, then `entity_attachments` by #6950, which
+keeps a file on any entity; an order's files are its rows with an `order_id`.)
 
 **As built (#4251, the order-entry slice, ahead of the print path).** Any file may be
 attached to the order (`order:<id>`) or to a line item (`order_item:<id>`); attempts'

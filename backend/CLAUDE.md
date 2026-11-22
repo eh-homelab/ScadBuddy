@@ -1422,6 +1422,24 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and
   `mocks/features/activity.ts`.
+- `backend/scadbuddy/entities/` — files and links on any row (#6950, inventory spec
+  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3, plan
+  `docs/superpowers/plans/2026-11-21-inventory-phase-1-entities.md`): `refs.py`
+  (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table;
+  `EntityStore`: an `entities` row made by `ensure` only for an owner row that exists, and
+  `orphans`, the rows whose owner is gone), `attachments.py` (`EntityAttachmentStore` over
+  `entity_attachments`, the old `order_attachments`: an order's files are its rows with an
+  `order_id`, written only through the order routes, `ORDER_KINDS`; a print archive's files
+  are Bambuddy's `print_attachments`, read in the same shape), `links.py` (`EntityLinkStore`
+  over `entity_links`, http(s) URLs only), `sweep.py` (`sweep_orphan_entities`, the
+  housekeeping step `ENTITY_ORPHANS_SWEEP`: an orphan's files and holds, then its row and
+  links; an order's kinds only once they hold no file), `operations.py` (the
+  `entity_attachment_add` kind on the `library` queue), `activity.py`, `problems.py` and
+  `component.py` (`ENTITIES`). Routes `api/entity_attachments.py` and `api/entity_links.py`
+  under `/entities/{kind}:{ref}`; the file and thumbnail GETs are scriptless
+  (`auth/routes.py` `SCRIPTLESS_GETS`). The migration `20261122T0426Z_entities.sql` keeps
+  `order_attachments` as a view, with a trigger that fills `entity_id`, for the previous
+  build's replicas during the roll; a later migration drops them.
 - `backend/scadbuddy/orders/` — orders phase 1 (#4249, epic #4248, spec
   `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
   customers, orders and line items as ScadBuddy's own records. A library-file item has no
@@ -1559,7 +1577,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and no output starts it, then opens the print dialog on the new output (`useSliceQuotes`
   `render`, the run's `stage` `rendering`); the agent's `order_item_quote` needs none.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
-  `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
+  rows of `entity_attachments` with an `order_id` and the `entity_id` of their subject (#6950; the table was `order_attachments`) (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
   under its item through `attempt_item_id`; `POST …/fulfilments/{f}/attachments`; typed by its bytes in
   `orders/attachments.py` `sniff`; only `orders/models.py` `INLINE` types are served as
   themselves, the rest as downloads; the spec carries the type sets, which

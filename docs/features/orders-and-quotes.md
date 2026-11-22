@@ -51,7 +51,7 @@ print, wait and notify the customer (`backend/scadbuddy/orders/builtin_flow.py:4
 
 - Tables: `customers`, `customer_contacts`, `customer_addresses`, `orders`, `order_items`,
   `order_item_quotes`, `order_item_revisions`, `order_item_fulfilments`, `order_shipments`,
-  `order_events`, `order_payments`, `order_charges`, `order_attachments`, `order_messages`,
+  `order_events`, `order_payments`, `order_charges`, `entity_attachments` (an order's files, the rows with an `order_id`), `order_messages`,
   `order_time_entries`, `order_cost_entries`, `parts*`, `filaments` (the price book),
   `printer_cost_profiles`, `payment_*`, `bank_*`.
 - Blob keys: `quote-<sha256>`, `attachment-<sha256>`.
