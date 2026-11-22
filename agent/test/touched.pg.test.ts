@@ -219,7 +219,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
     const app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'unused' },
       credentials: new MemoryCredentials(),
       testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
       remoteAddress: () => '10.0.0.7',
@@ -276,7 +275,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
       return createApp({
         database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
         backend: () => Promise.resolve(true),
-        kek: { ok: false, reason: 'unused' },
         credentials: new MemoryCredentials(),
         testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
         remoteAddress: () => '10.0.0.7',

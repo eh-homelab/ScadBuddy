@@ -13,8 +13,8 @@ import { ready, type RouteModule } from './module.js'
 
 export const FLOW_QUEUE_PATH = '/api/v1/ai/flow-runs/:id/queue'
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 export type FlowQueueRouteDeps = {
   queue: Pick<FlowQueue, 'forRun'> | undefined
@@ -27,7 +27,7 @@ export function registerFlowQueueRoutes(app: Hono, deps: FlowQueueRouteDeps): vo
   app.get(FLOW_QUEUE_PATH, async (c) => {
     const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'flow run queue reads')
     if (problem) return c.json({ detail: problem }, 403)
-    if (!deps.queue) return c.json({ detail: NO_DATABASE }, 503)
+    if (!deps.queue) return c.json({ detail: NOT_CONFIGURED }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
     const queue = await deps.queue.forRun(c.req.param('id'))
     return queue ? c.json(queue) : c.json({ detail: `no flow run ${c.req.param('id')}` }, 404)

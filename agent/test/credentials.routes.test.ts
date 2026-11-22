@@ -7,7 +7,7 @@ import { type Credential, CREDENTIAL_NAME_MAX, MAX_CREDENTIALS, TOO_MANY_MESSAGE
 import { originPolicy } from '../src/http/origins.js'
 import type { CredentialEntryView, CredentialListView, CredentialView } from '../src/routes/credentials.js'
 import type { AiStatusView } from '../src/routes/status.js'
-import { kekFromBase64, type KekStatus } from '../src/secrets.js'
+import { kekFromBase64 } from '../src/secrets.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
@@ -16,7 +16,6 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 // single-credential routes as Settings uses them today.
 
 const kek = kekFromBase64(randomBytes(32).toString('base64'))
-const withKek: KekStatus = { ok: true, kek }
 const KEY_A = 'sk-ant-api03-entries-first-aaaa'
 const KEY_B = 'sk-ant-api03-entries-second-bbbb'
 const GW = 'gw-entries-third-token-cccc'
@@ -31,7 +30,6 @@ function setup(overrides: Partial<AppDeps> = {}, credentials = new MemoryCredent
   const app = createApp({
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
-    kek: withKek,
     credentials,
     testConnection: (credential) => {
       tested.push(credential)
@@ -129,7 +127,7 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
     expect(
       (await call('POST', '/entries', { kind: 'anthropic_api_key', secret: KEY_A }, { ...JSON_UI, origin: 'https://evil.example' })).status,
     ).toBe(403)
-    const noKey = setup({ kek: { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' } }, new MemoryCredentials())
+    const noKey = setup({}, new MemoryCredentials())
     expect((await noKey.call('POST', '/entries', { kind: 'anthropic_api_key', secret: KEY_A })).status).toBe(503)
   })
 

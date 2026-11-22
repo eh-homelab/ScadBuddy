@@ -236,11 +236,11 @@ describe('/api/v1/ai/credentials', () => {
   })
 
   it('answers 503 with the reason when there is no database', async () => {
-    const app = createApp(deps({ database: undefined, credentials: undefined }))
+    const app = createApp(deps({ credentials: undefined }))
     const res = await app.request('/api/v1/ai/credentials', { headers: UI })
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({
-      detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/),
+      detail: expect.stringMatching(/not set up in this process/),
       code: 'no_database',
     })
   })
@@ -259,7 +259,7 @@ describe('/api/v1/ai/credentials', () => {
     ['POST', '/api/v1/ai/credentials/entries/a/reset', undefined],
     ['POST', '/api/v1/ai/credentials/entries/a/test', undefined],
   ] as const)('answers %s %s with code no_database too', async (method, path, body) => {
-    const app = createApp(deps({ database: undefined, credentials: undefined }))
+    const app = createApp(deps({ credentials: undefined }))
     const res = await app.request(path, {
       method,
       headers: { ...UI, 'content-type': 'application/json' },
@@ -547,7 +547,7 @@ describe('/api/v1/ai/approvals (#258; the store is covered in test/approvals.pg.
   const id = '00000000-0000-4000-8000-000000000001'
 
   it('answers 503 without the database, and guards the writes first', async () => {
-    const app = createApp(deps({ database: undefined, credentials: undefined }))
+    const app = createApp(deps({ credentials: undefined }))
     expect((await app.request('/api/v1/ai/approvals')).status).toBe(403)
     expect((await app.request('/api/v1/ai/approvals', { headers: UI })).status).toBe(503)
     const bare = await app.request(`/api/v1/ai/approvals/${id}/approve`, { method: 'POST' })
@@ -562,10 +562,10 @@ describe('/api/v1/ai/pending-input (#815; the store is covered in test/attention
   const respond = { method: 'POST', headers: { ...UI, 'content-type': 'application/json' }, body: '{"kind":"answer","text":"x"}' }
 
   it('answers 503 without the database (#1228)', async () => {
-    const app = createApp(deps({ database: undefined, credentials: undefined }))
+    const app = createApp(deps({ credentials: undefined }))
     const read = await app.request('/api/v1/ai/pending-input', { headers: UI })
     expect(read.status).toBe(503)
-    expect(await read.json()).toEqual({ detail: expect.stringMatching(/need the database: SCADBUDDY_DATABASE_URL/) })
+    expect(await read.json()).toEqual({ detail: expect.stringMatching(/not set up in this process/) })
     expect((await app.request('/api/v1/ai/pending-input/question:1', respond)).status).toBe(503)
   })
 
@@ -573,7 +573,7 @@ describe('/api/v1/ai/pending-input (#815; the store is covered in test/attention
     const app = createApp(deps({ database: { ping: up, ready: down }, sessions }))
     const read = await app.request('/api/v1/ai/pending-input', { headers: UI })
     expect(read.status).toBe(503)
-    expect(await read.json()).toEqual({ detail: expect.stringMatching(/migrations have not applied/) })
+    expect(await read.json()).toEqual({ detail: expect.stringMatching(/does not serve the agent's CRUD areas yet/) })
     expect((await app.request('/api/v1/ai/pending-input/question:1', respond)).status).toBe(503)
   })
 })

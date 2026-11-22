@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { CrudAreas, TURN_AREAS } from '../src/api/crudAreas.js'
 import { CrudReadError } from '../src/api/crudRead.js'
-import { gated } from '../src/api/crudStores.js'
 import { type DurableTurn, DurableTurns } from '../src/sessions/durable.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { SessionRecord } from '../src/sessions/manager.js'
@@ -201,13 +200,4 @@ describe('a turn\'s row writes over the CRUD routes', () => {
     expect(areas.has('session-turns')).toBe(false)
   })
 
-  it('stays on the SQL until the API lists the area', async () => {
-    const sql = { interrupt: vi.fn(async () => true) } as unknown as TurnRows
-    const crud = { interrupt: vi.fn(async () => false) } as unknown as TurnRows
-    let listed = false
-    const turns = gated<TurnRows>(sql, crud, () => listed)
-    expect(await turns.interrupt(SESSION)).toBe(true)
-    listed = true
-    expect(await turns.interrupt(SESSION)).toBe(false)
-  })
 })

@@ -1,5 +1,5 @@
 import { AttachmentStore } from './support/sql/attachments.js'
-import { AuditLog } from '../src/audit/log.js'
+import { type AuditLog } from '../src/audit/log.js'
 import { ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ApprovalActions, ownerOf } from '../src/approvals/mcp.js'

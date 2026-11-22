@@ -96,8 +96,8 @@ declare module '../app.js' {
   }
 }
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 /**
  * The response body. `summaries_truncated`: more undismissed `done` summaries
@@ -561,7 +561,7 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
   app.get('/api/v1/ai/pending-input', async (c) => {
     const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'pending input reads')
     if (problem) return c.json({ detail: problem }, 403)
-    if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
+    if (!deps.sessions) return c.json({ detail: NOT_CONFIGURED }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
     return c.json(await pendingInput(deps.sessions, browserUser(c), { runs: true }))
   })
@@ -569,7 +569,7 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
   app.get('/api/v1/ai/sessions/:id/pending-input', async (c) => {
     const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'pending input reads')
     if (problem) return c.json({ detail: problem }, 403)
-    if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
+    if (!deps.sessions) return c.json({ detail: NOT_CONFIGURED }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
     try {
       const page = await sessionPendingInput(deps.sessions, browserUser(c), c.req.param('id'))
@@ -585,7 +585,7 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
   app.post('/api/v1/ai/pending-input/:id', jsonBodyLimit(RESPONSE_MAX), async (c) => {
     const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, 'responses to the assistant')
     if (problem) return c.json({ detail: problem }, 403)
-    if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
+    if (!deps.sessions) return c.json({ detail: NOT_CONFIGURED }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
     const type = c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase()
     if (type !== 'application/json') return c.json({ detail: 'request body must be application/json' }, 415)

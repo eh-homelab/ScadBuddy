@@ -325,7 +325,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           app: createApp({
             database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
             backend: () => Promise.resolve(true),
-            kek: { ok: true, kek },
             credentials: new MemoryCredentials(),
             plugins: store,
             testPlugin,
@@ -431,7 +430,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           const a = createApp({
             database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
             backend: () => Promise.resolve(true),
-            kek: { ok: true, kek },
             credentials: new MemoryCredentials(),
             plugins: store,
             testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
@@ -460,7 +458,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         const a = createApp({
           database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
           backend: () => Promise.resolve(true),
-          kek: { ok: true, kek },
           credentials: new MemoryCredentials(),
           plugins: store,
           testPlugin,

@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import type { ItemDetails, SourceView } from '../src/access/capabilities.js'
 import { listedTool, toStoredTools, type ListedTool, type PluginListingPut, type StoredTool } from '../src/access/listings.js'
@@ -11,7 +10,6 @@ import type { PluginPatch, PluginRepo, PluginSummary } from '../src/plugins/regi
 import { PluginError } from '../src/plugins/registry.js'
 import type { PluginTest } from '../src/plugins/testConnection.js'
 import { CAPABILITIES_PATH } from '../src/routes/capabilities.js'
-import { kekFromBase64 } from '../src/secrets.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { memoryAccess } from './support/memoryAccess.js'
 import { memoryPackages, packageView } from './support/memoryPackages.js'
@@ -20,7 +18,6 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 // /api/v1/ai/capabilities (#2171, Task 5): the tree over the built-in sources and the
 // remote plugins, read and set from Settings → Tools & plugins.
 
-const kek = kekFromBase64(randomBytes(32).toString('base64'))
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https', 'content-type': 'application/json' }
 const READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 
@@ -138,7 +135,6 @@ function rig(opts: { access?: boolean; ready?: boolean; plugins?: boolean; packa
     ...(opts.access === false ? {} : { access: mem.access as never }),
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(opts.ready ?? true) },
     backend: () => Promise.resolve(true),
-    kek: { ok: true, kek },
     credentials: new MemoryCredentials(),
     ...(opts.plugins === false ? {} : { plugins: plugins.repo }),
     ...(opts.packages ? { pluginPackages: memoryPackages([packageView('p', {}, { mcp_servers: [{ name: 's', type: 'http', url: 'https://s.example/mcp' }] })]).repo } : {}),

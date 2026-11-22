@@ -4,11 +4,10 @@ import type { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/cl
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { createApp } from '../src/app.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { createHarnessServer } from '../src/tools/projections.js'
-import { appFetch, BACKEND, baseDeps, connect, firstText, INGRESS, LOOPBACK, MCP_URL, services, testApp, UNTRUSTED } from './helpers/mcp.js'
+import { appFetch, BACKEND, connect, firstText, INGRESS, LOOPBACK, MCP_URL, services, testApp, UNTRUSTED } from './helpers/mcp.js'
 
 // /mcp end to end with the MCP SDK's own Streamable HTTP client (issue #251
 // "Checks and tests"; spec §13): transport rules, auth per mode, the approval
@@ -316,7 +315,7 @@ describe('/mcp: oidc mode with nothing configured', () => {
 })
 
 describe('/mcp: outward tools prepare; with no approval store, confirm is refused', () => {
-  it('prepares a pending action instead of printing, and refuses to confirm it without the database', async () => {
+  it('prepares a pending action instead of printing, and refuses to confirm it without the approval store', async () => {
     // No backend handler for the print routes: an attempt to call them would
     // fail the test through onUnhandledFrame: 'error'.
     const { app, auth } = await bearerApp('outward')
@@ -341,7 +340,7 @@ describe('/mcp: outward tools prepare; with no approval store, confirm is refuse
       },
     })
     expect(confirmed.isError).toBe(true)
-    expect(firstText(confirmed)).toContain('SCADBUDDY_DATABASE_URL')
+    expect(firstText(confirmed)).toContain('not set up in this process')
     expect(firstText(confirmed)).toContain('Nothing was sent')
   })
 
@@ -370,30 +369,7 @@ describe('/mcp: outward tools prepare; with no approval store, confirm is refuse
 })
 
 describe('/mcp: fail closed', () => {
-  it('answers 503 "AI disabled: no database" when no database is configured (spec §9)', async () => {
-    const app = createApp(
-      baseDeps({
-        database: undefined,
-        credentials: undefined,
-        mcp: {
-          tools: ALL_TOOLS,
-          services: services(),
-          tokens: testApp().tokens,
-          authSettings: () => ({ mode: 'disabled', anonymousCap: 'outward' }),
-        },
-      }),
-    )
-    const res = await appFetch(app)(MCP_URL, { method: 'POST', body: '{}' })
-    expect(res.status).toBe(503)
-    expect(await res.text()).toContain('AI disabled: no database')
-    // The uploads under /mcp (#4550, mcp/uploads.ts) answer the same.
-    const upload = await appFetch(app)(`${MCP_URL}/workspace/a.png`, { method: 'PUT', body: 'x' })
-    expect(upload.status).toBe(503)
-    expect(await upload.text()).toContain('AI disabled: no database')
-    await expect(connect(app)).rejects.toMatchObject({ code: 503 })
-  })
-
-  it("answers 503 until the database's migrations have applied (db.ts ready())", async () => {
+  it('answers 503 until the API serves the agent\'s CRUD areas (api/dataHealth.ts ready())', async () => {
     let migrated = false
     const { app } = testApp({
       settings: { mode: 'disabled' },
@@ -401,11 +377,11 @@ describe('/mcp: fail closed', () => {
     })
     const res = await appFetch(app)(MCP_URL, { method: 'POST', body: '{}' })
     expect(res.status).toBe(503)
-    expect(await res.text()).toContain('migrations')
-    // The uploads under /mcp (#4550, mcp/uploads.ts) wait for the migrations too.
+    expect(await res.text()).toContain("the API does not serve the agent's CRUD areas yet")
+    // The uploads under /mcp (#4550, mcp/uploads.ts) wait for the areas too.
     const upload = await appFetch(app)(`${MCP_URL}/workspace/a.png`, { method: 'PUT', body: 'x' })
     expect(upload.status).toBe(503)
-    expect(await upload.text()).toContain('migrations')
+    expect(await upload.text()).toContain("the API does not serve the agent's CRUD areas yet")
     migrated = true
     const client = await open(app)
     expect((await client.listTools()).tools.length).toBe(ALL_TOOLS.length)

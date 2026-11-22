@@ -1,6 +1,7 @@
 // Graceful stop on SIGTERM (what Kubernetes sends on rollout) and SIGINT.
 // Order matters: stop accepting connections and let in-flight requests finish
-// FIRST, and only then close the database pool those requests may be using.
+// FIRST, and only then the last step (main.ts: the session-event publisher those
+// requests may still use).
 // Bounded, so a request that never finishes cannot keep the pod in
 // Terminating until the kubelet's SIGKILL.
 
@@ -14,8 +15,8 @@ export type ShutdownSteps = {
   closeSessions?: () => Promise<void>
   /** Stops accepting connections; resolves once in-flight requests have finished. */
   closeServer: () => Promise<void>
-  /** Closes the database pool, when there is one. */
-  closeDatabase?: () => Promise<void>
+  /** Runs after the drain, however it ended: what the requests may still use. */
+  closeLast?: () => Promise<void>
   /** Upper bound on waiting for the server to drain. */
   timeoutMs?: number
 }
@@ -23,7 +24,7 @@ export type ShutdownSteps = {
 export type ShutdownResult = 'clean' | 'timed out'
 
 export async function shutdown(steps: ShutdownSteps): Promise<ShutdownResult> {
-  const { closeSessions, closeServer, closeDatabase, timeoutMs = 10_000 } = steps
+  const { closeSessions, closeServer, closeLast, timeoutMs = 10_000 } = steps
   let timer: NodeJS.Timeout | undefined
   const deadline = new Promise<'timed out'>((resolve) => {
     timer = setTimeout(() => resolve('timed out'), timeoutMs)
@@ -40,9 +41,9 @@ export async function shutdown(steps: ShutdownSteps): Promise<ShutdownResult> {
     clearTimeout(timer)
   }
   try {
-    await closeDatabase?.()
+    await closeLast?.()
   } catch {
-    // Exiting anyway; a pool that fails to close has nothing left to protect.
+    // Exiting anyway; a last step that fails has nothing left to protect.
   }
   return result
 }

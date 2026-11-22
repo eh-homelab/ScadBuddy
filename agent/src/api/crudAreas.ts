@@ -120,6 +120,9 @@ export class CrudAreas {
   #stopped = false
   /** The kinds of reason for waiting already logged, each once (`refresh`). */
   readonly #logged = new Set<string>()
+  /** Resolves `whenComplete` once every wanted area is listed. */
+  #completed!: () => void
+  readonly #complete = new Promise<void>((resolve) => (this.#completed = resolve))
 
   constructor(baseUrl: string, options: CrudAreasOptions) {
     this.#base = baseUrl
@@ -138,6 +141,11 @@ export class CrudAreas {
   /** Whether every wanted area is served. */
   get complete(): boolean {
     return this.#wanted.every((a) => this.#listed.has(a))
+  }
+
+  /** Resolves once every wanted area is listed (by `refresh` or the background reads); never rejects. */
+  whenComplete(): Promise<void> {
+    return this.#complete
   }
 
   /**
@@ -183,6 +191,7 @@ export class CrudAreas {
         if (typeof area === 'string' && this.#wanted.includes(area)) this.#listed.add(area)
       }
       if (this.complete) {
+        this.#completed()
         if (!before) this.#log(`CRUD areas: the agent reads ${this.#wanted.join(', ')} through the backend's CRUD routes`)
         return true
       }

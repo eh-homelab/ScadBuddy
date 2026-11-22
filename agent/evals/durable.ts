@@ -8,11 +8,9 @@ import { Client, WorkflowNotFoundError } from '@temporalio/client'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { bundleWorkflowCode } from '@temporalio/worker'
 import { createBackendClient } from '../src/api/backend.js'
-import { approvalHashKey } from '../src/approvals/service.js'
-import { AuditLog } from '../src/audit/log.js'
 import type { Credential } from '../src/credentials.js'
 import { sqlSettings } from '../test/support/sql/settings.js'
-import { connectDatabase, type Database } from '../src/db.js'
+import { connectDatabase, type Database } from '../test/support/database.js'
 import { PgEventListener } from '../test/support/pgListener.js'
 import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
 import { parseRequestId } from '../src/gate/ids.js'
@@ -33,13 +31,22 @@ import { TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { FilePayloadStore, subjectDataConverter } from '../src/temporal/payloadCodec.js'
 import { PgPayloadKeys } from '../test/support/sql/payloadKeys.js'
+import { PgTranscriptRows } from '../test/support/sql/transcriptRows.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
 import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
 import { SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, sessionHostQueue } from '../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
-import { gateActivities, PgApprovalRecords, PgSessionOwners } from '../src/temporal/toolActivities.js'
+import { gateActivities } from '../src/temporal/toolActivities.js'
+import { PgApprovalRecords, PgSessionOwners } from '../test/support/sql/approvalRecords.js'
+import { sqlAuditLog } from '../test/support/sql/audit.js'
+import { sqlGateDb } from '../test/support/sql/gate.js'
+import { PgTurnRows } from '../test/support/sql/turnRows.js'
+import { SqlSweep } from '../test/support/sql/sweep.js'
+import { SqlTurnRoutes } from '../test/support/sql/turnRoutes.js'
+import { SessionFiles } from '../test/support/sql/sessionFiles.js'
+import { sqlSessionStores } from '../test/support/sessions.js'
 import { turnToolActivities, turnToolActivity, type TurnToolsDeps } from '../src/temporal/turnTools.js'
 import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -58,13 +65,14 @@ import type { TurnSettings } from '../src/sessions/turnSettings.js'
 
 // The evals on the one runtime (plan 2026-10-13 Step 6.6, spec §3 goal 7): each scenario is a
 // session, an AgentSession on Temporal, as every session has been since Step 6.3. Two agent
-// processes on one Temporal dev server and one throwaway Postgres database, each wired as
+// processes on one Temporal dev server and one throwaway Postgres database, whose stores are the
+// tests' SQL ones (test/support/sql/) where main.ts has the API's CRUD routes, each wired as
 // main.ts wires its SCADBUDDY_AGENT_ROLE (runtime/role.ts `roleParts`): the `api` process starts
 // the session and answers its gate, as the panel does, and polls no turn queue; the `worker`
 // process runs AgentSession, its shared agent-tools activities and its session host queue, so
 // every turn runs there, in the real Claude Code, with the real ScadBuddy tools
 // (tools/harness.ts `harnessTools`) against the scenario's backend and ScadBuddy's own plugin,
-// as main.ts gives a session. Every payload is sealed, as main.ts seals them with the KEK. The
+// as main.ts gives a session. Every payload is sealed, as main.ts seals them under the keys the API releases. The
 // credential is the caller's (a gateway pointed at the fake Anthropic endpoint, or a live key),
 // the model and the budget are the Settings a session's turn reads.
 //
@@ -213,9 +221,10 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
     const dir = await mkdtemp(path.join(os.tmpdir(), 'scadbuddy-eval-'))
     cleanups.push(() => rm(dir, { recursive: true, force: true }))
     const kek = kekFromBase64(randomBytes(32).toString('base64'))
+    const randomKey = randomBytes(32)
     const keys = new PgPayloadKeys(db.sql, kek)
-    // One input-hash key for both processes, as main.ts derives it from the one KEK.
-    const hashKey = approvalHashKey(kek)
+    // One input-hash key for both processes, as the API releases one key to every agent.
+    const hashKey = () => randomKey
     const dataConverter = subjectDataConverter(keys, new FilePayloadStore(path.join(dir, 'payloads')))
     const client = new Client({ connection: env.connection, namespace: 'default', dataConverter })
 
@@ -247,7 +256,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
       const pool: Database = connectDatabase(url, { searchPath: schema })
       const listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
       const settings = sqlSettings(pool.sql)
-      const audit = new AuditLog({ sql: pool.sql, settings: () => settings, hashKey })
+      const audit = sqlAuditLog(pool.sql, { settings: () => settings, hashKey })
       const p: AgentProcess = { spawned: 0 } as AgentProcess
       const run: QueryRunner = (spawn) => {
         p.spawned++
@@ -266,12 +275,15 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
         )
       }
       p.m = new SessionManager({
-        flowReads: new SqlFlowRunReads(pool.sql),
-        sql: pool.sql,
+        // The agent's stores straight on the eval's database (test/support/sql/), where main.ts
+        // has the API's CRUD routes.
+        ...sqlSessionStores(pool.sql),
+        transcripts: new PgTranscriptRows(pool.sql, keys),
+        workspace: new SessionFiles(pool.sql, { settings }),
+        currentTiers: () => Promise.resolve(undefined),
         paths: { stateDir },
         credentials: fixedCredentials(options.credential),
         settings,
-        payloadKeys: keys,
         approvalHashKey: hashKey,
         audit,
         // ScadBuddy's tools and their tiers, and its own plugin, as main.ts gives every session.
@@ -281,7 +293,14 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
         newSessions: { max: 10_000, windowMs: 1 },
       })
       // Every session is an AgentSession: ready while the worker's session host polls.
-      p.m.durableTurns = new DurableTurns({ client, sql: pool.sql, events: p.m.events, audit, liveHosts: async () => new Set([workerHost]) })
+      p.m.durableTurns = new DurableTurns({
+        client,
+        blobs: new SessionBlobs(pool.sql),
+        turns: new PgTurnRows(pool.sql),
+        pendingRoutes: new SqlSweep(pool.sql),
+        events: p.m.events,
+        liveHosts: async () => new Set([workerHost]),
+      })
       p.m.durable = new DurableGate(client, { timeoutMs: 15_000 })
       listener.start()
 
@@ -291,7 +310,8 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
       if (parts.sessionHost && parts.sharedWorkers) {
         turnHost = new TurnHost({
           core: p.m.turnCore,
-          sql: pool.sql,
+          turns: new PgTurnRows(pool.sql),
+          pendingRoutes: new SqlTurnRoutes(pool.sql),
           images: new SessionBlobs(pool.sql),
           hostQueue: sessionHost,
           listen: (channel, onNotify) => listener.listenAlso(channel, onNotify),
@@ -311,8 +331,8 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
             taskQueue: TASK_QUEUE,
             activities: {
               ...gateActivities({ audit, sessions: new PgSessionOwners(pool.sql), tools: ALL_TOOLS, services }),
-              ...sessionGateActivities({ sql: pool.sql, events: p.m.events }),
-              ...sessionFinishActivities(pool.sql, p.m.events),
+              ...sessionGateActivities(sqlGateDb(pool.sql, p.m.events), settings),
+              ...sessionFinishActivities(new PgTurnRows(pool.sql), p.m.events),
               ...acquire,
             },
             workflows: { workflowBundle: bundle },

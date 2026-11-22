@@ -186,8 +186,8 @@ const UpdateBody = z
 const ARCHIVED_QUERY = { true: 'only', include: 'include', false: 'exclude' } as const
 const BudgetBody = z.strictObject({ add_usd: z.number().min(0.01).max(MAX_SESSION_BUDGET_USD) })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 /** The most sessions one list returns (manager.ts listQuery clamps to the same). */
 export const LIST_LIMIT_MAX = 500
@@ -240,7 +240,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const base = '/api/v1/ai/sessions'
 
   async function manager(): Promise<SessionManager | string> {
-    if (!deps.sessions) return NO_DATABASE
+    if (!deps.sessions) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.sessions : NOT_READY
   }
 

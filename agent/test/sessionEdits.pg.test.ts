@@ -1,7 +1,7 @@
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
-import { AuditLog, type AuditRecord } from '../src/audit/log.js'
+import { type AuditLog, type AuditRecord } from '../src/audit/log.js'
 import type { DurableGate } from '../src/gate/durable.js'
 import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
@@ -44,7 +44,6 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session edi
     const deps: AppDeps = {
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'unused' },
       credentials: new MemoryCredentials(),
       testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
       remoteAddress: () => '10.0.0.7',

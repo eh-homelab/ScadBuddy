@@ -31,9 +31,9 @@ import { mcpAuthOf, ready, type RouteModule } from './module.js'
 // Error bodies are `{ detail }`, like routes/credentials.ts.
 
 export type McpTokenRouteDeps = {
-  /** Undefined when there is no database (spec §9, "No database"). */
+  /** Undefined when this process was not given it (tests). */
   tokens: TokenStore | undefined
-  /** Applies migrations; the routes answer 503 until it resolves true. */
+  /** True once the API serves the agent's CRUD areas; the routes answer 503 until then. */
   ready: () => Promise<boolean>
   /** The current MCP auth settings (the same function /mcp reads per request). */
   authSettings: () => McpAuthSettings | Promise<McpAuthSettings>
@@ -90,8 +90,8 @@ const PostBody = z.strictObject({
   approval_grant: z.boolean().optional(),
 })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 export function tokenView(record: TokenRecord, now: Date): McpTokenView {
   const status: McpTokenStatus = record.revokedAt
@@ -117,7 +117,7 @@ export function registerMcpTokenRoutes(app: Hono, deps: McpTokenRouteDeps): void
   const now = deps.now ?? (() => new Date())
 
   async function store(): Promise<TokenStore | string> {
-    if (!deps.tokens) return NO_DATABASE
+    if (!deps.tokens) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.tokens : NOT_READY
   }
 
@@ -193,7 +193,7 @@ declare module '../app.js' {
   interface AppDeps {
     /**
      * The MCP bearer-token store Settings manages. Pass the same instance as
-     * `mcp.tokens`. Undefined (or left out) when there is no database: the routes
+     * `mcp.tokens`. Undefined (or left out) when this process was not given it (tests): the routes
      * then answer 503.
      */
     tokens?: TokenStore | undefined
