@@ -21,9 +21,10 @@ export type Throwaway = {
 
 /**
  * A database of the test's own, already migrated, and a Database connected to it;
- * `drop()` removes both. It is copied from a template migrated once per set of
- * migrations (#2018): migrating per test cost each test ~0.2 s, and seconds under
- * load, since MIGRATION_LOCK serialises migrating across the whole server.
+ * `drop()` closes the Database, then drops the database outside the hook (`dropLater`).
+ * It is copied from a template migrated once per set of migrations (#2018): migrating
+ * per test cost each test ~0.2 s, and seconds under load, since MIGRATION_LOCK
+ * serialises migrating across the whole server.
  *
  * `{ empty: true }` gives a fresh, unmigrated schema in the shared database
  * instead, for the tests of migrating itself; its `ready()` migrates it (`migrateSchema`).
@@ -47,7 +48,11 @@ export async function throwawayDatabase(options: { empty?: boolean } = {}): Prom
       },
     }
   }
-  await admin.unsafe(`CREATE DATABASE "${name}" TEMPLATE "${TEMPLATE}"`)
+  try {
+    await admin.unsafe(`CREATE DATABASE "${name}" TEMPLATE "${TEMPLATE}"`)
+  } finally {
+    await admin.end({ timeout: 5 })
+  }
   const url = databaseUrl(base, name)
   const db = connectDatabase(url, { searchPath: 'public' })
   return {
@@ -56,10 +61,29 @@ export async function throwawayDatabase(options: { empty?: boolean } = {}): Prom
     schema: 'public',
     drop: async () => {
       await db.close()
-      await admin.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`)
-      await admin.end({ timeout: 5 })
+      dropLater(base, name)
     },
   }
+}
+
+/** This process's one connection for `dropLater`: it drops the databases one at a time. */
+let dropper: Sql | undefined
+
+/**
+ * Drops a throwaway database after its test, outside the test's hook (#7044). `DROP DATABASE`
+ * requests an immediate checkpoint and waits for it (dropdb in
+ * [dbcommands.c](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/commands/dbcommands.c)).
+ * On a slow CI disk one such checkpoint took 20.7 s (sync 15.8 s), and an `afterEach` that
+ * waited for it timed out at 20 s, although the test had closed every connection it opened.
+ * So `drop()` waits only for `db.close()`, and the DROP runs here, queued on one connection.
+ * A failed DROP is an unhandled rejection, which fails the run. A process that ends with a
+ * DROP still queued leaves that database behind, as a killed run does.
+ */
+function dropLater(base: string, name: string): void {
+  dropper ??= postgres(base, { max: 1, idle_timeout: 1, onnotice: () => {} })
+  dropper.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`).catch((err: unknown) => {
+    throw new Error(`dropping the test database ${name} failed`, { cause: err })
+  })
 }
 
 /**
