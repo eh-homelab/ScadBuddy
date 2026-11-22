@@ -190,7 +190,7 @@ from scadbuddy.print_library.copies import (
 )
 from scadbuddy.print_library.reads import LibraryReads, NativeCopies
 from scadbuddy.printers.hot_path import NATIVE_STORES, hot_path_native, native_backends
-from scadbuddy.printers.lan_models import LanReport, LanStarted, LanStopped
+from scadbuddy.printers.lan_models import LanQueued, LanReport, LanStarted, LanStopped
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import is_fresh, status_from_report
 from scadbuddy.rack.rank import (
@@ -637,6 +637,10 @@ class PrintRunResult(BaseModel):
     #: waits for someone to say its plate is clear before it starts it (#4939,
     #: ``lan_require_plate_clear``): ``POST /print/runs/{id}/plate-cleared``.
     lan_awaiting_clear: bool = False
+    #: The printer was busy when the run read it, so it sent nothing and waits to start
+    #: its first print (#6871, ``lan_queue_when_busy``); ``None`` once that print starts,
+    #: or for a run that never waited. The waiting prints are ``lan_waiting``.
+    lan_queued: LanQueued | None = None
     #: The slicer settings per filament slot this print was laid out with (#5571,
     #: #5627), as the request set them (``part_settings.normalised``); ``None`` for none.
     #: Only the request's: a template's ``part_print_settings`` (#5626) are not recorded,
@@ -3490,8 +3494,14 @@ class PlannedRun(BaseModel):
     lan_start: bool = False
     #: Whether a LAN run of several prints waits, after each, for someone to say the
     #: plate is clear before it starts the next (#4939): ``lan_require_plate_clear`` as
-    #: the plan read it. The default keeps every recorded ``print_plan`` result as before.
+    #: the plan read it. A run planned with ``queue_when_busy`` also reads a printer
+    #: that holds an ended print as busy with it (#6871). The default keeps every
+    #: recorded ``print_plan`` result as before.
     plate_clear: bool = False
+    #: Whether a LAN run reads the printer before its first upload and, finding it busy,
+    #: waits for it rather than send (#6871): ``lan_queue_when_busy`` as the plan read
+    #: it. The default keeps every recorded ``print_plan`` result as before.
+    queue_when_busy: bool = False
 
 
 class QueuedPlate(BaseModel):
@@ -4190,6 +4200,17 @@ def finish_run(
     for plate_warnings in [*(plate.warnings for plate in queued or []), *lan]:
         # A rack warning repeated on every plate is one fact, shown once (spec §6).
         warnings += [warning for warning in plate_warnings if warning not in warnings]
+    if not outcomes and planned.lan_start:
+        # A LAN run queued on a busy printer (#6871): nothing started yet.
+        return PrintRunResult(
+            library_file_id=planned.library_file_id,
+            printer_id=planned.printer_id,
+            copies=planned.copies,
+            warnings=warnings,
+            project_id=planned.project_id,
+            folder_id=planned.folder_id,
+            path="native",
+        )
     return _queued(
         config,
         outcomes,

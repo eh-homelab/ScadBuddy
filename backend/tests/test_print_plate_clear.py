@@ -1,16 +1,21 @@
 """#4939: a native run of several prints keeps ``lan_require_plate_clear`` as its plan
-read it (`print_activities.plate_clear_of`); any other run never waits for a clear."""
+read it (`print_activities.plate_clear_of`). #6871: every native run keeps it and
+``lan_queue_when_busy`` for the check before its first upload; a run on Bambuddy's path
+reads neither."""
 
 from __future__ import annotations
 
 from typing import cast
 
 import pytest
+from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan
+from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.library.settings_store import PrintSettings, SettingsReader, StoredSettings
 from scadbuddy.workflows.print_activities import plate_clear_of
+from scadbuddy.workflows.print_models import LAN_REFUSED, NOTHING_SENT
 from scadbuddy.workflows.printing import _ClearTimeoutError, _lan_failed
 
 
@@ -28,13 +33,18 @@ def planned(*, lan_start: bool = True, copies: int = 2, plates: int = 1) -> Plan
 
 
 class Store:
-    def __init__(self, required: bool) -> None:
+    def __init__(self, required: bool, queue: bool = True) -> None:
         self.required = required
+        self.queue = queue
         self.reads = 0
 
     def plate_clear_required(self) -> bool:
         self.reads += 1
         return self.required
+
+    def queue_when_busy(self) -> bool:
+        self.reads += 1
+        return self.queue
 
 
 @pytest.mark.parametrize(("copies", "plates"), [(2, 1), (1, 2)])
@@ -55,21 +65,55 @@ def test_only_the_gates_own_timeout_reads_as_nobody_saying_the_plate_is_clear() 
     assert other.message.startswith("Plate 2 was not started")
 
 
-def test_one_print_or_a_bambuddy_run_never_reads_it() -> None:
+def _refusal(detail: str) -> ApplicationError:
+    problem = PrintRunError(status=502, title="Bad Gateway", detail=detail)
+    return ApplicationError(detail, problem, type=LAN_REFUSED, non_retryable=True)
+
+
+def test_a_refused_start_says_nothing_was_sent_only_for_what_it_did_not_start() -> None:
+    """#6871 (review of #6882): a queued run whose first start is refused started nothing,
+    so printing again is safe; a refused later copy names itself, since the prints before
+    it did start; an unsure refusal says neither. A refusal from a build that added the
+    sentence in ``lan_print`` is not doubled."""
+    old = _refusal(f"Fake H2C refused the print: ERROR STATE. {NOTHING_SENT}")
+    first = _lan_failed(old, "start", 1, 1, refused=True, started=0)
+    assert first.message.endswith(f"ERROR STATE. {NOTHING_SENT}")
+    assert first.message.count(NOTHING_SENT) == 1
+    later = _lan_failed(old, "start", 1, 1, refused=True, started=1, copy=2)
+    assert NOTHING_SENT not in later.message
+    assert "Nothing was sent for plate 1, copy 2, or the prints after it" in later.message
+    assert "the 1 before it did start" in later.message
+    unsure = _lan_failed(old, "start", 1, 1, refused=False, started=0)
+    assert unsure.message.endswith("ERROR STATE.") and "Nothing was sent" not in unsure.message
+
+
+def test_a_bambuddy_run_never_reads_them() -> None:
     store = Store(True)
-    assert not plate_clear_of(
-        planned(copies=1), cast(SettingsReader, store), StoredSettings()
-    ).plate_clear
-    assert not plate_clear_of(
-        planned(lan_start=False), cast(SettingsReader, store), StoredSettings()
-    ).plate_clear
+    run = plate_clear_of(planned(lan_start=False), cast(SettingsReader, store), StoredSettings())
+    assert not run.plate_clear and not run.queue_when_busy
     assert store.reads == 0
+
+
+@pytest.mark.parametrize("queue", [True, False])
+def test_a_native_run_of_one_print_keeps_both_for_its_check(queue: bool) -> None:
+    """#6871: the check before the first upload reads a printer holding an ended print as
+    busy when its plate must be cleared, so a run of one print keeps both settings."""
+    run = plate_clear_of(
+        planned(copies=1), cast(SettingsReader, Store(True, queue)), StoredSettings()
+    )
+    assert run.plate_clear and run.queue_when_busy is queue
 
 
 def test_the_print_workers_loaded_settings_answer_without_a_second_read() -> None:
     """#5298: the print worker's settings carry the field, so the plan's own read answers
     it, and the Bambuddy key is not fetched again for one bool."""
     store = Store(False)
-    loaded = PrintSettings(lan_require_plate_clear=True)
-    assert plate_clear_of(planned(), cast(SettingsReader, store), loaded).plate_clear
+    loaded = PrintSettings(lan_require_plate_clear=True, lan_queue_when_busy=False)
+    run = plate_clear_of(planned(), cast(SettingsReader, store), loaded)
+    assert run.plate_clear and not run.queue_when_busy
     assert store.reads == 0
+
+
+def test_the_print_worker_queues_when_busy_by_default() -> None:
+    """#6871 ruling 5: on by default."""
+    assert PrintSettings().lan_queue_when_busy

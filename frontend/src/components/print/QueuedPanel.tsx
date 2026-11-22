@@ -1,3 +1,4 @@
+import { Link } from 'react-router'
 import type { OutputPlate, PrintProgress, PrintRunResult } from '../../api/types'
 import { plateLabel } from '../../lib/plate'
 import { Badge } from '@/components/ui/badge'
@@ -29,10 +30,34 @@ export function QueuedPanel({ result, printerName, progress, polling, plates = [
   const waiting = native && stopped === null && !settledWaits ? (result.lan_waiting ?? []).length : 0
   /** Every print the run makes: each plate's copies, where `copies` is per plate. */
   const prints = (result.lan ?? []).length + waiting
+  /** #6871 — the printer was busy, so nothing was sent: the run waits in ScadBuddy's queue. */
+  const queued = native && stopped === null ? (result.lan_queued ?? null) : null
+  const printer = printerName ?? 'the printer you chose'
   return (
     <div className="space-y-2 text-[13px] text-foreground">
       <div data-testid="queued-items">
-        {native ? (
+        {queued !== null ? (
+          <>
+          <p>
+            Queued for {printer}:{' '}
+            {queued.job
+              ? 'it is busy with another print, so nothing was sent to it yet.'
+              : 'its plate must be cleared first, so nothing was sent to it yet.'}{' '}
+            ScadBuddy sends it once the printer has finished and someone says the plate is clear.
+            <span className="mt-1 block text-[12px] text-muted-foreground">
+              {queued.place !== null && queued.place !== undefined && (
+                <span data-testid="lan-queued-place">
+                  Place <span className="sb-num">{queued.place}</span> in the queue for {printer}.{' '}
+                </span>
+              )}
+              <Link to="/prints" className="underline underline-offset-2 hover:text-foreground">
+                Open the queue
+              </Link>
+            </span>
+          </p>
+          {progress?.lan_run && <LanRunControls control={progress.lan_run} printerName={printerName} className="mt-1.5" />}
+          </>
+        ) : native ? (
           <>
           <p>
             Sliced and sent to {printerName ?? 'the printer you chose'} over the LAN —{' '}

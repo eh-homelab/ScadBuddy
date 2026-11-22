@@ -22,7 +22,7 @@ function posted(action: 'stop' | 'plate-cleared', status = 202) {
 }
 
 function controls(control: Partial<LanRunControl> = {}) {
-  render(<LanRunControls control={{ run_id: RUN, waiting: 2, awaiting_clear: false, ...control }} printerName="H2C" />)
+  render(<LanRunControls control={{ run_id: RUN, waiting: 2, awaiting_clear: false, queued: false, ...control }} printerName="H2C" />)
 }
 
 describe('LanRunControls (#4942, #4939)', () => {
@@ -68,5 +68,15 @@ describe('LanRunControls (#4942, #4939)', () => {
     await user.click(screen.getByRole('button', { name: 'Stop the rest' }))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Stop them' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('no prints still to start')
+  })
+})
+
+// #6871 — a run queued on a busy printer has started nothing yet.
+describe('LanRunControls · a run queued on a busy printer', () => {
+  it('says it waits for the print the printer runs', () => {
+    controls({ waiting: 1, queued: true })
+    expect(screen.getByTestId('lan-run-controls')).toHaveTextContent(
+      'Queued until H2C has finished the print it is running. 1 print still to start.',
+    )
   })
 })

@@ -243,7 +243,7 @@ def test_plate_cleared_while_not_waiting_for_one_is_a_409(
 
 
 def test_the_printers_card_names_the_runs_controls(
-    client: TestClient, workflow_reaper: WorkflowReaper
+    client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
 ) -> None:
     """The Prints page card of the printer a run waits on: its controls, and, while the
     run waits for a clear, the plate warning the Bambuddy path shows too."""
@@ -259,6 +259,43 @@ def test_the_printers_card_names_the_runs_controls(
         WAITING.model_copy(update={"lan_awaiting_clear": True}),
         printer=printer,
     )
+    _sequence(workflow_reaper, run_id, sequences)
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
-    assert card["lan_run"] == {"run_id": run_id, "waiting": 2, "awaiting_clear": True}
+    assert card["lan_run"] == {
+        "run_id": run_id,
+        "waiting": 2,
+        "awaiting_clear": True,
+        "queued": False,
+    }
     assert card["awaiting_plate_clear"] is True
+
+
+def test_a_gone_oldest_run_never_hides_the_newer_runs_controls(
+    client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
+) -> None:
+    """#6871 (review of #6882): the card shows a printer's oldest waiting run, so one whose
+    sequence closed without recording its end (and whose ``PrintRun`` has closed) is
+    recorded stopped, as `end_gone_sequences` does, and the next run's controls show. A
+    run whose ``PrintRun`` is still open may yet start its sequence, so it stays first."""
+    printer = _printer(client)
+    gone = _run(client, workflow_reaper, printer=printer)
+    starting = _run(client, workflow_reaper, printer=printer)
+    alive = _run(client, workflow_reaper, printer=printer)
+    _sequence(workflow_reaper, alive, sequences)
+    assert workflow_reaper.client is not None
+    parent = workflow_reaper.run(
+        workflow_reaper.client.start_workflow(
+            "PrintRun", "stand-in", id=f"print-{starting}", task_queue=f"nobody-{starting[:8]}"
+        )
+    )
+    sequences.append(parent)
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["run_id"] == starting
+    stopped = printing_api.SEQUENCE_GONE_STOP.model_dump()
+    assert client.get(f"/api/v1/print/runs/{gone}").json()["result"]["lan_stopped"] == stopped
+
+    workflow_reaper.run(parent.terminate())
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["run_id"] == alive
+    assert client.get(f"/api/v1/print/runs/{alive}").json()["result"]["lan_stopped"] is None
