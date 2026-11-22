@@ -182,7 +182,7 @@ The agent worker creates the pods through the Kubernetes API (`agent/src/sandbox
 Serves only `/healthz` and runs no Temporal worker
 (`agent-durable/src/scadbuddy_durable/__main__.py:25-37`,
 `agent-durable/src/scadbuddy_durable/worker.py:21-24`). Its Deployment is at zero replicas
-and still mounts the database secret and the KEK; see
+and mounts no database secret and no KEK; see
 [`agent-durable/CLAUDE.md`](../../agent-durable/CLAUDE.md).
 
 ## Slicer worker
