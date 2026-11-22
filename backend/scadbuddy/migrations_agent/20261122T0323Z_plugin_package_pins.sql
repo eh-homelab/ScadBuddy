@@ -92,10 +92,10 @@ ALTER TABLE ai_plugin_packages
   ADD CONSTRAINT ai_plugin_packages_pending_source_pin_check CHECK (
     pending_content_hash IS NULL OR
     CASE source_kind
-      WHEN 'git' THEN coalesce(pending_pin_kind, 'commit') = 'commit'
-      WHEN 'archive' THEN coalesce(pending_pin_kind, 'commit') = 'bytes'
-      WHEN 'npm' THEN coalesce(pending_pin_kind, 'commit') = 'bytes'
-      WHEN 'hosted' THEN coalesce(pending_pin_kind, 'commit') = 'version'
-      ELSE coalesce(pending_pin_kind, 'commit') IN ('commit', 'bytes')
+      WHEN 'git' THEN coalesce(pending_pin_kind, CASE WHEN pending_commit_sha IS NOT NULL THEN 'commit' END) = 'commit'
+      WHEN 'archive' THEN coalesce(pending_pin_kind, CASE WHEN pending_commit_sha IS NOT NULL THEN 'commit' END) = 'bytes'
+      WHEN 'npm' THEN coalesce(pending_pin_kind, CASE WHEN pending_commit_sha IS NOT NULL THEN 'commit' END) = 'bytes'
+      WHEN 'hosted' THEN coalesce(pending_pin_kind, CASE WHEN pending_commit_sha IS NOT NULL THEN 'commit' END) = 'version'
+      ELSE coalesce(pending_pin_kind, CASE WHEN pending_commit_sha IS NOT NULL THEN 'commit' END) IN ('commit', 'bytes')
     END
   );

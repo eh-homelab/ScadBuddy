@@ -652,6 +652,8 @@ async def package_mirror_post(name: Name, request: Request, state: StateDep) -> 
             digest.update(chunk)
             await asyncio.to_thread(spool.write, chunk)
         sha256 = digest.hexdigest()
+        # The blob is published before the hold's transaction. If that transaction fails, the
+        # blob has no hold, and the blob sweep removes it once its grace runs out.
         await package_mirrors.keep(state.store.blobs, spool, sha256)
 
     def run(conn: psycopg.Connection[Any]) -> None:
