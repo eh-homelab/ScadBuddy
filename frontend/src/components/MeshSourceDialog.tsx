@@ -59,6 +59,8 @@ export function MeshSourceDialog({
 }) {
   const [from, setFrom] = useState<From>('disk')
   const [picked, setPicked] = useState<Picked | null>(null)
+  // The library file as the search listed it: its real filename, not the model's name.
+  const [libraryFile, setLibraryFile] = useState<LibraryFileSuggestion | null>(null)
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -144,8 +146,11 @@ export function MeshSourceDialog({
           ) : from === 'library' ? (
             <LibraryFileChoice
               id="mesh-library-search"
-              chosen={picked?.library_file_id != null ? libraryPick(picked.library_file_id, name) : null}
-              onChoose={(file: LibraryFileSuggestion) => choose({ library_file_id: file.id }, stem(file.filename))}
+              chosen={picked?.library_file_id != null ? libraryFile : null}
+              onChoose={(file: LibraryFileSuggestion) => {
+                setLibraryFile(file)
+                choose({ library_file_id: file.id }, stem(file.filename))
+              }}
               keep={holdsMesh}
               emptyHint="Search for a 3MF or an STL. A sliced file is left out."
             />
@@ -180,11 +185,6 @@ export function MeshSourceDialog({
       </DialogContent>
     </Dialog>
   )
-}
-
-/** The chosen library file as its button names it (only its id is compared). */
-function libraryPick(id: number, name: string): LibraryFileSuggestion {
-  return { id, filename: name, folder_id: null }
 }
 
 /**

@@ -88,6 +88,36 @@ describe('MeshSourceDialog', () => {
     })
   })
 
+  it('"Choose another print" clears the chosen source, so no stale print is sent', async () => {
+    const create = vi.spyOn(api, 'createMeshModel')
+    const { dialog, user } = render()
+    await user.click(within(dialog).getByRole('radio', { name: 'A print' }))
+    await user.click(await within(dialog).findByTestId('past-9104'))
+    await user.click(await within(dialog).findByRole('radio', { name: /slicer project/ }))
+    expect(within(dialog).getByRole('button', { name: 'Open as a model' })).toBeEnabled()
+    await user.click(within(dialog).getByRole('button', { name: 'Choose another print' }))
+    expect(await within(dialog).findByTestId('past-9105')).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Name')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Open as a model' })).toBeDisabled()
+    await user.click(within(dialog).getByTestId('past-9105'))
+    await within(dialog).findByRole('radiogroup', { name: 'Source' })
+    expect(within(dialog).getByRole('button', { name: 'Open as a model' })).toBeDisabled()
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('clears the chosen file when the source changes', async () => {
+    const create = vi.spyOn(api, 'createMeshModel')
+    const { dialog, user } = render()
+    await user.click(within(dialog).getByRole('radio', { name: 'A print' }))
+    await user.click(await within(dialog).findByTestId('past-9104'))
+    await user.click(await within(dialog).findByRole('radio', { name: /slicer project/ }))
+    expect(within(dialog).getByLabelText('Name')).toHaveValue('benchy')
+    await user.click(within(dialog).getByRole('radio', { name: 'An output' }))
+    expect(within(dialog).queryByLabelText('Name')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Open as a model' })).toBeDisabled()
+    expect(create).not.toHaveBeenCalled()
+  })
+
   it("reads the printer's storage only when told to, as Import print does", async () => {
     const read = vi.spyOn(api, 'getPrintSources')
     const { dialog, user } = render()

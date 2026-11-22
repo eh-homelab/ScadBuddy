@@ -60,7 +60,7 @@ export const meshModelTools: Tool[] = [
       '(output_id), a print\'s file (archive_id with archive_source, one place get_print_sources lists as available: ' +
       '`{kind: archive}`, `{kind: archive_source}`, `{kind: library, library_file_id}` or `{kind: printer, path}`; a ' +
       'sliced file has no meshes and is refused, and a `printer` source reaches the printer, so that call waits for a ' +
-      "person's approval), or a 3MF/STL in your workspace (workspace_path with its workspace_sha256). Each object becomes a " +
+      "person's approval; of the Bambuddy scopes, Control Printer is needed only for a `printer` source), or a 3MF/STL in your workspace (workspace_path with its workspace_sha256). Each object becomes a " +
       'scene object you can cut, join with a peg and socket, lay flat, add to or subtract from with edit_scene, then ' +
       'render and print like any template. Nothing is written to Bambuddy. ' + BYTES_NEVER_AN_ARGUMENT,
     input: z

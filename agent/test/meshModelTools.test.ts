@@ -83,6 +83,16 @@ describe('mesh model tools', () => {
     expect(pinnedOutward('mcp__scadbuddy__create_model_from_mesh', { name: 'X', archive_id: 193, archive_source: 'printer' })).toBe(true)
     expect(pinnedOutward('create_model_from_mesh', { name: 'X', archive_id: 193, archive_source: { kind: 'archive' } })).toBe(false)
     expect(pinnedOutward('create_model_from_mesh', { name: 'X', library_file_id: 7 })).toBe(false)
+    // #6969: import_print's check is the same one.
+    for (const kind of ['archive', 'archive_source', 'library', 'printer', undefined]) {
+      expect(pinnedOutward('create_model_from_mesh', { name: 'X', archive_id: 193, archive_source: { kind } })).toBe(pinnedOutward('import_print', { source: { kind } }))
+    }
+  })
+
+  it('says Control Printer is needed only for a printer source (#6969)', () => {
+    const found = tool('create_model_from_mesh')
+    expect(found.bambuddyScope).toEqual(['Read Status', 'Control Printer'])
+    expect(found.description).toContain('Control Printer is needed only for a `printer` source')
   })
 
   it('uploads a workspace file as multipart, named by its path', async () => {
