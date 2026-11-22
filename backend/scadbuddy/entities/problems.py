@@ -9,6 +9,7 @@ from fastapi import status
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.entities.attachments import ORDER_KINDS, PRINT_ARCHIVE
+from scadbuddy.entities.links import is_web_url
 from scadbuddy.entities.refs import BadEntityRef, EntityRef
 from scadbuddy.entities.registry import KINDS
 
@@ -73,6 +74,20 @@ def writable(text: str) -> EntityRef:
 
 def entity_not_found(ref: EntityRef) -> ApiError:
     return problem(status.HTTP_404_NOT_FOUND, "entity_not_found", f"no {ref.kind} {ref.ref!r}")
+
+
+def link_not_found(ref: EntityRef, link_id: str) -> ApiError:
+    return problem(status.HTTP_404_NOT_FOUND, "link_not_found", f"{ref} has no link {link_id!r}")
+
+
+def checked_url(url: str) -> str:
+    if not is_web_url(url):
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "bad_link_url",
+            "a link is an `http` or `https` URL with a host, up to 2000 characters",
+        )
+    return url
 
 
 def checked_role(role: str) -> str:
