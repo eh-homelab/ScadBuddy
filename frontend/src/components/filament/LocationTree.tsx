@@ -29,8 +29,8 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
   return (
     <li data-place={node.id}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
-        {/* The name opens the place's own page (#6955); the spools in it are `filamentLinks.location`. */}
-        <EntityLink to={filamentLinks.locationPage(node.id)} className={archived ? 'font-medium text-muted-foreground line-through' : 'font-medium'}>
+        {/* The name opens the place's own page (#6955); the spools in it are `filamentLinks.locationSpools`. */}
+        <EntityLink to={filamentLinks.location(node.id)} className={archived ? 'font-medium text-muted-foreground line-through' : 'font-medium'}>
           {node.name}
         </EntityLink>
         {tree.kinds.has(node.kind_id) && (
@@ -40,7 +40,7 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
         )}
         {node.identifier && <span className="text-muted-foreground">{node.identifier}</span>}
         <EntityLink
-          to={filamentLinks.location(node.id)}
+          to={filamentLinks.locationSpools(node.id)}
           aria-label={`${node.spool_count} ${node.spool_count === 1 ? 'spool' : 'spools'} in ${node.name}`}
           className="rounded-full bg-muted px-2 text-[12px] tabular-nums text-muted-foreground"
         >

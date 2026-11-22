@@ -64,7 +64,7 @@ describe('filament ui paths (#6869)', () => {
       type_id: TYPE,
       type_ui_path: `/filament/types/${TYPE}`,
       location_id: 'dry-box',
-      location_ui_path: '/filament/spools?place=dry-box',
+      location_ui_path: '/filament/locations/dry-box',
       names: { location: 'Dry box' },
       invoice: {
         invoice_id: INVOICE,
@@ -94,11 +94,30 @@ describe('filament ui paths (#6869)', () => {
     })
   })
 
-  it('places each node of the location tree at the spools in it', async () => {
+  it('places each node of the location tree at its own page', async () => {
     server.use(http.get(`${FILAMENT}/locations`, () => HttpResponse.json([{ id: 'a', name: 'Shelf', children: [{ id: 'b', name: 'Box 1', children: [] }] }])))
     const [shelf] = firstText(await runTool(tool('filament_location_list'), {}, ctx())) as { ui_path: string; children: { ui_path: string }[] }[]
-    expect(shelf!.ui_path).toBe('/filament/spools?place=a')
-    expect(shelf!.children[0]!.ui_path).toBe('/filament/spools?place=b')
+    expect(shelf!.ui_path).toBe('/filament/locations/a')
+    expect(shelf!.children[0]!.ui_path).toBe('/filament/locations/b')
+  })
+
+  it("gives one place, its path, its children and its spools their pages (#6955)", async () => {
+    const PLACE = '0badc0de-0000-4000-8000-0000000000a1'
+    server.use(
+      http.get(`${FILAMENT}/locations/${PLACE}`, () =>
+        HttpResponse.json({ id: PLACE, name: 'Box', path: [{ id: 'r', name: 'Shelf' }], children: [{ id: 'b', name: 'Bag' }], spools: [{ id: SPOOL, number: 12 }] }),
+      ),
+    )
+    const place = firstText(await runTool(tool('filament_location_get'), { location_id: PLACE }, ctx())) as {
+      ui_path: string
+      path: { ui_path: string }[]
+      children: { ui_path: string }[]
+      spools: { ui_path: string }[]
+    }
+    expect(place.ui_path).toBe(`/filament/locations/${PLACE}`)
+    expect(place.path[0]!.ui_path).toBe('/filament/locations/r')
+    expect(place.children[0]!.ui_path).toBe('/filament/locations/b')
+    expect(place.spools[0]!.ui_path).toBe(`/filament/spools/${SPOOL}`)
   })
 
   it("anchors a price sheet's product on its supplier's page", () => {

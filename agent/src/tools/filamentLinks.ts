@@ -19,8 +19,8 @@ export const filamentPaths = {
   supplierProduct: (supplierId: string, productId: string) => anchored(at(`${BASE}/suppliers`, supplierId), `product-${productId}`),
   invoice: (id: string) => at(`${BASE}/invoices`, id),
   invoiceLine: (invoiceId: string, lineId: string) => anchored(at(`${BASE}/invoices`, invoiceId), `line-${lineId}`),
-  /** A place has no page: the spools in it (the Spools tab's `place` filter, by id, so two places of one name stay apart). */
-  location: (id: string) => query(`${BASE}/spools`, { place: id }),
+  /** #6955 — a place's own page (its path, children and spools), the target of `/x/L-<n>`. */
+  location: (id: string) => at(`${BASE}/locations`, id),
   /** A catalog row's catalog (the Catalog tab opens on materials). */
   catalog: (kind: string) => (kind === 'materials' ? `${BASE}/catalog` : query(`${BASE}/catalog`, { kind })),
   shoppingList: `${BASE}/shopping-list`,
@@ -75,7 +75,7 @@ function ownPath(kind: LinkKind, row: Row): string | null {
 /** The fields of a kind whose values are entities of another kind. */
 const NESTED: Partial<Record<LinkKind, Record<string, LinkKind>>> = {
   invoice: { lines: 'invoice_line' },
-  location: { children: 'location' },
+  location: { children: 'location', path: 'location', spools: 'spool' },
   price_sheet_row: { product: 'product' },
   line_candidates: { costed: 'spool', uncosted: 'spool' },
 }

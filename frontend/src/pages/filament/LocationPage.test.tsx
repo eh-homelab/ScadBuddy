@@ -2,7 +2,7 @@ import { screen, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { getLocation } from '../../api/filament'
-import { L, spoolId } from '../../mocks/features/filament/seed'
+import { H2C, L, spoolId } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { LocationPage } from './LocationPage'
@@ -22,6 +22,7 @@ describe('the location page', () => {
     expect(spool).toHaveTextContent('120 g')
     expect(screen.getByRole('link', { name: 'Print label' })).toHaveAttribute('href', `/filament/labels?locations=${L.AMS_A1}`)
     expect(screen.queryByRole('link', { name: 'Printer settings' })).toBeNull()
+    expect(screen.queryByRole('link', { name: "Print this printer's labels" })).toBeNull()
     expect(screen.getByRole('link', { name: 'View spools' })).toHaveAttribute('href', `/filament/spools?place=${L.AMS_A1}`)
     expect(screen.queryByText('Archived')).toBeNull()
   })
@@ -33,11 +34,12 @@ describe('the location page', () => {
     expect(await screen.findByText('Archived')).toBeInTheDocument()
   })
 
-  it('shows a printer place: its units and the settings link', async () => {
+  it('shows a printer place: its units, the settings link and its labels link', async () => {
     open(L.H2C)
     expect(await screen.findByRole('heading', { level: 1, name: '3DP-31B-598' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'H2C AMS-A' })).toHaveAttribute('href', `/filament/locations/${L.AMS_A}`)
     expect(screen.getByRole('link', { name: 'Printer settings' })).toHaveAttribute('href', '/settings/printing#printers')
+    expect(screen.getByRole('link', { name: "Print this printer's labels" })).toHaveAttribute('href', `/filament/labels?printers=${H2C.printer_id}`)
   })
 
   it('says so for an unknown id', async () => {

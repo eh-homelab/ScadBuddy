@@ -1482,9 +1482,12 @@ const tools: Tool[] = [
     description:
       "The label of each printer's own place, each AMS unit with its slots, and the external holder, each with its " +
       '`code`, `name` and `depth` (0 printer, 1 unit or external holder, 2 slot), and the `base_url` a QR opens. ' +
-      '`printer_ids` limits it; omit for every printer. It may create a printer\'s own place: that is derived data ' +
-      'that the next spool capture would make anyway, so this tool is `read` tier. 409 `no_printer_kind` when no ' +
-      'location kind is marked as a printer.',
+      '`printer_ids` limits it; omit for every printer. It may create the printer\'s own place and the place of each ' +
+      'AMS unit, slot and external holder the printer\'s latest report lists. That is derived data: capture makes ' +
+      'the same places (the printer\'s own on its next tray capture, a slot\'s when a spool loads there), so this ' +
+      'tool is `read` tier. `no_report` names the printers with no report that lists a unit or a holder: their ' +
+      'empty slots get labels only once a spool has been loaded. 409 `no_printer_kind` when no location kind is ' +
+      'marked as a printer.',
     input: z.object({ printer_ids: z.array(z.string().uuid()).optional() }),
     risk: 'read',
     source: SOURCE,
@@ -1809,5 +1812,6 @@ export const filamentTools: Tool[] = linkingTools(tools, {
   filament_spool_archive: 'spool',
   filament_spool_move: 'spool',
   filament_location_list: 'location',
+  filament_location_get: 'location',
   filament_location_upsert: 'location',
 })

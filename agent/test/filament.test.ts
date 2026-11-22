@@ -538,7 +538,7 @@ describe('filament location tools', () => {
       }),
     )
     const listed = await runTool(tool('filament_location_list'), { include_archived: true }, ctx())
-    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: `/filament/spools?place=${ROW}`, children: [] }])
+    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: `/filament/locations/${ROW}`, children: [] }])
     const fields = { name: 'Shelf A', kind_id: ROW }
     expect((await runTool(tool('filament_location_upsert'), { fields }, ctx())).isError).toBeFalsy()
     const edit = { location_id: ROW, fields: { note: null }, archived: true }

@@ -45,7 +45,7 @@ export function LocationPage() {
             <nav aria-label="Path" className="flex flex-wrap items-center gap-x-1 text-muted-foreground">
               {place.path.map((step) => (
                 <span key={step.id} className="flex items-center gap-1">
-                  <Link to={filamentLinks.locationPage(step.id)} className="break-words hover:underline">
+                  <Link to={filamentLinks.location(step.id)} className="break-words hover:underline">
                     {step.name}
                   </Link>
                   <span aria-hidden="true">/</span>
@@ -63,7 +63,12 @@ export function LocationPage() {
             <Link to={filamentLinks.locationLabel(place.id)} className="inline-flex items-center gap-1 underline">
               <PrinterIcon className="size-3.5" /> Print label
             </Link>
-            <Link to={filamentLinks.location(place.id)} className="underline">
+            {place.printer_root && place.printer_id && (
+              <Link to={filamentLinks.printerLabels(place.printer_id)} className="inline-flex items-center gap-1 underline">
+                <PrinterIcon className="size-3.5" /> Print this printer's labels
+              </Link>
+            )}
+            <Link to={filamentLinks.locationSpools(place.id)} className="underline">
               View spools
             </Link>
             {place.printer_root && (
@@ -78,7 +83,7 @@ export function LocationPage() {
               <ul className="flex flex-col gap-1">
                 {place.children.map((child) => (
                   <li key={child.id} className="min-w-0">
-                    <Link to={filamentLinks.locationPage(child.id)} className="break-words hover:underline">
+                    <Link to={filamentLinks.location(child.id)} className="break-words hover:underline">
                       {child.name}
                     </Link>{' '}
                     <span className="text-muted-foreground">{child.code}</span>
