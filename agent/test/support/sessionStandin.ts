@@ -2,7 +2,8 @@ import { ApplicationFailure, condition, defineQuery, defineSignal, defineUpdate,
 
 // A stand-in for AgentSession (temporal/session/workflow.ts) that runs no turn: what the agent
 // service's dispatch (src/sessions/durable.ts) sends it, kept for the test to read. The
-// `send_message` Update's validator refuses a second turn `busy`, as the real one does;
+// `send_message` Update's validator refuses a second turn `busy`, and any once told to `end`
+// `ended`, as the real one does;
 // `cancel_input`, the `interrupt` Signal and the `owner_changed` Signal are recorded in the order
 // they came. With `hold_cancel` signalled, `cancel_input` never answers (a worker that is down).
 // The `turn` Query names the turn it holds, null between turns. `end_turn` stands for the turn's
@@ -41,6 +42,7 @@ export async function AgentSession(start: unknown): Promise<void> {
     },
     {
       validator: (_message: Message) => {
+        if (ended) throw ApplicationFailure.nonRetryable('the session ended', 'ended')
         if (busy) throw ApplicationFailure.nonRetryable('the session is running a turn', 'busy')
       },
     },

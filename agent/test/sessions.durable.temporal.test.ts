@@ -2,7 +2,7 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { Worker } from '@temporalio/worker'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import type { Client } from '@temporalio/client'
+import { ApplicationFailure, type Client, WorkflowUpdateFailedError } from '@temporalio/client'
 import type { Sql } from 'postgres'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AttachmentStore } from './support/sql/attachments.js'
@@ -360,6 +360,67 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       }
     }, 30_000)
   }
+
+  /** A session whose run was told to end while a turn ran, so it stays open, and whose row is idle again. */
+  async function endingRun(m: SessionManager): Promise<{ sessionId: string; runId: string }> {
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    await m.send(session.id, browser, 'first')
+    const handle = env.client.workflow.getHandle(sessionWorkflowId(session.id))
+    await handle.signal('end')
+    await db.sql`UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL WHERE id = ${session.id}`
+    return { sessionId: session.id, runId: (await handle.describe()).runId }
+  }
+
+  it('a send whose second try, after the ending run closed, meets a run ending again is refused `unavailable` (#7031)', async () => {
+    // A second archive races the retry: both tries are refused `ended`. Nothing took the message.
+    const m = await durableManager({ sendTimeoutMs: 10_000 })
+    const { sessionId } = await endingRun(m)
+    const real = env.client.workflow.executeUpdateWithStart.bind(env.client.workflow)
+    const ended = () => new WorkflowUpdateFailedError('refused', ApplicationFailure.create({ type: 'ended', message: 'the session ended' }))
+    const spy = vi
+      .spyOn(env.client.workflow, 'executeUpdateWithStart')
+      .mockImplementationOnce(async (...args) => {
+        try {
+          return await real(...args)
+        } finally {
+          // The refused run's turn ends, so it closes.
+          await env.client.workflow.getHandle(sessionWorkflowId(sessionId)).signal('end_turn')
+        }
+      })
+      .mockImplementationOnce(() => Promise.reject(ended()))
+    try {
+      await expect(m.send(sessionId, browser, 'hello')).rejects.toMatchObject({ code: 'unavailable', message: expect.stringMatching(/still ending/) })
+      expect(spy).toHaveBeenCalledTimes(2)
+      const [row] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${sessionId}`
+      expect(row).toEqual({ status: 'idle', durable_turn_id: null })
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+
+  it('a send waiting for the run that refused it reaches a run started meanwhile (#7031)', async () => {
+    const m = await durableManager({ sendTimeoutMs: 10_000 })
+    const { sessionId, runId } = await endingRun(m)
+    const workflowId = sessionWorkflowId(sessionId)
+    const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart')
+    try {
+      const sent = m.send(sessionId, browser, 'hello')
+      await expect.poll(() => spy.mock.calls.length, { timeout: 5_000 }).toBeGreaterThan(0)
+      // Time for the refusal and the describe that pins the wait to the refused run.
+      await new Promise((r) => setTimeout(r, 1_000))
+      // The refused run closes and another run of the session starts: the send is not refused.
+      await env.client.workflow.getHandle(workflowId, runId).terminate('test')
+      await env.client.workflow
+        .start('AgentSession', { workflowId, taskQueue: QUEUE, args: [{}], workflowIdConflictPolicy: 'USE_EXISTING', workflowIdReusePolicy: 'ALLOW_DUPLICATE' })
+        .catch(() => undefined)
+      await sent
+      const latest = env.client.workflow.getHandle(workflowId)
+      expect((await latest.describe()).runId).not.toBe(runId)
+      expect((await latest.query<Recorded>('recorded')).messages.map((msg) => msg.text)).toEqual(['hello'])
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
 
   it('sends nothing again when the turn ended while its workflow was described (#6353 review)', async () => {
     // The workflow took the first Update after all, finished the turn (releasing the row) and
@@ -753,18 +814,20 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect((await recorded(session.id)).messages.map((x) => x.text)).toEqual(['hello again'])
   }, 60_000)
 
-  it('refuses `closed`, as ended, a session whose workflow ran turns and ended but is still retained (#2078)', async () => {
+  it('starts a new run for a session whose workflow ran turns and ended but is still retained (#7031, ALLOW_DUPLICATE)', async () => {
     const m = await durableManager()
     const { session } = await m.start(browser, { origin: 'chat', prompt: 'hello' })
     await finishTurn(session.id, [
       { type: 'session.result', costUsd: 0.1, turns: 1, budgetUsd: 5 },
       { type: 'session.status', status: 'idle' },
     ])
-    await env.client.workflow.getHandle(sessionWorkflowId(session.id)).terminate('ended')
-    // REJECT_DUPLICATE: an ended workflow is never started afresh under the same session.
-    const refused = await m.send(session.id, browser, 'hello again').catch((err: unknown) => err)
-    expect(refused).toMatchObject({ code: 'closed', message: expect.stringMatching(/has ended; continue in a new chat/) })
-    expect((refused as Error).message).not.toMatch(/removed/)
+    const handle = env.client.workflow.getHandle(sessionWorkflowId(session.id))
+    const endedRun = (await handle.describe()).runId
+    await handle.terminate('ended')
+    // The row decides (it is not done, archived or spent): the send starts a new run under the same id.
+    await m.send(session.id, browser, 'hello again')
+    expect((await handle.describe()).runId).not.toBe(endedRun)
+    expect((await recorded(session.id)).messages.map((x) => x.text)).toEqual(['hello again'])
   }, 60_000)
 
   it("leaves a turn that was claimed again while its workflow was described", async () => {

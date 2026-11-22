@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -524,3 +526,42 @@ def test_deleting_a_fetch_releases_its_blobs(pg_pool: PgPool) -> None:
         ).fetchone()
     assert held is not None
     assert held["n"] == 0
+
+
+class _RacedTdfp(SpoolTypeStore):
+    """Both callers reach their write together (a `threading.Barrier`, as
+    `test_invoices_race.py`), so the row's lock is where the two meet."""
+
+    def __init__(self, pool: PgPool) -> None:
+        super().__init__(pool)
+        self._gate = threading.Barrier(2, timeout=20)
+
+    def set_tdfp_id(self, type_id: UUID, tdfp_id: int) -> bool:
+        self._gate.wait()
+        return super().set_tdfp_id(type_id, tdfp_id)
+
+
+@pg
+def test_two_sets_of_a_types_tdfp_id_keep_the_first(pg_pool: PgPool) -> None:
+    """R-7025-14: two creates for one type, under different keys, set its ``tdfp_id`` at
+    once; one write wins, and the other finds that id and writes nothing."""
+    made = SpoolTypeStore(pg_pool).create(_body(pg_pool))
+    store = _RacedTdfp(pg_pool)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda i: store.set_tdfp_id(made.id, i), [40001, 40002]))
+    assert sorted(results) == [False, True]
+    won = 40001 if results[0] else 40002
+    kept = SpoolTypeStore(pg_pool).get(made.id)
+    assert kept is not None and kept.tdfp_id == won
+
+
+@pg
+def test_a_tdfp_id_set_again_holds_and_another_does_not_replace_it(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    made = store.create(_body(pg_pool))
+    assert store.set_tdfp_id(made.id, 40001)
+    assert store.set_tdfp_id(made.id, 40001)
+    assert not store.set_tdfp_id(made.id, 40002)
+    kept = store.get(made.id)
+    assert kept is not None and kept.tdfp_id == 40001
+    assert not store.set_tdfp_id(UUID(int=1), 40001)

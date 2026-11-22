@@ -2284,6 +2284,11 @@ def _rack_option(candidate: RackCandidate) -> RackOption:
     )
 
 
+def _untyped(spool: Spool) -> bool:
+    """A spool with no type: its material name is missing or blank (R-6876-6)."""
+    return not (spool.names.material or "").strip()
+
+
 def _spool_material(spool: Spool) -> str:
     material, subtype = spool.names.material or "", spool.names.subtype
     return f"{material}-{subtype}" if subtype else material
@@ -2383,7 +2388,7 @@ async def rack_preview(
             )
             for slot in slots
             # A spool with no type names no material to test Glow on (R-6876-6).
-            if (spool := found[slot.slot_id]) is None or not spool.names.material
+            if (spool := found[slot.slot_id]) is None or _untyped(spool)
         ]
         if nozzle_plan is not None:
             planned = {slot.slot_id for slot in request.filament_plan.slots}
@@ -2399,7 +2404,10 @@ async def rack_preview(
             volume_type=rack_volume_type(request.choices.nozzles, laid_out=laid_out),
             # Zero alpha (a Clear spool's #00000000) is no color, never black.
             color=rack_color(first) if first else None,
-            materials=tuple(dict.fromkeys(_spool_material(spool) for spool in known)),
+            # A spool with no type names no material (R-6876-6).
+            materials=tuple(
+                dict.fromkeys(_spool_material(spool) for spool in known if not _untyped(spool))
+            ),
             abrasive=any(
                 abrasive_type(f"{spool.names.material or ''} {spool.names.subtype or ''}")
                 or glow(spool.names.material or "", spool.names.subtype)

@@ -115,9 +115,13 @@ async def test_a_glow_spool_in_the_named_tray_is_judged_abrasive() -> None:
     assert view.glow_unchecked is False
 
 
-async def test_a_spool_with_no_type_in_the_named_tray_leaves_glow_unchecked() -> None:
-    """R-6876-6: the SB spool in the tray has no material, so Glow rests on nothing."""
-    spool = sb_spool(7, material=None)
+@pytest.mark.parametrize("material", [None, "", "  "])
+async def test_a_spool_with_no_type_in_the_named_tray_leaves_glow_unchecked(
+    material: str | None,
+) -> None:
+    """R-6876-6: the SB spool in the tray has no material, so Glow rests on nothing. A blank
+    material name is no type, as a missing one is."""
+    spool = sb_spool(7, material=material)
     held = TrayView(
         trays=[TrayHolder(ams_id=128, tray_id=0, spool=spool, found_by="link")], shelf=[]
     )
@@ -127,6 +131,34 @@ async def test_a_spool_with_no_type_in_the_named_tray_leaves_glow_unchecked() ->
     assert view.glow_unchecked is True
     assert [(item.slot_id, item.reason, item.tray) for item in view.unchecked] == [
         (2, "no_type", "HT-A")
+    ]
+
+
+@pytest.mark.parametrize("material", [None, "", "  "])
+async def test_an_untyped_glow_spool_names_no_blank_material(material: str | None) -> None:
+    """R-6876-6: a spool with no type adds no material to the group, so its warning says
+    "this filament", never a blank or a bare "-Glow"; its Glow subtype still makes it
+    abrasive."""
+    spool = sb_spool(7, material=material, subtype="Glow")
+    held = TrayView(
+        trays=[TrayHolder(ams_id=128, tray_id=0, spool=spool, found_by="link")], shelf=[]
+    )
+
+    _, warnings = await rack_preview(
+        None,
+        _request(SlotChoice(slot_id=2, spool_id=HT_A)),
+        StoredSettings(),
+        printer_id=1,
+        status=_status(),
+        rack=None,
+        laid_out=False,
+        inventory=[],
+        held=held,
+    )
+
+    assert [warning.message for warning in warnings] == [
+        "No free hardened 0.4 nozzle in the rack for this filament; "
+        "position 1 is not known to be hardened."
     ]
 
 

@@ -58,6 +58,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The Storefront page's pictures and a model media's \"Storefront…\" dialog (#6213); an agent tool follows with #5283.",
   },
   {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/pictures',
+    reason: "A picture the shop uploads to a file listing (#6710 spec 2026-11-21 §5.4), a multipart image from the listing editor; the editor's file listing UI comes in a later PR of #6710.",
+  },
+  {
+    operation: 'GET /api/v1/storefront/listings/{listing_id}/plates/{plate}.png',
+    reason: "A file listing's plate picture as image bytes (#6710 spec 2026-11-21 §9.3), for the listing editor's pictures; a tool gains nothing from a PNG the editor shows.",
+  },
+  {
     operation: 'GET /api/v1/storefront/listings/{listing_id}/prepare',
     reason: "The Storefront editor's \"Prepare every colour combination\" shows the count and the progress (#6237); a back-office action, as publish is on the page.",
   },
@@ -792,6 +800,19 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     'PUT /api/v1/ai/capabilities/{source}/items/{item}/loading',
     'DELETE /api/v1/ai/capabilities/{source}/items/{item}/loading',
   ].map((route) => ({ route, reason: CAPABILITIES_WRITE })),
+  // The marketplace feed (#6933, routes/pluginFeeds.ts).
+  ...['GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json', 'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{file}'].map(
+    (route) => ({
+      route,
+      reason:
+        'A Claude Code marketplace feed for sessions outside ScadBuddy, fetched by `/plugin marketplace add` and ' +
+        '`/plugin install` on the /mcp auth; an assistant reads packages with the plugin package routes, not a catalog.',
+    }),
+  ),
+  {
+    route: 'GET /api/v1/ai/plugin-feeds/{feed}',
+    reason: "Settings → MCP access' view of the feed and its setup snippet, for the person to copy into Claude Code.",
+  },
   {
     route: 'POST /api/v1/ai/capabilities/{source}/refresh',
     reason: "Connects to the plugin with its stored secret to list its tools for the Settings page, at the user's click in the UI",

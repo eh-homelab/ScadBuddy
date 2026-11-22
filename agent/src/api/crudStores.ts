@@ -22,6 +22,10 @@ export const STORE_AREAS = [
   'plugins',
   'plugin-packages',
   'package-mirrors',
+  // The marketplace feeds' packages (#6933, plugins/feed.ts); a hosted version's zip is
+  // `hosted-plugins`', which the backend lists with it.
+  'plugin-feeds',
+  'hosted-plugins',
 ] as const
 export type StoreArea = (typeof STORE_AREAS)[number]
 

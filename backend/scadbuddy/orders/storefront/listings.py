@@ -277,12 +277,6 @@ def check_source(body: ListingInput) -> None:
             )
 
 
-def _not_yet() -> ApiError:
-    """A file listing's publish and pictures change, which the next PR of #6710 §12
-    item 3 checks; until then they are refused."""
-    return _source_invalid("source", "a file listing cannot be published yet")
-
-
 def _stored_file(body: ListingInput) -> Jsonb | None:
     """A new row's ``library_file``: no pin, no request."""
     if body.library_file is None:
@@ -1187,8 +1181,8 @@ async def publish(core: AppState, store: ListingStore, listing_id: str) -> Listi
     slice profile has no filament type for (#6153); 409 ``listing_changed`` when it was
     edited while it was being published; 409 ``listing_publishing`` while another
     publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
-    :data:`PUBLISH_LOCKS_MAX` other publishes run. A file listing is refused (422
-    ``listing_source_invalid``, `_not_yet`) until its checks land (#6710 §12 item 3)."""
+    :data:`PUBLISH_LOCKS_MAX` other publishes run. A file listing is checked and kept as
+    `file_listings.py` `publish_file` says (#6710 §5)."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
         raise listing_not_found(listing_id)
@@ -1208,7 +1202,10 @@ async def _publish(
     core: AppState, store: ListingStore, listing: Listing, snapshots: SnapshotStore
 ) -> Listing:
     if listing.source == "library_file":
-        raise _not_yet()
+        # Here, not at the top: that module builds on this one.
+        from scadbuddy.orders.storefront.file_listings import publish_file
+
+        return await publish_file(core, store, listing)
     assert listing.slug is not None and listing.commit is not None
     facts = await _commit_facts(core, listing.slug, listing.commit)
     colours = await asyncio.to_thread(store.filament_colours)
@@ -1292,10 +1289,14 @@ async def change_media(
     if listing.updated_at != expected_updated_at:
         raise _changed(listing_id)
     if listing.slug is None:
-        raise _not_yet()
-    await asyncio.to_thread(
-        _check_pictures, core, listing.slug, media_ids, frozenset(listing.media_ids)
-    )
+        # A file listing's pictures (#6710): checked whole when it is published.
+        from scadbuddy.orders.storefront.file_listings import check_file_pictures
+
+        check_file_pictures(media_ids)
+    else:
+        await asyncio.to_thread(
+            _check_pictures, core, listing.slug, media_ids, frozenset(listing.media_ids)
+        )
     changed = await asyncio.to_thread(
         store.set_media, listing_id, media_ids, expected_updated_at=expected_updated_at
     )

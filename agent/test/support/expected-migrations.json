@@ -414,5 +414,9 @@
   {
     "id": "20261122T0329Z_hosted_plugins",
     "sha256": "9fa8021a36518ae3350f5507bd3872c20b791e824b1404bff491bb1da3b212cc"
+  },
+  {
+    "id": "20261122T1907Z_plugin_feed_packages",
+    "sha256": "5ce2b28b5d8b97ded610dd72bacee833cbe9632ecd5a505f042a88b5dd7c7754"
   }
 ]

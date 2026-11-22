@@ -41,6 +41,16 @@ describe('invoiceImportPrompt', () => {
     expect(prompt).toMatch(/filament_catalog_list with kind colours and q/)
   })
 
+  // #7025: a 3DFP id comes from the worker's search, never a web search; a create only on a yes.
+  it('finds a 3DFP id with filament_tdfp_search and creates only after a yes', () => {
+    expect(prompt).toContain('filament_tdfp_search')
+    expect(prompt).toMatch(/never with a web search/)
+    expect(prompt).toMatch(/filament_tdfp_create, and call it only after the person says yes/)
+    const skill = readFileSync(fileURLToPath(new URL('../plugins/scadbuddy/skills/filament/SKILL.md', import.meta.url)), 'utf8')
+    expect(skill).toContain('`filament_tdfp_search`')
+    expect(skill).toMatch(/never with a\s+web search/)
+  })
+
   // The skill says the same, in the same order (read through the agent's copy of the plugin).
   it('is the filament skill\'s order too', () => {
     const skill = readFileSync(fileURLToPath(new URL('../plugins/scadbuddy/skills/filament/SKILL.md', import.meta.url)), 'utf8')

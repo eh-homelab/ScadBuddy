@@ -146,13 +146,13 @@ Fetches a new spool type's slicer presets per printer model and nozzle from
 ["Profile-fetch worker"](../../README.md#profile-fetch-worker-6625).
 
 - **Worker.** `python -m scadbuddy.profile_fetch` (`scadbuddy/profile_fetch/__main__.py:32`)
-  polls `profile-fetch` with the `ProfileFetch` workflow (`scadbuddy/profile_fetch/worker.py:103-104`).
+  polls `profile-fetch` with the `ProfileFetch`, `TdfpSearch` and `TdfpCreate` workflows (`scadbuddy/profile_fetch/worker.py:108-111`).
   It reads the API URL, a service proof and Temporal's address, reaches the API only as
   CRUD caller `profile-fetch` (area `runs`, `scadbuddy/api/crud_areas.py:250`), and calls the
   browser service over HTTP. It refuses a database secret, the KEK and the site login
   (`scadbuddy/profile_fetch/settings.py:80-93`).
 - **Browser service.** `python -m scadbuddy.profile_fetch.browser`
-  (`scadbuddy/profile_fetch/browser.py:336`) runs Chromium on the site and holds only the
+  (`scadbuddy/profile_fetch/browser.py:364`) runs Chromium on the site and holds only the
   site login (`SCADBUDDY_TDFP_EMAIL`, `SCADBUDDY_TDFP_PASSWORD`). It refuses a service proof
   and a Temporal or API address (`scadbuddy/profile_fetch/settings.py:38`, `:96-102`).
 - **Image.** `scadbuddy-profile-fetch`, Dockerfile stage `profile-fetch` (`Dockerfile:654`).

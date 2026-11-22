@@ -493,7 +493,7 @@ def test_an_sb_row_with_no_type_is_named_by_its_slot_alone() -> None:
     )
 
 
-@pytest.mark.parametrize("material", [None, ""])
+@pytest.mark.parametrize("material", [None, "", "  "])
 def test_an_untyped_sb_spool_whose_subtype_says_glow_is_abrasive(material: str | None) -> None:
     """R-6876-6 / Decision 37: the spool's own subtype still counts. An untyped SB spool
     whose subtype is Glow ranks abrasive and gets no ``rack-glow-unchecked`` warning; an

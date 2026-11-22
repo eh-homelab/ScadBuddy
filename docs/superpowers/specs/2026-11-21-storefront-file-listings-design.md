@@ -161,7 +161,7 @@ answers. Line numbers are on that commit.
 22. **The content store streams a held blob.** `ContentStore.get(ref)` streams a blob, and
     `stat(key)` gives its ref (`store/content.py:319`, `:432`). Read.
 23. **An order item's print reads the live file.** A `library_file` item prints through
-    `start_library_run` (`orders/operations.py:862-930`), whose run source is
+    `start_library_run` (called from `item_print_run`, `orders/operations.py:916`), whose run source is
     `SourceSpec(kind="library", file_id=…)` (`api/library_print.py:1407-1450`, `:1445`): the
     print worker reads the file from the library that serves at print time. Read.
 24. **Remembered choices outlive the file.** `model_print_choices` loses a scope's row only
@@ -256,19 +256,34 @@ class ListedFileInput(BaseModel):
     id: int = Field(ge=1)
     library: ItemLibrary  # "bambuddy" | "native", as `LibraryFileRef.library`
     #: True asks the next publish to read the library's file now and pin that version
-    #: ("Use the library's version", §9.4). False, the default, asks nothing.
-    repin: bool = False
+    #: ("Use the library's version", §9.4); False withdraws the request ("Keep the
+    #: published version"). Left out, the stored request stays.
+    repin: bool | None = None
+    #: What `Listing.library_file` answers, accepted so a client can send back the
+    #: object it read. It is ignored: no body sets the pin. A value that is not a
+    #: lowercase hex sha256 is refused (422), so a malformed body does not save
+    #: silently. `Listing.library_file` always answers it lowercase, so a read-back
+    #: object passes; a client that upper-cases hashes gets the 422.
+    pinned: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 ```
 
 The pin is the server's: no body can set it. The `library_file` column stores
 `{id, library, pinned, repin}`. `pinned` is the sha256 of the held copy the listing sells,
-or null before the first publish; `repin` is the last save's request. A save keeps the
-stored `pinned` unless it changes `library_file.id` or `library`, which stores `pinned`
-null. A save never clears `pinned` for `repin`: it only stores the request. Publish
+or null before the first publish; `repin` is the stored request. A save writes `repin`
+only when the body names it (`model_fields_set`), so a body that leaves it out (the
+agent's, an older page's) neither makes nor withdraws a request. A save keeps the stored
+`pinned` unless it changes `library_file.id` or `library`; that save stores `pinned` null
+and `repin` false, whatever `repin` the body names (with no pin, the next publish reads
+the library anyway), and drops the `storefront_listing_kept` hold on the old
+`listing-file-*` key in its transaction, because no pin names that copy any more (an
+order item's own hold keeps what an order needs, §10.1). A save never clears `pinned`
+for `repin`: it only stores the request. Publish
 writes `pinned` and `repin: false` in the same transaction as the snapshot, and only when
 it succeeds. So a body that says nothing of the pin (the agent's, a script's, an older page's) never moves the listing to
 the live file, and a body cannot name another file's held copy. `Listing.library_file` answers the stored
-object, `pinned` included, so the editor can read the file's state against it (§9.4).
+object, `pinned` and `repin` included, so the editor can read the file's state against
+it (§9.4). A client may send that object back as it read it: the input takes `pinned`
+and ignores it.
 
 A `model_validator(mode="after")` keeps the two shapes apart. It answers 422 with code
 `listing_source_invalid` and the field's `name` when:
@@ -390,8 +405,8 @@ Each code carries `name`, so the editor shows it under the field it names.
 Rows 1 to 4 read the library. They run only when the stored `pinned` is null or the
 stored `repin` is true (§4.1): a first publish, a new file picked, or "Use the library's
 version" (§9.4). When such a publish pins a sha256, it drops every `storefront_listing_kept`
-hold on a `listing-file-*` key but the new one. When it is refused (the file is gone, or
-any row of the table), the row keeps its old `pinned` and its held copy; the listing is
+hold on a `listing-file-*` key but the new one. When a `repin` publish is refused (the
+file is gone, or any row of the table), the row keeps its old `pinned` and its held copy; the listing is
 offline as after any edit, and the shop puts it back on its held version with "Keep the
 published version" (§9.4), a save with `repin: false`, then a publish. Otherwise, with `pinned`
 set, publish reads the held copy `listing-file-<pinned>` in place of the library, and
@@ -415,8 +430,9 @@ file and no picture held for the listing is 422 `listing_media_unknown`, with th
    edit or an unpublish drops the (`storefront_listing`, listing id) holds
    (`listings.py:1-17`, `release_unheld` at `:549-563`), and the pinned version must
    outlive both. The `storefront_listing_kept` hold on `listing-file-<sha256>` is dropped
-   only by the listing's delete, and by a publish that pins another sha256 (in the row's
-   transaction, as the other drops are). The kept holds on uploaded pictures
+   only by the listing's delete, by a save that changes `library_file.id` or `library`
+   (§4.1), and by a publish that pins another sha256 (each in the row's transaction, as
+   the other drops are). The kept holds on uploaded pictures
    (`listing-media-*`, §5.4) follow their own rule there; a publish drops none of them.
    With `pinned` set, this step reads nothing: the copy is held already. Two
    listings of one file share one blob and hold it twice.
@@ -477,9 +493,15 @@ kind `media` at `listing-media-<sha256>` (the key publish gives a template pictu
 holds it under (`storefront_listing_kept`, listing id). It answers the id
 `upload:<sha256>`, which the editor adds to `media_ids` as it adds a template upload's
 id (`onUploaded`). The listing must be saved first (it needs an id); the editor saves a
-new draft before the first upload. A save, and `change_media` (`PUT …/media`), drop a
-`storefront_listing_kept` hold on a `listing-media-*` key that the new `media_ids` no
-longer names, in the same transaction as the row's write. This is
+new draft before the first upload. A save, and `change_media` (`PUT …/media`), drop every
+`storefront_listing_kept` hold on a `listing-media-*` key that the new `media_ids` does
+not name, also one whose id never reached a save, in the same transaction as the row's
+write. A hold taken or refreshed in the last hour is spared (an upload of a picture the
+listing holds already sets that hold's `created_at` to now: the upload takes it with
+`BlobRefs.hold` (`store/refs.py`), whose `ON CONFLICT … DO UPDATE SET created_at = now()`
+refreshes it, never with `add`, whose `ON CONFLICT DO NOTHING` would count the hour from
+the first upload), so an upload is not lost to a save from
+another tab before the editor names it; the next save after that hour drops it. This is
 the one new route: after the upload, the picture takes the template's path (§5.2 step 4).
 
 ## 6. The customer page
@@ -907,7 +929,7 @@ pinned bytes, and only then starts the run as today.
    download. Else, when the held copy is there (`content.stat(copy_key)`), the check
    answers as today with `"restore": true` added. Only a missing held copy is
    `library_file_gone`. There is no `library_file_changed` refusal.
-2. **The restore.** `item_print_run` (`orders/operations.py:850-945`), on a check with
+2. **The restore.** `item_print_run` (`orders/operations.py:871-984`), on a check with
    `restore`, puts the held copy into the library that serves before
    `start_library_run`. It looks first in the folder "Storefront" (made when missing) for
    a file whose sha256 is the item's, so a retry of the same claim uploads nothing. Else
@@ -920,7 +942,18 @@ pinned bytes, and only then starts the run as today.
    new scope holds none, so the dialog opens on the file as before. The run itself takes
    the accepted quote's setup (`quoted_setup(quote)`, `printing.py:598`), so the print
    does not depend on this copy.
-4. **The run** starts on the new id, as today. The next print of the item finds that
+4. **The run's key.** Today `item_print_run` reads `file_id =
+   checked.get("library_file_id")` and sets `subject = PrintSubject.library(file_id)`
+   (`orders/operations.py:886-892`), and `existing` and `start` key the claimed run by
+   it (`:914-933`). The restore runs
+   before that line, and `subject`, `existing` and `start` take the item's new id, not
+   the check's. No run of the claim can exist under the old id: the restore ends before
+   any start. This holds because `OperationWorkflow` runs the check once and every retry
+   of the run reuses that same `checked` (its `restore` flag too); a change that re-runs
+   the check on a retry must keep it. A retry of the same claim restores nothing (it finds the file in
+   "Storefront" by its sha256, or the item already moved), so it keys `claimed_run` by
+   `library:<new id>` and finds the run its first try started.
+5. **The run** starts on the new id, as today. The next print of the item finds that
    file with the pinned sha256, and stands without a restore.
 
 The item's accepted quote stays: its bytes are the held copy's, which it priced
@@ -949,7 +982,9 @@ colour each slot needs, and "Wait for the right colour" (#6218) is on by default
   a first publish writes `pinned` in the `library_file` column and holds the copy as
   `storefront_listing_kept`; an edit, an unpublish and a publish again keep that hold;
   a save that omits `repin`, and an agent body with no `pinned` at all, keep the stored
-  `pinned`; a body with a `pinned` field is 422 (`extra="forbid"`); a publish again with
+  `pinned` and the stored `repin`; a body that sends back `pinned` (another sha256
+  included) saves and leaves the stored pin as it was; a save that changes
+  `library_file.id` drops the old `listing-file-*` kept hold; a publish again with
   `pinned` set reads no library (a fake that fails every library read) and passes with
   the file deleted; after `repin: true`, or a changed `library_file.id`, the next publish
   pins the library's sha256 and drops every other `listing-file-*` kept hold but no
@@ -962,7 +997,10 @@ colour each slot needs, and "Wait for the right colour" (#6218) is on by default
   listing, in that order, with their ids as `media_id`; an unknown id is
   `listing_media_unknown` with `name`; an upload holds `listing-media-<sha256>` as
   `storefront_listing_kept` and answers `upload:<sha256>`; a save, and a `PUT …/media`,
-  that drops the id drop that hold; `PUT …/media` republishes a published file listing.
+  that does not name the id drop that hold, also for an id never saved, except within an
+  hour of the upload; the same picture uploaded again after that hour refreshes the
+  hold, so a save from another tab right after it spares it; `PUT …/media` republishes a
+  published file listing.
 - **Resolver** (`tests/bambuddy/test_resolver.py`): a spool-less slot with a
   `slot_colours` entry takes it; one without takes the file's; a slot with a spool takes
   the spool's, whatever `slot_colours` says.

@@ -35,7 +35,8 @@ state.
 Tray changes and print ends are recorded when a printer report is written
 (`backend/scadbuddy/filament/capture.py`). They are not a workflow of their own.
 
-Fetching presets is the `ProfileFetch` workflow on the profile-fetch worker
+Fetching presets is the `ProfileFetch` workflow on the profile-fetch worker, and a 3DFP
+search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
 ([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).
 
 ## Code

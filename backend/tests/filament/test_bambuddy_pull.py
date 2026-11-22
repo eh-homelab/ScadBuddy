@@ -2841,7 +2841,8 @@ def test_an_unchanged_pull_reads_in_a_fixed_number_of_queries(pg_pool: PgPool, c
     with scale.counting() as counts:
         report = pull(f, rows, now=NOW + timedelta(minutes=1))
     # The pull's reads before the spools and `_quiet`'s; 259 statements and 13
-    # transactions for 12 spools before #6768.
+    # transactions for 12 spools before #6768. 20 is the exact count (Decision 238): a new
+    # batch read in `_quiet` raises it here, on purpose.
     assert counts.transactions == 2
     assert counts.statements <= 20
     assert report.archived == 2

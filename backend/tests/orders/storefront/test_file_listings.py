@@ -15,13 +15,8 @@ from pydantic import ValidationError
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.storefront import prepare
-from scadbuddy.orders.storefront.listings import (
-    HOLDER,
-    KEPT_HOLDER,
-    ListingStore,
-    change_media,
-    publish,
-)
+from scadbuddy.orders.storefront.file_listings import check_offered, support_locks
+from scadbuddy.orders.storefront.listings import HOLDER, KEPT_HOLDER, ListingStore
 from scadbuddy.orders.storefront.wire import (
     FileSlot,
     FileSnapshot,
@@ -342,6 +337,31 @@ def test_the_list_shows_a_file_listing(store: ListingStore, pg_pool: PgPool) -> 
     assert store.page(ListingQuery(slug=["demo"])).total == 1
 
 
+def _slot(slot: int, *, used: bool = True, material: str | None = "PLA") -> FileSlot:
+    support = material is not None and "support" in material.casefold()
+    return FileSlot(slot=slot, colour="#FF0000", material=material, used=used, support=support)
+
+
+def test_a_file_with_no_slot_to_offer_is_refused() -> None:
+    """§5.1 row 5: every slot unused or support."""
+    with pytest.raises(ApiError) as refused:
+        check_offered([_slot(0, used=False), _slot(1, material="PLA Support")])
+    assert refused.value.type == STOREFRONT_PROBLEMS + "listing_file_no_parts"
+    check_offered([_slot(0)])
+
+
+def test_a_support_slot_takes_a_support_filament_of_its_material() -> None:
+    """§5.1 row 8: the shop locks each support slot; none on offer is refused."""
+    materials = {"red": "PLA", "pva": "PVA", "plas": "PLA Support"}
+    slots = [_slot(0), _slot(1, material="PLA Support"), _slot(2, used=False, material="PVA")]
+    assert support_locks(slots, ["red", "pva", "plas"], materials) == {1: "plas"}
+    assert support_locks(slots, ["red", "pva"], materials) == {1: "pva"}
+    with pytest.raises(ApiError) as refused:
+        support_locks(slots, ["red"], materials)
+    assert refused.value.type == STOREFRONT_PROBLEMS + "listing_file_support_unset"
+    assert refused.value.extensions["slots"] == [1]
+
+
 async def test_a_published_file_listing_starts_no_default_render(
     store: ListingStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -354,30 +374,3 @@ async def test_a_published_file_listing_starts_no_default_render(
     monkeypatch.setattr(prepare, "preparer", no_run)
     state = SimpleNamespace(settings=SimpleNamespace(storefront_warm_prices=True))
     await prepare.warm_default(state, listing)  # type: ignore[arg-type]
-
-
-def _s3_state() -> Any:
-    return SimpleNamespace(store=SimpleNamespace(backend="s3", snapshots=object()))
-
-
-async def test_a_file_listing_is_not_published_before_its_checks_land(
-    store: ListingStore,
-) -> None:
-    """Until publish checks a file (#6710 §12 item 3, the next PR), it refuses one."""
-    listing = store.create(file_body())
-    with pytest.raises(ApiError) as refused:
-        await publish(_s3_state(), store, listing.id)
-    assert refused.value.type == STOREFRONT_PROBLEMS + "listing_source_invalid"
-    assert refused.value.extensions["name"] == "source"
-    assert store.get(listing.id) == listing
-
-
-async def test_a_file_listings_pictures_are_not_changed_before_publish_checks_them(
-    store: ListingStore,
-) -> None:
-    listing = store.create(file_body())
-    with pytest.raises(ApiError) as refused:
-        await change_media(
-            _s3_state(), store, listing.id, ["plate:1"], expected_updated_at=listing.updated_at
-        )
-    assert refused.value.type == STOREFRONT_PROBLEMS + "listing_source_invalid"

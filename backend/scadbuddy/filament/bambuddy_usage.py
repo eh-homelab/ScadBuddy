@@ -108,6 +108,11 @@ def unbooked(conn: Conn, rows: Sequence[SpoolUsage]) -> set[int]:
     event names yet."""
     links = _links(conn, rows)
     ids = {row.id for row in rows if _books(row, links.get(row.spool_id))}
+    return ids - _booked(conn, ids)
+
+
+def _booked(conn: Conn, ids: set[int]) -> set[int]:
+    """The ``ids`` a `ledger.BB_USAGE` event names already."""
     if not ids:
         return set()
     booked = conn.execute(
@@ -115,7 +120,7 @@ def unbooked(conn: Conn, rows: Sequence[SpoolUsage]) -> set[int]:
         " WHERE ref_kind = %s AND ref_id = ANY(%s)",
         (ledger.BB_USAGE, [str(i) for i in ids]),
     ).fetchall()
-    return ids - {int(row["ref_id"]) for row in booked}
+    return {int(row["ref_id"]) for row in booked}
 
 
 def match_archive(row: SpoolUsage, archives: Sequence[Archive]) -> int | None:
@@ -143,22 +148,22 @@ def book_usage(
     a BB spool with no link is counted ``unlinked``; a row of an archived SB spool is
     counted neither way. Each row is booked, and its estimate covered (`_cover`), in one
     savepoint: a row whose booking or cover fails is logged and skipped, nothing of it is
-    kept, and the next pull retries both; the rest are booked. The spools it books are locked
-    first, in id order, as `capture.lock` does for a report write, so the two cannot deadlock."""
+    kept, and the next pull retries both; the rest are booked. A row a `ledger.BB_USAGE`
+    event names already is left out in one query, never tried again: the pull sends every
+    row it read, not only the new ones (R-7002-3). The spools it books are locked first, in id
+    order, as `capture.lock` does for a report write, so the two cannot deadlock."""
     report = UsageReport()
     links = _links(conn, rows)
-    spools = {
-        link.spool_id
-        for row in rows
-        if (link := links.get(row.spool_id)) is not None and _books(row, link)
-    }
-    if spools:
-        capture.lock(conn, sorted(spools))
-    todo = [
+    wanted = [
         (row, link)
         for row in rows
         if (link := links.get(row.spool_id)) is not None and _books(row, link)
     ]
+    done = _booked(conn, {row.id for row, _ in wanted})
+    todo = [(row, link) for row, link in wanted if row.id not in done]
+    spools = {link.spool_id for _, link in todo}
+    if spools:
+        capture.lock(conn, sorted(spools))
     for row in rows:
         if row.weight_used > 0 and links.get(row.spool_id) is None:
             report.unlinked += 1

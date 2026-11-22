@@ -1,7 +1,8 @@
-"""The 3dfilamentprofiles.com driver (#6625 Task 5): a Python port of the filament-intake
+"""The 3dfilamentprofiles.com driver (#6625 Task 5, #7025): a Python port of the filament-intake
 skill's `3dfp.mjs` (`.claude/skills/filament-intake/scripts/3dfp.mjs`), its ``login``,
-``add`` and ``export`` steps, with the same selectors, the same in-page blob hook and the
-same per-spool page.
+``add``, ``export`` and ``search`` steps, with the same selectors, the same in-page blob hook
+and the same per-spool page; and the add form (/filament/add) as the script posted on #7025
+filled it (`ThreeDfpSite.create`).
 
 Headed Chromium with a normal Chrome user agent is the mode measured to pass Vercel's
 check (plan Decision 5; the skill's SKILL.md: headless with the ``HeadlessChrome`` UA gets
@@ -28,14 +29,32 @@ from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
+from urllib.parse import quote_plus
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import SecretStr
 
+from scadbuddy.profile_fetch.duplicates import likely_duplicates
 from scadbuddy.profile_fetch.steps import ExportedFile, SiteError
-from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES, SLICER
+from scadbuddy.profile_fetch.wire import (
+    MAX_CANDIDATES,
+    MAX_DUPLICATE_TEXT,
+    MAX_FILE_BYTES,
+    MAX_HEXES,
+    MAX_TEXT,
+    SLICER,
+    Candidate,
+    CreateAnswer,
+    CreateAsk,
+    LikelyDuplicate,
+    SearchAnswer,
+    SearchAsk,
+    ranked,
+    search_query,
+    weight_from_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +129,161 @@ BLOB_HOOK: Final = """() => {
     return click.call(this);
   };
 }""".replace("__MAX__", str(MAX_FILE_BYTES))  # noqa: E501 (3dfp.mjs's, with the size cap)
+
+
+#: #7025: how long the add form may take to say `DEFAULTS_FOUND` once the type is chosen.
+DEFAULTS_WAIT_MS: float = 5_000
+#: How long "Save Filament" may take to open the new filament's page.
+SAVE_WAIT_MS: float = 20_000
+#: What the add form shows when the brand, material and type have site defaults (measured
+#: by the script on #7025, 2026-11-22).
+DEFAULTS_FOUND: Final = "Defaults found"
+#: The heading of the add form's duplicate list (the same script).
+AVOID_DUPLICATES: Final = "Avoid creating duplicates"
+#: The add form's save button (the same script).
+SAVE_FILAMENT: Final = "Save Filament"
+SAVED_URL: Final = re.compile(r"/filament/details/(\d+)")
+#: The label of the add form's field for each identifier key but ``mpn`` (R-7025-6): the
+#: fields were not measured, so a key goes only to the one field whose label names it.
+IDENTIFIER_LABELS: Final[Mapping[str, re.Pattern[str]]] = {
+    "gtin": re.compile(r"\b(GTIN|UPC|EAN|barcode)\b", re.IGNORECASE),
+    "asin": re.compile(r"\bASIN\b", re.IGNORECASE),
+    "manufacturer_url": re.compile(
+        r"\b(manufacturer|mfr|product)\b.*\b(url|link|site|page)\b", re.IGNORECASE
+    ),
+    "empty_spool_weight_g": re.compile(r"\bempty spool\b|\bspool weight\b", re.IGNORECASE),
+    "td": re.compile(r"^\s*TD\b|transmission distance", re.IGNORECASE),
+}
+#: The results table's rows (`3dfp.mjs search`'s page, its layout measured 2026-11-22: a
+#: header row of Brand, Material, Type, Color, RGB… and one row per filament whose Color
+#: cell links ``/filament/details/<id>``). Cells are found by their header, since the page's
+#: "Columns" control can hide some.
+SEARCH_READ: Final = """() => {
+  const table = document.querySelector('main table') || document.querySelector('table');
+  if (!table) return [];
+  const heads = [...table.querySelectorAll('th')].map(th => th.innerText.trim().toLowerCase());
+  const at = name => heads.indexOf(name);
+  const rows = [];
+  for (const tr of table.querySelectorAll('tr')) {
+    const link = tr.querySelector('a[href^="/filament/details/"]');
+    if (!link) continue;
+    const cells = tr.querySelectorAll('td');
+    const cell = name => (at(name) >= 0 && cells[at(name)]) ? cells[at(name)] : null;
+    const text = name => cell(name) ? cell(name).innerText.trim() : null;
+    const rgb = cell('rgb');
+    rows.push({
+      id: link.getAttribute('href').split('/').pop(),
+      brand: text('brand'), material: text('material'), type: text('type'),
+      name: link.innerText.trim(),
+      hexes: rgb ? (rgb.innerHTML.match(/#[0-9a-fA-F]{6}\\b/g) || []) : [],
+    });
+    if (rows.length >= __MAX__) break;
+  }
+  return rows;
+}""".replace("__MAX__", str(MAX_CANDIDATES))
+#: The add form's duplicate list: the text after `AVOID_DUPLICATES` in ``main`` (as the
+#: script on #7025 read it), and a card per ``/filament/details/<id>`` link after it, read
+#: as a search page's card is: its breadcrumb (``/filaments/<brand>/<material>/<type>``),
+#: its name and its colours. The text ends at the `SAVE_FILAMENT` button when it is within
+#: it, so the form's own labels after the list are not read as the list (R-7025-13).
+DUPLICATES_READ: Final = (
+    """() => {
+  const main = document.querySelector('main') || document.body;
+  const all = main.innerText || '';
+  const at = all.indexOf('__HEAD__');
+  if (at < 0) return { text: '', cards: [] };
+  let text = all.slice(at, at + __TEXT__);
+  const save = text.indexOf('__SAVE__');
+  if (save > 0) text = text.slice(0, save);
+  const head = [...main.querySelectorAll('*')].find(
+    e => e.children.length === 0 && e.textContent.includes('__HEAD__'));
+  const cards = [];
+  const seen = new Set();
+  const idOf = a => a.getAttribute('href').split('/').pop();
+  for (const link of main.querySelectorAll('a[href^="/filament/details/"]')) {
+    if (head && !(head.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+    const id = idOf(link);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const ids = e => new Set([...e.querySelectorAll('a[href^="/filament/details/"]')].map(idOf));
+    let card = link;
+    const up = () => card.parentElement && card.parentElement !== main;
+    while (up() && ids(card.parentElement).size === 1) card = card.parentElement;
+    const crumbs = {};
+    for (const a of card.querySelectorAll('a[href^="/filaments/"]')) {
+      const depth = a.getAttribute('href').split('?')[0].split('/').filter(Boolean).length;
+      crumbs[depth] = a.innerText.trim();
+    }
+    const hexes = [];
+    for (const e of card.querySelectorAll('[style], span')) {
+      const own = e.children.length ? '' : e.textContent;
+      const source = (e.getAttribute('style') || '') + ' ' + own;
+      hexes.push(...(source.match(/#[0-9a-fA-F]{6}\\b/g) || []));
+    }
+    cards.push({ id, brand: crumbs[2] ?? null, material: crumbs[3] ?? null, type: crumbs[4] ?? null,
+      name: link.innerText.trim(), hexes });
+    if (cards.length >= __MAX__) break;
+  }
+  return { text, cards };
+}""".replace("__HEAD__", AVOID_DUPLICATES)
+    .replace("__TEXT__", str(MAX_DUPLICATE_TEXT))
+    .replace("__MAX__", str(MAX_CANDIDATES))
+    .replace("__SAVE__", SAVE_FILAMENT)
+)
+
+
+def _text(value: object) -> str | None:
+    return value.strip()[:MAX_TEXT] if isinstance(value, str) and value.strip() else None
+
+
+def _candidates(rows: object) -> list[Candidate]:
+    """The page's rows as candidates. The page is untrusted: a row of any other shape, or
+    with an id that is not a number, is dropped; texts are cut to `MAX_TEXT`, and each
+    row keeps its first `MAX_HEXES` distinct hexes."""
+    found: list[Candidate] = []
+    seen: set[int] = set()
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        raw_id, name = row.get("id"), _text(row.get("name"))
+        if not isinstance(raw_id, str) or not raw_id.isascii() or not raw_id.isdigit():
+            continue
+        if name is None or int(raw_id) in seen or int(raw_id) == 0:
+            continue
+        hexes: list[str] = []
+        raw_hexes = row.get("hexes")
+        for value in raw_hexes if isinstance(raw_hexes, list) else []:
+            if isinstance(value, str) and HEX.fullmatch(value) and value.upper() not in hexes:
+                hexes.append(value.upper())
+        seen.add(int(raw_id))
+        found.append(
+            Candidate(
+                tdfp_id=int(raw_id),
+                brand=_text(row.get("brand")),
+                material=_text(row.get("material")),
+                material_type=_text(row.get("type")),
+                name=name,
+                hexes=hexes[:MAX_HEXES],
+                nominal_weight_g=weight_from_name(name),
+            )
+        )
+        if len(found) >= MAX_CANDIDATES:
+            break
+    return found
+
+
+def _duplicate_list(listed: object) -> tuple[str, list[Candidate]]:
+    """`DUPLICATES_READ`'s answer as its text (cut to `MAX_DUPLICATE_TEXT`) and cards."""
+    if not isinstance(listed, dict):
+        return "", []
+    text = listed.get("text")
+    return (
+        text[:MAX_DUPLICATE_TEXT] if isinstance(text, str) else "",
+        _candidates(listed.get("cards")),
+    )
+
+
+HEX: Final = re.compile(r"#[0-9A-Fa-f]{6}")
 
 
 #: The variables Chromium is launched with (`browser_env`): the locale, the time zone, the
@@ -368,6 +542,157 @@ class ThreeDfpSite:
         # As `3dfp.mjs` names its file: the site's name with every "/" made "-".
         return ExportedFile(name=name.replace("/", "-"), text=text)
 
+    async def search(self, ask: SearchAsk) -> SearchAnswer:
+        """`3dfp.mjs search`: ``/filaments?q=`` (`wire.search_query`) and the rows of its
+        results table, read by their header (`SEARCH_READ`), ranked (`wire.ranked`)."""
+        query = search_query(ask)
+        try:
+            await self._signed_in(f"/filaments?q={quote_plus(query)}", settle_ms=6000)
+            rows = await self.page.evaluate(SEARCH_READ)
+        except PlaywrightTimeoutError:
+            raise SiteError("timeout", "the 3dfilamentprofiles.com search timed out") from None
+        except PlaywrightError:
+            raise SiteError("browser", "the 3dfilamentprofiles.com search failed") from None
+        found = _candidates(rows)
+        logger.info("3DFP search found %d filament(s)", len(found))
+        return SearchAnswer(query=query, candidates=ranked(ask, found))
+
+    async def create(self, ask: CreateAsk) -> CreateAnswer:
+        """Add a filament on /filament/add, as the script on #7025 did (R-7025-4): the brand,
+        material and type through each combobox's native ``<select>``, the brand typed into
+        its combobox when the select lacks it; `SiteError` ``no_defaults`` when the page does
+        not say "Defaults found" for them. Then "Next", the colour name, the hexes (a row
+        added per hex), the nominal weight and the identifiers (`_identifiers`). The site's
+        duplicate list (`DUPLICATES_READ`) is judged by `duplicates.likely_duplicates`: a
+        likely one answers ``duplicate`` and saves nothing. Else "Save Filament", which
+        lands on ``/filament/details/<id>``; any failure after that click is
+        ``not_created``, never a retried kind, since the filament may exist."""
+        page = self.page
+        try:
+            await self._signed_in("/filament/add", settle_ms=7000)
+            await self._choose("brand", ask.brand, typed=True)
+            await self._choose("material", ask.material)
+            await self._choose("material_type", ask.material_type)
+            if not await self._defaults_found():
+                raise SiteError(
+                    "no_defaults",
+                    f"3dfilamentprofiles.com has no defaults for {ask.brand} {ask.material}"
+                    f" {ask.material_type}",
+                )
+            await page.get_by_role("button", name="Next", exact=True).click()
+            await self._pause(2500)
+            await page.fill("#color", ask.colour)
+            for index, hex_colour in enumerate(ask.hexes):
+                if index:
+                    add_row = page.locator(f"#rgbText-{index - 1}").locator(
+                        "xpath=following::button[1]"
+                    )
+                    await add_row.click()
+                    await self._pause(500)
+                await page.fill(f"#rgbText-{index}", hex_colour)
+            if ask.nominal_weight_g is not None:
+                await page.fill("#nominal_weight", str(ask.nominal_weight_g))
+            sent, not_sent = await self._identifiers(ask)
+            await self._pause(1500)
+            listed = await page.evaluate(DUPLICATES_READ)
+        except SiteError:
+            raise
+        except PlaywrightTimeoutError:
+            raise SiteError(
+                "timeout", "filling 3dfilamentprofiles.com's add form timed out"
+            ) from None
+        except PlaywrightError:
+            raise SiteError("browser", "filling 3dfilamentprofiles.com's add form failed") from None
+        text, cards = _duplicate_list(listed)
+        likely = [
+            LikelyDuplicate(tdfp_id=None if found is None else found.tdfp_id, reason=reason)
+            for found, reason in likely_duplicates(ask, cards, text)
+        ]
+        answer = CreateAnswer(
+            status="duplicate" if likely else "created",
+            duplicates=cards,
+            duplicate_text=text,
+            likely=likely,
+            sent=sent,
+            not_sent=not_sent,
+        )
+        if likely:
+            logger.info("3DFP create stopped on %d likely duplicate(s)", len(likely))
+            return answer
+        try:
+            await page.get_by_role("button", name=SAVE_FILAMENT, exact=True).click()
+            await page.wait_for_url(SAVED_URL, wait_until="commit", timeout=SAVE_WAIT_MS)
+            found_id = SAVED_URL.search(page.url)
+        except PlaywrightError:
+            raise SiteError("not_created") from None
+        if found_id is None:
+            raise SiteError("not_created")
+        answer.tdfp_id = int(found_id.group(1))
+        logger.info("created 3DFP filament %d", answer.tdfp_id)
+        return answer
+
+    async def _choose(self, field: str, label: str, *, typed: bool = False) -> None:
+        """Pick ``label`` in the add form's combobox ``#field`` through the native
+        ``<select>`` after it (typing into the combobox picked the wrong entry, #7025), its
+        option matched exactly, else by case; with ``typed`` (the brand, which the script
+        typed), type it into the combobox and click the exact option when the select
+        lacks it. `SiteError` ``option_missing`` when the form offers no such entry."""
+        page = self.page
+        select = page.locator(f"#{field}").locator("xpath=following::select[1]")
+        if await select.count():
+            offered = [text.strip() for text in await select.locator("option").all_inner_texts()]
+            match = next((o for o in offered if o == label), None) or next(
+                (o for o in offered if o.casefold() == label.casefold()), None
+            )
+            if match is not None:
+                await select.select_option(label=match, force=True)
+                await self._pause(1500)
+                return
+        if typed:
+            await page.click(f"#{field}")
+            await self._pause(800)
+            await page.keyboard.type(label, delay=30)
+            await self._pause(1500)
+            option = page.get_by_role("option", name=label, exact=True)
+            if await option.count():
+                await option.first.click()
+                await self._pause(1500)
+                return
+            await page.keyboard.press("Escape")
+        what = field.replace("_", " ")
+        raise SiteError("option_missing", f"3dfilamentprofiles.com offers no {what} {label!r}")
+
+    async def _defaults_found(self) -> bool:
+        """The page says "Defaults found" within `DEFAULTS_WAIT_MS` (R-7025-4)."""
+        try:
+            await (
+                self.page.locator("main")
+                .get_by_text(DEFAULTS_FOUND)
+                .first.wait_for(timeout=DEFAULTS_WAIT_MS)
+            )
+        except PlaywrightTimeoutError:
+            return False
+        return True
+
+    async def _identifiers(self, ask: CreateAsk) -> tuple[list[str], list[str]]:
+        """Fill each identifier the ask has where the form has a field for it: ``mpn`` in
+        ``#sku-0`` (measured on #7025), the rest in the one field whose label
+        `IDENTIFIER_LABELS` matches (R-7025-6). The keys sent, and those with no field."""
+        page = self.page
+        sent: list[str] = []
+        not_sent: list[str] = []
+        for key, value in ask.identifiers().items():
+            if key == "mpn":
+                field = page.locator("#sku-0")
+            else:
+                field = page.get_by_label(IDENTIFIER_LABELS[key])
+            if await field.count() == 1 and await field.is_editable():
+                await field.fill(value)
+                sent.append(key)
+            else:
+                not_sent.append(key)
+        return sent, not_sent
+
     async def _read_export(self, printer_model: str, nozzle: str) -> tuple[str, str]:
         """The hook's first entry, as its name and text. The page is untrusted and can push
         any entry, so its type and lengths are read first (`EXPORT_SHAPE`), and its text
@@ -413,6 +738,18 @@ class ThreeDfpSite:
         if ms * PACE > 0:
             await self.page.wait_for_timeout(ms * PACE)
 
+    async def _signed_in(self, path: str, *, settle_ms: float) -> int | None:
+        """`_goto`, signing in again when the site sends the browser to ``/login``; the
+        page's HTTP status."""
+        status = await self._goto(path, settle_ms=settle_ms)
+        if "/login" in self.page.url:
+            logger.info("3dfilamentprofiles.com asked for the login again")
+            await self.login()
+            status = await self._goto(path, settle_ms=settle_ms)
+            if "/login" in self.page.url:
+                raise SiteError("login_failed")
+        return status
+
     async def _goto(self, path: str, *, settle_ms: float) -> int | None:
         """Open ``path`` and wait out Vercel's check; the answer's HTTP status."""
         status = await self._load(path)
@@ -430,15 +767,8 @@ class ThreeDfpSite:
         return None if response is None else response.status
 
     async def _open(self, path: str, tdfp_id: int, *, settle_ms: float) -> None:
-        """`_goto`, signing in again when the site sends the browser to ``/login``; a
-        404 is `SiteError` ``tdfp_not_found``."""
-        status = await self._goto(path, settle_ms=settle_ms)
-        if "/login" in self.page.url:
-            logger.info("3dfilamentprofiles.com asked for the login again")
-            await self.login()
-            status = await self._goto(path, settle_ms=settle_ms)
-            if "/login" in self.page.url:
-                raise SiteError("login_failed")
+        """`_signed_in`; a 404 is `SiteError` ``tdfp_not_found``."""
+        status = await self._signed_in(path, settle_ms=settle_ms)
         if status == 404:
             raise SiteError("tdfp_not_found", f"3dfilamentprofiles.com has no filament {tdfp_id}")
 
