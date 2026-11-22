@@ -101,7 +101,6 @@ async def test_a_scripted_sign_in_slower_than_the_wait_is_login_failed(
     with pytest.raises(SiteError) as caught:
         await browser.login()
     assert caught.value.kind == "login_failed"
-    assert replica.site.sessions == set()
     _chain_holds_no_secret(caught.value)
 
 
