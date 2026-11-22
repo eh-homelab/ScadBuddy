@@ -866,18 +866,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   import and the RFID scan (`api/filament.py` `NOT_NUDGED`) have nothing to push. The print worker
   reaches SB through the CRUD area `filament-sync` (`api/crud_print.py`, `…/print/filament/sync/directions`, `plan`, `results` and `pass`;
   client `RemoteFilamentSync` in `crud/print.py`), and the routes `GET /filament/sync/status`
-  and `POST /filament/sync/run` (`api/filament.py`) serve people and the agent. Every pass is
-  also a row of `filament_bb_sync_passes` (#6905, `bb_sync_passes.py`): `record_pass` inserts it
-  in the state row's transaction, keyed by the worker's `pass_id` so a resent record adds none
-  (an `instance_changed` pass gets the history row only); `run_pass` records a pass whose step
-  raised (a CRUD `plan` or `results` timeout, the settings read) with `failure_label`
-  (`crud_unavailable:<failure>`, `crud_refused:<status>`, `internal`) and raises it again, so
-  the activity's retries are unchanged; the workflow sends the pass's `trigger` (`timer`,
-  `change`, `full`, `more`) in the activity's input only, so its commands are unchanged.
-  `GET /filament/sync/passes` pages them newest first by cursor (agent `filament_sync_passes`),
-  and the housekeeping's activity sweep deletes rows older than the stored setting
-  `filament_sync_pass_ttl_days` (30 by default), at most `PRUNE_BATCH` a run
-  (`SyncPassStore.prune`). After the
+  and `POST /filament/sync/run` (`api/filament.py`) serve people and the agent. After the
   Bambuddy URL changes the status says `instance_changed` and the sync stops until
   `POST /filament/sync/reset-links` (#6773, plan Decisions 165-170; `GET` is its dry run)
   deletes the old instance's links, hashes, seen copies, intents, error rows, ignored BB
@@ -893,7 +882,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   least half the links timed on both sides), a reset with `expect_kept: true` reads them
   again and, while that holds, deletes nothing, records the configured instance and answers
   `kept: true`; else 409 `proof_changed`, nothing written. `expect_kept: false` deletes
-  without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward). A new
+  without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward).
+  Every pass is also a row of `filament_bb_sync_passes` (#6905, `bb_sync_passes.py`):
+  `record_pass` inserts it in the state row's transaction, keyed by the worker's `pass_id` so a
+  resent record adds none (an `instance_changed` pass gets the history row only); `run_pass`
+  records a pass whose step raised (a CRUD `plan` or `results` timeout, the settings read) with
+  `failure_label` (`crud_unavailable:<failure>`, `crud_refused:<status>`, `internal`) and raises
+  it again, so the activity's retries are unchanged; the workflow sends the pass's `trigger`
+  (`timer`, `change`, `full`, `more`) in the activity's input only, so its commands are
+  unchanged. `GET /filament/sync/passes` pages them newest first by cursor (agent
+  `filament_sync_passes`), and the housekeeping's activity sweep deletes rows older than the
+  stored setting `filament_sync_pass_ttl_days` (30 by default), at most `PRUNE_BATCH` a run
+  (`SyncPassStore.prune`). A new
   workflow type: roll `scadbuddy-print` with `Recreate` (README, "A release that needs
   `Recreate`").
   History and metrics (#6269, spec §5.7; plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`,
