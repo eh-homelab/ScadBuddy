@@ -270,7 +270,8 @@ or null before the first publish; `repin` is the stored request. A save writes `
 only when the body names it (`model_fields_set`), so a body that leaves it out (the
 agent's, an older page's) neither makes nor withdraws a request. A save keeps the stored
 `pinned` unless it changes `library_file.id` or `library`; that save stores `pinned` null
-and `repin` false, and drops the `storefront_listing_kept` hold on the old
+and `repin` false, whatever `repin` the body names (with no pin, the next publish reads
+the library anyway), and drops the `storefront_listing_kept` hold on the old
 `listing-file-*` key in its transaction, because no pin names that copy any more (an
 order item's own hold keeps what an order needs, §10.1). A save never clears `pinned`
 for `repin`: it only stores the request. Publish
@@ -401,8 +402,8 @@ Each code carries `name`, so the editor shows it under the field it names.
 Rows 1 to 4 read the library. They run only when the stored `pinned` is null or the
 stored `repin` is true (§4.1): a first publish, a new file picked, or "Use the library's
 version" (§9.4). When such a publish pins a sha256, it drops every `storefront_listing_kept`
-hold on a `listing-file-*` key but the new one. When it is refused (the file is gone, or
-any row of the table), the row keeps its old `pinned` and its held copy; the listing is
+hold on a `listing-file-*` key but the new one. When a `repin` publish is refused (the
+file is gone, or any row of the table), the row keeps its old `pinned` and its held copy; the listing is
 offline as after any edit, and the shop puts it back on its held version with "Keep the
 published version" (§9.4), a save with `repin: false`, then a publish. Otherwise, with `pinned`
 set, publish reads the held copy `listing-file-<pinned>` in place of the library, and
@@ -491,7 +492,8 @@ id (`onUploaded`). The listing must be saved first (it needs an id); the editor 
 new draft before the first upload. A save, and `change_media` (`PUT …/media`), drop every
 `storefront_listing_kept` hold on a `listing-media-*` key that the new `media_ids` does
 not name, also one whose id never reached a save, in the same transaction as the row's
-write. A hold taken in the last hour is spared, so an upload is not lost to a save from
+write. A hold taken or refreshed in the last hour is spared (an upload of a picture the
+listing holds already sets that hold's `created_at` to now), so an upload is not lost to a save from
 another tab before the editor names it; the next save after that hour drops it. This is
 the one new route: after the upload, the picture takes the template's path (§5.2 step 4).
 
