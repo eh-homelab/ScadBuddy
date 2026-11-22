@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.registry import EntityStore
 from scadbuddy.orders.attachments import clean_filename, sniff
 from scadbuddy.orders.lifecycle import FulfilmentInput, LifecycleError
 from scadbuddy.orders.models import (
@@ -116,6 +118,23 @@ def holders_of(pool: PgPool, attachment_id: str) -> list[str]:
             (ATTACHMENT_HOLDER, attachment_id),
         ).fetchall()
     return [row["key"] for row in rows]
+
+
+@pytest.mark.requires_postgres
+def test_attachment_row_has_its_entity(shop: Shop, pool: PgPool) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    attached = attach_to(shop, order, item, rev)
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT subject, entity_id FROM entity_attachments WHERE id = %s", (attached.id,)
+        ).fetchone()
+        assert row is not None
+        assert row["subject"] == f"order_item_revision:{rev.id}"
+        found = EntityStore(pool).find(conn, EntityRef.parse(row["subject"]))
+    assert found is not None
+    assert row["entity_id"] == found
 
 
 @pytest.mark.requires_postgres

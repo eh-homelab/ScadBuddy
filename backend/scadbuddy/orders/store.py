@@ -26,6 +26,8 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.registry import EntityStore
 from scadbuddy.orders.models import (
     IMPORT_STUCK,
     Actor,
@@ -489,6 +491,7 @@ class SpoolLink:
 class OrderStore:
     def __init__(self, pool: Pool) -> None:
         self._pool = pool
+        self._entities = EntityStore(pool)
 
     # -- connections ------------------------------------------------------------------
 
@@ -2279,14 +2282,25 @@ class OrderStore:
             "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
             (holder_kind, attempt_id),
         )
-        conn.execute(
-            "UPDATE order_attachments SET subject = 'order_item:' || attempt_item_id,"
-            " attempt_item_id = NULL WHERE subject = %s",
+        moved = conn.execute(
+            "SELECT DISTINCT attempt_item_id FROM entity_attachments WHERE subject = %s",
             (fulfilment_subject(attempt_id),),
-        )
+        ).fetchall()
+        for moving in moved:
+            item_id = moving["attempt_item_id"]
+            conn.execute(
+                "UPDATE entity_attachments SET subject = %s, entity_id = %s,"
+                " attempt_item_id = NULL WHERE subject = %s AND attempt_item_id = %s",
+                (
+                    f"order_item:{item_id}",
+                    self._entities.ensure(conn, EntityRef("order_item", item_id)),
+                    fulfilment_subject(attempt_id),
+                    item_id,
+                ),
+            )
         # A test print's photo stays its revision's, naming no attempt.
         conn.execute(
-            "UPDATE order_attachments SET fulfilment_id = NULL WHERE fulfilment_id = %s",
+            "UPDATE entity_attachments SET fulfilment_id = NULL WHERE fulfilment_id = %s",
             (attempt_id,),
         )
         conn.execute("DELETE FROM order_item_fulfilments WHERE id = %s", (attempt_id,))
@@ -3047,15 +3061,18 @@ class OrderStore:
             " ON CONFLICT DO NOTHING",
             (blob_key, ATTACHMENT_HOLDER, attachment_id),
         )
+        entity_id = self._entities.ensure(conn, EntityRef.parse(subject))
         row = conn.execute(
-            "INSERT INTO order_attachments (id, order_id, subject, kind, role, filename,"
-            " media_type, size_bytes, sha256, blob_key, caption, created_by, attempt_item_id,"
-            " fulfilment_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            "INSERT INTO entity_attachments (id, order_id, subject, entity_id, kind, role,"
+            " filename, media_type, size_bytes, sha256, blob_key, caption, created_by,"
+            " attempt_item_id, fulfilment_id)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             f" RETURNING {_ATTACHMENT}",
             (
                 attachment_id,
                 order_id,
                 subject,
+                entity_id,
                 kind,
                 role,
                 filename,
@@ -3078,7 +3095,7 @@ class OrderStore:
         """The attachment and its blob key, or None."""
         with self._read(conn) as c:
             row = c.execute(
-                f"SELECT {_ATTACHMENT} FROM order_attachments WHERE id = %s", (attachment_id,)
+                f"SELECT {_ATTACHMENT} FROM entity_attachments WHERE id = %s", (attachment_id,)
             ).fetchone()
         return None if row is None else _attachment_of(row)
 
@@ -3086,7 +3103,7 @@ class OrderStore:
         """Every attachment of the order and of its items, oldest first."""
         with self._read(conn) as c:
             rows = c.execute(
-                f"SELECT {_ATTACHMENT} FROM order_attachments WHERE order_id = %s"
+                f"SELECT {_ATTACHMENT} FROM entity_attachments WHERE order_id = %s"
                 " ORDER BY created_at, id",
                 (order_id,),
             ).fetchall()
@@ -3097,7 +3114,7 @@ class OrderStore:
         oldest first."""
         with self._read(conn) as c:
             rows = c.execute(
-                f"SELECT {_ATTACHMENT} FROM order_attachments WHERE subject = %s"
+                f"SELECT {_ATTACHMENT} FROM entity_attachments WHERE subject = %s"
                 " ORDER BY created_at, id",
                 (subject,),
             ).fetchall()
@@ -3113,7 +3130,7 @@ class OrderStore:
     ) -> Attachment:
         row = _update(
             conn,
-            "order_attachments",
+            "entity_attachments",
             attachment_id,
             {"caption": caption, "role": role},
             _ATTACHMENT,
@@ -3165,7 +3182,7 @@ class OrderStore:
             "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
             (ATTACHMENT_HOLDER, attachment_id),
         )
-        conn.execute("DELETE FROM order_attachments WHERE id = %s", (attachment_id,))
+        conn.execute("DELETE FROM entity_attachments WHERE id = %s", (attachment_id,))
 
     def set_delivered(self, conn: Conn, item_id: str, attachment_id: str | None) -> OrderItem:
         row = _update(
