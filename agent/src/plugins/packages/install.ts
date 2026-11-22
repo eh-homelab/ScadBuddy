@@ -1,19 +1,24 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { EgressError, type Resolver, systemResolver } from '../../http/egress.js'
 import { assertEndpointAllowed, PluginError } from '../registry.js'
+import { ARCHIVE_LIMITS, type Downloader, egressDownload, MARKETPLACE_LIMITS } from './download.js'
 import { type Checkout, extractSubdir, FetchError, type RepoFetcher } from './git.js'
-import { hashTree, PackageContentError } from './hash.js'
+import { hashTree, PackageContentError, type TreeHash } from './hash.js'
 import { declaredHeaderSecrets } from './mcp.js'
+import type { PackageMirror } from './mirror.js'
+import { fetchNpmTarball } from './npm.js'
 import {
   DEFAULT_REF,
   normaliseGitUrl,
   normaliseRepoPath,
   type PackageSource,
   validateRef,
+  validateSource,
 } from './source.js'
+import { entryPath, pluginRoot, unpackArchive, UnpackError } from './unpack.js'
 import type { PackagePin, PackageRepo, PreparedPackage } from './store.js'
 import { builtInNamed } from './builtins.js'
 import { capProblems, type Endpoint, itemsOfPlugin, LISTING_PACKAGES_BUDGET, listedPackageSize, type PackageReview, vetPackage } from './vet.js'
@@ -25,12 +30,23 @@ import { capProblems, type Endpoint, itemsOfPlugin, LISTING_PACKAGES_BUDGET, lis
 // first and provide the local directory path").
 //
 // POSTGRES IS THE RECORD, DISK IS A CACHE. `ai_plugin_packages` holds the
-// source, the pinned commit and the content hash (store.ts). A harness run
+// source, the pin and the content hash (store.ts). A harness run
 // asks `materialise` for each enabled pin: the cached directory
 // `<cacheRoot>/<name>/<commit>-<hash prefix>` is used only when every file in
 // it hashes to the pin; a missing, partial or altered copy is removed and
 // fetched again from the pin (same commit; the new files must hash the same,
 // or the package is not loaded). The cache can be an emptyDir.
+//
+// BYTES PINS (#6935, spec 2026-11-21 §6.6): an `archive` or `npm` source, or a
+// marketplace entry of either (a `marketplace-url` source is a bare `marketplace.json`
+// URL), is fetched once at install (download.ts, the egress check at every hop),
+// unpacked with every link, device and path out of it refused (unpack.ts), vetted and
+// hashed, and only then pinned to the sha256 of the file and mirrored in the blob store
+// (mirror.ts, the API's area `package-mirrors`). Its cached directory is
+// `<cacheRoot>/<name>/b<first 40 of the sha256>-<hash prefix>`, and a cache miss
+// unpacks the MIRRORED copy, never the upstream URL: an approved pin still loads after
+// upstream deleted or changed the file, and a re-pin fetches upstream again and shows
+// the diff.
 //
 // EVERY FETCH goes through the egress check first (src/http/egress.ts, via
 // `assertEndpointAllowed`: https, or http to loopback; no link-local or cloud
@@ -67,9 +83,16 @@ export type InstallerOptions = {
   /** Where materialised packages live; a `.tmp/` under it holds fetches in progress. */
   cacheRoot: string
   resolve?: Resolver
+  /** The bytes pins' mirror, when the API serves area `package-mirrors`; without it a bytes install or load is a 503. */
+  mirror?: () => PackageMirror | undefined
+  /** The HTTP download (download.ts `egressDownload`, which runs the egress check at every hop). */
+  download?: Downloader
 }
 
-type MarketplaceTarget = { url: string; ref: string; path: string; sameRepo: boolean }
+type GitTarget = { kind: 'git'; url: string; ref: string; path: string; sameRepo: boolean }
+type BytesSource = Extract<PackageSource, { kind: 'archive' | 'npm' }>
+type BytesTarget = { kind: 'bytes'; source: BytesSource }
+export type MarketplaceTarget = GitTarget | BytesTarget
 
 const ENTRY_COMPONENT_KEYS = ['commands', 'agents', 'skills', 'hooks', 'mcpServers', 'lspServers', 'outputStyles']
 
@@ -84,12 +107,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * a relative path "from the marketplace root" (fetched at the same commit),
  * or a `github`, `url` or `git-subdir` source, each a git repository at an
  * optional `ref` or `sha` (`git-subdir`'s `url` may be an `owner/repo`
- * GitHub shorthand). `archive`, `npm` and `command` sources are refused: no
- * git commit to pin, or a command to run. An entry that declares components
- * of its own is refused too: the SDK loads the plugin by path and would not
- * apply them.
+ * GitHub shorthand), pinned to a commit; or an `archive` (`url`, optional
+ * `sha256`) or `npm` (`package`, optional `version` and `registry`) source,
+ * pinned to its bytes (#6935). A `command` source is refused: it runs a command.
+ * A marketplace read from a bare URL (`bare`) has no files beside it, so a
+ * relative path is refused there ("Claude Code downloads only that file",
+ * https://code.claude.com/docs/en/plugins/host-marketplace.md). An entry that
+ * declares components of its own is refused too: the SDK loads the plugin by
+ * path and would not apply them.
  */
-export function marketplaceTarget(marketplace: unknown, entryName: string, marketplaceUrl: string): MarketplaceTarget {
+export function marketplaceTarget(
+  marketplace: unknown,
+  entryName: string,
+  marketplaceUrl: string,
+  options: { bare?: boolean } = {},
+): MarketplaceTarget {
   if (!isRecord(marketplace) || !Array.isArray(marketplace.plugins)) {
     throw new PluginError('.claude-plugin/marketplace.json has no "plugins" list', 422)
   }
@@ -104,7 +136,13 @@ export function marketplaceTarget(marketplace: unknown, entryName: string, marke
   }
   const source = entry.source
   if (typeof source === 'string') {
-    return { url: marketplaceUrl, ref: '', path: normaliseRepoPath(source), sameRepo: true }
+    if (options.bare) {
+      throw new PluginError(
+        `the marketplace entry "${entryName}" has a relative path, and a marketplace read from a bare URL has no files beside it; give it a github, url or archive source`,
+        422,
+      )
+    }
+    return { kind: 'git', url: marketplaceUrl, ref: '', path: normaliseRepoPath(source), sameRepo: true }
   }
   if (!isRecord(source)) throw new PluginError(`the marketplace entry "${entryName}" has no source`, 422)
   const at = (): string => {
@@ -117,7 +155,7 @@ export function marketplaceTarget(marketplace: unknown, entryName: string, marke
       if (typeof source.repo !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(source.repo)) {
         throw new PluginError(`the marketplace entry "${entryName}" has no valid github repo`, 422)
       }
-      return { url: `https://github.com/${source.repo}.git`, ref: at(), path: '', sameRepo: false }
+      return { kind: 'git', url: `https://github.com/${source.repo}.git`, ref: at(), path: '', sameRepo: false }
     }
     case 'url':
     case 'git-subdir': {
@@ -125,15 +163,37 @@ export function marketplaceTarget(marketplace: unknown, entryName: string, marke
       const sub = source.source === 'git-subdir' && typeof source.path === 'string' ? source.path : ''
       const shorthand = source.source === 'git-subdir' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(source.url)
       const url = shorthand ? `https://github.com/${source.url}.git` : normaliseGitUrl(source.url)
-      return { url, ref: at(), path: normaliseRepoPath(sub), sameRepo: false }
+      return { kind: 'git', url, ref: at(), path: normaliseRepoPath(sub), sameRepo: false }
     }
+    case 'archive':
+    case 'npm': {
+      const text = (key: string) => (typeof source[key] === 'string' ? (source[key] as string) : undefined)
+      try {
+        const bytes =
+          source.source === 'archive'
+            ? validateSource({ kind: 'archive', url: text('url') ?? '', sha256: text('sha256') })
+            : validateSource({ kind: 'npm', package: text('package') ?? '', version: text('version'), registry: text('registry') })
+        return { kind: 'bytes', source: bytes as BytesSource }
+      } catch (err) {
+        if (err instanceof PluginError) throw new PluginError(`the marketplace entry "${entryName}": ${err.message}`, 422)
+        throw err
+      }
+    }
+    case 'command':
+      throw new PluginError(`the marketplace entry "${entryName}" has a command source; ScadBuddy runs no command to fetch a plugin`, 422)
     default:
-      throw new PluginError(
-        `the marketplace entry "${entryName}" has a ${JSON.stringify(source.source)} source; only git sources can be pinned`,
-        422,
-      )
+      throw new PluginError(`the marketplace entry "${entryName}" has a ${JSON.stringify(source.source)} source, which ScadBuddy cannot pin`, 422)
   }
 }
+
+/** A name for a package whose manifest has none: the file's or the npm package's name. */
+function bytesFallbackName(source: BytesSource): string {
+  const last = decodeURIComponent(new URL(source.url).pathname.split('/').pop() ?? '')
+  const bare = last.includes('/') ? last.slice(last.indexOf('/') + 1) : last
+  return bare.replace(/(-\d[^/]*)?\.(zip|tgz|tar\.gz|tar)$/i, '').toLowerCase()
+}
+
+const sha256Hex = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
 
 /**
  * How long a pin whose files could not be had for its header secrets (`headerSecrets`) is
@@ -147,6 +207,8 @@ export class PackageInstaller {
   readonly cacheRoot: string
   private readonly fetcher: RepoFetcher
   private readonly resolve: Resolver
+  private readonly mirrorOf: () => PackageMirror | undefined
+  private readonly download: Downloader
   /** Per package, the tail of its queue: materialising and pruning run one at a time. */
   private readonly queues = new Map<string, Promise<unknown>>()
   /** Turns using each cached directory; a leased directory is never pruned. */
@@ -162,6 +224,19 @@ export class PackageInstaller {
     this.fetcher = options.fetcher
     this.cacheRoot = path.resolve(options.cacheRoot)
     this.resolve = options.resolve ?? systemResolver
+    this.mirrorOf = options.mirror ?? (() => undefined)
+    this.download = options.download ?? egressDownload
+  }
+
+  private mirror(): PackageMirror {
+    const mirror = this.mirrorOf()
+    if (!mirror) {
+      throw new PluginError(
+        'an archive or npm package needs the API to keep its file (CRUD area package-mirrors), and this API does not serve it yet',
+        503,
+      )
+    }
+    return mirror
   }
 
   private async tempDir(): Promise<string> {
@@ -212,7 +287,11 @@ export class PackageInstaller {
    * allow is in the review's `refused`.
    */
   private async extractAndVet(checkout: Checkout, subpath: string, dest: string, fallbackName: string) {
-    const tree = await this.extract(checkout, subpath, dest)
+    return this.vetTree(await this.extract(checkout, subpath, dest), dest, fallbackName)
+  }
+
+  /** Vets the hashed tree at `dest`: as `extractAndVet`, for a tree from anywhere. */
+  private async vetTree(tree: TreeHash, dest: string, fallbackName: string) {
     const vetting = vetPackage(dest, fallbackName)
     const builtIn = vetting.review && builtInNamed(vetting.review.name)
     if (builtIn) throw new BuiltInPluginError(builtIn.installRefusal)
@@ -244,13 +323,142 @@ export class PackageInstaller {
     }
   }
 
+  /** `bytes` unpacked into `dest` and hashed; an UnpackError or a refused file is a PackageRefusedError. */
+  private async unpacked(bytes: Buffer, dest: string): Promise<{ root: string; dir: string }> {
+    try {
+      await unpackArchive(bytes, dest)
+    } catch (err) {
+      if (err instanceof UnpackError) throw new PackageRefusedError([err.message])
+      throw err
+    }
+    const root = await pluginRoot(dest)
+    return { root, dir: path.join(dest, root) }
+  }
+
+  private async hashed(dir: string): Promise<TreeHash> {
+    try {
+      return await hashTree(dir)
+    } catch (err) {
+      if (err instanceof PackageContentError) throw new PackageRefusedError([err.message])
+      throw err
+    }
+  }
+
+  /** The file of an archive or npm source, fetched through the egress check. */
+  private async fetchBytes(target: BytesSource, signal?: AbortSignal): Promise<Buffer> {
+    if (target.kind === 'npm') {
+      return (await fetchNpmTarball(target, (url, o) => this.download(url, { ...o, resolve: this.resolve }), signal)).bytes
+    }
+    const { bytes } = await this.download(target.url, { what: 'archive', ...ARCHIVE_LIMITS, resolve: this.resolve, signal })
+    const sha = sha256Hex(bytes)
+    if (target.ref && target.ref !== `sha256:${sha}`) {
+      throw new PluginError(`the archive's sha256 is ${sha}, not the ${target.ref.slice('sha256:'.length)} named`, 422)
+    }
+    return bytes
+  }
+
   /**
-   * Fetches `source`, pins its commit, and vets and hashes the plugin. Nothing
-   * is stored: the caller stores the result (unapproved) for the admin to
-   * review. The fetched copy is kept in the cache for the first run. `signal` stops
-   * the fetch (an AgentOperation run that is cancelled).
+   * An archive or npm package (`target`, the source itself or a marketplace entry's),
+   * fetched, unpacked, vetted and hashed, then mirrored and pinned to its sha256.
+   */
+  private async prepareBytes(
+    source: PackageSource,
+    target: BytesSource,
+    fallbackName: string,
+    signal?: AbortSignal,
+    marketplaceSha?: string,
+  ): Promise<PreparedPackage> {
+    const mirror = this.mirror()
+    const bytes = await this.fetchBytes(target, signal)
+    const tmp = await this.tempDir()
+    try {
+      const { root, dir } = await this.unpacked(bytes, path.join(tmp, 'unpacked'))
+      const pkg = path.join(tmp, 'pkg')
+      await rename(dir, pkg)
+      const { tree, review } = await this.vetTree(await this.hashed(pkg), pkg, fallbackName)
+      const sha = sha256Hex(bytes)
+      // Only a package that passed is mirrored: a refused one leaves nothing behind.
+      await mirror.put(sha, bytes, signal)
+      const prepared: PreparedPackage = {
+        source,
+        fetchUrl: target.url,
+        fetchPath: root,
+        commit: '',
+        bytesSha256: sha,
+        contentHash: tree.hash,
+        files: tree.files,
+        review: marketplaceSha ? { ...review, marketplace_sha256: marketplaceSha } : review,
+      }
+      await this.place(pinOfPrepared(prepared), pkg).catch(() => undefined)
+      return prepared
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  }
+
+  /** An entry of a bare `marketplace.json` URL: the file fetched (5 MiB, 10 s), its entry's plugin prepared. */
+  private async prepareBareMarketplace(source: Extract<PackageSource, { kind: 'marketplace-url' }>, signal?: AbortSignal) {
+    const { bytes } = await this.download(source.url, {
+      what: 'the marketplace',
+      ...MARKETPLACE_LIMITS,
+      accept: 'application/json',
+      resolve: this.resolve,
+      signal,
+    })
+    let marketplace: unknown
+    try {
+      marketplace = JSON.parse(bytes.toString('utf8'))
+    } catch {
+      throw new PluginError('the marketplace URL did not answer a valid marketplace.json', 422)
+    }
+    const marketplaceSha = sha256Hex(bytes)
+    const target = marketplaceTarget(marketplace, source.entry, source.url, { bare: true })
+    if (target.kind === 'bytes') return this.prepareBytes(source, target.source, source.entry, signal, marketplaceSha)
+    return this.prepareCheckout(source, target.url, target.ref, target.path, source.entry, signal, marketplaceSha)
+  }
+
+  /** A repository at `ref`, its directory `fetchPath` vetted and hashed and pinned to the commit. */
+  private async prepareCheckout(
+    source: PackageSource,
+    fetchUrl: string,
+    ref: string,
+    fetchPath: string,
+    fallbackName: string,
+    signal?: AbortSignal,
+    marketplaceSha?: string,
+  ): Promise<PreparedPackage> {
+    await this.egress(fetchUrl, `marketplace entry "${fallbackName}"`)
+    const tmp = await this.tempDir()
+    try {
+      const checkout = await this.checkout(fetchUrl, ref, path.join(tmp, 'repo'), signal)
+      const pkg = path.join(tmp, 'pkg')
+      const { tree, review } = await this.extractAndVet(checkout, fetchPath, pkg, fallbackName)
+      const prepared: PreparedPackage = {
+        source,
+        fetchUrl,
+        fetchPath,
+        commit: checkout.commit,
+        contentHash: tree.hash,
+        files: tree.files,
+        review: marketplaceSha ? { ...review, marketplace_sha256: marketplaceSha } : review,
+      }
+      await this.place(pinOfPrepared(prepared), pkg).catch(() => undefined)
+      return prepared
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  }
+
+  /**
+   * Fetches `source`, pins its commit (or for an archive or npm package, its bytes), and
+   * vets and hashes the plugin. Nothing is stored: the caller stores the result
+   * (unapproved) for the admin to review; a bytes pin's file is mirrored first. The
+   * fetched copy is kept in the cache for the first run. `signal` stops the fetch (an
+   * AgentOperation run that is cancelled).
    */
   async prepare(source: PackageSource, signal?: AbortSignal): Promise<PreparedPackage> {
+    if (source.kind === 'marketplace-url') return this.prepareBareMarketplace(source, signal)
+    if (source.kind === 'archive' || source.kind === 'npm') return this.prepareBytes(source, source, bytesFallbackName(source), signal)
     await this.egress(source.url, 'source url')
     const tmp = await this.tempDir()
     try {
@@ -268,6 +476,7 @@ export class PackageInstaller {
           throw new PluginError('the repository has no valid .claude-plugin/marketplace.json', 422)
         }
         const target = marketplaceTarget(marketplace, source.entry, source.url)
+        if (target.kind === 'bytes') return await this.prepareBytes(source, target.source, source.entry, signal)
         fetchUrl = target.url
         fetchPath = target.path
         if (!target.sameRepo) {
@@ -301,9 +510,10 @@ export class PackageInstaller {
     }
   }
 
-  /** `<cacheRoot>/<name>/<commit>-<first 16 of the hash>`. */
+  /** `<cacheRoot>/<name>/<commit>-<first 16 of the hash>`; for a bytes pin `b<first 40 of its sha256>-…`. */
   cacheDir(pin: PackagePin): string {
-    return path.join(this.cacheRoot, pin.name, `${pin.commit}-${pin.contentHash.slice('sha256:'.length, 'sha256:'.length + 16)}`)
+    const id = pin.bytesSha256 !== undefined ? `b${pin.bytesSha256.slice(0, 40)}` : pin.commit
+    return path.join(this.cacheRoot, pin.name, `${id}-${pin.contentHash.slice('sha256:'.length, 'sha256:'.length + 16)}`)
   }
 
   /** Moves a verified copy into the cache (no-op when a copy is already there). */
@@ -446,6 +656,13 @@ export class PackageInstaller {
    */
   private async verifiedCopy(pin: PackagePin, options: { vet?: boolean } = {}): Promise<string> {
     const dir = this.cacheDir(pin)
+    if (pin.bytesSha256 !== undefined && !(await this.cacheMatches(dir, pin))) {
+      await rm(dir, { recursive: true, force: true })
+      await this.fromMirror(pin, pin.bytesSha256, options)
+      if (!(await this.cacheMatches(dir, pin))) {
+        throw new PluginError(`the cached copy of ${pin.name} does not match its pin after unpacking`, 502)
+      }
+    }
     if (!(await this.cacheMatches(dir, pin))) {
       await rm(dir, { recursive: true, force: true })
       await this.egress(pin.fetchUrl, 'plugin url')
@@ -475,6 +692,34 @@ export class PackageInstaller {
       }
     }
     return dir
+  }
+
+  /** A bytes pin's mirrored file unpacked, its `fetchPath` hashed (and vetted) against the pin, and placed in the cache. */
+  private async fromMirror(pin: PackagePin, sha: string, options: { vet?: boolean }): Promise<void> {
+    const bytes = await this.mirror().get(sha)
+    const tmp = await this.tempDir()
+    try {
+      const unpacked = path.join(tmp, 'unpacked')
+      await this.unpacked(bytes, unpacked)
+      let sub: string
+      try {
+        sub = entryPath(pin.fetchPath)
+      } catch {
+        throw new PluginError(`the pin's path ${JSON.stringify(pin.fetchPath)} is not inside its archive`, 502)
+      }
+      const pkg = path.join(tmp, 'pkg')
+      await rename(path.join(unpacked, sub), pkg).catch(() => {
+        throw new PluginError(`the mirrored file of ${pin.name} has no ${pin.fetchPath || 'root'} directory`, 502)
+      })
+      const tree = await this.hashed(pkg)
+      if (options.vet !== false) await this.vetTree(tree, pkg, pin.name)
+      if (tree.hash !== pin.contentHash) {
+        throw new PluginError(`the files of the mirrored ${sha} hash to ${tree.hash}, not the pinned ${pin.contentHash}`, 502)
+      }
+      await this.place(pin, pkg)
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
   }
 
   private async materialiseNow(pin: PackagePin): Promise<string> {
@@ -516,6 +761,18 @@ export class PackageInstaller {
       this.current.delete(name)
       await this.prune(name)
     })
+  }
+}
+
+/** The pin a prepared package will be stored as. */
+function pinOfPrepared(p: PreparedPackage): PackagePin {
+  return {
+    name: p.review.name,
+    fetchUrl: p.fetchUrl,
+    fetchPath: p.fetchPath,
+    commit: p.commit,
+    ...(p.bytesSha256 !== undefined ? { bytesSha256: p.bytesSha256 } : {}),
+    contentHash: p.contentHash,
   }
 }
 

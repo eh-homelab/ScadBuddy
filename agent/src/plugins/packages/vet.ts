@@ -109,6 +109,11 @@ export type PackageReview = {
    */
   builtin_tools?: string[]
   /**
+   * For an entry of a bare `marketplace.json` URL (#6935, spec 2026-11-21 §6.6): the
+   * sha256 of the marketplace file the entry was read from, for the admin to see.
+   */
+  marketplace_sha256?: string
+  /**
    * Each item's id (`skill:<name>` for a skill or a command, `subagent:<name>`) to its
    * frontmatter `description`, cut to `LISTING_CAPS.description` (#4757). A skill and a
    * command of one name are one item: the skill's description, else the command's.

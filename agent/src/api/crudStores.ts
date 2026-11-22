@@ -6,7 +6,7 @@ import { AGENT_CRUD, CRUD_READ_TIMEOUT_MS, CrudReadError } from './crudRead.js'
 // api/crud_agent_stores.py, crud_agent_notify.py, crud_agent_access.py, crud_agent_plugins.py
 // and crud_agent_packages.py): activity kinds, browser origins, session tabs, tab owners, tab
 // images, pairings, MCP tokens, Web Push and notification channels (`notify`), tool access and
-// listings, upstream MCP sessions, remote plugins and their sign-ins, and plugin packages. Each store keeps its interface; its `Crud…` class is that
+// listings, upstream MCP sessions, remote plugins and their sign-ins, plugin packages and their mirrored files (#6935). Each store keeps its interface; its `Crud…` class is that
 // interface over the routes, one route per method, and `gated` picks it per call once the API
 // lists the store's area (api/crudAreas.ts), the SQL store until then (#5299 D9). Old API pods
 // may still answer during a roll, so the SQL stays until every pod lists the areas.
@@ -23,6 +23,7 @@ export const STORE_AREAS = [
   'plugin-sessions',
   'plugins',
   'plugin-packages',
+  'package-mirrors',
 ] as const
 export type StoreArea = (typeof STORE_AREAS)[number]
 

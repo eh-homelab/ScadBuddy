@@ -56,6 +56,7 @@ import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
 import { reviewsByHash } from './access/packageProvider.js'
 import { CrudPackageStore, type PackageRepo, PackageStore } from './plugins/packages/store.js'
+import { CrudPackageMirror } from './plugins/packages/mirror.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { CrudOAuthRows, PluginOAuth } from './plugins/oauthStore.js'
 import { CrudPluginStore, loadEnabledPlugins, PluginStore, type PluginStoreLike } from './plugins/registry.js'
@@ -623,7 +624,14 @@ const stopWorkspaceSweep = !role.http ? undefined : workspace?.startSweeper(WORK
 const pluginPackages = database
   ? gated<PackageRepo>(new PackageStore(database.sql), new CrudPackageStore(crudTarget), storeArea('plugin-packages'))
   : undefined
-const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
+// An archive or npm package's file (#6935) is kept by the API (area `package-mirrors`); until it
+// lists the area, installing or loading one is refused (503) and git packages work as before.
+const packageMirror = new CrudPackageMirror(crudTarget)
+const packageInstaller = new PackageInstaller({
+  fetcher: new GitFetcher(),
+  cacheRoot: pluginCacheDir(paths),
+  mirror: () => (crudAreas.has('package-mirrors') ? packageMirror : undefined),
+})
 // Settings → Tools & plugins (#4757): an older stored review's items read from the cached copy
 // (read only), once per content hash; and what a turn would make of the enabled packages.
 const verifiedPackageReview = reviewsByHash((pin) => verifiedReview(packageInstaller, pin))
