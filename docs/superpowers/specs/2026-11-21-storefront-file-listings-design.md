@@ -161,7 +161,7 @@ answers. Line numbers are on that commit.
 22. **The content store streams a held blob.** `ContentStore.get(ref)` streams a blob, and
     `stat(key)` gives its ref (`store/content.py:319`, `:432`). Read.
 23. **An order item's print reads the live file.** A `library_file` item prints through
-    `start_library_run` (`orders/operations.py:862-930`), whose run source is
+    `start_library_run` (called from `item_print_run`, `orders/operations.py:939`), whose run source is
     `SourceSpec(kind="library", file_id=…)` (`api/library_print.py:1407-1450`, `:1445`): the
     print worker reads the file from the library that serves at print time. Read.
 24. **Remembered choices outlive the file.** `model_print_choices` loses a scope's row only
@@ -929,7 +929,7 @@ pinned bytes, and only then starts the run as today.
    download. Else, when the held copy is there (`content.stat(copy_key)`), the check
    answers as today with `"restore": true` added. Only a missing held copy is
    `library_file_gone`. There is no `library_file_changed` refusal.
-2. **The restore.** `item_print_run` (`orders/operations.py:850-945`), on a check with
+2. **The restore.** `item_print_run` (`orders/operations.py:871-984`), on a check with
    `restore`, puts the held copy into the library that serves before
    `start_library_run`. It looks first in the folder "Storefront" (made when missing) for
    a file whose sha256 is the item's, so a retry of the same claim uploads nothing. Else
@@ -942,9 +942,10 @@ pinned bytes, and only then starts the run as today.
    new scope holds none, so the dialog opens on the file as before. The run itself takes
    the accepted quote's setup (`quoted_setup(quote)`, `printing.py:598`), so the print
    does not depend on this copy.
-4. **The run's key.** Today `item_print_run` sets `subject =
-   PrintSubject.library(checked["library_file_id"])` (`orders/operations.py:863-866`),
-   and `existing` and `start` key the claimed run by it (`:891-930`). The restore runs
+4. **The run's key.** Today `item_print_run` reads `file_id =
+   checked.get("library_file_id")` and sets `subject = PrintSubject.library(file_id)`
+   (`orders/operations.py:886-892`), and `existing` and `start` key the claimed run by
+   it (`:914-933`). The restore runs
    before that line, and `subject`, `existing` and `start` take the item's new id, not
    the check's. No run of the claim can exist under the old id: the restore ends before
    any start. This holds because `OperationWorkflow` runs the check once and every retry
