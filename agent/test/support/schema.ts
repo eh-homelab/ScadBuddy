@@ -1,15 +1,13 @@
-import { crudOf, type CrudTarget } from '../api/crudStores.js'
 import expected from './expected-migrations.json' with { type: 'json' }
 
-// The agent no longer migrates (#5299 D6): only the CRUD service may hold SQL access
-// (#5295), so the API applies the agent's files at its start
-// (backend/scadbuddy/render/agent_migrations.py, ledger `ai_migrations`), and the agent
-// waits until the ledger holds every file this build was written against.
+// The tests' wait for the agent's migrations (#5299 D6). The API applies the agent's files at
+// its start (backend/scadbuddy/render/agent_migrations.py, ledger `ai_migrations`), and the
+// agent reads no ledger (#5299 step 12): its data routes wait for the API's CRUD areas
+// (src/api/crudAreas.ts). The tests' Postgres client (support/database.ts) still waits here.
 //
-// Those files are listed in ./expected-migrations.json, by id and SHA-256: the agent
-// image does not carry them. test/schema.test.ts fails when the list differs from
-// backend/scadbuddy/migrations_agent/, or when the API's runner reads those files
-// differently, so a new agent migration is also an entry here
+// The files are listed in ./expected-migrations.json, by id and SHA-256. test/schema.test.ts
+// fails when the list differs from backend/scadbuddy/migrations_agent/, or when the API's runner
+// reads those files differently
 // (`UPDATE_EXPECTED_MIGRATIONS=1 pnpm exec vitest run test/schema.test.ts` writes it).
 
 /** One file the agent's code needs applied: its id in `ai_migrations` and its SQL's SHA-256. */
@@ -19,7 +17,7 @@ export const EXPECTED_MIGRATIONS: readonly ExpectedMigration[] = expected
 
 /**
  * The ledger records a file this build expects with other SQL than the build was written
- * against: someone edited a merged migration. Permanent, so main.ts stops the process.
+ * against: someone edited a merged migration. Permanent.
  */
 export class MigrationChecksumError extends Error {
   override name = 'MigrationChecksumError'
@@ -106,20 +104,5 @@ export async function awaitMigrations(
   )
 }
 
-/** Reads the expected files' rows of the ledger: the API's route (`crudLedger`); the tests read it over SQL. */
+/** Reads the expected files' rows of the ledger (support/database.ts `sqlLedger`). */
 export type LedgerReader = (expected: readonly ExpectedMigration[]) => Promise<Map<string, string | null> | 'positional'>
-
-/** `LedgerReader` through the API's route (area `migrations`, backend api/crud_agent_start.py). */
-export function crudLedger(target: CrudTarget): LedgerReader {
-  const call = crudOf(target)
-  return async (expected) => {
-    const ledger = await call<{ found: boolean; keyed: boolean; rows: { id: string; checksum: string | null }[] }>(
-      "the agent's migrations",
-      '/migrations/ledger',
-      { method: 'POST', body: { ids: expected.map((m) => m.id) } },
-    )
-    if (!ledger.found) return new Map()
-    if (!ledger.keyed) return 'positional'
-    return new Map(ledger.rows.map((row) => [row.id, row.checksum]))
-  }
-}

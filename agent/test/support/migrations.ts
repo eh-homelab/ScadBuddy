@@ -5,7 +5,7 @@ import type { Sql, TransactionSql } from 'postgres'
 
 // The agent's own migration runner, kept for the tests only (#5299 D6). In production
 // the API applies the agent's files (backend/scadbuddy/render/agent_migrations.py, a port
-// of this module) and the agent waits for them (src/db/schema.ts). The tests make their
+// of this module). The tests make their
 // schemas with this one (support/postgres.ts), and test/schema.test.ts checks that both
 // runners read the same files with the same checksums, so the two cannot drift.
 //

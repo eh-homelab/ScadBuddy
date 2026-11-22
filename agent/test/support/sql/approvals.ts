@@ -34,11 +34,20 @@ function auditOutcome(decision: SettleCall['decision']): AuditOutcome {
   return decision === 'approved' ? 'ok' : decision === 'denied' ? 'denied' : 'refused'
 }
 
+/**
+ * Tests only: runs in a write's transaction just before its session events are appended. A throw
+ * rolls the write back, as a failed append on the API does; a read of the pool from here sees
+ * nothing the write has not committed.
+ */
+export type BeforeAppend = (sessionId: string, events: readonly ServerEvent[]) => Promise<void>
+
 export class SqlApprovals implements ApprovalRoutes {
   readonly #sql: Sql
+  readonly #beforeAppend: BeforeAppend | undefined
 
-  constructor(sql: Sql) {
+  constructor(sql: Sql, options: { beforeAppend?: BeforeAppend } = {}) {
     this.#sql = sql
+    this.#beforeAppend = options.beforeAppend
   }
 
   async row(id: string): Promise<ApprovalRow | undefined> {
@@ -155,6 +164,7 @@ export class SqlApprovals implements ApprovalRoutes {
           }),
         ),
       ]
+      await this.#beforeAppend?.(sessionId, events)
       return { approval, logged: [{ session_id: sessionId, events, seqs: await appendIn(tx, sessionId, events) }] }
     })
   }
@@ -223,6 +233,7 @@ export class SqlApprovals implements ApprovalRoutes {
         }),
         inputResolved(row.session_id, `approval:${id}`, 'approval', decision, decision === 'expired' || decision === 'cancelled' ? reason : null),
       ]
+      await this.#beforeAppend?.(row.session_id, events)
       return { approval: row, logged: [{ session_id: row.session_id, events, seqs: await appendIn(tx, row.session_id, events) }] }
     })
     const approval = done.approval

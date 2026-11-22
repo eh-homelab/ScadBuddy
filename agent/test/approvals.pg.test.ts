@@ -17,7 +17,6 @@ import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { registerApprovalRoutes } from '../src/routes/approvals.js'
 import { ChatConnection } from '../src/routes/chat.js'
-import type { EventLog } from '../src/sessions/eventLog.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -26,7 +25,7 @@ import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 import { respond } from '../src/routes/pendingInput.js'
 import { sqlSettings } from './support/sql/settings.js'
 import { sqlAuditLog, TEST_HASH_KEY } from './support/sql/audit.js'
-import { SqlApprovals } from './support/sql/approvals.js'
+import { type BeforeAppend, SqlApprovals } from './support/sql/approvals.js'
 
 // The approval store and its rules without the SDK (#258): ai_approvals in
 // Postgres, expiry, visibility, the orphan paths, and the HTTP routes. Since plan
@@ -109,17 +108,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
   let drop: () => Promise<void>
   let m: SessionManager
   let values: Map<string, unknown>
+  /** A fault in the approvals' routes, in a write's transaction before its events are appended. */
+  let fault: BeforeAppend | undefined
 
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     values = new Map()
+    fault = undefined
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
     m = manager({
       sql: db.sql,
       paths: await tempPaths(),
       run: runner,
       settings: { get: <T>(key: string) => Promise.resolve(values.get(key) as T) },
+      approvalRoutes: new SqlApprovals(db.sql, { beforeAppend: (sessionId, events) => fault?.(sessionId, events) ?? Promise.resolve() }),
     })
   })
   afterEach(async () => {
@@ -221,14 +224,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     const second = await orphan(agentB)
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second'`
     const boom = new Error('invalid input syntax for type uuid: "f"')
-    const append = m.events.append.bind(m.events)
     let failed = false
-    m.events.append = async (sessionId, events) => {
+    // The first one's expiry fails in its transaction, so it rolls back.
+    fault = async (sessionId) => {
       if (sessionId === first.session.id && !failed) {
         failed = true
         throw boom
       }
-      return append(sessionId, events)
     }
     await expect(m.approvals.expireDue()).rejects.toBe(boom)
     const decisions = async () =>
@@ -248,10 +250,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 minute' WHERE id IN ${db.sql(stuck.map((o) => o.approval.id))}`
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${later.approval.id}`
     const failing = new Set(stuck.map((o) => o.session.id))
-    const append = m.events.append.bind(m.events)
-    m.events.append = async (sessionId, events) => {
-      if (sessionId && failing.has(sessionId)) throw new Error('boom')
-      return append(sessionId, events)
+    fault = async (sessionId) => {
+      if (failing.has(sessionId)) throw new Error('boom')
     }
     const thrown = await m.approvals.expireDue(2).then(
       () => undefined,
@@ -366,18 +366,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   it('a decision racing create cannot log approval.resolved before approval.required', async () => {
     const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
-    // An event log that tries to decide the approval just before
-    // `approval.required` is written: the fastest possible decision.
+    // Routes that try to decide the approval just before `approval.required` is
+    // written in the create's transaction: the fastest possible decision.
     let raced: unknown
-    const events = Object.create(m.events) as EventLog
-    events.append = async (sessionId, batch) => {
-      const required = batch.find((e) => e.type === 'approval.required')
-      if (required && 'id' in required) {
-        raced = await service.decide(browser, String(required.id), false).catch((err: unknown) => err)
-      }
-      return m.events.append(sessionId, batch)
-    }
-    const service = new ApprovalService({ routes: new SqlApprovals(db.sql), events, hashKey: () => TEST_HASH_KEY })
+    const routes = new SqlApprovals(db.sql, {
+      beforeAppend: async (_sessionId, batch) => {
+        const required = batch.find((e) => e.type === 'approval.required')
+        if (required && 'id' in required) {
+          raced = await service.decide(browser, String(required.id), false).catch((err: unknown) => err)
+        }
+      },
+    })
+    const service = new ApprovalService({ routes, events: m.events, hashKey: () => TEST_HASH_KEY })
     const approval = await service.create({
       sessionId: session.id,
       turnId: null,

@@ -14,8 +14,8 @@ import type { TemporalHealth } from '../temporal/worker.js'
 export type WorkerHealth = {
   status: 'ok'
   role: 'worker'
-  database: 'ok' | 'unreachable' | 'not configured'
-  secret_key: 'ok' | 'not configured'
+  /** Whether the API lists and answers the agent's CRUD areas, where its data is (#5299 step 12). */
+  database: 'ok' | 'unreachable'
   /** The worst of `queues`: `ok` only when every worker is. */
   temporal: TemporalHealth
   /** Each worker's state, by the queue it polls. */
@@ -23,8 +23,7 @@ export type WorkerHealth = {
 }
 
 export type WorkerHealthDeps = {
-  database?: { ping(): Promise<boolean> }
-  kek: { ok: boolean }
+  database: { ping(): Promise<boolean> }
   workers: () => Record<string, TemporalHealth>
   /** Why this process is not ready yet, or undefined once it is (`queuesPolled`). */
   ready: () => Promise<string | undefined>
@@ -39,14 +38,13 @@ export function workerHealthApp(deps: WorkerHealthDeps): Hono {
     c.res.headers.set(SERVICE_HEADER, 'agent-worker')
   })
   app.get('/healthz', async (c) => {
-    const dbOk = deps.database ? await deps.database.ping() : undefined
+    const dataOk = await deps.database.ping()
     const queues = deps.workers()
     const states = Object.values(queues)
     const body: WorkerHealth = {
       status: 'ok',
       role: 'worker',
-      database: dbOk === undefined ? 'not configured' : dbOk ? 'ok' : 'unreachable',
-      secret_key: deps.kek.ok ? 'ok' : 'not configured',
+      database: dataOk ? 'ok' : 'unreachable',
       temporal: WORST.find((s) => states.includes(s)) ?? 'unavailable',
       queues,
     }
@@ -61,7 +59,7 @@ export function workerHealthApp(deps: WorkerHealthDeps): Hono {
 
 /**
  * temporal.api.enums.v1.TaskQueueType: WORKFLOW 1, ACTIVITY 2. `started: false`: this process
- * never started its worker on the queue (a missing database, KEK or Temporal; the start log says).
+ * never started its worker on the queue (a missing Temporal; the start log says).
  */
 export type PolledQueue = { name: string; type: 1 | 2; started?: boolean }
 const DESCRIBE_DEADLINE_MS = 3_000
