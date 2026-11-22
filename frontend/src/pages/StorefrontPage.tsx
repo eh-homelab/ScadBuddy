@@ -250,7 +250,8 @@ export function StorefrontPage() {
       headerClassName: 'w-12',
       className: 'py-1',
       cell: (row) =>
-        row.media_id ? (
+        // A file listing's picture (#6710) has no template media route; it shows the placeholder.
+        row.media_id && row.slug ? (
           <img src={api.mediaUrl(row.slug, { id: row.media_id })} alt="" loading="lazy" className="size-8 rounded border object-cover" />
         ) : (
           <span className="flex size-8 items-center justify-center rounded border bg-muted text-muted-foreground">
@@ -274,7 +275,10 @@ export function StorefrontPage() {
       header: sortHeader('slug', 'Model'),
       sort: sortState('slug'),
       className: 'max-w-[14rem] truncate text-muted-foreground',
-      cell: (row) => <span title={row.slug}>{modelName.get(row.slug) ?? row.slug}</span>,
+      cell: (row) => {
+        const name = row.slug ?? row.filename ?? ''
+        return <span title={name}>{(row.slug && modelName.get(row.slug)) ?? name}</span>
+      },
     },
     {
       key: 'status',

@@ -60,6 +60,18 @@ def test_a_file_is_found_by_the_folders_it_is_in() -> None:
     ]
 
 
+def test_types_lists_only_those_types_whatever_all_says() -> None:
+    rows = [*ROWS, row(14, "dino.stl", 3, "stl"), row(15, "dino.step", 3, "step")]
+
+    found = search_library(FOLDERS, rows, "dino", show_all=False, types=["3mf", "stl"])
+
+    # #6710 §9.2: a sliced file and another type are never listed, and none is hidden.
+    assert sorted(hit.id for hit in found.files) == [10, 14]
+    assert (found.total, found.hidden) == (2, 0)
+    only_stl = search_library(FOLDERS, rows, "dino", show_all=True, types=["stl"])
+    assert [hit.id for hit in only_stl.files] == [14]
+
+
 def test_a_match_in_the_name_comes_before_one_in_the_folder() -> None:
     found = search_library(FOLDERS, ROWS, "fidget", show_all=True)
 

@@ -83,6 +83,10 @@ class ColourPart:
     #: 2026-11-14): below 255 for a colour value given with an alpha
     #: (`colours.colour_alpha`), which OpenSCAD never sees. It prints as any part does.
     alpha: int = 255
+    #: The file's filament slot it prints in, from 0, when the reader knows it: a file
+    #: listing's held preview names it (#6710 §8.2, `glb.SLOT_EXTRA`), so the page
+    #: recolours the mesh by the customer's pick for that slot.
+    slot: int | None = None
 
     @property
     def watertight(self) -> bool:
@@ -139,7 +143,13 @@ def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
             name = part.name if colour == own else f"{part.name} ({colour})"
             # A painted colour is another filament: only the part's own keeps its alpha.
             alpha = part.alpha if colour == own else 255
-            out.append(replace(part, name=name, colour=colour, mesh=mesh, paint=None, alpha=alpha))
+            # Another colour is another slot: only the part's own keeps its slot.
+            slot = part.slot if colour == own else None
+            out.append(
+                replace(
+                    part, name=name, colour=colour, mesh=mesh, paint=None, alpha=alpha, slot=slot
+                )
+            )
     return out
 
 

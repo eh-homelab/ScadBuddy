@@ -34,7 +34,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import psycopg
 from fastapi import status
@@ -42,6 +42,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+from pydantic import TypeAdapter
 
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.pg_pool import record_connection
@@ -67,7 +68,10 @@ from scadbuddy.orders.storefront.inputs import (
 from scadbuddy.orders.storefront.inputs import sets_support as _sets_support
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile, missing_materials
 from scadbuddy.orders.storefront.wire import (
+    FILE_PICTURE_ID,
     ChoiceBound,
+    FileSnapshot,
+    ListedFile,
     Listing,
     ListingInput,
     ListingMedia,
@@ -86,6 +90,7 @@ from scadbuddy.orders.storefront.wire import (
     PublicNumber,
     PublicParam,
     PublicText,
+    Snapshot,
     TextBound,
     is_support,
     shown_label,
@@ -101,12 +106,26 @@ from scadbuddy.storefront.wire import LISTING_ID, STOREFRONT_PROBLEMS
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from scadbuddy.api.deps import AppState
     from scadbuddy.core.components import Core
     from scadbuddy.store.content import ContentStore
     from scadbuddy.store.snapshots import SnapshotStore
 
 #: The ``blob_refs`` holder kind of a published listing's snapshot and media.
 HOLDER: Final = "storefront_listing"
+#: The ``blob_refs`` holder kind of what a file listing keeps past an edit and an
+#: unpublish (#6710 §5.2, §5.4): the held copy of its file (``listing-file-<sha256>``),
+#: dropped only by the listing's delete, a save that picks another file and a publish
+#: that pins another sha256; and each picture the shop uploaded (``listing-media-<sha256>``),
+#: dropped by a save or a pictures change that no longer names it, once it is older than
+#: `KEPT_PICTURE_GRACE`.
+KEPT_HOLDER: Final = "storefront_listing_kept"
+#: How long an uploaded picture's hold is spared by a save that does not name it: a save
+#: from another tab may not have the new id yet (#6710 §5.4).
+KEPT_PICTURE_GRACE: Final = timedelta(hours=1)
+#: The key prefix of a file listing's held copy, and of a listing's pictures.
+FILE_COPY_PREFIX: Final = "listing-file-"
+PICTURE_PREFIX: Final = "listing-media-"
 #: Seconds to wait for the publish lock's own connection.
 PUBLISH_LOCK_CONNECT_TIMEOUT: Final = 5
 #: The most publishes one process runs at once, each holding one connection of its own
@@ -125,8 +144,9 @@ NEEDS_S3_WARN_EVERY: Final = 60.0
 _needs_s3_warned: float | None = None
 
 _COLUMNS = (
-    "id, slug, commit, title, description, position, published, params, fixed, colours,"
-    " media_ids, materials, snapshot, media, published_at, created_at, updated_at"
+    "id, source, slug, commit, library_file, title, description, position, published, params,"
+    " fixed, colours, media_ids, materials, snapshot, media, published_at, created_at,"
+    " updated_at"
 )
 _NUMBERS = frozenset({"number", "integer", "slider"})
 #: Each sort's columns, the last of each the id, so a page boundary never splits ties.
@@ -175,11 +195,115 @@ def _listing(row: DictRow) -> Listing:
     return Listing.model_validate(row)
 
 
+_SNAPSHOT: TypeAdapter[Snapshot] = TypeAdapter(Snapshot)
+
+
+def _snapshot_keys(snapshot: Snapshot) -> list[str]:
+    """The blobs a published snapshot holds under the listing, besides its media: a
+    template's source snapshot, or a file's previews (its copy is a kept hold)."""
+    if isinstance(snapshot, FileSnapshot):
+        return list(snapshot.preview_keys)
+    return [snapshot.snapshot_key]
+
+
 def _drop_holds(conn: Connection[DictRow], listing_id: str, keep: Collection[str] = ()) -> None:
     conn.execute(
         "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s AND NOT (key = ANY(%s))",
         (HOLDER, listing_id, list(keep)),
     )
+
+
+def file_copy_key(sha256: str) -> str:
+    """The key of a file listing's held copy of the file whose content is ``sha256``."""
+    return f"{FILE_COPY_PREFIX}{sha256}"
+
+
+def picture_key(sha256: str) -> str:
+    """The key a listing's picture of content ``sha256`` is held at (template media,
+    a plate picture or an upload alike)."""
+    return f"{PICTURE_PREFIX}{sha256}"
+
+
+def _drop_kept_copies(conn: Connection[DictRow], listing_id: str, keep: str | None) -> None:
+    """Drop the listing's kept holds on held copies of its file, but ``keep``'s."""
+    conn.execute(
+        "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s"
+        " AND starts_with(key, %s) AND key IS DISTINCT FROM %s",
+        (KEPT_HOLDER, listing_id, FILE_COPY_PREFIX, keep),
+    )
+
+
+def _drop_kept_pictures(
+    conn: Connection[DictRow], listing_id: str, media_ids: Sequence[str]
+) -> None:
+    """Drop the listing's kept holds on uploaded pictures that ``media_ids`` does not name,
+    each taken or refreshed more than `KEPT_PICTURE_GRACE` ago (#6710 §5.4)."""
+    named = [picture_key(m.removeprefix("upload:")) for m in media_ids if m.startswith("upload:")]
+    conn.execute(
+        "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s"
+        " AND starts_with(key, %s) AND NOT (key = ANY(%s)) AND created_at < now() - %s",
+        (KEPT_HOLDER, listing_id, PICTURE_PREFIX, named, KEPT_PICTURE_GRACE),
+    )
+
+
+def _source_invalid(name: str, detail: str) -> ApiError:
+    return problem(
+        status.HTTP_422_UNPROCESSABLE_CONTENT, "listing_source_invalid", detail, name=name
+    )
+
+
+def check_source(body: ListingInput) -> None:
+    """422 ``listing_source_invalid`` (with ``name``, the field) for a body whose fields
+    do not fit its ``source`` (#6710 §4.1): a template needs ``slug`` and ``commit`` and no
+    ``library_file``; a file listing needs ``library_file``, no ``slug``, ``commit``,
+    ``params`` or ``fixed``, and only `FILE_PICTURE_ID`s in ``media_ids``."""
+    if body.source == "template":
+        for name in ("slug", "commit"):
+            if getattr(body, name) is None:
+                raise _source_invalid(name, f"a template listing needs its {name}")
+        if body.library_file is not None:
+            raise _source_invalid("library_file", "a template listing names no library file")
+        return
+    if body.library_file is None:
+        raise _source_invalid("library_file", "a file listing needs its library file")
+    for name in ("slug", "commit", "params", "fixed"):
+        if getattr(body, name):
+            raise _source_invalid(name, f"a file listing has no {name}")
+    for media_id in body.media_ids:
+        if FILE_PICTURE_ID.fullmatch(media_id) is None:
+            raise _source_invalid(
+                "media_ids",
+                f"{media_id!r} is not a file listing's picture: plate:<n> or upload:<sha256>",
+            )
+
+
+def _not_yet() -> ApiError:
+    """A file listing's publish and pictures change, which the next PR of #6710 §12
+    item 3 checks; until then they are refused."""
+    return _source_invalid("source", "a file listing cannot be published yet")
+
+
+def _stored_file(body: ListingInput) -> Jsonb | None:
+    """A new row's ``library_file``: no pin, no request."""
+    if body.library_file is None:
+        return None
+    fresh = ListedFile(id=body.library_file.id, library=body.library_file.library)
+    return Jsonb(fresh.model_dump(mode="json"))
+
+
+def _saved_file(body: ListingInput, stored: Any) -> tuple[Jsonb | None, bool]:
+    """The row's ``library_file`` after a save of ``body`` over ``stored`` (the column
+    as it was), and whether the save drops a pin (#6710 §4.1). The pin is the server's: a
+    save keeps it unless the file's id or library changed, and then stores no pin and no
+    request. ``repin`` is written only when the body names it."""
+    asked = body.library_file
+    before = None if stored is None else ListedFile.model_validate(stored)
+    if asked is None:
+        return None, before is not None
+    if before is None or (before.id, before.library) != (asked.id, asked.library):
+        return _stored_file(body), before is not None
+    repin = before.repin if asked.repin is None else asked.repin
+    return Jsonb(before.model_copy(update={"repin": repin}).model_dump(mode="json")), False
 
 
 def _check_choices(body: ListingInput) -> None:
@@ -236,17 +360,18 @@ class ListingStore:
     def create(self, body: ListingInput) -> Listing:
         """A new listing, unpublished, after every other one; 422
         ``listing_choice_empty`` for a choice with nothing to choose."""
+        check_source(body)
         _check_choices(body)
         with self.pool.connection() as conn, conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (POSITION_LOCK,))
             row = conn.execute(
                 "INSERT INTO storefront_listings"
-                " (slug, commit, title, description, position, params, fixed, colours, media_ids,"
-                " materials)"
-                " VALUES (%s, %s, %s, %s,"
+                " (source, library_file, slug, commit, title, description, position, params,"
+                " fixed, colours, media_ids, materials)"
+                " VALUES (%s, %s, %s, %s, %s, %s,"
                 " (SELECT coalesce(max(position) + 1, 0) FROM storefront_listings),"
                 f" %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
-                (*self._fields(body),),
+                (body.source, _stored_file(body), *self._fields(body)),
             ).fetchone()
         assert row is not None
         return _listing(row)
@@ -271,20 +396,36 @@ class ListingStore:
     ) -> Listing:
         """The listing replaced by ``body``, and unpublished; 409 ``listing_changed``
         when it changed after ``expected_updated_at`` was read, 404 when it is gone, 422
-        ``listing_choice_empty`` for a choice with nothing to choose."""
+        ``listing_choice_empty`` for a choice with nothing to choose, 422
+        ``listing_source_invalid`` for a body that does not fit its source. A file
+        listing's pin stays unless the save picks another file (`_saved_file`); then the
+        hold on its held copy goes in the same transaction. An uploaded picture
+        ``media_ids`` no longer names loses its hold (`_drop_kept_pictures`)."""
+        check_source(body)
         _check_choices(body)
         slug, commit, title, description, params, fixed, colours, media_ids, materials = (
             self._fields(body)
         )
         with self.pool.connection() as conn, conn.transaction():
+            stored = conn.execute(
+                "SELECT library_file FROM storefront_listings WHERE id = %s AND updated_at = %s"
+                " FOR UPDATE",
+                (listing_id, expected_updated_at),
+            ).fetchone()
+            if stored is None:
+                raise self._refusal(conn, listing_id)
+            library_file, unpinned = _saved_file(body, stored["library_file"])
             row = conn.execute(
-                "UPDATE storefront_listings SET slug = %s, commit = %s, title = %s,"
+                "UPDATE storefront_listings SET source = %s, library_file = %s,"
+                " slug = %s, commit = %s, title = %s,"
                 " description = %s, params = %s, fixed = %s, colours = %s, media_ids = %s,"
                 " materials = %s, published = false, snapshot = NULL, media = '[]',"
                 " published_at = NULL,"
                 " updated_at = clock_timestamp()"
                 f" WHERE id = %s AND updated_at = %s RETURNING {_COLUMNS}",
                 (
+                    body.source,
+                    library_file,
                     slug,
                     commit,
                     title,
@@ -301,6 +442,9 @@ class ListingStore:
             if row is None:
                 raise self._refusal(conn, listing_id)
             _drop_holds(conn, listing_id)
+            if unpinned:
+                _drop_kept_copies(conn, listing_id, None)
+            _drop_kept_pictures(conn, listing_id, body.media_ids)
         return _listing(row)
 
     def set_media(
@@ -318,6 +462,7 @@ class ListingStore:
             ).fetchone()
             if row is None:
                 raise self._refusal(conn, listing_id)
+            _drop_kept_pictures(conn, listing_id, media_ids)
         return _listing(row)
 
     @staticmethod
@@ -341,7 +486,8 @@ class ListingStore:
         after the listing at ``after`` (its position and id), whose title has ``query`` in
         it, any case (#6154). Keyset paging on ``storefront_listings_published_order``, so
         a later page costs what the first does."""
-        where = ["published"]
+        # A file listing is left out until the public page can show one (#6710 §12 PR 6).
+        where = ["published", "source = 'template'"]
         args: list[Any] = []
         if after is not None:
             where.append("(position, id) > (%s, %s)")
@@ -389,8 +535,8 @@ class ListingStore:
         if query.q.strip():
             # ILIKE on the raw pattern: Postgres folds the case of both sides the same way.
             pattern = f"%{_like_escaped(query.q.strip())}%"
-            where.append("(title ILIKE %s OR slug ILIKE %s)")
-            args += [pattern, pattern]
+            where.append("(title ILIKE %s OR slug ILIKE %s OR library_file->>'filename' ILIKE %s)")
+            args += [pattern, pattern, pattern]
         if query.status is not None:
             where.append("published" if query.status == "published" else "NOT published")
         if query.slug:
@@ -416,7 +562,8 @@ class ListingStore:
                 args,
             ).fetchone()
             rows = conn.execute(
-                "SELECT id, slug, commit, title, place, published, media_ids,"
+                "SELECT id, source, slug, commit, library_file->>'filename' AS filename, title,"
+                " place, published, media_ids,"
                 " media_ids[1] AS media_id, published_at, updated_at FROM ("
                 "  SELECT *, row_number() OVER (ORDER BY position, id) AS place"
                 "  FROM storefront_listings"
@@ -500,35 +647,51 @@ class ListingStore:
                 )
             conn.execute("DELETE FROM storefront_listings WHERE id = %s", (listing_id,))
             _drop_holds(conn, listing_id)
+            conn.execute(
+                "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+                (KEPT_HOLDER, listing_id),
+            )
 
     def mark_published(
         self,
         listing_id: str,
         *,
-        snapshot: ListingSnapshot,
+        snapshot: Snapshot,
         media: Sequence[ListingMedia],
         expected_updated_at: datetime,
     ) -> Listing:
         """The listing published with what ``publish`` captured (its effective values in
         ``snapshot.fixed``; the row's ``fixed`` is left as the shop set it). Holds of the listing
         on any blob other than the snapshot and ``media`` are dropped (a republish's
-        old ones). 409 ``listing_changed`` when it changed after it was read."""
+        old ones). A file listing's pin is written in the same transaction (#6710 §4.1:
+        its sha256 and filename, and no request), and its kept holds on other copies of
+        its file are dropped. 409 ``listing_changed`` when it changed after it was read."""
+        pin = None
+        if isinstance(snapshot, FileSnapshot):
+            pin = Jsonb({"pinned": snapshot.sha256, "repin": False, "filename": snapshot.filename})
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "UPDATE storefront_listings SET snapshot = %s, media = %s,"
+                " library_file = CASE WHEN %s::jsonb IS NULL THEN library_file"
+                "  ELSE library_file || %s::jsonb END,"
                 " published = true, published_at = clock_timestamp(),"
                 " updated_at = clock_timestamp()"
                 f" WHERE id = %s AND updated_at = %s RETURNING {_COLUMNS}",
                 (
-                    Jsonb(snapshot.model_dump(mode="json")),
+                    Jsonb(snapshot.model_dump(mode="json", by_alias=True)),
                     Jsonb([item.model_dump(mode="json") for item in media]),
+                    pin,
+                    pin,
                     listing_id,
                     expected_updated_at,
                 ),
             ).fetchone()
             if row is None:
                 raise self._refusal(conn, listing_id)
-            _drop_holds(conn, listing_id, [snapshot.snapshot_key, *(m.blob_key for m in media)])
+            keep = [*_snapshot_keys(snapshot), *(m.blob_key for m in media)]
+            _drop_holds(conn, listing_id, keep)
+            if isinstance(snapshot, FileSnapshot):
+                _drop_kept_copies(conn, listing_id, snapshot.copy_key)
         return _listing(row)
 
     def mark_unpublished(self, listing_id: str) -> Listing:
@@ -550,17 +713,23 @@ class ListingStore:
         """Drop every hold of the listing on a blob its row does not name, under the row
         lock: after a failed publish, whose copies are held but never recorded. A
         published listing keeps its snapshot and media; an unpublished one keeps
-        nothing (an edit's own drop may have run before the publish took its holds)."""
+        nothing (an edit's own drop may have run before the publish took its holds). A file
+        listing keeps the held copy its row pins, and loses any other one a publish took
+        (#6710 §5.2)."""
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
-                "SELECT published, snapshot, media FROM storefront_listings"
+                "SELECT published, snapshot, media, library_file FROM storefront_listings"
                 " WHERE id = %s FOR UPDATE",
                 (listing_id,),
             ).fetchone()
             keep: list[str] = []
             if row is not None and row["published"]:
-                keep = [row["snapshot"]["snapshot_key"], *(m["blob_key"] for m in row["media"])]
+                stored = _SNAPSHOT.validate_python(row["snapshot"])
+                keep = [*_snapshot_keys(stored), *(m["blob_key"] for m in row["media"])]
             _drop_holds(conn, listing_id, keep)
+            found = None if row is None else row["library_file"]
+            pinned = None if found is None else found.get("pinned")
+            _drop_kept_copies(conn, listing_id, None if pinned is None else file_copy_key(pinned))
 
     def begin_publish(self, listing_id: str) -> Callable[[], None]:
         """Take the listing's publish lock, or 409 ``listing_publishing`` when another
@@ -947,7 +1116,7 @@ def _sha256(path: Path) -> str:
 
 
 async def _copy_media(
-    core: Core, refs: BlobRefs, listing: Listing, title: str
+    core: Core, refs: BlobRefs, listing: Listing, slug: str, title: str
 ) -> list[ListingMedia]:
     """Each chosen media file stored as ``listing-media-<sha256>`` and held."""
     content = core.store.content
@@ -955,7 +1124,7 @@ async def _copy_media(
     copied: list[ListingMedia] = []
     for media_id in listing.media_ids:
         try:
-            view, path = await asyncio.to_thread(core.catalogue.media_item, listing.slug, media_id)
+            view, path = await asyncio.to_thread(core.catalogue.media_item, slug, media_id)
         except (MediaNotFoundError, ModelNotFoundError):
             raise _unprocessable(
                 "listing_media_unknown", f"the template has no media {media_id!r}"
@@ -967,7 +1136,7 @@ async def _copy_media(
                 "media",
                 data,
                 name=view.file,
-                scope=BlobScope(slug=listing.slug, title=title),
+                scope=BlobScope(slug=slug, title=title),
                 key=key,
             )
         finally:
@@ -1006,7 +1175,7 @@ def check_sliceable(
         )
 
 
-async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
+async def publish(core: AppState, store: ListingStore, listing_id: str) -> Listing:
     """The listing checked against its commit and published (see the module's notes).
     409 ``storefront_needs_s3`` unless the store is S3; 422 ``listing_param_unknown``,
     ``listing_bounds_outside_schema``, ``listing_fixed_invalid``,
@@ -1018,7 +1187,8 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     slice profile has no filament type for (#6153); 409 ``listing_changed`` when it was
     edited while it was being published; 409 ``listing_publishing`` while another
     publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
-    :data:`PUBLISH_LOCKS_MAX` other publishes run."""
+    :data:`PUBLISH_LOCKS_MAX` other publishes run. A file listing is refused (422
+    ``listing_source_invalid``, `_not_yet`) until its checks land (#6710 §12 item 3)."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
         raise listing_not_found(listing_id)
@@ -1035,8 +1205,11 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
 
 
 async def _publish(
-    core: Core, store: ListingStore, listing: Listing, snapshots: SnapshotStore
+    core: AppState, store: ListingStore, listing: Listing, snapshots: SnapshotStore
 ) -> Listing:
+    if listing.source == "library_file":
+        raise _not_yet()
+    assert listing.slug is not None and listing.commit is not None
     facts = await _commit_facts(core, listing.slug, listing.commit)
     colours = await asyncio.to_thread(store.filament_colours)
     supports = await asyncio.to_thread(store.support_filaments)
@@ -1050,9 +1223,9 @@ async def _publish(
     check_sliceable(profile, listing, materials)
     refs = BlobRefs(core.projection.pool)
     try:
-        key = await snapshots.ensure(listing.slug, listing.commit)
+        key = await snapshots.ensure(facts_slug := listing.slug, listing.commit)
         await asyncio.to_thread(refs.add, key, HOLDER, listing.id)
-        media = await _copy_media(core, refs, listing, facts.template_name)
+        media = await _copy_media(core, refs, listing, facts_slug, facts.template_name)
         return await asyncio.to_thread(
             store.mark_published,
             listing.id,
@@ -1066,7 +1239,7 @@ async def _publish(
 
 
 def _check_pictures(
-    core: Core, slug: str, media_ids: Sequence[str], kept: Collection[str] = ()
+    core: AppState, slug: str, media_ids: Sequence[str], kept: Collection[str] = ()
 ) -> None:
     """422 ``listing_media_duplicate`` for an id named twice, ``listing_media_unknown``
     for one the template does not have (or whose file is missing), and
@@ -1094,7 +1267,7 @@ def _check_pictures(
 
 
 async def change_media(
-    core: Core,
+    core: AppState,
     store: ListingStore,
     listing_id: str,
     media_ids: Sequence[str],
@@ -1118,6 +1291,8 @@ async def change_media(
     # The cheap check first: a stale read is refused before any media is read.
     if listing.updated_at != expected_updated_at:
         raise _changed(listing_id)
+    if listing.slug is None:
+        raise _not_yet()
     await asyncio.to_thread(
         _check_pictures, core, listing.slug, media_ids, frozenset(listing.media_ids)
     )
@@ -1295,8 +1470,7 @@ def _offered(
     and live materials a render takes (`printable_materials` of `effective_materials`),
     so a visitor never sees a colour that can only clash, and a listing no render can
     make reads as unavailable. The materials stay the effective list."""
-    assert listing.snapshot is not None
-    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
+    by_name = {p.name: p for p in listing.design[2].schema_.parameters}
     effective = effective_materials(listing, shop_materials)
     printable = printable_materials(listing, filaments, effective)
     offered = customer_filaments(listing, filaments, printable)
@@ -1381,11 +1555,23 @@ async def public_listing(
     )
 
 
-def published_listing(store: ListingStore, listing_id: str) -> Listing:
-    """The listing, when it is published; 404 ``listing_not_found`` for an unpublished
-    or unknown one alike, so a visitor cannot tell them apart, and for an id that is not
-    one, before any lookup."""
+def published_listing(
+    store: ListingStore,
+    listing_id: str,
+    *,
+    source: Literal["template", "library_file"] = "template",
+) -> Listing:
+    """The listing, when it is published and sells ``source``; 404 ``listing_not_found``
+    for an unpublished or unknown one alike, so a visitor cannot tell them apart, and for
+    an id that is not one, before any lookup. A template's render, its public page and
+    its prepare run take a template listing only (#6710: a file listing is not shown to a
+    customer until its page exists)."""
     listing = store.get(listing_id) if LISTING_ID.fullmatch(listing_id) else None
-    if listing is None or not listing.published or listing.snapshot is None:
+    if (
+        listing is None
+        or not listing.published
+        or listing.snapshot is None
+        or listing.source != source
+    ):
         raise problem(status.HTTP_404_NOT_FOUND, "listing_not_found", "There is no such listing.")
     return listing
