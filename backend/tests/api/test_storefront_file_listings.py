@@ -27,7 +27,12 @@ from scadbuddy.library.settings_store import ModelPrintChoices, S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.storefront import file_listings
-from scadbuddy.orders.storefront.listings import HOLDER, KEPT_HOLDER, published_listing
+from scadbuddy.orders.storefront.listings import (
+    HOLDER,
+    KEPT_HOLDER,
+    file_copy_key,
+    published_listing,
+)
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.store import NativeFile
@@ -473,6 +478,41 @@ def test_a_published_plate_picture_is_served_from_its_copy(
     monkeypatch.setattr(file_listings, "plate_image", whole_file)
     found = client.get(f"{LISTINGS}/{listing['id']}/plates/1.png")
     assert found.status_code == 200 and found.content.startswith(b"\x89PNG")
+
+
+def test_a_plate_picture_whose_copy_is_gone_is_read_from_the_held_file(
+    client: TestClient, keychain: NativeFile, pla_red: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = publish(
+        client, create(client, body(keychain, [pla_red], media_ids=["plate:1"]))["id"]
+    )
+    copied = listing["media"][0]["blob_key"]
+    read_held = file_listings.read_held
+    keys: list[str] = []
+
+    async def copy_gone(content: ContentStore, key: str) -> bytes | None:
+        keys.append(key)
+        return None if key == copied else await read_held(content, key)
+
+    monkeypatch.setattr(file_listings, "read_held", copy_gone)
+    found = client.get(f"{LISTINGS}/{listing['id']}/plates/1.png")
+    assert found.status_code == 200 and found.content.startswith(b"\x89PNG")
+    assert keys == [copied, file_copy_key(keychain.sha256)]
+
+
+def test_a_listing_with_no_pin_has_no_plate_picture(
+    client: TestClient, keychain: NativeFile, pla_red: str
+) -> None:
+    """§9.3: 404 for a listing with no pin, whatever pictures its row still names."""
+    listing = publish(
+        client, create(client, body(keychain, [pla_red], media_ids=["plate:1"]))["id"]
+    )
+    with _state(client).projection.pool.connection() as conn:
+        conn.execute(
+            "UPDATE storefront_listings SET library_file = library_file - 'pinned' WHERE id = %s",
+            (listing["id"],),
+        )
+    assert client.get(f"{LISTINGS}/{listing['id']}/plates/1.png").status_code == 404
 
 
 def test_a_delete_drops_the_kept_copy(

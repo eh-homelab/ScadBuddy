@@ -516,23 +516,16 @@ async def pinned_plate_image(
     so a file gone from it still shows its pictures. A plate picture publish copied
     (``plate:<n>`` in the listing's ``media``) is read from that copy, not the whole file."""
     listing = await asyncio.to_thread(store.get, listing_id)
+    if listing is None or listing.library_file is None or listing.library_file.pinned is None:
+        return None
+    pinned = listing.library_file.pinned
     copied = next(
-        (
-            item.blob_key
-            for item in (listing.media if listing is not None else [])
-            if item.media_id == f"plate:{plate}"
-        ),
-        None,
+        (item.blob_key for item in listing.media if item.media_id == f"plate:{plate}"), None
     )
     if copied is not None:
         picture = await read_held(_content(state), copied)
         if picture is not None:
             return picture
-    pinned = (
-        None if listing is None or listing.library_file is None else listing.library_file.pinned
-    )
-    if pinned is None:
-        return None
     payload = await read_held(_content(state), file_copy_key(pinned))
     return None if payload is None else await asyncio.to_thread(plate_image, payload, plate)
 
