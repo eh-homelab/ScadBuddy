@@ -366,10 +366,16 @@ export function FilamentPicker({
   showMissing = false,
 }: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
-  // The printer and file a reset was pressed for: another printer or file is a new start
-  // (#6885 review). Not the options object: a new slice's grams make a new one.
+  // The printer, file and slots a reset was pressed for: another one is a new start (#6885
+  // review). Each slot's id, material and colour tell two outputs apart, which have no library file
+  // (#2720). Not the options object: a new slice's grams make a new one.
   const [resetFor, setResetFor] = useState<string | null>(null)
-  const target = `${options.printer_id ?? ''}|${options.library_file_id ?? ''}|${options.source ?? ''}`
+  const target = [
+    options.printer_id ?? '',
+    options.library_file_id ?? '',
+    options.source ?? '',
+    ...(options.slots ?? []).map((slot) => `${slot.slot_id}:${slot.material ?? ''}:${slot.colour ?? ''}`),
+  ].join('|')
   // Slots whose list is open although a spool is chosen. A slot with a spool shows only
   // that spool until "Change" opens it; a slot with nothing chosen is always open.
   const [opened, setOpened] = useState<ReadonlySet<number>>(() => new Set())

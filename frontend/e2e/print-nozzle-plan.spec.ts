@@ -17,11 +17,10 @@ test.describe('print dialog on the H2C', () => {
     return dialog
   }
 
-  test('basic mode: one flow, the plan on both nozzles, no sides, and a background slice', async ({ page }) => {
+  test('basic mode: the nozzle in the summary row, the plan on both nozzles, no sides, and a background slice', async ({ page }) => {
     const dialog = await openDialog(page)
-    const flow = dialog.getByRole('radiogroup', { name: 'Nozzle' })
-    await expect(flow.getByRole('radio')).toHaveText(['High Flow', 'Standard'])
-    await expect(dialog.getByTestId('flow-high_flow')).toHaveAttribute('aria-checked', 'true')
+    // #6885 — one nozzle control: the summary row's cell opens the nozzle step.
+    await expect(dialog.getByTestId('print-summary-nozzle')).toHaveText('0.4 mm High Flow')
     await expect(dialog.getByTestId('nozzle-plan')).toContainText('Mistletoe Green → right')
     await expect(dialog.getByTestId('nozzle-plan')).toContainText('Inland Black → left')
     await expect(dialog.getByTestId('nozzle-plan')).toContainText('0.4 High Flow')
@@ -34,7 +33,11 @@ test.describe('print dialog on the H2C', () => {
     await expect(pane.getByTestId('preview-side-1')).toHaveText('right nozzle')
 
     // Standard reslices: the old result is marked until the new one lands.
-    await dialog.getByTestId('flow-standard').click()
+    await dialog.getByTestId('print-summary-nozzle-open').click()
+    const step = dialog.getByRole('group', { name: 'Nozzles' })
+    await step.getByRole('radio', { name: 'Left Standard' }).click()
+    await step.getByRole('radio', { name: 'Right Standard' }).click()
+    await expect(dialog.getByTestId('print-summary-nozzle')).toHaveText('0.4 mm Standard')
     await expect(pane.getByTestId('slice-status')).toBeVisible()
     await expect(pane.getByTestId('slice-time')).toHaveText('1h 6m', { timeout: 15_000 })
     await expect(dialog.getByTestId('nozzle-plan')).toContainText('0.4 Standard')
@@ -86,7 +89,7 @@ test.describe('print dialog on the H2C', () => {
     const pane = dialog.getByTestId('preview-pane')
     await pane.scrollIntoViewIfNeeded()
     await expect(pane.getByTestId('slice-time')).toBeVisible({ timeout: 15_000 })
-    const flow = await dialog.getByTestId('flow-high_flow').boundingBox()
+    const flow = await dialog.getByTestId('print-summary').boundingBox()
     const box = await pane.boundingBox()
     expect(box && flow && box.y > flow.y).toBe(true)
     expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
