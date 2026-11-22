@@ -617,6 +617,23 @@ describe('CustomizePage', () => {
     expect(screen.queryByText('Working out the price…')).toBeNull()
   })
 
+  it('stops saying the price is being worked out when the read of it fails (#6921 review)', async () => {
+    let reads = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
+      http.get('/api/store/v1/renders/:id/estimate', () => {
+        reads += 1
+        return reads < 2
+          ? HttpResponse.json({ ...PENDING_PRICE, retry_after: 0 })
+          : HttpResponse.json({ type: `${PROBLEMS}render_not_found`, status: 404, detail: 'gone' }, { status: 404, headers: { 'Content-Type': 'application/problem+json' } })
+      }),
+    )
+    show()
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(reads).toBe(2)
+    expect(screen.queryByText('Working out the price…')).toBeNull()
+  })
+
   it('shows no number when there is no firm price (#6153)', async () => {
     server.use(
       http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
