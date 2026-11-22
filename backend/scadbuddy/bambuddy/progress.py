@@ -77,10 +77,14 @@ class LanRunControl(BaseModel):
     awaiting_clear: bool = False
     #: The run has started nothing: the printer was busy, so it waits for it (#6871).
     queued: bool = False
-    #: A queued run that waits for the print the printer is running to end; ``False``
-    #: when it waits only for an ended print's plate to be cleared (``lan_queued.job``
-    #: is ``None``).
+    #: A queued run that waits for the print the printer is running to end. ``False``
+    #: when ``lan_queued.job`` is ``None`` (it waits only for an ended print's plate), or
+    #: when the printer's live state says the print it was queued behind has ended
+    #: (`printers.progress.printing_now`); with no state read, it follows ``job``.
     queued_for_print: bool = False
+    #: A queued run whose printer reads ``IDLE`` now (a restart, say): the print it was
+    #: queued behind is gone from the report, but its plate may still hold it.
+    printer_idle: bool = False
 
 
 class PrintProgress(BaseModel):

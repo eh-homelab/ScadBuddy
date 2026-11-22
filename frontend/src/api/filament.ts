@@ -183,6 +183,13 @@ export const getSyncStatus = () => request<SyncStatus>(`${BASE}/sync/status`)
  */
 export const runSync = () => request<Schemas['SyncRun']>(`${BASE}/sync/run`, { method: 'POST' })
 
+export type SyncPass = Schemas['SyncPass']
+export type SyncPassPage = Schemas['SyncPassPage']
+
+/** #6905 — a page of sync passes, newest first, failed ones too; pass `next_cursor` back as `cursor`. */
+export const listSyncPasses = (params: Query<'list_filament_sync_passes_api_v1_filament_sync_passes_get'> = {}) =>
+  request<SyncPassPage>(`${BASE}/sync/passes${query(params)}`)
+
 export type LinksResetCounts = Schemas['LinksResetCounts']
 export type LinksResetPreview = Schemas['LinksResetPreview']
 export type LinksResetDone = Schemas['LinksResetDone']

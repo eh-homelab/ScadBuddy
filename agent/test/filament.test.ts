@@ -869,6 +869,8 @@ const SYNC = `${BACKEND}/api/v1/filament/sync`
 describe('filament Bambuddy sync tools (#6265)', () => {
   it.each([
     ['filament_sync_status', 'read', false],
+    // #6905: the pass history reads ScadBuddy only.
+    ['filament_sync_passes', 'read', false],
     // It writes Bambuddy, as filament_rfid_reconcile does: outward and approved first.
     ['filament_sync_run', 'outward', true],
     // #6773: it deletes the links and asks for a pass that writes Bambuddy.
@@ -942,7 +944,7 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     const deps = { services: services(), sessions: { ownerOf: async () => undefined } }
     const activities = toolActivities(ALL_TOOLS, deps)
     const calls = toolCallActivities(ALL_TOOLS, deps)
-    for (const name of ['filament_sync_status', 'filament_sync_run']) {
+    for (const name of ['filament_sync_status', 'filament_sync_passes', 'filament_sync_run']) {
       expect(activities[name]).toBeTypeOf('function')
       expect(calls[toolCallActivity(name)]).toBeTypeOf('function')
     }
@@ -958,6 +960,25 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     const status = { instance: null, errors: [], skipped: 'no_bambuddy' }
     server.use(http.get(`${SYNC}/status`, () => HttpResponse.json(status)))
     expect(firstText(await runTool(tool('filament_sync_status'), {}, ctx()))).toEqual(status)
+  })
+
+  it('reads the pass history a page at a time (#6905)', async () => {
+    const queries: Record<string, string>[] = []
+    const page = {
+      passes: [{ id: ROW, trigger: 'timer', error: 'crud_unavailable:transport', written: 0 }],
+      next_cursor: 'abc',
+    }
+    server.use(
+      http.get(`${SYNC}/passes`, ({ request }) => {
+        queries.push(Object.fromEntries(new URL(request.url).searchParams))
+        return HttpResponse.json(page)
+      }),
+    )
+    const t = tool('filament_sync_passes')
+    expect(firstText(await runTool(t, {}, ctx()))).toEqual(page)
+    await runTool(t, { cursor: 'abc', limit: 5 }, ctx())
+    expect(queries).toEqual([{ limit: '20' }, { cursor: 'abc', limit: '5' }])
+    expect(() => t.parse({ limit: 201 })).toThrow()
   })
 
   it('asks for a full pass with POST', async () => {

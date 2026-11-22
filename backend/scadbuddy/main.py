@@ -98,7 +98,7 @@ from scadbuddy.crud import listener as crud_listener
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, execute_pull
 from scadbuddy.filament.bb_pull_run import FilamentPullActivities
 from scadbuddy.filament.bb_sync_nudge import instance_for
-from scadbuddy.filament.bb_sync_results import LocalFilamentSync, adopt_instance
+from scadbuddy.filament.bb_sync_results import InProcessFilamentSync, adopt_instance
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
@@ -218,6 +218,7 @@ from scadbuddy.workflows.housekeeping import (
     LOST_SLICES_SWEEP,
     MAINTENANCE_IMPORT_SWEEP,
     NATIVE_COPIES_SWEEP,
+    NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CLOSES_SWEEP,
@@ -227,6 +228,7 @@ from scadbuddy.workflows.housekeeping import (
     QUOTE_HOLDS_SWEEP,
     REAP_SWEEP,
     RUN_HOLDS_SWEEP,
+    RUN_HOLDS_TIMEOUT,
     STOREFRONT_DRAFTS_SWEEP,
     STOREFRONT_MAIL_SWEEP,
     SWEEPS,
@@ -984,7 +986,7 @@ async def _sweep_native_copies_logged(state: AppState) -> None:
         # backend, since the strip only reads. Without Temporal every LAN run with prints
         # still to start is kept as in use.
         try:
-            await end_gone_sequences(state.print_runs)
+            await end_gone_sequences(state.print_runs, NATIVE_COPIES_TIMEOUT / 2)
         except Exception:
             logger.warning(
                 "could not check the LAN runs' sequences; their files are kept", exc_info=True
@@ -1060,6 +1062,19 @@ async def _sweep_activity_logged(state: AppState) -> None:
     else:
         if pruned:
             logger.info("pruned sensor notifications", extra={"count": pruned})
+    # #6905: the filament sync's old pass rows, at most `PRUNE_BATCH` a run, by the setting
+    # read above (a failed load prunes nothing), in this activity for the same reason.
+    try:
+        pruned = await asyncio.to_thread(
+            state.components.get(FILAMENT).sync_passes.prune,
+            settings.filament_sync_pass_ttl_days,
+        )
+    except Exception:
+        logger.exception("could not prune the filament sync passes")
+        failed = True
+    else:
+        if pruned:
+            logger.info("pruned filament sync passes", extra={"count": pruned})
     if failed:
         raise RuntimeError("the activity sweep failed")
 
@@ -1499,7 +1514,14 @@ async def _import_maintenance_logged(state: AppState) -> None:
 
 
 async def _reap_run_holds_logged(state: AppState) -> None:
-    """#6122: the LAN runs' holds on their sliced files that a run's end left."""
+    """#6122: the LAN runs' holds on their sliced files that a run's end left. First
+    (#6871) the LAN runs whose sequence is gone are recorded stopped, which drops their
+    holds too and lets the next queued run head its printer's card, every
+    `PRUNE_INTERVAL` whatever the asset sweep's interval."""
+    try:
+        await end_gone_sequences(state.print_runs, RUN_HOLDS_TIMEOUT / 2)
+    except Exception:
+        logger.warning("could not check the LAN runs' sequences", exc_info=True)
     try:
         dropped = await asyncio.to_thread(reap_run_holds, state.refs)
     except Exception:
@@ -1782,9 +1804,10 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists),
         ).lan_auto_import,
         # The filament sync's pass (#6265) on this process's own stores, as the CRUD
-        # routes run it for the print worker.
+        # routes run it for the print worker; it waits out a busy sync as that worker's
+        # client waits out the routes' 503 `sync_busy` (#6910 review).
         FilamentSyncActivities(
-            LocalFilamentSync(state.components.get(FILAMENT), state.settings_store),
+            InProcessFilamentSync(state.components.get(FILAMENT), state.settings_store),
             settings_loader(state.settings_store.load),
         ).sync_pass,
         # The Bambuddy pull's reads (#6772) on this process's own stores, as the CRUD

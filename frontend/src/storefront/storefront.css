@@ -542,6 +542,16 @@
   margin: 2px 0 0;
   font-size: 0.9rem;
 }
+/* #6921: a price that is not yet the firm price of the choices on screen stays visible,
+   marked as updating: a quieter panel with a dashed edge, never the firm one's. */
+.sf-estimate-updating {
+  background: transparent;
+  outline: 2px dashed var(--sf-signal);
+  outline-offset: -2px;
+}
+.sf-estimate-updating .sf-estimate-price {
+  opacity: 0.7;
+}
 
 /* The order. */
 .sf-panel {

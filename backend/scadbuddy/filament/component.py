@@ -10,6 +10,7 @@ from typing import Annotated
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.filament.assignments_cache import AssignmentsCache
+from scadbuddy.filament.bb_sync_passes import SyncPassStore
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import FilamentInventory, PoolSbSpoolReads
 from scadbuddy.filament.invoices import InvoiceStore
@@ -63,6 +64,11 @@ class Filament:
         make them (`SbSpoolReads`): Bambuddy's path's picker rows among them (#6262
         Task 7)."""
         return PoolSbSpoolReads(self.inventory, self.presets)
+
+    @property
+    def sync_passes(self) -> SyncPassStore:
+        """The Bambuddy sync's pass history (#6905)."""
+        return SyncPassStore(self.spools)
 
 
 FILAMENT: Key[Filament] = Key("filament")

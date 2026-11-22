@@ -2645,10 +2645,11 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   or it is busy with other fetches" (build Decision 115).
 - **What is retried.** A login that the site refuses (it sends the browser back to
   `/login`), an unknown 3DFP id, a missing export option and a file over 512 KiB are not
-  retried. A network error, a failed navigation, a timeout, a browser crash and Vercel's
+  retried in a fetch. A network error, a failed navigation, a timeout, a browser crash and Vercel's
   check are retried. At start the browser service logs them and starts anyway, so a network
-  blip does not stop it (build Decisions 110, 116); a refused login or a browser that does
-  not launch ends it with 1. A browser service that cannot be reached is a retried
+  blip does not stop it (build Decisions 110, 116). A login refused at start is tried again
+  10 s and then 30 s later (#6941); one refused on all three tries, or a browser that does
+  not launch, ends it with 1. A browser service that cannot be reached is a retried
   `browser` failure.
 - **Deploy:** `deploy.reusable.yml` pins `applications/scadbuddy/scadbuddy-profile-fetch.yaml`
   (`MANIFEST_PROFILE_FETCH`) like the slicer: only once that file is in clusters and names

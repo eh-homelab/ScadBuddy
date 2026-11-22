@@ -72,11 +72,13 @@ from scadbuddy.filament.bb_sync_models import (
     LinksResetDone,
     LinksResetPreview,
     LinksResetRequest,
+    SyncPassPage,
     SyncRun,
     SyncStatus,
     skip_reason,
 )
 from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.bb_sync_passes import PAGE_MAX, BadPassCursorError
 from scadbuddy.filament.bb_sync_results import (
     Listing,
     ResetRefusedError,
@@ -1880,6 +1882,39 @@ async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDe
     )
 
 
+@router.get(
+    "/sync/passes",
+    response_model=SyncPassPage,
+    summary="Bambuddy sync pass history",
+    description=(
+        "The ScadBuddy-to-Bambuddy sync's passes (#6905), newest first by when each ended, "
+        "failed ones too; `GET /filament/sync/status` holds the last one. Each has its `id`, "
+        "the Bambuddy `instance` it served, its `trigger` (`timer`: the interval ran out; "
+        "`change`: a write's nudge; `full`: a full pass asked for, such as Sync now; `more`: "
+        "the pass before it left writes; null when the worker did not say), `started_at` (by "
+        "the worker's clock) and `ended_at` (the server's), the counts `written`, `failed`, "
+        "`deferred`, `conflicts` and `unmapped_k`, `skipped` (`no_bambuddy` or "
+        "`nothing_pushes`), `instance_changed` (the links or the pass's instance were another "
+        "Bambuddy's, so it wrote nothing) and `error` (a label, null when it worked; "
+        "`crud_unavailable:<failure>` or `crud_refused:<status>` when a call to ScadBuddy's "
+        "own API failed, `internal` for any other failure outside Bambuddy). A page holds up "
+        f"to `limit` passes (at most {PAGE_MAX}); `next_cursor` is opaque, and passing it "
+        "back as `cursor` gives the next page with no row lost or repeated. 422 for a cursor "
+        "no page gave. Rows older than the setting `filament_sync_pass_ttl_days` (30 by "
+        "default) are deleted. Reads ScadBuddy only."
+    ),
+)
+async def list_filament_sync_passes(
+    filament: FilamentDep,
+    cursor: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=PAGE_MAX)] = 20,
+) -> SyncPassPage:
+    try:
+        return await asyncio.to_thread(filament.sync_passes.page, cursor=cursor, limit=limit)
+    except BadPassCursorError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+
+
 def _configured(url: str | None) -> str | None:
     """The configured Bambuddy's instance, ``None`` with none configured."""
     return instance_for(url) if url else None
@@ -1926,7 +1961,14 @@ async def _listing(settings: StoredSettings) -> tuple[Listing, bool]:
         "RFID tag, a supplier, location or insert type by its name), so every untagged "
         "spool is made again on the side its direction sends it to. Reads ScadBuddy and "
         "the configured Bambuddy's spools (`GET`). When Bambuddy cannot be read the answer "
-        "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. The "
+        "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. "
+        "`changed_since_pull` is true when `same_bambuddy` is false although the "
+        "configured Bambuddy holds every linked spool and none is older than its link, and "
+        "at least half the links have a time on both sides (Decision 199): every linked "
+        "spool ScadBuddy could compare (a time on both sides) was edited in "
+        "Bambuddy since the last pull, so none matches exactly and ScadBuddy cannot prove "
+        "it is the same Bambuddy; only the delete is "
+        "then offered. The "
         "counts are approximate: they are read without a lock, so a pass that runs "
         "meanwhile can change them. The answer of the `POST` gives the counts it deleted."
     ),

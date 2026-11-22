@@ -305,18 +305,29 @@ def without_empty_unconfirmed(model: SyncPlan | ResultsRequest) -> dict[str, Any
 #: The pass activity's name (`bb_sync_run.FilamentSyncActivities`), as the workflow
 #: (`workflows/filament_sync.py`) schedules it.
 SYNC_PASS_ACTIVITY = "filament_bb_sync_pass"
+#: The 503 problem's ``reason`` when another plan or results call of the instance is
+#: running (#6902, `bb_sync_plan.hold_sync`): the client tries again after a backoff.
+SYNC_BUSY = "sync_busy"
 #: The timer's interval a pass reports when it made no plan, unless told another.
 DEFAULT_INTERVAL_S = 300.0
+
+
+#: What started a pass (#6905): ``timer`` (the workflow's interval ran out), ``change`` (a
+#: write's nudge), ``full`` (a nudge that asked for a full pass: "Sync now", a reset of the
+#: links, the API's start), ``more`` (the pass before it left writes, so it ran at once).
+PassTrigger = Literal["timer", "change", "full", "more"]
 
 
 class SyncPassInput(BaseModel, extra="forbid"):
     """The activity's input: the Bambuddy instance the workflow serves, whether the pass
     is a full one (Decision 7), and the interval the workflow waits now, which a pass
-    that made no plan reports back unchanged."""
+    that made no plan reports back unchanged. ``trigger``: what started it (#6905);
+    ``None`` from a history recorded before #6905."""
 
     instance: str
     full: bool
     interval_s: float = DEFAULT_INTERVAL_S
+    trigger: PassTrigger | None = None
 
 
 #: Why a pass did nothing: no Bambuddy is configured, or no data type pushes (R-T8-2).
@@ -340,7 +351,14 @@ class SyncPassResult(BaseModel, extra="forbid"):
     it is ``None``, so a newer API takes an older or start-less worker's result. Roll the
     API before the print worker: the manifests are separate apps and nothing in the
     README's "Deploying" orders them, so during a skew a pass can be lost, and the next
-    signal or the timer runs another."""
+    signal or the timer runs another.
+
+    #6905: ``pass_id`` names the pass's row in ``filament_bb_sync_passes`` (the worker
+    makes it when the pass starts, so a retried record adds no second row), ``instance``
+    is the Bambuddy the workflow serves, and ``trigger`` what started the pass. Each is
+    ``None`` from an older worker, and `RemoteFilamentSync.record_pass` leaves it out then,
+    as it does ``started_at``; the record makes an id of its own for a result with
+    none."""
 
     written: int
     failed: int
@@ -353,6 +371,9 @@ class SyncPassResult(BaseModel, extra="forbid"):
     skipped: SkipReason | None = None
     error: str | None = None
     started_at: AwareDatetime | None = None
+    pass_id: UUID | None = None
+    instance: str | None = None
+    trigger: PassTrigger | None = None
 
 
 #: The data types the engine pushes (`tags` is #6264's drain, Decision 6).
@@ -431,6 +452,37 @@ class SyncStatus(BaseModel, extra="forbid"):
     instance_changed: bool = False
 
 
+class SyncPass(BaseModel, extra="forbid"):
+    """One ``filament_bb_sync_passes`` row (#6905): one pass of the sync, failed ones too.
+    ``started_at`` is by the worker's clock and ``ended_at`` the database's, when the pass
+    was recorded. ``trigger`` is ``None`` for a pass whose worker did not say. ``error`` is
+    a label (`bb_sync_run.failure_label`), never a message; ``None`` when it worked.
+    ``instance_changed``: the links belong to another Bambuddy, or the pass's instance is
+    not the configured one, so it wrote nothing and the workflow ended."""
+
+    id: UUID
+    instance: str | None
+    trigger: PassTrigger | None
+    started_at: datetime
+    ended_at: datetime
+    written: int
+    failed: int
+    deferred: int
+    conflicts: int
+    unmapped_k: int
+    skipped: SkipReason | None
+    instance_changed: bool
+    error: str | None
+
+
+class SyncPassPage(BaseModel, extra="forbid"):
+    """``GET /filament/sync/passes``: a page of passes, newest first. ``next_cursor`` is
+    opaque; ``None`` on the last page."""
+
+    passes: list[SyncPass]
+    next_cursor: str | None
+
+
 class SyncRun(BaseModel, extra="forbid"):
     """``POST /filament/sync/run``'s answer: the full pass was asked for. ``requested_at`` is
     the API's clock when it asked; a pass whose ``last_pass_started_at`` is at or after it
@@ -468,12 +520,18 @@ class LinksResetPreview(BaseModel, extra="forbid"):
     saw them (`bb_sync_results.same_bambuddy`, #6845), so a reset with ``expect_kept``
     keeps every link and deletes nothing. ``bambuddy_unreadable``: the configured
     Bambuddy could not be read, so ``same_bambuddy`` is false and only the delete is
-    offered (Decision 198)."""
+    offered (Decision 198). ``changed_since_pull``: ``same_bambuddy`` is false although
+    Bambuddy holds every linked spool, none is older than its link, and at least half the
+    links have a time on both sides (Decision 199): every linked spool with a time on both
+    sides (untimed links are skipped) was edited in Bambuddy since the
+    last pull, so none matches exactly and the proof has nothing to stand on
+    (`bb_sync_results.changed_since_pull`, #6845 review)."""
 
     instance: str | None
     configured_instance: str | None
     counts: LinksResetCounts
     same_bambuddy: bool
+    changed_since_pull: bool = False
     bambuddy_unreadable: bool = False
 
 
@@ -492,8 +550,11 @@ class LinksResetRequest(BaseModel, extra="forbid"):
 class LinksResetDone(BaseModel, extra="forbid"):
     """``POST /filament/sync/reset-links``'s answer: the instance whose links were
     reset, whether they were ``kept`` (the configured Bambuddy is the same one, #6845:
-    nothing deleted, the links now belong to it), and what was deleted."""
+    nothing deleted, the links now belong to it), and what was deleted.
+    ``configured_instance``: the instance the links belong to now, which a kept reset has
+    just recorded (the configured Bambuddy's); null after a delete (#6845 review)."""
 
     instance: str
     kept: bool
+    configured_instance: str | None = None
     deleted: LinksResetCounts

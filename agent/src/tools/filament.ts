@@ -1178,6 +1178,32 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_sync_passes',
+    label: 'Read the Bambuddy sync history',
+    description:
+      "The ScadBuddy-to-Bambuddy filament sync's passes, newest first, failed ones too (filament_sync_status " +
+      'holds only the last). Each has its `id`, the Bambuddy `instance`, its `trigger` (`timer`, `change`: a ' +
+      'write\'s nudge, `full`: a full pass asked for such as Sync now, `more`: the pass before it left writes; ' +
+      'null when unknown), `started_at`, `ended_at`, the counts `written`, `failed`, `deferred`, `conflicts` and ' +
+      '`unmapped_k`, `skipped` (`no_bambuddy` or `nothing_pushes`), `instance_changed` and `error` (a label, null ' +
+      "when it worked; `crud_unavailable:<failure>` or `crud_refused:<status>` when ScadBuddy's own API failed " +
+      'during the pass, `internal` for any other failure outside Bambuddy). A page holds up to `limit` passes (at most 200); when `next_cursor` is set, pass it back ' +
+      'as `cursor` for the next page. Passes older than the setting `filament_sync_pass_ttl_days` (30 by default) ' +
+      'are gone. Reads ScadBuddy only.',
+    input: z.object({
+      cursor: z.string().optional(),
+      limit: z.number().int().min(1).max(200).default(20),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/sync/passes'],
+    handler: async (query, { backend }) =>
+      json(
+        await ok(backend.GET('/api/v1/filament/sync/passes', { params: { query } }), 'read the Bambuddy sync history'),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_sync_run',
     label: 'Sync with Bambuddy now',
     description:
@@ -1208,7 +1234,10 @@ const tools: Tool[] = [
       "`expect_kept: true`: it reads the configured Bambuddy's spools, and when that Bambuddy holds every linked " +
       'spool as ScadBuddy last saw it (the same Bambuddy at a new address), nothing is deleted: every link now ' +
       'belongs to it, and the answer has `kept: true` and zero counts. When it cannot prove that (Bambuddy could ' +
-      'not be read, or it is another Bambuddy), it answers 409 `proof_changed` and deletes nothing. Only then, ' +
+      'not be read, or it is another Bambuddy, or every linked spool ScadBuddy could compare (a time on both sides) was edited in Bambuddy since the last pull so ' +
+      'none matches what ScadBuddy saw and the proof has nothing to stand on), it answers 409 `proof_changed` and ' +
+      'deletes nothing; tell the user which case it is if you know (the dry run `GET /filament/sync/reset-links` ' +
+      'has `changed_since_pull`). Only then, ' +
       'and only after the user agreed to the delete below, call it again with `expect_kept: false` (the default), ' +
       'which reads no Bambuddy and deletes, in one transaction, every spool link, the ' +
       'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +

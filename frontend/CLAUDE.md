@@ -84,6 +84,17 @@ same way, `vite.config.ts`).
   `vite dev` and
   `vite preview` serve the page under `/store` (`storefrontPreview`); its mocks are
   `src/mocks/features/storefrontPublic.ts`, its e2e `e2e/storefront.spec.ts` (390 px wide).
+  The price (#6153, #6921): `pages/CustomizePage.tsx` reads `store.variant` (the instant
+  read, `POST /listings/{id}/variant`) first on load and on each change. A cached preview
+  shows at once; with it and a `slice` price the page posts no render (the add takes the
+  variant the shop priced). Otherwise it renders and reads the estimate as before. A
+  price, once known, stays on screen: `components/Estimate.tsx` `updating` marks one that
+  is not yet the firm price of the choices on screen, and a `last` price is always marked,
+  never firm. A render that ends with no price (refused, failed, too slow, or its estimate
+  read failed) drops any other price and a `last` one, so nothing shows as updating when
+  nothing is. "Working out the price…" shows only with no price known; "We price this
+  design by hand" only when the render's estimate answers `none`. The mock holds a variant
+  once its render's estimate answered (`holdVariant` seeds one).
   The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)
   and loads Cloudflare's script only when `components/Turnstile.tsx` mounts. A form that
   takes the check sends the widget's token as `X-Turnstile-Token` and draws a new widget
@@ -294,13 +305,17 @@ same way, `vite.config.ts`).
   (`getSyncStatus`, `GET /filament/sync/status`: the last pass, why none runs, and each
   item whose last write failed or was held back, with `syncErrorText`); and "Sync now"
   (`runSync`, `POST /filament/sync/run`), after which the status is read again until a
-  pass has started at or after the run's `requested_at` (R-T11-2, #6836). While the status says
+  pass has started at or after the run's `requested_at` (R-T11-2, #6836). Under the status,
+  "Recent passes" (#6905, `SyncPassesRow`, `listSyncPasses`, `GET /filament/sync/passes`) lists
+  the passes newest first, 10 a page with "Show older passes", read again when the status's last
+  pass moves, and "Keep sync history for (days)" is the stored `filament_sync_pass_ttl_days`
+  (empty is 30). While the status says
   `instance_changed` it offers "Reset Bambuddy links" (#6773, `ResetLinks`: a dry run's
   counts in a confirm dialog, then `resetSyncLinks` with the dry run's `instance`; the mock's
   `linkOtherBambuddy` sets that state; with the dry run's `same_bambuddy` the dialog is "Keep the
   Bambuddy links?" and the reset sends `expect_kept` and deletes nothing, #6845,
   `linkOtherBambuddy(id, { same: true })`; a 409 `proof_changed` reads the dry run again and
-  says why, `loseSameBambuddy`; a dry run that cannot read Bambuddy notes it and offers the
+  says why, `loseSameBambuddy`; a dry run with `changed_since_pull` says every linked spool with a time on both sides changed since the last pull and offers the delete, `linkOtherBambuddy(id, { changed: true })`; a dry run that cannot read Bambuddy notes it and offers the
   delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264;
   the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
   `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and

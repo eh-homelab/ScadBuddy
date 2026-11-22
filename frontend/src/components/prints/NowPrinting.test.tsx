@@ -488,7 +488,7 @@ describe('NowPrinting (#977)', () => {
 
   // #4942, #4939 — the card of a printer a native run waits on carries the run's controls.
   it("shows a native run's controls on its printer's card, with the plate warning while it waits for a clear", async () => {
-    const control = { run_id: 'f'.repeat(32), waiting: 2, awaiting_clear: true, queued: false, queued_for_print: false }
+    const control = { run_id: 'f'.repeat(32), waiting: 2, awaiting_clear: true, queued: false, queued_for_print: false, printer_idle: false }
     setPrintersNow(
       PRINTERS_NOW.map((printer) =>
         printer.printer_id === 3

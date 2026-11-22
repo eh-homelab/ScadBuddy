@@ -8,10 +8,12 @@ the routes only send to it, and what they sent is in its history."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,12 +22,13 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHandle
 from temporalio.service import RPCError
 
+from scadbuddy import main as app_main
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.printers.component import PRINTERS, Printers
-from scadbuddy.printers.lan_models import LanStarted, LanStopped
+from scadbuddy.printers.lan_models import LanQueued, LanStarted, LanStopped
 from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.workflows.print_models import (
     LAN_SEQUENCE_WORKFLOW,
@@ -267,6 +270,7 @@ def test_the_printers_card_names_the_runs_controls(
         "awaiting_clear": True,
         "queued": False,
         "queued_for_print": False,
+        "printer_idle": False,
     }
     assert card["awaiting_plate_clear"] is True
 
@@ -305,3 +309,110 @@ def test_a_gone_oldest_run_gives_way_once_the_sweep_records_it(
     workflow_reaper.run(printing_api.end_gone_sequences(state.print_runs))
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
     assert card["lan_run"]["run_id"] == alive
+
+
+def test_the_prune_passes_run_holds_sweep_ends_a_gone_run(
+    client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
+) -> None:
+    """#6871 (review of #6939): the run-holds sweep, on the prune Schedule every
+    `PRUNE_INTERVAL` whatever the asset sweep's interval, records a run whose sequence is
+    gone as stopped, so the next run heads the printer's card within minutes."""
+    printer = _printer(client)
+    gone = _run(client, workflow_reaper, printer=printer)
+    alive = _run(client, workflow_reaper, printer=printer)
+    _sequence(workflow_reaper, alive, sequences)
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["run_id"] == gone
+
+    workflow_reaper.run(app_main._reap_run_holds_logged(_state(client)))
+
+    stopped = printing_api.SEQUENCE_GONE_STOP.model_dump()
+    assert client.get(f"/api/v1/print/runs/{gone}").json()["result"]["lan_stopped"] == stopped
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["run_id"] == alive
+
+
+def test_a_queued_runs_card_reads_whether_the_print_it_waits_for_still_runs(
+    client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
+) -> None:
+    """#6871 (review of #6939): `queued_for_print` follows the card's live state, so the
+    text turns to the plate once the print the run was queued behind has ended."""
+    printer = _printer(client)
+    printers: Printers = _state(client).components.get(PRINTERS)
+    queued = PrintRunResult(
+        library_file_id=41,
+        copies=1,
+        path="native",
+        lan_waiting=[1],
+        lan_queued=LanQueued(state="RUNNING", job=STARTED, place=1),
+    )
+    run_id = _run(client, workflow_reaper, queued, printer=printer)
+    _sequence(workflow_reaper, run_id, sequences)
+
+    printers.reports.put(printer, {"gcode_state": "RUNNING"}, datetime.now(UTC))
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["queued"] and card["lan_run"]["queued_for_print"]
+
+    printers.reports.put(printer, {"gcode_state": "FINISH"}, datetime.now(UTC))
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["queued"] and not card["lan_run"]["queued_for_print"]
+
+
+def test_a_hanging_describe_never_stops_the_hold_reap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#6871 (review of #6948): each run's sequence check is bounded, and one that does
+    not answer is skipped, so the run-holds reap after it still runs."""
+
+    class Hanging:
+        async def describe(self) -> None:
+            await asyncio.sleep(3600)
+
+    class Client:
+        def get_workflow_handle(self, workflow_id: str) -> Hanging:
+            return Hanging()
+
+    class Store:
+        async def lan_waiting_runs(self) -> list[tuple[str, str | None]]:
+            return [("r1", "print-r1"), ("r2", "print-r2")]
+
+    reaped: list[object] = []
+
+    def reap(refs: object) -> int:
+        reaped.append(refs)
+        return 0
+
+    monkeypatch.setattr(printing_api, "SEQUENCE_CHECK_TIMEOUT", timedelta(milliseconds=50))
+    monkeypatch.setattr(app_main, "reap_run_holds", reap)
+    state = SimpleNamespace(print_runs=SimpleNamespace(store=Store(), client=Client()), refs="refs")
+    asyncio.run(asyncio.wait_for(app_main._reap_run_holds_logged(state), timeout=5))  # type: ignore[arg-type]
+    assert reaped == ["refs"]
+
+
+def test_the_gone_checks_stop_within_their_budget_however_many_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6871 (review of #6948): many hanging describes, each within its own bound, still
+    end within the pass's budget, so the hold reap after them runs inside its timeout."""
+
+    class Hanging:
+        async def describe(self) -> None:
+            await asyncio.sleep(3600)
+
+    class Client:
+        def get_workflow_handle(self, workflow_id: str) -> Hanging:
+            return Hanging()
+
+    class Store:
+        async def lan_waiting_runs(self) -> list[tuple[str, str | None]]:
+            return [(f"r{n}", f"print-r{n}") for n in range(50)]
+
+    monkeypatch.setattr(printing_api, "SEQUENCE_CHECK_TIMEOUT", timedelta(seconds=1))
+    runs = SimpleNamespace(store=Store(), client=Client())
+
+    async def check() -> float:
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        await printing_api.end_gone_sequences(runs, timedelta(milliseconds=300))  # type: ignore[arg-type]
+        return loop.time() - began
+
+    took = asyncio.run(asyncio.wait_for(check(), timeout=10))
+    assert took < 2  # 50 runs at 1 s each would take 50 s

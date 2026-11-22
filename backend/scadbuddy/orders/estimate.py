@@ -67,8 +67,10 @@ class RoughEstimate(OrderEstimate):
 
 
 #: Where a storefront price comes from (#6153): a done slice (firm), a slice that still
-#: works it out, or none, and then the shop prices the line by hand.
-PriceSource = Literal["slice", "pending", "none"]
+#: works it out, or none, and then the shop prices the line by hand. #6921: ``last`` is the
+#: last firm price of the visitor's choices, which the instant read gives when the shop's
+#: settings changed since: the page shows it marked as updating, and never as firm.
+PriceSource = Literal["slice", "pending", "none", "last"]
 
 
 class StoreEstimate(BaseModel):
@@ -76,12 +78,13 @@ class StoreEstimate(BaseModel):
     it is the price of a done slice through the back office's quote path, and it is
     firm. While the slice runs it is ``pending``, and the page reads it again after
     ``retry_after`` seconds. With no firm price it is ``none``, and the shop prices the
-    line by hand. A volume estimate is never sent. The edge sends a visitor only
-    `storefront/routes.py` ``ESTIMATE_FIELDS``: never `SHOP_ONLY_FIELDS`, a line, a cost or
-    a rate."""
+    line by hand. With ``last`` (#6921, the instant read only) it is the variant's last
+    firm price, not today's: no cart line takes it. A volume estimate is never sent. The
+    edge sends a visitor only `storefront/routes.py` ``ESTIMATE_FIELDS``: never
+    `SHOP_ONLY_FIELDS`, a line, a cost or a rate."""
 
     source: PriceSource
-    #: The price of one, set only for ``slice``.
+    #: The price of one, set only for ``slice`` and ``last``.
     price_minor: Money | None = None
     currency: str | None = None
     minor_exponent: int | None = None
