@@ -1234,13 +1234,16 @@ class FilamentSpoolSummary(BaseModel):
 class HeldSpool(BaseModel):
     """What a tray's picker row and its low-filament warnings read of the SB spool in it
     (`bambuddy/trays.py` `loaded_trays`): its id and number, its effective brand and
-    colour names, ``rgba`` and label weight, and the ledger's grams. Nothing else, so
+    colour names, ``rgba`` and label weight, the ledger's grams, and its material and
+    subtype names for the rack's Glow and abrasive tests only (#6876). Nothing else, so
     the background slice's request stays small (#6262, ``MAX_REQUEST_BYTES``)."""
 
     id: UUID
     number: int
     needs_type: bool
     brand: str | None = None
+    material: str | None = None
+    subtype: str | None = None
     colour_name: str | None = None
     rgba: str | None = None
     grams_left: float | None = None
@@ -1254,6 +1257,8 @@ class HeldSpool(BaseModel):
             number=spool.number,
             needs_type=spool.type_id is None,
             brand=spool.names.brand,
+            material=spool.names.material,
+            subtype=spool.names.subtype,
             colour_name=effective.colour_name,
             rgba=effective.rgba,
             grams_left=spool.grams_left,

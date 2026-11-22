@@ -11,6 +11,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from scadbuddy.bambuddy.extruders import RACK_SIDE
 from scadbuddy.bambuddy.filament_ids import filament_material
@@ -24,8 +25,10 @@ from scadbuddy.bambuddy.models import (
     DEFAULT_ALGORITHM,
     FilamentRequirement,
     NozzleRackSlot,
+    PrinterStatus,
     RackAlgorithm,
 )
+from scadbuddy.bambuddy.trays import tray_label, tray_material_colour, tray_of_spool_id
 
 __all__ = ["DEFAULT_ALGORITHM", "RackAlgorithm"]
 
@@ -66,6 +69,30 @@ class Usage:
     last_used_at: datetime | None = None
 
 
+#: Why a rack-side slot's spool could not be checked for Glow (#6872, #6876): the plan
+#: chose no spool for it; it chose a tray that holds none; or the spool it names (an SB
+#: number, or the spool in a tray chosen for itself) is not in the inventory.
+UncheckedReason = Literal["no_spool", "empty_tray", "not_in_inventory"]
+
+
+@dataclass(frozen=True)
+class UncheckedSlot:
+    """One slot Glow could not be tested on, and the id the plan names for it, if any."""
+
+    slot_id: int
+    reason: UncheckedReason
+    spool_id: int | None = None
+
+
+def unfound_reason(spool_id: int, status: PrinterStatus | None) -> UncheckedReason:
+    """Why the spool ``spool_id`` names was not checked: a tray chosen for itself that
+    reports no filament is empty (#6872 ruling 3); anything else is not in the inventory.
+    The tray's report decides, never the id alone (R-6872-5)."""
+    if tray_of_spool_id(spool_id) is not None and tray_material_colour(spool_id, status) is None:
+        return "empty_tray"
+    return "not_in_inventory"
+
+
 @dataclass(frozen=True)
 class RackGroup:
     """One ``on_rack`` filament group of a sliced plate, or the preview's rack side."""
@@ -78,6 +105,9 @@ class RackGroup:
     abrasive: bool = False
     #: A filament had no inventory spool, so Glow could not be checked (spec §3).
     glow_unchecked: bool = False
+    #: Each slot behind ``glow_unchecked`` and why (#6876), when the run knows the ids
+    #: its plan chose; empty otherwise.
+    unchecked: tuple[UncheckedSlot, ...] = ()
     #: How a warning names it; empty means "group <id>".
     label: str = ""
 
@@ -183,6 +213,21 @@ def glow(*texts: str | None) -> bool:
     return any("glow" in (text or "").lower() for text in texts)
 
 
+def glow_or_abrasive_spool(spool: SpoolOption) -> bool:
+    """Whether ``spool`` makes its filament abrasive (spec §3): ``glow`` in its material
+    or subtype, or in the SB spool's (#6876: a native tray choice keeps the tray's
+    material and no subtype), or a ``CF``/``GF`` token in the SB spool's."""
+    return glow(spool.material, spool.subtype, spool.sb_material, spool.sb_subtype) or (
+        abrasive_type(f"{spool.sb_material or ''} {spool.sb_subtype or ''}")
+    )
+
+
+def _checked(spool: SpoolOption | None) -> bool:
+    """A spool Glow can be tested on: an inventory spool, or a tray choice that holds an
+    SB spool. A tray choice with none says only what the AMS reports (#6876)."""
+    return spool is not None and not (spool.tray_only and spool.sb_number is None)
+
+
 def rack_color(raw: str) -> str | None:
     """A rack color, or ``None`` for a zero alpha: the rack reports ``00000000`` for a
     hotend with no filament loaded, which is no color rather than black."""
@@ -193,11 +238,18 @@ def rack_color(raw: str) -> str | None:
 
 
 def rack_groups(
-    filaments: Sequence[FilamentRequirement], spools_by_slot: Mapping[int, SpoolOption]
+    filaments: Sequence[FilamentRequirement],
+    spools_by_slot: Mapping[int, SpoolOption],
+    *,
+    chosen: Mapping[int, int] | None = None,
+    status: PrinterStatus | None = None,
 ) -> list[RackGroup]:
     """One :class:`RackGroup` per ``on_rack`` group of the plate's used filaments. A group
     is abrasive when any of its filaments is; its color is the group's own (its first
-    filament's, spec §8 unknown 2)."""
+    filament's, spec §8 unknown 2). ``chosen`` is the id the plan names for each slot
+    (#6876): with it, each slot Glow could not be checked on gets its reason, the tray's
+    from ``status`` (:func:`unfound_reason`); without it (a plan recorded before it),
+    only ``glow_unchecked`` says so."""
     grouped: dict[int, list[FilamentRequirement]] = {}
     for filament in filaments:
         if (
@@ -213,6 +265,11 @@ def rack_groups(
         if shape is None:  # narrowed above; keeps mypy honest without an assert
             continue
         spools = [spools_by_slot.get(member.slot_id) for member in members]
+        unchecked = [
+            member.slot_id
+            for member, spool in zip(members, spools, strict=True)
+            if not _checked(spool)
+        ]
         groups.append(
             RackGroup(
                 group_id=group_id,
@@ -221,13 +278,25 @@ def rack_groups(
                 color=shape.filament_color or None,
                 materials=tuple(dict.fromkeys(m.type for m in members if m.type)),
                 abrasive=any(abrasive_type(member.type) for member in members)
-                or any(
-                    spool is not None and glow(spool.material, spool.subtype) for spool in spools
-                ),
-                glow_unchecked=any(spool is None for spool in spools),
+                or any(spool is not None and glow_or_abrasive_spool(spool) for spool in spools),
+                glow_unchecked=bool(unchecked),
+                unchecked=()
+                if chosen is None
+                else tuple(_unchecked_slot(slot_id, chosen, status) for slot_id in unchecked),
             )
         )
     return groups
+
+
+def _unchecked_slot(
+    slot_id: int, chosen: Mapping[int, int], status: PrinterStatus | None
+) -> UncheckedSlot:
+    spool_id = chosen.get(slot_id)
+    if spool_id is None:
+        return UncheckedSlot(slot_id=slot_id, reason="no_spool")
+    return UncheckedSlot(
+        slot_id=slot_id, reason=unfound_reason(spool_id, status), spool_id=spool_id
+    )
 
 
 def _available(
@@ -406,6 +475,26 @@ def _sentence(picker: str) -> str:
     return f"{picker[:1].upper()}{picker[1:]}"
 
 
+def _unchecked_text(item: UncheckedSlot) -> str:
+    where = tray_of_spool_id(item.spool_id) if item.spool_id is not None else None
+    if item.reason == "no_spool":
+        return f"filament {item.slot_id} has no spool chosen"
+    if where is None:
+        return f"filament {item.slot_id}'s spool is not in the inventory"
+    if item.reason == "empty_tray":
+        return f"filament {item.slot_id}'s tray, {tray_label(*where)}, is empty"
+    return f"filament {item.slot_id}'s spool in {tray_label(*where)} is not in the inventory"
+
+
+def _glow_unchecked(group: RackGroup) -> str:
+    """The run's per-slot Glow reasons (#6876), as the dialog's (#6872 ruling 3)."""
+    reasons = "; ".join(_unchecked_text(item) for item in group.unchecked)
+    return (
+        f"Glow could not be checked for {group.name}, so it was ranked by its type "
+        f"alone: {reasons}."
+    )
+
+
 def manual_for(
     groups: Sequence[RackGroup],
     position: int | None,
@@ -472,6 +561,8 @@ def rack_warnings(
                     f"{flow}), so {outcome}",
                 )
             )
+        if pick is not None and group.unchecked and not group.abrasive:
+            found.append(_warning("rack-glow-unchecked", _glow_unchecked(group)))
         if pick is not None:
             if pick.unsafe_material:
                 material = nozzle_material(positions[pick.position].nozzle_type)
