@@ -284,6 +284,12 @@ sequenceDiagram
   request. Without it a GET stream relayed through a replica that crashed (or was
   replaced in a rolling deploy) would stay held, and the transport, which allows one
   standalone stream per session, would answer the client's reconnect with 409.
+- **A slow channel is not a silent peer.** Each side counts a beat as missed only when it
+  heard one of its own messages for the request come back since its last tick (every
+  replica hears every message, its own too, in commit order). While the change stream
+  lags or reconnects, nothing comes back, so neither side takes the other for gone; a
+  peer that died is still found, because the side that lives keeps hearing its own
+  beats (#6563).
 - **Who may use it.** The replica the request reached runs every gate (HTTPS, Origin,
   auth) and relays the principal as authenticated; the owner ties it to the session
   (an anonymous caller's `anonymous:<session id>` is made there) and still refuses
