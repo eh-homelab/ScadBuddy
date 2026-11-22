@@ -186,6 +186,32 @@ async def test_a_sigterm_during_the_start_sign_in_ends_serve_at_once(tmp_path: P
     assert (site.logins, site.closed) == (1, 1)
 
 
+async def test_a_sigterm_during_the_start_login_closes_the_browser(tmp_path: Path) -> None:
+    """``stop`` set while ``site.login()`` still runs cancels it, and `SiteHolder.get`
+    still closes the browser it opened (review of #6954)."""
+
+    class SlowLogin(FakeSite):
+        def __init__(self) -> None:
+            super().__init__()
+            self.signing_in = asyncio.Event()
+
+        async def login(self) -> None:
+            self.logins += 1
+            self.signing_in.set()
+            await asyncio.Event().wait()
+
+    site = SlowLogin()
+    stop = asyncio.Event()
+    serving = asyncio.create_task(
+        serve(_settings(tmp_path), stop=stop, open_site=lambda: site, host="127.0.0.1", port=0)
+    )
+    await asyncio.wait_for(site.signing_in.wait(), 2)
+    assert (site.opened, site.closed) == (1, 0)
+    stop.set()
+    await asyncio.wait_for(serving, 2)
+    assert (site.opened, site.logins, site.closed) == (1, 1, 1)
+
+
 async def test_serve_forbids_core_dumps_before_the_browser(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
