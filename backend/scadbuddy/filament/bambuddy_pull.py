@@ -132,7 +132,7 @@ from scadbuddy.bambuddy.models import (
     as_utc,
 )
 from scadbuddy.bambuddy.models import Spool as BbSpool
-from scadbuddy.core.cancel import CancelToken, check, watched
+from scadbuddy.core.cancel import CancelledError, CancelToken, check, watched
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger
@@ -348,8 +348,9 @@ def pull(
 
     ``cancel`` (the CRUD route's, cancelled when the print worker goes away, #6902) stops
     the pull between BB spools and cancels the running statement, so the spool in flight
-    rolls back and `CancelledError` is raised; the spools pulled before it stay, each a
-    whole transaction that the next pull leaves as it is."""
+    rolls back (unless its transaction had already reached its commit, after its last
+    check) and `CancelledError` or ``QueryCanceled`` is raised; the spools pulled before it
+    stay, each a whole transaction that the next pull leaves as it is."""
     report = PullReport()
     newest: dict[int, datetime] = {}
     for row in usage:
@@ -385,6 +386,10 @@ def pull(
                 skipped: list[str] = []
                 outcome = _one(conn, run, bb, skipped, newest.get(bb.id))
                 record_instance(conn, instance)
+                check(cancel)
+        except (CancelledError, errors.QueryCanceled):
+            # The caller went away: the pull stops, never a spool that failed.
+            raise
         except Exception as error:
             logger.warning(
                 "could not pull a Bambuddy spool",

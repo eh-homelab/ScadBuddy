@@ -501,9 +501,9 @@ async def test_a_results_call_the_worker_gave_up_on_rolls_back(
     store: SettingsStore, crud: CrudClient
 ) -> None:
     """#6902, over a real connection: the worker's read timeout ends a results round that
-    waits on a spool another writer holds. The API notices the disconnect, cancels the
+    waits on a spool link another writer holds. The API notices the disconnect, cancels the
     round's statement and rolls the whole round back, and frees the sync's lock while that
-    spool is still held, so the round never finished: nothing of it is committed."""
+    link is still held, so the round never finished: nothing of it is committed."""
     filament = filament_on(store.pool)
     made = scale.build(store.pool, filament, spools=8, archived=1, events=20)
     planned = plan(filament, made.snap, scale.TWO_WAY, interval_s=300.0)
@@ -522,7 +522,10 @@ async def test_a_results_call_the_worker_gave_up_on_rolls_back(
 
     before = committed()
     with store.pool.connection() as conn, conn.transaction():
-        conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (held_spool,))
+        # Its link, not the spool: the round locks its spools up front.
+        conn.execute(
+            "SELECT 1 FROM filament_bb_links WHERE spool_id = %s FOR UPDATE", (held_spool,)
+        )
         with pytest.raises(CrudUnavailableError) as gave_up:
             await crud.request("POST", RESULTS, json=body, timeout=1.5, budget=0)
         assert gave_up.value.failure == "transport"

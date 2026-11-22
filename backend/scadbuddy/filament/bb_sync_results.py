@@ -199,10 +199,14 @@ def apply_results(
     back its own writes only (#6902: a transaction per result was 200 commits, and each
     took 1 to 2 s on prod). The transaction takes the state row's lock once, and the
     instance's sync lock (`hold_sync`), so a second call for the instance while this one
-    runs is `SyncBusyError` and writes nothing. ``cancel`` stops the round between results
-    (and cancels the running statement): the whole round rolls back, and the results sent
-    again later apply as the first time. An error that is no ignored result rolls the
-    round back too. ``now`` is the stored seen copies' ``bb_seen_at``.
+    runs is `SyncBusyError` and writes nothing. It also locks the round's spools up front,
+    in id order, so a writer that locks several spools in the same order waits for the
+    round rather than deadlocking with it. ``cancel`` stops the round between results (and
+    cancels the running statement): the whole round rolls back, unless it had already
+    passed its last check, just before the commit. Either way the results sent again later
+    are safe: they find their items linked or recorded, and the plan's ``pass_id`` adds no
+    attempt. An error that is no ignored result rolls the round back too. ``now`` is the
+    stored seen copies' ``bb_seen_at``.
 
     An ``ok`` create or adoption links the item, closes its intent, sets its hashes and
     seen copy (a spool's K-profiles too, R-T4-11), books a spool's event and queues the
@@ -234,6 +238,11 @@ def apply_results(
         hold_sync(conn, instance)
         state = conn.execute("SELECT instance FROM filament_bb_sync_state FOR UPDATE").fetchone()
         foreign = state is not None and state["instance"] not in (None, instance)
+        if reads.spool_ids:
+            conn.execute(
+                "SELECT 1 FROM filament_spools WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+                (list(reads.spool_ids),),
+            )
         for result in results:
             check(cancel)
             write = writes.get(result.key)
@@ -828,7 +837,8 @@ class LocalFilamentSync:
         self, snap: BbSnapshot, limit: int, cancel: CancelToken | None = None
     ) -> SyncPlan:
         """``cancel``: the CRUD route's (`api/disconnect.py`), cancelled when its caller
-        goes away; the plan then writes nothing. Another plan or results call of the
+        goes away; the plan then writes nothing unless it had already passed its last
+        check (`plan`). Another plan or results call of the
         instance still running is `SyncBusyError`."""
 
         def run() -> SyncPlan:
@@ -866,7 +876,8 @@ class LocalFilamentSync:
         unconfirmed: Sequence[tuple[Kind, UUID]] = (),
         cancel: CancelToken | None = None,
     ) -> ResultsReport:
-        """``cancel`` as `plan`'s: the round then writes nothing (`apply_results`)."""
+        """``cancel`` as `plan`'s: the round then writes nothing unless it had already
+        passed its last check (`apply_results`)."""
         read = await asyncio.to_thread(self._settings.read, {"bambuddy_url"})
         # This reads bambuddy_url before apply_results takes the state row's lock. After a
         # reset the row's instance is NULL, so this check is what stops an old pass's

@@ -7,6 +7,11 @@ statement running on that connection (psycopg ``cancel_safe``). Either way the w
 raises (`CancelledError`, or psycopg's ``QueryCanceled``) inside its transaction, which rolls
 back. `api/disconnect.py` cancels the token when the caller of a CRUD route goes away.
 
+Postgres ignores a cancel request that reaches a backend between statements, so the work
+must `check` as its last step before the commit. A cancel after that last check is too
+late: the work commits. A caller that stops waiting therefore cannot know whether the work
+committed; work that takes a token must be natural, so that sending it again is safe.
+
 A connection is watched only while the work holds it: `watching` stops watching it
 before the transaction ends, under the token's lock, so a cancel never reaches a
 connection that is back in the pool and serves another caller.

@@ -883,8 +883,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   of the instance meanwhile is 503 `sync_busy`, which the client waits out within
   `RemoteFilamentSync.BUSY_BUDGET`. Both routes, and the pull's `…/pull` and `…/pull/usage`,
   run under `api/disconnect.py` `until_disconnect`: when the worker goes away the running
-  statement is cancelled and the work rolls back (`core/cancel.py`; the pull keeps the BB
-  spools it pulled before, each its own transaction). The client gives `plan` and
+  statement is cancelled and the work rolls back, unless it had already passed its last
+  check, just before its commit (`core/cancel.py`; Postgres ignores a cancel between
+  statements). A retry is safe because each call is natural, not because the call rolled
+  back. The pull keeps the BB spools it pulled before, each its own transaction, and a
+  round locks its spools up front in id order. The client gives `plan` and
   `results` `ROUND_TIMEOUT` (120 s), and the pass heartbeats while one runs
   (`bb_sync_run.CALL_BEAT_S`). After the
   Bambuddy URL changes the status says `instance_changed` and the sync stops until

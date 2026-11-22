@@ -18,10 +18,12 @@ from uuid import UUID
 
 import pytest
 from fastapi import Request
+from psycopg import errors
 
 from scadbuddy.api.disconnect import CALLER_GONE, until_disconnect
 from scadbuddy.core.cancel import CancelledError, CancelToken
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament import bambuddy_pull
 from scadbuddy.filament.bambuddy_pull import parse_rows, pull
 from scadbuddy.filament.bb_sync_models import BbWrite, BbWriteResult
 from scadbuddy.filament.bb_sync_plan import (
@@ -73,25 +75,33 @@ def _committed(pool: PgPool) -> tuple[int, Any]:
 
 
 @contextmanager
-def _held_spool(pool: PgPool, spool: UUID) -> Iterator[None]:
-    """Another transaction holds ``spool``'s row while the block runs."""
+def _held_spool(pool: PgPool, spool: UUID) -> Iterator[int]:
+    """Another transaction holds ``spool``'s link row while the block runs; the block gets
+    that transaction's backend pid. The link, not the spool: a round locks its spools up
+    front, so a held spool would stop it before its first result, and a held link stops
+    it at that spool's result, with the results before it written."""
     with pool.connection() as conn, conn.transaction():
-        conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool,))
-        yield
+        conn.execute("SELECT 1 FROM filament_bb_links WHERE spool_id = %s FOR UPDATE", (spool,))
+        yield conn.info.backend_pid
 
 
-def _wait_for_lock_wait(pool: PgPool) -> None:
-    """Until a backend waits on a row lock (the round reached the held spool)."""
+def _wait_for_lock_wait(pool: PgPool, holder: int) -> None:
+    """Until a backend waits on ``holder``'s lock (the round reached the held spool).
+
+    Only a backend that ``holder`` blocks counts (``pg_blocking_pids``): any other lock
+    wait in the database (an earlier test's, say) could pass for the round's, and a second
+    call then takes the free sync lock and waits on the row this thread holds, for ever
+    (#6910: a CI shard that ran such a test hung for an hour)."""
     for _ in range(200):
         with pool.connection() as conn:
             row = conn.execute(
-                "SELECT count(*) AS n FROM pg_stat_activity"
-                " WHERE wait_event_type = 'Lock' AND datname = current_database()"
+                "SELECT count(*) AS n FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                (holder,),
             ).fetchone()
         if row is not None and row["n"] > 0:
             return
         threading.Event().wait(0.05)
-    raise AssertionError("the round never waited on the held spool")
+    raise AssertionError("the round never waited on the held link")
 
 
 def _spool_of_late_write(writes: list[BbWrite]) -> UUID:
@@ -151,7 +161,7 @@ def test_the_read_once_values_are_each_spools_own(pg_pool: PgPool) -> None:
 
 
 def test_a_second_call_while_one_runs_is_busy(pg_pool: PgPool) -> None:
-    """A results call still running (it waits on a spool another writer holds) keeps the
+    """A results call still running (it waits on a spool link another writer holds) keeps the
     instance's sync: a second results call, and a plan, are `SyncBusyError` at once and
     write nothing; the first then records its round alone."""
     f = _filament(pg_pool)
@@ -159,10 +169,10 @@ def test_a_second_call_while_one_runs_is_busy(pg_pool: PgPool) -> None:
     writes, results = _round(f, made)
     before = _committed(pg_pool)
     first: list[Any] = []
-    with _held_spool(pg_pool, _spool_of_late_write(writes)):
+    with _held_spool(pg_pool, _spool_of_late_write(writes)) as holder:
         runner = threading.Thread(target=lambda: first.append(_apply(f, writes, results)))
         runner.start()
-        _wait_for_lock_wait(pg_pool)
+        _wait_for_lock_wait(pg_pool, holder)
         with pytest.raises(SyncBusyError):
             _apply(f, writes, results)
         with pytest.raises(SyncBusyError):
@@ -200,8 +210,8 @@ class _Settings:
 
 
 def test_a_caller_that_goes_away_rolls_the_round_back(pg_pool: PgPool) -> None:
-    """The results route's caller disconnects while the round waits mid-way on a spool
-    another writer holds: the running statement is cancelled, the whole round rolls back
+    """The results route's caller disconnects while the round waits mid-way on a spool's
+    link another writer holds: the running statement is cancelled, the whole round rolls back
     (none of the results before it stays), and the sync's lock, the state row and the
     connection are free again. The same results sent again then apply in full."""
     f = _filament(pg_pool)
@@ -217,14 +227,20 @@ def test_a_caller_that_goes_away_rolls_the_round_back(pg_pool: PgPool) -> None:
             lambda token: sync.results(INSTANCE, writes, results, "p1", (), token),
         )
 
-    def hang_up() -> None:
-        _wait_for_lock_wait(pg_pool)
-        gone.set()
+    def hang_up(holder: int) -> None:
+        try:
+            _wait_for_lock_wait(pg_pool, holder)
+            reached.set()
+        finally:
+            # Always: a call left waiting on the held link would never end.
+            gone.set()
 
-    with _held_spool(pg_pool, _spool_of_late_write(writes)):
-        threading.Thread(target=hang_up).start()
+    reached = threading.Event()
+    with _held_spool(pg_pool, _spool_of_late_write(writes)) as holder:
+        threading.Thread(target=hang_up, args=(holder,)).start()
         with pytest.raises(ApiError) as refused:
             asyncio.run(call())
+    assert reached.is_set(), "the round never waited on the held link"
     assert refused.value.extensions.get("reason") == CALLER_GONE
     assert _committed(pg_pool) == before
     _free(pg_pool)
@@ -249,3 +265,21 @@ def test_a_cancelled_pull_stops_before_the_next_spool(pg_pool: PgPool) -> None:
     token.cancel()
     with pytest.raises(CancelledError):
         pull(f, spools, now=_AT + timedelta(days=1), instance=INSTANCE, cancel=token)
+
+
+def test_a_cancelled_statement_stops_the_pull_and_fails_no_spool(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A statement the cancel stopped (``QueryCanceled``) stops the pull: it is not logged
+    as a Bambuddy spool that could not be pulled (#6910 review)."""
+    f = _filament(pg_pool)
+    made = scale.build(pg_pool, f, spools=6, archived=1, events=20)
+    spools, _ = parse_rows(made.snap.spools)
+
+    def cancelled(*_args: Any) -> Any:
+        raise errors.QueryCanceled("canceling statement due to user request")
+
+    monkeypatch.setattr(bambuddy_pull, "_one", cancelled)
+    with pytest.raises(errors.QueryCanceled):
+        pull(f, spools, now=_AT + timedelta(days=1), instance=INSTANCE, cancel=CancelToken())
+    assert "could not pull a Bambuddy spool" not in caplog.text

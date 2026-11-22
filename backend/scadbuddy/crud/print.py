@@ -1475,7 +1475,9 @@ class RemoteFilamentSync:
     A plan or results call of a full round (200 writes on about 110 spools) took longer
     than the client's 10 s default on prod (#6902), so each has `ROUND_TIMEOUT`. The API
     stops and rolls back the call's work when the client goes away (`api/disconnect.py`),
-    so a read timeout means nothing was written. The client does not send it again: its
+    so a read timeout means the work was cancelled, unless it had already reached its
+    commit. Either way a retry is safe, because each call is natural (above), not because
+    the call rolled back. The client does not send it again: its
     retry budget (`BUSY_BUDGET`) ends before the timeout, so the pass activity's retry is
     the next try. The budget is how long a call waits out the API's 503 ``sync_busy``
     (another call of the instance not ended yet, `bb_sync_plan.hold_sync`), a 5xx or a

@@ -22,7 +22,7 @@ from temporalio.client import Client
 
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.core import settings as core_settings
-from scadbuddy.core.cancel import CancelToken, watched
+from scadbuddy.core.cancel import CancelToken, check, watched
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bambuddy_usage, sensors
 from scadbuddy.filament.bambuddy_pull import ACTOR, links_elsewhere, parse_rows, pull
@@ -136,7 +136,8 @@ class LocalBbPull:
             return bambuddy_usage.unbooked(conn, usage)
 
     async def book_usage(self, body: UsageBody, cancel: CancelToken | None = None) -> UsageBooked:
-        """One transaction; ``cancel`` (as `apply`'s) rolls it back whole."""
+        """One transaction. ``cancel`` (as `apply`'s) rolls it back whole unless the booking
+        had already reached its commit: the last step before the commit checks it."""
         return await asyncio.to_thread(self._book_usage, body, cancel)
 
     def _book_usage(self, body: UsageBody, cancel: CancelToken | None = None) -> UsageBooked:
@@ -146,6 +147,7 @@ class LocalBbPull:
             booked = bambuddy_usage.book_usage(
                 conn, body.usage, archives, actor=self._actor(body.pull_id)
             )
+            check(cancel)
         return UsageBooked(booked=booked.booked, unlinked=booked.unlinked)
 
     async def ha_states(self, body: HaBody) -> None:

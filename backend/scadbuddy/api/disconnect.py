@@ -8,9 +8,10 @@ print worker's 10 s timeout, and its retries ran beside them.
 
 `until_disconnect` runs the work with a `CancelToken` and waits for it or for the
 client's ``http.disconnect``. When the client has gone, or the route's own task is
-cancelled, it cancels the token (`core/cancel.py`: the running statement is cancelled
-and the next step raises, so the work's transaction rolls back), waits for the work to
-end, so its connection is back in the pool and its locks are free, and answers 503
+cancelled, it cancels the token (`core/cancel.py`: the running statement is cancelled,
+and the work's next check raises, so its transaction rolls back; work that had already
+passed its last check, just before its commit, commits), waits for the work to end, so
+its connection is back in the pool and its locks are free, and answers 503
 `CALLER_GONE`, which nobody reads.
 """
 
@@ -59,6 +60,6 @@ async def until_disconnect[T](request: Request, work: Callable[[CancelToken], Aw
         await task
     raise ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
-        "the caller went away; the work was cancelled and rolled back",
+        "the caller went away; the work was cancelled",
         reason=CALLER_GONE,
     )

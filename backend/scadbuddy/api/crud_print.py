@@ -1945,9 +1945,9 @@ async def filament_sync_directions(sync: SyncDep) -> FilamentSync:
         " records its intent in this call, so a plan sent again plans the same create"
         " from that intent. A snapshot of another Bambuddy than the configured one plans"
         " nothing and answers `instance_changed` (#6773). `unconfirmed` is left out when"
-        " it is empty (#6688). A caller that goes away rolls the plan back, and a call"
-        " while another plan or results call of the instance runs is 503 `sync_busy`"
-        " (#6902)."
+        " it is empty (#6688). A caller that goes away rolls the plan back unless it had"
+        " already reached its commit; a plan sent again is safe either way. A call while"
+        " another plan or results call of the instance runs is 503 `sync_busy` (#6902)."
     ),
     response_model=SyncPlan,
 )
@@ -1971,7 +1971,8 @@ async def filament_sync_plan(body: PlanRequest, sync: SyncDep, request: Request)
         ' list `PUT`\'s answer is `{"k_profiles": rows}` or `{"suppliers": rows}`. Answers'
         " the counts of items linked, updated, failed and unlinked. Results for another"
         " Bambuddy than the configured one are all ignored (#6773). The round is one"
-        " transaction: a caller that goes away rolls it back whole, and a call while"
+        " transaction: a caller that goes away rolls it back whole unless it had already"
+        " reached its commit; results sent again are safe either way. A call while"
         " another plan or results call of the instance runs is 503 `sync_busy` (#6902)."
     ),
 )
@@ -1991,9 +1992,9 @@ async def filament_sync_results(
 
 async def _sync_call[T](request: Request, work: Callable[[CancelToken], Awaitable[T]]) -> T:
     """A plan or results call (#6902): its work stops and rolls back when the print worker
-    goes away (`until_disconnect`), and a call while another of the instance runs is 503
-    `SYNC_BUSY`, which the worker's client tries again after a backoff, so a retry never
-    runs beside a call that has not ended yet."""
+    goes away (`until_disconnect`) before the work reached its commit, and a call while
+    another of the instance runs is 503 `SYNC_BUSY`, which the worker's client tries again
+    after a backoff, so a retry never runs beside a call that has not ended yet."""
     try:
         return await until_disconnect(request, work)
     except SyncBusyError as busy:
@@ -2067,7 +2068,8 @@ async def filament_pull(body: PullBody, sync: PullDep, request: Request) -> Pull
 )
 async def filament_pull_usage(body: UsageBody, sync: PullDep, request: Request) -> UsageBooked:
     """Natural: a row's ``bb_usage`` event names it, so it is booked once. It rolls back
-    when the print worker goes away (#6902, `until_disconnect`)."""
+    when the print worker goes away before the booking reached its commit (#6902,
+    `until_disconnect`)."""
     return await _for_configured(
         until_disconnect(request, lambda token: sync.book_usage(body, cancel=token))
     )

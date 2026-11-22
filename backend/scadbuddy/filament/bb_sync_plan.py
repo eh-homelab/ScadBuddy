@@ -1721,8 +1721,9 @@ def plan(
     links belong to another Bambuddy (``instance_changed``, Decision 12).
 
     One plan or results call of an instance's sync runs at a time (`hold_sync`, #6902):
-    another is `SyncBusyError`. ``cancel`` stops the plan, which then writes nothing
-    (`core/cancel.py`)."""
+    another is `SyncBusyError`. ``cancel`` stops the plan, which then writes nothing,
+    unless it had already passed its last check, just before the commit (`core/cancel.py`).
+    A plan sent again finds the intents a committed one recorded."""
     empty = SyncPlan(writes=[], deferred=0, directions=sync, interval_s=interval_s)
     if not pushes_anything(sync):
         return empty
@@ -1753,8 +1754,9 @@ def plan(
         unconfirmed = planner.unconfirmed()
         planner.refs = planner.refs.without(unconfirmed)
         planner.spools()
-        check(cancel)
         writes = planner.take(limit)
+        # `take` records the kept creates' intents: the last step before the commit.
+        check(cancel)
     return SyncPlan(
         writes=writes,
         deferred=len(planner.deferred),
