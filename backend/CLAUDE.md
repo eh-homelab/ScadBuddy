@@ -791,8 +791,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the stored setting `lan_require_plate_clear`, behind `PLATE_CLEAR_PATCH`, and for a run
   queued on a busy printer, whatever that setting says, behind `BUSY_PATCH`). The strip
   shows each printer's oldest waiting run and only reads; a run whose sequence is gone is
-  recorded stopped by the native-copies sweep (`end_gone_sequences`, on every backend) or
-  by a control sent to it. `components/print/LanRunControls.tsx` shows the controls from
+  recorded stopped (`end_gone_sequences`) by the run-holds sweep (`RUN_HOLDS_SWEEP`, on the
+  prune Schedule, so within `PRUNE_INTERVAL`, 300 s, sweeps off too), by the native-copies
+  sweep, or at once by a control sent to it. A queued run's `queued_for_print` is read
+  from the printer's live state (`printers/progress.py` `printing_now`: the card's `state`,
+  or a fresh report), so its text turns to the plate once the print it waited for ends. `components/print/LanRunControls.tsx` shows the controls from
   `PrintProgress.lan_run` and `PrinterNow.lan_run`; the agent's are `stop_print_run` and
   `confirm_plate_clear`.
 - `backend/scadbuddy/filament/` — the filament data model (#6261, epic #6260, spec

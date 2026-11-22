@@ -25,11 +25,15 @@ from scadbuddy.printers.progress import (
     NOT_HEARD,
     PAUSED,
     QUEUED_BUSY,
+    QUEUED_IDLE,
+    QUEUED_PLATE,
     WAITING,
     LanProgress,
     from_lan_report,
+    idle_now,
     lan_ended,
     lan_last_print,
+    printing_now,
     shows,
 )
 from scadbuddy.printers.status import print_error_text
@@ -499,6 +503,7 @@ async def test_a_sequenced_run_names_its_controls() -> None:
         "awaiting_clear": False,
         "queued": False,
         "queued_for_print": False,
+        "printer_idle": False,
     }
     stopped = result.model_copy(
         update={"lan_stopped": LanStopped(stage="cancelled", message="Stopped.")}
@@ -557,12 +562,33 @@ async def test_a_run_queued_on_a_busy_printer_reads_as_queued_with_its_controls(
         "awaiting_clear": False,
         "queued": True,
         "queued_for_print": True,
+        "printer_idle": False,
     }
     # Queued only for an ended print's plate (#6871): no print to wait for.
     plate = result.model_copy(update={"lan_queued": LanQueued(state="FINISH", job=None, place=1)})
     progress = await _lan(_run(plate), value).read("o" * 32)
     assert progress is not None and progress.lan_run is not None
     assert progress.lan_run.queued and not progress.lan_run.queued_for_print
+    assert [copy.waiting_reason for copy in progress.copies_detail] == [
+        QUEUED_PLATE.format(printer="H2C")
+    ]
+    # The print it was queued behind has ended (review of #6939): read live, the run now
+    # waits for the plate, before its sequence records that.
+    # The printer reads idle (a restart): the plate may still hold the print before.
+    idle = ({"gcode_state": "IDLE"}, at(seconds=20))
+    progress = await _lan(_run(result), idle).read("o" * 32)
+    assert progress is not None and progress.lan_run is not None
+    assert progress.lan_run.printer_idle and not progress.lan_run.queued_for_print
+    assert [copy.waiting_reason for copy in progress.copies_detail] == [
+        QUEUED_IDLE.format(printer="H2C")
+    ]
+    ended = ({"subtask_name": "theirs", "gcode_state": "FINISH"}, at(seconds=20))
+    progress = await _lan(_run(result), ended).read("o" * 32)
+    assert progress is not None and progress.lan_run is not None
+    assert progress.lan_run.queued and not progress.lan_run.queued_for_print
+    assert [copy.waiting_reason for copy in progress.copies_detail] == [
+        QUEUED_PLATE.format(printer="H2C")
+    ]
     clear = result.model_copy(update={"lan_awaiting_clear": True})
     progress = await _lan(_run(clear), value).read("o" * 32)
     assert progress is not None and progress.lan_run is not None
@@ -647,3 +673,31 @@ def test_a_busy_print_with_no_name_has_not_ended_while_busy(state: str) -> None:
     assert lan_ended(({"gcode_state": state}, at(seconds=10)), queued.job, seen=False) is None
     # Nor from a report no newer than the check.
     assert lan_ended(({"gcode_state": "FINISH"}, STARTED_AT), queued.job, seen=False) is None
+
+
+@pytest.mark.parametrize(
+    ("state", "printing"),
+    [
+        ("RUNNING", True),
+        ("PAUSE", True),
+        ("FINISH", False),
+        ("FAILED", False),
+        ("IDLE", False),
+        ("SOMETHING_NEW", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_only_known_states_say_whether_the_printer_prints(
+    state: object, printing: bool | None
+) -> None:
+    """#6871 (review of #6948): a word the code does not know reads as no state, so a
+    queued run's text falls back to the job it recorded."""
+    assert printing_now(state) is printing
+
+
+@pytest.mark.parametrize(
+    ("state", "idle"), [("IDLE", True), ("FINISH", False), ("RUNNING", False), (None, False)]
+)
+def test_only_idle_reads_as_idle(state: object, idle: bool) -> None:
+    assert idle_now(state) is idle
