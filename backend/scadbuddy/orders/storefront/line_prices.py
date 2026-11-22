@@ -140,9 +140,9 @@ async def variant_at_add(
 ) -> Variant | None:
     """The variant of the line the visitor adds: its own done render of ``render_key``
     (`RenderLimits.job_of`), the slot filaments of ``colours`` in ``material`` as the
-    estimate takes them (``renders.py`` `variant_of`). With no such render, the newest
-    priced slice of the choices' ``variant_key`` whose saved output is of the listing's
-    design (#6921: the page showed that preview and price with no render): its 3MF's
+    estimate takes them (``renders.py`` `variant_of`). With no such render, the priced
+    slice of the choices' ``variant_key`` (`SlicePrices.variant_row`), while its saved
+    output is of the listing's design (#6921: the page showed that preview and price with no render): its 3MF's
     sha256 and slot filaments, as the server recorded them. The price is still read by
     the key (`price_of`), never from the browser. None when there is neither, or a slot
     has no listing filament: the line has no firm price."""
@@ -173,11 +173,12 @@ async def _priced_variant(
     state: AppState, listing: Listing, variant_key: str | None
 ) -> Variant | None:
     """The variant a priced slice of ``variant_key`` recorded, while its saved output is
-    of the listing's design (#6921), or None."""
+    of the listing's design (#6921), or None. The row is the one the instant read showed
+    (`SlicePrices.variant_row`), so the line is charged from the 3MF whose price showed."""
     if variant_key is None:
         return None
     prices = _orders(state).slice_prices
-    row = await asyncio.to_thread(lambda: prices.newest_done(variant_key, with_output=True))
+    row = await asyncio.to_thread(prices.variant_row, variant_key)
     if row is None or row.slot_filaments is None:
         return None
     if await asyncio.to_thread(output_of, state, row, listing) is None:

@@ -7,9 +7,12 @@
 -- filament of each slot of that render (`slot_filaments`, from 0) and each slot's colour
 -- (`slot_colours`), so the instant read can build the price key again as the shop's
 -- settings stand now, and the output its slice saved (`output_id`, "Storefront: ..."),
--- whose preview outlives the render prune. Rows from before stay NULL.
+-- whose preview outlives the render prune. It records the listing the variant key was made
+-- for (`listing_id`) too: the preview is served only while that listing is published.
+-- Rows from before stay NULL.
 ALTER TABLE storefront_renders ADD COLUMN variant_key text;
 ALTER TABLE storefront_slice_prices ADD COLUMN variant_key text;
+ALTER TABLE storefront_slice_prices ADD COLUMN listing_id text;
 ALTER TABLE storefront_slice_prices ADD COLUMN slot_filaments jsonb;
 ALTER TABLE storefront_slice_prices ADD COLUMN slot_colours jsonb;
 ALTER TABLE storefront_slice_prices ADD COLUMN output_id text;

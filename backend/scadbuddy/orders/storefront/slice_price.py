@@ -186,6 +186,9 @@ class PriceRow(BaseModel):
     #: `variant_key`), and the price-book filament of each of its slots (from 0), so the
     #: instant read can build its price key again. None on a row written before.
     variant_key: str | None = None
+    #: The listing the variant key was made for: its preview is served only while that
+    #: listing is published (#6921 review).
+    listing_id: str | None = None
     slot_filaments: list[str] | None = None
     #: Each slot's colour, and the output the slice saved ("Storefront: ...", which
     #: outlives the render prune): the instant read shows its preview (#6921).
@@ -209,8 +212,8 @@ _COLUMNS: Final = (
     "price_key, model_sha256, status, attempt, claim_key, operation_key, currency,"
     " unit_price_minor,"
     " total_minor, unit_cost_minor, lines, print_seconds, grams, plates, printer,"
-    " machine_rate_breakdown, failure, started_at, finished_at, variant_key, slot_filaments,"
-    " slot_colours, output_id"
+    " machine_rate_breakdown, failure, started_at, finished_at, variant_key, listing_id,"
+    " slot_filaments, slot_colours, output_id"
 )
 
 
@@ -333,13 +336,15 @@ class SlicePrices:
         sliced: SlicedPrice,
         *,
         variant_key: str | None = None,
+        listing_id: str | None = None,
         slot_filaments: Sequence[str] | None = None,
         slot_colours: Sequence[str] | None = None,
         output_id: str | None = None,
     ) -> PriceRow:
         """The price written once the slice is done, with the variant key of the render it
-        priced, the filament and colour of each of its slots and the output it saved
-        (#6921)."""
+        priced and its listing, the filament and colour of each of its slots and the output
+        it saved (#6921). A NULL of these keeps the row's value: a slice whose operation
+        started before #6921 never clears a key the row recorded or adopted."""
         grams: dict[int, Decimal] = {}
         for plate in sliced.plates:
             for used in plate.filaments:
@@ -350,9 +355,9 @@ class SlicePrices:
                 "INSERT INTO storefront_slice_prices (price_key, model_sha256, status,"
                 " currency, unit_price_minor, total_minor, unit_cost_minor, lines,"
                 " print_seconds, grams, plates, printer, machine_rate_breakdown, variant_key,"
-                " slot_filaments, slot_colours, output_id, finished_at)"
+                " listing_id, slot_filaments, slot_colours, output_id, finished_at)"
                 " VALUES (%s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
-                " %s, clock_timestamp())"
+                " %s, %s, clock_timestamp())"
                 " ON CONFLICT (price_key) DO UPDATE SET status = 'done',"
                 " currency = EXCLUDED.currency, unit_price_minor = EXCLUDED.unit_price_minor,"
                 " total_minor = EXCLUDED.total_minor,"
@@ -361,8 +366,14 @@ class SlicePrices:
                 " plates = EXCLUDED.plates,"
                 " printer = EXCLUDED.printer,"
                 " machine_rate_breakdown = EXCLUDED.machine_rate_breakdown, failure = NULL,"
-                " variant_key = EXCLUDED.variant_key, slot_filaments = EXCLUDED.slot_filaments,"
-                " slot_colours = EXCLUDED.slot_colours, output_id = EXCLUDED.output_id,"
+                " variant_key"
+                " = coalesce(EXCLUDED.variant_key, storefront_slice_prices.variant_key),"
+                " listing_id = coalesce(EXCLUDED.listing_id, storefront_slice_prices.listing_id),"
+                " slot_filaments"
+                " = coalesce(EXCLUDED.slot_filaments, storefront_slice_prices.slot_filaments),"
+                " slot_colours"
+                " = coalesce(EXCLUDED.slot_colours, storefront_slice_prices.slot_colours),"
+                " output_id = coalesce(EXCLUDED.output_id, storefront_slice_prices.output_id),"
                 " finished_at = EXCLUDED.finished_at"
                 f" RETURNING {_COLUMNS}",
                 (
@@ -379,6 +390,7 @@ class SlicePrices:
                     None if sliced.rate is None else sliced.rate.printer,
                     None if sliced.rate is None else Jsonb(sliced.rate.model_dump(mode="json")),
                     variant_key,
+                    listing_id,
                     None if slot_filaments is None else Jsonb(list(slot_filaments)),
                     None if slot_colours is None else Jsonb(list(slot_colours)),
                     output_id,
@@ -388,26 +400,31 @@ class SlicePrices:
         assert row is not None
         return row
 
-    def adopt(self, price_key: str, variant_key: str, slot_filaments: Sequence[str]) -> None:
-        """A ``done`` row with no variant key (written before #6921) takes ``variant_key``,
-        the key of a render whose estimate read it, so the instant read finds it. A row
-        that has a key keeps it: one variant's price never moves to another's."""
+    def adopt(
+        self, price_key: str, variant_key: str, listing_id: str, slot_filaments: Sequence[str]
+    ) -> None:
+        """A ``done`` row with no variant key (written before #6921) takes ``variant_key``
+        and its listing, the key of a render whose estimate read it, so the instant read
+        finds it. A row that has a key keeps it: one variant's price never moves to
+        another's."""
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE storefront_slice_prices SET variant_key = %s, slot_filaments = %s"
+                "UPDATE storefront_slice_prices SET variant_key = %s, listing_id = %s,"
+                " slot_filaments = %s"
                 " WHERE price_key = %s AND status = 'done' AND variant_key IS NULL",
-                (variant_key, Jsonb(list(slot_filaments)), price_key),
+                (variant_key, listing_id, Jsonb(list(slot_filaments)), price_key),
             )
 
-    def newest_done(self, variant_key: str, *, with_output: bool = False) -> PriceRow | None:
-        """The newest ``done`` row of ``variant_key`` (#6921), or None; with
-        ``with_output``, the newest that names the output its slice saved."""
-        output = " AND output_id IS NOT NULL" if with_output else ""
+    def variant_row(self, variant_key: str) -> PriceRow | None:
+        """The one ``done`` row of ``variant_key`` that the instant read and the cart add
+        both take (#6921): the newest that names the output its slice saved, else the
+        newest. So the price shown, the preview and the 3MF a line is charged from are of
+        one row. None when the variant has no ``done`` row."""
         with self._pool.connection() as conn:
             found = conn.execute(
                 f"SELECT {_COLUMNS} FROM storefront_slice_prices"
-                f" WHERE variant_key = %s AND status = 'done'{output}"
-                " ORDER BY finished_at DESC LIMIT 1",
+                " WHERE variant_key = %s AND status = 'done'"
+                " ORDER BY (output_id IS NOT NULL) DESC, finished_at DESC LIMIT 1",
                 (variant_key,),
             ).fetchone()
         return _row(found)
@@ -543,6 +560,8 @@ class SliceVariant(BaseModel):
     #: The variant key of the render whose estimate started the slice (#6921), which the
     #: ``done`` row records. None on an operation started before.
     variant_key: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    #: The listing the variant key was made for (#6921 review), which the row records.
+    listing_id: str | None = None
 
 
 def subject_of(key: str) -> str:
@@ -640,6 +659,7 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             variant.currency,
             sliced,
             variant_key=variant.variant_key,
+            listing_id=variant.listing_id,
             slot_filaments=variant.slot_filaments,
             slot_colours=rendered.colours,
             output_id=rendered.output_id,
@@ -677,6 +697,7 @@ def plan_variant(
     printer: PrinterOpening,
     type_presets: Mapping[UUID, Sequence[EffectivePreset]],
     variant_key: str | None = None,
+    listing_id: str | None = None,
 ) -> Planned | None:
     """The variant of ``reference``'s render with ``filaments`` on its slots (from 0),
     sliced with the choices the print dialog opens on for the model on the profile's
@@ -726,6 +747,7 @@ def plan_variant(
             slot_presets=presets,
             machine_rate=machine_rate,
             variant_key=variant_key,
+            listing_id=listing_id,
         ),
     )
 
@@ -772,6 +794,7 @@ async def _planned(
     model_sha256: str,
     filaments: Sequence[Filament] | None,
     variant_key: str | None = None,
+    listing_id: str | None = None,
 ) -> Planned | None:
     """The variant's key and its operation's request, as the shop's settings, the price
     book, the live machine rate, the printer's status and the filament types' presets
@@ -806,6 +829,7 @@ async def _planned(
         printer=opening,
         type_presets=type_presets,
         variant_key=variant_key,
+        listing_id=listing_id,
     )
 
 
@@ -870,29 +894,32 @@ async def slice_estimate(
     model_sha256: str,
     filaments: Sequence[Filament] | None,
     variant_key: str | None = None,
+    listing_id: str | None = None,
 ) -> StoreEstimate:
     """The firm price of the render on screen (#6153): the cached price of its variant,
     else its slice started (the read starts it, and a re-read joins it) while fewer than
     ``storefront_slices_concurrent`` run, else pending. ``filaments`` are the price-book
     filament of each slot of the render, or None when a slot has none: then, and with no
     shop slice profile, no preset for a slot's material or no printer status, there is no
-    price. ``variant_key`` is the render's (#6921): the slice's ``done`` row records it,
-    and a ``done`` row from before #6921 takes it (:meth:`SlicePrices.adopt`)."""
+    price. ``variant_key`` is the render's and ``listing_id`` its listing's (#6921): the
+    slice's ``done`` row records them, and a ``done`` row from before #6921 takes them
+    (:meth:`SlicePrices.adopt`)."""
     planned = await _planned(
         state,
         reference=reference,
         model_sha256=model_sha256,
         filaments=filaments,
         variant_key=variant_key,
+        listing_id=listing_id,
     )
     if planned is None:
         return NO_PRICE
     prices = _orders(state).slice_prices
     row = await asyncio.to_thread(prices.get, planned.key)
     if row is not None and row.status == "done":
-        if variant_key is not None and row.variant_key is None:
+        if variant_key is not None and listing_id is not None and row.variant_key is None:
             await asyncio.to_thread(
-                prices.adopt, planned.key, variant_key, planned.variant.slot_filaments
+                prices.adopt, planned.key, variant_key, listing_id, planned.variant.slot_filaments
             )
         return answer_of(row)
     await _settle_ended(state, prices)
@@ -923,18 +950,25 @@ def last_answer(row: PriceRow) -> StoreEstimate:
 
 
 async def instant_price(
-    state: AppState, *, reference: Reference, variant_key: str
+    state: AppState, *, reference: Reference, newest: PriceRow | None
 ) -> StoreEstimate:
     """The price of a visitor's choices before any render (#6921), read only: it starts no
-    render and no slice. The newest ``done`` row of ``variant_key`` gives the 3MF's sha256
-    and the filament of each slot; with the shop's settings now (the same `_planned` inputs
-    as the estimate: the book, the live rate, the profile, the printer's opening and the
-    type presets) they give today's price key. When that key has a ``done`` row, it is the
-    firm price (``slice``). Else the newest row's price is the last price (``last``). With
-    no ``done`` row of the variant, ``none``."""
+    render and no slice. ``newest`` is the variant's row (:meth:`SlicePrices.variant_row`,
+    the row the preview and the cart add take too): it gives the 3MF's sha256 and the
+    filament of each slot; with the shop's settings now (the same `_planned` inputs as the
+    estimate: the book, the live rate, the profile, the printer's opening and the type
+    presets) they give today's price key. When that key has a ``done`` row, it is the firm
+    price (``slice``). Else the row's price is the last price (``last``). With no row,
+    ``none``.
+
+    The cost per read with a row (#6921 review): `_planned` loads the settings, the price
+    book and the type presets from the database, then one more row read by key. The live
+    rate and the printer's opening, its slow inputs, are already kept `RATE_TTL` in this
+    process (`live_rate`, `live_opening`), so a read never asks the printer or Bambuddy
+    again within that time. No further cache: the price book and the presets have no
+    version to key it on, and a stale key would show an old price as firm."""
     orders = _orders(state)
     prices = orders.slice_prices
-    newest = await asyncio.to_thread(prices.newest_done, variant_key)
     if newest is None or newest.currency is None or newest.total_minor is None:
         return NO_PRICE
     filaments = (

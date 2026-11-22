@@ -665,6 +665,7 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
         model_sha256=digest,
         filaments=slots,
         variant_key=owned.variant_key,
+        listing_id=listing.id,
     )
 
 
@@ -742,17 +743,17 @@ def preview_path(key: str) -> str:
     return f"{STOREFRONT_PREFIX}/variants/{key}/preview.glb"
 
 
-def output_of(state: AppState, row: PriceRow, listing: Listing | None) -> OutputMeta | None:
+def output_of(state: AppState, row: PriceRow, listing: Listing) -> OutputMeta | None:
     """The output a ``done`` row's slice saved, while it is there with its preview mesh
-    and is of the design ``listing`` shows (its slug and commit; with no listing, any).
-    Blocking: call it in a thread."""
+    and is of the design ``listing`` shows (its slug and commit). Blocking: call it in a
+    thread."""
     if row.output_id is None:
         return None
     try:
         meta = state.outputs.get(row.output_id)
     except OutputNotFoundError:
         return None
-    if listing is not None and (meta.slug, meta.model_version) != (listing.slug, listing.commit):
+    if (meta.slug, meta.model_version) != (listing.slug, listing.commit):
         return None
     if not (state.outputs.directory(row.output_id) / PREVIEW_NAME).is_file():
         return None
@@ -783,9 +784,11 @@ async def instant_variant(state: AppState, visitor_id: str, body: RenderBody) ->
     runtime = await asyncio.to_thread(_runtime, state)
     listing, resolved, choice = await checked_choice(orders, body, runtime.storefront_materials)
     key = variant_key(listing, choice, body.colours)
-    price = await instant_price(state, reference=resolved.reference, variant_key=key)
+    # One row gives the price and the preview, as it gives the cart add its 3MF (#6921
+    # review): the price shown is of the 3MF the line is charged from.
+    row = await asyncio.to_thread(orders.slice_prices.variant_row, key)
+    price = await instant_price(state, reference=resolved.reference, newest=row)
     preview = None
-    row = await asyncio.to_thread(lambda: orders.slice_prices.newest_done(key, with_output=True))
     meta = None if row is None else await asyncio.to_thread(output_of, state, row, listing)
     if meta is not None:
         preview = VariantPreview(
@@ -808,14 +811,20 @@ def variant_not_found() -> ApiError:
 
 
 async def variant_preview(state: AppState, key: str) -> Path:
-    """The preview mesh of the output the newest priced slice of variant ``key`` saved
-    (#6921); 404 ``variant_not_found`` for a key that names none, or one whose output is
-    gone."""
+    """The preview mesh of the output the priced slice of variant ``key`` saved (#6921,
+    `SlicePrices.variant_row`); 404 ``variant_not_found`` for a key that names none, one
+    whose output is gone, or one whose listing is no longer published or no longer shows
+    the output's design (#6921 review)."""
     orders = _orders(state)
-    row = await asyncio.to_thread(lambda: orders.slice_prices.newest_done(key, with_output=True))
-    if row is None or row.output_id is None:
+    row = await asyncio.to_thread(orders.slice_prices.variant_row, key)
+    if row is None or row.output_id is None or row.listing_id is None:
         raise variant_not_found()
-    meta = await asyncio.to_thread(output_of, state, row, None)
+    listing_id = row.listing_id
+    try:
+        listing = await asyncio.to_thread(published_listing, orders.listings, listing_id)
+    except ApiError:
+        raise variant_not_found() from None
+    meta = await asyncio.to_thread(output_of, state, row, listing)
     if meta is None:
         raise variant_not_found()
     return state.outputs.directory(row.output_id) / PREVIEW_NAME
@@ -825,5 +834,5 @@ async def variant_colours(state: AppState, key: str) -> list[str] | None:
     """The slot colours a priced slice of variant ``key`` recorded (#6921), or None: what
     a cart add takes when the visitor has no done render of its own."""
     prices = _orders(state).slice_prices
-    row = await asyncio.to_thread(lambda: prices.newest_done(key, with_output=True))
+    row = await asyncio.to_thread(prices.variant_row, key)
     return None if row is None else row.slot_colours

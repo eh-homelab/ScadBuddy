@@ -475,6 +475,39 @@ describe('CustomizePage', () => {
     expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
   })
 
+  it('drops the earlier price when the render of a change is refused, and says nothing is updating (#6921)', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => {
+        posts += 1
+        // The load renders; the change is refused.
+        return posts === 1 ? undefined : HttpResponse.json(LIMITED, { status: 429, headers: { 'Retry-After': '42' } })
+      }),
+    )
+    const { user } = show()
+    await screen.findByText('$12.40 for one')
+    await user.type(screen.getByLabelText('Name'), 'Bo')
+    expect(await screen.findByText('You have made a lot of previews. Try again in 42 seconds.')).toBeInTheDocument()
+    expect(screen.queryByText('Updating this price…')).toBeNull()
+    expect(screen.queryByText('$12.40 for one')).toBeNull()
+  })
+
+  it('drops the earlier price when the render of a change fails (#6921)', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => {
+        posts += 1
+        return posts === 1 ? undefined : HttpResponse.json({ ...DONE, status: 'failed', error: 'It broke.' })
+      }),
+    )
+    const { user } = show()
+    await screen.findByText('$12.40 for one')
+    await user.type(screen.getByLabelText('Name'), 'Bo')
+    expect(await screen.findByText('It broke.')).toBeInTheDocument()
+    expect(screen.queryByText('Updating this price…')).toBeNull()
+    expect(screen.queryByText('$12.40 for one')).toBeNull()
+  })
+
   it('shows a cached preview and its firm price before any render, and renders nothing (#6921)', async () => {
     const sent = renders()
     server.use(
@@ -654,11 +687,24 @@ describe('CustomizePage', () => {
   })
 
   it('keeps the visitor’s choices when they leave and come back', async () => {
+    // A slow slice, as on the loaded CI runner of #6927: the load's price shows, marked as
+    // updating, while the price of the change is still read. The handler falls through to the
+    // mock's own.
+    server.use(http.get('/api/store/v1/renders/:id/estimate', () => new Promise<undefined>((resolve) => setTimeout(resolve, 200))))
     const first = show()
-    await first.user.type(await screen.findByLabelText('Name'), 'Ada')
-    await first.user.click(screen.getByRole('button', { name: 'One more' }))
-    // The first page's render of these values was priced before it left.
+    // The load's render is priced before the visitor types (#6927 CI: a slow page did so).
     expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
+    await first.user.type(screen.getByLabelText('Name'), 'Ada')
+    await first.user.click(screen.getByRole('button', { name: 'One more' }))
+    // The first page's render of these values was priced before it left: the price is firm,
+    // not the load's price still marked as updating.
+    await waitFor(
+      () => {
+        expect(screen.queryByText('Updating this price…')).toBeNull()
+        expect(screen.getByText('$12.40 for one')).toBeInTheDocument()
+      },
+      { timeout: 5_000 },
+    )
     first.unmount()
     const sent = renders()
     const read: unknown[] = []

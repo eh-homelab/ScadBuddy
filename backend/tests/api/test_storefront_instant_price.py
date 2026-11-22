@@ -13,7 +13,9 @@ import uuid
 from typing import Any
 
 import pytest
+from psycopg.types.json import Jsonb
 
+from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.models import MachineRateBreakdown
 from scadbuddy.orders.storefront import slice_price
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
@@ -260,3 +262,82 @@ def test_a_visitor_with_no_render_adds_a_cached_variant_at_its_firm_price(
     assert (item["price"], item["unit_price_minor"]) == ("firm", est["price_minor"])
     renders, jobs, prices, slices = started_work(crud, sliced)
     assert (renders, jobs, prices, slices) == before
+
+
+def test_the_preview_of_an_unpublished_listing_is_404(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    """#6921 review: the price row records the listing its variant key was made for, and
+    the preview is served only while that listing is published."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 54})
+    priced(crud, job["id"])
+    key = variant_keys(crud)[job["id"]]
+    [row] = rows(crud, "SELECT listing_id FROM storefront_slice_prices WHERE variant_key = %s", key)
+    assert row["listing_id"] == listing["id"]
+    assert crud.get(f"/variants/{key}/preview.glb").status_code == 200
+    off = crud.api.post(f"/api/v1/storefront/listings/{listing['id']}/unpublish")
+    assert off.status_code == 200, off.text
+    r = crud.get(f"/variants/{key}/preview.glb")
+    assert r.status_code == 404 and r.json()["type"].endswith("variant_not_found")
+
+
+def test_a_finish_with_no_variant_keeps_what_the_row_recorded(
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    sliced: type[FakeSlicer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6921 review: a slice whose operation started before #6921 names no variant. Its
+    finish over a row that has one keeps the variant key, the listing, the slots and the
+    output."""
+    finished: list[tuple[Any, ...]] = []
+    finish = slice_price.SlicePrices.finish
+
+    def spy(self: slice_price.SlicePrices, *args: Any, **kwargs: Any) -> Any:
+        finished.append(args)
+        return finish(self, *args, **kwargs)
+
+    monkeypatch.setattr(slice_price.SlicePrices, "finish", spy)
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 55})
+    est = priced(crud, job["id"])
+    [args] = finished
+    columns = (
+        "SELECT variant_key, listing_id, slot_filaments, slot_colours, output_id"
+        " FROM storefront_slice_prices WHERE price_key = %s"
+    )
+    [before] = rows(crud, columns, est["price_key"])
+    assert all(value is not None for value in before.values())
+    finish(_state(crud.api).components.get(ORDERS).slice_prices, *args)
+    assert rows(crud, columns, est["price_key"]) == [before]
+
+
+def test_the_price_shown_and_the_price_charged_are_of_one_row(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    """#6921 review: a newer row of the variant with no output (one adopted from before
+    #6921) beside the row whose slice saved the output. The instant read and the cart add
+    both take the row with the output: its price, its preview and its 3MF."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 56})
+    est = priced(crud, job["id"])
+    key = variant_keys(crud)[job["id"]]
+    [real] = rows(
+        crud, "SELECT slot_filaments FROM storefront_slice_prices WHERE variant_key = %s", key
+    )
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO storefront_slice_prices (price_key, model_sha256, status, currency,"
+            " unit_price_minor, total_minor, lines, variant_key, listing_id, slot_filaments,"
+            " finished_at) VALUES (%s, %s, 'done', 'USD', 99999, 99999, '[]'::jsonb, %s, %s,"
+            " %s, clock_timestamp() + interval '1 hour')",
+            ("f" * 64, "e" * 64, key, listing["id"], Jsonb(real["slot_filaments"])),
+        )
+    answer = instant(crud, listing, {"width": 56}, token=TOKEN_B).json()
+    assert (answer["price"]["source"], answer["price"]["price_minor"]) == (
+        "slice",
+        est["price_minor"],
+    )
+    assert answer["preview"] is not None
+    r = add(crud, listing, 56, token=TOKEN_B)
+    assert r.status_code == 200, r.text
+    [item] = r.json()["items"]
+    assert (item["price"], item["unit_price_minor"]) == ("firm", est["price_minor"])

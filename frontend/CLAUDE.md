@@ -90,7 +90,9 @@ same way, `vite.config.ts`).
   variant the shop priced). Otherwise it renders and reads the estimate as before. A
   price, once known, stays on screen: `components/Estimate.tsx` `updating` marks one that
   is not yet the firm price of the choices on screen, and a `last` price is always marked,
-  never firm. "Working out the price…" shows only with no price known; "We price this
+  never firm. A render that ends with no price (refused, failed, too slow, or its estimate
+  read failed) drops any other price and a `last` one, so nothing shows as updating when
+  nothing is. "Working out the price…" shows only with no price known; "We price this
   design by hand" only when the render's estimate answers `none`. The mock holds a variant
   once its render's estimate answered (`holdVariant` seeds one).
   The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)

@@ -380,6 +380,10 @@ export function CustomizePage({
     setRenderError(null)
     // #6921: the price on screen stays, marked as updating, until the new one answers.
     setPendingFor(undefined)
+    // #6921: a render of `key` that ends with no price leaves no other price on screen, and
+    // no last price: nothing works on it now, so it is never shown as updating. Call it only
+    // while `live()`.
+    const unpriced = () => setPriced((p) => (p && (p.key !== key || p.estimate.source === 'last') ? undefined : p))
     let begun = false
     try {
       if (await instant(body, key, live)) return
@@ -393,8 +397,13 @@ export function CustomizePage({
       if (first.values) setSettled({ key, values: first.values })
       setJob(onScreen(first))
       const done = await follow(first, live)
-      if (!live() || done === null) return
+      if (!live()) return
+      if (done === null) {
+        unpriced()
+        return
+      }
       if (done.status !== 'done') {
+        unpriced()
         setRenderError(done.error ?? 'This preview could not be made. Change something and try again.')
         return
       }
@@ -409,6 +418,7 @@ export function CustomizePage({
       // A start refused or failed settled nothing: the parts the visitor did not set show
       // the page's prediction again (#6258, #6302 review).
       if (!begun) setSettled(undefined)
+      unpriced()
       if (changedListing(caught)) setStale(true)
       setRenderError(refusalText(caught, listing))
       if (retryable(caught) && !retry) {
