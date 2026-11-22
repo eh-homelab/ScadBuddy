@@ -466,9 +466,9 @@ on shutdown.
     pool one more) and closes a connection left idle for a minute, one a minute
     (psycopg_pool's `max_idle`). The `LISTEN` connection and `scadbuddy-preview-follows`
     are not pools, and neither is closed while idle: the follows' connection opens at
-    the first claim and closes only after a failed statement or at shutdown. The agent sidecar holds at most 8 (`agent/src/db.ts`
-    `AGENT_DB_CONNECTIONS`), briefly more while a failed lock connection is replaced, and no
-    `LISTEN` connection: its NOTIFY channels reach it over the API's change stream (#5299 D4).
+    the first claim and closes only after a failed statement or at shutdown. The agent sidecar
+    and the agent worker hold none: they have no SQL client (#5299 step 12), and their NOTIFY
+    channels reach them over the API's change stream (#5299 D4).
     `scadbuddy_db_pool_connections{pool}`, `scadbuddy_db_pool_max_connections{pool}`
     and `scadbuddy_db_pool_requests_waiting{pool}` (callers queued for a connection: a
     pool too small for its load) show each pool, and every pool names itself as its
@@ -836,14 +836,10 @@ above. On the deployment, besides that login's variables (`SCADBUDDY_AUTH_MODE`,
 `SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK=true` for an issuer inside the cluster), every
 service that calls the API presents a **service credential** (`Authorization: Bearer
 sbsvc_…`): the agent sidecar, the print worker (`--queue bambuddy`) and the flow runs'
-worker (`--queue projects`). Nothing is configured for them. The agent sidecar reads its
-current one from a view of its own: the API issues it at its start and rotates it on the
-prune Schedule with an overlap, and the sidecar unseals it with the KEK, so **a caller
-that reads its view needs `SCADBUDDY_SECRET_KEY_FILE` mounted**. The print and projects
-workers read no view: each exchanges a proof (below), and the API mints them no sealed
-credential and revokes any left at its start (#5298). The print worker needs no KEK at
-all (#5298 Task 33). Settings → System → Service credentials lists and revokes them, and
-rotates the agent's.
+worker (`--queue projects`). None of them reads a credential view: each exchanges a proof
+(below), and needs no KEK for it (#5298, #5299 step 12). Settings → System → Service
+credentials lists and revokes them, and rotates the agent's sealed one, which the API still
+issues (`service_credentials_agent`) although the agent no longer reads it.
 
 **The service-token exchange (#5494).** A caller can prove who it is instead, and get a
 15-minute credential with no sealed copy and no database read
@@ -851,8 +847,8 @@ rotates the agent's.
 It presents its proof at `POST /api/v1/auth/service-token` (RFC 8693 form fields
 `grant_type`, `subject_token`, `subject_token_type`) and renews the credential at half-life
 and at once after a 401. Each caller picks its proof with one variable; setting both is a
-start error, and setting neither reads the view as above, except on the workers that hold
-no database (render, print and projects), which refuse to start:
+start error, and setting neither is a start error too on every caller that holds no
+database (render, print, projects and the agent, #5299 step 12):
 
 | Proof | On the caller | On the API |
 |---|---|---|
@@ -916,14 +912,12 @@ store or another caller's credential:
 | render worker | none: the worker has no database client and ignores the URL (#5298 Task 20); the API revokes everything the role `scadbuddy_render` held at every start where the role still exists (#5298 Task 22) | none: prod sets none and has no such role (eh-homelab/clusters#3555, #3566, #3578; measured 2026-11-14) |
 | print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start where the role still exists (#5298 Task 35) | none: prod sets none and has no such role (as above) |
 | flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API revokes everything the role `scadbuddy_projects` held at every start where the role still exists | none: prod sets none and has no such role (as above) |
-| agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
+| agent sidecar and agent worker | none: the agent has no SQL client and ignores `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` with a warning (#5299 step 12). The API revokes everything the role `scadbuddy_agent` held, and the role itself, at every start where it still exists (`backend/scadbuddy/auth/revoke.py` `RETIRED_ROLES`, PR #6906) | none needed; prod still sets the owner URL until the eh-homelab/clusters change removes it |
 
-Create each role with a password (`CREATE ROLE scadbuddy_agent LOGIN PASSWORD '…'`; on
-CNPG a `managed.roles` entry) and point that caller's `SCADBUDDY_DATABASE_URL` at it;
-the API itself stays on the database's owner role. At every start the API grants each
-role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`) and its
-credential's view; a role created
-after the API started is granted on the API's next start. The agent grants nothing
+No caller needs a role of its own any more; the API itself stays on the database's owner
+role. At every start the API grants each role that exists exactly its list
+(`backend/scadbuddy/auth/caller_grants.py`); a role created after the API started is
+granted on the API's next start. The agent grants nothing
 since #6501: on separate roles, the API's role must own the `ai_*` tables (the files it
 applies since #5299 D6 already are; transfer the older ones with `ALTER TABLE … OWNER TO`).
 
@@ -946,8 +940,8 @@ the zones: [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md
 1. In `off`: set the issuer and client id, register the redirect URI at the issuer,
    save the client secret and the sign-in rule in Settings → System → Sign-in, and sign
    in once to check it.
-2. Create the callers' roles, point each caller at its own, mount the KEK in each, and
-   roll them, so every caller presents its credential.
+2. Give each caller its proof (`SCADBUDDY_SERVICE_TOKEN_FILE`, above) and roll them, so
+   every caller presents its credential.
 3. `SCADBUDDY_AUTH_MODE=observe` on the API and the agent sidecar. Nothing is refused;
    the API counts what `enforce` would refuse in `scadbuddy_auth_would_refuse_total{class,
    reason}`, and both log it once a minute (`enforce would refuse …`).
@@ -1830,12 +1824,12 @@ form as the `store_backend` one above.
 With **`SCADBUDDY_SECRET_KEY_FILE`** set, the backend seals the API keys it stores
 (`bambuddy_api_key`, `bambuddy_render_api_key`, `google_fonts_api_key`) in the
 `settings` table with envelope encryption, in the agent's format and under the same key
-file (see "The agent sidecar" below: 32 random bytes, base64). At start the API seals any
+file that seals the agent's secrets (32 random bytes, base64; `openssl rand -base64 32`). At start the API seals any
 key still stored in plaintext, once, under the migration lock, and logs
 `sealed plaintext API keys`. A key that is set but unreadable or malformed stops the
 start.
 
-- Mount the file into the API only (and the agent, which shares it). The API reads the
+- Mount the file into the API only. The agent reads no KEK (#5299 step 12). The API reads the
   keys from the database and opens them; a process without the key (or with another one)
   cannot open a sealed key, logs `ignoring a stored secret this process cannot open` and
   falls back to its own `SCADBUDDY_<FIELD>`. The render and print workers need no key and
@@ -1866,17 +1860,22 @@ the backend on `http://127.0.0.1:8080` (§4.3).
 
 - It listens on port `8081` and answers `GET /healthz` (`agent/src/app.ts`).
 - It reads only infrastructure variables (`agent/src/config.ts`; spec §9):
-  `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
-  `http://127.0.0.1:8080`), `SCADBUDDY_SECRET_KEY_FILE`,
-  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL`,
+  `SCADBUDDY_BACKEND_URL` (default `http://127.0.0.1:8080`), its service-credential
+  proof (`SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`, required;
+  "Authentication on the deployment" above), `SCADBUDDY_PUBLIC_URL`,
   `SCADBUDDY_ALLOWED_ORIGINS`, `SCADBUDDY_AGENT_TRUSTED_PROXIES` and the backend's
   `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE` and
-  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, each described below. With no database
-  URL it still runs and `/healthz` reports `"ai": "disabled (no database)"`.
+  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, each described below.
+- **No database and no KEK** (#5299 step 12). The agent has no SQL client: all its data
+  goes through the API's CRUD routes (`/api/v1/internal/crud/agent/*`) with its
+  service credential, and the API applies its migrations. Do not give it
+  `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` or
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`: when one is set it starts and logs `agent:
+  ignores <names>: the agent has no database and no key-encryption key (#5299 step 12)`.
 - **`SCADBUDDY_TEMPORAL_ADDRESS`** (#1055): set it as the API container has it. The
   agent then runs a Temporal worker on the `agent-tools` task queue: every tool as an
   activity for durable sessions, and the agent's own commands (installing and
-  re-pinning a plugin package). It needs the database too. `/healthz` reports
+  re-pinning a plugin package). `/healthz` reports
   `"temporal"`: `not configured`, `connecting`, `ok` or `unavailable`; without it,
   plugin package installs answer `503`. The pod's network policy must let the agent
   reach the Temporal frontend, as it does the API.
@@ -1888,8 +1887,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `agent-tools.<hostname>`) and serves only `GET /healthz` and `GET /readyz` on port
   `8081`; `/readyz` is `200` once Temporal lists it on all four queues and its build is
   current (below). Run `worker` in
-  a Deployment of its own, with the agent container's database, Temporal, KEK, payload
-  and backend settings, but with `SCADBUDDY_BACKEND_URL` set to the backend's cluster
+  a Deployment of its own, with the agent container's proof, Temporal, payload and
+  backend settings, but with `SCADBUDDY_BACKEND_URL` set to the backend's cluster
   address (it is not in the API's pod), and set the API pod's `agent` container to
   `api`. Without any `worker` or `all` process, no unified session can start
   (`docs/ai/operating.md` §1, "Roles").
@@ -1918,46 +1917,24 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   goes to unversioned pollers (measured,
   `agent/test/temporal.versioning.temporal.test.ts`;
   `docs/superpowers/plans/2026-10-13-unified-agent-runtime-phase-11.md`).
-- **`SCADBUDDY_SECRET_KEY_FILE`** is the key-encryption key for the Claude
-  credential, which is stored encrypted in the database (envelope encryption,
-  spec §9; `agent/src/secrets.ts`). The file holds exactly 32 random bytes,
-  base64-encoded; mount it from a Kubernetes Secret:
-
-  ```bash
-  openssl rand -base64 32 > scadbuddy-secret.key
-  kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
-    --from-file=secret.key=scadbuddy-secret.key
-  # container: volumeMount at /etc/scadbuddy/kek, readOnly;
-  # env SCADBUDDY_SECRET_KEY_FILE=/etc/scadbuddy/kek/secret.key
-  ```
-
-  It is read once at start. Without it (or with a malformed one) the service
-  still runs, but saving a credential answers `503` naming the reason and
-  `/healthz` reports `"ai": "disabled (no key-encryption key: …)"` (the
-  reason names the variable, never the path; the log has the detail). Keep a
-  copy: a credential sealed under a lost key cannot be decrypted and must be
-  entered again (`/healthz` then says it was sealed with a different key).
-- **Rotating the key** (spec §9, "re-wraps the data keys only"): create a new
-  key file, mount it as `SCADBUDDY_SECRET_KEY_FILE`, mount the old one as
-  **`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`** on the API container as well as the
-  agent's containers, and restart them. At its start the API re-seals the data
-  key of every Claude credential and payload key sealed under the old key, and
-  the agent does the same for the rest of its secrets (the secret itself is not
-  decrypted into a route or re-entered); each log says how many. Then remove
-  the previous file from every container and restart again. A row the old key
-  cannot open is left as it is and counted in that log line. Which tables each
-  one re-wraps: `docs/ai/operating.md` §3.3.
-- `/healthz` reports `"ai": "enabled"` only when the database answers (and, once the API lists
-  every area the agent wants, the API answers them too: `database` reads `unreachable` when either
-  does not, and the agent logs which, #6501), its
-  `ai_*` migrations have applied (`backend/scadbuddy/migrations_agent/`, which
-  the API applies at its start; the agent waits for them, #5299), the key is loaded and a Claude credential is
-  saved. Otherwise `ai` names the first missing piece; each database step is
-  bounded (2 s), so an API that has not migrated yet shows as
-  `"unavailable (waiting for the API to apply the database migrations)"`, and any
-  other stuck step as `"unavailable (database timed out)"`, instead of a hung probe. An edited,
-  already-applied migration stops the API at start, and the agent, with a
-  message naming it (each file's sha256 is recorded).
+- **The key-encryption key is the API's** (`SCADBUDDY_SECRET_KEY_FILE` on the API
+  container only; "Encrypted API keys" below). The API seals and opens the Claude
+  credentials and every other agent secret, and answers each plaintext or derived key to
+  the agent's credential from a route for that purpose (#5299 step 4, #5342). With no KEK
+  on the API, saving a credential answers `503` and `/healthz` reports
+  `"ai": "disabled (no key-encryption key: …)"`. Keep a copy: a credential sealed under a
+  lost key cannot be decrypted and must be entered again (`/healthz` then says it was
+  sealed with a different key). A rotation mounts the old key as
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` on the API container only, and the API re-wraps
+  every agent table at its start (`docs/ai/operating.md` §3.3).
+- `/healthz` reports `"ai": "enabled"` only when the API lists and answers every CRUD
+  area the agent wants (`database` reads `ok`, else `unreachable`, and the agent logs each
+  change, `agent/src/api/dataHealth.ts`), the API holds its key and a Claude credential is
+  saved. Otherwise `ai` names the first missing piece (`agent/src/aiStatus.ts` `AiStatus`):
+  `"unavailable (the API does not answer the agent's CRUD areas)"` until the API lists
+  them, and each step that asks the API is bounded (2 s), so a slow API shows as
+  `"unavailable (the API timed out)"` instead of a hung probe. Until the areas are listed,
+  `/mcp` and the agent's data routes answer `503`.
 - The Claude credentials (Anthropic API keys, Claude Code OAuth tokens from
   `claude setup-token`, or gateway base URLs plus tokens) are set in
   Settings → Assistant → **Claude credentials**, a list in the order the
