@@ -157,6 +157,12 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'printing',
     kind: 'bool',
   },
+  // #6871 — a native run waits for a busy printer, in ScadBuddy's queue, rather than send.
+  {
+    name: 'lan_queue_when_busy',
+    section: 'printing',
+    kind: 'bool',
+  },
   // #4953 — whether a fulfilled line item may be unfulfilled (#4952), by a person or the agent.
   {
     name: 'orders_allow_unfulfil',

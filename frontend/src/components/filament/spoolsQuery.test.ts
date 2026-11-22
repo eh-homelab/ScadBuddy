@@ -85,6 +85,15 @@ describe('filterSpools', () => {
     expect(numbers({ material: 'PETG' })).toEqual([6])
     expect(numbers({ brand: 'sunlu', location: 'Shelf A' })).toEqual([6])
   })
+
+  it('filters by place id, so two places of one name stay apart (#6869)', () => {
+    const shelf = (n: number, id: string) =>
+      spool(n, { location_id: id, names: { material: 'PLA', brand: 'Bambu Lab', location: 'Shelf', insert_type: null, subtype: null, category: null, effect: null } })
+    const both = [shelf(1, 'garage-shelf'), shelf(2, 'office-shelf')]
+    expect(filterSpools(both, { ...DEFAULT_SPOOLS_QUERY, place: 'office-shelf' }).map((s) => s.number)).toEqual([2])
+    expect(readQuery(new URLSearchParams('place=office-shelf')).place).toBe('office-shelf')
+    expect(writeQuery({ ...DEFAULT_SPOOLS_QUERY, place: 'office-shelf' }).toString()).toBe('place=office-shelf')
+  })
 })
 
 describe('sorting and grouping', () => {

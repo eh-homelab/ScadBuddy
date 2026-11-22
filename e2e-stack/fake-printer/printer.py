@@ -21,7 +21,9 @@ It is what a LAN client (3a's ``LanPrinter``) connects to, and it records what i
   (``mc_percent`` 0 to 100 over ``FAKE_PRINT_SECONDS``) and ``FINISH``. Otherwise the echo
   says ``result: FAIL`` with a reason, the print goes ``FAILED`` with a non-zero
   ``print_error`` and the refusal is listed. The failure's values are made up: what a
-  printer answers for a missing file is not measured. ``print.stop`` ends a print
+  printer answers for a missing file is not measured. A ``project_file`` sent while a
+  print runs (``BUSY_STATES``) is echoed ``FAIL`` with the reason ``ERROR STATE``, as the
+  H2C answered (#6871), and the print carries on. ``print.stop`` ends a print
   ``FAILED``. An ACL lets ``bblp`` use only ``device/<serial>/request`` and
   ``device/<serial>/report``: mosquitto 2 grants a ``#`` subscription but delivers it
   nothing else, and drops a publish to any other topic.
@@ -105,6 +107,12 @@ REPORT = Path(__file__).with_name("report.json")
 #: ``print_error`` for a ``project_file`` whose file is missing. Made up (not measured on
 #: a printer); a client should only rely on it being non-zero.
 FILE_NOT_FOUND = 0x0500_C010
+#: The states in which a ``project_file`` is refused ``BUSY_REASON``, and the print the
+#: printer runs carries on (#6871). Measured for ``RUNNING`` on the H2C on 2026-11-21: the
+#: echo said ``ERROR STATE`` and its HMS ``0500_4004`` "Device is busy and cannot start new
+#: task"; ``PREPARE``, ``SLICING`` and ``PAUSE`` hold a job the same way, not measured.
+BUSY_STATES = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
+BUSY_REASON = "ERROR STATE"
 #: Seconds between two RUNNING reports.
 TICK = 0.25
 #: mosquitto's PBKDF2-SHA512 password hash (``$7$``), with its default iterations.
@@ -502,10 +510,15 @@ class FakePrinter:
         if not isinstance(command, dict):
             return
         if command.get("command") == "project_file":
+            url = str(command.get("url") or "")
+            if self.state.get("gcode_state") in BUSY_STATES:
+                # As the H2C refused one on 2026-11-21 (#6871): the print it runs goes on.
+                await self._echo(client, command, url, BUSY_REASON)
+                self.received.refuse({"url": url, "reason": BUSY_REASON})
+                return
             if self._printing is not None:
                 self._printing.cancel()
                 self._printing = None
-            url = str(command.get("url") or "")
             path = resolve_url(url, str(command.get("file") or ""))
             reason = self._missing(path)
             await self._echo(client, command, url, reason)

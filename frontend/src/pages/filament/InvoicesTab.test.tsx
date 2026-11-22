@@ -43,6 +43,14 @@ describe('the invoices tab', () => {
     expect(within(confirmed).queryByLabelText('Has a file')).not.toBeInTheDocument()
   })
 
+  it('links each invoice and its supplier to their pages (#6869)', async () => {
+    render()
+    await waitFor(() => expect(rows().length).toBeGreaterThan(0))
+    const row = rows().find((one) => one.dataset.invoice === INVOICE.CONFIRMED_B)!
+    expect(within(row).getByRole('link', { name: '112-4471902-5530' })).toHaveAttribute('href', `/filament/invoices/${INVOICE.CONFIRMED_B}`)
+    expect(within(row).getByRole('link', { name: 'Amazon' })).toHaveAttribute('href', `/filament/suppliers/${SUPPLIER.AMAZON}`)
+  })
+
   it('filters by status and by supplier', async () => {
     const { user } = render()
     await waitFor(() => expect(rows()).toHaveLength(4))

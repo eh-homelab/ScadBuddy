@@ -747,9 +747,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   that report (`printers/reports.py` `advance_print`, #5138, #5142). A LAN print keeps
   `output_last_prints.sent_to_bambuddy`, so the output still says "Send again" (#5143).
   A run of several plates or copies is its own queue (#4541, `workflows/printing.py`
-  `_print_lan`): it succeeds at its first start, then `lan_wait` (`printers/print_activities.py`,
+  `_print_lan`): it succeeds at its first start (a queued run, below, before it), then `lan_wait` (`printers/print_activities.py`,
   over the watch's `printer_reports`) waits out each print before the next starts, and
   `print_lan_update` rewrites the result (`PrintRunResult.lan_waiting`, `lan_stopped`).
+  A busy printer (#6871, plan Decisions 8-21): a run planned with the stored setting
+  `lan_queue_when_busy` (on by default; one print too) reads the printer first
+  (`lan_check`, behind `BUSY_PATCH`). When it is busy the run succeeds with nothing
+  started (`PrintRunResult.lan_queued`, every print in `lan_waiting`), and its
+  `PrintLanSequence` waits for the printer and a cleared plate before the first start.
   A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
   A native file's associations (#6395): `print_library/associations.py` (`RELATIONS`, the
   one list; `library_file_associations`), routes `api/library_associations.py`, which adds
@@ -779,12 +784,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `copy_library_files` and `get_library_copy` (`agent/src/tools/libraryCopy.ts`);
   `list_library`'s `source: bambuddy`; frontend `components/library/LibraryCopyDialog.tsx`.
   A native run of several prints starts the later ones in `PrintLanSequence`
-  (`print-lan-<run id>`, `workflows/printing.py` `LanSequenceWorkflow`); its controls
+  (`print-lan-<run id>`, `workflows/printing.py` `LanSequenceWorkflow`), and a run queued
+  on a busy printer (#6871) starts all of them there, the first included; its controls
   (#4942, #4939) are `POST /print/runs/{id}/stop` (cancels the sequence, which records
   `lan_stopped`) and `…/plate-cleared` (the `plate_cleared` signal, for a run planned with
-  the stored setting `lan_require_plate_clear`, behind `PLATE_CLEAR_PATCH`), shown from
-  `PrintProgress.lan_run` and `PrinterNow.lan_run` by `components/print/LanRunControls.tsx`,
-  and the agent's `stop_print_run` and `confirm_plate_clear`.
+  the stored setting `lan_require_plate_clear`, behind `PLATE_CLEAR_PATCH`, and for a run
+  queued on a busy printer, whatever that setting says, behind `BUSY_PATCH`). The strip
+  shows each printer's oldest waiting run and only reads; a run whose sequence is gone is
+  recorded stopped by the native-copies sweep (`end_gone_sequences`, on every backend) or
+  by a control sent to it. `components/print/LanRunControls.tsx` shows the controls from
+  `PrintProgress.lan_run` and `PrinterNow.lan_run`; the agent's are `stop_print_run` and
+  `confirm_plate_clear`.
 - `backend/scadbuddy/filament/` — the filament data model (#6261, epic #6260, spec
   2026-11-14): `catalog.py` (configurable catalogs, no code enums; materials, subtypes,
   brands, categories and effects keep names and aliases in `filament_<kind>_names`, one key

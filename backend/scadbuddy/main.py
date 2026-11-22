@@ -976,19 +976,22 @@ async def _sweep_print_library_logged(state: AppState) -> None:
 
 async def _sweep_native_copies_logged(state: AppState) -> None:
     """#4337: a native run's per-print copies and slices nothing keeps, to the trash;
-    nothing on ``bambuddy``."""
+    no copies on ``bambuddy``. The LAN runs whose sequence is gone are recorded stopped
+    on every backend first (#6871)."""
     try:
-        native = await state.components.get(PRINT_LIBRARY).serving_native()
-        if native is None:
-            return
-        # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`). Without
-        # Temporal every LAN run with prints still to start is kept as in use.
+        # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`), and its
+        # controls no longer stand first on the Prints page (#6871): checked on every
+        # backend, since the strip only reads. Without Temporal every LAN run with prints
+        # still to start is kept as in use.
         try:
             await end_gone_sequences(state.print_runs)
         except Exception:
             logger.warning(
                 "could not check the LAN runs' sequences; their files are kept", exc_info=True
             )
+        native = await state.components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            return
         await sweep_print_copies(
             native,
             state.uploads,
@@ -1762,6 +1765,8 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
         uses=PoolPrintUses(state.settings_store.pool),
+        # A run queued on a busy printer says its place (#6871).
+        runs=state.print_runs.store,
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities: list[Callable[..., Any]] = [

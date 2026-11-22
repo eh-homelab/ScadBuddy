@@ -915,7 +915,7 @@ held (see the next paragraph). Each caller today:
 | render worker | none: the worker has no database client and ignores the URL (#5298 Task 20); the API revokes everything the role `scadbuddy_render` held at every start where the role still exists (#5298 Task 22) | none: prod sets none and has no such role (eh-homelab/clusters#3555, #3566, #3578; measured 2026-11-14) |
 | print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start where the role still exists (#5298 Task 35) | none: prod sets none and has no such role (as above) |
 | flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API revokes everything the role `scadbuddy_projects` held at every start where the role still exists | none: prod sets none and has no such role (as above) |
-| agent sidecar and agent worker | none: nothing ever connected as `scadbuddy_agent` (the agent connected as the owner); the API revokes everything that role held at every start where it still exists (#5299 step 12) | the owner's, until the agent PR of #5299 step 12 removes its SQL |
+| agent sidecar and agent worker | none: nothing connects as `scadbuddy_agent` (the agent connects as the owner; prod's `pg_stat_activity` showed no session of it on 2026-11-05, `docs/security/trust-boundaries.md`); the API revokes everything that role held at every start where it still exists (#5299 step 12) | the owner's, until the agent PR of #5299 step 12 removes its SQL |
 
 No caller gets a role of its own any more, and the API grants none: it only revokes the
 retired roles (`backend/scadbuddy/auth/revoke.py` `RETIRED_ROLES`) at every start, and logs
@@ -2318,6 +2318,9 @@ Each next one starts once the printer's report says the one before ended, finish
 failed. Bambuddy's queue does the same with its defaults (`require_plate_clear` and
 `require_previous_success` off). Nothing asks for the plate to be cleared between them
 yet (#4939), so clear the bed before each print ends. The run succeeds at the first start.
+When the printer is busy and "Queue when the printer is busy" is on (#6871), the run, even
+of one print, succeeds with nothing started. It starts its first print once the printer
+has ended its print and someone says the plate is clear.
 The dialog and the progress show each copy still to start as queued. A start that fails,
 or a cancel, stops the rest, and the progress says why. A wait longer than 7 days stops
 them too. A copy counts the one before as ended only after a report has shown that print

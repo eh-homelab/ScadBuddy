@@ -1,6 +1,8 @@
 import { ScanSearchIcon } from 'lucide-react'
 import type { FilamentInventoryView } from '../../api/filament'
 import { Badge } from '@/components/ui/badge'
+import { filamentLinks } from '../../lib/filamentLinks'
+import { EntityLink } from './EntityLink'
 import { RgbaSwatch } from './RgbaSwatch'
 
 /** What the printer reports in the tray a spool is placed in, where the spool does not match it (#6713). */
@@ -42,7 +44,10 @@ export function CheckTray({ check }: { check?: TrayCheck }) {
       </Badge>
       <span className="inline-flex items-center gap-1 text-[12px] text-muted-foreground">
         {check.reportedRgba && <RgbaSwatch rgba={check.reportedRgba} size="sm" />}
-        {`${check.place} reports ${check.reportedType}${colour ? ` ${colour}` : ''}`}
+        <span>
+          <EntityLink to={filamentLinks.printers}>{check.place}</EntityLink>
+          {` reports ${check.reportedType}${colour ? ` ${colour}` : ''}`}
+        </span>
       </span>
     </span>
   )

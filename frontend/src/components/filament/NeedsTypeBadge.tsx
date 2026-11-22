@@ -2,6 +2,7 @@ import { Badge } from '@/components/ui/badge'
 import type { SpoolOption } from '../../api/types'
 import { NEW_TAB } from '../../lib/embed'
 import { AppLink } from '../AppLink'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 /**
  * #6262 — the print dialog's mark for an SB spool with no type yet: a badge that opens
@@ -14,7 +15,7 @@ export function NeedsTypeBadge({ spool }: { spool: Pick<SpoolOption, 'needs_type
   return (
     <Badge variant="outline" className="text-warn" asChild>
       <AppLink
-        href={`/filament/spools/${spool.sb_spool_id}`}
+        href={filamentLinks.spool(spool.sb_spool_id)}
         {...NEW_TAB}
         onClick={(event) => event.stopPropagation()}
       >Needs type</AppLink>

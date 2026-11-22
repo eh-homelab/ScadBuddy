@@ -119,7 +119,8 @@ test('an invoice is imported with the assistant, and a second visit shows the im
 
   // In-app: a reload would reset the msw worker's data. Away to the Invoices tab and back to the Acme draft.
   await page.getByRole('link', { name: 'Invoices', exact: true }).click()
-  await page.locator('tr[data-invoice]', { hasText: 'Acme' }).getByRole('link').click()
+  // The row links its supplier too (#6869): open the invoice's own link.
+  await page.locator('tr[data-invoice]', { hasText: 'Acme' }).getByRole('link').filter({ hasNotText: 'Acme' }).click()
   await expect(page).toHaveURL(/\/filament\/invoices\/[0-9a-f-]+$/)
   await expect(page.getByText('Import running')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Import with the assistant' })).toHaveCount(0)

@@ -1,3 +1,4 @@
+import { filamentLinks } from '../../lib/filamentLinks'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
@@ -33,7 +34,7 @@ export function RackNozzleLine({ rack, algorithm }: { rack: RackPickView | null 
               {slot.reason === 'not_in_inventory' && (
                 <>
                   {' '}
-                  <Link to="/filament/spools" className="text-foreground underline underline-offset-4">
+                  <Link to={filamentLinks.spools} className="text-foreground underline underline-offset-4">
                     Open Filament
                   </Link>
                 </>

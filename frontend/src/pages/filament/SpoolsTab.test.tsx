@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { L } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { SpoolsTab } from './SpoolsTab'
@@ -13,6 +14,13 @@ const table = () => screen.findByRole('table', { name: 'Spools' })
 const spoolRows = (body: HTMLElement) => within(body).getAllByRole('row').filter((row) => row.dataset.spool)
 
 describe('the Spools tab', () => {
+  it('lists the spools in one place by its id, and names the place on its chip (#6869)', async () => {
+    const { user } = render(`/filament/spools?place=${L.SHELF_A}`)
+    await waitFor(async () => expect(spoolRows(await table()).map((row) => row.dataset.spool)).toEqual(['1', '3']))
+    await user.click(await screen.findByRole('button', { name: 'Clear filter Location: Workshop / Shelf A' }))
+    await waitFor(async () => expect(spoolRows(await table()).length).toBe(11))
+  })
+
   it('shows the 11 active seed spools, the translucent one over a checker as #…80', async () => {
     render()
     const rows = spoolRows(await table())
@@ -38,7 +46,7 @@ describe('the Spools tab', () => {
     const rows = spoolRows(await table())
     const row = (number: string) => rows.find((one) => one.dataset.spool === number)!
     expect(await within(row('8')).findByText('Check this tray')).toBeInTheDocument()
-    expect(within(row('8')).getByText('3DP-31B-598 AMS-A slot 4 reports PETG #A7AEB2')).toBeInTheDocument()
+    expect(within(row('8')).getByRole('link', { name: '3DP-31B-598 AMS-A slot 4' }).parentElement).toHaveTextContent('3DP-31B-598 AMS-A slot 4 reports PETG #A7AEB2')
     expect(within(row('4')).queryByText('Check this tray')).toBeNull()
   })
 

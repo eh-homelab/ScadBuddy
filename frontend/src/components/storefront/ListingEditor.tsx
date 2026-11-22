@@ -12,6 +12,7 @@ import { colourProblems, defaultFits, effectiveMaterials, emptyDraft, fittedDefa
 import { customerFilaments } from '../../storefront/params'
 import { MaterialOrder } from './MaterialOrder'
 import { ListingPictures, type LivePictures, type MediaState } from './ListingPictures'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 /**
  * #5282 (spec 2026-11-02 §5.3), #6131 (design 2026-11-13 §5) — one storefront listing in
@@ -58,7 +59,7 @@ export interface ListingEditorProps {
 }
 
 /** Where the price book's filaments are added (Filament → Types). */
-export const PRICE_BOOK_PATH = '/filament/types'
+export const PRICE_BOOK_PATH = filamentLinks.types
 
 function shown(value: ParamValue | undefined): string {
   if (value === undefined) return 'its default'

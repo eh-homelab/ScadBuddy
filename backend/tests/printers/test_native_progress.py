@@ -10,19 +10,21 @@ from typing import Any
 import psycopg
 import pytest
 
+from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, finish_run
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, RecentRuns, given_run, newest_failure
 from scadbuddy.core.events import PrintEvent, PrintRunEvent
-from scadbuddy.printers.lan_models import LanStarted, LanStopped
+from scadbuddy.printers.lan_models import LanQueued, LanStarted, LanStopped, busy_with
 from scadbuddy.printers.progress import (
     AWAITING_CLEAR,
     IDLE_SINCE,
     MOVED_ON,
     NOT_HEARD,
     PAUSED,
+    QUEUED_BUSY,
     WAITING,
     LanProgress,
     from_lan_report,
@@ -311,6 +313,25 @@ def test_a_lan_run_reports_no_bambuddy_link() -> None:
     assert result.queue_item_ids == []
 
 
+def test_a_lan_run_queued_on_a_busy_printer_reports_no_start_yet() -> None:
+    """#6871: a run that started nothing is reported over the LAN, with its plan's
+    printer and warnings, and no Bambuddy link."""
+    planned = PlannedRun(
+        library_file_id=41,
+        printer_id=1,
+        nozzle_size="0.4",
+        copies=2,
+        options=PrintOptions(),
+        plates=[],
+        path="native",
+        lan_start=True,
+    )
+    config = BambuddyConfig(base_url="http://bambuddy.test", api_key="k")
+    result = finish_run(config, planned, [])
+    assert (result.path, result.lan, result.bambuddy_url) == ("native", [], None)
+    assert (result.library_file_id, result.printer_id, result.copies) == (41, 1, 2)
+
+
 def test_a_lan_starts_warnings_are_the_runs() -> None:
     """#4545: the rack pick's advisories reach the run's warnings, each fact once."""
     from scadbuddy.bambuddy.filaments import FilamentWarning
@@ -472,7 +493,13 @@ async def test_a_sequenced_run_names_its_controls() -> None:
     )
     progress = await _lan(_run(result), value).read("o" * 32)
     assert progress is not None and progress.lan_run is not None
-    assert progress.lan_run.model_dump() == {"run_id": "r", "waiting": 1, "awaiting_clear": False}
+    assert progress.lan_run.model_dump() == {
+        "run_id": "r",
+        "waiting": 1,
+        "awaiting_clear": False,
+        "queued": False,
+        "queued_for_print": False,
+    }
     stopped = result.model_copy(
         update={"lan_stopped": LanStopped(stage="cancelled", message="Stopped.")}
     )
@@ -501,6 +528,47 @@ async def test_a_run_waiting_for_a_cleared_plate_says_so() -> None:
     assert [copy.waiting_reason for copy in progress.copies_detail[1:]] == [
         AWAITING_CLEAR.format(printer="H2C"),
         WAITING,
+    ]
+
+
+async def test_a_run_queued_on_a_busy_printer_reads_as_queued_with_its_controls() -> None:
+    """#6871: a run that sent nothing while the printer was busy is ``queued``, says what
+    it waits for, and names its controls, so the dialog and the Prints page show it and
+    can stop it or say the plate is clear."""
+    theirs = LanStarted(subtask_name="theirs", started_at=at())
+    result = PrintRunResult(
+        library_file_id=41,
+        copies=1,
+        path="native",
+        lan_waiting=[1],
+        lan_queued=LanQueued(state="RUNNING", job=theirs, place=2),
+    )
+    value = ({"subtask_name": "theirs", "gcode_state": "RUNNING"}, at(seconds=10))
+    progress = await _lan(_run(result), value).read("o" * 32)
+    assert progress is not None and progress.route == "lan"
+    assert (progress.stage, progress.settled, progress.run_id) == ("queued", False, "r")
+    assert [copy.waiting_reason for copy in progress.copies_detail] == [
+        QUEUED_BUSY.format(printer="H2C")
+    ]
+    assert progress.lan_run is not None
+    assert progress.lan_run.model_dump() == {
+        "run_id": "r",
+        "waiting": 1,
+        "awaiting_clear": False,
+        "queued": True,
+        "queued_for_print": True,
+    }
+    # Queued only for an ended print's plate (#6871): no print to wait for.
+    plate = result.model_copy(update={"lan_queued": LanQueued(state="FINISH", job=None, place=1)})
+    progress = await _lan(_run(plate), value).read("o" * 32)
+    assert progress is not None and progress.lan_run is not None
+    assert progress.lan_run.queued and not progress.lan_run.queued_for_print
+    clear = result.model_copy(update={"lan_awaiting_clear": True})
+    progress = await _lan(_run(clear), value).read("o" * 32)
+    assert progress is not None and progress.lan_run is not None
+    assert progress.lan_run.awaiting_clear
+    assert [copy.waiting_reason for copy in progress.copies_detail] == [
+        AWAITING_CLEAR.format(printer="H2C")
     ]
 
 
@@ -544,3 +612,38 @@ async def test_a_library_files_lan_print_has_no_last_print_row() -> None:
     progress = PrintProgress(route="lan", stage="done", settled=True, bambuddy_url="", run_id="r")
     await lan_last_print(prints)("library:7", progress)
     assert prints.moved == []
+
+
+#: The report of a print a queued run waits out (#6871) that names no ``subtask_name``.
+UNNAMED_REPORT = {"gcode_state": "RUNNING"}
+
+
+@pytest.mark.parametrize(
+    ("data", "stage"),
+    [
+        ({"gcode_state": "FINISH", "subtask_name": ""}, "done"),
+        ({"gcode_state": "FAILED", "subtask_name": ""}, "failed"),
+        # Ended, with no name to tell whose end it is.
+        ({"gcode_state": "FINISH"}, "unknown"),
+        ({"gcode_state": "IDLE"}, "unknown"),
+        ({"gcode_state": "FINISH", "subtask_name": "theirs"}, "unknown"),
+    ],
+)
+def test_a_busy_print_with_no_name_ends_when_the_printer_leaves_busy(
+    data: dict[str, Any], stage: str
+) -> None:
+    """#6871 review: `busy_with` names no job when the report names none, so no report
+    can name it. Any end counts: the printer no longer in a busy state."""
+    queued = busy_with(UNNAMED_REPORT, STARTED_AT, plate_clear=False)
+    assert queued is not None and queued.job is not None
+    ended = lan_ended((data, at(seconds=10)), queued.job, seen=False)
+    assert ended is not None and ended.ended == stage
+
+
+@pytest.mark.parametrize("state", ["RUNNING", "PAUSE", "PREPARE", "SLICING"])
+def test_a_busy_print_with_no_name_has_not_ended_while_busy(state: str) -> None:
+    queued = busy_with(UNNAMED_REPORT, STARTED_AT, plate_clear=False)
+    assert queued is not None and queued.job is not None
+    assert lan_ended(({"gcode_state": state}, at(seconds=10)), queued.job, seen=False) is None
+    # Nor from a report no newer than the check.
+    assert lan_ended(({"gcode_state": "FINISH"}, STARTED_AT), queued.job, seen=False) is None
