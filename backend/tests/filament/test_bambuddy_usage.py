@@ -15,9 +15,12 @@ import respx
 from scadbuddy.bambuddy.linking import ARCHIVE_PAGE, MAX_ARCHIVE_PAGES
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
-from scadbuddy.filament import bambuddy_usage, capture, ledger
-from scadbuddy.filament.bambuddy_pull import pull
+from scadbuddy.filament import bambuddy_usage, bb_pull_run, capture, ledger
+from scadbuddy.filament.bambuddy_pull import EVERY, pull
 from scadbuddy.filament.bambuddy_usage import book_usage
+from scadbuddy.filament.bb_pull_apply import LocalBbPull, new_pull_id
+from scadbuddy.filament.bb_pull_models import UsageBody, UsageBooked
+from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
@@ -804,3 +807,111 @@ def test_a_row_that_covered_an_estimate_does_not_make_a_later_row_of_the_job_amb
     assert _book(f, [later]).booked == 1
     covers = [e for e in f.spools.events(y) if e.kind == "print_ended"]
     assert sorted(str(e.ref_id) for e in covers) == [f"run-1/{JOB}/0", f"run-2/{JOB}/0"]
+
+
+async def test_a_usage_history_past_one_body_is_booked_once_in_order(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6860: more usage rows than one body holds go in several bodies, oldest first
+    (Bambuddy sends them newest first), each with only the archives its rows can match;
+    each row is booked once, and a second pull books none again. The rows of one print
+    (one ``created_at``) stay in one body."""
+    monkeypatch.setattr(bb_pull_run, "USAGE_BODY_ROWS", 2)
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    at = [T1 + timedelta(minutes=i) for i in range(4)]
+    rows = [
+        usage(id=10 + i, weight_used=5.0, print_name=f"job-{i}", created_at=_naive(when))
+        for i, when in enumerate(at)
+    ]
+    # Another spool's row of the third print: no link, so counted unlinked.
+    rows.append(usage(id=20, spool_id=99, print_name="job-2", created_at=_naive(at[2])))
+    newest_first = sorted(rows, key=lambda r: (r.created_at, r.id), reverse=True)
+    archives = [
+        {"id": 300 + i, "printer_id": 1, "completed_at": _naive(when + timedelta(seconds=1))}
+        for i, when in enumerate(at)
+    ]
+    sent: list[UsageBody] = []
+
+    class Recording(LocalBbPull):
+        async def book_usage(self, body: UsageBody, cancel: Any = None) -> UsageBooked:
+            sent.append(body)
+            return await super().book_usage(body, cancel)
+
+    async def run() -> Any:
+        return await bb_pull_run.read_and_pull(
+            Recording(f, lambda: settings),
+            settings,
+            instance=instance_for(BB),
+            pull_id=new_pull_id(),
+            pulls=EVERY,
+        )
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(
+            json=[r.model_dump(mode="json") for r in newest_first]
+        )
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=archives)
+        report = await run()
+        first = list(sent)
+        again = await run()
+    assert [[u.id for u in body.usage] for body in first] == [[10, 11], [12, 20], [13]]
+    assert [[a.id for a in body.archives] for body in first] == [[300, 301], [302], [303]]
+    assert (report.usage_booked, report.usage_unlinked) == (4, 1)
+    events = _usage_events(f, spool)
+    assert sorted((e.ref_id, e.data["bb_archive_id"]) for e in events) == [
+        ("10", 300),
+        ("11", 301),
+        ("12", 302),
+        ("13", 303),
+    ]
+    assert (again.usage_booked, again.usage_unlinked) == (0, 1)
+    assert len(_usage_events(f, spool)) == 4
+
+
+async def test_a_failed_usage_body_leaves_it_and_the_newer_rows_for_the_next_pull(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6860 R-6860-3: the bodies go oldest first, and one that fails ends the booking, so
+    what waits is always the newest rows, which the next pull reads again."""
+    monkeypatch.setattr(bb_pull_run, "USAGE_BODY_ROWS", 1)
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    rows = [
+        usage(id=10 + i, weight_used=5.0, print_name=f"job-{i}", created_at=_naive(when))
+        for i, when in enumerate([T1, T1 + timedelta(minutes=1), T1 + timedelta(minutes=2)])
+    ]
+    calls = 0
+
+    class FailingSecond(LocalBbPull):
+        async def book_usage(self, body: UsageBody, cancel: Any = None) -> UsageBooked:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("SB went away")
+            return await super().book_usage(body, cancel)
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(
+            json=[r.model_dump(mode="json") for r in reversed(rows)]
+        )
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        report = await bb_pull_run.read_and_pull(
+            FailingSecond(f, lambda: settings),
+            settings,
+            instance=instance_for(BB),
+            pull_id=new_pull_id(),
+            pulls=EVERY,
+        )
+        assert calls == 2
+        assert report.usage_booked == 1
+        assert [e.ref_id for e in _usage_events(f, spool)] == ["10"]
+        again = await read_and_pull(f, settings)
+    assert again.usage_booked == 2
+    assert sorted(e.ref_id for e in _usage_events(f, spool)) == ["10", "11", "12"]

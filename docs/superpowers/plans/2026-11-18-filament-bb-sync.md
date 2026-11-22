@@ -1893,7 +1893,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     Tests: `test_crud_filament_pull.py` refuses a body with `actor` on the pull and usage
     routes, and `test_the_events_name_the_actor_the_api_kept_never_the_workers` checks the
     events name the kept person.
-182. PR #6858 review (Blocking): the pull's routes had a cap of their own,
+182. (corrected by 224) PR #6858 review (Blocking): the pull's routes had a cap of their own,
     `PULL_BODY_BYTES_MAX` (32 MiB) with a 411 for no `Content-Length`, checked in a
     dependency. Neither held: the CRUD listener serves the same app, whose `BodySizeGate`
     (`api/limits.py`, `main.py`) refuses an `application/json` body past
@@ -2284,6 +2284,33 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     between products, so they stay rows of their own. Compared by a script over both
     files (each Bambuddy row's upper-cased name and material against each code's English
     name and `fila_type`).
+
+### #6860: the usage rows in bodies under the gate
+
+224. R-6860-1 (#6860; corrects 182's "Bambuddy's listing is not paged"): Bambuddy's
+    `GET /inventory/usage` takes `limit` (default 100), `printer_id` and `spoolman`, and no
+    offset or date; it answers newest first (`order_by(created_at.desc()).limit(limit)`,
+    https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/api/routes/inventory.py#L3128-L3158).
+    So it cannot be paged, or windowed by `since`, on Bambuddy's side. ScadBuddy has read it
+    with `limit=200` since #6263 (`BambuddyClient.spool_usage`), so the pull reads at most
+    the newest 200 rows, and 182's 10,000- and 20,000-row cases cannot happen with this read.
+    The read's window stays that `limit`. A gap of more than 200 rows between two pulls that
+    book loses the older rows; that is #7002, not this change.
+225. R-6860-2: the worker books the rows in bodies of at most `USAGE_BODY_ROWS` (5,000)
+    rows (`bb_pull_run.usage_bodies`), oldest first, and never splits the rows of one
+    `created_at` (one print's, spec §8.2), so `bambuddy_usage._cover` sees a print's rows
+    together. Each body carries only the archives that can match its rows
+    (`[first created_at, last created_at + ARCHIVE_AFTER]`). Measured with
+    `UsageBody.model_dump_json()`: a body at its most (5,000 rows and `ARCHIVES_MAX`
+    archives, every field filled, a 64-character job name) is 1,688,112 B, a fifth of the
+    8 MiB gate; `test_a_full_usage_body_stays_under_the_body_gate` pins it under half. With
+    today's read that is one body; the cut keeps the gate whatever `limit` a later change
+    reads. `PullBody.usage` still carries what was read (`pull` times an archived spool's
+    reading by it, and `LocalBbPull._unbooked` names the archives' date from it).
+226. R-6860-3: a body that fails (logged) ends the booking; the rows of it and the newer
+    ones wait for the next pull. Each row books once by its ref (`ledger.BB_USAGE` and its
+    id), so a body sent again books nothing twice. Oldest first, so what waits is always
+    the newest rows, which stay inside the next read's window.
 
 ## Self-review
 
