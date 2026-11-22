@@ -11,8 +11,8 @@ import { type AccessRow, BUILTIN_SOURCES, type ToolAccess } from './model.js'
 // pod. Measured on 2026-11-01 in `scadbuddy-agent-worker` (read-only): `unshare --user
 // --map-root-user --pid --fork` works, but with `--mount` it fails with "cannot change root
 // filesystem propagation: Permission denied" (AppArmor `cri-containerd.apparmor.d`, enforce),
-// and the image has no bwrap. Without a sandbox, Bash reads what the worker can (the KEK mount,
-// every session's directory). An `allow_refused` package that names one still switches it on
+// and the image has no bwrap. Without a sandbox, Bash reads what the worker can (the `agent`
+// credential's proof, every session's directory). An `allow_refused` package that names one still switches it on
 // (`turnBuiltins`), at `outward`. Where the deployment sets up sandbox pods (#5864,
 // config.ts `sandbox`), the turn never gets the native ones: the same two items govern the
 // session's own Bash and PowerShell, which run in its sandbox pod (builtins/sandboxShell.ts),
