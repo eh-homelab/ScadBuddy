@@ -2288,12 +2288,13 @@ class OrderStore:
         ).fetchall()
         for moving in moved:
             item_id = moving["attempt_item_id"]
+            entity_id = self._entities.ensure(conn, EntityRef("order_item", item_id))
             conn.execute(
                 "UPDATE entity_attachments SET subject = %s, entity_id = %s,"
                 " attempt_item_id = NULL WHERE subject = %s AND attempt_item_id = %s",
                 (
                     f"order_item:{item_id}",
-                    self._entities.ensure(conn, EntityRef("order_item", item_id)),
+                    entity_id,
                     fulfilment_subject(attempt_id),
                     item_id,
                 ),

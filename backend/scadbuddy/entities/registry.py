@@ -114,19 +114,23 @@ class EntityStore:
         return None if row is None else UUID(str(row["id"]))
 
     def orphans(
-        self, conn: Conn, limit: int, *, skip: Collection[str] = ()
+        self, conn: Conn, limit: int, *, guarded: Collection[str] = ()
     ) -> list[tuple[UUID, EntityRef]]:
-        """Up to `limit` entities whose owner's row is gone, of the kinds not in `skip`."""
+        """Up to `limit` entities whose owner's row is gone. One of a kind in `guarded` is
+        taken only once no `entity_attachments` row names it."""
         found: list[tuple[UUID, EntityRef]] = []
         for kind in KINDS.values():
-            if kind.name in skip:
-                continue
             if len(found) >= limit:
                 break
+            guard = (
+                " AND NOT EXISTS (SELECT 1 FROM entity_attachments a WHERE a.entity_id = e.id)"
+                if kind.name in guarded
+                else ""
+            )
             rows = conn.execute(
                 "SELECT e.id, e.ref FROM entities e WHERE e.kind = %s AND NOT EXISTS"
                 f" (SELECT 1 FROM {kind.table} t"
-                f"  WHERE t.{kind.id_column}::text = e.ref)"
+                f"  WHERE t.{kind.id_column}::text = e.ref){guard}"
                 " ORDER BY e.created_at, e.id LIMIT %s".encode(),
                 (kind.name, limit - len(found)),
             ).fetchall()

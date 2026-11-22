@@ -1,6 +1,6 @@
 """The sweep of entities whose owner is gone (#6950, spec D4 phase 1): each orphan's
 files and their holds go, then its row, which takes its links with it. An order's
-entities are the order code's to clean up."""
+entity goes once the order code has removed its files."""
 
 from __future__ import annotations
 
@@ -119,13 +119,45 @@ def test_an_orphan_loses_its_files_holds_and_links_and_an_owned_order_item_stays
     assert [link.url for link in links.list(item)] == ["https://example.com/item"]
 
 
-def test_an_orphaned_order_kind_is_left_to_the_order_code(pg_pool: PgPool) -> None:
+def test_an_orphaned_order_kind_with_files_is_left_to_the_order_code(pg_pool: PgPool) -> None:
     entities = EntityStore(pg_pool)
     attachments = EntityAttachmentStore(pg_pool, entities)
+    item = _order_item(pg_pool)
     with pg_pool.connection() as conn:
+        entity_id = entities.ensure(conn, item)
+        conn.execute(
+            "INSERT INTO entity_attachments (id, order_id, subject, entity_id, kind, filename,"
+            " media_type, size_bytes, sha256, blob_key, created_by)"
+            " VALUES ('a1', 'o1', 'order_item:i1', %s, 'image', 'x.png', 'image/png', 5, %s,"
+            " %s, '{}')",
+            (entity_id, SHA, KEY),
+        )
         conn.execute("INSERT INTO entities (kind, ref) VALUES ('order_item', 'gone')")
+        conn.execute("DELETE FROM order_items WHERE id = 'i1'")
 
-    assert sweep_orphan_entities(entities, attachments) == 0
+    # The bare orphan goes; the one whose file the order still holds stays.
+    assert sweep_orphan_entities(entities, attachments) == 1
 
     with pg_pool.connection() as conn:
-        assert entities.find(conn, EntityRef("order_item", "gone")) is not None
+        assert entities.find(conn, EntityRef("order_item", "gone")) is None
+        assert entities.find(conn, item) == entity_id
+    assert _count(pg_pool, "SELECT count(*) AS n FROM entity_attachments WHERE id = 'a1'") == 1
+
+
+def test_a_sweep_takes_at_most_its_limit(pg_pool: PgPool) -> None:
+    entities = EntityStore(pg_pool)
+    attachments = EntityAttachmentStore(pg_pool, entities)
+    links = EntityLinkStore(pg_pool, entities)
+    spools = [_spool(pg_pool) for _ in range(3)]
+    for spool in spools:
+        links.add(spool, LinkInput(url="https://example.com/s"), BY)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "DELETE FROM filament_spools WHERE id = ANY(%s)",
+            ([uuid.UUID(s.ref) for s in spools],),
+        )
+
+    assert sweep_orphan_entities(entities, attachments, limit=2) == 2
+    assert _count(pg_pool, "SELECT count(*) AS n FROM entities") == 1
+    assert sweep_orphan_entities(entities, attachments, limit=2) == 1
+    assert _count(pg_pool, "SELECT count(*) AS n FROM entities") == 0

@@ -120,7 +120,7 @@ ATTACHMENTS_SWEEP = "housekeeping_sweep_print_attachments"
 ATTACHMENTS_PATCH = "housekeeping-sweep-print-attachments"
 #: #6950 (spec D4, phase 1): remove the entities whose owner's row is gone, their files
 #: and holds first, then the row and its links (`entities/sweep.py`
-#: `sweep_orphan_entities`); an order's kinds are left to the order code. After the
+#: `sweep_orphan_entities`); an order's kinds only once they hold no file. After the
 #: print attachments, behind its own patch; on the sweeps' Schedule only, as they are.
 ENTITY_ORPHANS_SWEEP = "housekeeping_sweep_entity_orphans"
 ENTITY_ORPHANS_PATCH = "housekeeping-sweep-entity-orphans"
