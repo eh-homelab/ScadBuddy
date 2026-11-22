@@ -633,7 +633,7 @@ export const route: RouteModule = {
     registerPendingInputRoutes(app, {
       sessions: deps.sessions,
       ready: ready(deps),
-      keyReady: deps.database.ready,
+      keyReady: () => deps.database.ready(),
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
       changes: deps.pendingChanges,
