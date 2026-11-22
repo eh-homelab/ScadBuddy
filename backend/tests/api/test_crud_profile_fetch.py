@@ -47,6 +47,8 @@ pytestmark = pytest.mark.requires_postgres
 
 RUNS = "/api/v1/internal/crud/profile-fetch/runs"
 EXPORT = Path(__file__).parents[1] / "profile_fetch" / "site" / "export-h2c-0.4.json"
+#: A real export (#7029; `tests/filament/test_profile_fetch.py` `REAL_EXPORT` says which).
+REAL_EXPORT = Path(__file__).parents[1] / "fixtures" / "3dfp" / "export-35902-h2c-0.4.json"
 NOZZLES = ["0.2", "0.4", "0.6", "0.8"]
 KPROFILES = re.compile(rf"{re.escape(API)}/printers/(\d+)/kprofiles/.*")
 
@@ -246,8 +248,7 @@ def test_a_file_sent_again_replaces_the_key_and_its_hold(fetch: Fetch) -> None:
         ("machine preset", 422),
         ("printer settings id", 422),
         ("print settings id", 422),
-        ("no inherits", 422),
-        ("empty inherits", 422),
+        ("inherits not a string", 422),
         ("too deep", 422),
         ("deep enough to blow the stack", 422),
         ("NaN", 422),
@@ -274,12 +275,8 @@ def test_a_file_is_refused_unless_valid(fetch: Fetch, case: str, status: int) ->
         r = fetch.put(export(printer_settings_id="Bambu Lab H2C 0.4 nozzle"))
     elif case == "print settings id":
         r = fetch.put(export(print_settings_id="0.20mm Standard @BBL H2C"))
-    elif case == "no inherits":
-        doc = json.loads(export())
-        del doc["inherits"]
-        r = fetch.put(json.dumps(doc).encode())
-    elif case == "empty inherits":
-        r = fetch.put(export(inherits=""))
+    elif case == "inherits not a string":
+        r = fetch.put(export(inherits=["Generic PLA @BBL H2C"]))
     elif case == "too deep":
         # The object itself is level 1; 32 more lists make 33 levels.
         r = fetch.put(export(note=nested(32)))
@@ -322,6 +319,47 @@ def test_site_gcode_is_stripped_before_the_file_is_kept(fetch: Fetch) -> None:
     kept = _blob(fetch, entry["key"]).read_bytes()
     assert entry["sha256"] == hashlib.sha256(kept).hexdigest()
     assert json.loads(kept) == json.loads(export())
+
+
+@pytest.mark.parametrize("inherits", ["", None])
+def test_a_file_with_no_base_is_kept(fetch: Fetch, inherits: str | None) -> None:
+    """#7029: a flattened preset names no base, by an empty ``inherits`` or none."""
+    doc = json.loads(export(inherits=inherits))
+    if inherits is None:
+        del doc["inherits"]
+    r = fetch.put(json.dumps(doc).encode())
+    assert r.status_code == 204, r.text
+    [row] = fetch.rows("SELECT files FROM filament_profile_fetches WHERE id = %s", fetch.run_id)
+    assert json.loads(_blob(fetch, row["files"]["H2C"]["0.4"]["key"]).read_bytes()) == doc
+
+
+@respx.mock
+def test_a_real_3dfp_export_is_kept_and_imported(fetch: Fetch) -> None:
+    """#7029: a real 3DFP export (flattened, ``"inherits": ""``) is kept without its
+    G-code and imported into Bambuddy as it was kept, and the type's 0.4 mm preset is set."""
+    body = REAL_EXPORT.read_bytes()
+    doc = json.loads(body)
+    r = fetch.put(body)
+    assert r.status_code == 204, r.text
+    [row] = fetch.rows("SELECT files FROM filament_profile_fetches WHERE id = %s", fetch.run_id)
+    entry = row["files"]["H2C"]["0.4"]
+    kept = json.loads(_blob(fetch, entry["key"]).read_bytes())
+    gcode = {"filament_start_gcode", "filament_end_gcode"}
+    assert kept == {k: v for k, v in doc.items() if k not in gcode}
+    assert (entry["name"], kept["inherits"]) == (doc["name"], "")
+
+    sent = bb_import(1)
+    local_presets([doc["name"]])
+    no_k_profiles()
+    r = fetch.import_(
+        [{"printer_model": "H2C", "nozzle": n, "reason": "x"} for n in ("0.2", "0.6", "0.8")]
+    )
+    assert r.status_code == 200, r.text
+    assert (r.json()["status"], r.json()["presets"]) == ("partial", 1)
+    archive = zipfile.ZipFile(io.BytesIO(_zip_of(sent.calls.last.request)))
+    [name] = archive.namelist()
+    assert json.loads(archive.read(name)) == kept
+    assert fetch.presets() == [("H2C", "0.4", "101", doc["name"])]
 
 
 def test_an_unknown_run_is_404(fetch: Fetch) -> None:
