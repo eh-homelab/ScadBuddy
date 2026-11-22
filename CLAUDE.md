@@ -47,13 +47,16 @@ service credential (PR #5211). The owner decided this on 2026-11-05.
   `cnpg-cluster.yaml`, delete its `onepassworditem-*-db.yaml`, and archive the 1Password
   item (#5298; how to read prod: `deploy/CLAUDE.md` "Prod checks").
 
-Today's code still breaks the rule: two processes use a Postgres secret (the API and
-agent-durable); the agent containers still hold `SCADBUDDY_DATABASE_URL` in their environment,
-unused, until eh-homelab/clusters drops it. The agent sidecar and the agent worker have no SQL client and read no KEK
-(#5299 step 12): they reach the `ai_*` tables only through the API's CRUD routes, need a
-service-credential proof to start, and ignore `SCADBUDDY_DATABASE_URL` and
-`SCADBUDDY_SECRET_KEY_FILE` (and `_PREVIOUS_FILE`) with a warning. The API revokes their old role
-`scadbuddy_agent` at every start. The render, print and projects workers hold none: #5298 is done,
+Only the API holds a Postgres secret now. #5299 is done: the agent sidecar and the agent
+worker have no SQL client and read no KEK; they reach the `ai_*` tables only through the API's
+CRUD routes, need a service-credential proof to start, and ignore `SCADBUDDY_DATABASE_URL` and
+`SCADBUDDY_SECRET_KEY_FILE` (and `_PREVIOUS_FILE`) with a warning. eh-homelab/clusters#3965
+took both out of their containers and dropped their old role `scadbuddy_agent`, which the API
+still revokes at every start where it exists; agent-durable mounts neither. Measured
+2026-11-22 after that sync: in `kubectl -n bambuddy get deploy`, only the `scadbuddy`
+container names `SCADBUDDY_DATABASE_URL`; CNPG's `managedRolesStatus` lists `scadbuddy_agent`
+`reconciled`, and the API pods started after it log no "a retired caller's role still exists"
+line for it. The render, print and projects workers hold none: #5298 is done,
 and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` role and no
 database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
 #3566 and #3578). The API still revokes those roles at every start where they exist; the

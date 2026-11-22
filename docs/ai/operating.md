@@ -1207,8 +1207,8 @@ Monitor watches a WebSocket only (`nativeBuiltins.ts` `monitorAccess`, `live.ts`
   --map-root-user --pid --fork id` works, but with `--mount` it fails with "cannot change
   root filesystem propagation: Permission denied" (AppArmor `cri-containerd.apparmor.d`,
   enforce), and the image has no `bwrap`. Unsandboxed, `Bash` could read the pod's
-  environment and mounts (the `agent` credential's proof, and the database URL and KEK
-  while the manifest still sets them) and every session's directory. A sandbox pod (#779) comes first.
+  environment and mounts (the `agent` credential's proof; no database URL or KEK since
+  eh-homelab/clusters#3965) and every session's directory. A sandbox pod (#779) comes first.
 - An `allow_refused` package's `builtinTools` only switch on a built-in that is `off` by
   default, at the package's own tier for it (`outward` by default, so each call parks).
   The source switched off, or the item's own row set to `off`, keeps it off whatever a
