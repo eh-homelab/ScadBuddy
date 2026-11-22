@@ -446,4 +446,26 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     stop.abort(new Error('the call gave up'))
     await expect(call).rejects.toThrow('the call gave up')
   })
+
+  it('sends a GET or an idempotent call again when the connection drops, never another write, and an abort stops the wait (#6994)', async () => {
+    const reset = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) })
+    const methods: string[] = []
+    /** Drops the first call of each method, then answers as the route. */
+    const flaky: typeof fetch = async (_input, init) => {
+      const method = init?.method ?? 'GET'
+      methods.push(method)
+      if (methods.filter((m) => m === method).length === 1) throw reset()
+      return new Response('{"ok":true}', { headers: { 'x-scadbuddy-crud': '1' } })
+    }
+    expect(await (await crudCall(flaky, BASE, 'a read', '/session-tabs')).json()).toEqual({ ok: true })
+    await expect(crudCall(flaky, BASE, 'a write', '/session-tabs', { method: 'PUT', body: { a: 1 } })).rejects.toThrow('the backend could not be reached (a write: UND_ERR_SOCKET)')
+    expect(await (await crudCall(flaky, BASE, 'a checked read', '/session-tabs', { body: { a: 1 }, idempotent: true })).json()).toEqual({ ok: true })
+    expect(methods).toEqual(['GET', 'GET', 'PUT', 'POST', 'POST'])
+    const stop = new AbortController()
+    const dropping: typeof fetch = async () => {
+      stop.abort(new Error('the call gave up'))
+      throw reset()
+    }
+    await expect(crudCall(dropping, BASE, 'a read', '/session-tabs', { signal: stop.signal })).rejects.toThrow('the call gave up')
+  })
 })
