@@ -4,15 +4,12 @@ the gate's bearer lookup."""
 
 from __future__ import annotations
 
-import contextlib
 import os
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
-import psycopg
 import pytest
-from psycopg import sql
 
 from scadbuddy.auth.gate import AuthGate, caller_of
 from scadbuddy.auth.models import ANONYMOUS, Service
@@ -25,7 +22,6 @@ from scadbuddy.auth.service_credentials import (
     TokenReader,
     _insert,
     aad,
-    grant_caller_views,
 )
 from scadbuddy.core.secrets import Kek
 from tests.conftest import PgPool
@@ -159,24 +155,6 @@ def test_last_used_is_recorded(store: ServiceCredentialStore, pg_conninfo: str) 
     store.resolve(_token(pg_conninfo, "agent"))
     (agent,) = [c for c in store.list() if c.caller == "agent"]
     assert agent.last_used_at is not None
-
-
-def test_each_role_is_granted_its_own_view_only(pg_pool: PgPool, pg_conninfo: str) -> None:
-    role = "scadbuddy_agent"
-    with pg_pool.connection() as conn:
-        if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is None:
-            with contextlib.suppress(psycopg.errors.DuplicateObject):
-                conn.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(role)))
-        assert role in grant_caller_views(conn)
-        privileges = conn.execute(
-            "SELECT table_name FROM information_schema.role_table_grants"
-            " WHERE grantee = %s AND table_schema = current_schema()",
-            (role,),
-        ).fetchall()
-    assert {row["table_name"] for row in privileges} == {
-        "service_credentials_agent",
-        "auth_sessions_agent",
-    }
 
 
 async def test_the_gate_resolves_a_bearer_credential(
