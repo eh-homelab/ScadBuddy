@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
         StepState,
     )
     from scadbuddy.template import Blob, Part
+    from scadbuddy.workflows.handlers import handler_wait
     from scadbuddy.workflows.models import (
         ACCEPT_ACTIVITY,
         ACCEPT_ATTEMPTS,
@@ -657,7 +658,7 @@ class TemplatePipeline:
         # `accepted` and a `release` in one activation then see each other's effect
         # (the validator runs in the handler's task, temporalio 1.33).
         if not self._started():
-            await workflow.wait_condition(self._started)
+            await handler_wait(self._started)
         if self._queue_full is not None:
             return RenderAnswer(queue_full=self._queue_full)
         if self._unstartable is not None:
@@ -694,7 +695,7 @@ class TemplatePipeline:
     @workflow.update(name=RELEASE_UPDATE)
     async def release(self, reason: ReleaseReason) -> ReleaseAnswer:
         if not self._started():
-            await workflow.wait_condition(self._started)
+            await handler_wait(self._started)
         if self._work is None or self._released is not None or self._work.done():
             # Nothing to cancel: never started, already released, or finished while
             # the run waits for its handlers (review #1066 2.3).
@@ -707,7 +708,7 @@ class TemplatePipeline:
         self._released = SUPERSEDED_ERROR if reason == "superseded" else CANCELLED_ERROR
         work = self._work
         work.cancel()
-        await workflow.wait_condition(work.done)
+        await handler_wait(work.done)
         if not self._cancelled:
             # Its `done` or `failed` write was in flight and landed despite the cancel:
             # the job settled, and the run closes as settled.
