@@ -472,8 +472,10 @@ The owner confirms this (§14).
    `orders/bambuddy.py:347-373`). None: `FILE_GONE`, "the listed library file is no
    longer in the library".
 3. Its content sha256: `file_hash` when it states one, else the sha256 of a download.
-   No hash is kept between runs: a variant is sliced once per key, and a kept hash could
-   hide a file that changed under its id. Not the pinned one: `FILE_DIFFERS`, "the library file is
+   A native file always states its row's `sha256` (fact 10), so only a Bambuddy file
+   with no stated hash pays for that download, once per claimed slice (a slice runs once
+   per key). No hash is kept between runs: a kept hash could hide a file that changed
+   under its id. Not the pinned one: `FILE_DIFFERS`, "the library file is
    not the one the listing was published with". This takes the place of
    `GEOMETRY_DIFFERS`, which compares a render's 3MF to the key's.
 4. `slice_and_price` with
@@ -486,6 +488,14 @@ The owner confirms this (§14).
 passes them to `start_library_quote_preview` (fact 4), and that function passes them on
 to `start_preview_plates`. A back-office quote passes neither, so its request does not
 change.
+
+**Slot numbers.** The listing counts slots from 0 (`FileSlot.slot`, `PricedFile.used`,
+`RenderBody.colours`), as `ColourSlot.slot` and a sliced plate's `PlateFilament.slot` do.
+`resolve`'s `slot_presets` and `slot_colours`, and `part_settings_slots`, use slot ids,
+from 1 (`resolver.py:347-352`). The one place that converts is `plan_variant`: it builds
+`slot_presets` and `slot_colours` keyed `slot + 1`, as `slot_presets` does today
+(`slice_profile.py:92-98`), and publish stores `used` as each `part_settings_slots` id
+less 1. PR 2 tests that slot 0's colour reaches slot id 1.
 
 `slot_colours` is new (decision 5). `resolve` takes
 `slot_colours: Mapping[int, str] | None`, by slot id, and a slot with no spool takes
@@ -510,8 +520,10 @@ The body gains two fields:
 
 and `model` is the sha256 of the file the slice reads: a render's 3MF (today), or the
 library file's content (the pinned `FileSnapshot.sha256`). It is never a job id or a file
-id. Two listings of the same file at the same colours share one price; a file restored
-under a new id keeps its price. The slot colours are in the key already (each filament's
+id. Two listings of the same file at the same colours share one price. A file restored
+under a new id keeps its price only because the restore copies the remembered choices of
+`library:<old id>` to `library:<new id>` (§10.3 step 4): the key's `setup` comes from the
+remembered scope. The slot colours are in the key already (each filament's
 `colour`, `slice_price.py:420-427`).
 
 After the bump, every stored row is read under a new key, so each variant is sliced again
