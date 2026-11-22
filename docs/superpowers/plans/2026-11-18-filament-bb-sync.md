@@ -1893,7 +1893,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     Tests: `test_crud_filament_pull.py` refuses a body with `actor` on the pull and usage
     routes, and `test_the_events_name_the_actor_the_api_kept_never_the_workers` checks the
     events name the kept person.
-182. (corrected by 224) PR #6858 review (Blocking): the pull's routes had a cap of their own,
+182. (corrected by 230) PR #6858 review (Blocking): the pull's routes had a cap of their own,
     `PULL_BODY_BYTES_MAX` (32 MiB) with a 411 for no `Content-Length`, checked in a
     dependency. Neither held: the CRUD listener serves the same app, whose `BodySizeGate`
     (`api/limits.py`, `main.py`) refuses an `application/json` body past
@@ -2321,7 +2321,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 
 ### #6860: the usage rows in bodies under the gate
 
-224. R-6860-1 (#6860; corrects 182's "Bambuddy's listing is not paged"): Bambuddy's
+230. R-6860-1 (#6860; corrects 182's "Bambuddy's listing is not paged"): Bambuddy's
     `GET /inventory/usage` takes `limit` (default 100), `printer_id` and `spoolman`, and no
     offset or date; it answers newest first (`order_by(created_at.desc()).limit(limit)`,
     https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/api/routes/inventory.py#L3128-L3158).
@@ -2330,7 +2330,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     the newest 200 rows, and 182's 10,000- and 20,000-row cases cannot happen with this read.
     The read's window stays that `limit`. A gap of more than 200 rows between two pulls that
     book loses the older rows; that is #7002, not this change.
-225. R-6860-2: the worker books the rows in bodies of at most `USAGE_BODY_ROWS` (5,000)
+231. R-6860-2: the worker books the rows in bodies of at most `USAGE_BODY_ROWS` (5,000)
     rows (`bb_pull_run.usage_bodies`), oldest first, and never splits the rows of one
     `created_at` (one print's, spec §8.2), so `bambuddy_usage._cover` sees a print's rows
     together. Each body carries only the archives that can match its rows
@@ -2341,10 +2341,42 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     today's read that is one body; the cut keeps the gate whatever `limit` a later change
     reads. `PullBody.usage` still carries what was read (`pull` times an archived spool's
     reading by it, and `LocalBbPull._unbooked` names the archives' date from it).
-226. R-6860-3: a body that fails (logged) ends the booking; the rows of it and the newer
+232. R-6860-3: a body that fails (logged) ends the booking; the rows of it and the newer
     ones wait for the next pull. Each row books once by its ref (`ledger.BB_USAGE` and its
     id), so a body sent again books nothing twice. Oldest first, so what waits is always
     the newest rows, which stay inside the next read's window.
+
+### #6768: the pull skips the linked spools that did not change
+
+233. R-6768-1 (#6768): a linked BB spool is skipped (`bambuddy_pull._quiet`) only when
+    every step `_one` takes on it would change nothing. The issue's "BB `updated_at` and
+    `bb_seen` have not changed" is read that way, because `_one` also acts on a row whose
+    `updated_at` did not move: a weighing or a drying (`_book`), a preset or K-profiles
+    (`_bb_presets`, `_bb_k_values`), an insert type mapped since (`_backfill_insert_type`),
+    a seed of the place or the archive state, and a field that newly agrees with SB
+    (`_write_seen`). So a spool is quiet when BB's `updated_at` is the link's
+    `bb_updated_at` (an archived SB spool: not older; a link with none is never quiet), its
+    archive state and place agree with the seen copy, the last `synced_from_bb` reading
+    is BB's row (after the push's echo, every seen field too), the insert type BB names is unmapped or already the
+    spool's or its type's, BB's weighing and drying are booked, the link holds BB's preset
+    and K-profiles, and the seen copy `_write_seen` would merge is the one the link holds.
+    A skipped spool gets the outcome `_one` would give (`archived` for an archived SB
+    spool), so the report is unchanged. Anything else goes through `_one` as before.
+234. R-6768-2: the skip's facts are read for every linked spool at once, in one
+    transaction and a fixed number of queries: the links with their spools, the last
+    reading of each, the booked weighings and dryings, the mapped insert types and places,
+    and SB's values through `bb_sync_plan.SpoolFacts` (as the plan reads them, #6902).
+    `_write_seen`'s merge is shared (`_seen_parts`), so the skip and the write cannot
+    differ. A spool that is not skipped keeps its own reads (`_write_seen`'s desired
+    values, `_bb_k_values`, `_sb_newer`, `sb_changed_at`): each runs after that spool's
+    own writes in its transaction, so a value read before the loop would be stale.
+    Measured with `tests/filament/bb_sync_scale.counting` on the pull after the one that
+    made them: 12 linked spools (2 archived), each with a weighing, a drying, a preset and
+    a K-profile, took 259 statements in 13 transactions before, and 19 statements in 2
+    transactions after; 4 spools took 75 in 5 before and 19 in 2 after.
+235. R-6768-3: the skip's reads are not under each spool's advisory lock. A write that
+    lands after them (a person's edit, the push's results, another pull) is taken by the
+    next pull. A skipped spool writes nothing, so it can never overwrite that write.
 
 ## Self-review
 
