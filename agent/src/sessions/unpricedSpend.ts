@@ -2,8 +2,10 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 
 // What a turn spent on model requests Claude Code never priced (#991).
 //
-// Claude Code prices a request once its stream completes. A request cut off
-// mid-stream is never priced: measured on SDK 0.3.283 and 0.3.287 against the fake endpoint
+// Claude Code prices a request once its stream completes. A request no
+// message_stop closed (the process gone or killed mid-stream) is never priced.
+// Through SDK 0.3.314 a request the user stopped was not priced either:
+// measured on SDK 0.3.283 and 0.3.287 against the fake endpoint
 // (test/sessions.e2e.test.ts), a query stopped while the model streamed ends
 // with an `aborted_streaming` result whose `total_cost_usd` is 0, although
 // message_start had reported the request's input tokens; and the transcript's
