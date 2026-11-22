@@ -68,8 +68,8 @@ export async function throwawayDatabase(options: { empty?: boolean } = {}): Prom
 
 /** This process's one connection for `dropLater`: it drops the databases one at a time. */
 let dropper: Sql | undefined
-/** The DROPs `dropLater` queued that have not ended yet, by database name. */
-const dropping = new Map<string, Promise<void>>()
+/** The DROPs `dropLater` queued that have not ended yet, with their database's name. */
+const dropping = new Set<{ name: string; done: Promise<void> }>()
 /** A failed DROP, kept for `flushDrops` to throw from its hook. */
 let dropFailed: Error | undefined
 
@@ -84,7 +84,8 @@ let dropFailed: Error | undefined
  */
 function dropLater(base: string, name: string): void {
   dropper ??= postgres(base, { max: 1, idle_timeout: 1, onnotice: () => {} })
-  const done = dropper
+  const entry = { name, done: Promise.resolve() }
+  entry.done = dropper
     .unsafe(`DROP DATABASE "${name}" WITH (FORCE)`)
     .then(
       () => undefined,
@@ -92,8 +93,8 @@ function dropLater(base: string, name: string): void {
         dropFailed ??= new Error(`dropping the test database ${name} failed`, { cause: err })
       },
     )
-    .finally(() => dropping.delete(name))
-  dropping.set(name, done)
+    .finally(() => dropping.delete(entry))
+  dropping.add(entry)
 }
 
 /**
@@ -101,19 +102,20 @@ function dropLater(base: string, name: string): void {
  * (#7058). A file's process ends once its last hook resolves (`pool: 'forks'`, `isolate`), so
  * without this its last DROP raced the exit and could leave a template copy behind. Throws a
  * DROP that failed. A DROP still waiting after `waitMs` (a checkpoint stalled on a slow disk,
- * #7044) is left behind, named in the error log, rather than holding the hook past its timeout.
+ * #7044) is left behind, named in the error log, rather than holding the hook past its timeout;
+ * if it fails later, nothing throws it, since the hook has returned.
  */
 export async function flushDrops(waitMs: number): Promise<void> {
   let timer: NodeJS.Timeout | undefined
   const waited = await Promise.race([
-    Promise.all(dropping.values()).then(() => true),
+    Promise.all([...dropping].map((entry) => entry.done)).then(() => true),
     new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), waitMs))),
   ])
   clearTimeout(timer)
   if (waited) {
     await dropper?.end({ timeout: 2 })
   } else {
-    const left = [...dropping.keys()].join(', ')
+    const left = [...dropping].map((entry) => entry.name).join(', ')
     console.error(`test databases left behind, their DROP still waiting: ${left}`)
   }
   // After a timeout the connection is not ended: ending it would cancel the DROP it still

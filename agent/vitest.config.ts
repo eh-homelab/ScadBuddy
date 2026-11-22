@@ -36,7 +36,7 @@ export default defineConfig({
     // (vitest's defaults, pinned here). Files sharing a worker (`threads`, `vmThreads`,
     // `isolate: false`) would fail, and kill, each other's processes.
     // test/support/gateway.ts starts the credential gateway every query goes through (main.ts
-    // starts it in the service); first, so it closes after the leak guard's check.
+    // starts it in the service); before the leak guard, so it closes after the leak guard's check.
     // test/support/flushDrops.ts waits for the test databases' DROPs (#7058); before the
     // gateway, so its hook runs last.
     setupFiles: [
