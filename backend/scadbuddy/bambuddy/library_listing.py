@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
@@ -191,14 +191,18 @@ def search_library(
     *,
     show_all: bool,
     limit: int = SEARCH_LIMIT,
+    types: Collection[str] | None = None,
 ) -> LibrarySearch:
     """The files whose name, or the path of the folder they are in, holds every word of
     ``query`` as a substring (``key`` finds ``monkey`` too: forgiving, as a search box
     should be), whatever the case or separator (:data:`_SEPARATORS`; #3630): ``dino keychain`` finds
     ``Dinosaur_Keychain (ScadBuddy).3mf`` and every file under ``3D Name Keychains``.
-    Files whose own name holds more of the words come first, then by name."""
+    Files whose own name holds more of the words come first, then by name. With
+    ``types`` (#6710 §9.2), only files of those types are listed and ``show_all`` is
+    ignored: none is counted hidden."""
     terms = _words(query).split()
-    found = LibrarySearch(query=query, all=show_all)
+    wanted = {kind.lower() for kind in types} if types is not None else set()
+    found = LibrarySearch(query=query, all=show_all and types is None)
     if not terms:
         return found
     by_id = {folder.id: folder for folder in folders}
@@ -226,7 +230,11 @@ def search_library(
         where = _words(" ".join(path(row.folder_id)))
         if not all(term in name or term in where for term in terms):
             continue
-        if not show_all and row.file_type.lower() not in DEFAULT_TYPES:
+        kind = row.file_type.lower()
+        if types is not None:
+            if kind not in wanted:
+                continue
+        elif not show_all and kind not in DEFAULT_TYPES:
             found.hidden += 1
             continue
         matched.append((sum(term in name for term in terms), row))

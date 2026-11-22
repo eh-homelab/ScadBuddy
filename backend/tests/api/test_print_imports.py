@@ -829,6 +829,45 @@ def test_a_key_sent_again_for_another_source_links_no_model(
     assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
 
 
+@pytest.mark.requires_git
+@respx.mock
+def test_a_resend_after_the_printer_overwrote_its_file_offers_the_first_model(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7022: a printer file is read again on every send. The same body sent again after
+    the printer overwrote the file is a 409 that says the file changed, and offers the
+    first model, which was made from this print's file."""
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    path = "/cache/demo_elan.3mf"
+    on_printer = {"name": "demo_elan.3mf", "path": path, "size": 10}
+    bambuddy(printer_files={"path": "/cache", "files": [on_printer], "warnings": []})
+    content = {"bytes": painted_3mf()}
+    respx.get(f"{API}/printers/1/files/download", params={"path": path}).mock(
+        side_effect=lambda request: httpx.Response(200, content=content["bytes"])
+    )
+    respx.get(f"{API}/library/files", params={"folder_id": "2"}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(200, json={"id": 55, "filename": "demo_elan.3mf"})
+    )
+    respx.delete(f"{API}/library/files/55").mock(return_value=httpx.Response(200))
+    body = {"source": {"kind": "printer", "path": path}, "new_model": {"name": "Trophy"}}
+    key = press()
+    _lost_first_import(client, monkeypatch, body, key)
+    content["bytes"] = a_3mf()
+
+    again = import_print(client, body, **key)
+
+    assert again.status_code == 409, again.text
+    detail = again.json()["detail"]
+    assert detail.startswith("demo_elan.3mf changed since this request was first sent")
+    assert "import the print onto it with `slug`" in detail
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
+
+
 # --- the print watcher's activity row (#6029) -----------------------------------------
 
 

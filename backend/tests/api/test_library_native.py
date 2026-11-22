@@ -249,6 +249,16 @@ def test_search_finds_by_folder_path(native_client: TestClient, in_folder: Nativ
     assert hits["files"][0]["id"] == in_folder.id and hits["total"] == 1
 
 
+def test_search_takes_types(native_client: TestClient, in_folder: NativeFile) -> None:
+    """#6710 §9.2: the storefront's file picker lists 3MF and STL files only."""
+    search = "/api/v1/print/library/search"
+    stl = native_client.get(search, params=[("q", "dino"), ("types", "stl")]).json()
+    both = native_client.get(search, params=[("q", "dino"), ("types", "3mf"), ("types", "stl")])
+    assert (stl["total"], both.json()["total"]) == (0, 1)
+    refused = native_client.get(search, params=[("q", "dino"), ("types", "gcode.3mf")])
+    assert refused.status_code == 422
+
+
 def test_plates_on_native(native_client: TestClient, uploaded: NativeFile) -> None:
     plates = native_client.get(f"/api/v1/print/library/{uploaded.id}/plates").json()
     assert plates == [{"index": 1, "has_thumbnail": True, "name": "bracket"}]

@@ -234,7 +234,7 @@ def _checked(spool: SpoolOption | None) -> bool:
 
 def _untyped(spool: SpoolOption) -> bool:
     """An SB spool with no type: no material name to test (R-6876-6)."""
-    return spool.sb_number is not None and spool.sb_material is None
+    return spool.sb_number is not None and not spool.sb_material
 
 
 def rack_color(raw: str) -> str | None:

@@ -410,5 +410,9 @@
   {
     "id": "20261122T0323Z_plugin_package_pins",
     "sha256": "7468aec87f4aadbe99d72c42cebc6d84001a39526d37ad5aeaf8a88705c5d3de"
+  },
+  {
+    "id": "20261122T0329Z_hosted_plugins",
+    "sha256": "9fa8021a36518ae3350f5507bd3872c20b791e824b1404bff491bb1da3b212cc"
   }
 ]

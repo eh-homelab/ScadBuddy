@@ -450,6 +450,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   names after a day). `agent_data/access.py` holds the access writes they share.
   Tests `tests/api/test_crud_agent_access.py`, `test_crud_agent_plugins.py`,
   `test_crud_agent_packages.py`.
+- Hosted plugins (#6932, spec `2026-11-21-hosted-plugin-feeds-design.md` §6.1 to §6.3):
+  `hosted_plugins/` (`rules.py` the draft's paths, names and caps; `bundle.py` the publish's
+  checks, the generated `plugin.json`, the deterministic zip and the content hash, a port of
+  the agent's `hash.ts` pinned by `tests/fixtures/hosted-plugin-hash-vectors.json`, a copy of
+  the agent's, `agent/test/hostedPluginHashVectors.test.ts`; `store.py` the SQL) over the
+  agent-schema tables `ai_hosted_plugins`, `ai_hosted_plugin_files` (the draft) and
+  `ai_hosted_plugin_versions` (never updated; a trigger refuses it), and `ai_plugin_feeds`.
+  The bytes are blobs `attachment-<sha256>` held in `blob_refs` by holder `hosted_plugin`.
+  Routes `api/hosted_plugins.py` (`/hosted-plugins`, `api` class) and the agent's area
+  `hosted-plugins` in `api/crud_agent_packages.py` (a plugin's latest version, a version's
+  zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`.
 - The agent's tool-call gate (#5299 step 10): `api/crud_agent_gate.py` (area `gate`) over
   `agent_data/gate.py`, the agent's `gate/store.ts` writers statement for statement, each one
   transaction: an entry opened (the Reset's cancels first, in their own), resolved, or decided
