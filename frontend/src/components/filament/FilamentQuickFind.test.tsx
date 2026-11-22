@@ -5,6 +5,7 @@ import { spoolId, T } from '../../mocks/features/filament/seed'
 import { PICKER_FILTERS_KEY } from '../../lib/filamentPickerFilters'
 import { renderPage } from '../../test/utils'
 import { FilamentQuickFind } from './FilamentQuickFind'
+import { FilamentSearchBox } from './FilamentSearchBox'
 
 // #6894: the quick find over the spools and types, on the Filament page.
 
@@ -27,6 +28,7 @@ function render(route = '/filament/spools') {
           <>
             <FilamentQuickFind />
             <textarea aria-label="Composer" />
+            <FilamentSearchBox value="" onChange={() => {}} label="Search spools" placeholder="Search" />
             <Here />
           </>
         }
@@ -96,6 +98,13 @@ describe('the filament quick find', () => {
     composer.dispatchEvent(event)
     expect(event.defaultPrevented).toBe(false)
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('opens on Ctrl+K from the tab\'s own search box', async () => {
+    const { user } = render()
+    await user.click(screen.getByRole('searchbox', { name: 'Search spools' }))
+    await user.keyboard('{Control>}k{/Control}')
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
   })
 
   it('hands the open tab search back only on the Spools and Types tabs', async () => {
