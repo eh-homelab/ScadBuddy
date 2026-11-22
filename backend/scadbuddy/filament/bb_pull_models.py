@@ -15,7 +15,7 @@ URL never writes SB.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID
 
@@ -142,8 +142,9 @@ class PullReport(BaseModel):
     archived_ids: list[UUID] = Field(default_factory=list)
     failed_bb_ids: list[int] = Field(default_factory=list)
     invalid_bb_ids: list[int] = Field(default_factory=list)
-    #: BB's usage rows the pull booked as print ends, and those of a BB spool no SB
-    #: spool is linked to (`bambuddy_usage.py`).
+    #: BB's usage rows the pull booked as print ends, and the rows of a BB spool no SB
+    #: spool is linked to that are later than the last read an earlier pull booked whole
+    #: (a failed body's rows are counted again; `bambuddy_usage.py`, R-7002-6).
     usage_booked: int = 0
     usage_unlinked: int = 0
     #: BB spools made for a tag a linked SB spool holds: no SB spool is made.
@@ -276,13 +277,25 @@ class PullApplied(BaseModel):
     archives_since: date | None = None
 
 
+class UsageMark(BaseModel):
+    """A usage row's place in Bambuddy's order: its ``created_at``, then its ``id``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    at: datetime
+    id: int
+
+
 class UsageBody(_Body):
     """BB's usage rows to book on linked spools, with the archives read for them (only
-    ``id``, ``printer_id`` and ``completed_at`` are used, `bambuddy_usage.match_archive`)."""
+    ``id``, ``printer_id`` and ``completed_at`` are used, `bambuddy_usage.match_archive`).
+    ``read_to`` is set on a read's last body only: the newest row the read holds, which
+    becomes the instance's usage mark once this body is booked (R-7002-6)."""
 
     pull_id: PullId
     usage: list[SpoolUsage] = Field(max_length=ROWS_MAX)
     archives: list[Archive] = Field(default_factory=list, max_length=ARCHIVES_MAX)
+    read_to: UsageMark | None = None
 
 
 class UsageBooked(BaseModel):

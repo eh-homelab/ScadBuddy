@@ -153,9 +153,13 @@ class LocalBbPull:
         self._check(body.instance)
         archives: Sequence[Archive] = body.archives
         with self.filament.spools.transaction() as conn, watched(cancel, conn):
+            # The state row first, then the spools (R-7002-7).
+            mark = bambuddy_usage.usage_mark(conn, body.instance)
             booked = bambuddy_usage.book_usage(
-                conn, body.usage, archives, actor=self._actor(body.pull_id)
+                conn, body.usage, archives, actor=self._actor(body.pull_id), mark=mark
             )
+            if body.read_to is not None:
+                bambuddy_usage.advance_mark(conn, body.instance, (body.read_to.at, body.read_to.id))
             check(cancel)
         return UsageBooked(booked=booked.booked, unlinked=booked.unlinked)
 

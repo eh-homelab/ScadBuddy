@@ -166,7 +166,11 @@ export type DurableTurnsDeps = {
   sendTimeoutMs?: number
   /** How long `cancel_input` may take (DurableGate, default 10 s). */
   cancelTimeoutMs?: number
-  /** Tests only: how Stop describes a gone workflow (default durableDescriber). */
+  /**
+   * Tests only: how Stop and the unanswered-send re-send describe a workflow (default
+   * durableDescriber). A send refused `ended` does not use it: it describes the run it waits for
+   * itself, to pin the wait to that run's id.
+   */
   describe?: DescribeSession
   /** How long after an unanswered send its Update is sent once more (default RESEND_AFTER_MS). */
   resendAfterMs?: number

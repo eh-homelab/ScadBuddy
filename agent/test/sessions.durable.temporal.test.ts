@@ -402,12 +402,11 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const m = await durableManager({ sendTimeoutMs: 10_000 })
     const { sessionId, runId } = await endingRun(m)
     const workflowId = sessionWorkflowId(sessionId)
-    const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart')
+    // The wait's handle, made once the describe has pinned the refused run: getHandle with its run id.
+    const spy = vi.spyOn(env.client.workflow, 'getHandle')
     try {
       const sent = m.send(sessionId, browser, 'hello')
-      await expect.poll(() => spy.mock.calls.length, { timeout: 5_000 }).toBeGreaterThan(0)
-      // Time for the refusal and the describe that pins the wait to the refused run.
-      await new Promise((r) => setTimeout(r, 1_000))
+      await expect.poll(() => spy.mock.calls.some(([id, run]) => id === workflowId && run === runId), { timeout: 10_000 }).toBe(true)
       // The refused run closes and another run of the session starts: the send is not refused.
       await env.client.workflow.getHandle(workflowId, runId).terminate('test')
       await env.client.workflow

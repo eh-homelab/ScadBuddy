@@ -2428,7 +2428,56 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     left out is booked and changes nothing, as before (`_book` returned `None` for it).
     It is also no longer in `_cover`'s `pending`; it is a booked row there, which the
     `others` query counts (bar one that covered an estimate, as for any booked row).
-    `usage_unlinked` still counts every row of an unlinked BB spool in the read.
+    `usage_unlinked` counts only the unlinked rows later than the instance's usage mark
+    (Decisions 242 and 244). `test_a_mix_of_booked_and_new_rows_locks_and_books_only_the_new`
+    pins that `capture.lock` takes only the new rows' spools.
+242. (replaced by 244) R-7002-4 (PR #7040 review): `book_usage` counts a row of an
+    unlinked BB spool in `unlinked` only when it is later than the instance's usage mark
+    (Decision 244); with no mark, every such row counts. An unlinked row is never booked,
+    so `_booked` can never name it. PR #7046 first compared it with the newest linked row
+    booked before the call; its review found that an unlinked row newer than every linked
+    row, a read with no linked row, and a read of several bodies still counted rows again,
+    so the mark replaced it.
+243. R-7002-5 (PR #7040 review): `BambuddyClient.spool_usage` takes `limit` with no
+    default (it was 200). Bambuddy answers only the newest `limit` rows, so a default
+    would let a new caller read a short window without naming it. The pull names
+    `USAGE_READ_ROWS`. The client does not default to that constant, so it does not
+    import the filament package.
+244. R-7002-6 (PR #7046 review, Blocking): the state row `filament_bb_sync_state` keeps a
+    usage mark: `usage_read_instance`, `usage_read_at` and `usage_read_id` (migration
+    `20261122T2054Z_filament_bb_usage_read_mark.sql`). It is the newest usage row, by
+    `created_at` then `id`, that a pull of that instance read and booked whole.
+    `LocalBbPull.book_usage` reads it in each body's transaction
+    (`bambuddy_usage.usage_mark`; a mark of another instance is none), and `book_usage`
+    counts an unlinked row only when it is later than the mark. The worker sets the read's
+    newest row as `UsageBody.read_to` on the last body only, and the API moves the mark to
+    it in that body's transaction (`advance_mark`, never backwards for one instance). So
+    every body of a read counts against the mark from before the read, and a body that
+    fails (R-6860-3) leaves the mark where it was: the next whole read counts those rows
+    once more, rather than never. The reset that deletes the links clears the mark, since
+    the next Bambuddy's rows are not the old one's. The reset that keeps them (the same
+    Bambuddy at a new URL) moves the mark to the new instance. An old API refuses a body
+    with `read_to` (422, `extra="forbid"`) during a roll; that booking fails alone, logged,
+    and the next pull books it. Tests: `test_an_unlinked_row_after_the_last_linked_one_counts_once`,
+    `test_with_no_linked_rows_a_second_pull_counts_no_unlinked_row`,
+    `test_no_unlinked_row_counts_twice_across_bodies`, `test_a_failed_body_does_not_move_the_mark`,
+    `test_a_reset_that_deletes_the_links_clears_the_mark`.
+245. R-7002-7 (PR #7046 review): `bambuddy_usage.usage_mark` reads the state row
+    `FOR UPDATE`, first in `LocalBbPull.book_usage`'s transaction, before `book_usage`
+    locks its spools: the state row, then the spools, the order `apply_results` takes them
+    in. So two bookings at once (the import and the Schedule's pull) take turns, and the
+    second counts against the mark the first left;
+    `test_two_concurrent_bookings_count_each_new_unlinked_row_once` starts both at a
+    `threading.Barrier` and fails without the lock. The lock lasts one body's transaction,
+    not a read: the bodies are separate requests. A read is always one body
+    (`USAGE_READ_ROWS` is `USAGE_BODY_ROWS`, Decision 240), so in practice it covers the
+    whole read. If a read ever took several bodies, two reads at once could each count the
+    rows of their earlier bodies against the same mark. `pull`'s `record_instance` takes
+    the spool and then the state row, but its update waits on the state row only while no
+    instance is recorded, which is a first pull: there the database's deadlock check
+    would end one of them, logged, and the next pull books it. `usage_unlinked` is
+    described as the rows later than the last read an earlier pull booked whole, a failed
+    body's rows counted again (`bb_pull_models.py`, `agent/src/tools/filament.ts`).
 
 ## Self-review
 
