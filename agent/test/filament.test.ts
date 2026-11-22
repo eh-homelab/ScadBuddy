@@ -889,15 +889,39 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     server.use(
       http.post(`${SYNC}/reset-links`, async ({ request }) => {
         body = await request.json()
-        return HttpResponse.json({ instance: '0ld0ld0ld0ld', deleted })
+        return HttpResponse.json({ instance: '0ld0ld0ld0ld', kept: false, deleted })
       }),
     )
     const t = tool('filament_sync_reset_links')
     expect(() => t.parse({})).toThrow()
     const result = await t.execute(t.parse({ confirm_instance: '0ld0ld0ld0ld' }), ctx('outward'))
     expect(result.isError).toBeFalsy()
-    expect(body).toEqual({ confirm_instance: '0ld0ld0ld0ld' })
-    expect(firstText(result)).toEqual({ instance: '0ld0ld0ld0ld', deleted })
+    expect(body).toEqual({ confirm_instance: '0ld0ld0ld0ld', expect_kept: false })
+    expect(firstText(result)).toEqual({ instance: '0ld0ld0ld0ld', kept: false, deleted })
+  })
+
+  it('sends expect_kept, and says a 409 proof_changed deleted nothing (#6845 R-6845-6)', async () => {
+    let body: unknown
+    const none = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
+    server.use(
+      http.post(`${SYNC}/reset-links`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ instance: '0ld0ld0ld0ld', kept: true, deleted: none })
+      }),
+    )
+    const t = tool('filament_sync_reset_links')
+    const result = await t.execute(t.parse({ confirm_instance: '0ld0ld0ld0ld', expect_kept: true }), ctx('outward'))
+    expect(result.isError).toBeFalsy()
+    expect(body).toEqual({ confirm_instance: '0ld0ld0ld0ld', expect_kept: true })
+    const description = t.description
+    expect(description).toContain('`expect_kept: true`')
+    expect(description).toContain('`proof_changed`')
+  })
+
+  it('says the links are kept when the Bambuddy is the same one at a new address (#6845)', () => {
+    const description = tool('filament_sync_reset_links').description
+    expect(description).toContain('`kept: true`')
+    expect(description).toContain('After a delete (`kept: false`)')
   })
 
   it('fails on a 409 and says why nothing was deleted', async () => {

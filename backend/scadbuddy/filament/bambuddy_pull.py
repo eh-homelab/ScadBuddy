@@ -299,6 +299,16 @@ def record_instance(conn: Conn, instance: str | None) -> None:
         )
 
 
+def links_elsewhere(store: Filament, configured: str) -> bool:
+    """Whether the links' recorded instance is another than ``configured`` (Decision 12):
+    the pull then takes nothing, or it would write another Bambuddy's values onto linked
+    spools (#6845 R-6845-5). One statement on a pooled connection, with no transaction
+    block of its own: `LocalBbPull._check` runs it on every body."""
+    with store.spools.pool.connection() as conn:
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+    return state is not None and state["instance"] not in (None, configured)
+
+
 def pull(
     store: Filament,
     spools: Sequence[BbSpool],

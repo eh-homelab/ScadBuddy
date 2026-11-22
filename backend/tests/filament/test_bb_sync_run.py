@@ -10,7 +10,7 @@ import re
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -60,6 +60,7 @@ class FakeSync:
         self.planned: list[SyncPlan] = []
         self.sent: list[tuple[str, list[BbWrite], list[BbWriteResult], str | None]] = []
         self.recorded: list[SyncPassResult] = []
+        self.unconfirmed: list[list[tuple[Kind, UUID]]] = []
 
     async def directions(self) -> FilamentSync:
         return self.sync
@@ -82,8 +83,10 @@ class FakeSync:
         writes: Sequence[BbWrite],
         results: Sequence[BbWriteResult],
         pass_id: str | None,
+        unconfirmed: Sequence[tuple[Kind, UUID]] = (),
     ) -> ResultsReport:
         self.sent.append((instance, list(writes), list(results), pass_id))
+        self.unconfirmed.append(list(unconfirmed))
         return ResultsReport()
 
     async def record_pass(self, result: SyncPassResult) -> None:
@@ -534,6 +537,20 @@ async def test_each_round_sends_its_plans_pass_id() -> None:
 
     assert [pass_id for *_, pass_id in sync.sent] == [plan.pass_id for plan in sync.planned[:2]]
     assert len({plan.pass_id for plan in sync.planned}) == 3
+
+
+@respx.mock
+async def test_each_round_sends_its_plans_unconfirmed_rows() -> None:
+    """R-6688-11: the plan's unconfirmed rows go back with its results, so a spool's
+    compare names none of them, whether this round probes them or not."""
+    _listings()
+    _spool_updates()
+    held = [("location", uuid4())]
+    sync = FakeSync([_plan([_write("update", 1, {"note": "x"})], unconfirmed=held)])
+
+    await _run(sync)
+
+    assert sync.unconfirmed[0] == held
 
 
 @respx.mock

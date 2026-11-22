@@ -382,7 +382,7 @@ eh-homelab/clusters: scadbuddy-print strategy Recreate, then back to RollingUpda
 - Produces in `bb_sync_models.py` (pydantic, `extra="forbid"`):
   `BbSnapshot {instance: str, full: bool, spools: list[dict], spools_complete: bool, suppliers: list[BbSupplier] | None, locations: list[BbLocation] | None, catalog: list[SpoolCatalogEntry] | None, filaments: list[CatalogFilament] | None, read_at: datetime}` (a `None` list means "not read", never "empty"; `spools_complete` is False when any spool row failed `bambuddy_pull.parse_rows`; consumers parse `spools` with `parse_rows`);
   `seen_row(row: Spool) -> dict[str, Any]`: the one shape of every spool `bb_seen`: BB's row restricted to Decision 14's fields, keyed by BB names (`color_name`, `rgba`, `extra_colors`, `label_weight`, `weight_used`, `note`, `low_stock_threshold_pct`, `location_id`, `core_weight`, `last_dried_at`, `slicer_filament`, …), with `rgba`/`extra_colors` in Decision 14's canonical form. `bambuddy_pull.snapshot` stays for the `synced_from_bb` event only;
-  `BbWrite {key: str, kind: Kind, sb_id: UUID, op: Literal["create","update","archive","restore","k_profiles","presets","suppliers","probe"], bb_id: int | None, body: dict | list, hashes: dict[str, str]}` (`probe` is Decision 13's `GET spool_row(bb_id)`, with an empty body);
+  `BbWrite {key: str, kind: Kind, sb_id: UUID, op: Literal["create","update","archive","restore","k_profiles","presets","suppliers","probe"], bb_id: int | None, body: dict | list, hashes: dict[str, str]}` (`probe` is Decision 13's `GET spool_row(bb_id)`, with an empty body (a spool's; other rows': Decisions 187-192, 201));
   `BbWriteResult {key: str, ok: bool, bb_id: int | None = None, answer: dict | None = None, error: str | None = None, status: int | None = None}`;
   `SyncPlan {writes: list[BbWrite], deferred: int, instance_changed: bool = False, directions: FilamentSync, interval_s: float}`;
   `PlanRequest {snapshot: BbSnapshot, limit: int = Field(ge=1, le=200)}` (the plan route's body; `full` stays on the snapshot);
@@ -2000,7 +2000,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     entry holds no spool back: a spool names its type by code. Why: a spool update naming a
     deleted Bambuddy location gets a 404 or 422 and an error row. Cost: a spool waits up to
     two rounds; with a probe that keeps failing, it waits for later passes.
-192. R-6688-6: a row's probe is a phase-0 write, with its kind's other writes, and counts
+192. (changed by 202) R-6688-6: a row's probe is a phase-0 write, with its kind's other writes, and counts
     toward the cap as a spool's probe does; it writes nothing, so `written` does not count
     it, and its 404 is an answer, not `failed` (decision 116). Tests:
     `test_bb_sync_plan.py` (`test_a_row_missing_from_its_listing_is_probed`,
@@ -2017,6 +2017,72 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_bb_sync_results.py` (`test_a_row_probe_404_drops_the_link`,
     `test_a_row_probe_that_finds_the_row_keeps_the_link`,
     `test_a_spool_names_its_deleted_location_only_once_it_is_made_again`).
+193. R-6845-1 (#6845, controller's ruling; changes 170's cost): a reset to the same
+    Bambuddy keeps the links. It never adopts an untagged spool by a look-alike identity
+    (type, colour, weight, created time). Why: an identity match can silently merge two
+    different physical spools; keeping links that are proven to point at the same rows
+    cannot.
+194. R-6845-2 (#6845): Bambuddy has no instance id of its own, and the recorded instance is
+    a hash of the URL (Decision 12), so a new URL to the same Bambuddy is another instance.
+    The reset proves "same Bambuddy" from the configured Bambuddy's spools
+    (`bb_sync_results.same_bambuddy`): its full listing (archived spools too, every row
+    valid) holds every linked BB spool id, none of those rows has an `updated_at` older
+    than its link's `bb_updated_at`, and at least one has exactly that `updated_at`. Why: ids
+    alone match any Bambuddy with as many spools; an equal timestamp to the microsecond on
+    the same id is a row ScadBuddy has seen; "never older" refuses an older backup of it.
+    With no spool link there is no proof. Decision 199 adds a share of timed links. Cost: a
+    link Bambuddy lost, a row older than its link, or a row that does not parse leaves only
+    the delete, as before, with the warning of 170.
+195. R-6845-3 (#6845; widens 165 and 167): when the proof holds and the request has
+    `expect_kept: true` (Decision 198), `POST /filament/sync/reset-links` deletes nothing. It keeps every link, hash, seen copy,
+    intent, error row and ignored BB spool, records the configured instance, answers
+    `kept: true` with zero counts, and nudges a full pass, so Decision 10's intents and
+    every untagged spool's link stay. The dry run reads the same listing and answers
+    `same_bambuddy`; the dialog and the agent tool say the links are kept. With
+    `expect_kept: false` the reset is 165's, and the dialog keeps 170's warning. The `confirm_instance` check
+    and the 409s are unchanged. Tests: `test_a_reset_to_the_same_bambuddy_keeps_the_links`,
+    `test_the_proof_of_the_same_bambuddy` (each way it fails).
+196. R-6845-4 (#6845; amended by 198): the dry run, and a reset that expects the links
+    kept, read the configured Bambuddy's spools
+    (`GET /inventory/spools?include_archived=true`) before any write. Decision 198 sets what
+    a failed read does: the dry run answers it, and a reset that expects the links kept is
+    refused with nothing deleted. Why: a passing fault must not turn a reset that keeps the
+    links into one that duplicates every untagged spool.
+197. R-6845-5 (#6845; widens 168 and 177 to the links' instance): the pull (the
+    Schedule's and the import) takes no spool data while the links belong to another
+    instance than the configured Bambuddy's. `pull_start` asks the worker for no spools
+    (only the Home Assistant states when a sensor is set up), so the Schedule's pull is
+    `skipped`; `POST /filament/bambuddy/import` is 409 `instance_changed` before it starts
+    a run; and `LocalBbPull` refuses a spool, usage or trays body then with 409
+    `instance_changed` (`links_elsewhere`), for a run already under way. Why: the pull read the new URL with the old links, so it wrote
+    another Bambuddy's values onto linked spools and moved their `bb_updated_at` to that
+    Bambuddy's rows, which would also make 194's proof pass for a stranger. Tests:
+    `test_a_pull_of_another_bambuddy_is_skipped`,
+    `test_the_import_of_another_bambuddy_is_409`. `links_elsewhere` is one statement on a
+    pooled connection, with no transaction block, as `LocalBbPull` runs it on every body.
+198. R-6845-6 (#6845 review; amends 196): the dry run's proof and the reset's are two reads
+    of Bambuddy, so the reset says which one it acts on. `LinksResetRequest.expect_kept`
+    (default false) is the dry run's `same_bambuddy`. With `expect_kept: true` the reset
+    reads Bambuddy again and keeps the links only while the proof still holds; a failed
+    read, no Bambuddy configured, or a proof that no longer holds is 409 `proof_changed`,
+    with nothing written and nothing nudged. The dialog then reads the dry run again and
+    says why. With `expect_kept: false` the person confirmed the delete: the reset reads no
+    Bambuddy and deletes, as 165 does. The dry run answers 200 when Bambuddy cannot be read,
+    with `same_bambuddy: false` and `bambuddy_unreadable: true`; the dialog notes it and
+    offers the delete with 170's warning. The agent tool calls with `expect_kept: true`
+    first, and with false only after the user agreed to the delete. Why: "Keep links" must
+    never delete because the listing changed between the two reads, and a Bambuddy that is
+    down must not block a person who knows it is another one. Tests:
+    `test_a_kept_reset_whose_proof_changed_is_409`,
+    `test_a_kept_reset_that_cannot_read_bambuddy_is_409`,
+    `test_the_preview_of_an_unreadable_bambuddy_offers_the_delete`.
+199. R-6845-7 (#6845 review; widens 194): a link with no time on either side (no
+    `bb_updated_at`, a pre-#6265 link, or a row Bambuddy sent with no `updated_at`) is
+    only checked to be there. So the proof also needs at least half the links timed on
+    both sides (`timed * 2 >= links`). Why: one exact match among many unchecked links is
+    too little to call a Bambuddy the same one. Cost: a database where most links have no
+    time gets only the delete. Test: `test_the_proof_of_the_same_bambuddy` (the two cases
+    with most links or rows untimed).
 200. R-6688-7 (PR #6870 review; changes 191): a spool that names an archived row whose
     probe this round plans counts `deferred`, not `blocked`, as it does for an unarchived
     row. The probe's answer settles it in a later round of this pass: a 404 drops the link,
@@ -2036,6 +2102,56 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     listing read per filament entry Bambuddy deleted. Tests: `test_bb_sync_run.py`
     `test_a_filament_404_is_confirmed_by_the_listing`,
     `test_a_filament_404_whose_listing_fails_is_no_404`.
+202. R-6688-9 (PR #6870 review; changes 192): a row's probe is a phase-0 write even for a
+    row with an error row from an earlier pass (`add`'s `retry_last=False`), so the cap
+    takes it first and `missing` knows when it plans it whether it fits: a probe past the
+    round's `limit` is not planned. Its row counts `deferred` (`capped`), as `take` counts
+    a write the cap cut, so the next pass probes it; a spool that names it waits on it
+    (`deferred`) and never names the id Bambuddy may have deleted. Only a planned probe's
+    row is in `probing`. Why: a probe left in the retry phase could be cut by the cap with
+    no `more` while its spool waited on it, and `probing` named a row whose probe never ran.
+    Cost: a row whose probe keeps failing is probed before the other retries each pass (one
+    `GET`). Tests: `test_bb_sync_plan.py` `test_a_rows_probe_goes_before_the_retries`,
+    `test_a_probe_the_cap_cuts_is_not_planned`.
+203. R-6688-10 (PR #6870 review): `results` compares a spool's answer with SB's values as
+    the plan made them: the rows this round probes are taken out of its `BbRefs`
+    (`_Reads.unconfirmed`, `BbRefs.without`), as the plan took them out of the spool's desired
+    values. So a spool probe or write answered beside a location probe does not take the
+    answer's `location_id` into `bb_seen` as SB's value. Why: the location may be gone, and
+    the plan never sent that id. Cost: none known. Test: `test_bb_sync_results.py`
+    `test_a_spool_probe_beside_its_locations_probe_keeps_its_seen_location`.
+204. R-6688-11 (PR #6883 review): `results` leaves out of a spool's compare every row the
+    plan left out of the spool's desired values (`_Planner.unconfirmed()`: probe planned,
+    probe failed in this pass, or probe cut by the cap), not only the rows this round
+    probes. A row whose probe failed earlier in the pass gets no write in a later round,
+    so only the plan knows it. `SyncPlan` and `ResultsRequest` carry it as `unconfirmed`
+    (a list of `[kind, sb_id]`), and the pass sends the plan's list back with the results
+    (`FilamentSyncApi.results`). `results` still adds the round's own probes, so the
+    results of a worker that sends no list keep Decision 203. Both models forbid extra
+    keys, so an empty list is left out of the body (`without_empty_unconfirmed`, the plan
+    route and `RemoteFilamentSync.results`), as `started_at` is (#6846). A body that names a
+    row is refused by a build from before this (the pass fails, and the next signal or
+    the timer runs another), so roll the API and the print worker together, the API
+    first. Why: send it, not rebuild it in `results`. "Failed in this pass" is an error
+    row newer than the snapshot's `read_at`, and `results` has no snapshot; a cut by the
+    cap depends on the round's `limit`. Cost: one optional field on two CRUD bodies.
+    Also: `_Planner.limit` has no default; `plan` passes it, and `PlanRequest` bounds it.
+    Tests: `test_bb_sync_results.py`
+    `test_a_spool_probe_while_its_locations_probe_failed_keeps_its_seen_location`,
+    `test_bb_sync_run.py` `test_each_round_sends_its_plans_unconfirmed_rows`,
+    `test_crud_filament_sync.py` `test_the_sync_bodies_leave_out_an_empty_unconfirmed`;
+    `test_bb_sync_plan.py` `test_a_probe_the_cap_cuts_is_not_planned` now gives the spool
+    an error row from an earlier pass, so its write is a retry that a cut by the cap
+    would not count (R-T4-15): it counts `deferred` only because it waits on the capped
+    row.
+205. R-6688-12 (PR #6883, CI): `test_crud_filament_pull.py`
+    `test_a_body_past_the_gate_is_413_on_its_headers` and
+    `test_a_body_with_no_content_type_is_413_too` send the headers only, with a
+    `Content-Length` past 8 MiB and no body, over a plain socket. Why: they sent the whole
+    8 MiB body with httpx, and the gate answers 413 on the headers and the server closes;
+    the client could still be writing, and it failed with `httpx.WriteTimeout` (shard 4 on
+    main, run 44936881958, and on this PR). With no body to write there is no race, and
+    the test still proves the answer comes from the headers alone. Cost: none.
 
 ## Self-review
 

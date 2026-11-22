@@ -191,7 +191,7 @@ export type TurnHostDeps = {
   hostQueue: string
   /** Tests only: the fence's period (FENCE_MS). */
   fenceMs?: number
-  /** LISTEN on a channel (events/pgListener.ts `listenAlso`): a held call wakes on `scadbuddy_input`. Without it, the poll alone. */
+  /** Hears a channel (events/changeStream.ts `listenAlso`): a held call wakes on `scadbuddy_input`. Without it, the poll alone. */
   listen?: (channel: string, onNotify: (payload: string) => void) => void
   /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
   inputPollMs?: number
@@ -297,7 +297,7 @@ export class TurnHost {
   constructor(deps: TurnHostDeps) {
     this.#deps = deps
     this.#turns = deps.turns ?? new PgTurnRows(deps.sql)
-    // The only listener of this channel on the connection: listenAlso keeps one per channel, so a second would replace this one.
+    // The only listener of this channel on the stream: listenAlso keeps one per channel, so a second would replace this one.
     deps.listen?.(INPUT_CHANNEL, (requestId) => {
       for (const wake of this.#waiters.get(requestId) ?? []) wake()
     })

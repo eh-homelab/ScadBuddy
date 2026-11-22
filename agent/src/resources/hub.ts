@@ -3,7 +3,7 @@ import { affectedBy, NOTIFY_ONLY_PREFIXES } from './events.js'
 
 // From the event bus to each MCP session's subscriptions (issue #264).
 //
-// One hub per process follows the bus (src/events/pgListener.ts) and hands
+// One hub per process follows the bus (src/events/changeStream.ts) and hands
 // every event to each open `/mcp` session's `Subscriptions`. A session sends
 // `notifications/resources/updated { uri }` for the URIs it subscribed to and
 // `notifications/resources/list_changed` when the listed set changes

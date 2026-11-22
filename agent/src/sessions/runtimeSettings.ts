@@ -90,7 +90,7 @@ export function runtimeResizer(
   }
 }
 
-/** The LISTEN consumer (runtimeSync.ts): re-reads on `session-runtime` and ignores any other payload. */
+/** The change-stream consumer (runtimeSync.ts): re-reads on `session-runtime` and ignores any other payload. */
 export function resizeOnNotify(resize: () => Promise<void>): (payload: string) => void {
   return (payload) => {
     if (payload === RUNTIME_PAYLOAD) void resize()

@@ -24,7 +24,7 @@ from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.core import settings as core_settings
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bambuddy_usage, sensors
-from scadbuddy.filament.bambuddy_pull import ACTOR, parse_rows, pull
+from scadbuddy.filament.bambuddy_pull import ACTOR, links_elsewhere, parse_rows, pull
 from scadbuddy.filament.bb_pull_models import (
     FILAMENT_BB_PULL_WORKFLOW,
     HaBody,
@@ -82,9 +82,14 @@ class LocalBbPull:
             ).fetchone()
         return str(row["actor"]) if row is not None else ACTOR
 
-    def _check(self, instance: str) -> None:
+    def _check(self, instance: str, *, links: bool = True) -> None:
+        """Refuse a body of another Bambuddy than the configured one, and, for spool data
+        (``links``), while the links belong to another Bambuddy (#6845 R-6845-5): the pull
+        would write that Bambuddy's values onto them."""
         url = self.load().bambuddy_url
         if not url or instance_for(url) != instance:
+            raise PullInstanceChangedError(instance)
+        if links and links_elsewhere(self.filament, instance):
             raise PullInstanceChangedError(instance)
 
     async def apply(self, body: PullBody) -> PullApplied:
@@ -144,8 +149,9 @@ class LocalBbPull:
 
     def _ha_states(self, body: HaBody) -> None:
         """A state is a reading now (`sensors.apply_ha_states_on`); no states (the read
-        failed) marks every Home Assistant sensor on a live place unreachable."""
-        self._check(body.instance)
+        failed) marks every Home Assistant sensor on a live place unreachable. Sensors are
+        not spool data, so the links' instance does not stop them."""
+        self._check(body.instance, links=False)
         with self.filament.spools.transaction() as conn:
             sensors.apply_ha_states_on(conn, body.states or {}, self.clock())
 
@@ -200,10 +206,11 @@ async def pull_start(
     store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
 ) -> PullStart | None:
     """The Schedule's pull (`SpoolRefresh`), decided in the API: None (skipped) with no BB
-    URL, or when no data type of ``filament_sync`` pulls (#6265 F1) and no Home Assistant
-    sensor is set up. Else the start, whose ``pulls`` is None when only the Home Assistant
-    states are read: sensors are not spool data, so they are read whatever ``sync`` says
-    (#6268). ``sync`` reads the setting as it is now (#6262 Task 13)."""
+    URL, or when no data type of ``filament_sync`` pulls (#6265 F1) or the links belong to
+    another Bambuddy (#6845 R-6845-5), and no Home Assistant sensor is set up. Else the
+    start, whose ``pulls`` is None when only the Home Assistant states are read: sensors
+    are not spool data, so they are read whatever ``sync`` or the links say (#6268).
+    ``sync`` reads the setting as it is now (#6262 Task 13)."""
     settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:
         logger.info("no Bambuddy configured; its spools are not pulled")
@@ -211,13 +218,17 @@ async def pull_start(
     ha = await asyncio.to_thread(_has_ha_sensors, store)
     filament_sync = await asyncio.to_thread(sync)
     pulls: Pulls | None = Pulls.of(filament_sync)
+    instance = instance_for(settings.bambuddy_url)
     if not any(core_settings.pulls(d) for d in filament_sync.model_dump().values()):
         logger.info("Bambuddy's spools are not pulled: no Filament sync pulls")
         pulls = None
-        if not ha:
-            return None
+    elif await asyncio.to_thread(links_elsewhere, store, instance):
+        logger.info("Bambuddy's spools are not pulled: the links belong to another Bambuddy")
+        pulls = None
+    if pulls is None and not ha:
+        return None
     return PullStart(
-        instance=instance_for(settings.bambuddy_url),
+        instance=instance,
         pull_id=new_pull_id(),
         pulls=pulls,
         ha=ha,

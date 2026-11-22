@@ -9,6 +9,7 @@ import {
   runSync,
   setOverrideMode,
   type LinksResetCounts,
+  type LinksResetDone,
   type LinksResetPreview,
   type RfidReconcileReport,
   type RfidStatus,
@@ -266,6 +267,8 @@ function resetProblem(cause: unknown): string {
       return 'The links already belong to the Bambuddy that is set up now. Nothing was deleted.'
     case 'nothing_to_reset':
       return 'There are no Bambuddy links to reset.'
+    case 'proof_changed':
+      return 'The Bambuddy set up now is no longer proven to be the same one. Nothing was deleted. Read what a reset now deletes before you reset.'
     default:
       return cause.detail
   }
@@ -277,8 +280,13 @@ function resetProblem(cause: unknown): string {
  * (`GET /filament/sync/reset-links`), names it in a confirm dialog, and resets only the instance
  * that dry run read, so a stale page cannot reset another Bambuddy's links. No ScadBuddy row is
  * deleted. Then a full pass links the new Bambuddy afresh.
+ * #6845 — when the dry run says `same_bambuddy` (the Bambuddy set up now holds the linked spools as
+ * ScadBuddy last saw them), the reset sends `expect_kept`, deletes nothing and keeps every link, and the
+ * dialog says so. When the server can no longer prove it (`proof_changed`, R-6845-6), nothing is deleted:
+ * the dialog reads the dry run again and says why. A Bambuddy the dry run could not read
+ * (`bambuddy_unreadable`) gets the delete, with a note.
  */
-function ResetLinks({ onReset }: { onReset: (deleted: number) => void }) {
+function ResetLinks({ onReset }: { onReset: (done: LinksResetDone) => void }) {
   const [opening, setOpening] = useState(false)
   const [preview, setPreview] = useState<LinksResetPreview | null>(null)
   const [resetting, setResetting] = useState(false)
@@ -301,17 +309,25 @@ function ResetLinks({ onReset }: { onReset: (deleted: number) => void }) {
     setResetting(true)
     setProblem(null)
     try {
-      const done = await resetSyncLinks(preview.instance)
+      const done = await resetSyncLinks(preview.instance, preview.same_bambuddy)
       setPreview(null)
-      onReset(RESET_ROWS.slice(0, 5).reduce((sum, row) => sum + done.deleted[row.key], 0))
+      onReset(done)
     } catch (cause) {
       setProblem(resetProblem(cause))
+      if (cause instanceof ApiError && cause.status === 409 && cause.problem.code === 'proof_changed') {
+        try {
+          setPreview(await getResetPreview())
+        } catch {
+          // The message already says nothing was deleted; the old counts stay shown.
+        }
+      }
     } finally {
       setResetting(false)
     }
   }
 
   const rows = preview ? RESET_ROWS.filter((row) => preview.counts[row.key] > 0) : []
+  const same = preview?.same_bambuddy === true
   return (
     <div className="flex flex-col gap-2">
       <p className="text-warn">
@@ -335,14 +351,21 @@ function ResetLinks({ onReset }: { onReset: (deleted: number) => void }) {
         }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Reset the Bambuddy links?</AlertDialogTitle>
+            <AlertDialogTitle>{same ? 'Keep the Bambuddy links?' : 'Reset the Bambuddy links?'}</AlertDialogTitle>
             <AlertDialogDescription>
-              ScadBuddy forgets which Bambuddy rows its own rows match. No ScadBuddy spool, type, supplier or location is
-              deleted, and nothing is deleted in either Bambuddy.
+              {same
+                ? 'The Bambuddy set up now holds the linked spools as ScadBuddy last saw them, so it is the same Bambuddy at a new address. Nothing is deleted: every link now belongs to it.'
+                : 'ScadBuddy forgets which Bambuddy rows its own rows match. No ScadBuddy spool, type, supplier or location is deleted, and nothing is deleted in either Bambuddy.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {preview && (
+          {preview && !same && (
             <div className="flex flex-col gap-2 text-sm">
+              {preview.bambuddy_unreadable && (
+                <p className="text-warn">
+                  The Bambuddy set up now could not be read, so ScadBuddy cannot tell whether it is the same one at a new
+                  address. Reset only if it is another Bambuddy, or close this and try again later.
+                </p>
+              )}
               {rows.length > 0 ? (
                 <>
                   <p>This deletes:</p>
@@ -373,8 +396,8 @@ function ResetLinks({ onReset }: { onReset: (deleted: number) => void }) {
           <AlertDialogFooter>
             <AlertDialogCancel disabled={resetting}>Cancel</AlertDialogCancel>
             {/* Not an AlertDialogAction: the dialog stays open until the reset answers. */}
-            <Button variant="destructive" onClick={() => void reset()} disabled={resetting || !preview?.instance}>
-              {resetting ? <Spinner /> : 'Reset links'}
+            <Button variant={same ? 'default' : 'destructive'} onClick={() => void reset()} disabled={resetting || !preview?.instance}>
+              {resetting ? <Spinner /> : same ? 'Keep links' : 'Reset links'}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -435,11 +458,17 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
     }
   }, [waiting, setData])
 
-  /** #6773 — the reset nudged a full pass: say so, show the status without the old links, and wait for that pass. */
-  function resetDone(deleted: number) {
+  /** #6773 — the reset nudged a full pass: say so, show the status without the old links (#6845: or with the kept ones), and wait for that pass. */
+  function resetDone(done: LinksResetDone) {
     setProblem(null)
-    setNote(`${plural(deleted, 'link', 'links')} reset. A full pass now links the new Bambuddy.`)
-    if (data) setData({ ...data, instance: null, instance_changed: false, errors: [] }, { supersede: true })
+    if (done.kept) {
+      setNote('Links kept. A full pass now syncs with the Bambuddy at its new address.')
+      if (data) setData({ ...data, instance_changed: false }, { supersede: true })
+    } else {
+      const deleted = RESET_ROWS.slice(0, 5).reduce((sum, row) => sum + done.deleted[row.key], 0)
+      setNote(`${plural(deleted, 'link', 'links')} reset. A full pass now links the new Bambuddy.`)
+      if (data) setData({ ...data, instance: null, instance_changed: false, errors: [] }, { supersede: true })
+    }
     setWaiting({ requestedAt: new Date().toISOString() })
   }
 

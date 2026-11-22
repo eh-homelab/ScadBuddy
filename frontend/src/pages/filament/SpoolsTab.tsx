@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { getInventory, getSummary, listLocations, listSpools, listTypes, syncAmsWeights, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
 import { BulkBar, type Place } from '../../components/filament/BulkBar'
+import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { trayChecks, type TrayCheck } from '../../components/filament/CheckTray'
 import { SpoolCards } from '../../components/filament/SpoolCards'
 import { SpoolForecast } from '../../components/filament/SpoolForecast'
@@ -48,6 +49,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { downloadBlob } from '../../lib/embed'
+import { loadTypeSkus, spoolSearchDoc, traysBySpool } from '../../lib/filamentSearch'
 import { toast } from '../../lib/toast'
 import { syncText } from './syncText'
 import { cn } from '@/lib/utils'
@@ -153,6 +155,9 @@ export function SpoolsTab() {
   const [syncing, setSyncing] = useState(false)
   const [syncError, setSyncError] = useState<string | null>(null)
   const [checks, setChecks] = useState<ReadonlyMap<string, TrayCheck>>(new Map())
+  /** #6894: the tray each spool is in, and each type's SKUs, for the search; read after the list. */
+  const [trayNames, setTrayNames] = useState<ReadonlyMap<string, string>>(new Map())
+  const [skus, setSkus] = useState<ReadonlyMap<string, string[]>>(new Map())
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -170,10 +175,30 @@ export function SpoolsTab() {
     // The trays read Bambuddy too, so they come after the list and never hold it back;
     // without them, no spool is flagged (#6713).
     try {
-      const checked = trayChecks(await getInventory())
-      if (mine === latest.current) setChecks(checked)
+      const view = await getInventory()
+      if (mine === latest.current) {
+        setChecks(trayChecks(view))
+        setTrayNames(traysBySpool(view))
+      }
     } catch {
-      if (mine === latest.current) setChecks(new Map())
+      if (mine === latest.current) {
+        setChecks(new Map())
+        setTrayNames(new Map())
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    let live = true
+    // Without the suppliers' products a search still runs on everything but the SKU.
+    loadTypeSkus().then(
+      (found) => {
+        if (live) setSkus(found)
+      },
+      () => {},
+    )
+    return () => {
+      live = false
     }
   }, [])
 
@@ -189,7 +214,16 @@ export function SpoolsTab() {
   }
 
   const typeCodes = useMemo(() => new Map((data?.types ?? []).map((type) => [type.id, type.code])), [data])
-  const shown = useMemo(() => (data ? sortSpools(filterSpools(data.spools, q, data.trays), q.sort) : []), [data, q])
+  const shown = useMemo(() => {
+    if (!data) return []
+    const searchDoc = (spool: Spool) =>
+      spoolSearchDoc(spool, {
+        typeCode: spool.type_id ? typeCodes.get(spool.type_id) : null,
+        skus: spool.type_id ? skus.get(spool.type_id) : undefined,
+        tray: trayNames.get(spool.id),
+      })
+    return sortSpools(filterSpools(data.spools, q, data.trays, searchDoc), q.sort)
+  }, [data, q, typeCodes, skus, trayNames])
   const groups = useMemo(() => groupSpools(shown, q.group, typeCodes), [shown, q.group, typeCodes])
   const chosen = shown.filter((spool) => selected.has(spool.id))
 
@@ -246,6 +280,13 @@ export function SpoolsTab() {
       {data?.summary && <SpoolTiles summary={data.summary} active={tileFilter} onFilter={filterFromTile} />}
 
       <div className="flex flex-wrap items-center gap-2">
+        <FilamentSearchBox
+          label="Search spools"
+          placeholder="Search: #87, brand, colour, hex, SKU, place  /"
+          value={q.q ?? ''}
+          onChange={(text) => update({ q: text || undefined })}
+          className="w-full sm:w-80"
+        />
         <div role="group" aria-label="Status" className="inline-flex rounded-md border p-0.5">
           {STATUSES.map((status) => (
             <button
@@ -455,7 +496,7 @@ export function SpoolsTab() {
 
       {data && !shown.length && (
         <p className="rounded-md border px-3 py-6 text-center text-[13px] text-muted-foreground">
-          {data.spools.length ? 'No spool matches these filters.' : 'No spools yet. Add a spool, or import a CSV.'}
+          {!data.spools.length ? 'No spools yet. Add a spool, or import a CSV.' : q.q ? `No spool matches “${q.q}” with these filters.` : 'No spool matches these filters.'}
         </p>
       )}
       {data && shown.length > 0 && q.view === 'table' && (

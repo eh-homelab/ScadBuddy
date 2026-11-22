@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -25,6 +25,7 @@ from scadbuddy.filament.bb_sync_models import (
     ResultsReport,
     SyncPassResult,
     SyncPlan,
+    without_empty_unconfirmed,
 )
 from scadbuddy.filament.bb_sync_results import LocalFilamentSync, sync_status
 from scadbuddy.filament.models import Material, SpoolCreate
@@ -170,6 +171,8 @@ async def test_plan_route_returns_the_plan(store: SettingsStore, crud: CrudClien
     plan = SyncPlan.model_validate(response.json())
     assert [(w.kind, w.op, w.sb_id) for w in plan.writes] == [("spool", "create", spool)]
     assert plan.directions == SPOOLS
+    # R-6688-11: nothing unconfirmed, so a worker from before the key takes the plan.
+    assert "unconfirmed" not in response.json()
     # The route reads the timer's interval itself: `spool_overlay_refresh_seconds`.
     assert plan.interval_s == float(
         store.read({"spool_overlay_refresh_seconds"})["spool_overlay_refresh_seconds"]
@@ -286,6 +289,28 @@ async def test_the_pass_body_leaves_out_a_missing_start() -> None:
     assert sent[0]["error"] is None  # only started_at is left out, not other Nones
     await remote.record_pass(_pass(started_at=datetime(2026, 11, 20, 7, 0, tzinfo=UTC)))
     assert sent[1]["started_at"] == "2026-11-20T07:00:00Z"
+
+
+async def test_the_sync_bodies_leave_out_an_empty_unconfirmed() -> None:
+    """R-6688-11: `SyncPlan` and `ResultsRequest` forbid extra keys, so an empty
+    ``unconfirmed`` is left out of both, and a build before it takes the body."""
+    sent: list[dict[str, object]] = []
+
+    class Recorder:
+        async def request(self, method: str, path: str, **kw: object) -> httpx.Response:
+            sent.append(kw["json"])  # type: ignore[arg-type]
+            return httpx.Response(200, json={})
+
+    remote = RemoteFilamentSync(Recorder())  # type: ignore[arg-type]
+    await remote.results(INSTANCE, [], [], None)
+    assert "unconfirmed" not in sent[0]
+    held = uuid4()
+    await remote.results(INSTANCE, [], [], None, [("location", held)])
+    assert sent[1]["unconfirmed"] == [["location", str(held)]]
+    plan = SyncPlan(writes=[], deferred=0, directions=FilamentSync(), interval_s=300.0)
+    assert "unconfirmed" not in without_empty_unconfirmed(plan)
+    named = plan.model_copy(update={"unconfirmed": [("location", held)]})
+    assert SyncPlan.model_validate(without_empty_unconfirmed(named)) == named
 
 
 @pg

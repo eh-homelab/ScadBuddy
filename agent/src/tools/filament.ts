@@ -2,6 +2,17 @@ import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
 import { linkingTools, type LinkKind } from './filamentLinks.js'
+import {
+  catalogNames,
+  matchesSearch,
+  orElse,
+  parseSearch,
+  SEARCH_ROUTES,
+  spoolSearchDoc,
+  spoolTrays,
+  typeSearchDoc,
+  typeSkus,
+} from './filamentSearch.js'
 import { defineTool, idempotencyKey, json, ToolError, type Tool } from './registry.js'
 
 // ScadBuddy's own filament inventory (#6261, epic #6260): the catalogs a spool type or a
@@ -96,6 +107,16 @@ const DATE = z
 
 /** The events `filament_spool_history` returns: the route sends them newest first. */
 const HISTORY_EVENTS = 50
+
+/** #6894: the Filament page's text search (`filamentSearch.ts`). */
+const searchQuery = z
+  .string()
+  .max(200)
+  .optional()
+  .describe(
+    'Text search, as the Filament page searches: every word must match some field, in any case. `#87` is spool 87 ' +
+      'only; `87` is spool 87 or any field holding 87; a hex matches with or without `#` (`#FF6A13`, `ff6a13`).',
+  )
 
 const csvRows = z
   .array(z.record(z.string(), z.string().nullable()))
@@ -233,18 +254,22 @@ const tools: Tool[] = [
     description:
       'The spool types, by code. A type is a product: what a maker sells under one code (brand, material, ' +
       'subtype, colour `#RRGGBBAA`, label weight, print values a spool inherits, `cost_per_kg`, `filament_id` of ' +
-      'its price book row). Archived types only with `include_archived`.',
-    input: z.object({ include_archived: z.boolean().default(false) }),
+      'its price book row). Archived types only with `include_archived`. `q` keeps the types whose code, brand, ' +
+      'material, subtype, colour name, hex or supplier SKU match it.',
+    input: z.object({ include_archived: z.boolean().default(false), q: searchQuery }),
     risk: 'read',
     source: SOURCE,
-    routes: ['GET /api/v1/filament/types'],
-    handler: async ({ include_archived }, { backend }) =>
-      json(
-        await ok(
-          backend.GET('/api/v1/filament/types', { params: { query: { include_archived } } }),
-          'list the spool types',
-        ),
-      ),
+    routes: ['GET /api/v1/filament/types', 'GET /api/v1/filament/catalog/{kind}', ...SEARCH_ROUTES],
+    handler: async ({ include_archived, q }, { backend }) => {
+      const types = await ok(
+        backend.GET('/api/v1/filament/types', { params: { query: { include_archived } } }),
+        'list the spool types',
+      )
+      const tokens = parseSearch(q)
+      if (!tokens.length) return json(types)
+      const [names, skus] = await Promise.all([catalogNames(backend), orElse(typeSkus(backend), new Map<string, string[]>())])
+      return json(types.filter((type) => matchesSearch(typeSearchDoc(type, names, skus.get(type.id)), tokens)))
+    },
   }),
 
   defineTool({
@@ -599,21 +624,46 @@ const tools: Tool[] = [
       "override, else its type's), the fields it `overridden`, the `names` behind its ids, `low_stock`, and " +
       '`grams_left` from its ledger. ' +
       '`needs_type: true` lists only spools with no type yet, `false` only typed ones. Archived spools only ' +
-      'with `include_archived`.',
+      'with `include_archived`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
+      "place, tray, type code or type's supplier SKU match it.",
     input: z.object({
       include_archived: z.boolean().default(false),
       needs_type: z.boolean().optional(),
+      q: searchQuery,
     }),
     risk: 'read',
     source: SOURCE,
-    routes: ['GET /api/v1/filament/spools'],
-    handler: async ({ include_archived, needs_type }, { backend }) =>
-      json(
-        await ok(
-          backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type } } }),
-          'list the spools',
+    routes: ['GET /api/v1/filament/spools', 'GET /api/v1/filament/types', 'GET /api/v1/filament/inventory', ...SEARCH_ROUTES],
+    handler: async ({ include_archived, needs_type, q }, { backend }) => {
+      const spools = await ok(
+        backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type } } }),
+        'list the spools',
+      )
+      const tokens = parseSearch(q)
+      if (!tokens.length) return json(spools)
+      // The type codes, SKUs and trays only add to the search: one that cannot be read leaves its field out.
+      const [types, skus, trays] = await Promise.all([
+        orElse(
+          ok(backend.GET('/api/v1/filament/types', { params: { query: { include_archived: true } } }), 'list the spool types'),
+          [],
         ),
-      ),
+        orElse(typeSkus(backend), new Map<string, string[]>()),
+        orElse(spoolTrays(backend), new Map<string, string>()),
+      ])
+      const codes = new Map(types.map((type) => [type.id, type.code]))
+      return json(
+        spools.filter((spool) =>
+          matchesSearch(
+            spoolSearchDoc(spool, {
+              typeCode: spool.type_id ? codes.get(spool.type_id) : null,
+              skus: spool.type_id ? skus.get(spool.type_id) : undefined,
+              tray: trays.get(spool.id),
+            }),
+            tokens,
+          ),
+        ),
+      )
+    },
   }),
 
   defineTool({
@@ -1154,32 +1204,49 @@ const tools: Tool[] = [
     label: 'Reset the Bambuddy links',
     description:
       'After the Bambuddy URL changed, the links (Bambuddy ids) belong to the old Bambuddy and the sync is stopped: ' +
-      'filament_sync_status says `instance_changed: true`. This deletes, in one transaction, every spool link, the ' +
+      'filament_sync_status says `instance_changed: true`, and the pull is stopped too. Call it first with ' +
+      "`expect_kept: true`: it reads the configured Bambuddy's spools, and when that Bambuddy holds every linked " +
+      'spool as ScadBuddy last saw it (the same Bambuddy at a new address), nothing is deleted: every link now ' +
+      'belongs to it, and the answer has `kept: true` and zero counts. When it cannot prove that (Bambuddy could ' +
+      'not be read, or it is another Bambuddy), it answers 409 `proof_changed` and deletes nothing. Only then, ' +
+      'and only after the user agreed to the delete below, call it again with `expect_kept: false` (the default), ' +
+      'which reads no Bambuddy and deletes, in one transaction, every spool link, the ' +
       'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +
-      'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then it asks ' +
-      'for a full pass, which links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
-      'is deleted. Afterwards a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
+      'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then the full ' +
+      'pass links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
+      'is deleted. After a delete (`kept: false`) a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
       'spools are created on the side the sync sends them to, so tell the user an untagged spool can end up twice. ' +
+      'Either way it asks for a full pass. ' +
       '`confirm_instance` must be the instance the links belong to: filament_sync_status `instance`. Answers the ' +
-      'instance and the counts deleted (`deleted`: `spools`, `suppliers`, `locations`, `insert_types`, ' +
+      'instance, `kept` and the counts deleted (`deleted`: `spools`, `suppliers`, `locations`, `insert_types`, ' +
       '`filaments`, `intents`, `errors`, `ignored`). 409 `confirm_mismatch` when `confirm_instance` is not the ' +
       "links' instance, `same_instance` when they belong to the configured Bambuddy, `nothing_to_reset` when no " +
-      'instance is recorded; each deletes nothing. Approved first.',
+      'instance is recorded, `proof_changed` as above; each deletes nothing. Approved first.',
     input: z.object({
       confirm_instance: z
         .string()
         .min(1)
         .max(64)
         .describe('The instance the links belong to, as filament_sync_status `instance` gives it'),
+      expect_kept: z
+        .boolean()
+        .default(false)
+        .describe(
+          'true: keep the links only while the configured Bambuddy is proven the same one, else 409 ' +
+            '`proof_changed` with nothing deleted; false: delete the links without reading Bambuddy',
+        ),
     }),
     risk: 'outward',
     source: SOURCE,
     routes: ['POST /api/v1/filament/sync/reset-links'],
-    summarize: ({ confirm_instance }) => `Reset the Bambuddy links of instance ${confirm_instance}`,
-    handler: async ({ confirm_instance }, { backend }) =>
+    summarize: ({ confirm_instance, expect_kept }) =>
+      expect_kept
+        ? `Keep the Bambuddy links of instance ${confirm_instance} if the configured Bambuddy is the same one`
+        : `Delete the Bambuddy links of instance ${confirm_instance}`,
+    handler: async ({ confirm_instance, expect_kept }, { backend }) =>
       json(
         await ok(
-          backend.POST('/api/v1/filament/sync/reset-links', { body: { confirm_instance } }),
+          backend.POST('/api/v1/filament/sync/reset-links', { body: { confirm_instance, expect_kept } }),
           'reset the Bambuddy links',
         ),
       ),

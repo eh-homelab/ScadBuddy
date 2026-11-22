@@ -309,6 +309,8 @@ export type PrinterBedType = Schemas['PrinterBedType']
 /** #836 — the rack nozzle ScadBuddy would pick, its candidates, and what a run sent. */
 export type RackPickView = Schemas['RackPickView']
 export type RackOption = Schemas['RackOption']
+/** #6872 — a rack-side slot whose spool Glow could not be checked on, named. */
+export type RackUncheckedSlot = Schemas['RackUncheckedSlot']
 export type NozzlePlan = Schemas['NozzlePlan']
 export type PlannedSlot = Schemas['PlannedSlot']
 export type UnknownTray = Schemas['UnknownTray']

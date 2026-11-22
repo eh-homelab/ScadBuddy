@@ -4,11 +4,13 @@ import { Link, useLocation, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { fillTypesFromProfile, listCatalog, listSpools, listTypes, type CatalogRows, type Spool, type SpoolType, type TypeFill } from '../../api/filament'
 import { addShopping, getPriceSheet, listSuppliers, type PricePoint } from '../../api/filamentPurchasing'
+import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { FILL_LABELS } from '../../components/filament/profileFill'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { FilamentsEditor } from '../../components/orders/FilamentsEditor'
+import { addSku, matchesSearch, parseSearch, typeSearchDoc } from '../../lib/filamentSearch'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 
@@ -25,28 +27,31 @@ const nameMap = (rows: { id: string; name: string }[]) => new Map(rows.map((row)
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The types could not be loaded. Try again.')
 
 /**
- * Each type's newest per-kg price from the suppliers' price sheets. A sheet that cannot be read
- * leaves its prices out and sets `failed`, so a type with no price is not called unpriced.
+ * Each type's newest per-kg price from the suppliers' price sheets, and its SKUs for the
+ * search (#6894). A sheet that cannot be read leaves its prices out and sets `failed`, so a
+ * type with no price is not called unpriced.
  */
-async function newestPrices(): Promise<{ prices: Map<string, PricePoint>; failed: boolean }> {
+async function newestPrices(): Promise<{ prices: Map<string, PricePoint>; skus: Map<string, string[]>; failed: boolean }> {
   const prices = new Map<string, PricePoint>()
+  const skus = new Map<string, string[]>()
   let suppliers
   try {
     suppliers = (await listSuppliers()).filter((supplier) => !supplier.archived_at)
   } catch {
-    return { prices, failed: true }
+    return { prices, skus, failed: true }
   }
   const sheets = await Promise.allSettled(suppliers.map((supplier) => getPriceSheet(supplier.id)))
   for (const sheet of sheets) {
     if (sheet.status === 'rejected') continue
     for (const row of sheet.value) {
+      if (!row.product.archived_at) addSku(skus, row.product.type_id, row.product.sku)
       const point = row.newest
       if (!point?.price_per_kg || row.product.archived_at) continue
       const have = prices.get(row.product.type_id)
       if (!have || stamp(point) > stamp(have)) prices.set(row.product.type_id, point)
     }
   }
-  return { prices, failed: sheets.some((sheet) => sheet.status === 'rejected') }
+  return { prices, skus, failed: sheets.some((sheet) => sheet.status === 'rejected') }
 }
 
 /** The type's name as a person says it: brand, material, subtype. */
@@ -60,12 +65,14 @@ export function TypesTab() {
   const location = useLocation()
   // In the URL, so a reload and a shared link keep it, as the Spools tab's filters are.
   const archived = params.get('archived') === 'true'
+  const search = params.get('q') ?? ''
   const [data, setData] = useState<Loaded | null>(null)
   const [error, setError] = useState<string | null>(null)
   const money = useMoney()
   /** The newest per-kg price point per type, read beside the types so a slow supplier call never holds the table. */
   const [newest, setNewest] = useState<Map<string, PricePoint>>(new Map())
   const [pricesFailed, setPricesFailed] = useState(false)
+  const [skus, setSkus] = useState<Map<string, string[]>>(new Map())
   const [notice, setNotice] = useState<string | null>(null)
   // Types whose add is in flight: a second click meanwhile would make a second pending item.
   const [adding, setAdding] = useState<ReadonlySet<string>>(new Set())
@@ -102,9 +109,10 @@ export function TypesTab() {
 
   useEffect(() => {
     let live = true
-    void newestPrices().then(({ prices, failed }) => {
+    void newestPrices().then(({ prices, skus: found, failed }) => {
       if (!live) return
       setNewest(prices)
+      setSkus(found)
       setPricesFailed(failed)
     })
     return () => {
@@ -146,24 +154,32 @@ export function TypesTab() {
   }
 
   // Every type is loaded: a price book row linked to an archived type still names it.
-  const shown = data?.types.filter((type) => archived || !type.archived_at) ?? []
+  const tokens = parseSearch(search)
+  const kept = data?.types.filter((type) => archived || !type.archived_at) ?? []
+  const shown = tokens.length && data ? kept.filter((type) => matchesSearch(typeSearchDoc(type, data.names, skus.get(type.id)), tokens)) : kept
+  const setParam = (key: string, value: string | null) => {
+    const next = new URLSearchParams(params)
+    if (value) next.set(key, value)
+    else next.delete(key)
+    setParams(next, { replace: true })
+  }
   return (
     <div className="flex flex-col gap-6">
       <section aria-label="Types" className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
-            <Checkbox
-              checked={archived}
-              aria-label="Show archived types"
-              onCheckedChange={(on) => {
-                const next = new URLSearchParams(params)
-                if (on === true) next.set('archived', 'true')
-                else next.delete('archived')
-                setParams(next, { replace: true })
-              }}
+          <div className="flex flex-wrap items-center gap-3">
+            <FilamentSearchBox
+              label="Search types"
+              placeholder="Search: code, brand, colour, hex, SKU  /"
+              value={search}
+              onChange={(text) => setParam('q', text || null)}
+              className="w-full sm:w-80"
             />
-            Show archived
-          </label>
+            <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+              <Checkbox checked={archived} aria-label="Show archived types" onCheckedChange={(on) => setParam('archived', on === true ? 'true' : null)} />
+              Show archived
+            </label>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
           <Button type="button" variant="outline" size="sm" disabled={filling} title="Fills each type's empty temperatures, density and K values from the slicer preset it prints with." onClick={() => void fillAll()}>
             <SlidersHorizontalIcon /> {filling ? 'Filling…' : 'Fill from slicer profiles'}
@@ -249,7 +265,7 @@ export function TypesTab() {
                 {shown.length === 0 && (
                   <tr className="border-t">
                     <td colSpan={9} className="px-2 py-3 text-muted-foreground">
-                      No types yet. Add one, or make one from a price book row below.
+                      {tokens.length && kept.length ? `No type matches “${search}”.` : 'No types yet. Add one, or make one from a price book row below.'}
                     </td>
                   </tr>
                 )}
