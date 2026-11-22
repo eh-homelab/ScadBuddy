@@ -498,6 +498,7 @@ async def test_a_sequenced_run_names_its_controls() -> None:
         "waiting": 1,
         "awaiting_clear": False,
         "queued": False,
+        "queued_for_print": False,
     }
     stopped = result.model_copy(
         update={"lan_stopped": LanStopped(stage="cancelled", message="Stopped.")}
@@ -555,7 +556,13 @@ async def test_a_run_queued_on_a_busy_printer_reads_as_queued_with_its_controls(
         "waiting": 1,
         "awaiting_clear": False,
         "queued": True,
+        "queued_for_print": True,
     }
+    # Queued only for an ended print's plate (#6871): no print to wait for.
+    plate = result.model_copy(update={"lan_queued": LanQueued(state="FINISH", job=None, place=1)})
+    progress = await _lan(_run(plate), value).read("o" * 32)
+    assert progress is not None and progress.lan_run is not None
+    assert progress.lan_run.queued and not progress.lan_run.queued_for_print
     clear = result.model_copy(update={"lan_awaiting_clear": True})
     progress = await _lan(_run(clear), value).read("o" * 32)
     assert progress is not None and progress.lan_run is not None

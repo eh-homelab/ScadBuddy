@@ -266,17 +266,19 @@ def test_the_printers_card_names_the_runs_controls(
         "waiting": 2,
         "awaiting_clear": True,
         "queued": False,
+        "queued_for_print": False,
     }
     assert card["awaiting_plate_clear"] is True
 
 
-def test_a_gone_oldest_run_never_hides_the_newer_runs_controls(
+def test_a_gone_oldest_run_gives_way_once_the_sweep_records_it(
     client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
 ) -> None:
-    """#6871 (review of #6882): the card shows a printer's oldest waiting run, so one whose
-    sequence closed without recording its end (and whose ``PrintRun`` has closed) is
-    recorded stopped, as `end_gone_sequences` does, and the next run's controls show. A
-    run whose ``PrintRun`` is still open may yet start its sequence, so it stays first."""
+    """#6871 (reviews of #6882): the card shows a printer's oldest waiting run, and its
+    read writes nothing. A run whose sequence closed without recording its end (and whose
+    ``PrintRun`` has closed) is recorded stopped by the sweep, and the next run's controls
+    show. A run whose ``PrintRun`` is still open may yet start its sequence, so it stays
+    first."""
     printer = _printer(client)
     gone = _run(client, workflow_reaper, printer=printer)
     starting = _run(client, workflow_reaper, printer=printer)
@@ -289,13 +291,17 @@ def test_a_gone_oldest_run_never_hides_the_newer_runs_controls(
         )
     )
     sequences.append(parent)
+    state = _state(client)
 
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["run_id"] == gone
+    assert client.get(f"/api/v1/print/runs/{gone}").json()["result"]["lan_stopped"] is None
+
+    workflow_reaper.run(printing_api.end_gone_sequences(state.print_runs))
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
     assert card["lan_run"]["run_id"] == starting
-    stopped = printing_api.SEQUENCE_GONE_STOP.model_dump()
-    assert client.get(f"/api/v1/print/runs/{gone}").json()["result"]["lan_stopped"] == stopped
 
     workflow_reaper.run(parent.terminate())
+    workflow_reaper.run(printing_api.end_gone_sequences(state.print_runs))
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
     assert card["lan_run"]["run_id"] == alive
-    assert client.get(f"/api/v1/print/runs/{alive}").json()["result"]["lan_stopped"] is None

@@ -47,7 +47,15 @@ export function QueuedPanel({ result, printerName, progress, polling, plates = [
             <span className="mt-1 block text-[12px] text-muted-foreground">
               {queued.place !== null && queued.place !== undefined && (
                 <span data-testid="lan-queued-place">
-                  Place <span className="sb-num">{queued.place}</span> in the queue for {printer}.{' '}
+                  {queued.place <= 1 ? (
+                    <>No earlier ScadBuddy run waits for {printer}.</>
+                  ) : (
+                    <>
+                      <span className="sb-num">{queued.place - 1}</span> earlier{' '}
+                      {queued.place === 2 ? 'run waits' : 'runs wait'} for {printer}. The run whose plate is said
+                      clear first starts first.
+                    </>
+                  )}{' '}
                 </span>
               )}
               <Link to="/prints" className="underline underline-offset-2 hover:text-foreground">

@@ -219,6 +219,7 @@ def lan_control(run: PrintRun) -> LanRunControl | None:
         waiting=len(result.lan_waiting),
         awaiting_clear=result.lan_awaiting_clear,
         queued=result.lan_queued is not None,
+        queued_for_print=result.lan_queued is not None and result.lan_queued.job is not None,
     )
 
 
