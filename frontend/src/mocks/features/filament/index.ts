@@ -2013,6 +2013,8 @@ export const handlers = [
     if (placeTaken(body)) return problem(409, REFUSED.locationExists)
     if (badRef(body, LOCATION_REFS)) return problem(422, REFUSED.catalogRef)
     const made: S['Location'] = {
+      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      printer_root: false,
       parent_id: null,
       identifier: null,
       capacity: null,

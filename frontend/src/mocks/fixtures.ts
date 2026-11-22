@@ -1090,6 +1090,7 @@ export const settingsDefaults = {
   filament_sync: { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' },
   filament_low_stock_pct: 20,
   filament_default_cost_per_kg: null,
+  filament_label_base_url: null,
   filament_burn_window_days: 30,
   filament_lead_time_days: 7,
   filament_safety_margin_days: 3,

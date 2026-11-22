@@ -642,6 +642,32 @@ describe('Filament (#6262)', () => {
     expect(mockSettings().filament_default_cost_per_kg).toBe('24.50')
   })
 
+  it('saves the label address and refuses a path (#6955)', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const address = () => within(region('Filament')).getByLabelText('Label address')
+    await enter(user, address(), 'https://sb.example.com/x')
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    await within(region('Filament')).findByRole('alert')
+    expect(mockSettings().filament_label_base_url).toBeNull()
+
+    await user.clear(address())
+    await enter(user, address(), 'https://sb.example.com')
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_label_base_url).toBe('https://sb.example.com'))
+  })
+
+  it('saves an empty label address as unset (#6955)', async () => {
+    await api.putSettings({ filament_label_base_url: 'https://sb.example.com' })
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const address = within(region('Filament')).getByLabelText('Label address')
+    await waitFor(() => expect(address).toHaveValue('https://sb.example.com'))
+    await user.clear(address)
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_label_base_url).toBeNull())
+  })
+
   it('switches off adding empty spools to the shopping list, with Save Filament (#6868)', async () => {
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
