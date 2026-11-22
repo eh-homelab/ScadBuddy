@@ -464,8 +464,10 @@ def test_two_passes_at_once_record_a_gone_run_stopped_once(
 
     monkeypatch.setattr(store, "_announce", counted)
     # With the lock, the second read waits for the first write, so the first pass's
-    # wait times out and breaks the barrier; both then go on.
-    barrier = threading.Barrier(2, timeout=5)
+    # wait times out and breaks the barrier; both then go on. 1 s is long enough for both
+    # passes to read when the lock is missing on an idle runner; on a loaded one the second
+    # pass may start later, and the test would then miss a lost lock.
+    barrier = threading.Barrier(2, timeout=1)
     pool = store._pool
 
     class Paused:
