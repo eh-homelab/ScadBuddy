@@ -416,3 +416,58 @@ def test_the_gone_checks_stop_within_their_budget_however_many_hang(
 
     took = asyncio.run(asyncio.wait_for(check(), timeout=10))
     assert took < 2  # 50 runs at 1 s each would take 50 s
+
+
+def test_a_plate_only_queued_run_waits_for_a_print_started_since(
+    client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
+) -> None:
+    """#6871 (review of #6948): a run queued for an ended print's plate alone, on a
+    printer someone then started printing on, waits for that print on the card."""
+    printer = _printer(client)
+    printers: Printers = _state(client).components.get(PRINTERS)
+    queued = PrintRunResult(
+        library_file_id=41,
+        copies=1,
+        path="native",
+        lan_waiting=[1],
+        lan_queued=LanQueued(state="FINISH", job=None, place=1),
+    )
+    run_id = _run(client, workflow_reaper, queued, printer=printer)
+    _sequence(workflow_reaper, run_id, sequences)
+
+    printers.reports.put(printer, {"gcode_state": "FINISH"}, datetime.now(UTC))
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["queued"] and not card["lan_run"]["queued_for_print"]
+
+    printers.reports.put(printer, {"gcode_state": "RUNNING"}, datetime.now(UTC))
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["queued_for_print"]
+
+
+def test_two_passes_at_once_record_a_gone_run_stopped_once(
+    client: TestClient, workflow_reaper: WorkflowReaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6871 (review of #6948): the run-holds reap and the native-copies sweep may check
+    the same gone run at once; the row lock in `record_lan_stopped` lets only one record
+    and announce its stop."""
+    store = _state(client).print_runs.store
+    gone = _run(client, workflow_reaper, printer=_printer(client))
+    announced: list[str] = []
+    announce = store._announce
+
+    def counted(conn: Any, run: Any, slug: str, row: Any) -> None:
+        announced.append(run.id)
+        announce(conn, run, slug, row)
+
+    monkeypatch.setattr(store, "_announce", counted)
+
+    async def both() -> None:
+        runs = _state(client).print_runs
+        await asyncio.gather(
+            printing_api.end_gone_sequences(runs), printing_api.end_gone_sequences(runs)
+        )
+
+    workflow_reaper.run(both())
+    stopped = printing_api.SEQUENCE_GONE_STOP.model_dump()
+    assert client.get(f"/api/v1/print/runs/{gone}").json()["result"]["lan_stopped"] == stopped
+    assert announced == [gone]

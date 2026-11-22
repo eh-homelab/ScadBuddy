@@ -248,8 +248,8 @@ def lan_control(
     """A succeeded native run's prints still to start and its controls (#4942, #4939);
     ``None`` once it started every one or they were stopped. ``printing`` is whether the
     printer prints now, from its live state (`printing_now`): a queued run waits for a
-    print only while the printer still prints it (#6871); with no state read, the job
-    the run was queued behind says so. ``idle`` (`idle_now`) marks a queued run whose
+    print while the printer prints one, whatever it was queued behind, and not once it has
+    ended (#6871); with no state read, the job the run was queued behind says so. ``idle`` (`idle_now`) marks a queued run whose
     printer reads idle, whose plate may still hold the print before."""
     result = run.result
     if run.status != "succeeded" or result is None or result.path != "native":
@@ -262,8 +262,7 @@ def lan_control(
         awaiting_clear=result.lan_awaiting_clear,
         queued=result.lan_queued is not None,
         queued_for_print=result.lan_queued is not None
-        and result.lan_queued.job is not None
-        and printing is not False,
+        and (printing is True or (printing is None and result.lan_queued.job is not None)),
         printer_idle=result.lan_queued is not None and idle,
     )
 

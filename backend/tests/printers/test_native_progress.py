@@ -566,11 +566,23 @@ async def test_a_run_queued_on_a_busy_printer_reads_as_queued_with_its_controls(
     }
     # Queued only for an ended print's plate (#6871): no print to wait for.
     plate = result.model_copy(update={"lan_queued": LanQueued(state="FINISH", job=None, place=1)})
-    progress = await _lan(_run(plate), value).read("o" * 32)
+    finished = ({"subtask_name": "theirs", "gcode_state": "FINISH"}, at(seconds=10))
+    progress = await _lan(_run(plate), finished).read("o" * 32)
     assert progress is not None and progress.lan_run is not None
     assert progress.lan_run.queued and not progress.lan_run.queued_for_print
     assert [copy.waiting_reason for copy in progress.copies_detail] == [
         QUEUED_PLATE.format(printer="H2C")
+    ]
+    # With no state read it follows the job it recorded: none.
+    progress = await _lan(_run(plate), None).read("o" * 32)
+    assert progress is not None and progress.lan_run is not None
+    assert not progress.lan_run.queued_for_print
+    # Then someone started another print (review of #6948): read live, it waits for it.
+    progress = await _lan(_run(plate), value).read("o" * 32)
+    assert progress is not None and progress.lan_run is not None
+    assert progress.lan_run.queued_for_print and not progress.lan_run.printer_idle
+    assert [copy.waiting_reason for copy in progress.copies_detail] == [
+        QUEUED_BUSY.format(printer="H2C")
     ]
     # The print it was queued behind has ended (review of #6939): read live, the run now
     # waits for the plate, before its sequence records that.
