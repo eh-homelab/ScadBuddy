@@ -118,19 +118,21 @@ marked (S) before you build on them.
 ### 6.1 Data (beside `ai_plugin_packages`, `backend/scadbuddy/migrations_agent/`)
 
 The tables sit beside `ai_plugin_packages`, in the same schema, behind the same CRUD area
-(`crud_agent_packages.py`, extended). Only the API holds SQL access. Each new agent
-migration also gets its `expected-migrations.json` entry.
+(`crud_agent_packages.py`, extended). They take the schema's `ai_` prefix. Only the API
+holds SQL access: its public `/api/v1/hosted-plugins` routes (6.2, 6.3) write the
+`ai_hosted_plugin*` tables, and the agent reads them, and writes the feed list, only through
+the CRUD area. Each new agent migration also gets its `expected-migrations.json` entry.
 
-- `plugin_feeds`: `id`, `slug` (in the URL), `name` (the marketplace `name`), `owner`
+- `ai_plugin_feeds`: `id`, `slug` (in the URL), `name` (the marketplace `name`), `owner`
   text, `created_at`. One row, `default`, is created by the migration.
-- `plugin_feed_packages`: (`feed_id`, `package_name`), referencing `ai_plugin_packages`.
+- `ai_plugin_feed_packages`: (`feed_id`, `package_name`), referencing `ai_plugin_packages`.
   This is how a package (hosted or installed from outside) is listed in a feed.
-- `hosted_plugins`: `name` (the same alphabet as `ai_plugin_packages.name`; it is the
+- `ai_hosted_plugins`: `name` (the same alphabet as `ai_plugin_packages.name`; it is the
   package's name), `description`, `category`, `tags`, `latest_version` (null until the
   first publish), timestamps.
-- `hosted_plugin_files` (the draft): `plugin_id`, `path`, `sha256` (a blob pointer),
+- `ai_hosted_plugin_files` (the draft): `plugin_id`, `path`, `sha256` (a blob pointer),
   `size`, `executable`, `updated_at`. Primary key (`plugin_id`, `path`).
-- `hosted_plugin_versions`: `plugin_id`, `version` (an integer, from 1), `zip_sha256`
+- `ai_hosted_plugin_versions`: `plugin_id`, `version` (an integer, from 1), `zip_sha256`
   (a blob pointer to the zip), `content_hash` (the `hash.ts` file-list hash, so the agent
   checks it as it checks git pins), `files` jsonb (as `ai_plugin_packages.files`),
   `published_at`, `published_by`. Never updated or deleted, except by deleting the
@@ -152,16 +154,21 @@ token with `write` also works):
 - `POST /{name}/files/moves` renames a path.
 - `GET /{name}/draft-diff` shows the draft against the latest version.
 
-Path rules, checked at write: UTF-8, relative, no `..`, no leading `.` segment except
-`.claude-plugin/`, no symlinks. Allowed top-level folders are `skills/`, `agents/` and
+Path rules, checked at write: UTF-8, relative, no `..`, no segment that starts with `.`,
+no symlinks. Allowed top-level folders are `skills/`, `agents/` and
 `commands/`. `.claude-plugin/plugin.json` is generated at publish and refused as a write.
 Caps (my call, change them in review): 2 MiB per file, 500 files and 20 MiB per plugin.
 
 The assistant gets matching MCP tools: `hosted_plugin_create`, `hosted_plugin_list`,
 `hosted_plugin_file_read`, `hosted_plugin_file_write`, `hosted_plugin_file_delete` and
-`hosted_plugin_publish`. Neither a draft write nor a publish is outward: neither changes
-what loads. The gate is the package approval (6.5), which stays a human action in the UI
-as today.
+`hosted_plugin_publish`. A draft write is not outward: it changes nothing that loads.
+`hosted_plugin_publish` is outward, because it also installs or re-pins the package
+(6.3 step 5), and installing is an outward settings write (`agent/src/routes/pluginPackages.ts`,
+spec §8.1). It returns a pending action. Once a human approves it in the UI,
+`confirm_action` publishes the version and runs the install or re-pin once. That happens
+in-process, through `PackageInstaller`, not through the UI-guarded package routes, which
+refuse a call that does not come from the UI's origin. After that, the package approval
+(6.5) is still needed before anything loads, as for every package.
 
 The UI is an editor under Settings → Tools & plugins → Hosted plugins: a file tree, a
 Monaco editor (the one the template editor uses), "New skill" (it writes a `SKILL.md`
@@ -180,12 +187,23 @@ with frontmatter), the draft diff and Publish. Load `frontend-design` for this w
    extra fields. The same draft gives the same bytes, and the same `zip_sha256`.
 4. Store the zip blob and the version row, and set `latest_version`, in one transaction.
 5. Answer the new version number. The API does not vet and does not touch
-   `ai_plugin_packages`. The caller (the UI, or the `hosted_plugin_publish` tool) then
-   calls the agent's existing package routes with source `{ kind: 'hosted', name,
-   version }`: an install for the first version, a re-pin after that (6.5). The agent's
-   installer fetches, vets and stores it as it does every package. So there is one vetter
-   (`vet.ts`), the review always has the `PackageReview` shape, and there is no
-   API-to-agent call (my call).
+   `ai_plugin_packages`. The version is then offered to the package model with source
+   `{ kind: 'hosted', name }`, which always takes the plugin's `latest_version`:
+   - from the UI, through the agent's existing UI-guarded install and re-pin routes
+     (an outward settings write, confirmed in the UI as every install is);
+   - from the `hosted_plugin_publish` tool, in-process after its pending action is
+     approved (6.2).
+
+   Install or re-pin is chosen by whether an `ai_plugin_packages` row for the name
+   exists, never by the version number. The agent's installer fetches, vets and stores
+   it as it does every package. So there is one vetter (`vet.ts`), the review always has
+   the `PackageReview` shape, and there is no API-to-agent call (my call).
+
+   A caller that stops between the publish and the install leaves a version that no pin
+   names. Nothing is lost: the Hosted plugins editor marks a plugin whose
+   `latest_version` is neither its pin nor its pending pin ("version N not offered"), with
+   an Offer button that runs the same install or re-pin. The next publish offers the new
+   latest version anyway.
 
 There is no "unpublish" of one version. Deleting the plugin deletes its package, which
 removes it from the feed and the assistant.
@@ -193,7 +211,7 @@ removes it from the feed and the assistant.
 ### 6.4 The feed
 
 `GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json` (the agent) lists each package in
-`plugin_feed_packages` at its current approved pin. A pending re-pin is not listed until
+`ai_plugin_feed_packages` at its current approved pin. A pending re-pin is not listed until
 it is approved, and a package with no approved pin is not listed. A hosted package's
 entry is:
 
@@ -244,9 +262,7 @@ An outside package's entry is in section 6.7.
   - The agent reads the feed's data (packages, versions, zip and mirror bytes) over its
     CRUD routes, with its service credential, as it reads packages today. The API never
     serves the feed itself.
-- A pending pin, a draft, or a package not in the feed answers 404 on the feed's paths. The Settings page shows a copyable
-  `extraKnownMarketplaces` snippet and the `/plugin marketplace add` line, with the token
-  in `headers`.
+- A pending pin, a draft, or a package not in the feed answers 404 on the feed's paths.
 - The feed's `Cache-Control` is short (60 s), so `/plugin marketplace update` sees a new
   version soon.
 
@@ -261,8 +277,10 @@ An outside package's entry is in section 6.7.
   loading until the admin approves the pending one, after seeing the diff. "Plugins are
   never auto-updated" holds for hosted plugins too. The per-skill switches (#4757) work as
   for any package.
-- Install and re-pin are the agent's existing routes and installer (`PackageInstaller`),
-  with the new source kind. They store the pin and notify as they do today.
+- Install and re-pin are the agent's existing installer (`PackageInstaller`), with the
+  new source kind: reached from the UI through the existing UI-guarded routes, and from
+  the `hosted_plugin_publish` tool in-process after its approval (6.2, 6.3). They store
+  the pin and notify as they do today.
 - Approval is the existing package approval, bound to the exact (version,
   `content_hash`). Whoever may approve a package today may approve a hosted one; this
   design does not change who that is. Edits made to the draft after a publish never
@@ -349,7 +367,7 @@ like a hosted one:
    publish as install or re-pin).
 4. The installer takes `marketplace-url`, `archive` and `npm` with bytes pins and
    mirrors.
-5. Outside packages in the feed (`plugin_feed_packages`).
+5. Outside packages in the feed (`ai_plugin_feed_packages`).
 6. The UI editor.
 7. The MCP tools.
 
