@@ -145,7 +145,10 @@ def file_key_context(workspace: str, path: str, blob_key: str) -> str:
 
 
 def seal_file(file_key: bytes, data: bytes, digest: str) -> bytes:
-    """``data`` sealed under ``file_key`` segment by segment (the tests' ``workspaceSealing.ts`` ``sealFile``)."""
+    """``data`` sealed under ``file_key`` segment by segment.
+
+    The tests' ``workspaceSealing.ts`` ``sealFile`` is the same format.
+    """
     parts: list[bytes] = []
     offset = index = 0
     while True:
