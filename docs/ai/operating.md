@@ -949,9 +949,9 @@ backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
 `FOR SHARE` lock in the route's own transaction. The gate's grant check reads
 `flow_grants` and `flow_grant_uses` on the API, under the grant row's share lock, in the
 grant route's transaction (`backend/scadbuddy/api/crud_agent_gate.py`, area `gate`, #5299
-step 10). The API takes back the old grants on `events`, `workflow_runs`,
-`workflow_run_decisions`, `flow_grants` and `flow_grant_uses` (`RETIRED_GRANTS`) and the
-role `scadbuddy_agent` itself (`RETIRED_ROLES`, PR #6906) at every start
+step 10). The API takes back everything the role `scadbuddy_agent` held (among it
+`events`, `workflow_runs`, `workflow_run_decisions`, `flow_grants` and `flow_grant_uses`)
+at every start (`RETIRED_ROLES`, PR #6906)
 (`backend/scadbuddy/auth/revoke.py`), and logs, for each retired role that still exists,
 its granted relations, owned relations and sessions (`retired_state`).
 `agent/test/retiredTables.test.ts` fails on a Postgres driver in `agent/src`.

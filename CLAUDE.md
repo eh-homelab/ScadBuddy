@@ -23,6 +23,7 @@ CLAUDE.md of its own, which Claude Code reads when it works on files there:
 - `models/CLAUDE.md`: the template checks (`verify.sh`, the `models` job) and the bundled models.
 - `deploy/CLAUDE.md`: the Grafana dashboards and the browser pods' security profiles (`deploy/security/`).
 - `plugins/CLAUDE.md`: ScadBuddy's Claude plugin.
+- `docs/architecture/` (and `docs/features/`): the system map: processes, data, Temporal workflows, frontend, agent, CI and deploy, one page per feature, and where the code has drifted from the specs.
 
 ## Database access (#5295)
 

@@ -3,10 +3,8 @@ import { NOT_UP, transportKind } from './backendUp.js'
 // The agent's CRUD routes (`/api/v1/internal/crud/agent/`, backend api/crud_agent.py), read
 // with the service credential main.ts adds to `fetch` (`withServiceCredential`). The agent's
 // reads of the backend's tables (#5299 D7, areas `events` and `flows`) go only through them,
-// with no SQL fallback. The API takes back its role's grants on those tables at every start
-// (backend auth/revoke.py `RETIRED_GRANTS`), but the agent still connects as the database
-// owner, so nothing in Postgres stops such SQL until #5299 step 12 removes its database URL;
-// until then test/retiredTables.test.ts fails on agent SQL that names one.
+// with no SQL fallback: the agent has no SQL client (#5299 step 12), and
+// test/retiredTables.test.ts fails on a Postgres driver in `src`.
 // Its settings, credentials and payload keys (#5299 step 4), and its forget, key deletes and flow
 // images (#5299 step 6), wait for their areas
 // (api/crudAreas.ts).

@@ -902,24 +902,22 @@ caller. A write that is not idempotent by itself takes an `Idempotency-Key`; its
 kept 24 h in `crud_requests`, written in the write's own transaction, and a retry with the
 same key gets it back (another body under the same key is `422`).
 
-**Each caller's own database role (#5210).** This is today's state, not the target
-(see the next paragraph). Each caller should connect as a role of its own, so it holds
-exactly the tables it touches and its credential's view, never the API's settings
-store or another caller's credential:
+**The callers' old database roles (#5210).** #5210 gave each caller a role of its own.
+Those roles are retired: no caller connects as one, and the API only revokes what they
+held (see the next paragraph). Each caller today:
 
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|
 | render worker | none: the worker has no database client and ignores the URL (#5298 Task 20); the API revokes everything the role `scadbuddy_render` held at every start where the role still exists (#5298 Task 22) | none: prod sets none and has no such role (eh-homelab/clusters#3555, #3566, #3578; measured 2026-11-14) |
 | print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start where the role still exists (#5298 Task 35) | none: prod sets none and has no such role (as above) |
 | flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API revokes everything the role `scadbuddy_projects` held at every start where the role still exists | none: prod sets none and has no such role (as above) |
-| agent sidecar and agent worker | none: the agent has no SQL client and ignores `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` with a warning (#5299 step 12). The API revokes everything the role `scadbuddy_agent` held, and the role itself, at every start where it still exists (`backend/scadbuddy/auth/revoke.py` `RETIRED_ROLES`, PR #6906) | none needed; prod still sets the owner URL until the eh-homelab/clusters change removes it |
+| agent sidecar and agent worker | none: the agent has no SQL client and ignores `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` with a warning (#5299 step 12). The API revokes everything the role `scadbuddy_agent` held at every start where the role still exists; eh-homelab/clusters drops the role itself (`backend/scadbuddy/auth/revoke.py` `RETIRED_ROLES`, PR #6906) | none needed; prod still sets the owner URL until the eh-homelab/clusters change removes it |
 
-No caller needs a role of its own any more; the API itself stays on the database's owner
-role. At every start the API grants each role that exists exactly its list
-(`backend/scadbuddy/auth/caller_grants.py`); a role created after the API started is
-granted on the API's next start. The agent grants nothing
-since #6501: on separate roles, the API's role must own the `ai_*` tables (the files it
-applies since #5299 D6 already are; transfer the older ones with `ALTER TABLE … OWNER TO`).
+No caller gets a role of its own any more, and the API grants none: it only revokes the
+retired roles (`backend/scadbuddy/auth/revoke.py` `RETIRED_ROLES`) at every start, and logs
+for each one that still exists how many relations it is granted or owns and its open
+sessions ("a retired caller's role still exists"), which the retirement order's checks
+read (root `CLAUDE.md`, "Database access").
 
 On 2026-11-05 the render, print and projects workers connected as their own roles (the
 projects worker has made no connection since 2026-11-07, and the print worker none since

@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { Output } from '../api/types'
-import { queuedResult } from '../mocks/choices'
+import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -26,8 +26,10 @@ beforeEach(() => {
 })
 afterEach(() => vi.restoreAllMocks())
 
-function renderPicker() {
-  return renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+function renderPicker(queue = false) {
+  return renderPage(
+    <PrintPicker open queue={queue} source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+  )
 }
 
 async function loaded() {
@@ -92,6 +94,22 @@ describe('PrintPicker · the summary row (#6885)', () => {
       { size: '0.4', flow: 'high_flow' },
       { size: '0.4', flow: 'high_flow' },
     ])
+  })
+})
+
+describe('PrintPicker · a round trip through Advanced (#6885 review)', () => {
+  it("puts Simple back on the tier's process and one flow, as leaving Advanced always has", async () => {
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByTestId('print-summary-quality-open'))
+    await choose(user, screen.getByLabelText('Process'), '0.24mm Standard @BBL H2C')
+    expect(screen.getByTestId('print-summary-quality')).toHaveTextContent('0.24mm Standard @BBL H2C')
+
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await user.click(screen.getByRole('radio', { name: 'Right High Flow' }))
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    expect(screen.getByTestId('print-summary-quality')).toHaveTextContent('0.20mm Standard @BBL H2C')
+    expect(screen.getByTestId('print-summary-nozzle')).not.toHaveTextContent(/left|right/)
   })
 })
 
@@ -231,6 +249,36 @@ describe('PrintPicker · the footer (#6885)', () => {
     await loaded()
     expect(await screen.findByTestId('footer-blocking')).toHaveTextContent(refusal)
     expect(screen.getByTestId('run-print')).toBeDisabled()
+  })
+})
+
+describe('PrintPicker · an empty slot (#6885)', () => {
+  it.each([
+    ['Print', false],
+    ['Queue', true],
+  ])('says a slot is empty only once %s is pressed, sends nothing, and stops once it is filled', async (_name, queue) => {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          filaments: { ...choicesView.filaments, suggested: [{ slot_id: 1, spool_id: 21 }] },
+        }),
+      ),
+    )
+    const run = vi.spyOn(api, 'runPrint').mockResolvedValue(queuedResult)
+    const { user } = renderPicker(queue)
+    await loaded()
+    await screen.findByTestId('filament-slot-2')
+    expect(screen.queryByText(/has no filament chosen/)).toBeNull()
+
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    await user.click(screen.getByTestId('run-print'))
+    expect(screen.getByTestId('filament-warnings-2')).toHaveTextContent('Slot 2 has no filament chosen.')
+    expect(screen.getByTestId('footer-blocking')).toHaveTextContent('Slot 2 has no filament chosen.')
+    expect(run).not.toHaveBeenCalled()
+
+    await user.click(within(screen.getByTestId('filament-slot-2')).getAllByRole('radio')[0]!)
+    await waitFor(() => expect(screen.queryByText(/has no filament chosen/)).toBeNull())
   })
 })
 

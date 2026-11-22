@@ -16,6 +16,10 @@ start (#5299 D6; root CLAUDE.md "Migrations (#491)"), and revokes the agent's ol
 `scadbuddy_agent` at every start (`backend/scadbuddy/auth/revoke.py` `RETIRED_ROLES`, PR
 #6906). The deployment change that takes `SCADBUDDY_DATABASE_URL` and the KEK mount out of
 the sidecar and the agent-worker Deployment is in eh-homelab/clusters, after this.
+Claude Code, and any plugin package approved with `allow_refused`, runs in the
+agent's container, which holds no database URL and no KEK once eh-homelab/clusters
+removes them; the sidecar still shares the API's pod, whose API container holds both
+(#5296; `docs/ai/security.md`, "Plugin packages").
 
 `src/config.ts` ignores `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and
 `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (`IGNORED_VARS`, `config.ignored`) with one warning:
@@ -59,8 +63,8 @@ and its backend module:
   steps, the waiting runs and the parent-hop approvals (`src/flows/backendReads.ts`
   `CrudFlowRunReads` over `src/api/crudRead.ts` `crudRead`, used by `temporal/flowRuns.ts`,
   `flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`). The API revokes
-  the old grants on `events`, `workflow_runs`, `workflow_run_decisions`, `flow_grants` and
-  `flow_grant_uses` at every start (`revoke.py` `RETIRED_GRANTS`).
+  everything the agent's old role `scadbuddy_agent` held, these tables among it, at every
+  start (`revoke.py` `RETIRED_ROLES`).
 - `settings`, `credentials`, `payload-keys` (#5299 step 4, D5, #5342; `SECRET_AREAS`):
   `CrudSettings` (a compare-and-set sends what its check read as `expect`; the API sends the
   warm-evict and runtime NOTIFYs in the write's transaction); `CrudCredentials` (the API seals
