@@ -553,7 +553,9 @@ async def warm_default(state: AppState, listing: Listing) -> None:
     try:
         await preparer(state).start_default(listing.id)
     except Exception:
-        logger.warning("could not start the default price run of listing %s", listing.id)
+        logger.warning(
+            "could not start the default price run of listing %s", listing.id, exc_info=True
+        )
 
 
 async def progress(state: AppState, orders: OrdersComponent, listing_id: str) -> PrepareProgress:

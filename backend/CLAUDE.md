@@ -2260,9 +2260,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `renders.py` `estimate_of` (the visitor's `render_estimate` path, so `slice_estimate`
   claims and starts the slice under `storefront_slices_concurrent`), with the combination's
   variant key (`Combination.variant_key`, the key a visitor's page has for those picks: no
-  slot filament chosen). A variant with a `done` row starts none; a `running` slice moves
-  the run on; no room yet (`waiting`) is asked again after a backoff up to `WARM_POLL_MAX`
-  (30 s), so the cap holds; it continues as new with `warm_index`. While it prices, the
+  slot filament chosen). A variant with a `done` row starts none. A `running` slice, or no
+  room yet (`waiting`), is asked for again after a backoff up to `WARM_POLL_MAX` (30 s), so
+  a run holds at most one slice and leaves the rest of the cap to visitors (review of
+  #6970); after `WARM_TRIES` (240) asks of one index it goes on. It continues as new with
+  `warm_index`. While it prices, the
   GET still reads `running: true`. Publish (and a pictures change that republishes) starts
   a run of its own for the default combination only (`warm_default`, id
   `prepare-listing-default:<listing id>`, `default_only`, `TERMINATE_EXISTING`: the listing

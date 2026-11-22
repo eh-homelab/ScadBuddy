@@ -220,8 +220,9 @@ async def test_once_the_renders_settle_each_combination_is_priced_in_turn(
     client: Client, queue: str
 ) -> None:
     """#6922: the run prices each combination after every render settled, one index at a
-    time: a slice that runs moves on to the next, and one with no room yet (``waiting``,
-    the `storefront_slices_concurrent` cap) is asked again."""
+    time: a slice that runs is asked for again until it settles, so the run holds at most
+    one slice of `storefront_slices_concurrent` (review of #6970), and one with no room yet
+    (``waiting``) is asked for again too."""
     listing_id = uuid.uuid4().hex
     renders = Renders(3, warms={0: ["running"], 1: ["waiting", "waiting", "settled"]})
     try:
@@ -232,7 +233,7 @@ async def test_once_the_renders_settle_each_combination_is_priced_in_turn(
             )
             result = await asyncio.wait_for(handle.result(), 60)
         assert result == PrepareListingResult(submitted=3, failed_to_start=0)
-        assert renders.warmed == [0, 1, 1, 1, 2, 3]
+        assert renders.warmed == [0, 0, 1, 1, 1, 2, 3]
         # Every render had settled before the first price was asked.
         assert set(renders.open_at_warm) == {0}
     finally:

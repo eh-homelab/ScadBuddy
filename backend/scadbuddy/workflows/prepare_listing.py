@@ -27,15 +27,20 @@ activity reads the listing again, builds the combination at that index and submi
 with a backoff from `POLL_FIRST` to `POLL_MAX`. Once every combination was submitted and
 settled, the run prices them (#6922, behind `WARM_PATCH`): ``prepare_listing_warm`` asks
 for each index's storefront slice price through the visitor's own path (`slice_price.py`
-`slice_estimate`), one index at a time. Its answer:
+`slice_estimate`), one index at a time, with at most one of its slices running, so the
+rest of `storefront_slices_concurrent` stays free for visitors. Its answer:
 
 - ``settled``: the variant has a price, or none can be had (a failed render, no shop slice
   profile, a failed slice). The run goes to the next index.
-- ``running``: its slice runs (this ask's, or one started before). The run goes on.
+- ``running``: its slice runs (this ask's, or one started before). The run waits for it,
+  and asks for the same index again.
 - ``waiting``: no room for its slice yet (`storefront_slices_concurrent`), or its files are
-  still being fetched. The run waits, from `POLL_FIRST` to `WARM_POLL_MAX`, and asks for the
-  same index again, so the cap holds.
+  still being fetched. The run waits and asks for the same index again.
 - ``end``: no combination has that index, or the listing is not published any more.
+
+A wait is from `POLL_FIRST` to `WARM_POLL_MAX`. After `WARM_TRIES` asks of one index the
+run goes on without its price (a slice stuck past `LOST_AFTER`, files never fetched): a
+visitor's read still starts it.
 
 The run ends after the last price. It continues as new every `CONTINUE_EVERY` submits, or
 when its history passes `HISTORY_LIMIT` events, with the next index and the open jobs (in
@@ -89,6 +94,9 @@ SUBMIT_TIMEOUT = timedelta(minutes=2)
 #: The longest wait before a price with no room yet is asked for again: a slice takes
 #: minutes.
 WARM_POLL_MAX = timedelta(seconds=30)
+#: The most asks of one index's price, about 2 hours at `WARM_POLL_MAX`: past a slice's
+#: `LOST_AFTER` (`slice_price.py`, about 95 minutes), after which its row is freed.
+WARM_TRIES = 240
 #: One price ask reads the listing, the price book and the printer, and starts a slice.
 WARM_TIMEOUT = timedelta(minutes=2)
 #: One read of the open jobs' rows.
@@ -267,10 +275,13 @@ class PrepareListing:
 
     async def _warm(self, start: PrepareListingStart, index: int) -> PrepareListingResult:
         """The price phase (#6922): each combination's price asked for from ``index`` on,
-        one at a time. ``start`` holds the render phase's counts, which the result
-        reports."""
+        one at a time: the next index is asked for only once this one settled, so at most
+        one of the run's slices runs. ``start`` holds the render phase's counts, which the
+        result reports."""
         wait = POLL_FIRST
+        tries = 0
         while True:
+            tries += 1
             try:
                 answer: Warmed = await workflow.execute_activity(
                     WARM_ACTIVITY,
@@ -288,11 +299,13 @@ class PrepareListing:
                 return PrepareListingResult(
                     submitted=start.next_index, failed_to_start=start.failed_to_start
                 )
-            if answer.outcome == "waiting":
+            if answer.outcome in ("waiting", "running") and tries < WARM_TRIES:
+                # Its slice runs, or waits for room: ask for this index again.
                 await workflow.sleep(wait)
                 wait = min(wait * 2, WARM_POLL_MAX)
             else:
                 index += 1
+                tries = 0
                 wait = POLL_FIRST
             if workflow.info().get_current_history_length() > HISTORY_LIMIT:
                 carried = start.model_copy(update={"warm_index": index})

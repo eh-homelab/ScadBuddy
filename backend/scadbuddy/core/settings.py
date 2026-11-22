@@ -974,7 +974,8 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         ),
         "storefront_warm_prices": (
             "Whether publish and Prepare colours start the storefront's slices before a"
-            " visitor asks (#6922); the deployment's choice, read when each run starts."
+            " visitor asks (#6922); the deployment's choice, read at each publish and at each"
+            " price step of a run."
         ),
         "service_account_namespace": (
             "Whose ServiceAccounts may exchange for a service credential (#5494): the"
