@@ -3092,10 +3092,13 @@ class OrderStore:
     def attachment(
         self, attachment_id: str, *, conn: Conn | None = None
     ) -> tuple[Attachment, str] | None:
-        """The attachment and its blob key, or None."""
+        """The order's attachment and its blob key, or None (also for another entity's
+        file, which has no ``order_id``)."""
         with self._read(conn) as c:
             row = c.execute(
-                f"SELECT {_ATTACHMENT} FROM entity_attachments WHERE id = %s", (attachment_id,)
+                f"SELECT {_ATTACHMENT} FROM entity_attachments"
+                " WHERE id = %s AND order_id IS NOT NULL",
+                (attachment_id,),
             ).fetchone()
         return None if row is None else _attachment_of(row)
 

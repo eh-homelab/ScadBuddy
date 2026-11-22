@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.attachment_serving import INERT
 from tests.api.test_order_attachments import PAGE, attach, png, shop
 from tests.api.test_settings_runtime import _state
 from tests.support.operations import press
@@ -78,6 +79,7 @@ def test_a_photo_on_a_supplier_is_kept_and_served(client: TestClient) -> None:
     assert served.content == photo
     assert served.headers["content-type"] == "image/png"
     assert served.headers["x-content-type-options"] == "nosniff"
+    assert served.headers["content-security-policy"] == INERT["Content-Security-Policy"]
     assert "immutable" in served.headers["cache-control"]
     ranged = client.get(f"{base}/{body['id']}/content", headers={"Range": "bytes=0-7"})
     assert (ranged.status_code, ranged.content) == (206, photo[:8])
@@ -142,6 +144,23 @@ def test_order_entities_are_read_here_and_written_on_the_order_routes(
     assert client.get(f"{base}/content").status_code == 200
     _code(client.patch(base, json={"caption": "x"}), 409, "use_order_route")
     _code(client.delete(base), 409, "use_order_route")
+
+
+@pytest.mark.requires_git
+def test_an_order_route_does_not_reach_another_entitys_file(client: TestClient) -> None:
+    order, item = shop(client)
+    spool = _supplier(client)
+    added = upload(client, spool, png(), "shelf.png").json()
+    base = f"/api/v1/orders/{order['id']}/attachments/{added['id']}"
+    assert client.get(f"{base}/content").status_code == 404
+    assert client.get(f"{base}/thumbnail").status_code == 404
+    assert client.patch(base, json={"caption": "x"}, headers=press()).status_code == 404
+    assert client.delete(base, headers=press()).status_code == 404
+    delivered = f"/api/v1/orders/{order['id']}/items/{item['id']}/delivered"
+    refused = client.put(delivered, json={"attachment_id": added["id"]}, headers=press())
+    assert refused.status_code == 422, refused.text
+    # Still there, on its own entity.
+    assert client.get(f"/api/v1/entities/{spool}/attachments/{added['id']}/content").status_code == 200
 
 
 def test_references_that_name_nothing(client: TestClient) -> None:
