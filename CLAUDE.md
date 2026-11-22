@@ -46,16 +46,18 @@ service credential (PR #5211). The owner decided this on 2026-11-05.
   `cnpg-cluster.yaml`, delete its `onepassworditem-*-db.yaml`, and archive the 1Password
   item (#5298; how to read prod: `deploy/CLAUDE.md` "Prod checks").
 
-Today's code still breaks the rule: four processes hold a Postgres secret (the API, the
-agent sidecar, the agent worker and agent-durable), and the agent and the API share
-tables through grants. The render, print and projects workers hold none: #5298 is done,
+Today's code still breaks the rule: two processes hold a Postgres secret (the API and
+agent-durable). The agent sidecar and the agent worker have no SQL client and read no KEK
+(#5299 step 12): they reach the `ai_*` tables only through the API's CRUD routes, need a
+service-credential proof to start, and ignore `SCADBUDDY_DATABASE_URL` and
+`SCADBUDDY_SECRET_KEY_FILE` with a warning. The API revokes their old role
+`scadbuddy_agent` at every start. The render, print and projects workers hold none: #5298 is done,
 and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` role and no
 database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
 #3566 and #3578). The API still revokes those roles at every start where they exist; the
 agent revokes nothing since #6501. Template Python still runs in the render
 worker's pod, which holds no database secret now but holds its `crud.render` credential,
-the S3 keys and the Bambuddy render key. Do the rest in this order: #5299 (the agent),
-#5297 (authenticate `/api/v1/internal/*`; never `enforce` on prod, the owner's decision
+the S3 keys and the Bambuddy render key. Do the rest in this order: #5297 (authenticate `/api/v1/internal/*`; never `enforce` on prod, the owner's decision
 of 2026-11-17), #5296 (untrusted code out of
 pods with a database secret: openscad and `openscad-lsp` still run in the API's), then eh-homelab/clusters#3182 (the network). The evidence and the zones
 are in [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
@@ -125,13 +127,13 @@ Both schemas keep one file per migration, named by UTC timestamp plus a slug, an
 API applies both at its start (#5299 D6): `backend/scadbuddy/migrations/` (ledger
 `scadbuddy_migrations`, `render/pg_store.py` `migrate`), then the agent's
 `backend/scadbuddy/migrations_agent/` (ledger `ai_migrations`, `render/agent_migrations.py`
-`migrate_agent`, under the agent's old advisory lock "SCADAGNT"). The agent no longer
-migrates: its `ready()` waits until `ai_migrations` holds every file in
-`agent/src/db/expected-migrations.json` (`agent/src/db/schema.ts`), so a new agent
+`migrate_agent`, under the agent's old advisory lock "SCADAGNT"). The agent has no SQL
+client and reads no ledger (#5299 step 12). The agent's tests migrate with their own runner,
+`agent/test/support/migrations.ts`, and list the files in
+`agent/test/support/expected-migrations.json`, so a new agent
 migration is a file in `migrations_agent/` plus its entry there
 (`UPDATE_EXPECTED_MIGRATIONS=1 pnpm exec vitest run test/schema.test.ts`, which also checks
-that the API's runner and the agent's tests' runner, `agent/test/support/migrations.ts`,
-read the files alike). To add one, create a NEW file named
+that the API's runner and the tests' runner read the files alike). To add one, create a NEW file named
 `$(date -u +%Y%m%dT%H%MZ)_<slug>.sql` (slug `[a-z0-9_]`) and edit nothing else (an agent
 file adds its entry to `expected-migrations.json` too). Never
 edit, rename or remove a merged file; the agent's ledger keeps each applied file's
