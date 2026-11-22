@@ -2377,6 +2377,19 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 235. R-6768-3: the skip's reads are not under each spool's advisory lock. A write that
     lands after them (a person's edit, the push's results, another pull) is taken by the
     next pull. A skipped spool writes nothing, so it can never overwrite that write.
+236. R-6768-4 (PR #7013 review): the skip's batch read never fails the pull. A failure
+    is logged ("could not read which Bambuddy spools are unchanged") and no spool is quiet,
+    so each takes its own guarded path, as before #6768; a cancel still stops the pull,
+    and the read runs under `watched(cancel, conn)` as each spool's transaction does.
+    `test_a_failed_quiet_read_pulls_each_spool_on_its_own` injects the fault.
+237. R-6768-5 (PR #7013 review): the skip compares the last `synced_from_bb` reading with
+    BB's row in the form `_update` records it (`_reading`, then `_seen`): an unmapped
+    catalog id keeps the last id or stays out, and a field of a type that does not pull
+    keeps its last value. Before, a spool whose BB catalog entry SB has not mapped was
+    never quiet.
+238. R-6768-6 (PR #7013 review): a spool whose insert type a person edited after the link
+    is quiet, as `_backfill_insert_type` never sets it again; the batch reads those
+    `edited` events once for every spool (`_insert_edited_since_link`'s condition).
 
 ## Self-review
 

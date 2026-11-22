@@ -16,10 +16,10 @@ import pytest
 import respx
 from psycopg.types.json import Jsonb
 
+from scadbuddy.bambuddy.models import BbLocation, SpoolCatalogEntry
 from scadbuddy.bambuddy.models import Spool as BbSpool
-from scadbuddy.bambuddy.models import SpoolCatalogEntry
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament import ledger, prints
+from scadbuddy.filament import bambuddy_pull, ledger, prints
 from scadbuddy.filament.bambuddy_pull import (
     _WARNED_DUPLICATES,
     Pulls,
@@ -2876,3 +2876,89 @@ def _quiet_state(pool: PgPool) -> Any:
             " (SELECT count(*) FROM filament_spool_k_values) AS k"
         ).fetchone()
     return links, counts
+
+
+def _transactions(f: Filament, rows: list[BbSpool], at: datetime, **kw: Any) -> int:
+    """How many transactions a pull of ``rows`` opens: 2 when every spool is quiet, one
+    more for a catalog or a listing it maps first."""
+    with scale.counting() as counts:
+        report = pull(f, rows, now=at, **kw)
+    assert report.failed_bb_ids == []
+    return counts.transactions
+
+
+def test_a_failed_quiet_read_pulls_each_spool_on_its_own(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-6768-4: when the batch read fails, the pull logs it and takes every spool on its
+    own path, as before #6768; it never fails the pull."""
+    f = _filament(pg_pool)
+    rows = _quiet_rows(4)
+    made = pull(f, rows, now=NOW).created_ids
+    rows[2] = rows[2].model_copy(update={"color_name": "Blue", "updated_at": NOW})
+
+    def broken(*_args: Any) -> bool:
+        raise RuntimeError("the batch read failed")
+
+    monkeypatch.setattr(bambuddy_pull, "_steady", broken)
+    with scale.counting() as counts:
+        report = pull(f, rows, now=NOW + timedelta(minutes=1))
+    assert "could not read which Bambuddy spools are unchanged" in caplog.text
+    assert report.failed_bb_ids == []
+    assert report.updated_ids == [made[0]]
+    assert report.archived == 2
+    # Each spool took its own transaction again.
+    assert counts.transactions == 2 + len(rows)
+
+
+def test_a_spool_whose_catalog_entry_is_unmapped_is_quiet(pg_pool: PgPool) -> None:
+    """R-6768-5: a BB catalog id SB has not mapped is kept (or left out) in the reading, as
+    `_update` records it, so the unchanged spool is quiet; one BB changed is still pulled."""
+    f = _filament(pg_pool)
+    rows = _quiet_rows(4)
+    made = pull(f, rows, now=NOW).created_ids
+    # BB names catalog entry 99, which SB never mapped: the reading keeps the last id (none).
+    rows = [r.model_copy(update={"core_weight_catalog_id": 99, "updated_at": NOW}) for r in rows]
+    pull(f, rows, now=NOW + timedelta(minutes=1))
+    assert _transactions(f, rows, NOW + timedelta(minutes=2)) == 2
+    rows[2] = rows[2].model_copy(
+        update={"color_name": "Blue", "updated_at": NOW + timedelta(minutes=1)}
+    )
+    assert pull(f, rows, now=NOW + timedelta(minutes=3)).updated_ids == [made[0]]
+
+
+def test_a_spool_whose_insert_type_a_person_cleared_is_quiet(pg_pool: PgPool) -> None:
+    """R-6768-6: a person cleared the insert type BB's catalog entry names after the link,
+    so the pull never sets it again (`_backfill_insert_type`): the spool is quiet, and a
+    change BB makes is still pulled without bringing the insert type back."""
+    f = _filament(pg_pool)
+    rows = [r.model_copy(update={"core_weight_catalog_id": 5}) for r in _quiet_rows(4)]
+    made = pull(f, rows, now=NOW, catalog=[_entry()]).created_ids
+    got = f.spools.get(made[0])
+    assert got is not None and got.insert_type_id is not None
+    f.spools.update(made[0], SpoolPatch(insert_type_id=None), actor="person")
+    pull(f, rows, now=NOW + timedelta(minutes=1), catalog=[_entry()])
+    # The catalog's own transaction, `_context`'s and `_quiet`'s: none per spool.
+    assert _transactions(f, rows, NOW + timedelta(minutes=2), catalog=[_entry()]) == 3
+    rows[2] = rows[2].model_copy(update={"color_name": "Blue", "updated_at": NOW})
+    report = pull(f, rows, now=NOW + timedelta(minutes=3), catalog=[_entry()])
+    assert report.updated_ids == [made[0]]
+    got = f.spools.get(made[0])
+    assert got is not None and got.insert_type_id is None
+    assert got.effective.colour_name == "Blue"
+
+
+def test_a_place_mapped_since_seeds_the_seen_place(pg_pool: PgPool) -> None:
+    """#6768: BB's ``location_id`` newly maps to an open SB place, so `_write_seen` seeds
+    it (R-T9-3): the spool is not quiet, and the seen copy takes the place; then it is."""
+    f = _filament(pg_pool)
+    pulls = Pulls(locations=True)
+    rows = [r.model_copy(update={"location_id": 5}) for r in _quiet_rows(4)]
+    made = pull(f, rows, now=NOW, pulls=pulls).created_ids
+    assert "location_id" not in _link_seen(pg_pool, made[0])
+    assert _transactions(f, rows, NOW + timedelta(minutes=1), pulls=pulls) == 2
+    shelf = BbLocation(id=5, name="Shelf")
+    pull(f, rows, now=NOW + timedelta(minutes=2), pulls=pulls, locations=[shelf])
+    assert _link_seen(pg_pool, made[0])["location_id"] == 5
+    # The locations' own transaction, `_context`'s and `_quiet`'s: none per spool.
+    assert _transactions(f, rows, NOW + timedelta(minutes=3), pulls=pulls, locations=[shelf]) == 3
