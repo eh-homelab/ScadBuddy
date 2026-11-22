@@ -246,7 +246,8 @@ def _print_file_changed(name: str, slug: str, first: Operation) -> str:
             f" being made (operation {first.id}, `GET /api/v1/operations/{first.id}`)"
         )
     return (
-        "this Idempotency-Key was first sent for another print file, name or description"
+        "this Idempotency-Key was first sent for another print file, name or description,"
+        " or before this server recorded which print file a request names"
         f" (operation {first.id}): send the request with a new Idempotency-Key"
     )
 
@@ -285,7 +286,8 @@ async def _read_print_file(
         "the archive (Import print links one). A sliced file is a 422. A print's file needs "
         "an `Idempotency-Key` (428 without one); a resend of the same body under "
         "the key of a finished create answers what that create answered, and reads nothing "
-        "again; the key sent with another name, description or print file is a 409."
+        "again. The key sent with another description or print file, or a name of the "
+        "same slug, is a 409; a name of another slug makes another model."
     ),
 )
 async def create_from_mesh(
