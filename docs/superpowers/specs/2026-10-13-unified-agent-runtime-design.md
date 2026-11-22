@@ -440,10 +440,11 @@ lack them (§2.3).
   - **A dropped connection to the API** (`UND_ERR_SOCKET`, `UND_ERR_CLOSED`, `ECONNRESET`,
     `ECONNREFUSED`, `EPIPE`, as a rollout's ending API pod gives) is retried by the CRUD
     client for a GET, or a read marked idempotent, after 0.25 s, 1 s and 3 s
-    (`crudRead.ts` `crudFetch`; a refusal is left to its caller's wait); a write is never sent twice. A placement whose turn still
+    (`crudRead.ts` `crudFetch`, within the call's one deadline; a refusal is left to its caller's wait); a write is never sent twice. A placement whose turn still
     failed on one, or whose own claim or spend write did, fails the retryable
     `BackendUnreachable`: the workflow places the turn again, `restarted`, within the same
-    cycles, after PLACEMENT_BACKOFF's wait, not steered away from its live home, and the
+    cycles, after PLACEMENT_BACKOFF's wait, not steered away from its live home, once its
+    process's last appends landed (at most 15 s), and the
     new placement's claim fences the old one out (#6994).
   - **Spend is written as it goes.** A placement adds what its model requests cost at the
     table's prices (each finished request, and every second) to `cost_usd` and

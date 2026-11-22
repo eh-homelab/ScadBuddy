@@ -273,6 +273,9 @@ function cardOf(q: UserQuestion, secrets: readonly string[]): UserQuestion {
 
 const within = (ms: number, work: Promise<unknown>) => Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms).unref())])
 
+/** How long a placement that lost the API waits for its process's appends to land before the turn is placed again (#6994). */
+const LANDED_WAIT_MS = 15_000
+
 /** Why a released placement stopped: what its process is closed with, and its tally's stop. */
 const RELEASED_TEXT = 'a call waited longer than the turn holds its process; the turn goes on once it is decided'
 /** What a released call's result says until the continuation tells the model how it ended. */
@@ -642,9 +645,13 @@ export class TurnHost {
       }
       if (why !== undefined) throw ApplicationFailure.nonRetryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, SESSION_GONE)
       // The turn failed on a CRUD call whose connection dropped (a transcript load in a rollout,
-      // #6994): placed again, resumed from its transcript, not shown. Its spend is written above;
-      // the next placement's claim fences out anything this one still had in flight.
-      if (!result && run.backendDropped) throw unreachable(id, attempt, new Error(run.failure ?? 'the backend could not be reached'))
+      // #6994): placed again, resumed from its transcript, not shown. Its spend is written above.
+      // Its process's last appends land first, for at most LANDED_WAIT_MS (the API may still be
+      // away): the next placement resumes from the transcript, and its claim fences out the rest.
+      if (!result && run.backendDropped) {
+        await within(LANDED_WAIT_MS, this.#deps.core.warm.landed(id))
+        throw unreachable(id, attempt, new Error(run.failure ?? 'the backend could not be reached'))
+      }
       // A process the turn let go (it failed, or was recycled) lands its last appends before the
       // turn ends, as a classic turn's does: the next turn's claim would fence them out, and its
       // spawn would then start the session anew over Claude Code's own file of it.

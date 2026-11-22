@@ -87,9 +87,10 @@ function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
 }
 
 /**
- * `fetchImpl`'s answer to `url`, each try under its own `timeoutMs`, or CrudReadError when none
- * came. An idempotent call (`retry`) whose connection dropped (`TRANSIENT_KINDS`, but `NOT_UP`)
- * is tried again after each of RETRY_DELAYS_MS; any other call is never sent twice, since a write
+ * `fetchImpl`'s answer to `url`, or CrudReadError when none came within `timeoutMs`, one deadline
+ * for the call and all its tries (as one try had before #6994). An idempotent call (`retry`) whose
+ * connection dropped (`TRANSIENT_KINDS`, but `NOT_UP`) is tried again after each of
+ * RETRY_DELAYS_MS while the deadline allows; any other call is never sent twice, since a write
  * whose answer was lost may have landed. `signal` is the caller's: once it aborts, its reason is thrown.
  */
 export async function crudFetch(
@@ -99,20 +100,26 @@ export async function crudFetch(
   init: Omit<RequestInit, 'signal'>,
   options: { retry: boolean; timeoutMs?: number; signal?: AbortSignal | undefined },
 ): Promise<Response> {
+  options.signal?.throwIfAborted()
+  const deadline = AbortSignal.timeout(options.timeoutMs ?? CRUD_READ_TIMEOUT_MS)
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline
+  const failed = (kind: string) =>
+    new CrudReadError(`${kind === NOT_UP ? 'the backend is not up yet' : 'the backend could not be reached'} (${step}: ${kind})`, undefined, false, {}, kind)
   for (let tries = 0; ; tries++) {
-    options.signal?.throwIfAborted()
-    const timeout = AbortSignal.timeout(options.timeoutMs ?? CRUD_READ_TIMEOUT_MS)
     try {
-      return await fetchImpl(url, { ...init, signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout })
+      return await fetchImpl(url, { ...init, signal })
     } catch (error) {
       if (options.signal?.aborted) throw options.signal.reason
       const kind = transportKind(error)
       const wait = RETRY_DELAYS_MS[tries]
-      if (options.retry && kind !== NOT_UP && TRANSIENT_KINDS.has(kind) && wait !== undefined) {
-        await pause(wait, options.signal)
-        continue
+      if (!(options.retry && kind !== NOT_UP && TRANSIENT_KINDS.has(kind) && wait !== undefined)) throw failed(kind)
+      try {
+        await pause(wait, signal)
+      } catch {
+        if (options.signal?.aborted) throw options.signal.reason
+        // The deadline ended the wait: the call fails as its last try did.
+        throw failed(kind)
       }
-      throw new CrudReadError(`${kind === NOT_UP ? 'the backend is not up yet' : 'the backend could not be reached'} (${step}: ${kind})`, undefined, false, {}, kind)
     }
   }
 }

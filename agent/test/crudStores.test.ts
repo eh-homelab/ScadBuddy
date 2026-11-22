@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { crudUpsertActivityKinds } from '../src/activity/kinds.js'
-import { CrudReadError } from '../src/api/crudRead.js'
+import { backendDropped, CrudReadError } from '../src/api/crudRead.js'
 import { crudCall, CrudPathError, segment, STORE_AREAS, TABS_PER_CALL, UUID_SEGMENT } from '../src/api/crudStores.js'
 import { CrudTokenStore, hashToken, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { CrudPairingStore, hashCode, PairingError } from '../src/bridge/pairings.js'
@@ -467,5 +467,31 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
       throw reset()
     }
     await expect(crudCall(dropping, BASE, 'a read', '/session-tabs', { signal: stop.signal })).rejects.toThrow('the call gave up')
+  })
+
+  it('never sends a GET again after a refusal, which still counts as a dropped connection the turn is placed again for (#6994)', async () => {
+    let calls = 0
+    const refused: typeof fetch = async () => {
+      calls += 1
+      throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) })
+    }
+    const error = await crudCall(refused, BASE, 'a read', '/session-tabs').catch((e: unknown) => e)
+    expect(calls).toBe(1)
+    expect((error as CrudReadError).message).toBe('the backend is not up yet (a read: ECONNREFUSED)')
+    expect(backendDropped(error)).toBe(true)
+  })
+
+  it('keeps one deadline for a call and all its retries (#6994)', async () => {
+    let calls = 0
+    const dropping: typeof fetch = async () => {
+      calls += 1
+      throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) })
+    }
+    const started = Date.now()
+    // The first wait (RETRY_DELAYS_MS[0], 250 ms) fits in 600 ms; the second (1 s) does not.
+    const error = await crudCall(dropping, BASE, 'a read', '/session-tabs', { timeoutMs: 600 }).catch((e: unknown) => e)
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(calls).toBe(2)
+    expect((error as CrudReadError).message).toBe('the backend could not be reached (a read: UND_ERR_SOCKET)')
   })
 })
