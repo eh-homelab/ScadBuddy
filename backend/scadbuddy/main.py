@@ -35,6 +35,7 @@ from scadbuddy.api import (
     crud_agent_transcripts,
     crud_agent_turns,
     crud_print,
+    entity_attachments,
     health,
     internal_blobs,
     internal_library,
@@ -56,6 +57,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import (
     ATTACHMENT_UPLOAD_PATH,
     BODY_LIMITS,
+    ENTITY_ATTACHMENT_UPLOAD_PATH,
     INVOICE_FILE_UPLOAD_PATH,
     LIBRARY_UPLOAD_PATH,
     MEDIA_UPLOAD_PATH,
@@ -2489,6 +2491,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             ),
             RouteLimit(
                 "POST",
+                ENTITY_ATTACHMENT_UPLOAD_PATH,
+                lambda: state.settings.media_upload_max_bytes,
+                "an entity's attachment",
+                "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            ),
+            RouteLimit(
+                "POST",
                 INVOICE_FILE_UPLOAD_PATH,
                 lambda: state.settings.media_upload_max_bytes,
                 "an invoice's file",
@@ -2558,6 +2567,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         print_attachments.PrintAttachmentUpload,
         order_attachments.OrderAttachmentUpload,
         order_attachments.RevisionAttachmentUpload,
+        entity_attachments.EntityAttachmentUpload,
         outputs.NeedsBackfillProblem,
     )
 

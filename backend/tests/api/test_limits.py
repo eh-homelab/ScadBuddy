@@ -15,6 +15,7 @@ from starlette.routing import Route
 from scadbuddy.api import crud_agent_events, crud_agent_transcripts, crud_agent_turns
 from scadbuddy.api.limits import (
     BODY_LIMITS,
+    ENTITY_ATTACHMENT_UPLOAD_PATH,
     INVOICE_FILE_UPLOAD_PATH,
     MAX_MULTIPART_BODY_BYTES,
     MAX_TEXT_BODY_BYTES,
@@ -174,6 +175,11 @@ def test_no_other_order_route_takes_the_media_limit(path: str) -> None:
 def test_an_invoice_file_upload_takes_the_media_limit() -> None:
     assert INVOICE_FILE_UPLOAD_PATH.match("/api/v1/filament/invoices/abc/file")
     assert not INVOICE_FILE_UPLOAD_PATH.match("/api/v1/filament/invoices/abc/lines")
+
+
+def test_an_entity_attachment_upload_takes_the_media_limit() -> None:
+    assert ENTITY_ATTACHMENT_UPLOAD_PATH.match("/api/v1/entities/spool:abc/attachments")
+    assert not ENTITY_ATTACHMENT_UPLOAD_PATH.match("/api/v1/entities/spool:abc/attachments/a1")
 
 
 def test_a_json_body_with_no_content_type_is_capped_too(client: TestClient) -> None:
