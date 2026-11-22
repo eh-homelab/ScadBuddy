@@ -504,6 +504,10 @@ class StoredSettings(BambuddyIds):
     #: only (no row is on), because `filament/shopping.py` `add_for_empty_on` reads it in
     #: the emptying write's own transaction, where no environment value reaches.
     filament_shopping_auto_add_empty: bool = True
+    #: #6905: how many days a Bambuddy sync pass's history row is kept. ``None``: 30
+    #: (`filament/bb_sync_passes.py` `PASS_TTL_DAYS_DEFAULT`). Stored only: the
+    #: housekeeping's activity sweep reads it.
+    filament_sync_pass_ttl_days: int | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -826,6 +830,9 @@ class SettingsPatch(BaseModel):
     #: #6868: whether an empty spool adds its type to the shopping list; ``null`` puts
     #: back the default (on).
     filament_shopping_auto_add_empty: bool | None = None
+    #: #6905: days a sync pass's history row is kept, 1 to ten years; ``null`` puts back
+    #: the default, 30.
+    filament_sync_pass_ttl_days: int | None = Field(default=None, ge=1, le=3650)
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.

@@ -425,6 +425,11 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " shopping list, with a note that names the spool. Nothing is added while an item"
             " for that type is still to buy. It orders nothing.",
         ),
+        "filament_sync_pass_ttl_days": SettingDoc(
+            "Keep sync history for (days)",
+            "How long the list of Bambuddy sync passes keeps a pass, failed ones too. 1 to"
+            " 3650. Empty is the default, 30 days.",
+        ),
         "filament_burn_window_days": SettingDoc(
             "Burn window, days",
             "Days of print history the burn rate and the forecast look at. 1 to 365.",

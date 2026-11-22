@@ -1188,6 +1188,8 @@ export const settings: Settings = {
   print_auto_import_skip_lan_printers: [],
   // #6868: an empty spool adds its type to the shopping list; stored only, on by default.
   filament_shopping_auto_add_empty: true,
+  // #6905 — how long the sync's pass history is kept; stored only, null is 30 days.
+  filament_sync_pass_ttl_days: null,
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,

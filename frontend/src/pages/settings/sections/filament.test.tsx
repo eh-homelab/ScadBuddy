@@ -639,3 +639,79 @@ describe('Filament (#6262)', () => {
     expect(SECTION_REGISTRY.find((section) => section.id === 'filament')?.area).toBe('printing')
   })
 })
+
+describe('the sync pass history (#6905)', () => {
+  const passes = () => within(region('Filament')).findByRole('list', { name: 'Recent sync passes' })
+
+  it('lists recent passes newest first, a failed one with its error, and pages older ones', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const list = await passes()
+    const rows = within(list).getAllByRole('listitem')
+    expect(rows).toHaveLength(10)
+    expect(rows[0]).toHaveTextContent(/full pass, took 4 s/)
+    expect(rows[0]).toHaveTextContent('4 written, 2 failed.')
+    expect(rows[0]).toHaveAttribute('data-outcome', 'ok')
+    expect(rows[2]).toHaveAttribute('data-outcome', 'failed')
+    expect(rows[2]).toHaveTextContent('after a change')
+    expect(rows[2]).toHaveTextContent("Failed: ScadBuddy's own API did not answer in time.")
+    expect(rows[2]).toHaveTextContent('Nothing written.')
+    expect(rows[3]).toHaveAttribute('data-outcome', 'idle')
+    expect(rows[3]).toHaveTextContent('Skipped: nothing was set to go to Bambuddy.')
+    expect(within(region('Filament')).getByText('Every pass, failed ones too, kept for 30 days.')).toBeInTheDocument()
+
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Show older passes' }))
+    await waitFor(() => expect(within(list).getAllByRole('listitem')).toHaveLength(14))
+    expect(within(region('Filament')).queryByRole('button', { name: 'Show older passes' })).not.toBeInTheDocument()
+  })
+
+  it('says when no pass is recorded', async () => {
+    server.use(http.get('/api/v1/filament/sync/passes', () => HttpResponse.json({ passes: [], next_cursor: null })))
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    expect(await within(region('Filament')).findByText('No pass recorded yet.')).toBeInTheDocument()
+  })
+
+  it('says the history could not be read', async () => {
+    server.use(http.get('/api/v1/filament/sync/passes', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    expect(await within(region('Filament')).findByText(/The recent passes could not be read/)).toBeInTheDocument()
+  })
+
+  it('reads the history again when Sync now lands a pass', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      await api.putSettings({ filament_sync: { spools: 'bb_to_sb', weights: 'two_way', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' } })
+      const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+      await seeded()
+      expect(within(await passes()).getAllByRole('listitem')[0]).toHaveTextContent('4 written, 2 failed.')
+      await user.click(within(region('Filament')).getByRole('button', { name: 'Sync now' }))
+      // The mock's pass lands on the second status read after the run.
+      await act(() => vi.advanceTimersByTimeAsync(6_000))
+      await waitFor(() => expect(within(region('Filament')).getByText('Sync finished.')).toBeInTheDocument())
+      await waitFor(async () => expect(within(await passes()).getAllByRole('listitem')[0]).toHaveTextContent('4 written, 1 failed.'))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('saves how long passes are kept, refuses 0, and empty puts back the default', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const field = () => within(region('Filament')).getByLabelText('Keep sync history for (days)')
+    expect(field()).toHaveValue(null)
+    expect(field()).toHaveAttribute('placeholder', '30')
+    await enter(user, field(), '0')
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    expect(await within(region('Filament')).findByText('Enter 1 to 3650 days, or leave it empty for 30.')).toBeInTheDocument()
+    await user.clear(field())
+    await enter(user, field(), '7')
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_sync_pass_ttl_days).toBe(7))
+    expect(within(region('Filament')).getByText('Every pass, failed ones too, kept for 7 days.')).toBeInTheDocument()
+    await user.clear(field())
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_sync_pass_ttl_days).toBeNull())
+  })
+})

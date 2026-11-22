@@ -222,6 +222,9 @@ function putSettings(body: Record<string, unknown>) {
       continue
     }
     if (name === 'storefront_payment_instructions' && typeof value === 'string' && value.length > 2000) return refused(name, 'String should have at most 2000 characters')
+    // #6905 — `SettingsPatch`'s bounds: 1 to 3650 days.
+    if (name === 'filament_sync_pass_ttl_days' && typeof value === 'number' && (value < 1 || value > 3650))
+      return refused(name, value < 1 ? 'Input should be greater than or equal to 1' : 'Input should be less than or equal to 3650')
     if (!envSeeded.has(name)) {
       next[name] =
         name === 'display_unit'
