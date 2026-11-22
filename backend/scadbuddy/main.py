@@ -97,6 +97,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.entities.component import ENTITIES
+from scadbuddy.entities.sweep import sweep_orphan_entities
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, execute_pull
 from scadbuddy.filament.bb_pull_run import FilamentPullActivities
 from scadbuddy.filament.bb_sync_nudge import instance_for
@@ -211,6 +213,7 @@ from scadbuddy.workflows.housekeeping import (
     AUTO_IMPORT_SWEEP,
     BACKFILL_SWEEP,
     BANK_DEPOSITS_SWEEP,
+    ENTITY_ORPHANS_SWEEP,
     FLOWS_SWEEP,
     GIT_REMOTE_SWEEP,
     GIT_SWEEP,
@@ -711,6 +714,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_print_attachments() -> None:
         await _heartbeating(_sweep_print_attachments_logged(state))
 
+    @activity.defn(name=ENTITY_ORPHANS_SWEEP)
+    async def sweep_entity_orphans() -> None:
+        await _heartbeating(_sweep_entity_orphans_logged(state))
+
     @activity.defn(name=LIBRARY_SWEEP)
     async def sweep_print_library() -> None:
         await _heartbeating(_sweep_print_library_logged(state))
@@ -797,6 +804,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         maintain_models_git,
         sweep_activity,
         sweep_print_attachments,
+        sweep_entity_orphans,
         sweep_print_library,
         sweep_native_slice_rows,
         prune_transfer_puts,
@@ -1022,6 +1030,21 @@ async def _sweep_print_attachments_logged(state: AppState) -> None:
             logger.info("forgot the attachments of deleted archives", extra={"count": gone})
 
     await _with_bambuddy(state, sweep)
+
+
+async def _sweep_entity_orphans_logged(state: AppState) -> None:
+    """#6950 (spec D4, phase 1): the entities whose owner's row is gone, with their files
+    and links."""
+    entities = state.components.get(ENTITIES)
+    try:
+        removed = await asyncio.to_thread(
+            sweep_orphan_entities, entities.store, entities.attachments
+        )
+    except Exception:
+        logger.exception("could not sweep the entities whose owner is gone")
+        raise
+    if removed:
+        logger.info("removed entities whose owner is gone", extra={"count": removed})
 
 
 async def _sweep_activity_logged(state: AppState) -> None:

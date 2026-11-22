@@ -7,6 +7,7 @@ whose owner is gone."""
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -112,10 +113,14 @@ class EntityStore:
         ).fetchone()
         return None if row is None else UUID(str(row["id"]))
 
-    def orphans(self, conn: Conn, limit: int) -> list[tuple[UUID, EntityRef]]:
-        """Up to `limit` entities whose owner's row is gone."""
+    def orphans(
+        self, conn: Conn, limit: int, *, skip: Collection[str] = ()
+    ) -> list[tuple[UUID, EntityRef]]:
+        """Up to `limit` entities whose owner's row is gone, of the kinds not in `skip`."""
         found: list[tuple[UUID, EntityRef]] = []
         for kind in KINDS.values():
+            if kind.name in skip:
+                continue
             if len(found) >= limit:
                 break
             rows = conn.execute(
