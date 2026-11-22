@@ -590,13 +590,15 @@ export class DurableTurns {
         // The run was told to end (an archive just before an unarchive, #7031; a done whose edit
         // did not land) and is closing. The claim passed, so the row is not done: once that run
         // closes, the same Update starts a new one. The closing run refused it, so it never took it.
-        // The wait is pinned to the run that refused it: a run another send started meanwhile is
-        // not waited for, and takes the Update (or answers busy) like any other.
+        // The wait is pinned to the run current at this describe, which is the run that refused it
+        // unless that run closed and another started in between (the SDK's update-with-start handle
+        // does not expose the run its start found). A run started after the describe is not waited
+        // for: the retry reaches it, and it takes the Update or answers busy.
         const workflowId = sessionWorkflowId(session.id)
         const closed = await this.#client
           .withDeadline(deadline, async () => {
             const { runId } = await this.#client.workflow.getHandle(workflowId).describe()
-            const run = this.#client.workflow.getHandle(workflowId, runId)
+            const run = this.#client.workflow.getHandle(workflowId, runId, { followRuns: false })
             await run.result().catch(() => undefined)
             return (await run.describe()).status.name !== 'RUNNING'
           })

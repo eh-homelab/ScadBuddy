@@ -361,17 +361,62 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     }, 30_000)
   }
 
+  /** A session whose run was told to end while a turn ran, so it stays open, and whose row is idle again. */
+  async function endingRun(m: SessionManager): Promise<{ sessionId: string; runId: string }> {
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    await m.send(session.id, browser, 'first')
+    const handle = env.client.workflow.getHandle(sessionWorkflowId(session.id))
+    await handle.signal('end')
+    await db.sql`UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL WHERE id = ${session.id}`
+    return { sessionId: session.id, runId: (await handle.describe()).runId }
+  }
+
   it('a send whose second try, after the ending run closed, meets a run ending again is refused `unavailable` (#7031)', async () => {
     // A second archive races the retry: both tries are refused `ended`. Nothing took the message.
-    const m = await durableManager({ sendTimeoutMs: 5_000, describe: async () => 'closed' })
+    const m = await durableManager({ sendTimeoutMs: 10_000 })
+    const { sessionId } = await endingRun(m)
+    const real = env.client.workflow.executeUpdateWithStart.bind(env.client.workflow)
     const ended = () => new WorkflowUpdateFailedError('refused', ApplicationFailure.create({ type: 'ended', message: 'the session ended' }))
-    const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart').mockImplementation(() => Promise.reject(ended()))
+    const spy = vi
+      .spyOn(env.client.workflow, 'executeUpdateWithStart')
+      .mockImplementationOnce(async (...args) => {
+        try {
+          return await real(...args)
+        } finally {
+          // The refused run's turn ends, so it closes.
+          await env.client.workflow.getHandle(sessionWorkflowId(sessionId)).signal('end_turn')
+        }
+      })
+      .mockImplementationOnce(() => Promise.reject(ended()))
     try {
-      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
-      await expect(m.send(session.id, browser, 'hello')).rejects.toMatchObject({ code: 'unavailable', message: expect.stringMatching(/still ending/) })
+      await expect(m.send(sessionId, browser, 'hello')).rejects.toMatchObject({ code: 'unavailable', message: expect.stringMatching(/still ending/) })
       expect(spy).toHaveBeenCalledTimes(2)
-      const [row] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${session.id}`
+      const [row] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${sessionId}`
       expect(row).toEqual({ status: 'idle', durable_turn_id: null })
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+
+  it('a send waiting for the run that refused it reaches a run started meanwhile (#7031)', async () => {
+    const m = await durableManager({ sendTimeoutMs: 10_000 })
+    const { sessionId, runId } = await endingRun(m)
+    const workflowId = sessionWorkflowId(sessionId)
+    const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart')
+    try {
+      const sent = m.send(sessionId, browser, 'hello')
+      await expect.poll(() => spy.mock.calls.length, { timeout: 5_000 }).toBeGreaterThan(0)
+      // Time for the refusal and the describe that pins the wait to the refused run.
+      await new Promise((r) => setTimeout(r, 1_000))
+      // The refused run closes and another run of the session starts: the send is not refused.
+      await env.client.workflow.getHandle(workflowId, runId).terminate('test')
+      await env.client.workflow
+        .start('AgentSession', { workflowId, taskQueue: QUEUE, args: [{}], workflowIdConflictPolicy: 'USE_EXISTING', workflowIdReusePolicy: 'ALLOW_DUPLICATE' })
+        .catch(() => undefined)
+      await sent
+      const latest = env.client.workflow.getHandle(workflowId)
+      expect((await latest.describe()).runId).not.toBe(runId)
+      expect((await latest.query<Recorded>('recorded')).messages.map((msg) => msg.text)).toEqual(['hello'])
     } finally {
       spy.mockRestore()
     }
