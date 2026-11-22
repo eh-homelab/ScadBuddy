@@ -198,6 +198,12 @@ export function CustomizePage({
   const latest = useRef(0)
   /** Whether the page rendered yet: the first render does not wait out the debounce. */
   const started = useRef(false)
+  /**
+   * The choices of the latest render started. The effect below also runs when the preview on
+   * screen changes: an older render can show its preview just after a newer one started, and
+   * starting those choices again cleared the refusal on screen, then showed it again.
+   */
+  const startedKey = useRef<string | undefined>(undefined)
   const renderNow = useRef<(key: string, retry: boolean) => Promise<void>>(async () => undefined)
   /** The choices on screen, and whether the page refuses them: what a delayed retry checks. */
   const choicesNow = useRef({ key: '', blocked: true })
@@ -238,7 +244,11 @@ export function CustomizePage({
   }, [current, blocked])
 
   useEffect(() => {
-    if (blocked || shown?.key === current) return
+    if (blocked) {
+      startedKey.current = undefined
+      return
+    }
+    if (shown?.key === current || startedKey.current === current) return
     const timer = setTimeout(
       () => {
         started.current = true
@@ -375,6 +385,7 @@ export function CustomizePage({
     if (!listing) return
     const body: RenderInput = { ...input(listing), colours: {} }
     const mine = ++latest.current
+    startedKey.current = key
     const live = () => alive.current && latest.current === mine
     setRendering(true)
     setRenderError(null)
