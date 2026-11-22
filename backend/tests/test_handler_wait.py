@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from datetime import timedelta
 
 import pytest
 import pytest_asyncio
@@ -25,6 +26,8 @@ class _Waits:
     def __init__(self) -> None:
         self.go = False
         self.cancelled = False
+        #: Whether the SDK has checked the waiting task's condition: it is in the wait.
+        self.checked = False
 
     @workflow.signal
     def release(self) -> None:
@@ -41,8 +44,14 @@ class _Waits:
 
     @workflow.update
     async def cancelled_while_false(self) -> str:
-        waiting = asyncio.create_task(handler_wait(lambda: False))
-        await asyncio.sleep(0)
+        def never() -> bool:
+            self.checked = True
+            return False
+
+        waiting = asyncio.create_task(handler_wait(never))
+        await workflow.sleep(timedelta(milliseconds=100))  # a later workflow task
+        if not self.checked:
+            return "never waited"
         waiting.cancel()
         try:
             await waiting
