@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { ApiError, api } from '../api/client'
 import { useLatest } from '../lib/useLatest'
 import { useSubscription } from '../lib/realtime'
@@ -195,12 +196,16 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
     const link = `![${altText(file.name)}](${added.path})`
     const field = readmeField.current
     let caret = 0
-    setReadme((text) => {
-      const start = Math.min(field?.selectionStart ?? text.length, text.length)
-      const end = Math.max(start, Math.min(field?.selectionEnd ?? start, text.length))
-      caret = start + link.length
-      return text.slice(0, start) + link + text.slice(end)
-    })
+    // Rendered now, so the selection is read before anything else moves it, and the caret
+    // below is the link's end: an animation frame can run before a batched render does.
+    flushSync(() =>
+      setReadme((text) => {
+        const start = Math.min(field?.selectionStart ?? text.length, text.length)
+        const end = Math.max(start, Math.min(field?.selectionEnd ?? start, text.length))
+        caret = start + link.length
+        return text.slice(0, start) + link + text.slice(end)
+      }),
+    )
     requestAnimationFrame(() => {
       field?.focus()
       field?.setSelectionRange(caret, caret)
