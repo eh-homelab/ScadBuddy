@@ -35,7 +35,12 @@ if TYPE_CHECKING:
 
 KIND = "filament_colour_sync"
 #: 200 pages at most, each up to three tries of 30 s with their waits: far more than the 23
-#: pages read in a few seconds each; under `colour_catalog.RUN_STALE`.
+#: pages read in a few seconds each; under `colour_catalog.RUN_STALE`. The run heartbeats
+#: while it waits (`workflows.operation_activities._heartbeating`), so this timeout or a
+#: worker's shutdown cancels it between pages (a page's write in its thread still lands),
+#: and the run's row ends ``failed`` "the run was interrupted". The
+#: ``filament_colour_syncs`` row, not the operation, is the run's real state: a run whose
+#: process died ends there once `RUN_STALE` has passed (`ColourSyncs.latest`, ``start``).
 SYNC_TIMEOUT = timedelta(minutes=20)
 
 

@@ -1603,6 +1603,8 @@ export const handlers = [
       const own = next as unknown as AliasedRow
       own.aliases = own.aliases.filter((one) => catalogKey(one) !== key)
     }
+    // #6907 Decision 217: a person's write makes the colour theirs.
+    if (kind === 'colours') (next as unknown as { synced_at: string | null }).synced_at = null
     rows[at] = next
     return HttpResponse.json(next)
   }),
@@ -2209,6 +2211,9 @@ export const handlers = [
       locations: 0,
       moved: 0,
       conflicts: 0,
+      colours: 0,
+      colours_kept: 0,
+      colours_failed: false,
     } satisfies S['PullReport']),
   ),
 ]

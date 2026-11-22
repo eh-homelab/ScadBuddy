@@ -50,7 +50,6 @@ export function ColourSources({ onSynced }: { onSynced: () => void }) {
   const [runs, setRuns] = useState<ColourSync[]>([])
   const [busy, setBusy] = useState<ColourSyncSource | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const read = useCallback(async () => {
     try {
@@ -62,15 +61,33 @@ export function ColourSources({ onSynced }: { onSynced: () => void }) {
 
   useEffect(() => {
     void read()
-    return () => {
-      if (timer.current) clearInterval(timer.current)
-    }
   }, [read])
+
+  // Polls while any run it read is running, whoever started it (another tab, the agent),
+  // and while its own press waits; a run past `RUN_STALE` the server reads as failed.
+  const polling = busy !== null || runs.some((one) => one.state === 'running')
+  useEffect(() => {
+    if (!polling) return
+    const timer = setInterval(() => void read(), POLL_MS)
+    return () => clearInterval(timer)
+  }, [polling, read])
+
+  // A run that ended while polled (one this panel did not start too) reloads the table.
+  const synced = useRef(onSynced)
+  useEffect(() => {
+    synced.current = onSynced
+  })
+  const wasRunning = useRef(new Set<ColourSyncSource>())
+  useEffect(() => {
+    const now = new Set(runs.filter((one) => one.state === 'running').map((one) => one.source))
+    const ended = [...wasRunning.current].some((source) => !now.has(source))
+    wasRunning.current = now
+    if (ended) synced.current()
+  }, [runs])
 
   async function sync(source: ColourSyncSource, force = false) {
     setBusy(source)
     setError(null)
-    timer.current = setInterval(() => void read(), POLL_MS)
     try {
       const run = await startColourSync(source, force)
       setRuns((all) => [...all.filter((one) => one.source !== source), run])
@@ -78,8 +95,6 @@ export function ColourSources({ onSynced }: { onSynced: () => void }) {
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'The sync could not start. Try again.')
     } finally {
-      if (timer.current) clearInterval(timer.current)
-      timer.current = null
       setBusy(null)
       void read()
     }

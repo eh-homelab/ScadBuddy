@@ -181,7 +181,7 @@ class LocalBbPull:
         self._check(body.instance)
         rows, bad = bambuddy_rows(body.colours)
         with self.filament.spools.transaction() as conn:
-            counts = upsert_colours(conn, rows, "bambuddy", self.clock())
+            counts = upsert_colours(conn, rows, "bambuddy")
             record_instance(conn, body.instance)
         return ColoursApplied(
             added=counts.added,

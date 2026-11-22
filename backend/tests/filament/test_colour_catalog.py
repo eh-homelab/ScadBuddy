@@ -3,6 +3,7 @@ Bambu Studio's colour codes, each written through `upsert_colours`."""
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -133,6 +134,26 @@ async def test_a_person_edit_since_the_last_pull_wins(pg_pool: PgPool) -> None:
     await _send(pg_pool, _bb())
     row = _one(pg_pool, "Jade White")
     CatalogStore(pg_pool).update("colours", row.id, ColourPatch(rgba="#FAFAFA"))
+    again = await _send(pg_pool, _bb(hex_color="#EEEEEE"))
+    assert (again.kept, again.updated) == (1, 0)
+    assert _one(pg_pool, "Jade White").rgba == "#FAFAFAFF"
+
+
+@pg
+async def test_a_person_edit_wins_whatever_its_clock_says(pg_pool: PgPool) -> None:
+    # An edit whose transaction began before the pull's can stamp an earlier `updated_at`
+    # than the pull's `synced_at`; the edit clears `synced_at`, so the row stays the
+    # person's (Decision 217).
+    await _send(pg_pool, _bb())
+    row = _one(pg_pool, "Jade White")
+    CatalogStore(pg_pool).update("colours", row.id, ColourPatch(rgba="#FAFAFA"))
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_colours SET updated_at = now() - interval '1 hour' WHERE id = %s",
+            (row.id,),
+        )
+    edited = _one(pg_pool, "Jade White")
+    assert (edited.source, edited.synced_at) == ("bambuddy", None)
     again = await _send(pg_pool, _bb(hex_color="#EEEEEE"))
     assert (again.kept, again.updated) == (1, 0)
     assert _one(pg_pool, "Jade White").rgba == "#FAFAFAFF"
@@ -332,7 +353,23 @@ def test_a_second_run_of_a_source_is_refused_while_one_runs(pg_pool: PgPool) -> 
     assert not syncs.running("filamentcolors")
     syncs.start("filamentcolors")
     states = sorted((s.source, s.state) for s in syncs.latest())
-    assert states == [("bambu", "running"), ("filamentcolors", "running")]
+    assert states == [("bambu", "failed"), ("filamentcolors", "running")]
+
+
+@pg
+def test_a_stale_running_run_reads_as_interrupted(pg_pool: PgPool) -> None:
+    # Its process died (a restart): no one else would ever end it, and the panel would
+    # wait on it for good.
+    syncs = ColourSyncs(pg_pool)
+    stale = syncs.start("filamentcolors")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_colour_syncs SET started_at = now() - interval '31 minutes'")
+    syncs.start("bambu")
+    runs = {run.source: run for run in syncs.latest()}
+    assert (runs["filamentcolors"].id, runs["filamentcolors"].state) == (stale, "failed")
+    assert runs["filamentcolors"].error == "the run was interrupted"
+    assert runs["filamentcolors"].finished_at is not None
+    assert runs["bambu"].state == "running"
 
 
 # -- Bambu Studio's colour codes --------------------------------------------------------
@@ -361,6 +398,21 @@ async def test_bambu_s_codes_are_bambu_lab_colours_with_exact_rgba(
     assert (dual.rgba, dual.extra_colours) == ("#FF0000FF", ["#0000FFFF"])
     again = await run_bambu(syncs, syncs.start("bambu"), _profiles(tmp_path / "again"))
     assert (again.added, again.unchanged) == (0, 4)
+
+
+@pg
+async def test_a_bambu_code_with_no_material_is_added_without_one(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    (tmp_path / TABLE).parent.mkdir(parents=True)
+    table = json.loads(FIXTURE.read_text())
+    table["data"] = [table["data"][0] | {"fila_type": " "}]
+    (tmp_path / TABLE).write_text(json.dumps(table))
+    syncs = ColourSyncs(pg_pool)
+    done = await run_bambu(syncs, syncs.start("bambu"), tmp_path)
+    assert (done.state, done.added) == ("done", 1)
+    black = _one(pg_pool, "Black")
+    assert (black.material_name, black.material_id) == (None, None)
 
 
 @pg

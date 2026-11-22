@@ -56,7 +56,7 @@ let sameBambuddy = false
 let unreadable = false
 
 /** What the seed's links number when they belong to another Bambuddy. */
-const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, intents: 1, ignored: 0 }
+const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, colours: 0, intents: 1, ignored: 0 }
 
 export function reset() {
   lastPassAt = FIRST_PASS
@@ -99,7 +99,7 @@ function linksInstance(): string | null {
 }
 
 function resetCounts(): S['LinksResetCounts'] {
-  if (unlinked) return { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
+  if (unlinked) return { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, colours: 0, intents: 0, errors: 0, ignored: 0 }
   return { ...SEED_LINKS, errors: errors.length }
 }
 
@@ -187,7 +187,7 @@ export const handlers = [
       otherInstance = null
       sameBambuddy = false
       running ??= READS_TO_LAND
-      const none = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
+      const none = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, colours: 0, intents: 0, errors: 0, ignored: 0 }
       return HttpResponse.json({ instance, kept: true, deleted: none } satisfies S['LinksResetDone'])
     }
     const deleted = resetCounts()

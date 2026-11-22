@@ -30,7 +30,8 @@ const SOURCE_NAMES: Record<string, string> = { bambuddy: 'Bambuddy', filamentcol
 function provenance(row: Row): string | null {
   if (typeof row.source !== 'string') return null
   const from = `From ${SOURCE_NAMES[row.source] ?? row.source}`
-  const edited = typeof row.synced_at === 'string' && Date.parse(String(row.updated_at)) > Date.parse(row.synced_at)
+  // A person's write clears `synced_at` (#6907 Decision 217).
+  const edited = row.synced_at === null
   return edited ? `${from}, edited since (syncs leave it as it is)` : from
 }
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The change could not be saved. Try again.')
@@ -121,15 +122,22 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   const refs = [...new Set(spec.fields.flatMap((field) => (field.ref ? [field.ref] : [])))]
   const needsMore = spec.fields.some((field) => field.required)
 
+  // Each load's number: an answer to any but the newest is dropped, so a late answer to
+  // an older search never replaces a newer one's rows.
+  const loads = useRef(0)
+
   const load = useCallback(async (): Promise<boolean> => {
+    const mineLoad = ++loads.current
     try {
       const [mine, ...others] = await Promise.all([listCatalog(kind, { includeArchived: archived, q: asked || undefined }), ...refs.map((to) => listCatalog(to, { includeArchived: true }))])
+      if (mineLoad !== loads.current) return true
       setRows(mine as Row[])
       setOptions(Object.fromEntries(refs.map((to, at) => [to, others[at] as Row[]])))
       setNames(new Map(others.flat().map((row) => [row.id, row.archived_at ? `${row.name} (archived)` : row.name])))
       setError(null)
       return true
     } catch (cause) {
+      if (mineLoad !== loads.current) return true
       setError(message(cause))
       return false
     }

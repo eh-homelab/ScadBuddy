@@ -2171,7 +2171,8 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     activity reads one GET more.
 208. R-6907-3: "a person's edit wins" is the row's own times: a sync's write sets `updated_at`
     and `synced_at` to one time, and a row whose `synced_at` is NULL (a person's) or whose
-    `updated_at` is later (edited since) is `kept`; a Bambuddy entry still links to it. Why:
+    `updated_at` is later (edited since) is `kept`; a Bambuddy entry still links to it
+    (made exact by Decision 217). Why:
     every catalog write already sets `updated_at` (`CatalogStore.update`), so no new
     bookkeeping is needed, and it is #6688's rule. Cost: an edit that changes nothing still
     makes the row a person's.
@@ -2192,8 +2193,11 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     type (an `OperationWorkflow` kind), so no Recreate. Each run is a `filament_colour_syncs`
     row whose counts and pages the run writes as it goes, which `GET /filament/colour-syncs`
     and `filament_colour_sync_status` read for the progress; a run still `running` after 30
-    minutes is ended `failed` by the next start, and finished runs older than 30 days but the
-    newest are deleted.
+    minutes is ended `failed` ("the run was interrupted") by the next start or the next read
+    of the runs, and finished runs older than 30 days but the newest are deleted. The row,
+    not the operation, is the run's real state: the operation heartbeats while it waits, so
+    its 20-minute timeout or a worker's shutdown cancels the run between pages, and the row
+    ends `failed` "the run was interrupted".
 211. R-6907-6: a filamentcolors run reads `GET /api/version/` first and reads no page when its
     `db_last_modified` equals the last finished run's (`unchanged`); `force` reads anyway. Why:
     the site's README asks callers to check it before reading again ("Please cache", at
@@ -2222,6 +2226,18 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     import's catalog lookup (#6907 item 4) are a follow-up issue under #6260, so this PR stays
     a reviewable size. The agent's `filament_catalog_list` takes `q` now, which the follow-up
     builds on.
+217. R-6907-12 (review of 6c77500d): a person's write of a colour (`CatalogStore.update`)
+    clears `synced_at`, and a sync reads the row it may write `FOR UPDATE` and stamps the
+    database's `now()` (the pull too, not the API's clock). A row with `synced_at` NULL is
+    the person's, so no sync overwrites it again. Why: with times alone, an edit whose
+    transaction began before a sync's but committed after it stamps an `updated_at` earlier
+    than the sync's `synced_at`, and the next sync overwrote the edit; `clock_timestamp()`
+    does not close that, since the edit's own stamp is still its transaction's start. A
+    per-row write counter would need a column and a trigger on every write. The row lock
+    makes the order exact: an edit in flight is waited for and then seen, and an edit after
+    the sync's read waits for it and then clears `synced_at`. Cost: the Colours tab reads
+    "edited since" from `synced_at` NULL with a `source`, and no longer shows when the
+    edited row was last synced.
 
 ## Self-review
 

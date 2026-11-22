@@ -1,5 +1,5 @@
 """The colour catalog's sources (#6907, plan `docs/superpowers/plans/2026-11-18-filament-bb-sync.md`
-Decisions 206-215): Bambuddy's colour catalog (the pull, `bb_pull_apply.LocalBbPull.colours`),
+Decisions 206-217): Bambuddy's colour catalog (the pull, `bb_pull_apply.LocalBbPull.colours`),
 filamentcolors.xyz and Bambu Studio's colour codes (`ColourSyncs`, run as the operation
 ``filament_colour_sync`` on the ``library`` queue, `filament/operations.py`).
 
@@ -11,9 +11,12 @@ Every source writes through `upsert_colours`, one transaction under one advisory
   ``backend/app/api/routes/inventory.py`` lines 1339-1434 at
   https://github.com/maziggy/bambuddy/tree/b7d894b57c0a373f66dc0de49680865b02b3aae5).
   Bambuddy's entry is found first by its link (``bb_colour_id``), then by identity.
-- A row found that a person made (``synced_at`` NULL) or edited since the last sync wrote it
-  (``updated_at`` after ``synced_at``) is ``kept`` as it is (Decision 208); a Bambuddy entry
-  still links to it. A sync's write sets ``updated_at`` and ``synced_at`` to one time.
+- A row found that a person made or edited (``synced_at`` NULL: a person's write of a
+  colour clears it, `catalog.CatalogStore.update`) is ``kept`` as it is (Decisions 208,
+  217); a Bambuddy entry still links to it. A sync's write sets ``updated_at`` and
+  ``synced_at`` to the database's ``now()``, and it reads the row ``FOR UPDATE``, so an
+  edit that commits while the sync runs waits for it or is seen by it, whatever the
+  clocks say.
 - An archived row counts: a sync never brings back a row a person archived, and never
   deletes a row (Decision 209).
 - A source's material is resolved to the materials catalog by key (`catalog.lookup_key`):
@@ -181,13 +184,15 @@ def _effect_id(conn: Conn, name: str | None, cache: dict[str, UUID | None]) -> U
 _COLUMNS = "id, name, manufacturer, rgba, material_name, material_id, extra_colours, effect_id"
 
 
-def upsert_colours(
-    conn: Conn, rows: Iterable[ColourIn], source: ColourSource, now: datetime
-) -> ColourCounts:
+def upsert_colours(conn: Conn, rows: Iterable[ColourIn], source: ColourSource) -> ColourCounts:
     """Write ``rows`` as the module says, in the caller's transaction, under the catalog's
-    advisory lock. Each row is its own savepoint, so one that fails is ``skipped``."""
+    advisory lock, stamped with the database's ``now()``. Each row is its own savepoint,
+    so one that fails is ``skipped``."""
     counts = ColourCounts()
     conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_LOCK,))
+    stamp = conn.execute("SELECT now() AS now").fetchone()
+    assert stamp is not None
+    now: datetime = stamp["now"]
     materials: dict[str, UUID | None] = {}
     effects: dict[str, UUID | None] = {}
     seen: set[tuple[str, str, str]] = set()
@@ -221,7 +226,7 @@ def _one(
     if row.bb_colour_id is not None:
         found = conn.execute(
             f"SELECT {_COLUMNS}, synced_at, updated_at, bb_colour_id FROM filament_colours"
-            " WHERE bb_colour_id = %s",
+            " WHERE bb_colour_id = %s FOR UPDATE",
             (row.bb_colour_id,),
         ).fetchone()
     if found is None:
@@ -229,7 +234,7 @@ def _one(
             f"SELECT {_COLUMNS}, synced_at, updated_at, bb_colour_id FROM filament_colours"
             " WHERE coalesce(upper(manufacturer), '') = upper(%s) AND upper(name) = upper(%s)"
             " AND coalesce(upper(material_name), '') = upper(%s)"
-            " ORDER BY archived_at IS NOT NULL, created_at LIMIT 1",
+            " ORDER BY archived_at IS NOT NULL, created_at LIMIT 1 FOR UPDATE",
             (row.manufacturer, row.name, row.material_name or ""),
         ).fetchone()
     values = {
@@ -329,7 +334,7 @@ def bambu_rows(profiles_dir: Path) -> list[ColourIn]:
             manufacturer=BAMBU_LAB,
             name=code.name,
             rgba=code.rgba[0],
-            material_name=code.fila_type,
+            material_name=_text(code.fila_type),
             extra_colours=code.rgba[1:] or None,
         )
         for code in colour_codes(profiles_dir).all()
@@ -343,6 +348,26 @@ def bambu_rows(profiles_dir: Path) -> list[ColourIn]:
 Sleep = Callable[[float], Awaitable[None]]
 
 
+def _why(stopped: BaseException) -> str:
+    """A run's error for an exception it did not expect: a cancel (the operation's timeout
+    or a worker's shutdown, delivered through its heartbeat between pages) interrupted it."""
+    return INTERRUPTED if isinstance(stopped, asyncio.CancelledError) else "internal error"
+
+
+INTERRUPTED = "the run was interrupted"
+
+
+def _end_stale(conn: Conn, source: SyncSource | None = None) -> None:
+    """End ``failed`` every run (of ``source``, or of any) still ``running`` past
+    `RUN_STALE`."""
+    conn.execute(
+        "UPDATE filament_colour_syncs SET state = 'failed', finished_at = now(), error = %s"
+        " WHERE state = 'running' AND started_at <= now() - %s"
+        " AND (%s::text IS NULL OR source = %s)",
+        (INTERRUPTED, RUN_STALE, source, source),
+    )
+
+
 class ColourSyncs:
     """The colour catalog's sync runs over a pool whose connections autocommit and return
     dict rows. Its methods block: `run` calls them in threads."""
@@ -352,13 +377,13 @@ class ColourSyncs:
 
     def upsert(self, rows: Sequence[ColourIn], source: ColourSource) -> ColourCounts:
         with self._pool.connection() as conn, conn.transaction():
-            now = conn.execute("SELECT now() AS now").fetchone()
-            assert now is not None
-            return upsert_colours(conn, rows, source, now["now"])
+            return upsert_colours(conn, rows, source)
 
     def latest(self) -> list[ColourSync]:
-        """Each source's newest run."""
-        with self._pool.connection() as conn:
+        """Each source's newest run. A run still ``running`` past `RUN_STALE` ends
+        ``failed`` first: its process died (a restart), and nothing else would end it."""
+        with self._pool.connection() as conn, conn.transaction():
+            _end_stale(conn)
             rows = conn.execute(
                 "SELECT DISTINCT ON (source) * FROM filament_colour_syncs"
                 " ORDER BY source, started_at DESC"
@@ -389,12 +414,7 @@ class ColourSyncs:
         runs."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{_LOCK}:{source}",))
-            conn.execute(
-                "UPDATE filament_colour_syncs SET state = 'failed', finished_at = now(),"
-                " error = 'the run was interrupted' WHERE source = %s AND state = 'running'"
-                " AND started_at <= now() - %s",
-                (source, RUN_STALE),
-            )
+            _end_stale(conn, source)
             if conn.execute(
                 "SELECT 1 FROM filament_colour_syncs WHERE source = %s AND state = 'running'",
                 (source,),
@@ -551,9 +571,9 @@ async def run_filamentcolors(
     except ColourSourceError as error:
         logger.warning("the filamentcolors.xyz sync failed: %s", error)
         return await asyncio.to_thread(syncs.finish, sync_id, "failed", error=str(error))
-    except BaseException:
+    except BaseException as stopped:
         await asyncio.shield(
-            asyncio.to_thread(syncs.finish, sync_id, "failed", error="internal error")
+            asyncio.to_thread(syncs.finish, sync_id, "failed", error=_why(stopped))
         )
         raise
 
@@ -569,9 +589,9 @@ async def run_bambu(syncs: ColourSyncs, sync_id: UUID, profiles_dir: Path) -> Co
         return await asyncio.to_thread(syncs.finish, sync_id, "done")
     except ColourTableMissingError as error:
         return await asyncio.to_thread(syncs.finish, sync_id, "failed", error=str(error))
-    except BaseException:
+    except BaseException as stopped:
         await asyncio.shield(
-            asyncio.to_thread(syncs.finish, sync_id, "failed", error="internal error")
+            asyncio.to_thread(syncs.finish, sync_id, "failed", error=_why(stopped))
         )
         raise
 

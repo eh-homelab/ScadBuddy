@@ -453,6 +453,9 @@ class CatalogStore:
                 "archived_at = COALESCE(archived_at, now())" if archived else "archived_at = NULL"
             )
         sets.append("updated_at = now()")
+        if kind == "colours":
+            # The row is the person's from now on: no sync overwrites it (#6907 Decision 217).
+            sets.append("synced_at = NULL")
         with self._pool.connection() as conn:
             try:
                 with conn.transaction():
