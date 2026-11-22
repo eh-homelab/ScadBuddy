@@ -33,7 +33,7 @@ import type { WarmSessions } from './warm.js'
 // changes between the two calls (a turn claimed, a call parked) can still refuse the second with
 // the workflow told, and a 503 or a lost answer on the told send, tried twice, leaves the
 // workflow told and the row not done: either way the edit sent again marks it done (a send
-// meanwhile is refused while that workflow closes, then starts a new run, durable.ts). An archive
+// meanwhile waits for that workflow to close, within its deadline, then starts a new run, durable.ts). An archive
 // needs no telling first: its workflow is told to end once the archive is written, best-effort
 // (#7031), since a session archived with its workflow still running loses nothing. When the told send's first answer
 // is lost after it committed, the retry finds the row already archived and answers no dismissed
