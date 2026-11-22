@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "properties": {
+    "house": {
+      "type": "object",
+      "title": "House",
+      "properties": {
+        "cols": {"type": "integer", "title": "Modules wide", "minimum": 1, "maximum": 4},
+        "rows": {"type": "integer", "title": "Modules deep", "minimum": 1, "maximum": 3},
+        "storeys": {"type": "integer", "title": "Storeys", "minimum": 1, "maximum": 3},
+        "windows": {"type": "integer", "title": "Windows per storey", "minimum": 0, "maximum": 14}
+      },
+      "required": ["cols", "rows", "storeys", "windows"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["house"],
+  "additionalProperties": false
+}

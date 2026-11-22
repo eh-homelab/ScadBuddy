@@ -10,7 +10,7 @@ import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Response, status
 from fastapi.responses import JSONResponse
@@ -206,21 +206,40 @@ class RevisionSchema(CustomizerSchema):
 
     ui: UiDeclaration | None = None
     ui_error: str | None = None
+    #: The parameters that revision's pipeline sets itself (``pipeline.sets_params``, spec
+    #: 2026-11-17 §6.1), which the listing editor hides; empty with no readable pipeline.
+    pipeline_params: list[str] = Field(default_factory=list)
 
 
-def _revision_ui(directory: Path, slug: str) -> tuple[UiDeclaration | None, str | None]:
-    """The ``ui`` of the model.json in ``directory``, read as the catalogue reads it: only
-    that key, so a revision's other metadata cannot hide its interface."""
+def _revision_meta(directory: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """The model.json in ``directory`` as a JSON object, or why it could not be read."""
     try:
         raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None, None
     except (OSError, ValueError, RecursionError) as error:
         return None, f"model.json could not be read: {error}"
-    if not isinstance(raw, dict) or raw.get("ui") is None:
-        return None, None
+    return (raw if isinstance(raw, dict) else None), None
+
+
+def _revision_ui(directory: Path, slug: str) -> tuple[UiDeclaration | None, str | None]:
+    """The ``ui`` of the model.json in ``directory``, read as the catalogue reads it: only
+    that key, so a revision's other metadata cannot hide its interface."""
+    raw, error = _revision_meta(directory)
+    if raw is None or raw.get("ui") is None:
+        return None, error
     meta = ModelMeta.model_validate({"name": slug, "ui": raw["ui"]})
     return meta.ui, meta.ui_error
+
+
+def _revision_pipeline_params(directory: Path, slug: str) -> list[str]:
+    """The ``pipeline.sets_params`` of the model.json in ``directory``, read as the
+    catalogue reads the pipeline: only that key."""
+    raw, _ = _revision_meta(directory)
+    if raw is None or raw.get("pipeline") is None:
+        return []
+    meta = ModelMeta.model_validate({"name": slug, "pipeline": raw["pipeline"]})
+    return list(meta.pipeline.sets_params) if meta.pipeline is not None else []
 
 
 @router.get(
@@ -258,7 +277,10 @@ async def get_version_schema(
     directory = source.scad.parent
     sampled = await asyncio.to_thread(with_samples, schema, directory)
     ui, ui_error = await asyncio.to_thread(_revision_ui, directory, slug)
-    return RevisionSchema(**sampled.model_dump(), ui=ui, ui_error=ui_error)
+    pipeline_params = await asyncio.to_thread(_revision_pipeline_params, directory, slug)
+    return RevisionSchema(
+        **sampled.model_dump(), ui=ui, ui_error=ui_error, pipeline_params=pipeline_params
+    )
 
 
 @router.get(

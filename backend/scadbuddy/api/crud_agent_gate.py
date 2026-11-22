@@ -4,7 +4,7 @@ route is one of ``agent/src/gate/store.ts``'s writers, one transaction (the open
 agent's); the SQL is ``agent_data/gate.py``. The agent's gate (``gate/store.ts``,
 ``gate/crudStore.ts`` `CrudGate`) calls them once ``…/areas`` lists ``gate``, and its own SQL
 until then (D9), except the grant, which reads the backend's ``flow_grants`` and has no SQL
-left in the agent (``auth/revoke.py`` ``RETIRED_GRANTS``).
+left in the agent (``auth/revoke.py`` ``RETIRED_ROLES``).
 
 Area ``gate``:
 

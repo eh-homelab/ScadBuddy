@@ -160,6 +160,9 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: row, for its directory sweeps; its ``forget-rows`` area is
 #: ``…/agent/sessions/{id}/forget-rows``, a forgotten session's last rows deleted with its
 #: unnamed workspace bytes and its warm-evict NOTIFY (#6501, `api/crud_agent_sweeps.py`).
+#: Its ``keys`` area is ``…/agent/keys/input-hash``, the approvals' input-hash key, and
+#: ``…/agent/fetch-grants``, a one-off fetch's grant minted here, so the agent mounts no KEK
+#: (#5299 step 12, `api/crud_agent_keys.py`).
 #: The profile-fetch ``runs`` area is ``…/profile-fetch/runs/{id}/files/{sha256}``,
 #: ``…/import`` and ``…/failed``: a fetch's preset files, their import into Bambuddy as the
 #: type's presets, and its failure (#6625, `api/crud_profile_fetch.py`).
@@ -245,6 +248,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "auth-sessions",
         "session-sweeps",
         "forget-rows",
+        "keys",
     ],
     "intake": ["sources"],
     "profile-fetch": ["runs"],

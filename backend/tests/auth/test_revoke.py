@@ -1,5 +1,6 @@
-"""#5298 Tasks 11, 22 and 35: `revoke_role` takes back everything the API granted a
-caller's role (`auth/revoke.py`), so the deployment can then drop the role."""
+"""#5298 Tasks 11, 22 and 35, #5299 step 12: `revoke_role` takes back everything the API
+granted a caller's role (`auth/revoke.py`), so the deployment can then drop the role, and
+`retired_state` reports what a retired role still has."""
 
 from __future__ import annotations
 
@@ -12,13 +13,13 @@ import pytest
 from psycopg import sql
 from psycopg.rows import DictRow, dict_row
 
-from scadbuddy.auth.caller_grants import AGENT_GRANTS, grant_role
 from scadbuddy.auth.revoke import (
-    RETIRED_GRANTS,
+    GRANT_LOCK,
     RETIRED_ROLES,
+    RetiredState,
+    retired_state,
     revoke_retired,
     revoke_role,
-    revoke_tables,
 )
 from scadbuddy.render.pg_store import migrate
 
@@ -45,6 +46,29 @@ def role(pg_conninfo: str) -> Iterator[str]:
         with psycopg.connect(pg_conninfo, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(name)))
             admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(name)))
+
+
+def grant_role(conn: Conn, role: str, grants: Mapping[str, tuple[str, ...]]) -> bool:
+    """What an older API's `auth/caller_grants.py` `grant_role` (gone since #5299 step 12)
+    granted a caller's role: USAGE on the schema and ``grants``, under `GRANT_LOCK`."""
+    if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is None:
+        return False
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (GRANT_LOCK,))
+        conn.execute(
+            sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                sql.Identifier(_schema(conn)), sql.Identifier(role)
+            )
+        )
+        for table, privileges in grants.items():
+            conn.execute(
+                sql.SQL("GRANT {} ON {} TO {}").format(
+                    sql.SQL(", ").join(sql.SQL(p) for p in privileges),
+                    sql.Identifier(table),
+                    sql.Identifier(role),
+                )
+            )
+    return True
 
 
 def _held(conn: Conn, role: str) -> dict[str, set[str]]:
@@ -172,59 +196,76 @@ def test_a_second_revoke_does_nothing(conn: Conn, role: str) -> None:
     assert _held(conn, role) == {"relations": set(), "schema": set(), "policies": set()}
 
 
-def test_a_table_dropped_from_a_callers_list_is_taken_back_at_start(
-    conn: Conn, role: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#5299: the agent's role held `blob_refs` for its trigger; `grant_role` never revokes,
-    so the start takes the table back and leaves the rest of the list."""
-    retired = RETIRED_GRANTS["scadbuddy_agent"]
-    assert set(retired).isdisjoint(AGENT_GRANTS)
-    assert grant_role(conn, role, {**AGENT_GRANTS, "blob_refs": ("SELECT", "INSERT", "DELETE")})
-    monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_ROLES", ())
-    monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_GRANTS", {role: ("blob_refs",)})
-    assert revoke_retired(conn) == [role]
-    assert revoke_retired(conn) == []
-    held = _held(conn, role)
-    assert held["relations"] == set(AGENT_GRANTS)
-    assert held["schema"]
-    assert revoke_tables(conn, f"absent_{role}", ("blob_refs",)) == []
-
-
-def test_the_agent_keeps_no_backend_table(
-    conn: Conn, role: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#5299: the agent reads the event log, flow runs and their decisions through the CRUD
-    routes (`api/crud_agent.py`, D7), and its gate's grant check runs on the API
-    (`api/crud_agent_gate.py`, step 10), so the start takes every one of those tables back."""
-    assert RETIRED_GRANTS == {
-        "scadbuddy_agent": (
-            "blob_refs",
-            "events",
-            "workflow_runs",
-            "workflow_run_decisions",
-            "flow_grants",
-            "flow_grant_uses",
+def test_the_start_takes_back_the_agents_role(conn: Conn, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#5299 step 12: nothing connects as `scadbuddy_agent`, so the API's start takes back
+    what it held as an older API left it (its credential views, USAGE on the schema, and
+    the backend tables of #5299 D7 and step 10 an older list granted it), a second start
+    does nothing, and the role can then be dropped. A role of its own stands in for it, as
+    for the print worker's below."""
+    assert "scadbuddy_agent" in RETIRED_ROLES
+    stand_in = f"agent_{uuid.uuid4().hex[:12]}"
+    conn.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(stand_in)))
+    try:
+        assert grant_role(
+            conn,
+            stand_in,
+            {
+                "blob_refs": ("SELECT", "INSERT", "DELETE"),
+                "events": ("SELECT",),
+                "flow_grants": ("SELECT", "UPDATE"),
+                "service_credentials_agent": ("SELECT",),
+                "auth_sessions_agent": ("SELECT",),
+            },
         )
-    }
-    assert AGENT_GRANTS == {}
-    # The role as an older API left it: the five tables of #5299 D7's list.
-    before = {
-        "flow_grants": ("SELECT", "UPDATE"),
-        "flow_grant_uses": ("SELECT",),
-        "events": ("SELECT",),
-        "workflow_runs": ("SELECT",),
-        "workflow_run_decisions": ("SELECT",),
-    }
-    assert grant_role(conn, role, before)
-    monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_ROLES", ())
-    monkeypatch.setattr(
-        "scadbuddy.auth.revoke.RETIRED_GRANTS", {role: RETIRED_GRANTS["scadbuddy_agent"]}
+        assert _held(conn, stand_in)["schema"]
+        monkeypatch.setattr(
+            "scadbuddy.auth.revoke.RETIRED_ROLES",
+            tuple(stand_in if r == "scadbuddy_agent" else r for r in RETIRED_ROLES),
+        )
+
+        assert revoke_retired(conn) == [stand_in]
+        assert _held(conn, stand_in) == {"relations": set(), "schema": set(), "policies": set()}
+        assert revoke_retired(conn) == []
+        conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(stand_in)))
+    finally:
+        if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (stand_in,)).fetchone():
+            conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(stand_in)))
+            conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(stand_in)))
+
+
+def test_the_state_of_a_retired_role_is_reported(
+    pg_conninfo: str, conn: Conn, role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retirement order's checks (root CLAUDE.md "Database access"): the relations a
+    retired role is granted in any schema (by anyone), owns, and its sessions, for the
+    start's log. A missing role is left out."""
+    monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_ROLES", (role, f"absent_{role}"))
+    assert retired_state(conn) == [RetiredState(role, granted=0, owned=0, sessions=0)]
+
+    _grant_like_the_api(conn, role)
+    conn.execute(
+        sql.SQL("GRANT CREATE ON SCHEMA {} TO {}").format(
+            sql.Identifier(_schema(conn)), sql.Identifier(role)
+        )
     )
-    assert revoke_retired(conn) == [role]
-    assert revoke_retired(conn) == []
-    held = _held(conn, role)
-    assert held["relations"] == set()
-    assert held["schema"]
+    conn.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
+    conn.execute("CREATE TABLE ai_left_behind (id int)")
+    conn.execute("RESET ROLE")
+    # CI's Postgres asks every role for a password (scram-sha-256).
+    password = uuid.uuid4().hex
+    conn.execute(
+        sql.SQL("ALTER ROLE {} LOGIN PASSWORD {}").format(
+            sql.Identifier(role), sql.Literal(password)
+        )
+    )
+    with psycopg.connect(pg_conninfo, user=role, password=password, autocommit=True):
+        (state,) = retired_state(conn)
+    # settings, activity, operations, the sequence and the credential view.
+    assert state == RetiredState(role, granted=5, owned=1, sessions=1)
+
+    revoke_role(conn, role)
+    (state,) = retired_state(conn)
+    assert (state.granted, state.owned, state.sessions) == (0, 1, 0)
 
 
 def test_a_missing_role_is_no_op(conn: Conn) -> None:
@@ -295,7 +336,12 @@ def _schema(conn: Conn) -> str:
 def test_the_api_start_revokes_the_retired_roles(
     conn: Conn, role: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert RETIRED_ROLES == ("scadbuddy_projects", "scadbuddy_print", "scadbuddy_render")
+    assert RETIRED_ROLES == (
+        "scadbuddy_projects",
+        "scadbuddy_print",
+        "scadbuddy_render",
+        "scadbuddy_agent",
+    )
     _grant_like_the_api(conn, role)
     monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_ROLES", (role, f"absent_{role}"))
     assert revoke_retired(conn) == [role]

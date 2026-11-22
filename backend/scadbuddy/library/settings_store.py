@@ -947,6 +947,8 @@ class SettingsPatch(BaseModel):
     orders_allow_unfulfil: bool | None = None
     #: Whether a native run waits for a cleared plate between its prints (#4939).
     lan_require_plate_clear: bool | None = None
+    #: Whether a native run waits for a busy printer rather than send (#6871).
+    lan_queue_when_busy: bool | None = None
     #: The S3 store (spec 2026-10-16 §4.2); the secret is write-only, ``""`` clears it.
     store_s3_endpoint: str | None = None
     store_s3_region: str | None = None
@@ -1235,6 +1237,11 @@ class SettingsStore:
         """``lan_require_plate_clear`` as it is now (#4939): an env-seeded field that
         `StoredSettings` does not hold."""
         return self.snapshot().runtime.lan_require_plate_clear
+
+    def queue_when_busy(self) -> bool:
+        """``lan_queue_when_busy`` as it is now (#6871): an env-seeded field that
+        `StoredSettings` does not hold."""
+        return self.snapshot().runtime.lan_queue_when_busy
 
     def _written(self, section: SettingsSection) -> StoredSettings:
         """Announce a committed write and read the settings back."""
@@ -1676,6 +1683,8 @@ class SettingsReader(Protocol):
 
     def plate_clear_required(self) -> bool: ...
 
+    def queue_when_busy(self) -> bool: ...
+
 
 #: The sealed settings the print worker gets opened (#5298, plan D8): the Bambuddy key.
 #: `print_projection` leaves every other sealed field null.
@@ -1695,9 +1704,11 @@ PRINT_UNREAD = (
 
 class PrintSettings(StoredSettings):
     """What the print worker gets of the settings (`print_projection`): the stored
-    settings, and ``lan_require_plate_clear`` as the API resolves it."""
+    settings, and ``lan_require_plate_clear`` and ``lan_queue_when_busy`` as the API
+    resolves them."""
 
     lan_require_plate_clear: bool = False
+    lan_queue_when_busy: bool = True
 
 
 def print_projection(snapshot: SettingsSnapshot) -> PrintSettings:
@@ -1718,6 +1729,7 @@ def print_projection(snapshot: SettingsSnapshot) -> PrintSettings:
             **snapshot.stored.model_dump(),
             **blanked,
             "lan_require_plate_clear": snapshot.runtime.lan_require_plate_clear,
+            "lan_queue_when_busy": snapshot.runtime.lan_queue_when_busy,
         }
     )
 

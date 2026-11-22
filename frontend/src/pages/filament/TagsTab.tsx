@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { getTag, listSpools, listTags, type TagDetail, type TagRow } from '../../api/filament'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { TD, TH, when } from '../../components/filament/formClasses'
 import { KINDS } from '../../components/filament/tagKinds'
-import { spoolPath } from '../../components/filament/spoolsQuery'
+import { EntityLink } from '../../components/filament/EntityLink'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { Button } from '@/components/ui/button'
 
 const ANY = '__any'
@@ -84,10 +85,10 @@ export function TagsTab() {
     }
   }
 
-  const spoolLink = (id: string, number: number | null | undefined) => (
-    <Link to={spoolPath({ id })} className="font-medium underline-offset-4 hover:underline">
+  const spoolLink = (id: string, number: number | null | undefined, deleted = false) => (
+    <EntityLink to={filamentLinks.spool(id)} deleted={deleted} className="font-medium">
       {number == null ? 'Spool' : `#${number}`}
-    </Link>
+    </EntityLink>
   )
 
   return (
@@ -199,7 +200,8 @@ export function TagsTab() {
           <ul className="flex flex-col gap-1 text-[13px]">
             {(open.history ?? []).map((binding) => (
               <li key={binding.id} className="flex flex-wrap items-baseline gap-x-2">
-                {spoolLink(binding.spool_id, numbers?.get(binding.spool_id))}
+                {/* A spool missing from the read of every spool (archived too) is gone (R-6869-5). */}
+                {spoolLink(binding.spool_id, numbers?.get(binding.spool_id), numbers != null && !numbers.has(binding.spool_id))}
                 <span className="text-muted-foreground">
                   <time dateTime={binding.bound_at}>{when(binding.bound_at)}</time>
                   {' to '}

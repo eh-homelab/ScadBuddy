@@ -1,5 +1,6 @@
 import { Link } from 'react-router'
 import type { SpoolInvoiceRef, SpoolTypeSupplier } from '../../../api/filamentPurchasing'
+import { filamentLinks } from '../../../lib/filamentLinks'
 import { SafeLink } from './SafeLink'
 import { useMoney } from './useMoney'
 
@@ -18,8 +19,12 @@ export function SpoolPurchasing({ invoice, suppliers }: { invoice: SpoolInvoiceR
         <div className="flex flex-wrap gap-x-3">
           <dt className="w-24 shrink-0 text-muted-foreground">Invoice</dt>
           <dd>
-            <Link to={`/filament/invoices/${invoice.invoice_id}`} className="font-medium underline-offset-4 hover:underline">
-              Invoice {invoice.number ?? '(no number)'} · {invoice.supplier_name}
+            <Link to={filamentLinks.invoiceLine(invoice.invoice_id, invoice.line_id)} className="font-medium underline-offset-4 hover:underline">
+              Invoice {invoice.number ?? '(no number)'}
+            </Link>
+            {' from '}
+            <Link to={filamentLinks.supplier(invoice.supplier_id)} className="underline-offset-4 hover:underline">
+              {invoice.supplier_name}
             </Link>
             <span className="text-muted-foreground">
               {' '}
@@ -35,7 +40,7 @@ export function SpoolPurchasing({ invoice, suppliers }: { invoice: SpoolInvoiceR
             <ul className="flex flex-col gap-0.5">
               {sellers.map((seller) => (
                 <li key={`${seller.supplier_id}-${seller.sku}`}>
-                  <Link to={`/filament/suppliers/${seller.supplier_id}`} className="underline-offset-4 hover:underline">
+                  <Link to={filamentLinks.supplier(seller.supplier_id)} className="underline-offset-4 hover:underline">
                     {seller.supplier_name}
                   </Link>{' '}
                   <span className="text-muted-foreground">

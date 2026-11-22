@@ -232,6 +232,8 @@ async def test_the_reads_answer_as_the_sql_store(crud: CrudClient, runs: PrintRu
     }
     assert await remote.lan_waiting([]) == {}
     assert await remote.lan_waiting(["00000000-0000-0000-0000-000000000000"]) == {}
+    # #6871: a queued run's place, from the API's runs.
+    assert await remote.queue_place("00000000-0000-0000-0000-000000000000", "a" * 32) == 1
     failed = await remote.fail("r1", SLUG, FAILED, unqueued=True)
     assert failed == await runs.get("r1") and failed.error == FAILED
     assert not failed.may_have_queued
@@ -527,6 +529,19 @@ async def test_a_printer_that_is_no_uuid_is_refused(crud: CrudClient) -> None:
     and refuses one its cast would fail on with a 422, not a 500."""
     with pytest.raises(CrudRefusedError) as refused:
         await crud.request("GET", f"{BASE}/runs/lan-waiting?printers=not-a-uuid")
+    assert refused.value.status == 422
+    with pytest.raises(CrudRefusedError) as refused:
+        await crud.request("GET", f"{BASE}/runs/{'a' * 32}/queue-place?printer=not-a-uuid")
+    assert refused.value.status == 422
+
+
+@pytest.mark.parametrize("run_id", ["r1", "A" * 32, "%00" + "a" * 31])
+async def test_a_queue_place_of_no_run_id_is_refused(crud: CrudClient, run_id: str) -> None:
+    """#6871 review: a run id that is no run id is a 422, never a query (a NUL byte in
+    it failed the query with a 500)."""
+    printer = "00000000-0000-0000-0000-000000000000"
+    with pytest.raises(CrudRefusedError) as refused:
+        await crud.request("GET", f"{BASE}/runs/{run_id}/queue-place?printer={printer}")
     assert refused.value.status == 422
 
 

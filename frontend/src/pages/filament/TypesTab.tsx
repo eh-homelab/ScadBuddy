@@ -7,6 +7,7 @@ import { addShopping, getPriceSheet, listSuppliers, type PricePoint } from '../.
 import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { FILL_LABELS } from '../../components/filament/profileFill'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { FilamentsEditor } from '../../components/orders/FilamentsEditor'
 import { addSku, matchesSearch, parseSearch, typeSearchDoc } from '../../lib/filamentSearch'
@@ -184,7 +185,7 @@ export function TypesTab() {
             <SlidersHorizontalIcon /> {filling ? 'Filling…' : 'Fill from slicer profiles'}
           </Button>
           <Button asChild size="sm">
-            <Link to="/filament/types/new">
+            <Link to={filamentLinks.newType}>
               <PlusIcon /> New type
             </Link>
           </Button>
@@ -229,7 +230,7 @@ export function TypesTab() {
                       <RgbaSwatch rgba={type.rgba} size="md" />
                     </td>
                     <td className="px-2 py-1.5">
-                      <Link to={`/filament/types/${type.id}`} state={{ back: location.search }} className="font-medium underline-offset-4 hover:underline">
+                      <Link to={filamentLinks.type(type.id)} state={{ back: location.search }} className="font-medium underline-offset-4 hover:underline">
                         {type.code}
                       </Link>
                       {type.archived_at && <span className="ml-2 text-[12px] text-muted-foreground">Archived</span>}
@@ -310,7 +311,7 @@ function FillReport({ results, back, onClose }: { results: TypeFill[]; back: str
         <ul className="mt-1 flex flex-col gap-1">
           {changed.map((one) => (
             <li key={one.type_id}>
-              <Link to={`/filament/types/${one.type_id}`} state={{ back }} className="font-medium underline-offset-4 hover:underline">
+              <Link to={filamentLinks.type(one.type_id)} state={{ back }} className="font-medium underline-offset-4 hover:underline">
                 {one.code}
               </Link>
               <span className="text-muted-foreground">
@@ -322,7 +323,7 @@ function FillReport({ results, back, onClose }: { results: TypeFill[]; back: str
           ))}
           {unread.map((one) => (
             <li key={one.type_id} className="text-muted-foreground">
-              <Link to={`/filament/types/${one.type_id}`} state={{ back }} className="font-medium text-foreground underline-offset-4 hover:underline">
+              <Link to={filamentLinks.type(one.type_id)} state={{ back }} className="font-medium text-foreground underline-offset-4 hover:underline">
                 {one.code}
               </Link>
               {`: ${one.reason ?? ''}`}

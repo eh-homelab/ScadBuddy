@@ -32,6 +32,7 @@ import { addDecimals, formatCost } from '../../lib/decimal'
 import { useLatest } from '../../lib/useLatest'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
 import { message } from '../../components/filament/purchasing/priceFormat'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 /** How long after a field is left the lines are saved, so a tab through three fields is one save. */
 const SAVE_DELAY_MS = 400
@@ -42,7 +43,7 @@ function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl px-4 py-6">
-        <Link to="/filament/invoices" className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
+        <Link to={filamentLinks.invoices} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
           <ChevronLeftIcon className="size-3.5" /> Invoices
         </Link>
         {children}
@@ -75,6 +76,9 @@ export function InvoicePage() {
   const [types, setTypes] = useState<SpoolType[]>([])
   const [products, setProducts] = useState<SupplierProduct[]>([])
   const [spools, setSpools] = useState<Spool[]>([])
+  /** The spool list read after the last confirm; until then a missing spool is unknown, not deleted (R-6869-5). */
+  const [spoolsCurrent, setSpoolsCurrent] = useState(false)
+  const spoolRead = useRef(0)
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
   const [asking, setAsking] = useState<'confirm' | 'delete' | null>(null)
   const [busy, setBusy] = useState(false)
@@ -149,7 +153,15 @@ export function InvoicePage() {
   }, [supplierId])
 
   const readSpools = useCallback(() => {
-    listSpools({ includeArchived: true }).then(setSpools, () => undefined)
+    const read = ++spoolRead.current
+    listSpools({ includeArchived: true }).then(
+      (rows) => {
+        if (read !== spoolRead.current) return
+        setSpools(rows)
+        setSpoolsCurrent(true)
+      },
+      () => undefined,
+    )
   }, [])
   useEffect(() => {
     let live = true
@@ -321,6 +333,7 @@ export function InvoicePage() {
     try {
       const made = await confirmInvoice(page)
       if (here.current !== page) return
+      setSpoolsCurrent(false)
       setInvoice(made)
       setDirty(false)
       focusHeading.current = true
@@ -341,7 +354,7 @@ export function InvoicePage() {
       await deleteInvoice(page)
       if (here.current !== page) return
       setDirty(false)
-      navigate('/filament/invoices')
+      navigate(filamentLinks.invoices)
     } catch (cause) {
       if (here.current !== page) return
       setRefusal(message(cause, 'The draft could not be deleted. Try again.'))
@@ -466,7 +479,7 @@ export function InvoicePage() {
             {draft ? (
               <InvoiceLinesTable editable pending={dirty} rows={rows} computed={computed} errors={errors} products={products} types={types} spools={spools} money={format} onChange={edit} onCommit={commit} />
             ) : (
-              <InvoiceLinesTable editable={false} lines={invoice.lines} types={types} spools={spools} money={format} />
+              <InvoiceLinesTable editable={false} lines={invoice.lines} supplierId={invoice.supplier_id} types={types} spools={spools} spoolsCurrent={spoolsCurrent} money={format} />
             )}
           </section>
           <InvoiceTotals
