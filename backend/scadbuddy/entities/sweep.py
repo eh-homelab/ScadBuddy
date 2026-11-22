@@ -19,8 +19,13 @@ def sweep_orphan_entities(
     code's, which removes or moves them before the owner's row goes."""
     removed = 0
     with entities.pool.connection() as conn:
-        for entity_id, _ref in entities.orphans(conn, limit, guarded=ORDER_KINDS):
+        for entity_id, ref in entities.orphans(conn, limit, guarded=ORDER_KINDS):
             with conn.transaction():
+                # The owner is checked again under the entity's lock: a row made under
+                # the same id since `orphans` read keeps its files and links.
+                conn.execute("SELECT 1 FROM entities WHERE id = %s FOR UPDATE", (entity_id,))
+                if entities.exists(conn, ref):
+                    continue
                 rows = conn.execute(
                     "SELECT id FROM entity_attachments WHERE entity_id = %s FOR UPDATE",
                     (entity_id,),
