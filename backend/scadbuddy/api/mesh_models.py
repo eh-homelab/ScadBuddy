@@ -233,18 +233,21 @@ async def create_from_read(
     )
 
 
-def _print_file_changed(name: str, slug: str, first: Operation, made: bool) -> str:
-    """The 409 of a retry whose print file changed since its first send (#5979): a
-    printer overwrites its files, so the retry read other bytes."""
-    changed = f"{name} changed since this request was first sent"
+def _print_file_changed(name: str, slug: str, first: Operation) -> str:
+    """The 409 of a key on record for another body of this model (#5979). While the first
+    create runs, its print file changed since (a printer overwrites its files, so the
+    retry read other bytes). Once it finished, `made_before` answers a resend of the same
+    body, so this key was first sent for another print file, name or description (#6984)."""
     if first.status == "running":
         return (
-            f"{changed}, and the model {slug!r} that request started is still being made"
+            f"{name} changed since this request was first sent, and the model {slug!r} that"
+            f" request started is still being made"
             f" (operation {first.id}, `GET /api/v1/operations/{first.id}`)"
         )
-    if made:
-        return f"{changed}; the model {slug!r} was made from the file as it was then, and stays"
-    return f"{changed}; send the request with a new Idempotency-Key to open the file as it is now"
+    return (
+        "this Idempotency-Key was first sent for another print file, name or description"
+        f" (operation {first.id}): send the request with a new Idempotency-Key"
+    )
 
 
 async def _read_print_file(
@@ -279,8 +282,9 @@ async def _read_print_file(
         "the new model's `meshes/`, and a `scene.json` that compiles to its `model.scad` "
         "(spec 2026-10-11). Nothing is written to Bambuddy, and the model is no print of "
         "the archive (Import print links one). A sliced file is a 422. A print's file needs "
-        "an `Idempotency-Key` (428 without one); a resend under the key of a finished "
-        "create answers what that create answered, and reads nothing again."
+        "an `Idempotency-Key` (428 without one); a resend of the same body under "
+        "the key of a finished create answers what that create answered, and reads nothing "
+        "again; the key sent with another name, description or print file is a 409."
     ),
 )
 async def create_from_mesh(
@@ -321,7 +325,7 @@ async def create_from_mesh(
             read=read,
             origin=origin,
             # A retry reads the file again: other bytes are named, never opened.
-            changed=lambda first, made: _print_file_changed(read.name, slug, first, made),
+            changed=lambda first, _made: _print_file_changed(read.name, slug, first),
         )
     source: dict[str, Any] = (
         {"kind": "bambuddy_library", "file_id": body.library_file_id}

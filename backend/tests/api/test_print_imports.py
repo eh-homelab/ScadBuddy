@@ -1167,13 +1167,19 @@ def test_a_key_sent_again_for_another_printer_file_is_no_resend(
     from tests.api.test_mesh_models import painted_3mf
 
     configure(client)
-    files = [{"name": name, "path": f"/cache/{name}", "size": 10} for name in ("a.3mf", "b.3mf")]
-    bambuddy(printer_files={"path": "/cache", "files": files, "warnings": []})
+    # Two copies of the print's file, in the two folders a print's file is looked for in.
+    paths = ("/cache/demo_elan.3mf", "/demo_elan.3mf")
+    bambuddy(printer_files={"path": "/cache", "files": [_on_printer(paths[0])], "warnings": []})
+    respx.get(f"{API}/printers/1/files", params={"path": "/"}).mock(
+        return_value=httpx.Response(
+            200, json={"path": "/", "files": [_on_printer(paths[1])], "warnings": []}
+        )
+    )
     downloads = {
-        name: respx.get(f"{API}/printers/1/files/download", params={"path": f"/cache/{name}"}).mock(
+        path: respx.get(f"{API}/printers/1/files/download", params={"path": path}).mock(
             return_value=httpx.Response(200, content=painted_3mf())
         )
-        for name in ("a.3mf", "b.3mf")
+        for path in paths
     }
     key = press()
 
@@ -1185,15 +1191,20 @@ def test_a_key_sent_again_for_another_printer_file_is_no_resend(
         }
         return from_mesh(client, body, **key)
 
-    first = send("/cache/a.3mf")
+    first = send(paths[0])
     assert first.status_code == 201, first.text
     _wait_finished(client, "from-the-printer", key["Idempotency-Key"])
 
-    other = send("/cache/b.3mf")
+    other = send(paths[1])
 
     assert other.status_code == 409, other.text
-    assert downloads["b.3mf"].call_count == 1
-    assert downloads["a.3mf"].call_count == 1
+    assert "first sent for another print file" in other.json()["detail"]
+    assert downloads[paths[1]].call_count == 1
+    assert downloads[paths[0]].call_count == 1
+
+
+def _on_printer(path: str) -> dict[str, Any]:
+    return {"name": path.rsplit("/", 1)[-1], "path": path, "size": 10}
 
 
 @respx.mock
