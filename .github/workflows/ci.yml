@@ -1589,17 +1589,8 @@ jobs:
       # committed timings (the step above copied them), which the split reads, and
       # ends as this shard's own tests timed on this runner, for
       # `backend-pytest-split` to merge.
-      #
-      # `timeout`: the step ends itself before the job's 55-minute limit. A shard that
-      # reached that limit was cancelled with no log kept (`gh run view --log` answers
-      # "log not found"; on 2026-11-22, run 44982849813 on main and runs 44967980900
-      # and 44993200454 of PRs), so `faulthandler_timeout`'s dump of a hung test was lost
-      # with it.
-      # SIGINT stops pytest, which prints its summary, and the job ends with its log. The
-      # step took 23 to 36 minutes on 2026-11-22 (runs 44987295838, 44999390630).
       - name: pytest
         run: >-
-          timeout --signal=INT --kill-after=2m 47m
           docker run --rm --network host --shm-size=1g
           -v "$PWD/test-fixtures:/app/test-fixtures:ro"
           -v "$PWD/results:/results"
