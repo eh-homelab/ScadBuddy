@@ -10,9 +10,10 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 ## Database access
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
-database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
-`auth/caller_grants.py` `AGENT_GRANTS`, empty since its gate's grant check runs here (#5299
-step 10); the API revokes what it held at every start (`auth/revoke.py` `RETIRED_GRANTS`). The print worker holds no Postgres pool (#5298
+database owner and runs SQL on the agent's `ai_*` tables. No caller has a role or a grant
+list: the API revokes what the retired roles held, the agent's `scadbuddy_agent` among them
+(#5299 step 12), at every start (`auth/revoke.py` `RETIRED_ROLES`), and logs what each one
+that still exists is granted, owns and has open (`retired_state`). The print worker holds no Postgres pool (#5298
 Task 31): every store it uses goes through CRUD routes, it has no grant list, and the API
 revokes what its old role `scadbuddy_print` held at every start (`auth/revoke.py`, #5298
 Task 35). It holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
@@ -51,7 +52,7 @@ credential, falling back to its view on a 404 while it has a database URL; other
 reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
 (the projects, render and print workers, #5298) takes `exchange_source` instead: the exchange
 only, with no view, and no proof refuses its start. The agent's `ExchangeCredential` reads no
-view on a 404 either (#6501); without a proof it still reads its view until #5299 step 12.
+view on a 404 either (#6501); without a proof it still reads its view until the agent PR of #5299 step 12.
 `ExchangeReader`, `exchange_source` and `ServiceAuth`
 live in `auth/service_auth.py`, which imports no Postgres code (`service_credentials.py`
 re-exports them), so the storefront edge (`python -m scadbuddy.storefront`, #5282; it holds
@@ -219,8 +220,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   either), so such a deployment keeps the API and the agent on one role
   until the agent's data moves behind CRUD routes (#5299)); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
-  every start, `auth/revoke.py`, and every caller's grant list goes through
-  `auth/caller_grants.py` `grant_role`): it reads the store settings and
+  every start, `auth/revoke.py`): it reads the store settings and
   writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it. The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
@@ -747,9 +747,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   that report (`printers/reports.py` `advance_print`, #5138, #5142). A LAN print keeps
   `output_last_prints.sent_to_bambuddy`, so the output still says "Send again" (#5143).
   A run of several plates or copies is its own queue (#4541, `workflows/printing.py`
-  `_print_lan`): it succeeds at its first start, then `lan_wait` (`printers/print_activities.py`,
+  `_print_lan`): it succeeds at its first start (a queued run, below, before it), then `lan_wait` (`printers/print_activities.py`,
   over the watch's `printer_reports`) waits out each print before the next starts, and
   `print_lan_update` rewrites the result (`PrintRunResult.lan_waiting`, `lan_stopped`).
+  A busy printer (#6871, plan Decisions 8-21): a run planned with the stored setting
+  `lan_queue_when_busy` (on by default; one print too) reads the printer first
+  (`lan_check`, behind `BUSY_PATCH`). When it is busy the run succeeds with nothing
+  started (`PrintRunResult.lan_queued`, every print in `lan_waiting`), and its
+  `PrintLanSequence` waits for the printer and a cleared plate before the first start.
   A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
   A native file's associations (#6395): `print_library/associations.py` (`RELATIONS`, the
   one list; `library_file_associations`), routes `api/library_associations.py`, which adds
@@ -779,12 +784,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `copy_library_files` and `get_library_copy` (`agent/src/tools/libraryCopy.ts`);
   `list_library`'s `source: bambuddy`; frontend `components/library/LibraryCopyDialog.tsx`.
   A native run of several prints starts the later ones in `PrintLanSequence`
-  (`print-lan-<run id>`, `workflows/printing.py` `LanSequenceWorkflow`); its controls
+  (`print-lan-<run id>`, `workflows/printing.py` `LanSequenceWorkflow`), and a run queued
+  on a busy printer (#6871) starts all of them there, the first included; its controls
   (#4942, #4939) are `POST /print/runs/{id}/stop` (cancels the sequence, which records
   `lan_stopped`) and `…/plate-cleared` (the `plate_cleared` signal, for a run planned with
-  the stored setting `lan_require_plate_clear`, behind `PLATE_CLEAR_PATCH`), shown from
-  `PrintProgress.lan_run` and `PrinterNow.lan_run` by `components/print/LanRunControls.tsx`,
-  and the agent's `stop_print_run` and `confirm_plate_clear`.
+  the stored setting `lan_require_plate_clear`, behind `PLATE_CLEAR_PATCH`, and for a run
+  queued on a busy printer, whatever that setting says, behind `BUSY_PATCH`). The strip
+  shows each printer's oldest waiting run and only reads; a run whose sequence is gone is
+  recorded stopped by the native-copies sweep (`end_gone_sequences`, on every backend) or
+  by a control sent to it. `components/print/LanRunControls.tsx` shows the controls from
+  `PrintProgress.lan_run` and `PrinterNow.lan_run`; the agent's are `stop_print_run` and
+  `confirm_plate_clear`.
 - `backend/scadbuddy/filament/` — the filament data model (#6261, epic #6260, spec
   2026-11-14): `catalog.py` (configurable catalogs, no code enums; materials, subtypes,
   brands, categories and effects keep names and aliases in `filament_<kind>_names`, one key
@@ -881,14 +891,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   linked BB id there, none older than its link's `bb_updated_at`, one exactly that, at
   least half the links timed on both sides), a reset with `expect_kept: true` reads them
   again and, while that holds, deletes nothing, records the configured instance and answers
-  `kept: true`; else 409 `proof_changed`, nothing written. `expect_kept: false` deletes
+  `kept: true` (and `configured_instance`); else 409 `proof_changed`, nothing written. The dry run's `changed_since_pull` is
+  true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered. `expect_kept: false` deletes
   without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward).
   Every pass is also a row of `filament_bb_sync_passes` (#6905, `bb_sync_passes.py`):
   `record_pass` inserts it in the state row's transaction, keyed by the worker's `pass_id` so a
   resent record adds none (an `instance_changed` pass gets the history row only); `run_pass`
   records a pass whose step raised (a CRUD `plan` or `results` timeout, the settings read) with
-  `failure_label` (`crud_unavailable:<failure>`, `crud_refused:<status>`, `internal`) and raises
-  it again, so the activity's retries are unchanged; the workflow sends the pass's `trigger`
+  `failure_label` (`crud_unavailable:<failure>`, `crud_refused:<status>`, `internal`) and the
+  counts its rounds reached, and raises it again, so the activity's retries are unchanged; the workflow sends the pass's `trigger`
   (`timer`, `change`, `full`, `more`) in the activity's input only, so its commands are
   unchanged. `GET /filament/sync/passes` pages them newest first by cursor (agent
   `filament_sync_passes`), and the housekeeping's activity sweep deletes rows older than the

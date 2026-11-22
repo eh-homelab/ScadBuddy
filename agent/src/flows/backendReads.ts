@@ -4,7 +4,7 @@ import { crudRead } from '../api/crudRead.js'
 // `workflow_run_decisions` and `flow_grants`. The backend answers each over a CRUD route of
 // area `flows` (backend api/crud_agent.py, flows/agent_reads.py), and the agent runs no SQL on
 // `workflow_runs` or `workflow_run_decisions`. The API takes back its role's grants on them at
-// every start (backend auth/revoke.py `RETIRED_GRANTS`), but the agent still connects as the
+// every start (backend auth/revoke.py `RETIRED_ROLES`), but the agent still connects as the
 // database owner, so that binds nothing until #5299 step 12; until then the guard is
 // test/retiredTables.test.ts.
 //

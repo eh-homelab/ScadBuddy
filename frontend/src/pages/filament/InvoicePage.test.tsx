@@ -129,6 +129,51 @@ describe('the invoice page', () => {
     expect(screen.queryByLabelText('Unit price, line 1')).not.toBeInTheDocument()
   })
 
+  describe('the spools a confirm made, before the spools are read again (R-6869-5)', () => {
+    /** Answers the spool list as usual until the invoice is confirmed, then with `after`. */
+    function spoolsAfterConfirm(after: () => Promise<Response | undefined> | Response | undefined) {
+      let confirmed = false
+      server.use(
+        http.post('/api/v1/filament/invoices/:id/confirm', () => {
+          confirmed = true
+          return undefined
+        }),
+        http.get('/api/v1/filament/spools', () => (confirmed ? after() : undefined)),
+      )
+    }
+
+    async function confirmDraft() {
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      await user.click(await screen.findByRole('button', { name: 'Confirm' }))
+      await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Make the spools' }))
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument())
+      return screen.getByRole('table', { name: 'Invoice lines' })
+    }
+
+    it('links each new spool while the read is in flight, never as deleted', async () => {
+      let release: () => void = () => {}
+      const held = new Promise<void>((resolve) => (release = resolve))
+      spoolsAfterConfirm(async () => {
+        await held
+        return undefined
+      })
+      const lines = await confirmDraft()
+      expect(within(lines).getAllByRole('link', { name: /^Spool #/ })).toHaveLength(5)
+      expect(lines).not.toHaveTextContent('(deleted)')
+      release()
+      await waitFor(() => expect(within(lines).getAllByRole('link', { name: /^Spool #\d+$/ })).toHaveLength(5))
+    })
+
+    it('never says deleted when the read fails', async () => {
+      spoolsAfterConfirm(() => HttpResponse.json({ detail: 'down' }, { status: 500 }))
+      const lines = await confirmDraft()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(within(lines).getAllByRole('link', { name: /^Spool #/ })).toHaveLength(5)
+      expect(lines).not.toHaveTextContent('(deleted)')
+    })
+  })
+
   it('keeps a confirmed invoice frozen except the note and the file', async () => {
     const { user } = render(INVOICE.CONFIRMED_A)
     await heading()

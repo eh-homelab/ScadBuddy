@@ -4,5 +4,10 @@
   "tags": ["kids", "toy", "dollhouse", "modular", "multi-colour"],
   "source": "inspired by MakerWorld \"Fully Modular & Scaleable Dollhouse\" by 6POiNT6 (#1417985, 841 downloads, 1.2k likes; 1:18, scale 300% for 1:6), MakerWorld \"A Modular Dollhouse Garden Cottage\" (#472786, 1.0k downloads) and \"Modular 3d Printed Doll House\" (#919649, 305 downloads); key-in-pocket joints after OpenLOCK (Printables \"#NoWalls Standard Dungeon Tiles (OpenLock/MagBall)\" #11945, 2.4k downloads)",
   "ui": {"module": "ui/index.js", "slot": "page", "api": 1},
-  "pipeline": {"module": "pipeline/pipeline.py", "api": 1}
+  "pipeline": {
+    "module": "pipeline/pipeline.py",
+    "api": 1,
+    "inputs": "pipeline/inputs.json",
+    "sets_params": ["piece", "course", "width_units", "depth_units", "preview"]
+  }
 }

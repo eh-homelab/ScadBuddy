@@ -5,8 +5,10 @@ wrapping and the certificate pin."""
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime as dt
 import hashlib
+import json
 import logging
 import socket
 import ssl
@@ -92,13 +94,15 @@ def test_project_file_command_carries_a_nozzle_mapping() -> None:
     assert cmd["print"]["nozzle_mapping"] == wire
 
 
-def test_merge_report_keeps_unmentioned_keys_and_replaces_ams() -> None:
+def test_merge_report_keeps_unmentioned_keys_and_lists_the_deltas_units() -> None:
     previous = {
         "gcode_state": "RUNNING",
         "mc_percent": 10,
         "ams": {"ams": [{"id": "0", "tray": [{"id": "0"}, {"id": "1"}]}]},
     }
     merged = merge_report(previous, {"mc_percent": 11, "ams": {"ams": [{"id": "1"}]}})
+    # The delta lists unit 1 only, so unit 0 is gone: the H2C sends every unit in every
+    # report (`test_lan_live.py`'s docstring), so a unit it leaves out is unplugged.
     assert merged == {
         "gcode_state": "RUNNING",
         "mc_percent": 11,
@@ -106,6 +110,185 @@ def test_merge_report_keeps_unmentioned_keys_and_replaces_ams() -> None:
     }
     assert previous["mc_percent"] == 10
     assert merge_report(None, {"mc_percent": 3}) == {"mc_percent": 3}
+
+
+#: A loaded RFID tray in the H2C's whole-report shape (`lan-report-h2c-idle.json`), with
+#: the tag of spool #39 (#6897).
+TAG_UID = "0E9E689F00000100"
+TRAY_UUID = "3F7981AB88A54374ADDC4B46DFF3ED7E"
+ZERO_UID = "0000000000000000"
+ZERO_UUID = "00000000000000000000000000000000"
+
+
+def _tray(**fields: Any) -> dict[str, Any]:
+    return {
+        "id": "0",
+        "state": 11,
+        "tray_type": "PLA",
+        "tray_color": "9D432CFF",
+        "tray_info_idx": "GFA00",
+        "tray_id_name": "A00-N0",
+        "remain": 78,
+        "tag_uid": TAG_UID,
+        "tray_uuid": TRAY_UUID,
+        **fields,
+    }
+
+
+def _report(*trays: dict[str, Any], bits: str = "1", **unit: Any) -> dict[str, Any]:
+    return {
+        "gcode_state": "IDLE",
+        "ams": {
+            "ams": [{"id": "0", "humidity_raw": "29", "tray": list(trays), **unit}],
+            "tray_exist_bits": bits,
+        },
+    }
+
+
+def _tray_of(report: dict[str, Any], unit: int = 0, tray: int = 0) -> dict[str, Any]:
+    found: dict[str, Any] = report["ams"]["ams"][unit]["tray"][tray]
+    return found
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [(ZERO_UID, ZERO_UUID), (None, None), ("", "")],
+    ids=["zeroed", "absent", "empty"],
+)
+def test_a_slot_configure_keeps_the_trays_tag(tag: tuple[str | None, str | None]) -> None:
+    """#6897: after Bambuddy's ``ams_filament_setting`` on an RFID tray the report shows
+    the tray configured (a custom preset, ``remain`` -1, no ``tray_id_name``, as the
+    configured trays of `lan-report-h2c-idle.json`) and its tag zeroed or gone. The spool
+    is the same, so the tag is kept while the tray stays filled with the same material."""
+    before = merge_report(None, _report(_tray()))
+    after = _tray(tray_info_idx="OFDSrzZ8", tray_id_name="", remain=-1)
+    for key, value in zip(("tag_uid", "tray_uuid"), tag, strict=True):
+        if value is None:
+            del after[key]
+        else:
+            after[key] = value
+    merged = _tray_of(merge_report(before, _report(after)))
+    assert (merged["tag_uid"], merged["tray_uuid"]) == (TAG_UID, TRAY_UUID)
+    assert (merged["tray_info_idx"], merged["remain"], merged["tray_id_name"]) == (
+        "OFDSrzZ8",
+        -1,
+        "",
+    )
+
+
+def test_a_new_tag_replaces_the_old_one() -> None:
+    before = merge_report(None, _report(_tray()))
+    other = ("1122334455667788", "AABBCCDDEEFF00112233445566778899")
+    merged = merge_report(before, _report(_tray(tag_uid=other[0], tray_uuid=other[1])))
+    assert (_tray_of(merged)["tag_uid"], _tray_of(merged)["tray_uuid"]) == other
+
+
+@pytest.mark.parametrize("material", ["PETG", "PLA-CF"])
+def test_an_untagged_tray_of_another_material_drops_the_tag(material: str) -> None:
+    """Another material with no tag is another spool, so the old tag goes."""
+    before = merge_report(None, _report(_tray()))
+    zeroed = merge_report(
+        before, _report(_tray(tray_type=material, tag_uid=ZERO_UID, tray_uuid=ZERO_UUID))
+    )
+    assert (_tray_of(zeroed)["tag_uid"], _tray_of(zeroed)["tray_uuid"]) == (ZERO_UID, ZERO_UUID)
+    absent = _tray(tray_type=material)
+    del absent["tag_uid"], absent["tray_uuid"]
+    dropped = _tray_of(merge_report(before, _report(absent)))
+    assert "tag_uid" not in dropped and "tray_uuid" not in dropped
+
+
+@pytest.mark.parametrize(
+    "bare",
+    [{"id": "0", "state": 10}, {"id": "0"}, {"id": "0", "state": 11, "tray_type": ""}],
+    ids=["pulled", "id-only", "emptied"],
+)
+def test_an_emptied_tray_keeps_nothing_of_the_old_spool(bare: dict[str, Any]) -> None:
+    """The H2C sends a pulled spool's tray as ``{id, state}`` (`lan-tray-reinsert-h2c.json`
+    at 9.8 s): a tray with no material is taken as sent, so no material, colour or tag
+    survives it."""
+    before = merge_report(None, _report(_tray()))
+    merged = merge_report(before, _report(bare, bits="0"))
+    assert _tray_of(merged) == bare
+    assert merged["ams"]["tray_exist_bits"] == "0"
+    # And a tray filled again after it keeps nothing of the spool before the pull.
+    again = _tray(tag_uid=ZERO_UID, tray_uuid=ZERO_UUID)
+    refilled = _tray_of(merge_report(merged, _report(again)))
+    assert (refilled["tag_uid"], refilled["tray_uuid"]) == (ZERO_UID, ZERO_UUID)
+
+
+def test_a_partial_tray_list_keeps_the_trays_and_fields_it_leaves_out() -> None:
+    before = merge_report(None, _report(_tray(), _tray(id="1", tag_uid="1", tray_uuid="2")))
+    merged = merge_report(before, {"ams": {"ams": [{"id": "0", "tray": [_tray(remain=50)]}]}})
+    trays = merged["ams"]["ams"][0]["tray"]
+    assert [(t["id"], t["remain"], t["tag_uid"]) for t in trays] == [
+        ("0", 50, TAG_UID),
+        ("1", 78, "1"),
+    ]
+    assert merged["ams"]["tray_exist_bits"] == "1"
+    assert merged["ams"]["ams"][0]["humidity_raw"] == "29"
+
+
+def test_an_ams_block_without_units_keeps_them() -> None:
+    before = merge_report(None, _report(_tray()))
+    merged = merge_report(before, {"ams": {"tray_now": "0"}})
+    assert _tray_of(merged)["tag_uid"] == TAG_UID
+    assert merged["ams"]["tray_now"] == "0"
+
+
+def test_an_ams_ht_unit_merges_by_id_and_the_holders_are_replaced() -> None:
+    """An AMS-HT (``ams_id`` 128+) is merged as any unit; the external holders
+    (``vt_tray``, ``vir_slot``) are top-level keys, taken as sent."""
+    ht = {"id": "128", "tray": [_tray(tray_type="PETG")]}
+    holder = {"id": "254", "tray_type": "PLA", "tag_uid": ZERO_UID}
+    before = merge_report(None, {"ams": {"ams": [ht]}, "vt_tray": holder, "vir_slot": [holder]})
+    configured = _tray(tray_type="PETG", tag_uid=ZERO_UID, tray_uuid=ZERO_UUID, remain=-1)
+    empty = {"id": "254", "tray_type": "", "tray_color": "00000000"}
+    merged = merge_report(
+        before,
+        {
+            "ams": {"ams": [{"id": "128", "tray": [configured]}]},
+            "vt_tray": empty,
+            "vir_slot": [empty],
+        },
+    )
+    assert _tray_of(merged)["tag_uid"] == TAG_UID and _tray_of(merged)["remain"] == -1
+    assert merged["vt_tray"] == empty and merged["vir_slot"] == [empty]
+    pulled = merge_report(
+        merged, {"ams": {"ams": [{"id": "128", "tray": [{"id": "0", "state": 9}]}]}}
+    )
+    assert _tray_of(pulled) == {"id": "0", "state": 9}
+
+
+def test_merge_report_leaves_previous_alone() -> None:
+    before = merge_report(None, _report(_tray()))
+    snapshot = copy.deepcopy(before)
+    merged = merge_report(before, _report(_tray(remain=10, tag_uid=ZERO_UID), humidity_raw="40"))
+    _tray_of(merged)["remain"] = 1
+    merge_report(before, _report({"id": "0", "state": 10}))
+    assert before == snapshot
+
+
+REINSERT = Path(__file__).parent / "fixtures" / "lan-tray-reinsert-h2c.json"
+IDLE = Path(__file__).parent / "fixtures" / "lan-report-h2c-idle.json"
+
+
+def test_the_recorded_pull_and_push_back_through_the_merge() -> None:
+    """`lan-tray-reinsert-h2c.json` (AMS 1 slot 1 pulled and pushed back on the live H2C),
+    each step a whole report over the recorded idle one: the tray is bare from the pull
+    until the RFID read, and has its tag back after it."""
+    idle = json.loads(IDLE.read_text(encoding="utf-8"))["print"]
+    merged = merge_report(None, idle)
+    seen: list[tuple[str | None, str | None]] = []
+    for step in json.loads(REINSERT.read_text(encoding="utf-8"))["steps"]:
+        delta = copy.deepcopy(idle)
+        delta["ams"]["tray_exist_bits"] = step["tray_exist_bits"]
+        delta["ams"]["ams"][1]["tray"][1] = step["ams_1_tray_1"]
+        merged = merge_report(merged, delta)
+        tray = _tray_of(merged, 1, 1)
+        seen.append((tray.get("tray_type"), tray.get("tag_uid")))
+    assert seen[0] == ("PLA", "REDACTED")
+    assert seen[1:5] == [(None, None)] * 4
+    assert seen[-1] == ("PLA", "REDACTED")
 
 
 @dataclass

@@ -638,6 +638,29 @@ def _reset_counts(conn: Conn) -> LinksResetCounts:
     return LinksResetCounts(**counts)
 
 
+def _proof(
+    links: Mapping[int, datetime | None], rows: Sequence[BbSpool], bad: Sequence[int | None]
+) -> tuple[bool, bool]:
+    """``(same, changed)`` for `same_bambuddy` and `changed_since_pull`."""
+    if not links or bad:
+        return False, False
+    held = {row.id: row for row in rows}
+    exact = False
+    timed = 0
+    for bb_id, seen in links.items():
+        row = held.get(bb_id)
+        if row is None:
+            return False, False
+        if seen is None or row.updated_at is None:
+            continue
+        if row.updated_at < seen:
+            return False, False
+        timed += 1
+        exact = exact or row.updated_at == seen
+    enough = timed * 2 >= len(links)
+    return exact and enough, enough and not exact
+
+
 def same_bambuddy(
     links: Mapping[int, datetime | None], rows: Sequence[BbSpool], bad: Sequence[int | None]
 ) -> bool:
@@ -650,31 +673,34 @@ def same_bambuddy(
     only checked to be there, so at least half the links must have a time on both sides
     (Decision 199): a few exact matches among many unchecked links prove too little. A
     listing with a row that did not parse, or no spool link at all, proves nothing."""
-    if not links or bad:
-        return False
-    held = {row.id: row for row in rows}
-    exact = False
-    timed = 0
-    for bb_id, seen in links.items():
-        row = held.get(bb_id)
-        if row is None:
-            return False
-        if seen is None or row.updated_at is None:
-            continue
-        if row.updated_at < seen:
-            return False
-        timed += 1
-        exact = exact or row.updated_at == seen
-    return exact and timed * 2 >= len(links)
+    return _proof(links, rows, bad)[0]
 
 
-def _proven_same(conn: Conn, listing: tuple[Sequence[BbSpool], Sequence[int | None]]) -> bool:
-    """`same_bambuddy` for the spool links as they stand."""
+def changed_since_pull(
+    links: Mapping[int, datetime | None], rows: Sequence[BbSpool], bad: Sequence[int | None]
+) -> bool:
+    """Why `same_bambuddy` is false although nothing contradicts it: Bambuddy holds every
+    linked spool, none older than its link, at least half the links are timed on both
+    sides, but not one is exactly as ScadBuddy last saw it, so every timed linked spool
+    was edited in Bambuddy since the last pull and nothing ties this Bambuddy to the
+    links. The reset offers only the delete then (#6845 review)."""
+    return _proof(links, rows, bad)[1]
+
+
+def _proof_of(
+    conn: Conn, listing: tuple[Sequence[BbSpool], Sequence[int | None]]
+) -> tuple[bool, bool]:
+    """`same_bambuddy` and `changed_since_pull` for the spool links as they stand."""
     links = {
         row["bb_spool_id"]: row["bb_updated_at"]
         for row in conn.execute("SELECT bb_spool_id, bb_updated_at FROM filament_bb_links")
     }
-    return same_bambuddy(links, *listing)
+    return _proof(links, *listing)
+
+
+def _proven_same(conn: Conn, listing: tuple[Sequence[BbSpool], Sequence[int | None]]) -> bool:
+    """`same_bambuddy` for the spool links as they stand."""
+    return _proof_of(conn, listing)[0]
 
 
 #: What `parse_rows` makes of the configured Bambuddy's spools: the rows, and the ids of
@@ -693,12 +719,13 @@ def reset_preview(
     with store.spools.transaction() as conn:
         state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
         counts = _reset_counts(conn)
-        same = listing is not None and _proven_same(conn, listing)
+        same, changed = (False, False) if listing is None else _proof_of(conn, listing)
     return LinksResetPreview(
         instance=state["instance"] if state is not None else None,
         configured_instance=configured,
         counts=counts,
         same_bambuddy=same,
+        changed_since_pull=changed,
         bambuddy_unreadable=unreadable,
     )
 
@@ -746,7 +773,12 @@ def reset_links(
                 "the Bambuddy links were kept: the new URL reaches the same Bambuddy",
                 extra={"instance": instance, "configured": configured},
             )
-            return LinksResetDone(instance=instance, kept=True, deleted=LinksResetCounts())
+            return LinksResetDone(
+                instance=instance,
+                kept=True,
+                configured_instance=configured,
+                deleted=LinksResetCounts(),
+            )
         counts = _reset_counts(conn)
         for table in (
             "filament_bb_links",

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
+import { linkingTools, type LinkKind } from './filamentLinks.js'
 import {
   catalogNames,
   matchesSearch,
@@ -123,7 +124,7 @@ const csvRows = z
   .max(5000)
   .describe('One object per CSV row, column name to cell text')
 
-export const filamentTools: Tool[] = [
+const tools: Tool[] = [
   defineTool({
     name: 'filament_catalog_list',
     label: 'List a filament catalog',
@@ -1233,7 +1234,10 @@ export const filamentTools: Tool[] = [
       "`expect_kept: true`: it reads the configured Bambuddy's spools, and when that Bambuddy holds every linked " +
       'spool as ScadBuddy last saw it (the same Bambuddy at a new address), nothing is deleted: every link now ' +
       'belongs to it, and the answer has `kept: true` and zero counts. When it cannot prove that (Bambuddy could ' +
-      'not be read, or it is another Bambuddy), it answers 409 `proof_changed` and deletes nothing. Only then, ' +
+      'not be read, or it is another Bambuddy, or every linked spool ScadBuddy could compare (a time on both sides) was edited in Bambuddy since the last pull so ' +
+      'none matches what ScadBuddy saw and the proof has nothing to stand on), it answers 409 `proof_changed` and ' +
+      'deletes nothing; tell the user which case it is if you know (the dry run `GET /filament/sync/reset-links` ' +
+      'has `changed_since_pull`). Only then, ' +
       'and only after the user agreed to the delete below, call it again with `expect_kept: false` (the default), ' +
       'which reads no Bambuddy and deletes, in one transaction, every spool link, the ' +
       'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +
@@ -1731,3 +1735,23 @@ export const filamentTools: Tool[] = [
       ),
   }),
 ]
+
+const catalogRow = (args: Record<string, unknown>): LinkKind => `catalog:${String(args.kind)}`
+
+/** #6869: each answer's entities carry their `ui_path` (`filamentLinks.ts`); these tools answer one kind of entity, or a list of it. */
+export const filamentTools: Tool[] = linkingTools(tools, {
+  filament_catalog_list: catalogRow,
+  filament_catalog_upsert: catalogRow,
+  filament_catalog_resolve: catalogRow,
+  filament_catalog_set_aliases: catalogRow,
+  filament_type_list: 'type',
+  filament_type_get: 'type',
+  filament_type_upsert: 'type',
+  filament_spool_list: 'spool',
+  filament_spool_get: 'spool',
+  filament_spool_upsert: 'spool',
+  filament_spool_archive: 'spool',
+  filament_spool_move: 'spool',
+  filament_location_list: 'location',
+  filament_location_upsert: 'location',
+})

@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { api } from '../../../api/client'
-import { getSyncStatus, listSyncPasses } from '../../../api/filament'
+import { getResetPreview, getSyncStatus, listSyncPasses, resetSyncLinks } from '../../../api/filament'
 import { describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
 import { linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
@@ -125,7 +125,7 @@ describe('Filament (#6262)', () => {
     expect(within(region('Filament')).getByText(/No pass runs: no data type but tags is set to send to Bambuddy/)).toBeInTheDocument()
   })
 
-  it('names an item that is gone by its id', async () => {
+  it('names an item that is gone by its id, as deleted and with no link (#6869)', async () => {
     const gone = '0badc0de-0000-4000-8000-000000000001'
     server.use(
       http.get('*/api/v1/filament/sync/status', () =>
@@ -145,7 +145,30 @@ describe('Filament (#6262)', () => {
     renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const failed = await within(region('Filament')).findByRole('list', { name: 'Items not synced' })
-    expect(within(failed).getByRole('link', { name: 'Location 0badc0de' })).toBeInTheDocument()
+    expect(within(failed).queryByRole('link')).toBeNull()
+    expect(within(failed).getByRole('listitem')).toHaveTextContent('Location 0badc0de (deleted)')
+  })
+
+  it('links a failed place to the spools in it (#6869)', async () => {
+    server.use(
+      http.get('*/api/v1/filament/sync/status', () =>
+        HttpResponse.json({
+          instance: null,
+          last_pass_at: null,
+          last_pass_started_at: null,
+          last_ok_at: null,
+          last_error: null,
+          counts: {},
+          errors: [{ kind: 'location', sb_id: '0badc0de-0000-4000-8000-000000000002', label: 'Dry box', error: 'internal', attempts: 1, at: '2026-11-15T07:00:00Z' }],
+          directions: DEFAULT_SYNC,
+          skipped: null,
+        }),
+      ),
+    )
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const failed = await within(region('Filament')).findByRole('list', { name: 'Items not synced' })
+    expect(within(failed).getByRole('link', { name: 'Location Dry box' })).toHaveAttribute('href', expect.stringContaining('/filament/spools?place=0badc0de-0000-4000-8000-000000000002'))
   })
 
   /** The sync status reads made so far, counted from msw's request events. */
@@ -426,6 +449,37 @@ describe('Filament (#6262)', () => {
       await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
       await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
       expect((await getSyncStatus()).instance_changed).toBe(false)
+    })
+
+    it('says why there is no keep when every comparable linked spool changed since the last pull (#6845)', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld', { changed: true })
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      expect(dialog).toHaveTextContent(
+        'Every linked spool ScadBuddy could compare (a time on both sides) changed in Bambuddy since the last pull, so ScadBuddy cannot prove this is the same Bambuddy.',
+      )
+      expect(dialog).not.toHaveTextContent('could not be read')
+      expect(within(dialog).queryByRole('button', { name: 'Keep links' })).toBeNull()
+      expect(within(dialog).getByRole('button', { name: 'Reset links' })).toBeInTheDocument()
+    })
+
+    it('does not give that reason for a Bambuddy that proves nothing else (#6845)', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld')
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      expect(dialog).not.toHaveTextContent('changed in Bambuddy since the last pull')
+    })
+
+    it('answers a kept reset with the instance the links belong to now (#6845)', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld', { same: true })
+      const preview = await getResetPreview()
+      expect(preview.changed_since_pull).toBe(false)
+      const done = await resetSyncLinks('0ld0ld0ld0ld', true)
+      expect(done.kept).toBe(true)
+      expect(done.configured_instance).toBe(preview.configured_instance)
+      expect(done.configured_instance).not.toBeNull()
     })
 
     it('keeps everything when the person cancels', async () => {

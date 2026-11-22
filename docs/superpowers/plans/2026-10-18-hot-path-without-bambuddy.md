@@ -59,6 +59,99 @@ The H2C's hotend rack is chosen per filament group, and the sliced file does not
 
 So Task 8 measures first, with the user at the printer, then the LAN path sends `nozzle_mapping` from ScadBuddy's own rack pick (`rack_chooser`, `print_run.py:578-670` at `7613580bf`). No refusal ships. **Decide then:** only if the measurement finds the printer cannot be told the mapping over LAN does the plan choose a fallback (refuse with a reason, let the firmware pick as Bambuddy does when it cannot resolve one, `bambu_mqtt.py` `resolve_rack_nozzle_mapping` docstring, or hand the run to Bambuddy); that choice goes to the user with the measurement.
 
+### D8 to D21. A busy printer queues the print (#6871)
+
+Recorded 2026-11-21 for #6871. The run that started it: workflow `print-1e3d8e87…`, run
+`e58d226b`, 15:04 UTC. Its `lan_upload` succeeded, `lan_print` failed `3DP-31B-598 refused the
+print: ERROR STATE.`, and the dialog said the print "may still have been queued". The history
+was read with `scadbuddy-run-forensics` (`print_runs.py show`). It is now the replay fixture
+`print_run_histories/lan_refused_busy.json`.
+
+8. R-6871-1: The printer refuses a `project_file` with `ERROR STATE` while it holds a job:
+   `RUNNING` was measured; `PREPARE`, `SLICING` and `PAUSE` are counted the same
+   (`lan_models.BUSY_STATES`). `FINISH` and `IDLE` take a start. `FAILED` after a stop refuses
+   ScadBuddy's zero-id start (the `h2c-print-from-scadbuddy` skill, section 4), but waiting does
+   not change that state, so `FAILED` is not busy. Why: at 15:04:44 UTC Bambuddy archive 320 (a
+   Bambuddy queue print, started 14:29:33 UTC) was `RUNNING`. Bambuddy's status for printer 1
+   held HMS `0500_4004`, "Device is busy and cannot start new task" (`GET /printers/1/status`,
+   read 2026-11-21). The fake printer now refuses in `BUSY_STATES` too, and
+   `test_a_start_while_a_print_runs_is_refused_error_state` checks it.
+9. R-6871-2: The queue is ScadBuddy's own: the run's `PrintLanSequence` (#4541), not Bambuddy's
+   queue. Why: the native path already has this queue. It holds the later copies of a run,
+   waits with `lan_wait` and holds for a cleared plate (`plate_cleared`). It adds no workflow
+   type, so the `bambuddy` queue needs no Recreate roll. Bambuddy's queue cannot be reached for
+   a printer the registry links over the LAN (the skill's fixed facts).
+10. R-6871-3: The run reads the printer before its first upload (`lan_check`, an MQTT probe, as
+    `lan_print` reads it). It reads it before `print_start_enqueue`, so a check that fails has
+    queued nothing. A printer that cannot be read counts as not busy, and `lan_print` decides
+    as before. Why: ruling 2, and a check must never add a new way to fail a print that would
+    have started.
+11. R-6871-4: A queued run starts only after someone says the plate is clear, whatever
+    `lan_require_plate_clear` says. Before it uploads, it reads the printer again. A print that
+    started meanwhile is waited out, and that print needs its own clear. Why: the run waited
+    for a print, so the bed holds that print. The safer choice is to never start onto a full
+    bed and never send twice.
+12. R-6871-5: A printer that holds an ended print (`FINISH`, `FAILED`) is busy only while
+    `lan_require_plate_clear` is on. Why: with that setting off, the person chose not to be
+    asked, and today's run starts on such a printer. Ruling 1 ties the hold to a plate "that
+    needs a plate clear". This hold (`lan_check` with `plate_clear`, `ENDED_STATES`) covers
+    `FAILED` too, which decision 8 does not count as busy: the bed still holds the failed
+    print. After someone says the plate is clear, the re-check (decision 11) reads with
+    `plate_clear=False`, so a `FAILED` printer then lets the start through.
+13. R-6871-6: A queued run is recorded `succeeded`. Its result has every print in
+    `lan_waiting`, nothing in `lan`, and `lan_queued`: the state read, the job it waits for, and
+    its place. The place is 1 plus the printer's older runs that still have prints to start,
+    read when the run is queued (`PrintRunStore.queue_place`, CRUD
+    `GET …/runs/{id}/queue-place`). The dialog links to the queue on the Prints page
+    (`/prints`, the card's `LanRunControls`). Why: a new run status would reach every client,
+    the agent and the flows. A succeeded run keeps its repeat window, so a request sent again
+    does not print twice.
+14. R-6871-7: A start that started nothing for sure is a definite refusal. That is the
+    printer's own refusal of the first attempt (`LAN_REFUSED`), or a failed first upload. The
+    run records it with `unqueued`, so `may_have_queued` is false, and the text ends "Nothing
+    was sent to print, so it is safe to print again." A lost answer, or a refusal after an
+    unsure attempt, keeps `may_have_queued`, and only these outcomes show "may still have been
+    queued". Why: ruling 4. Only the input of `print_fail` changes, so a history replays as
+    before.
+15. R-6871-8: A start refused after a clean check (a print that started between the check and
+    the start) is not queued again. It fails with the printer's reason. Why: ruling 2 says not
+    to learn about a busy printer from a refusal. A refusal is definite, so printing again is
+    safe.
+16. R-6871-9: "Queue when the printer is busy" is the stored setting `lan_queue_when_busy`. It
+    is on by default and live, a run keeps the value its plan read, and its toggle is in
+    Settings → Printing. The help text is only in `core/setting_docs.py`. Why: whether a printer
+    is busy is the printer's state, not a model's choice, so it is remembered the way
+    `lan_require_plate_clear` is. Off gives today's behaviour, now with the truthful refusal.
+17. R-6871-10: The workflow change goes behind `workflow.patched("print-lan-queue-when-busy")`
+    (`BUSY_PATCH`). Only a plan with `queue_when_busy` asks for it, and a sequence asks only
+    with its new `queued` input. A run of one print planned that way takes `_print_lan`. The
+    new activity `lan_check` is registered beside `lan_print` on the print worker. During a
+    roll, an old pod that receives it fails it as not registered. `READ_RETRY` then retries it,
+    and a run whose attempts all fail ends before anything is sent. Why: the prod history
+    `lan_refused_busy` and the new `lan_queued_busy` (both workflows) replay in
+    `tests/test_print_replay.py`. No new workflow type is added.
+18. R-6871-11: Only the printer's own refusal of a `project_file` is `LAN_REFUSED`. A start
+    that `lan_print` stops before it sends one (the printer cannot be reached, a certificate
+    mismatch, a report that shows the print finished) stays `FAILED`, with
+    `may_have_queued` as before. Why: those early exits cannot always prove that nothing
+    was sent, so they must not say "Nothing was sent to print" (review of #6882).
+19. R-6871-12: A queued run's first start fills `slice_job_id` and
+    `sliced_library_file_id` on the run's result, as `finish_run` fills them for a run that
+    starts at once. `rack_picks` stays empty, as it is on every LAN run: a LAN start keeps
+    its picks by run and `subtask_name` (`rack_nozzle_*`). Why: a reader of the run (the
+    dialog, the agent, an order) finds the sliced file the same way on both paths (review
+    of #6882).
+20. R-6871-13: The print a queued run waits for may have no name, when the report names
+    no `subtask_name` (`busy_with` then gives the job the name `""`). Any end then counts:
+    `lan_ended` takes any report after the check that is not in a busy state. Why: no
+    report can name that print, so the wait would otherwise run to `LAN_WAIT_BOUND`. The
+    plate-clear gate and the re-check (decision 11) still guard the start (review of
+    #6882).
+21. R-6871-14: `GET …/runs/{run_id}/queue-place` takes only a run id as the API makes
+    them (`RunIdPath`, 32 lowercase hex characters) and answers 422 for any other. Why:
+    the id goes into a query, and a NUL byte in it failed with a 500 (review of #6882).
+
+
 ## Acceptance criteria and the layer each lives in
 
 | # | Criterion | Layer |

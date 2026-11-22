@@ -23,6 +23,7 @@ CLAUDE.md of its own, which Claude Code reads when it works on files there:
 - `models/CLAUDE.md`: the template checks (`verify.sh`, the `models` job) and the bundled models.
 - `deploy/CLAUDE.md`: the Grafana dashboards and the browser pods' security profiles (`deploy/security/`).
 - `plugins/CLAUDE.md`: ScadBuddy's Claude plugin.
+- `docs/architecture/` (and `docs/features/`): the system map: processes, data, Temporal workflows, frontend, agent, CI and deploy, one page per feature, and where the code has drifted from the specs.
 
 ## Database access (#5295)
 
@@ -47,8 +48,8 @@ service credential (PR #5211). The owner decided this on 2026-11-05.
   item (#5298; how to read prod: `deploy/CLAUDE.md` "Prod checks").
 
 Today's code still breaks the rule: four processes hold a Postgres secret (the API, the
-agent sidecar, the agent worker and agent-durable), and the agent and the API share
-tables through grants. The render, print and projects workers hold none: #5298 is done,
+agent sidecar, the agent worker and agent-durable), and the agent connects as the owner
+role and shares the API's tables. The render, print and projects workers hold none: #5298 is done,
 and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` role and no
 database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
 #3566 and #3578). The API still revokes those roles at every start where they exist; the

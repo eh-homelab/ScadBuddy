@@ -70,12 +70,10 @@ from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
 from scadbuddy.auth.authorship_rule import AuthorshipRule
-from scadbuddy.auth.caller_grants import grant_callers
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
-from scadbuddy.auth.revoke import revoke_retired
-from scadbuddy.auth.service_credentials import grant_caller_views
+from scadbuddy.auth.revoke import RetiredState, retired_state, revoke_retired
 from scadbuddy.auth.start_check import check_enforce
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
@@ -978,19 +976,22 @@ async def _sweep_print_library_logged(state: AppState) -> None:
 
 async def _sweep_native_copies_logged(state: AppState) -> None:
     """#4337: a native run's per-print copies and slices nothing keeps, to the trash;
-    nothing on ``bambuddy``."""
+    no copies on ``bambuddy``. The LAN runs whose sequence is gone are recorded stopped
+    on every backend first (#6871)."""
     try:
-        native = await state.components.get(PRINT_LIBRARY).serving_native()
-        if native is None:
-            return
-        # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`). Without
-        # Temporal every LAN run with prints still to start is kept as in use.
+        # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`), and its
+        # controls no longer stand first on the Prints page (#6871): checked on every
+        # backend, since the strip only reads. Without Temporal every LAN run with prints
+        # still to start is kept as in use.
         try:
             await end_gone_sequences(state.print_runs)
         except Exception:
             logger.warning(
                 "could not check the LAN runs' sequences; their files are kept", exc_info=True
             )
+        native = await state.components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            return
         await sweep_print_copies(
             native,
             state.uploads,
@@ -1245,26 +1246,35 @@ def _migrate_agent_at_start(state: AppState) -> None:
 
 
 def _grant_and_rotate_at_start(state: AppState) -> None:
-    """At start, after the migrations: each caller's role its own view, a retired
-    caller's role nothing (#5298 Tasks 11, 22 and 35), a table dropped from a caller's list
-    taken back (`auth/revoke.py` `RETIRED_GRANTS`), and the credentials due. A failure is
+    """At start, after the migrations: a retired caller's role nothing (#5298 Tasks 11, 22
+    and 35, #5299 step 12), what each retired role still has logged (`auth/revoke.py`
+    `retired_state`, the retirement order's checks), and the credentials due. A failure is
     logged, never fatal."""
     try:
         with state.settings_store.pool.connection() as conn:
-            granted = grant_caller_views(conn)
-            tables = grant_callers(conn)
             revoked: list[str] = []
+            states: list[RetiredState] = []
             try:
                 revoked = revoke_retired(conn)
             except Exception:
                 # A revoke that fails must not cost the start its credentials' rotation.
                 logger.exception("could not revoke the retired callers' roles")
-        if granted:
-            logger.info("granted the callers' credential views", extra={"roles": granted})
-        if tables:
-            logger.info("granted the callers' tables", extra={"roles": tables})
+            try:
+                states = retired_state(conn)
+            except Exception:
+                logger.exception("could not read what the retired callers' roles still have")
         if revoked:
             logger.info("revoked the retired callers' roles", extra={"roles": revoked})
+        for left in states:
+            logger.info(
+                "a retired caller's role still exists",
+                extra={
+                    "role": left.role,
+                    "granted_relations": left.granted,
+                    "owned_relations": left.owned,
+                    "sessions": left.sessions,
+                },
+            )
         _rotate_service_credentials(state)
     except Exception:
         logger.exception("could not issue the service credentials")
@@ -1768,6 +1778,8 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
         uses=PoolPrintUses(state.settings_store.pool),
+        # A run queued on a busy printer says its place (#6871).
+        runs=state.print_runs.store,
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities: list[Callable[..., Any]] = [

@@ -1365,7 +1365,12 @@ def test_a_template_shows_its_pipelines_inputs_version(
     _declare_pipeline(paths, model, {"module": "pipeline/p.py", "api": 1}, "INPUTS_VERSION = 2\n")
     body = client.get(f"/api/v1/models/{model}").json()
     assert body["inputs_version"] == 2
-    assert body["pipeline"] == {"module": "pipeline/p.py", "api": 1}
+    assert body["pipeline"] == {
+        "module": "pipeline/p.py",
+        "api": 1,
+        "inputs": None,
+        "sets_params": [],
+    }
     assert body["pipeline_error"] is None
 
 
