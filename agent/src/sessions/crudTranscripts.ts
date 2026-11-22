@@ -5,8 +5,8 @@ import { sessionPath } from './rows.js'
 import type { AppendFence, TranscriptHead, TranscriptRows } from './store.js'
 
 // A session's transcript over the API's CRUD routes (#5299 step 9, part b; backend
-// api/crud_agent_transcripts.py, area `transcripts`): `PgTranscriptRows` method for method, each
-// one route and one transaction. The API seals and opens every entry with the session's data key
+// api/crud_agent_transcripts.py, area `transcripts`): each `TranscriptRows` method is one route
+// and one transaction. The API seals and opens every entry with the session's data key
 // (#5299 D5): an entry travels as its JSON text, so what comes back is deep-equal to what went in
 // (the SDK's one invariant, store.ts). A session id goes into a path only as `sessionPath` makes
 // it; a subpath and a project key travel in the query or the body.
@@ -53,15 +53,17 @@ export class CrudTranscriptRows implements TranscriptRows {
     this.#fetch = options.fetch ?? globalThis.fetch
   }
 
-  async #call<T>(step: string, path: string, init: { body?: unknown; timeoutMs?: number } = {}): Promise<T> {
+  /** A GET is tried again when the connection drops (crudRead.ts `crudFetch`), and a POST only when `idempotent`: an append never is. */
+  async #call<T>(step: string, path: string, init: { body?: unknown; timeoutMs?: number; idempotent?: boolean } = {}): Promise<T> {
     try {
       return await crudRead<T>(this.#fetch, this.#base, step, path, {
         // Well-formed: the API refuses a lone surrogate, which postgres.js wrote as U+FFFD (crudRead.ts).
         ...(init.body === undefined ? {} : { method: 'POST' as const, body: wellFormed(init.body) }),
         ...(init.timeoutMs === undefined ? {} : { timeoutMs: init.timeoutMs }),
+        ...(init.idempotent ? { idempotent: true } : {}),
       })
     } catch (error) {
-      // As the store's key lookup answers a forgotten session over SQL.
+      // A forgotten session: as a payload key's lookup answers one.
       if (forgotten(error)) throw new SubjectForgotten(`session transcript: ${(error as CrudReadError).detail || 'the session was forgotten'}`)
       throw error
     }
@@ -161,7 +163,8 @@ export class CrudTranscriptRows implements TranscriptRows {
     // More than the route takes: the process is spawned again rather than its tail read in part.
     if (own.length > OWN_MAX) return true
     const path = this.#path(sessionId, '/transcript/moved')
-    return (await this.#call<{ moved: boolean }>(`the transcript tail of session ${sessionId}`, path, { body: { since, own } })).moved
+    // A read the route takes a body for: sent again when the connection drops.
+    return (await this.#call<{ moved: boolean }>(`the transcript tail of session ${sessionId}`, path, { body: { since, own }, idempotent: true })).moved
   }
 
   async userLanded(sessionId: string, mark: number): Promise<boolean> {

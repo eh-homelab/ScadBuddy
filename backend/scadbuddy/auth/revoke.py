@@ -28,7 +28,9 @@ from psycopg.rows import tuple_row
 
 #: `pg_advisory_xact_lock` key for `revoke_role` ("SCADRNDR" in ASCII, from when the render
 #: worker's role was the only one), which an older API's `grant_role` took too, so a revoke
-#: never interleaves with an older replica's grants during a roll.
+#: never interleaves with an older replica's `grant_role` grants during a roll. An older
+#: `grant_caller_views` took no lock: an old replica that starts mid-roll may grant its views
+#: again, and the next start revokes them.
 GRANT_LOCK = 0x5343_4144_524E_4452
 
 #: The roles the API takes back at every start (`revoke_retired`): the projects worker's,

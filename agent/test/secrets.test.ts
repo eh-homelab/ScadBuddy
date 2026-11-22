@@ -1,13 +1,9 @@
 import { createCipheriv, randomBytes } from 'node:crypto'
-import { mkdtemp, writeFile } from 'node:fs/promises'
-import os from 'node:os'
-import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   type Envelope,
   kekFromBase64,
   last4,
-  loadKek,
   openSecret,
   redact,
   rewrap,
@@ -157,34 +153,6 @@ describe('the key file', () => {
     ['nothing', ''],
   ])('refuses %s', (_name, text) => {
     expect(() => kekFromBase64(text)).toThrow(SecretKeyError)
-  })
-
-  it('reports why it is unusable without throwing', async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'kek-'))
-    expect(await loadKek(undefined)).toEqual({ ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' })
-
-    const missing = await loadKek(path.join(dir, 'missing.key'))
-    expect(missing.ok).toBe(false)
-    // The public reason names the variable only; the path and errno are for the log.
-    expect(!missing.ok && missing.reason).toBe('SCADBUDDY_SECRET_KEY_FILE cannot be read')
-    expect(!missing.ok && missing.detail).toMatch(/missing\.key cannot be read \(ENOENT\)/)
-
-    const bad = path.join(dir, 'bad.key')
-    await writeFile(bad, 'not a key')
-    const badStatus = await loadKek(bad)
-    expect(!badStatus.ok && badStatus.reason).toBe(
-      'SCADBUDDY_SECRET_KEY_FILE does not hold a valid key (32 random bytes, base64)',
-    )
-    expect(!badStatus.ok && badStatus.detail).toMatch(/bad\.key: .*not base64/)
-    expect(await loadKek(undefined, 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE')).toEqual({
-      ok: false,
-      reason: 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE is not set',
-    })
-
-    const good = path.join(dir, 'good.key')
-    await writeFile(good, randomBytes(32).toString('base64') + '\n')
-    const goodStatus = await loadKek(good)
-    expect(goodStatus.ok).toBe(true)
   })
 })
 

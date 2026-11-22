@@ -756,7 +756,7 @@ Amends §6.1 and Ruling 16, and 10-01 §7.3–7.4 ("the script is the run's inpu
   brings back the file as it was at that commit. Ruling 16 still holds for state: the
   schema is source, versioned with the script, while the approval timeout stays in
   Postgres.
-- **A closed subset** (`flows/inputs.py`): the top level is `type: object` with
+- **A closed subset** (`flows/inputs.py`; its schema check moved to `core/input_schema.py`, #5701): the top level is `type: object` with
   `properties`, `required` and at most `additionalProperties: false` (extra inputs are
   always refused); each input is a `string`, `integer`, `number`, `boolean` or an
   `array` of one of those, with `title`, `description`, `default` and its type's own

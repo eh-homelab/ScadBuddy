@@ -4,7 +4,7 @@ import { Worker } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { DurableGate, DurableUnavailable, respondUpdateId, sessionWorkflowId } from '../src/gate/durable.js'
 import { responseHash } from '../src/gate/canonical.js'
 import { durableRequestId } from '../src/gate/ids.js'
@@ -18,6 +18,7 @@ import { services } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, throwawayDatabase } from './support/postgres.js'
 import { agentA, manager, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { SqlSweep } from './support/sql/sweep.js'
 
 // The agent service's side of a durable session's gate (spec 2026-10-01 §6.6) against a
 // Temporal dev server and a stand-in for DurableSession's handlers
@@ -251,7 +252,7 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
                   ${['browser', 'grant']}, now() - interval '1 hour', now() + interval '1 hour')`
       }
       await env.client.workflow.getHandle(sessionWorkflowId(sessionId)).terminate('test')
-      const sweep = new PendingInputSweep({ sql: db.sql, events: m.events, describe: temporalDescriber(env.client) })
+      const sweep = new PendingInputSweep({ routes: new SqlSweep(db.sql), events: m.events, describe: temporalDescriber(env.client) })
       expect(await sweep.sweep()).toBe(1)
       const left = await db.sql<{ session_id: string }[]>`SELECT session_id FROM ai_pending_input`
       expect(left.map((r) => r.session_id)).toEqual([live.sessionId])

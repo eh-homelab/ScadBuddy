@@ -233,7 +233,7 @@ describe('TemporalTabRelay', () => {
     const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', log: () => {} })
     expect(await relay.forward('tab-1', call, options())).toMatchObject({
       op: 'call',
-      outcome: { ok: false, error: { code: 'no_browser', message: expect.stringMatching(/SCADBUDDY_SECRET_KEY_FILE/) } },
+      outcome: { ok: false, error: { code: 'no_browser', message: expect.stringMatching(/service credential/) } },
     })
     expect(await relay.forward('tab-1', { op: 'status' }, options())).toBeUndefined()
   })

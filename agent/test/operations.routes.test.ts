@@ -44,7 +44,6 @@ function app(commands: Commands | undefined) {
   const deps: AppDeps = {
     database: { ping: async () => true, ready: async () => true },
     backend: async () => true,
-    kek: { ok: false, reason: 'not configured' },
     credentials: new MemoryCredentials(),
     pluginPackages: {} as PackageRepo,
     packageInstaller: { prepare: async () => undefined as never, evict: async () => undefined, readFile: async () => undefined as never, acquire: async () => undefined as never },

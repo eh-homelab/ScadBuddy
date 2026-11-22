@@ -42,12 +42,12 @@ export type { RelayAnswer, RelayRequest } from '../temporal/bridgeCall.js'
 //
 // Sealed, always: the request and the answer (page snapshots, form contents, the
 // editor's text) are the workflow's payloads, and every BridgeCall workflow is a subject
-// of its own, `bridge-<uuid>`, sealed under a key made for it under the KEK
+// of its own, `bridge-<uuid>`, sealed under a data key the API makes for it
 // (temporal/payloadCodec.ts `subjectOf`). The caller deletes that key once it has the
 // answer, so the call's history cannot be read again; `sweepBridgeKeys` deletes the key
 // of a call that was cancelled or whose caller went away. A bridge payload is never stored
 // by reference (only a session's are): each is capped at MAX_BRIDGE_BYTES instead, inline.
-// Without a sealing client (no KEK), no call goes through Temporal.
+// Without a sealing client (no Temporal client), no call goes through Temporal.
 //
 // No owner: there is no row, or the owner's queue has no poller and the activity is not
 // taken within `ackTimeoutMs` (schedule-to-start, never retried), and the call answers
@@ -100,7 +100,7 @@ const TIMEOUT_TYPE_START_TO_CLOSE = 1
 
 /**
  * How often a replica refreshes its tabs' rows (`TabOwnerStore.refresh`): a claim lost while
- * the database was down, or a row a call that missed this replica's queue dropped, is back
+ * the API was down, or a row a call that missed this replica's queue dropped, is back
  * within this. A row naming another replica is never taken back.
  */
 export const OWNER_REFRESH_MS = 30_000
@@ -145,7 +145,7 @@ export type TemporalTabRelayOptions = {
   ackTimeoutMs?: number
   /** `OWNER_REFRESH_MS` when omitted. */
   refreshMs?: number
-  /** The database is migrated (db.ts `ready`): each owner-row write waits for it, and is skipped when it is down. */
+  /** The API's stores are ready: each owner-row write waits for it, and is skipped when they are down. */
   ready?: () => Promise<boolean>
   log?: (message: string) => void
   /** The clock a call's length is read on; `Date.now` when omitted. */
@@ -159,8 +159,8 @@ export type TemporalTabRelayOptions = {
 export type SealingClient = { client: Client; dropKey: (subject: string) => Promise<void> }
 
 const SEALING_NEEDED =
-  'no browser attached: the tab is connected to another agent replica, and reaching it there needs the agent ' +
-  "service's secret key (SCADBUDDY_SECRET_KEY_FILE), which seals the call's contents in Temporal. Ask the operator to mount it."
+  'no browser attached: the tab is connected to another agent replica, and reaching it there needs the payload ' +
+  "codec that seals the call's contents in Temporal, with the data keys the API releases. Ask the operator to check the agent's service credential."
 
 const NO_SEALING: RelayAnswer = { op: 'call', outcome: { ok: false, error: { code: 'no_browser', message: SEALING_NEEDED } } }
 
@@ -219,7 +219,7 @@ export class TemporalTabRelay implements TabRelay {
    * from now on this replica claims its tabs in ai_tab_owners, and claims the ones it already
    * holds. Never before: a claim with nothing polling the queue would send every call there to
    * wait out the ack timeout. Never without a sealing client (`useClient`) either: a replica
-   * with no KEK cannot decode the sealed calls other replicas send it, so each would answer
+   * with no codec cannot decode the sealed calls other replicas send it, so each would answer
    * no_answer (#4949). Its tabs then reach only the calls made on this replica.
    */
   startHosting(): void {
@@ -227,7 +227,7 @@ export class TemporalTabRelay implements TabRelay {
     if (!this.#client) {
       if (!this.#refused) {
         this.#refused = true
-        this.#log('bridge relay: no sealing client (no secret key), so no tab is claimed here; other replicas cannot reach this one\'s tabs')
+        this.#log('bridge relay: no sealing client (no Temporal codec), so no tab is claimed here; other replicas cannot reach this one\'s tabs')
       }
       return
     }
@@ -272,7 +272,7 @@ export class TemporalTabRelay implements TabRelay {
     const ready = this.#ready
     this.#writes = this.#writes
       .then(async () => {
-        if (ready && !(await ready())) throw new Error('the database is not ready; a tab owner row was not written')
+        if (ready && !(await ready())) throw new Error('the API\'s stores are not ready; a tab owner row was not written')
         await write()
       })
       .catch((err: unknown) => this.#failed(err))
@@ -442,7 +442,7 @@ export const HOSTING_POLL_MS = 200
 /**
  * How main.ts starts this replica's tab hosting (#5421): the sealing client first, when there is
  * one, then `startHosting` once `worker` (the host worker on `relay.hostQueue`) polls, asked now
- * and every `pollMs`. In that order, or `startHosting` would refuse as for a replica with no KEK.
+ * and every `pollMs`. In that order, or `startHosting` would refuse as for a replica with no codec.
  * Without `worker` the client is set and no tab is claimed. Returns a stop for the wait.
  */
 export function hostTabs(

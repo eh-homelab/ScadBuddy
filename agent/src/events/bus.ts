@@ -134,7 +134,7 @@ export class Followers {
   }
 }
 
-/** An EventSource fed by hand: tests, and a deployment with no database (it never emits). */
+/** An EventSource fed by hand: tests (it never emits). */
 export class MemoryEventSource implements EventSource {
   readonly #followers = new Followers()
 

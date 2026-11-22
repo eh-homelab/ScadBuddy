@@ -20,10 +20,9 @@ describe('what each role starts', () => {
 })
 
 describe("the worker's HTTP server", () => {
-  function app(ready: string | undefined, database: boolean | null = true) {
+  function app(ready: string | undefined, database = true) {
     return workerHealthApp({
-      ...(database === null ? {} : { database: { ping: () => Promise.resolve(database) } }),
-      kek: { ok: true },
+      database: { ping: () => Promise.resolve(database) },
       workers: () => ({ 'agent-tools': 'ok', 'agent-sessions': 'ok', 'agent-sessions.w-1': 'connecting', 'agent-tools.w-1': 'ok' }),
       ready: () => Promise.resolve(ready),
     })
@@ -36,21 +35,16 @@ describe("the worker's HTTP server", () => {
     },
   )
 
-  it('reports its role, the database, the key and each queue on /healthz, always 200', async () => {
+  it("reports its role, the API's answer for its data and each queue on /healthz, always 200", async () => {
     const res = await app('not yet', false).request('/healthz')
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       status: 'ok',
       role: 'worker',
       database: 'unreachable',
-      secret_key: 'ok',
       temporal: 'connecting',
       queues: { 'agent-tools': 'ok', 'agent-sessions': 'ok', 'agent-sessions.w-1': 'connecting', 'agent-tools.w-1': 'ok' },
     } satisfies WorkerHealth)
-  })
-
-  it('says the database is not configured without one', async () => {
-    expect(((await (await app(undefined, null).request('/healthz')).json()) as WorkerHealth).database).toBe('not configured')
   })
 
   it('is ready on /readyz only once every queue it serves is polled', async () => {

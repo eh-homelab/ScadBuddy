@@ -369,12 +369,32 @@ async def test_one_bad_source_row_does_not_stop_the_rest(
     assert await index.get(f"render:{good.id}") is not None
 
 
+class RecordingPasses:
+    """`SyncPassStore.prune` (#6905): the TTL of each call."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.ttls: list[int | None] = []
+        self.fail = fail
+
+    def prune(self, ttl_days: int | None) -> int:
+        self.ttls.append(ttl_days)
+        if self.fail:
+            raise RuntimeError("boom")
+        return 0
+
+
 class RecordingIndex:
-    def __init__(self, fail_repair: bool = False, fail_notifications: bool = False) -> None:
+    def __init__(
+        self,
+        fail_repair: bool = False,
+        fail_notifications: bool = False,
+        fail_passes: bool = False,
+    ) -> None:
         self.calls: list[tuple[str, float, float | None]] = []
         self.fail_repair = fail_repair
         self.fail_notifications = fail_notifications
         self.notification_prunes = 0
+        self.passes = RecordingPasses(fail_passes)
 
     def prune_notifications(self) -> int:
         """`SensorStore.prune_notifications` (#6646 Decision 49)."""
@@ -395,7 +415,9 @@ class RecordingIndex:
 
 
 def sweep_state(stored: StoredSettings, index: RecordingIndex) -> Any:
-    components = SimpleNamespace(get=lambda key: SimpleNamespace(index=index, sensors=index))
+    components = SimpleNamespace(
+        get=lambda key: SimpleNamespace(index=index, sensors=index, sync_passes=index.passes)
+    )
     return SimpleNamespace(
         settings_store=SimpleNamespace(load=lambda: stored), components=components
     )
@@ -441,6 +463,23 @@ async def test_the_sweep_prunes_the_sensor_notifications_too() -> None:
         await main._sweep_activity_logged(sweep_state(StoredSettings(), failing))
     assert [call[0] for call in failing.calls] == ["repair", "prune"]
     assert failing.notification_prunes == 1
+
+
+async def test_the_sweep_prunes_the_sync_passes_by_the_setting() -> None:
+    """#6905: each run prunes the filament sync's pass rows by the stored
+    ``filament_sync_pass_ttl_days`` it read (``None``: the store's default); a failed one
+    fails the sweep after the others ran."""
+    index = RecordingIndex()
+    await main._sweep_activity_logged(sweep_state(StoredSettings(), index))
+    await main._sweep_activity_logged(
+        sweep_state(StoredSettings(filament_sync_pass_ttl_days=7), index)
+    )
+    assert index.passes.ttls == [None, 7]
+    failing = RecordingIndex(fail_passes=True)
+    with pytest.raises(RuntimeError, match="the activity sweep failed"):
+        await main._sweep_activity_logged(sweep_state(StoredSettings(), failing))
+    assert [call[0] for call in failing.calls] == ["repair", "prune"]
+    assert failing.notification_prunes == 1 and failing.passes.ttls == [None]
 
 
 async def test_the_sweep_prunes_nothing_when_the_settings_cannot_be_read() -> None:

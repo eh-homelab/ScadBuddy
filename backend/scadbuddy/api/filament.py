@@ -35,9 +35,17 @@ from typing import Annotated, Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import AwareDatetime, BaseModel, ValidationError
 
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import SettingsStoreDep, StateDep
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+)
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
 from scadbuddy.bambuddy.client import client_for
@@ -72,11 +80,13 @@ from scadbuddy.filament.bb_sync_models import (
     LinksResetDone,
     LinksResetPreview,
     LinksResetRequest,
+    SyncPassPage,
     SyncRun,
     SyncStatus,
     skip_reason,
 )
 from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.bb_sync_passes import PAGE_MAX, BadPassCursorError
 from scadbuddy.filament.bb_sync_results import (
     Listing,
     ResetRefusedError,
@@ -92,6 +102,7 @@ from scadbuddy.filament.catalog import (
     CatalogRefError,
     CatalogSpec,
 )
+from scadbuddy.filament.colour_catalog import ColourSync, ColourSyncRequest, ColourSyncs
 from scadbuddy.filament.component import Filament, FilamentDep
 from scadbuddy.filament.csv_import import (
     ImportPreview,
@@ -106,6 +117,8 @@ from scadbuddy.filament.locations import (
     LocationExistsError,
     MoveTargetError,
 )
+from scadbuddy.filament.operations import KIND as COLOUR_SYNC_KIND
+from scadbuddy.filament.operations import subject as colour_sync_subject
 from scadbuddy.filament.profile_fetch import (
     PROBLEMS,
     START_TIMEOUT_SECONDS,
@@ -138,9 +151,11 @@ from scadbuddy.filament.spools import (
 )
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
 from scadbuddy.printers.component import PrintersDep
+from scadbuddy.rows.component import ROWS, Rows
 
 #: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
@@ -248,14 +263,21 @@ def _refused(exc: ValueError) -> ApiError:
         "`brands`, `categories`, `effects`, `insert-materials`, `insert-types`, `colours` "
         "or `location-kinds`. In sort order; archived rows only with `include_archived`. "
         "A material, subtype, brand, category or effect has `aliases`, its other names. "
+        "`q` keeps the rows where every word matches some text, in any case: the name, and "
+        "for a colour its manufacturer, `material_name` and `#RRGGBBAA` (#6907). "
         "404 for an unknown kind."
     ),
 )
 async def list_catalog(
-    filament: FilamentDep, kind: str, include_archived: bool = False
+    filament: FilamentDep,
+    kind: str,
+    include_archived: bool = False,
+    q: Annotated[str | None, Query(max_length=200)] = None,
 ) -> list[CatalogRow]:
     _spec(kind)
-    rows = await asyncio.to_thread(filament.catalog.list, kind, include_archived=include_archived)
+    rows = await asyncio.to_thread(
+        filament.catalog.list, kind, include_archived=include_archived, q=q
+    )
     return cast("list[CatalogRow]", rows)
 
 
@@ -373,6 +395,60 @@ async def resolve_catalog_row(
     if row is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no {kind} row is named {name!r}")
     return cast("CatalogRow", row)
+
+
+# -- the colour catalog's syncs (#6907) -------------------------------------------------
+
+
+@router.get(
+    "/colour-syncs",
+    response_model=list[ColourSync],
+    summary="The colour catalog's newest sync of each source",
+    description=(
+        "The newest run of each colour sync (`filamentcolors`, `bambu`): `state` `running` "
+        "(with `pages_read` of `pages_total` and the counts so far), `done`, `unchanged` "
+        "(filamentcolors.xyz had no new swatch since the last run, so no page was read) or "
+        "`failed` (`error` says why; what it wrote stays). A source never run is absent."
+    ),
+)
+async def list_colour_syncs(
+    rows: Annotated[Rows, component_dep(ROWS)],
+) -> list[ColourSync]:
+    return await asyncio.to_thread(ColourSyncs(rows.pool).latest)
+
+
+@router.post(
+    "/colour-syncs",
+    response_model=ColourSync,
+    summary="Fill the colour catalog from filamentcolors.xyz or Bambu's colour codes",
+    description=(
+        "`source` `filamentcolors`: every swatch of https://filamentcolors.xyz/api/swatch/ "
+        "(about 23 pages), unless its `GET /api/version/` is unchanged since the last run "
+        "(`force` reads them anyway). `bambu`: Bambu Studio's colour codes as Bambu Lab's "
+        "colours, alpha as the table gives it (`80` for a translucent one). A colour is "
+        "added, or updated by its maker, name and material; a row a person made or edited "
+        "is left as it is, and no row is deleted. A failed read answers the run `failed` "
+        "with `error`, not an error status. Past the command deadline the answer is 202 "
+        "with the operation to follow; `GET /filament/colour-syncs` shows its progress. "
+        "409 `colour_sync_running` while a run of that source runs."
+    ),
+    responses=OPERATION_RESPONSES,
+)
+async def post_colour_sync(
+    body: ColourSyncRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ColourSync | JSONResponse:
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[COLOUR_SYNC_KIND],
+        subject=colour_sync_subject(body),
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ColourSync)
 
 
 # -- spool types ----------------------------------------------------------------------
@@ -1880,6 +1956,39 @@ async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDe
     )
 
 
+@router.get(
+    "/sync/passes",
+    response_model=SyncPassPage,
+    summary="Bambuddy sync pass history",
+    description=(
+        "The ScadBuddy-to-Bambuddy sync's passes (#6905), newest first by when each ended, "
+        "failed ones too; `GET /filament/sync/status` holds the last one. Each has its `id`, "
+        "the Bambuddy `instance` it served, its `trigger` (`timer`: the interval ran out; "
+        "`change`: a write's nudge; `full`: a full pass asked for, such as Sync now; `more`: "
+        "the pass before it left writes; null when the worker did not say), `started_at` (by "
+        "the worker's clock) and `ended_at` (the server's), the counts `written`, `failed`, "
+        "`deferred`, `conflicts` and `unmapped_k`, `skipped` (`no_bambuddy` or "
+        "`nothing_pushes`), `instance_changed` (the links or the pass's instance were another "
+        "Bambuddy's, so it wrote nothing) and `error` (a label, null when it worked; "
+        "`crud_unavailable:<failure>` or `crud_refused:<status>` when a call to ScadBuddy's "
+        "own API failed, `internal` for any other failure outside Bambuddy). A page holds up "
+        f"to `limit` passes (at most {PAGE_MAX}); `next_cursor` is opaque, and passing it "
+        "back as `cursor` gives the next page with no row lost or repeated. 422 for a cursor "
+        "no page gave. Rows older than the setting `filament_sync_pass_ttl_days` (30 by "
+        "default) are deleted. Reads ScadBuddy only."
+    ),
+)
+async def list_filament_sync_passes(
+    filament: FilamentDep,
+    cursor: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=PAGE_MAX)] = 20,
+) -> SyncPassPage:
+    try:
+        return await asyncio.to_thread(filament.sync_passes.page, cursor=cursor, limit=limit)
+    except BadPassCursorError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+
+
 def _configured(url: str | None) -> str | None:
     """The configured Bambuddy's instance, ``None`` with none configured."""
     return instance_for(url) if url else None
@@ -1926,7 +2035,14 @@ async def _listing(settings: StoredSettings) -> tuple[Listing, bool]:
         "RFID tag, a supplier, location or insert type by its name), so every untagged "
         "spool is made again on the side its direction sends it to. Reads ScadBuddy and "
         "the configured Bambuddy's spools (`GET`). When Bambuddy cannot be read the answer "
-        "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. The "
+        "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. "
+        "`changed_since_pull` is true when `same_bambuddy` is false although the "
+        "configured Bambuddy holds every linked spool and none is older than its link, and "
+        "at least half the links have a time on both sides (Decision 199): every linked "
+        "spool ScadBuddy could compare (a time on both sides) was edited in "
+        "Bambuddy since the last pull, so none matches exactly and ScadBuddy cannot prove "
+        "it is the same Bambuddy; only the delete is "
+        "then offered. The "
         "counts are approximate: they are read without a lock, so a pass that runs "
         "meanwhile can change them. The answer of the `POST` gives the counts it deleted."
     ),

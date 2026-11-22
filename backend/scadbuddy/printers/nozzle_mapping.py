@@ -390,13 +390,15 @@ def choose_nozzles(
     manual_position: int | None,
     usage: Mapping[str, Usage],
     spools: Mapping[int, SpoolOption],
+    chosen: Mapping[int, int] | None = None,
 ) -> NozzleChoice:
     """Rank the printer's rack for the plate's rack groups, as the Bambuddy path does
     (`rack.rank.rank_rack`, the dialog's hand-picked position through ``manual_for``),
     and write the picks as the wire. ``status`` is the printer's LAN report's. The
     "bambuddy" ranking picks nothing itself, so its rack groups are left to the
-    firmware: no field, as before Task 8."""
-    groups = rack_groups(plan.filaments, spools)
+    firmware: no field, as before Task 8. ``chosen`` is the id the plan names per slot,
+    so a slot Glow could not be checked on is named with its reason (#6876)."""
+    groups = rack_groups(plan.filaments, spools, chosen=chosen, status=status)
     if not groups:
         return NozzleChoice(mapping=None)
     manual, notes = manual_for(groups, manual_position, algorithm, picker="the printer")

@@ -1,4 +1,3 @@
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { CrudAudit } from '../src/audit/crudAudit.js'
 import { type AuditEntry, AuditLog, DETAIL_MAX, SUMMARY_MAX } from '../src/audit/log.js'
@@ -30,19 +29,11 @@ class FakeApi {
   }
 }
 
-const noSql = new Proxy(() => undefined, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
 
 function log(api: FakeApi, errors: unknown[] = []): AuditLog {
   return new AuditLog({
-    sql: noSql,
-    routes: { crud: new CrudAudit({ baseUrl: BASE, fetch: api.fetch }), use: () => true },
+    routes: new CrudAudit({ baseUrl: BASE, fetch: api.fetch }),
+    hashKey: () => Buffer.alloc(32, 1),
     settings: () => ({ get: <T>() => Promise.resolve(30 as T), set: () => Promise.resolve() }),
     onError: (err) => errors.push(err),
   })

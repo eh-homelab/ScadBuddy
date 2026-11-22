@@ -31,9 +31,9 @@ export const PUSH_SUBSCRIPTION_PATH = '/api/v1/ai/push/subscription'
 export const PUSH_SERVICES_PATH = '/api/v1/ai/settings/push-services'
 
 export type PushRouteDeps = {
-  /** Undefined without the database. With no KEK here the keys are sealed by the API, once it serves area `notify` (`available`). */
+  /** Undefined without the API's stores. The API seals the keys. */
   push: { store: PushRepo; dispatcher: NotificationDispatcher } | undefined
-  /** Where the allowlist is kept; undefined without the database. */
+  /** Where the allowlist is kept; undefined when this process was not given it (tests). */
   settings: SettingsRepo | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
@@ -43,14 +43,14 @@ export type PushRouteDeps = {
 
 declare module '../app.js' {
   interface AppDeps {
-    /** Web Push (#815, notify/): left out without the database; with no KEK, through the API once it serves area `notify`. */
+    /** Web Push (#815, notify/): left out without the API's stores. */
     push?: { store: PushRepo; dispatcher: NotificationDispatcher } | undefined
   }
 }
 
-const UNAVAILABLE = 'Web Push needs the database, and SCADBUDDY_SECRET_KEY_FILE or an API that seals its keys (CRUD area notify)'
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const UNAVAILABLE = "Web Push needs the API's stores (CRUD area notify)"
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'push notification settings'
 
 const base64url = (octets: number) =>
@@ -78,11 +78,11 @@ const problemOf = (err: unknown) =>
 
 export function registerPushRoutes(app: Hono, deps: PushRouteDeps): void {
   async function push(): Promise<NonNullable<PushRouteDeps['push']> | string> {
-    if (!deps.push || deps.push.store.available?.() === false) return UNAVAILABLE
+    if (!deps.push) return UNAVAILABLE
     return (await deps.ready()) ? deps.push : NOT_READY
   }
   async function settings(): Promise<SettingsRepo | string> {
-    if (!deps.settings) return NO_DATABASE
+    if (!deps.settings) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.settings : NOT_READY
   }
 

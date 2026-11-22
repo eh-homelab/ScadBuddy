@@ -11,15 +11,29 @@ import { evictOnNotify, WARM_EVICT_CHANNEL } from './warmEvict.js'
 /** How often the settings are re-read and each idle process is checked against a fresh assembly. */
 export const RESYNC_MS = 60_000
 
-/** The settings the cache starts with: the defaults, said so in `log`, when the database is not ready or the read fails; the resync picks the stored values up later. */
+/** How long the start waits for the API to list the agent's CRUD areas before it takes the defaults. */
+export const START_SETTINGS_WAIT_MS = 5_000
+
+/**
+ * The settings the cache starts with. It waits up to `waitMs` for `areas` (the API listing the
+ * agent's CRUD areas, `CrudAreas.whenComplete`; the key is not needed for this read), then reads
+ * the stored values. The defaults, said so in `log`, when the areas are not listed in time or
+ * the read fails; the resync picks the stored values up later.
+ */
 export async function readStartSettings(
-  deps: { database: { ready(): Promise<boolean> } | undefined; settings: Pick<SettingsRepo, 'get'> | undefined },
+  deps: { areas: (() => Promise<void>) | undefined; settings: Pick<SettingsRepo, 'get'> | undefined },
   log: (message: string) => void,
+  waitMs = START_SETTINGS_WAIT_MS,
 ): Promise<RuntimeSettings> {
-  if (!deps.database || !deps.settings) return RUNTIME_DEFAULTS
+  if (!deps.areas || !deps.settings) return RUNTIME_DEFAULTS
   try {
-    if (await deps.database.ready()) return await readRuntimeSettings(deps.settings)
-    log('warm: the database is not ready; starting with the default runtime settings until the next resync')
+    let timer: NodeJS.Timeout | undefined
+    const listed = await Promise.race([
+      deps.areas().then(() => true),
+      new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), waitMs))),
+    ]).finally(() => clearTimeout(timer))
+    if (listed) return await readRuntimeSettings(deps.settings)
+    log(`warm: the API does not list the agent's CRUD areas after ${waitMs} ms; starting with the default runtime settings until the next resync`)
   } catch (err) {
     log(`warm: reading the runtime settings failed (${err instanceof Error ? err.message : String(err)}); starting with the defaults until the next resync`)
   }

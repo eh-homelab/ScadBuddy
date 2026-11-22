@@ -1,5 +1,4 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import type { Sql } from 'postgres'
 import type { Risk } from '../tools/registry.js'
 import { crudRead, wellFormed } from '../api/crudRead.js'
 import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
@@ -352,6 +351,12 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_attach: () => [],
   order_attachment_update: () => [],
   order_attachment_delete: () => [],
+  // An entity's files and links (#6950) are records of their own, shown on the entity's page.
+  entity_attachment_update: () => [],
+  entity_attachment_delete: () => [],
+  entity_link_add: () => [],
+  entity_link_update: () => [],
+  entity_link_delete: () => [],
   // A storefront listing (#6131) is a record of its own, on the Storefront page; the draft's
   // answer links it there.
   storefront_listing_draft: () => [],
@@ -718,6 +723,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',
   'filament_catalog_set_aliases',
+  // #6907: a colour sync writes catalog rows only.
+  'filament_colour_sync',
   'filament_type_upsert',
   // #6701: the proposed types a person confirmed, and their spools' `edited` events.
   'filament_type_proposals_confirm',
@@ -896,9 +903,8 @@ export type ResourceRow = {
 }
 
 /**
- * Where `SessionResources` keeps the rows (#5299 step 9, part a): `PgResourceRows`, its own SQL,
- * or `CrudResourceRows`, the API's routes (area `session-resources`, backend
- * api/crud_agent_sessions.py), picked per call in main.ts once the area is listed.
+ * Where `SessionResources` keeps the rows (#5299 step 9, part a): `CrudResourceRows`, the API's
+ * routes (area `session-resources`, backend api/crud_agent_sessions.py).
  */
 export interface ResourceRows {
   /** One call's rows, at most MAX_TOUCHES_PER_CALL; throws for a session that is gone. */
@@ -907,37 +913,9 @@ export interface ResourceRows {
   list(sessionId: string): Promise<TouchedRecord[]>
 }
 
-export class PgResourceRows implements ResourceRows {
-  readonly #sql: Sql
-
-  constructor(sql: Sql) {
-    this.#sql = sql
-  }
-
-  async insert(sessionId: string, rows: ResourceRow[]): Promise<void> {
-    await this.#sql`INSERT INTO ai_session_resources ${this.#sql(rows.map((r) => ({ session_id: sessionId, ...r })))}`
-  }
-
-  async list(sessionId: string): Promise<TouchedRecord[]> {
-    const rows = await this.#sql<Row[]>`
-      SELECT resource_type, resource_id, action, model_slug, before_id, after_id, tool, at
-      FROM ai_session_resources WHERE session_id = ${sessionId}::uuid ORDER BY id`
-    return rows.map((r) => ({
-      type: r.resource_type,
-      id: r.resource_id,
-      action: r.action,
-      model: r.model_slug,
-      before: r.before_id,
-      after: r.after_id,
-      tool: r.tool,
-      at: r.at.toISOString(),
-    }))
-  }
-}
-
 type WireTouched = Omit<Row, 'at'> & { at: string }
 
-/** `PgResourceRows` over the API's CRUD routes (area `session-resources`). */
+/** `ResourceRows` over the API's CRUD routes (area `session-resources`). */
 export class CrudResourceRows implements ResourceRows {
   readonly #base: string
   readonly #fetch: typeof fetch
@@ -958,7 +936,7 @@ export class CrudResourceRows implements ResourceRows {
   }
 
   async list(sessionId: string): Promise<TouchedRecord[]> {
-    // As the SQL's uuid cast refuses it: no session has such an id.
+    // No session has an id that is no UUID.
     const path = sessionPath(sessionId)
     if (path === undefined) return []
     const { resources } = await crudRead<{ resources: WireTouched[] }>(this.#fetch, this.#base, `the resources of session ${sessionId}`, `${path}/resources`)

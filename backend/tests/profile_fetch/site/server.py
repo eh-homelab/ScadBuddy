@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import secrets
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +36,10 @@ class Replica:
     known_ids: set[int] = field(default_factory=lambda: {30173})
     checkpoint: Literal["off", "never", "clears"] = "off"
     login_form: Literal["ok", "disabled"] = "ok"
+    #: Set, the form signs in as the real site does (#6941): its script posts the login to
+    #: ``/api/login``, which sets the session cookie after this many seconds, then the page
+    #: goes to ``/my/dashboard``. Unset, the form posts itself to ``/login``.
+    scripted_login_delay_s: float | None = None
     #: The three option lists of the export dialog: slicer, printer, nozzle.
     options: list[list[str]] = field(default_factory=lambda: [SLICERS, PRINTERS, NOZZLES])
     export_name: str = EXPORT_NAME
@@ -131,13 +136,19 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
             if path == "/login":
                 error = "Invalid email or password" if "error" in url.query else ""
                 disabled = "disabled" if site.login_form == "disabled" else ""
-                self._send(200, _page("login.html", ERROR=error, DISABLED=disabled))
+                scripted = "true" if site.scripted_login_delay_s is not None else "false"
+                self._send(
+                    200, _page("login.html", ERROR=error, DISABLED=disabled, SCRIPTED=scripted)
+                )
                 return
             if not self._signed_in():
                 self._redirect("/login")
                 return
             if path == "/my/spools":
                 self._send(200, b"<!doctype html><title>My Spools</title><h1>My Spools</h1>")
+                return
+            if path == "/my/dashboard":
+                self._send(200, b"<!doctype html><title>Dashboard</title><h1>Dashboard</h1>")
                 return
             for prefix, page in (
                 ("/filament/details/", "filament.html"),
@@ -179,6 +190,20 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
                     self._redirect("/my/spools", cookie=f"session={token}; Path=/")
                 else:
                     self._redirect("/login?error=1")
+                return
+            if path == "/api/login":
+                form = parse_qs(body)
+                if form.get("email") == [site.email] and form.get("password") == [site.password]:
+                    time.sleep(site.scripted_login_delay_s or 0.0)
+                    site.logins += 1
+                    token = secrets.token_hex(8)
+                    site.sessions.add(token)
+                    self.send_response(204)
+                    self.send_header("Set-Cookie", f"session={token}; Path=/")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    self._send(401, b"")
                 return
             if path.startswith("/api/spools/") and self._signed_in():
                 tdfp_id = self._id(path, "/api/spools/")

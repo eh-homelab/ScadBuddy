@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryEventSource } from '../src/events/bus.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import { busKindOf, followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
-import { PgPublisher } from '../src/sessions/publish.js'
 import { event } from '../src/sessions/protocol.js'
 import { turnPrincipal } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -11,6 +10,7 @@ import { runTool } from '../src/tools/registry.js'
 import { condense, HANDOFF_TARGET, sessionTools } from '../src/tools/sessions.js'
 import { firstText, services } from './helpers/mcp.js'
 import { agentA, browser } from './support/sessions.js'
+import { PgPublisher } from './support/sql/publisher.js'
 
 // The `sessions_*` tools' and the `session.*` bus events' own logic, without
 // a database (#300). End to end over /mcp and Postgres: test/sessionTools.pg.test.ts.
@@ -45,7 +45,7 @@ describe('the sessions_* tools', () => {
     for (const t of sessionTools) expect(t.name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/)
   })
 
-  it('say so when there is no database', async () => {
+  it('say so when this process has no session manager', async () => {
     const tool = sessionTools.find((t) => t.name === 'sessions_list')!
     const result = await runTool(tool, {}, {
       ...services(),
@@ -54,7 +54,7 @@ describe('the sessions_* tools', () => {
       signal: new AbortController().signal,
     })
     expect(result.isError).toBe(true)
-    expect(firstText(result)).toMatch(/need the database/)
+    expect(firstText(result)).toMatch(/not set up in this process/)
   })
 
   it('passes no background built-in on from a flow run or a session that has none, through start, send and fork (#5870)', async () => {

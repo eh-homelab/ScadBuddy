@@ -8,10 +8,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { inputHash } from '../src/approvals/service.js'
 import { flowRequestId } from '../src/gate/ids.js'
-import { PgFlowRuns } from '../src/temporal/flowRuns.js'
+import { CrudFlowRuns } from '../src/temporal/flowRuns.js'
 import { connectInProcess, turnToolActivity } from '../src/temporal/turnTools.js'
 import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
+import { PgSessionRows } from './support/sql/sessionRows.js'
 
 // A flow run's starter and decisions, read from the backend's own tables (#1057, plan
 // 2026-10-09 Task D1). The tables come from the backend's migration files, copied into
@@ -19,16 +20,16 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throw
 
 const MIGRATIONS = fileURLToPath(new URL('./fixtures/backend-flow-migrations/', import.meta.url))
 
-describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set ${TEST_DATABASE_URL_ENV})`}`, () => {
+describe.skipIf(!TEST_DATABASE_URL)(`CrudFlowRuns${TEST_DATABASE_URL ? '' : ` (set ${TEST_DATABASE_URL_ENV})`}`, () => {
   let t: Throwaway
-  let flows: PgFlowRuns
+  let flows: CrudFlowRuns
   beforeEach(async () => {
     t = await throwawayDatabase()
     for (const file of readdirSync(MIGRATIONS).sort()) await t.db.sql.unsafe(readFileSync(`${MIGRATIONS}${file}`, 'utf8'))
     await t.db.sql`
       INSERT INTO workflow_definitions (id, name, version, commit, created_by)
       VALUES ('d1', 'swap', 1, 'c1', '{"kind": "browser"}')`
-    flows = new PgFlowRuns(t.db.sql, new SqlFlowRunReads(t.db.sql))
+    flows = new CrudFlowRuns(new SqlFlowRunReads(t.db.sql), new PgSessionRows(t.db.sql))
   })
   afterEach(async () => {
     await t?.drop()

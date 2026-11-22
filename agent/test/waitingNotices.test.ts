@@ -117,7 +117,7 @@ describe('waiting requests by Web Push (#6399)', () => {
     expect(claims).toEqual([])
   })
 
-  it('takes the poll lease through the CRUD route, and polls on every replica before the API serves it', async () => {
+  it('takes the poll lease through the CRUD route', async () => {
     const seen: { url: string; body: unknown }[] = []
     const fetch = (input: string | URL | Request, init?: RequestInit) => {
       seen.push({ url: String(input), body: JSON.parse(String(init?.body)) })
@@ -126,8 +126,6 @@ describe('waiting requests by Web Push (#6399)', () => {
     const target = { baseUrl: 'http://api.test', fetch: fetch as typeof globalThis.fetch }
     expect(await crudPollLease(target)('waiting-poll', 25)).toBe(false)
     expect(seen).toEqual([{ url: 'http://api.test/api/v1/internal/crud/agent/push/poll-lease', body: { name: 'waiting-poll', seconds: 25 } }])
-    expect(await crudPollLease(target, () => false)('waiting-poll', 25)).toBe(true)
-    expect(seen).toHaveLength(1)
   })
 
   it("still pushes the agent's own requests when the grants cannot be read", async () => {
@@ -158,11 +156,10 @@ describe('waiting requests by Web Push (#6399)', () => {
     expect(seen).toEqual(['http://api.test/api/v1/internal/crud/agent/push/waiting'])
   })
 
-  it('reads no grants before the API serves area notify, and leaves out a source that fails', async () => {
+  it('leaves out a source that fails', async () => {
     const logged: string[] = []
     const read = waitingNotices(
       [
-        crudGrantRequests({ baseUrl: 'http://api.test', fetch: () => Promise.reject(new Error('not reached')) }, () => false),
         () => Promise.reject(new Error('pairings down')),
       ],
       (m) => logged.push(m),

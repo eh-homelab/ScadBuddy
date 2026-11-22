@@ -29,6 +29,14 @@ the visitor who asked for that render, and 404 ``render_not_found`` for any othe
 that is not a render is 422 ``render_body_invalid``: every refusal a visitor can cause is a
 storefront problem, which the edge passes on.
 
+Area ``variants`` (#6921, `orders/storefront/renders.py`): ``POST …/listings/{id}/variant``
+takes a render's body (checked as the render checks it; a body naming another listing than
+the path is 422 ``render_body_invalid``) and answers at once what the shop holds of those
+choices: the instant price, the preview of the output a priced slice of them saved, and the
+visitor's own render of them while it is held. It starts no render and no slice. ``GET
+…/variants/{key}/preview.glb`` streams that preview; a key that names none is 404
+``variant_not_found``.
+
 Area ``drafts`` (`orders/storefront/drafts.py`): ``GET …/draft`` is the visitor's draft
 order, or ``null`` when it has none; ``POST …/draft/items`` adds a listing at the visitor's
 values to it, and ``DELETE …/draft/items/{item_id}`` removes an item of it (each with an
@@ -99,7 +107,8 @@ from functools import partial
 from typing import Annotated, Any, Final
 from urllib.parse import urlsplit
 
-from fastapi import Depends, Query, Request, Response, status
+from fastapi import Depends, Path, Query, Request, Response, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.api.deps import AppState, PathsDep, ReadBudgetDep, StateDep
@@ -155,10 +164,13 @@ from scadbuddy.orders.storefront.model_requests import (
     upload_origin,
 )
 from scadbuddy.orders.storefront.renders import (
+    StoreVariant,
+    instant_variant,
     owned_job,
     render_estimate,
     shown_render,
     start_render,
+    variant_preview,
 )
 from scadbuddy.orders.storefront.submit import submit_draft
 from scadbuddy.orders.storefront.turnstile import (
@@ -412,6 +424,47 @@ async def render_estimate_route(
     through the quote path (`source` `slice`), `pending` while the slice runs, or `none`
     (the shop prices it by hand)."""
     return await render_estimate(state, visitor, job_id)
+
+
+@router.post(
+    "/listings/{listing_id}/variant",
+    name="crud_storefront_variant",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": RenderBody.model_json_schema()}},
+        }
+    },
+)
+async def variant(
+    listing_id: str, request: Request, state: StateDep, visitor: Visitor, _client: StoreClient
+) -> StoreVariant:
+    """What the shop holds of the visitor's choices, at once (#6921): the instant price,
+    the cached preview and the visitor's live render. It starts no render and no slice."""
+    body = await _render_body(request)
+    if body.listing_id != listing_id:
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "render_body_invalid",
+            "This request is not a render of a listing.",
+        )
+    return await instant_variant(state, visitor, body)
+
+
+@router.get(
+    "/variants/{variant_key}/preview.glb",
+    name="crud_storefront_variant_preview",
+    responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
+)
+async def variant_preview_route(
+    variant_key: Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")],
+    state: StateDep,
+    _visitor: Visitor,
+    _client: StoreClient,
+) -> FileResponse:
+    """The preview mesh of the output a priced slice of the variant saved (#6921); 404
+    ``variant_not_found`` for a key that names none."""
+    return FileResponse(await variant_preview(state, variant_key), media_type=GLB_MEDIA_TYPE)
 
 
 @router.get("/draft", name="crud_storefront_draft")

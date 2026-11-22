@@ -8,6 +8,7 @@ import { LABEL_HEIGHT_MM, LABEL_WIDTH_MM, labelPayload, MAX_LABELS, qrSvg } from
 import { Button } from '@/components/ui/button'
 import { Label as FieldLabel } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 type Layout = 'roll' | 'sheet'
 const LAYOUT_KEY = 'scadbuddy.labels.layout'
@@ -115,7 +116,7 @@ export function LabelsPage() {
     <div className="h-full overflow-y-auto">
       <style>{printCss(layout)}</style>
       <div className="mx-auto max-w-4xl px-4 py-6">
-        <Link to="/filament/spools" className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
+        <Link to={filamentLinks.spools} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
           <ChevronLeftIcon className="size-3.5" /> Spools
         </Link>
         <header className="mb-5 flex flex-wrap items-center gap-3">

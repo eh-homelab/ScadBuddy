@@ -560,6 +560,17 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "each item's `delivered_attachment_id`, and the bytes and thumbnails are for the page to draw. The agent " +
       'adds, edits and removes them with order_attach, order_attachment_update and order_attachment_delete (#4722).',
   })),
+  ...(
+    [
+      'POST /api/v1/entities/{ref}/attachments',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/content',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "An entity's files (#6950): a multipart upload, and the bytes and thumbnails the page draws. The agent lists, edits and removes them with entity_attachment_list, entity_attachment_update and entity_attachment_delete; an upload by the agent is out of scope in phase 1.",
+  })),
   {
     operation: 'GET /api/v1/orders/{order_id}/sources/{source_id}/preview',
     reason:

@@ -277,6 +277,8 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "sync_deposits", _broken_async)
     # #5282: the idle storefront carts.
     monkeypatch.setattr(main, "_sweep_storefront", _broken(OSError("the database is gone")))
+    # #6950: the entities whose owner is gone.
+    monkeypatch.setattr(main, "sweep_orphan_entities", _broken(OSError("the database is gone")))
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -311,6 +313,7 @@ async def test_a_failing_sweep_fails_its_activity(
                 floor=_broken_async,
                 # #5774: the printers' maintenance logs, read from Bambuddy.
                 machine_rates=SimpleNamespace(read_logs=_broken_async),
+                attachments=None,  # #6950: read by the stubbed entity sweep
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -500,6 +503,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             sessions=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),
             # #6646 Decision 49: the sensors' old notification rows, one delete.
             sensors=SimpleNamespace(prune_notifications=lambda: time.sleep(0.1)),
+            # #6905: the filament sync's old pass rows, one bounded delete.
+            sync_passes=SimpleNamespace(prune=lambda ttl_days: time.sleep(0.1)),
             # Phase 6: the spent delegation codes and long-dead access tokens.
             delete_spent_delegations=lambda: time.sleep(0.1),
             tokens=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),

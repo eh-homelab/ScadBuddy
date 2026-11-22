@@ -65,8 +65,8 @@ export type WorkspacePickerDeps = {
   origins: OriginPolicy
 }
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 export const PICKER_LIMIT_DEFAULT = 100
 export const QUERY_MAX = 200
@@ -104,7 +104,7 @@ export function registerWorkspacePickerRoutes(app: Hono, deps: WorkspacePickerDe
   app.get('/api/v1/ai/workspace-files', async (c: Context) => {
     const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'workspace file reads')
     if (problem) return c.json({ detail: problem }, 403)
-    if (!deps.sessions || !deps.workspace) return c.json({ detail: NO_DATABASE }, 503)
+    if (!deps.sessions || !deps.workspace) return c.json({ detail: NOT_CONFIGURED }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
 
     const type = c.req.query('resource_type')

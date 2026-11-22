@@ -52,7 +52,7 @@ Each fact names where and how it was measured. "Read" means a read of the code o
    (`backend/scadbuddy/library/catalogue.py`) has only `module` and `api`. Pydantic
    ignores other keys there, so a new optional key breaks no template. Read.
 5. **A closed JSON Schema subset exists already, for flows.** `backend/scadbuddy/flows/inputs.py`
-   checks a flow's `inputs.json` (scalars and arrays of scalars at the top level,
+   checks a flow's `inputs.json` (its schema check moved to `core/input_schema.py`, #5701) (scalars and arrays of scalars at the top level,
    `additionalProperties: false`, size and pattern limits) with `jsonschema`, which is a
    backend dependency (`backend/pyproject.toml`, `jsonschema>=4.23`).
    `frontend/src/components/flows/StartRun.tsx` draws a form from it. Read.
@@ -168,7 +168,7 @@ Not measured: how long a whole dollhouse takes to render. Prod has no `v` 1 outp
 `inputs` is a path under the template directory, with the same pattern rule as `module`.
 The file is a JSON Schema in a closed subset:
 
-- The flows' subset (`flows/inputs.py`): the top level is
+- The flows' subset (`core/input_schema.py`, moved out of `flows/inputs.py` by #5701): the top level is
   `{"type": "object", "properties": {...}, "required": [...], "additionalProperties": false}`,
   and each property is a `string`, `integer`, `number`, `boolean`, or an `array` of one
   of those, with `title`, `description`, `default` and the type's own limits.
@@ -176,7 +176,7 @@ The file is a JSON Schema in a closed subset:
   properties, with `additionalProperties: false` and its own `required`. The dollhouse's
   `house` needs this.
 - The top level must not declare `params` or `v`. Those belong to the host.
-- At most 16 KiB, as `flows/inputs.py` `MAX_SCHEMA_BYTES`. A `pattern` has the flows'
+- At most 16 KiB, as `core/input_schema.py` `MAX_SCHEMA_BYTES`. A `pattern` has the flows'
   limits (`MAX_PATTERNED_LENGTH`, the pattern time budget), because the API runs it.
 
 The subset's checker moves out of `flows/inputs.py` into one shared module, which flows
@@ -821,6 +821,9 @@ until the step that makes it safe.
    Each pipeline line is therefore "priced by hand", and `reprice` finds no row at
    submit either. `prepare.py` and the `PrepareListing` workflow start no slice: they
    only render (checked by reading both on `main`, and by scadify on #6581's tree).
+   Since #6922 they also start each combination's slice price, through the estimate's
+   own path (`renders.py` `estimate_of`), so a pipeline render gets what a visitor's
+   estimate of it gets.
 3. **`feat(storefront): price a pipeline listing`** (backend). The rule of §7.2 in
    `render_estimate` and `reprice` (the inputs compared by deep equality of the parsed
    values, not by key order), the slice request through #6581's `plan_variant`

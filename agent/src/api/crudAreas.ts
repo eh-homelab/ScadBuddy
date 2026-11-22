@@ -3,10 +3,10 @@ import { CrudReadError, crudRead } from './crudRead.js'
 
 // The rolling deploy (#5299 D9, as #5298's workers do): a new agent may meet an API pod older
 // than an area's routes. `CrudAreas` reads `GET …/crud/agent/areas` from the start, backing off,
-// until the API lists every area the agent wants; until then each area stays on SQL, and once
-// listed it goes through the routes for good. An area is listed only once all its routes are in
-// (backend api/crud_areas.py `CRUD_AREAS`). The reads of the backend's tables (areas `events`
-// and `flows`) need no wait: they have no SQL left (api/crudRead.ts).
+// until the API lists every area the agent wants. The agent has no SQL path (#5299 step 12), so
+// until then it is not ready: `/mcp` and the data routes answer 503 (`/healthz` stays 200). An
+// area is listed only once all its routes are in
+// (backend api/crud_areas.py `CRUD_AREAS`).
 
 /**
  * The areas of the agent's settings, Claude credentials and payload data keys, which the API
@@ -83,11 +83,16 @@ export const REST_AREAS = ['publish', 'session-reads'] as const
 export const TURN_AREAS = ['session-turns', 'session-edits'] as const
 
 /**
- * What the agent read at its start and per request (#6501; backend api/crud_agent_start.py):
- * the ledger of its migrations (db/schema.ts `crudLedger`) and a signed-in person's session
- * (auth/browserSession.ts `CrudSessionLookup`).
+ * A signed-in person's session, read per request (#6501; backend api/crud_agent_start.py;
+ * auth/browserSession.ts `CrudSessionLookup`).
  */
-export const START_AREAS = ['migrations', 'auth-sessions'] as const
+export const START_AREAS = ['auth-sessions'] as const
+
+/**
+ * The keys the API derives from its KEK for the agent: the approvals' input-hash key and the
+ * one-off fetch grants (#5299 step 12; backend api/crud_agent_keys.py; api/agentKeys.ts).
+ */
+export const KEY_AREAS = ['keys'] as const
 
 /**
  * Which sessions still have a row, for the pod's directory sweeps, and a forget's last rows
@@ -121,6 +126,9 @@ export class CrudAreas {
   #stopped = false
   /** The kinds of reason for waiting already logged, each once (`refresh`). */
   readonly #logged = new Set<string>()
+  /** Resolves `whenComplete` once every wanted area is listed. */
+  #completed!: () => void
+  readonly #complete = new Promise<void>((resolve) => (this.#completed = resolve))
 
   constructor(baseUrl: string, options: CrudAreasOptions) {
     this.#base = baseUrl
@@ -141,10 +149,14 @@ export class CrudAreas {
     return this.#wanted.every((a) => this.#listed.has(a))
   }
 
+  /** Resolves once every wanted area is listed (by `refresh` or the background reads); never rejects. */
+  whenComplete(): Promise<void> {
+    return this.#complete
+  }
+
   /**
-   * Whether the API answers the agent's areas within `timeoutMs`: what health requires besides
-   * the Postgres ping once every area is listed (#6501). One read at a time, shared by every
-   * caller; never throws.
+   * Whether the API answers the agent's areas within `timeoutMs`: what health requires once
+   * every area is listed (#6501). One read at a time, shared by every caller; never throws.
    */
   answers(timeoutMs = 2_000): Promise<boolean> {
     this.#answering ??= crudRead<unknown>(this.#fetch, this.#base, 'its areas', '/areas', { timeoutMs })
@@ -165,6 +177,7 @@ export class CrudAreas {
     void this.#poll(this.#firstMs)
   }
 
+  /** Ends the reads. `whenComplete` stays pending: what waits on it (a warm-up, a sweep) must not run at shutdown. */
   stop(): void {
     this.#stopped = true
     clearTimeout(this.#timer)
@@ -185,6 +198,7 @@ export class CrudAreas {
         if (typeof area === 'string' && this.#wanted.includes(area)) this.#listed.add(area)
       }
       if (this.complete) {
+        this.#completed()
         if (!before) this.#log(`CRUD areas: the agent reads ${this.#wanted.join(', ')} through the backend's CRUD routes`)
         return true
       }
@@ -195,7 +209,7 @@ export class CrudAreas {
       if (refusal?.fromRoute && (refusal.status === 401 || refusal.status === 403)) {
         // The route's own refusal, not an older pod's or a proxy's: no live credential, or one
         // without `crud.agent` (#6234 review).
-        why = `the backend refused the agent's service credential (HTTP ${refusal.status}); check SCADBUDDY_SERVICE_TOKEN_FILE or the credential view`
+        why = `the backend refused the agent's service credential (HTTP ${refusal.status}); check SCADBUDDY_SERVICE_TOKEN_FILE or SCADBUDDY_SERVICE_BOOTSTRAP_FILE`
       } else {
         why = (error as Error).message
       }
@@ -207,7 +221,7 @@ export class CrudAreas {
     // set stays as small as the kinds a wait meets.
     if (!this.#logged.has(kind)) {
       this.#logged.add(kind)
-      this.#log(`CRUD areas: waiting for the backend's agent areas (${why}); reading over SQL until it lists them`)
+      this.#log(`CRUD areas: waiting for the backend's agent areas (${why}); not ready until it lists them`)
     }
     return false
   }

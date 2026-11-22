@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { BoxIcon } from 'lucide-react'
 import type { OrderAttachment, OrderItem } from '../../api/types'
-import { itemPictureSources } from './attachmentMedia'
+import { itemPictureSources } from '../entities/attachmentMedia'
 import { cn } from '@/lib/utils'
 
 /** A line item's picture: what was delivered once marked, else a finished-print photo, else the render. */

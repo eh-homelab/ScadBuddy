@@ -11,7 +11,8 @@ keeps it as a blob of ScadBuddy's own store (``orders/attachments.py``).
 What a file is comes from its bytes. Only the types a browser shows and never runs
 (``models.INLINE``) are served as themselves; every other file is
 ``application/octet-stream`` and a download, under a sandboxing policy, so an uploaded
-page never runs on ScadBuddy's origin.
+page never runs on ScadBuddy's origin (``api/attachment_serving.py``, shared with any
+entity's files).
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
@@ -27,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from scadbuddy.api import media as media_api
+from scadbuddy.api.attachment_serving import caption_of, serve_content, serve_thumbnail
 from scadbuddy.api.deps import CatalogueDep, PathsDep, StateDep
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -52,10 +54,8 @@ from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.lifecycle import LifecycleError
 from scadbuddy.orders.models import (
-    INLINE,
     MAX_ATTACHMENT_CAPTION,
     REVISION_ROLES,
-    THUMBNAILED,
     Attachment,
     AttachmentPatch,
     AttachmentRole,
@@ -73,17 +73,6 @@ from scadbuddy.orders.store import (
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
-#: An attachment's id names its bytes for good: a changed file is a new attachment.
-IMMUTABLE = "private, max-age=31536000, immutable"
-#: Every file served: no sniffing it into something it is not.
-NOSNIFF = {"X-Content-Type-Options": "nosniff"}
-#: An image, a video or a download opened as a page: inert, as `api/assets.py`'s
-#: user-supplied images are. Not a PDF's: a browser's PDF viewer will not run under it.
-INERT = {
-    "Content-Security-Policy": (
-        "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox"
-    ),
-}
 ROLES: tuple[str, ...] = get_args(AttachmentRole)
 #: A role part is one of `ROLES`, so a few bytes.
 MAX_ROLE_BYTES = 32
@@ -162,19 +151,6 @@ def _role(received: media_api.ReceivedUpload, *, revision: bool) -> str:
     return sent
 
 
-def _caption(received: media_api.ReceivedUpload) -> str:
-    try:
-        caption = received.caption.decode("utf-8").strip()
-    except UnicodeDecodeError:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the caption is not UTF-8") from None
-    if len(caption) > MAX_ATTACHMENT_CAPTION:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"a caption is at most {MAX_ATTACHMENT_CAPTION} characters",
-        )
-    return caption
-
-
 async def _upload(
     order_id: str,
     item_id: str | None,
@@ -228,7 +204,7 @@ async def _upload(
             "media_type": media_type,
             "size": received.sizes["file"],
             "role": role,
-            "caption": _caption(received),
+            "caption": caption_of(received),
             # Ruling 12: who added it comes from the author header, never the body.
             "by": current_actor().model_dump(mode="json"),
         }
@@ -404,21 +380,13 @@ async def get_attachment_content(
     download: Annotated[bool, Query(description="Serve it as a download")] = False,
 ) -> FileResponse:
     attachment, key = await _attachment(orders, order_id, attachment_id)
-    path = await attachments.blob_path(state.store.blobs, key)
-    if path is None:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND, f"the file of attachment {attachment_id!r} is gone"
-        )
-    inline = attachment.media_type in INLINE and not download
-    headers = {"Cache-Control": IMMUTABLE, **NOSNIFF}
-    if attachment.media_type != "application/pdf" or not inline:
-        headers |= INERT
-    return FileResponse(
-        path,
-        media_type=attachment.media_type if inline else "application/octet-stream",
+    return await serve_content(
+        state.store.blobs,
+        key,
+        attachment_id=attachment_id,
+        media_type=attachment.media_type,
         filename=attachment.filename,
-        content_disposition_type="inline" if inline else "attachment",
-        headers=headers,
+        download=download,
     )
 
 
@@ -440,25 +408,13 @@ async def get_attachment_thumbnail(
     order_id: str, attachment_id: str, orders: OrdersDep, state: StateDep, request: Request
 ) -> Response:
     attachment, key = await _attachment(orders, order_id, attachment_id)
-    if attachment.media_type not in THUMBNAILED:
-        raise ApiError(status.HTTP_404_NOT_FOUND, "only a PNG, JPEG or WebP photo has a thumbnail")
-    path = await attachments.blob_path(state.store.blobs, key)
-    if path is None:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND, f"the file of attachment {attachment_id!r} is gone"
-        )
-    # The media routes' decode budget, shared, so photos here never starve a gallery.
-    decodes = media_api.decode_slots(request)
-
-    def shrink() -> bytes | None:
-        with path.open("rb") as handle:
-            return media_api.shrink(handle, media_api.CARD_SIDE)
-
-    async with decodes:
-        small = await asyncio.to_thread(shrink)
-    if small is None:
-        raise ApiError(status.HTTP_404_NOT_FOUND, "this photo cannot be shrunk; show the file")
-    return Response(small, media_type="image/webp", headers={"Cache-Control": IMMUTABLE, **NOSNIFF})
+    return await serve_thumbnail(
+        state.store.blobs,
+        key,
+        attachment_id=attachment_id,
+        media_type=attachment.media_type,
+        request=request,
+    )
 
 
 @router.patch(

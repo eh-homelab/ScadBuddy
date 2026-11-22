@@ -291,6 +291,18 @@ async def printer_sources(client: BambuddyClient, archive: ArchiveDetail) -> lis
     return [FoundSource(kind="printer", available=False, reason=reason)]
 
 
+async def archive_detail(client: BambuddyClient, archive_id: int) -> ArchiveDetail:
+    """The archive, or a 404 that names it when Bambuddy has none."""
+    try:
+        return await client.archive(archive_id)
+    except ApiError as error:
+        if error.status == status.HTTP_404_NOT_FOUND:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND, f"Bambuddy has no archive {archive_id}"
+            ) from None
+        raise
+
+
 async def find_sources(
     client: BambuddyClient, archive: ArchiveDetail, *, printer: bool
 ) -> list[FoundSource]:

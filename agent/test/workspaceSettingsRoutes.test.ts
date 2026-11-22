@@ -10,13 +10,8 @@ import {
   registerWorkspaceSettingsRoutes,
   WORKSPACE_SETTINGS_PATH,
 } from '../src/routes/workspaceSettings.js'
-import {
-  DEFAULT_FILE_MAX_BYTES,
-  DEFAULT_WORKSPACE_MAX_BYTES,
-  SessionFiles,
-  WORKSPACE_FILE_MAX_SETTING,
-  WORKSPACE_MAX_SETTING,
-} from '../src/workspace/store.js'
+import { DEFAULT_FILE_MAX_BYTES, DEFAULT_WORKSPACE_MAX_BYTES, WORKSPACE_FILE_MAX_SETTING, WORKSPACE_MAX_SETTING } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 
 // /api/v1/ai/settings/workspace (#2329): the workspace caps, behind the same UI
 // guards as every other AI settings route (routes/guard.ts), read by the store.

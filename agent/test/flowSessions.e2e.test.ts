@@ -7,15 +7,16 @@ import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { respond } from '../src/routes/pendingInput.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { type SessionManager } from '../src/sessions/manager.js'
-import { PgFlowRuns } from '../src/temporal/flowRuns.js'
+import { CrudFlowRuns } from '../src/temporal/flowRuns.js'
 import { flowSessionActivities } from '../src/temporal/flowSessions.js'
-import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
-import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from '../src/temporal/toolActivities.js'
+import { SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
+import { PgPayloadKeys } from './support/sql/payloadKeys.js'
+import { gateActivities, toolActivities } from '../src/temporal/toolActivities.js'
 import { turnServers } from '../src/temporal/turnServers.js'
 import { turnToolActivities } from '../src/temporal/turnTools.js'
 import { AgentWorker } from '../src/temporal/worker.js'
@@ -29,6 +30,9 @@ import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropi
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, stopManagers, tempPaths } from './support/sessions.js'
+import { PgEventRows } from './support/sql/eventRows.js'
+import { PgSessionRows } from './support/sql/sessionRows.js'
+import { PgApprovalRecords, PgSessionOwners } from './support/sql/approvalRecords.js'
 
 // A flow's `agent(...)` and `ask_session(...)` end to end (#1057, plan
 // 2026-10-09-durable-phase-6-flows.md §8: "agent(...) and ask_session against the fake
@@ -216,7 +220,7 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
       hash: (tool: string, input: unknown) => createHash('sha256').update(JSON.stringify([tool, input])).digest('hex'),
       summarise: (tool: string) => `call ${tool}`,
     }
-    const flows = new PgFlowRuns(db.sql, new SqlFlowRunReads(db.sql))
+    const flows = new CrudFlowRuns(new SqlFlowRunReads(db.sql), new PgSessionRows(db.sql))
     worker = AgentWorker.start({
       address: env.address,
       namespace: 'default',
@@ -232,7 +236,7 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
         ...gateActivities({ audit, sessions: new PgSessionOwners(db.sql) }),
         // A durable turn lists its other tools first (#2320): none here.
         ...turnToolActivities({ sessions: new PgSessionOwners(db.sql), servers: turnServers({}) }),
-        ...flowSessionActivities({ sql: db.sql, flows, pollMs: 200 }),
+        ...flowSessionActivities({ events: new PgEventRows(db.sql), sessions: new PgSessionRows(db.sql), flows, pollMs: 200 }),
       },
       dataConverter: { ...codec, failureConverterPath: FAILURE_CONVERTER },
     })
@@ -256,7 +260,7 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
       settings: { get: <T>() => Promise.resolve(undefined as T) },
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       ...harnessTools(services, TURN_TOOLS),
-      approvalHashKey: Buffer.alloc(32, 7),
+      approvalHashKey: () => Buffer.alloc(32, 7),
     })
     services.sessions = sessions
   })

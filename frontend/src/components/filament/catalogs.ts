@@ -63,6 +63,6 @@ export const CATALOGS: { kind: CatalogKind; title: string; fields: Field[] }[] =
   {
     kind: 'colours',
     title: 'Colours',
-    fields: [text('manufacturer', 'Manufacturer'), { name: 'rgba', label: 'Colour', kind: 'rgba', required: true }, { name: 'extra_colours', label: 'Extra colours', kind: 'rgbalist' }, ref('material_id', 'Material', 'materials'), ref('effect_id', 'Effect', 'effects')],
+    fields: [text('manufacturer', 'Manufacturer'), { name: 'rgba', label: 'Colour', kind: 'rgba', required: true }, { name: 'extra_colours', label: 'Extra colours', kind: 'rgbalist' }, ref('material_id', 'Material', 'materials'), text('material_name', 'Material as the maker names it'), ref('effect_id', 'Effect', 'effects')],
   },
 ]

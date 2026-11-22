@@ -1,16 +1,17 @@
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
-import { AuditLog, type AuditRecord } from '../src/audit/log.js'
-import type { Database } from '../src/db.js'
+import { type AuditLog, type AuditRecord } from '../src/audit/log.js'
+import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
-import { SessionFiles } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // #2329 part 3: the panel's Files, routes/sessionFiles.ts, over a real
 // ai_session_files: list, download, upload and delete, with the session routes'
@@ -38,14 +39,13 @@ describe.skipIf(skip !== undefined)(`session files${skip ? ` (skipped: ${skip})`
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     failures.length = 0
-    audit = new AuditLog({ sql: db.sql, onError: (err) => failures.push(err) })
+    audit = sqlAuditLog(db.sql, { onError: (err) => failures.push(err) })
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
     files = new SessionFiles(db.sql, { limits: { fileMaxBytes: 1024, workspaceMaxBytes: 2048 } })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, workspace: files })
     const deps: AppDeps = {
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'unused' },
       credentials: new MemoryCredentials(),
       testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
       remoteAddress: () => '10.0.0.7',

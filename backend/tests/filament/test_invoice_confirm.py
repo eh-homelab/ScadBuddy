@@ -69,6 +69,10 @@ def test_confirm_makes_spools_with_cost_and_link(shop: Shop) -> None:
     [point] = shop.suppliers.type_prices(type_id)
     assert point.price == D("21.4000")
     assert (point.currency, point.source, point.on_date) == ("USD", "invoice", date(2026, 11, 1))
+    # #6869: the price names its invoice, so the UI links it to the line.
+    assert (point.invoice_line_id, point.invoice_id) == (line.id, invoice.id)
+    [newest] = shop.suppliers.prices(point.product_id)
+    assert newest.invoice_id == invoice.id
 
 
 def test_confirm_twice_creates_nothing_more(shop: Shop) -> None:

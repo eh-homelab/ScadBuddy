@@ -87,8 +87,9 @@ describe('filament purchasing tools', () => {
     )
     expect(firstText(await runTool(tool('filament_supplier_list'), { supplier_id: SUPPLIER }, ctx()))).toEqual({
       id: SUPPLIER,
+      ui_path: `/filament/suppliers/${SUPPLIER}`,
     })
-    expect(firstText(await runTool(tool('filament_supplier_list'), {}, ctx()))).toEqual([{ id: SUPPLIER }])
+    expect(firstText(await runTool(tool('filament_supplier_list'), {}, ctx()))).toEqual([{ id: SUPPLIER, ui_path: `/filament/suppliers/${SUPPLIER}` }])
   })
 
   it('lists prices by product or by type, never neither', async () => {
@@ -163,7 +164,7 @@ describe('filament purchasing tools', () => {
       { fields: { supplier_id: SUPPLIER, total: '40.00' }, lines: [line] },
       ctx(),
     )
-    expect(firstText(made)).toEqual({ id: INVOICE })
+    expect(firstText(made)).toEqual({ id: INVOICE, ui_path: `/filament/invoices/${INVOICE}` })
     await runTool(
       tool('filament_invoice_upsert'),
       { invoice_id: INVOICE, fields: { shipping: '5.00' }, lines: [line] },
@@ -253,12 +254,12 @@ describe('filament purchasing tools', () => {
     expect(seen).toBe('pending')
     expect(
       firstText(await runTool(tool('filament_shopping_add'), { type_id: TYPE, quantity_spools: 2 }, ctx())),
-    ).toEqual({ id: ITEM })
+    ).toEqual({ id: ITEM, ui_path: '/filament/shopping-list' })
     expect(
       firstText(
         await runTool(tool('filament_shopping_update'), { item_id: ITEM, status: 'purchased', note: null }, ctx()),
       ),
-    ).toEqual({ id: ITEM })
+    ).toEqual({ id: ITEM, ui_path: '/filament/shopping-list' })
   })
 
   it('removes one shopping list item or clears the list', async () => {
@@ -322,7 +323,9 @@ describe('filament purchasing tools', () => {
         return HttpResponse.json([{ id: INVOICE }])
       }),
     )
-    expect(firstText(await runTool(tool('filament_supplier_stats'), {}, ctx()))).toEqual([{ supplier_id: SUPPLIER }])
+    expect(firstText(await runTool(tool('filament_supplier_stats'), {}, ctx()))).toEqual([
+      { supplier_id: SUPPLIER, supplier_ui_path: `/filament/suppliers/${SUPPLIER}` },
+    ])
     expect(firstText(await runTool(tool('filament_price_sheet'), { supplier_id: SUPPLIER }, ctx()))).toEqual([
       { change_pct: null },
     ])
@@ -332,11 +335,12 @@ describe('filament purchasing tools', () => {
     expect(archived).toBe('true')
     expect(
       firstText(await runTool(tool('filament_invoice_list'), { supplier_id: SUPPLIER, status: 'draft' }, ctx())),
-    ).toEqual([{ id: INVOICE }])
+    ).toEqual([{ id: INVOICE, ui_path: `/filament/invoices/${INVOICE}` }])
     expect(invoiceQuery).toContain(`supplier_id=${SUPPLIER}`)
     expect(invoiceQuery).toContain('status=draft')
     expect(firstText(await runTool(tool('filament_invoice_get'), { invoice_id: INVOICE }, ctx()))).toEqual({
       id: INVOICE,
+      ui_path: `/filament/invoices/${INVOICE}`,
       lines: [],
     })
   })

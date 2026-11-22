@@ -20,7 +20,7 @@ import {
   toolPrefix,
 } from '../plugins/registry.js'
 import { DEFAULT_PLUGIN_TEST_TIMEOUT_MS, type PluginTest, testPlugin } from '../plugins/testConnection.js'
-import { type KekStatus, SealError } from '../secrets.js'
+import { SealError } from '../secrets.js'
 import { type RemoteAddress, requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
 import { browserUser } from '../auth/browserSession.js'
 import { ready, type RouteModule } from './module.js'
@@ -57,10 +57,9 @@ import { ready, type RouteModule } from './module.js'
 // schema refuses any other unknown field.
 
 export type PluginRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   plugins: PluginRepo | undefined
   ready: () => Promise<boolean>
-  kek: KekStatus
   remoteAddress: RemoteAddress
   origins: OriginPolicy
   resolveHost?: Resolver
@@ -95,8 +94,8 @@ export type PluginView = {
   updated_at: string
 }
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 const CreateBody = z.strictObject({
   name: z.string().max(64),
@@ -117,7 +116,7 @@ const PatchBody = z.strictObject({
   secret: z.string().min(1).max(4096).nullable().optional(),
 })
 
-export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
+export function pluginView(plugin: PluginSummary): PluginView {
   return {
     name: plugin.name,
     kind: plugin.kind,
@@ -126,8 +125,8 @@ export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
     enabled: plugin.enabled,
     tool_prefix: toolPrefix(plugin.name),
     auth: plugin.auth_header === null ? null : { header: plugin.auth_header, last4: plugin.secret_last4 ?? '' },
-    // Through the API's routes, its key opens the secret (#5299 step 5); over SQL, this process's.
-    usable: plugin.opens ?? (plugin.kekId === null || (kek.ok && kek.kek.id === plugin.kekId)),
+    // The API's key opens the secret.
+    usable: plugin.opens,
     problem: reservedNameProblem(plugin.name),
     tool_tiers: plugin.tool_tiers,
     disabled_tools: plugin.disabled_tools,
@@ -160,10 +159,9 @@ async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.
 export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
   const base = '/api/v1/ai/plugins'
   const resolveHost = deps.resolveHost ?? systemResolver
-  const kek = () => (deps.kek.ok ? deps.kek.kek : undefined)
 
   async function store(): Promise<PluginRepo | string> {
-    if (!deps.plugins) return NO_DATABASE
+    if (!deps.plugins) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.plugins : NOT_READY
   }
 
@@ -205,7 +203,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const [builtIns, remote] = await Promise.all([deps.builtIns.list(), repo.list()])
-    return c.json([...builtIns, ...remote.map((p) => pluginView(p, deps.kek))])
+    return c.json([...builtIns, ...remote.map((p) => pluginView(p))])
   })
 
   app.get(`${base}/:name`, async (c) => {
@@ -215,7 +213,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     if (set) return c.json(await deps.builtIns.view(set))
     const plugin = await repo.get(c.req.param('name'))
     if (!plugin) return c.json({ detail: `no plugin named "${c.req.param('name')}"` }, 404)
-    return c.json(pluginView(plugin, deps.kek))
+    return c.json(pluginView(plugin))
   })
 
   app.post(base, async (c) => {
@@ -227,16 +225,13 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     try {
       // The endpoint is checked before anything is stored (egress + https).
       await assertEndpointAllowed(normalisePluginUrl(body.url), resolveHost)
-      const saved = await repo.create(
-        {
-          name: body.name,
-          url: body.url,
-          ...(body.auth_header === undefined ? {} : { auth_header: body.auth_header }),
-          ...(body.secret === undefined ? {} : { secret: body.secret }),
-        },
-        kek(),
-      )
-      return c.json(pluginView(saved, deps.kek), 201)
+      const saved = await repo.create({
+        name: body.name,
+        url: body.url,
+        ...(body.auth_header === undefined ? {} : { auth_header: body.auth_header }),
+        ...(body.secret === undefined ? {} : { secret: body.secret }),
+      })
+      return c.json(pluginView(saved), 201)
     } catch (err) {
       return refusal(c, err)
     }
@@ -262,8 +257,8 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     }
     try {
       if (body.url !== undefined) await assertEndpointAllowed(normalisePluginUrl(body.url), resolveHost)
-      const saved = await repo.update(c.req.param('name'), body, kek())
-      return c.json(pluginView(saved, deps.kek))
+      const saved = await repo.update(c.req.param('name'), body)
+      return c.json(pluginView(saved))
     } catch (err) {
       return refusal(c, err)
     }
@@ -289,7 +284,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     if (body.client_secret !== undefined && body.client_id === undefined) {
       return c.json({ detail: 'client_secret needs its client_id' }, 400)
     }
-    if (!deps.pluginOAuth) return c.json({ detail: NO_DATABASE }, 503)
+    if (!deps.pluginOAuth) return c.json({ detail: NOT_CONFIGURED }, 503)
     const plugin = await repo.get(name)
     if (!plugin) return c.json({ detail: `no plugin named "${name}"` }, 404)
     if (plugin.auth_header !== null) {
@@ -299,17 +294,14 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     const verdict = checkOrigin(requestFacts(c, deps.remoteAddress), deps.origins)
     if (!verdict.ok) return c.json({ detail: 'sign-in must start from the ScadBuddy UI' }, 403)
     try {
-      const started = await deps.pluginOAuth.start(
-        {
-          plugin: { name, url: plugin.url },
-          redirectUri: `${verdict.origin}${CALLBACK_PATH}`,
-          ...(body.client_id === undefined ? {} : { clientId: body.client_id }),
-          ...(body.client_secret === undefined ? {} : { clientSecret: body.client_secret }),
-          ...(body.scope === undefined ? {} : { scope: body.scope }),
-          by: browserUser(c).id,
-        },
-        kek(),
-      )
+      const started = await deps.pluginOAuth.start({
+        plugin: { name, url: plugin.url },
+        redirectUri: `${verdict.origin}${CALLBACK_PATH}`,
+        ...(body.client_id === undefined ? {} : { clientId: body.client_id }),
+        ...(body.client_secret === undefined ? {} : { clientSecret: body.client_secret }),
+        ...(body.scope === undefined ? {} : { scope: body.scope }),
+        by: browserUser(c).id,
+      })
       return c.json({
         authorize_url: `${OAUTH_PATH}/authorize?ticket=${started.ticket}`,
         redirect_uri: started.redirect_uri,
@@ -328,7 +320,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const name = c.req.param('name')
     if (builtIn(name)) return isBuiltIn(c, name, 'signed out: it runs inside the agent')
-    if (!deps.pluginOAuth) return c.json({ detail: NO_DATABASE }, 503)
+    if (!deps.pluginOAuth) return c.json({ detail: NOT_CONFIGURED }, 503)
     // No plugin has a name outside the rule, so none is signed in; and such a name never reaches a route path.
     if (!PLUGIN_NAME_RE.test(name)) return c.json({ detail: `plugin "${name}" is not signed in` }, 404)
     if (!(await deps.pluginOAuth.forget(name))) return c.json({ detail: `plugin "${name}" is not signed in` }, 404)
@@ -373,11 +365,11 @@ export async function testAndList(
   if (testing.has(name)) return BUSY
   testing.add(name)
   try {
-    if (!deps.plugins) return { status: 503, body: { detail: NO_DATABASE } }
+    if (!deps.plugins) return { status: 503, body: { detail: NOT_CONFIGURED } }
     if (!(await deps.ready())) return { status: 503, body: { detail: NOT_READY } }
     let plugin: RemotePlugin | undefined
     try {
-      plugin = await deps.plugins.reveal(name, deps.kek.ok ? deps.kek.kek : undefined)
+      plugin = await deps.plugins.reveal(name)
     } catch (err) {
       if (err instanceof SealError) {
         return { status: 409, body: { detail: `the plugin secret cannot be decrypted: ${err.message}; save it again` } }
@@ -415,7 +407,7 @@ export async function testAndList(
     if (held === 'full') {
       return { status: 429, body: { detail: 'too many connection tests are running; try again shortly' }, retryAfter: RETRY_AFTER_S }
     }
-    // The lock client's database is down: the same answer as the ready check above, not a 500.
+    // The API did not answer the lease: the same answer as the ready check above, not a 500.
     if (held === 'unreachable') return { status: 503, body: { detail: NOT_READY } }
     return { status: 200, body: held.value }
   } finally {
@@ -426,10 +418,9 @@ export async function testAndList(
 /** What the connection test needs from the app's deps: the default test goes through the forwarder. */
 export function pluginTestDeps(
   deps: AppDeps,
-): Pick<PluginRouteDeps, 'plugins' | 'kek' | 'testPlugin' | 'resolveHost'> & { listings?: ToolListings } {
+): Pick<PluginRouteDeps, 'plugins' | 'testPlugin' | 'resolveHost'> & { listings?: ToolListings } {
   return {
     plugins: deps.plugins,
-    kek: deps.kek,
     testPlugin:
       deps.testPlugin ??
       ((plugin, address) =>
@@ -451,7 +442,7 @@ export function pluginTestDeps(
 
 declare module '../app.js' {
   interface AppDeps {
-    /** The plugin registry (#297); undefined when there is no database. */
+    /** The plugin registry (#297); undefined when this process was not given it (tests). */
     plugins?: PluginRepo | undefined
     /** The plugin connection test; src/plugins/testConnection.ts when omitted. */
     testPlugin?: (plugin: RemotePlugin, address: string) => Promise<PluginTest>

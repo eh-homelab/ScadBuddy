@@ -113,8 +113,24 @@ function writeKValues(typeId: string, rows: S['TypeKValueCreate'][], result: S['
 
 let state: Seed = seed()
 
+type ColourSync = components['schemas']['ColourSync']
+/** #6907: each source's newest run; empty until a sync runs. */
+let colourSyncs: ColourSync[] = []
+/** What a mock sync adds: a few colours of each source. */
+const MOCK_SYNC_COLOURS = {
+  bambu: [
+    { name: 'Black', manufacturer: 'Bambu Lab', rgba: '#000000FF', material_name: 'PLA Basic' },
+    { name: 'Translucent Yellow', manufacturer: 'Bambu Lab', rgba: '#F4EE2A80', material_name: 'PLA Translucent' },
+  ],
+  filamentcolors: [
+    { name: 'Galaxy Black', manufacturer: 'Polymaker', rgba: '#1A1A1EFF', material_name: 'PLA' },
+    { name: 'Clear Red', manufacturer: 'Prusament', rgba: '#D0102080', material_name: 'PETG' },
+  ],
+} as const
+
 export function reset() {
   state = seed()
+  colourSyncs = []
   bambuddyKValues.clear()
   imports.clear()
   invoicedLine.clear()
@@ -573,7 +589,7 @@ function cleared(body: Record<string, unknown>, fields: readonly string[]): stri
 const CATALOG_FIELDS = Object.fromEntries(
   Object.entries(seed().catalogs).map(([kind, rows]) => [
     kind,
-    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id', 'aliases'].includes(field))),
+    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id', 'aliases', 'source', 'synced_at', 'bb_colour_id'].includes(field))),
   ]),
 ) as Record<keyof Catalogs, Set<string>>
 
@@ -638,14 +654,17 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
     name: string
     archived_at: string | null
     manufacturer?: string | null
+    material_name?: string | null
   }[]
   const taken = rows.some(
     (row) =>
       row.id !== self &&
       !row.archived_at &&
       sameName(row.name, values.name) &&
-      // `filament_colours_name`: a colour's name is unique per manufacturer (none is one).
-      (kind !== 'colours' || sameName(row.manufacturer ?? '', values.manufacturer ?? '')),
+      // `filament_colours_name`: a colour is unique per manufacturer, name and material (none is one).
+      (kind !== 'colours' ||
+        (sameName(row.manufacturer ?? '', String(values.manufacturer ?? '')) &&
+          sameName(row.material_name ?? '', String(values.material_name ?? '')))),
   )
   return taken ? problem(409, REFUSED.catalogExists) : null
 }
@@ -1518,9 +1537,60 @@ export const handlers = [
     const rows = state.catalogs[params.kind as keyof Catalogs] as { archived_at: string | null; sort_order: number; name: string }[] | undefined
     if (!rows) return problem(404, `no catalog ${String(params.kind)}`)
     const archived = flag(request, 'include_archived')
+    // #6907: every word of `q` matches some text of the row (`CatalogStore.list`).
+    const words = (new URL(request.url).searchParams.get('q') ?? '').toLowerCase().split(/\s+/).filter(Boolean)
+    const texts = (row: object) =>
+      ['name', 'manufacturer', 'material_name', 'rgba'].map((field) => (row as Record<string, unknown>)[field]).filter((v): v is string => typeof v === 'string').map((v) => v.toLowerCase())
     return HttpResponse.json(
-      rows.filter((row) => archived || !row.archived_at).sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)),
+      rows
+        .filter((row) => archived || !row.archived_at)
+        .filter((row) => words.every((word) => texts(row).some((text) => text.includes(word))))
+        .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)),
     )
+  }),
+  // -- the colour catalog's syncs (#6907) --
+  http.get(`${BASE}/colour-syncs`, () => HttpResponse.json(colourSyncs)),
+  http.post(`${BASE}/colour-syncs`, async ({ request }) => {
+    const { source } = (await request.json()) as { source?: string }
+    if (source !== 'filamentcolors' && source !== 'bambu') return problem(422, "source: Input should be 'filamentcolors' or 'bambu'")
+    // `colour_catalog.upsert_colours`: a row is found by maker, name and material, case-blind;
+    // a person's row (`synced_at` null), an archived one or another source's is kept as it is
+    // (Decisions 209, 217, 221). As `_one` on its name path (the mock has no `bb_colour_id`
+    // lookup), it compares `upper(...)` with no trim, and of several matches takes an
+    // unarchived row first, then the oldest.
+    const counts = { added: 0, updated: 0, unchanged: 0, kept: 0 }
+    const same = (a: string | null | undefined, b: string) => (a ?? '').toUpperCase() === b.toUpperCase()
+    for (const colour of MOCK_SYNC_COLOURS[source]) {
+      const row = state.catalogs.colours
+        .filter((one) => same(one.manufacturer, colour.manufacturer) && same(one.name, colour.name) && same(one.material_name, colour.material_name))
+        .sort((a, b) => Number(a.archived_at !== null) - Number(b.archived_at !== null) || a.created_at.localeCompare(b.created_at))[0]
+      if (!row) {
+        state.catalogs.colours.push({ ...colour, id: newId(), sort_order: 0, material_id: null, effect_id: null, extra_colours: null, bb_colour_id: null, source, archived_at: null, created_at: now(), updated_at: now(), synced_at: now() })
+        counts.added += 1
+      } else if (row.synced_at === null || row.archived_at !== null || row.source !== source) {
+        counts.kept += 1
+      } else if (row.rgba === colour.rgba) {
+        counts.unchanged += 1
+      } else {
+        Object.assign(row, { rgba: colour.rgba, synced_at: now(), updated_at: now() })
+        counts.updated += 1
+      }
+    }
+    const run: ColourSync = {
+      id: newId(),
+      source,
+      state: 'done',
+      pages_read: 1,
+      pages_total: 1,
+      total: MOCK_SYNC_COLOURS[source].length,
+      ...counts,
+      skipped: 0,
+      error: null,
+      started_at: now(),
+      finished_at: now(),
+    }
+    colourSyncs = [...colourSyncs.filter((one) => one.source !== source), run]
+    return HttpResponse.json(run)
   }),
   http.post(`${BASE}/catalog/:kind`, async ({ params, request }) => {
     const kind = params.kind as keyof Catalogs
@@ -1529,7 +1599,9 @@ export const handlers = [
     const refused = catalogRefusal(kind, body, body)
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, sort_order: 0, ...body, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    // #6907: a person's colour has no source, no sync time and no Bambuddy link.
+    const own = kind === 'colours' ? { source: null, synced_at: null, bb_colour_id: null } : {}
+    const made = { ...blank, sort_order: 0, ...body, ...own, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
     return HttpResponse.json(made, { status: 201 })
   }),
@@ -1550,6 +1622,10 @@ export const handlers = [
       const own = next as unknown as AliasedRow
       own.aliases = own.aliases.filter((one) => catalogKey(one) !== key)
     }
+    // #6907 Decision 217: a person's write of a value a sync writes makes the colour theirs.
+    // A copy of the backend's `_SYNCED_VALUES` (`backend/scadbuddy/filament/catalog.py`).
+    const values = ['name', 'manufacturer', 'rgba', 'material_name', 'material_id', 'extra_colours', 'effect_id']
+    if (kind === 'colours' && values.some((field) => field in body)) (next as unknown as { synced_at: string | null }).synced_at = null
     rows[at] = next
     return HttpResponse.json(next)
   }),
@@ -2156,6 +2232,9 @@ export const handlers = [
       locations: 0,
       moved: 0,
       conflicts: 0,
+      colours: 0,
+      colours_kept: 0,
+      colours_failed: false,
     } satisfies S['PullReport']),
   ),
 ]

@@ -4,10 +4,10 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { EXTRACTORS, type Extractor, MAX_TOUCHES_PER_CALL, PgResourceRows, RESOURCE_TYPES, SessionResources } from '../src/sessions/touched.js'
+import { EXTRACTORS, type Extractor, MAX_TOUCHES_PER_CALL, RESOURCE_TYPES, SessionResources } from '../src/sessions/touched.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -17,6 +17,7 @@ import { BACKEND, firstText, services } from './helpers/mcp.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { PgResourceRows } from './support/sql/resourceRows.js'
 
 // What a session touched (#931, src/sessions/touched.ts) in Postgres: a
 // session's tool calls through the harness projection land in
@@ -218,7 +219,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
     const app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'unused' },
       credentials: new MemoryCredentials(),
       testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
       remoteAddress: () => '10.0.0.7',
@@ -275,7 +275,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`session resources in Postgres${TEST_DATABAS
       return createApp({
         database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
         backend: () => Promise.resolve(true),
-        kek: { ok: false, reason: 'unused' },
         credentials: new MemoryCredentials(),
         testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
         remoteAddress: () => '10.0.0.7',

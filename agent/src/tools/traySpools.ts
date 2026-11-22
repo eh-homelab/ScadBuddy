@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ok } from './call.js'
+import { linkingTools } from './filamentLinks.js'
 import { defineTool, json, type Tool } from './registry.js'
 
 // Which SB spool is in a registry printer's tray, on the native print path (#3818 tier A,
@@ -20,7 +21,7 @@ const trayId = z.number().int().min(0).max(3).describe('The slot in the unit, fr
 
 const SOURCE = "ScadBuddy's own spool inventory (SB spools and their places)"
 
-export const traySpoolTools: Tool[] = [
+const tools: Tool[] = [
   defineTool({
     name: 'link_tray_spool',
     label: 'Link a spool to a tray',
@@ -78,3 +79,6 @@ export const traySpoolTools: Tool[] = [
     },
   }),
 ]
+
+/** #6869: the answers carry the spools' `ui_path`s (`filamentLinks.ts`). */
+export const traySpoolTools: Tool[] = linkingTools(tools, {})
