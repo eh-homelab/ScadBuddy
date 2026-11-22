@@ -548,8 +548,9 @@ class RackUncheckedSlot(BaseModel):
     """A rack-side slot whose spool Glow could not be checked on (spec §3, #6872), named
     so a person can act: why, the SB number the plan names, else the tray it names, and
     what that tray or slot holds. ``reason`` is ``no_spool`` when the plan chose no spool,
-    ``empty_tray`` when it chose a tray that holds none, and ``not_in_inventory`` when
-    the spool, or the spool in the tray, is not in the inventory."""
+    ``empty_tray`` when it chose a tray that holds none, ``not_in_inventory`` when the
+    spool, or the spool in the tray, is not in the inventory, and ``no_type`` when that
+    SB spool has no type, so no material to test (R-6876-6)."""
 
     slot_id: int
     reason: UncheckedReason
@@ -1095,6 +1096,9 @@ def rack_chooser(
                 else await client.filament_requirements(sliced, plate_id=plate_id)
             )
             stage = "rack pick failed"
+            # Only for ``manual_for`` and the early return below: it has no status, so it
+            # names no slot's Glow reason. The ranking uses ``ranked``, built again on the
+            # fresh status; the two lists must not stand in for each other.
             groups = rack_groups(read.filaments, spools)
             manual, notes = manual_for(groups, manual_position, algorithm)
             if not groups:
@@ -1115,10 +1119,11 @@ def rack_chooser(
             # version (#1082), though the upsert still locks its rows.
             await record_seen(rack, printer, status_read)
             stage = "rack pick failed"
-            # Again with the fresh status, which says whether a chosen tray is empty.
-            groups = rack_groups(read.filaments, spools, chosen=chosen, status=status_read)
-            picks = rank_rack(groups, status_read.nozzle_rack, algorithm, usage, manual)
-            found = rack_warnings(groups, status_read.nozzle_rack, algorithm, picks, manual)
+            # Again with the fresh status, which says whether a chosen tray is empty: the
+            # groups the ranking and its warnings use (never ``groups`` above).
+            ranked = rack_groups(read.filaments, spools, chosen=chosen, status=status_read)
+            picks = rank_rack(ranked, status_read.nozzle_rack, algorithm, usage, manual)
+            found = rack_warnings(ranked, status_read.nozzle_rack, algorithm, picks, manual)
             if any(g not in picks or not picks[g].manual for g in manual):
                 # ``rack_warnings`` says the manual position was refused, so drop
                 # ``manual_for``'s "group N got position P" (final review minor 1).
@@ -2373,11 +2378,12 @@ async def rack_preview(
         unchecked = [
             UncheckedSlot(
                 slot_id=slot.slot_id,
-                reason=unfound_reason(slot.spool_id, status),
+                reason=unfound_reason(slot.spool_id, status) if spool is None else "no_type",
                 spool_id=slot.spool_id,
             )
             for slot in slots
-            if found[slot.slot_id] is None
+            # A spool with no type names no material to test Glow on (R-6876-6).
+            if (spool := found[slot.slot_id]) is None or spool.names.material is None
         ]
         if nozzle_plan is not None:
             planned = {slot.slot_id for slot in request.filament_plan.slots}

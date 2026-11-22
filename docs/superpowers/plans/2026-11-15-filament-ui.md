@@ -776,7 +776,7 @@ check passed it no inventory. So Decision 2's negative tray id was never found.
     (`filamentLinks.spools`, #6869's helper). `glow_unchecked`
     stays, so an older client still shows its one line. Why: issue ruling 2; a line that
     names no slot or spool cannot be acted on.
-17. R-6872-3: three reasons, each said in its own words. `no_spool`: a rack-side slot of
+17. R-6872-3: three reasons (a fourth, `no_type`, since R-6876-6), each said in its own words. `no_spool`: a rack-side slot of
     the nozzle plan that the filament plan gives no spool. `empty_tray`: a tray chosen for
     itself that reports no filament. `not_in_inventory`: an SB number the inventory does
     not have, or a filled tray that holds no SB spool. The reasons lived in `print_run.py`
@@ -841,6 +841,14 @@ check passed it no inventory. So Decision 2's negative tray id was never found.
     `GET /api/v1/filament/inventory` (read in the API pod) showed the SB Glow spools
     (#48, #49, #90, #91) on the shelf, none in a tray. The fix judges Glow by the SB spool
     whatever the tray reports.
+37. R-6876-6: an SB spool with no type (no material name: `sb_material` is empty on the
+    run's choice, `names.material` on the dialog's spool) leaves Glow unchecked, with the
+    fourth reason `no_type`. The run says "filament 1's spool in AMS-A slot 1 has no
+    type"; the dialog says "Slot 1: the spool in AMS-A slot 1 has no type, so Glow could
+    not be checked." and links the Filament page, as `not_in_inventory` does. The spool's
+    own subtype still counts if it says Glow. Why: the review of #7011; without it, Glow
+    on a native tray rested on the tray's `tray_type` alone, the gap #6876 closed for
+    typed spools, and the run and the dialog must agree.
 
 ## Entity links audit (#6869)
 
