@@ -39,13 +39,14 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
           </EntityLink>
         )}
         {node.identifier && <span className="text-muted-foreground">{node.identifier}</span>}
-        <span
-          aria-label={`${node.spool_count} ${node.spool_count === 1 ? 'spool' : 'spools'}`}
+        <EntityLink
+          to={filamentLinks.location(node.id)}
+          aria-label={`${node.spool_count} ${node.spool_count === 1 ? 'spool' : 'spools'} in ${node.name}`}
           className="rounded-full bg-muted px-2 text-[12px] tabular-nums text-muted-foreground"
         >
           {node.spool_count}
           {node.capacity != null ? ` / ${node.capacity}` : ''}
-        </span>
+        </EntityLink>
         {tray && <span className="text-[12px] text-muted-foreground">AMS tray, read only</span>}
         {archived && <span className="text-[12px] text-muted-foreground">Archived</span>}
         {!tray && (

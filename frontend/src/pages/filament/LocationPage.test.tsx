@@ -1,6 +1,9 @@
 import { screen, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
+import { getLocation } from '../../api/filament'
 import { L, spoolId } from '../../mocks/features/filament/seed'
+import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { LocationPage } from './LocationPage'
 
@@ -19,6 +22,15 @@ describe('the location page', () => {
     expect(spool).toHaveTextContent('120 g')
     expect(screen.getByRole('link', { name: 'Print label' })).toHaveAttribute('href', `/filament/labels?locations=${L.AMS_A1}`)
     expect(screen.queryByRole('link', { name: 'Printer settings' })).toBeNull()
+    expect(screen.getByRole('link', { name: 'View spools' })).toHaveAttribute('href', `/filament/spools?place=${L.AMS_A1}`)
+    expect(screen.queryByText('Archived')).toBeNull()
+  })
+
+  it('shows Archived for an archived place', async () => {
+    const found = await getLocation(L.SHELF_A)
+    server.use(http.get('*/api/v1/filament/locations/:id', () => HttpResponse.json({ ...found, archived_at: '2026-11-01T00:00:00Z' })))
+    open(L.SHELF_A)
+    expect(await screen.findByText('Archived')).toBeInTheDocument()
   })
 
   it('shows a printer place: its units and the settings link', async () => {

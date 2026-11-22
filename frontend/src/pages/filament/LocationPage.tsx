@@ -63,6 +63,9 @@ export function LocationPage() {
             <Link to={filamentLinks.locationLabel(place.id)} className="inline-flex items-center gap-1 underline">
               <PrinterIcon className="size-3.5" /> Print label
             </Link>
+            <Link to={filamentLinks.location(place.id)} className="underline">
+              View spools
+            </Link>
             {place.printer_root && (
               <Link to={filamentLinks.printers} className="underline">
                 Printer settings
