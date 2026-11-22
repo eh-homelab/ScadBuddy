@@ -260,8 +260,9 @@ class ListedFileInput(BaseModel):
     #: published version"). Left out, the stored request stays.
     repin: bool | None = None
     #: What `Listing.library_file` answers, accepted so a client can send back the
-    #: object it read. It is ignored: no body sets the pin.
-    pinned: str | None = None
+    #: object it read. It is ignored: no body sets the pin. A value that is not a
+    #: sha256 is refused (422), so a malformed body does not save silently.
+    pinned: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 ```
 
 The pin is the server's: no body can set it. The `library_file` column stores
@@ -494,7 +495,10 @@ new draft before the first upload. A save, and `change_media` (`PUT …/media`),
 `storefront_listing_kept` hold on a `listing-media-*` key that the new `media_ids` does
 not name, also one whose id never reached a save, in the same transaction as the row's
 write. A hold taken or refreshed in the last hour is spared (an upload of a picture the
-listing holds already sets that hold's `created_at` to now), so an upload is not lost to a save from
+listing holds already sets that hold's `created_at` to now: the upload takes it with
+`BlobRefs.hold` (`store/refs.py`), whose `ON CONFLICT … DO UPDATE SET created_at = now()`
+refreshes it, never with `add`, whose `ON CONFLICT DO NOTHING` would count the hour from
+the first upload), so an upload is not lost to a save from
 another tab before the editor names it; the next save after that hour drops it. This is
 the one new route: after the upload, the picture takes the template's path (§5.2 step 4).
 
@@ -941,7 +945,9 @@ pinned bytes, and only then starts the run as today.
    and `existing` and `start` key the claimed run by it (`:891-930`). The restore runs
    before that line, and `subject`, `existing` and `start` take the item's new id, not
    the check's. No run of the claim can exist under the old id: the restore ends before
-   any start. A retry of the same claim restores nothing (it finds the file in
+   any start. This holds because `OperationWorkflow` runs the check once and every retry
+   of the run reuses that same `checked` (its `restore` flag too); a change that re-runs
+   the check on a retry must keep it. A retry of the same claim restores nothing (it finds the file in
    "Storefront" by its sha256, or the item already moved), so it keys `claimed_run` by
    `library:<new id>` and finds the run its first try started.
 5. **The run** starts on the new id, as today. The next print of the item finds that
