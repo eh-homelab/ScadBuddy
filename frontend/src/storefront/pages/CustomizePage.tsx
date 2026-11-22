@@ -202,8 +202,9 @@ export function CustomizePage({
    * The choices of the latest render started. The effect below also runs when the preview on
    * screen changes: an older render can show its preview just after a newer one started, and
    * starting those choices again cleared the refusal on screen, then showed it again. It holds
-   * only while those choices stay on screen: a change away and back renders them again, even
-   * when the change away never rendered (#7000 review).
+   * only while those choices stay on screen: a change away and back renders them again once
+   * their render has ended (a running one goes on, `runningKey`), even when the change away
+   * never rendered (#7000 review).
    */
   const startedKey = useRef<string | undefined>(undefined)
   /**
