@@ -150,3 +150,124 @@ def test_a_print_s_file_on_the_printer_is_read_and_not_kept() -> None:
 
     assert (read.name, read.data) == ("demo_elan.3mf", data)
     assert download.called and not upload.called
+
+
+class _Operations:
+    """The operation record of one key: what a first send's `mesh_model_create` did."""
+
+    def __init__(self, first: object) -> None:
+        self.first = first
+        self.asked: list[tuple[str, str, str]] = []
+
+    async def keyed_operation(self, kind: str, subject: str, key: str) -> object:
+        self.asked.append((kind, subject, key))
+        return self.first
+
+
+def _commands(first: object) -> object:
+    from types import SimpleNamespace
+
+    from scadbuddy.operations.component import OperationCommands
+
+    return OperationCommands(
+        store=_Operations(first),  # type: ignore[arg-type]
+        client=None,  # type: ignore[arg-type]
+        queues={},
+        kinds={"mesh_model_create": SimpleNamespace(name="mesh_model_create")},  # type: ignore[dict-item]
+    )
+
+
+def _first(status: str, **fields: object) -> object:
+    from datetime import UTC, datetime
+
+    from scadbuddy.operations.store import Operation
+
+    return Operation.model_validate(
+        {
+            "id": "op-1",
+            "kind": "mesh_model_create",
+            "subject": "trophy",
+            "status": status,
+            "created_at": datetime(2026, 11, 22, tzinfo=UTC),
+            **fields,
+        }
+    )
+
+
+def _trophy() -> dict[str, object]:
+    from datetime import UTC, datetime
+
+    from scadbuddy.library.catalogue import ModelRecord
+
+    return ModelRecord(
+        name="Trophy",
+        slug="trophy",
+        origin="mine",
+        has_thumbnail=False,
+        has_readme=False,
+        updated_at=datetime(2026, 11, 22, tzinfo=UTC),
+    ).model_dump(mode="json")
+
+
+@respx.mock
+def test_a_resend_gets_the_first_model_and_reads_no_print_again() -> None:
+    """#6969: a resend under the key of a finished create answers its model before the
+    print's file is read, so the printer is not read again, and a file it deleted since
+    is no 404."""
+    from fastapi import Response
+
+    from scadbuddy.api.mesh_models import MeshModelCreate, create_from_mesh
+    from scadbuddy.library.catalogue import ModelRecord
+    from tests.api.test_print_imports import ARCHIVE, bambuddy
+
+    bambuddy()  # The printer's /cache is empty now: the file is gone.
+    body = MeshModelCreate(
+        name="Trophy",
+        archive_id=ARCHIVE,
+        archive_source=SourceChoice(kind="printer", path="/cache/demo_elan.3mf"),
+    )
+    ops = _commands(_first("succeeded", result=_trophy()))
+
+    made = asyncio.run(
+        create_from_mesh(
+            body,
+            Response(),
+            ops,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+            _Store(),  # type: ignore[arg-type]
+            idempotency_key="k1",
+        )
+    )
+
+    assert isinstance(made, ModelRecord) and made.slug == "trophy"
+    assert ops.store.asked == [("mesh_model_create", "trophy", "k1")]  # type: ignore[attr-defined]
+    assert not respx.calls
+
+
+@respx.mock
+def test_a_resend_of_a_failed_create_is_its_problem_and_reads_no_print() -> None:
+    """#6969: a first send that failed answers its problem again, and nothing is read."""
+    from fastapi import Response
+
+    from scadbuddy.api.mesh_models import MeshModelCreate, create_from_mesh
+    from tests.api.test_print_imports import ARCHIVE
+
+    error = {"status": 422, "title": "Unprocessable Content", "detail": "too many objects"}
+    body = MeshModelCreate(
+        name="Trophy", archive_id=ARCHIVE, archive_source=SourceChoice(kind="archive_source")
+    )
+
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(
+            create_from_mesh(
+                body,
+                Response(),
+                _commands(_first("failed", error=error)),  # type: ignore[arg-type]
+                None,  # type: ignore[arg-type]
+                _Store(),  # type: ignore[arg-type]
+                idempotency_key="k1",
+            )
+        )
+
+    assert (refused.value.status, refused.value.detail) == (422, "too many objects")
+    assert not respx.calls

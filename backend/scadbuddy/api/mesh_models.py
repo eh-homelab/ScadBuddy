@@ -21,6 +21,7 @@ from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     Claimed,
     IdempotencyKey,
+    answer_recorded,
     operation_answer,
     recorded,
     run_operation,
@@ -166,6 +167,24 @@ async def create_mesh_model(
     return operation_answer(result, ModelRecord)
 
 
+async def made_before(
+    ops: OperationCommands, response: Response, name: str, idempotency_key: str
+) -> ModelRecord | None:
+    """The model a finished ``mesh_model_create`` sent with ``idempotency_key`` made for
+    ``name``, or its problem raised (#6969). A route that reads a print's file asks this
+    first: a resend after a lost answer then gets the first send's answer, the printer is
+    not read again, and a file deleted since is no 404. None when no such operation
+    finished: the route reads the file, and `create_mesh_model` answers the rest."""
+    first = await ops.store.keyed_operation(
+        ops.kinds["mesh_model_create"].name, _slug_from_name(name), idempotency_key
+    )
+    if first is None or first.status == "running":
+        return None
+    made = operation_answer(answer_recorded(first, response), ModelRecord)
+    assert isinstance(made, ModelRecord)  # a finished operation is never a 202
+    return made
+
+
 async def create_from_read(
     ops: OperationCommands,
     response: Response,
@@ -242,7 +261,8 @@ async def _read_print_file(
         "the new model's `meshes/`, and a `scene.json` that compiles to its `model.scad` "
         "(spec 2026-10-11). Nothing is written to Bambuddy, and the model is no print of "
         "the archive (Import print links one). A sliced file is a 422. A print's file needs "
-        "an `Idempotency-Key` (428 without one)."
+        "an `Idempotency-Key` (428 without one); a resend under the key of a finished "
+        "create answers what that create answered, and reads nothing again."
     ),
 )
 async def create_from_mesh(
@@ -260,6 +280,9 @@ async def create_from_mesh(
                 KEY_REQUIRED_DETAIL,
                 type_=KEY_REQUIRED_PROBLEM,
             )
+        made = await made_before(ops, response, body.name, idempotency_key)
+        if made is not None:
+            return made
         read = await _read_print_file(store, body.archive_id, body.archive_source)
         slug = _slug_from_name(body.name)
         return await create_from_read(

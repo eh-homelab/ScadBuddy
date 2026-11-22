@@ -686,14 +686,59 @@ def test_an_import_waiting_on_another_is_refused_in_time(
     assert import_print(client, {"source": {"kind": "archive"}, "slug": model}).status_code == 201
 
 
+def _lost_first_import(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], key: dict[str, str]
+) -> None:
+    """A first request that makes the model but records no import: its answer is lost."""
+    from scadbuddy.api import print_imports as route
+
+    record = route._record
+
+    async def lost(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the answer never arrived")
+
+    monkeypatch.setattr(route, "_record", lost)
+    with pytest.raises(RuntimeError):
+        import_print(client, body, **key)
+    monkeypatch.setattr(route, "_record", record)
+    assert client.get("/api/v1/models/trophy/scene").status_code == 200
+
+
+@pytest.mark.requires_git
 @respx.mock
-def test_a_retry_whose_source_changed_names_the_model_and_links_nothing(
+def test_a_retry_links_the_model_its_first_send_made_and_reads_no_source(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#5979: a first request makes the model but records no import; its retry with the
-    same key reads the source again, now other bytes, as a printer file overwritten in
-    between would be. The retry links nothing, and names the model only while it exists."""
-    from scadbuddy.api import print_imports as route
+    """#5979, #6969: the retry with the same key links the model the first request made
+    before it reads the source again, so a source gone since is no 404."""
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    bambuddy(source_3mf_path="archive/x/source/demo_elan.3mf")
+    answers = iter([httpx.Response(200, content=painted_3mf())])
+    download = respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
+        side_effect=lambda request: next(answers, httpx.Response(404))
+    )
+    body = {"source": {"kind": "archive_source"}, "new_model": {"name": "Trophy"}}
+    key = press()
+    _lost_first_import(client, monkeypatch, body, key)
+
+    made = import_print(client, body, **key)
+
+    assert made.status_code == 201, made.text
+    assert (made.json()["slug"], made.json()["created_model"]) == ("trophy", True)
+    assert download.call_count == 1
+    assert client.get(f"/api/v1/prints/{ARCHIVE}").json()["slug"] == "trophy"
+
+
+@pytest.mark.requires_git
+@respx.mock
+def test_a_retry_whose_model_was_deleted_and_source_changed_links_nothing(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5979: once the model the first request made is deleted, the retry reads the
+    source again, now other bytes, as a printer file overwritten in between would be. The
+    retry links nothing, and says the model was deleted."""
     from tests.api.test_mesh_models import painted_3mf
 
     configure(client)
@@ -702,32 +747,17 @@ def test_a_retry_whose_source_changed_names_the_model_and_links_nothing(
     respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
         side_effect=lambda request: httpx.Response(200, content=content["bytes"])
     )
-    record = route._record
-
-    async def lost(*args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("the answer never arrived")
-
     body = {"source": {"kind": "archive_source"}, "new_model": {"name": "Trophy"}}
     key = press()
-    monkeypatch.setattr(route, "_record", lost)
-    with pytest.raises(RuntimeError):
-        import_print(client, body, **key)
-    monkeypatch.setattr(route, "_record", record)
-    assert client.get("/api/v1/models/trophy/scene").status_code == 200
+    _lost_first_import(client, monkeypatch, body, key)
     content["bytes"] = a_3mf()
-
-    made = import_print(client, body, **key)
-
-    assert made.status_code == 409, made.text
-    assert "the model 'trophy' was made from" in made.json()["detail"]
-    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
-
     assert client.delete("/api/v1/models/trophy", headers=press()).status_code == 204
+
     gone = import_print(client, body, **key)
 
     assert gone.status_code == 409, gone.text
     assert "that request made the model 'trophy', which was deleted since" in gone.json()["detail"]
-    assert gone.json()["operation_id"] == made.json()["operation_id"]
+    assert gone.json()["operation_id"]
     assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
 
 
@@ -1066,6 +1096,42 @@ def test_a_printer_file_opens_as_a_mesh_model_and_is_not_kept(
     assert made.status_code == 201, made.text
     assert download.called and not upload.called
     assert made.json()["mesh_source"]["name"] == "demo_elan.3mf"
+
+
+@pytest.mark.requires_git
+@respx.mock
+def test_a_resend_gets_the_first_model_after_the_printer_file_is_gone(
+    client: TestClient, model: str
+) -> None:
+    """#6969: a resend under the same key answers the model the first send made before
+    it reads the print's file, so the printer is read once, and a file it deleted since
+    is no 404."""
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    on_printer = {"name": "demo_elan.3mf", "path": "/cache/demo_elan.3mf", "size": 10}
+    bambuddy(printer_files={"path": "/cache", "files": [on_printer], "warnings": []})
+    download = respx.get(
+        f"{API}/printers/1/files/download", params={"path": "/cache/demo_elan.3mf"}
+    ).mock(return_value=httpx.Response(200, content=painted_3mf()))
+    body = {
+        "name": "From the printer",
+        "archive_id": ARCHIVE,
+        "archive_source": {"kind": "printer", "path": "/cache/demo_elan.3mf"},
+    }
+    key = press()
+    first = from_mesh(client, body, **key)
+    assert first.status_code == 201, first.text
+    listing = respx.get(f"{API}/printers/1/files", params={"path": "/cache"}).mock(
+        return_value=httpx.Response(200, json={"path": "/cache", "files": [], "warnings": []})
+    )
+
+    again = from_mesh(client, body, **key)
+
+    assert again.status_code == 201, again.text
+    assert again.json()["slug"] == first.json()["slug"] == "from-the-printer"
+    assert download.call_count == 1
+    assert not listing.called
 
 
 @respx.mock

@@ -36,19 +36,22 @@ export function pinnedOutwardReason(toolName: string, input: unknown): string | 
   if (name === 'get_print_sources' && ![undefined, false].includes(field(input, 'printer') as undefined | false)) {
     return `${toolName} asks to read the printer's storage, which reaches the printer and needs a human approval in the ScadBuddy UI.`
   }
-  if (name === 'import_print') {
-    const source = field(input, 'source')
-    if (typeof source !== 'object' || source === null || field(source, 'kind') !== 'archive' && field(source, 'kind') !== 'archive_source' && field(source, 'kind') !== 'library') {
-      return `${toolName} asks to read the print's file from the printer, which reaches the printer and needs a human approval in the ScadBuddy UI.`
-    }
-  }
-  if (name === 'create_model_from_mesh' && field(input, 'archive_source') !== undefined) {
-    const source = field(input, 'archive_source')
-    if (typeof source !== 'object' || source === null || !['archive', 'archive_source', 'library'].includes(field(source, 'kind') as string)) {
-      return `${toolName} asks to read the print's file from the printer, which reaches the printer and needs a human approval in the ScadBuddy UI.`
-    }
+  if ((name === 'import_print' && readsPrinter(field(input, 'source'))) || (name === 'create_model_from_mesh' && field(input, 'archive_source') !== undefined && readsPrinter(field(input, 'archive_source')))) {
+    return `${toolName} asks to read the print's file from the printer, which reaches the printer and needs a human approval in the ScadBuddy UI.`
   }
   return null
+}
+
+/** The print-file places that never reach the printer (`get_print_sources`' kinds but `printer`). */
+const OFF_PRINTER_KINDS: readonly unknown[] = ['archive', 'archive_source', 'library']
+
+/**
+ * Whether a print's file `source` (import_print's `source`, create_model_from_mesh's
+ * `archive_source`) reads the printer. Fails closed: anything but one of the three kinds
+ * that stay off the printer counts.
+ */
+function readsPrinter(source: unknown): boolean {
+  return typeof source !== 'object' || source === null || !OFF_PRINTER_KINDS.includes(field(source, 'kind'))
 }
 
 /** Whether this call must be approved by a person whatever the tool's tier (`pinnedOutwardReason`). */
