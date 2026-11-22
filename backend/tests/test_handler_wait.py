@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncIterator
 
 import pytest
+import pytest_asyncio
 from temporalio import workflow
 from temporalio.client import Client, WorkflowUpdateStage
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
@@ -15,7 +16,8 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 from scadbuddy.workflows.handlers import handler_wait
 from tests.support.temporal import temporal_client
 
-pytestmark = pytest.mark.requires_temporal
+#: One dev server for the module's tests, on one loop.
+pytestmark = [pytest.mark.requires_temporal, pytest.mark.asyncio(loop_scope="module")]
 
 
 @workflow.defn(sandboxed=False)
@@ -59,7 +61,7 @@ class _Waits:
         return "done"
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def client() -> AsyncIterator[Client]:
     async with temporal_client() as connected:
         yield connected
@@ -92,6 +94,10 @@ async def test_a_workflow_cancel_while_the_condition_is_false_leaves_the_handler
 async def test_a_cancel_of_the_waiting_task_with_the_condition_false_is_raised(
     client: Client,
 ) -> None:
+    """`handler_wait`'s own re-raise, for a cancel of the handler's task (an eviction).
+    The cancel is an asyncio one inside the handler, so it never reaches temporalio's
+    `cancellation_arrived`: this pins `handler_wait`, not the SDK. The test above is the
+    one a temporalio change to `wait_condition` fails."""
     queue = f"hw-{uuid.uuid4().hex[:8]}"
     async with Worker(
         client, task_queue=queue, workflows=[_Waits], workflow_runner=UnsandboxedWorkflowRunner()
