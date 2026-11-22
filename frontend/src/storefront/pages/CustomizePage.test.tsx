@@ -226,6 +226,25 @@ describe('CustomizePage', () => {
     expect(screen.getByRole('button', { name: /Rim colour/ })).toHaveAccessibleName('Rim colour Teal')
   })
 
+  it('never starts the same choices again when the page re-runs its render effect (clash flake)', async () => {
+    // The effect also runs when the preview on screen changes. An older render that showed
+    // its preview after the newer one started ran it again: the second start cleared the
+    // refusal on screen, then showed it again.
+    const sent = renders()
+    const { user, rerender } = show(CHARM_ID)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
+    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    const refusal = await screen.findByRole('alert')
+    const starts = () => sent.filter((body) => Object.keys((body as { values: object }).values).length === 2).length
+    expect(starts()).toBe(1)
+    rerender(<CustomizePage id={CHARM_ID} timing={FAST} debounceMs={11} />)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(starts()).toBe(1)
+    expect(refusal).toBeInTheDocument()
+  })
+
   it('says the preview must show before an add, with a retry, when the preview fails (#6152 review)', async () => {
     // A colour the visitor set (saved), so the first render is the one that fails.
     window.localStorage.setItem('scadbuddy.storefront.customize.l1', JSON.stringify({ v: 1, values: { base_colour: '#E8532F' }, quantity: 1 }))
