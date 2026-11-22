@@ -559,6 +559,9 @@ async def warm_default(state: AppState, listing: Listing) -> None:
         # A Temporal that does not answer never holds up the publish (review of #6970).
         await asyncio.wait_for(preparer(state).start_default(listing.id), WARM_START_TIMEOUT)
     except TimeoutError:
+        # Also a TimeoutError from inside start_default (a client timeout): that start
+        # too may have reached Temporal, so it is "given up", with its traceback. Keep
+        # the catch this wide.
         logger.warning(
             "gave up waiting for the default price run of listing %s to start",
             listing.id,
