@@ -49,7 +49,13 @@ test.describe('the public storefront', () => {
     await page.goto('/store/l/l1')
     const name = page.getByLabel('Name', { exact: true })
     // Each name is priced before the next: the load's price is on screen too, so wait for
-    // the estimate of that name's own render, not for any price (#6921).
+    // the estimate of that name's own render, not for any price (#6921). The answers are
+    // recorded from the start, so an estimate that answers before the wait is not missed.
+    const estimated = new Set<string>()
+    page.on('response', (response) => {
+      const found = /\/renders\/([^/]+)\/estimate$/.exec(new URL(response.url()).pathname)
+      if (found) estimated.add(found[1])
+    })
     const priced = async (value: string) => {
       const posted = page.waitForRequest(
         (request) =>
@@ -60,7 +66,7 @@ test.describe('the public storefront', () => {
       await name.fill(value)
       const answer = await (await posted).response()
       const { id } = (await answer!.json()) as { id: string }
-      await page.waitForResponse((response) => new URL(response.url()).pathname.endsWith(`/renders/${id}/estimate`))
+      await expect.poll(() => estimated.has(id)).toBe(true)
       await expect(page.getByText('Updating this price…')).toBeHidden()
     }
     await priced('Ada')
