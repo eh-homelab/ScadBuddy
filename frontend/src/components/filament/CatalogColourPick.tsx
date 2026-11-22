@@ -1,5 +1,5 @@
 import { PaletteIcon } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
 import { listCatalog, type CatalogRows } from '../../api/filament'
 import { alphaOf, CLEAR_MAX_ALPHA } from '../../lib/rgba'
@@ -34,6 +34,21 @@ type State =
  */
 export function CatalogColourPick({ onPick }: { onPick: (colour: CatalogColour) => void }) {
   const [open, setOpen] = useState(false)
+  // The material of a row whose maker gives no label is the materials catalog's name. Read
+  // at the first open and kept while the page is, as the pages keep their catalogs; a failed
+  // read is tried again at the next open.
+  const [materials, setMaterials] = useState<Map<string, string> | null>(null)
+  const asked = useRef(false)
+  useEffect(() => {
+    if (!open || asked.current) return
+    asked.current = true
+    listCatalog('materials', { includeArchived: true }).then(
+      (rows) => setMaterials(new Map(rows.map((row) => [row.id, row.name]))),
+      () => {
+        asked.current = false
+      },
+    )
+  }, [open])
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
@@ -45,6 +60,7 @@ export function CatalogColourPick({ onPick }: { onPick: (colour: CatalogColour) 
       <PopoverContent align="start" className="w-[min(26rem,calc(100vw-2rem))] p-0">
         {open && (
           <CatalogColourList
+            materials={materials}
             onPick={(colour) => {
               onPick(colour)
               setOpen(false)
@@ -56,23 +72,10 @@ export function CatalogColourPick({ onPick }: { onPick: (colour: CatalogColour) 
   )
 }
 
-function CatalogColourList({ onPick }: { onPick: (colour: CatalogColour) => void }) {
+function CatalogColourList({ materials, onPick }: { materials: ReadonlyMap<string, string> | null; onPick: (colour: CatalogColour) => void }) {
   const [text, setText] = useState('')
   const query = useDebounced(text.trim(), SEARCH_DEBOUNCE_MS)
   const [state, setState] = useState<State>({ kind: 'idle' })
-  const [materials, setMaterials] = useState<Map<string, string>>(new Map())
-
-  // The material of a row whose maker gives no label is the materials catalog's name.
-  useEffect(() => {
-    let live = true
-    listCatalog('materials', { includeArchived: true }).then(
-      (rows) => live && setMaterials(new Map(rows.map((row) => [row.id, row.name]))),
-      () => {},
-    )
-    return () => {
-      live = false
-    }
-  }, [])
 
   useEffect(() => {
     if (query === '') {
@@ -114,7 +117,7 @@ function CatalogColourList({ onPick }: { onPick: (colour: CatalogColour) => void
           {rows.length > 0 && (
             <CommandGroup heading={rows.length > CATALOG_PICK_LIMIT ? `${CATALOG_PICK_LIMIT} of ${rows.length}, type more to narrow` : undefined}>
               {rows.slice(0, CATALOG_PICK_LIMIT).map((colour) => {
-                const material = colour.material_name ?? (colour.material_id ? materials.get(colour.material_id) : null) ?? null
+                const material = colour.material_name ?? (colour.material_id ? materials?.get(colour.material_id) : null) ?? null
                 const alpha = alphaOf(colour.rgba)
                 const detail = [colour.manufacturer, material, alpha === 0xff ? null : alpha <= CLEAR_MAX_ALPHA ? 'clear' : 'translucent'].filter(Boolean).join(' · ')
                 return (

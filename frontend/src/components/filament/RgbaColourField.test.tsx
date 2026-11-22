@@ -1,8 +1,10 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
+import { http, HttpResponse } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { listCatalog } from '../../api/filament'
+import { server } from '../../mocks/server'
 import { RgbaColourField } from './RgbaColourField'
 
 function setup(value: string | null, inherited: string | null = null) {
@@ -216,5 +218,36 @@ describe('the catalog pick (#6912)', () => {
     await user.clear(hex)
     await user.type(hex, '#123456AA')
     expect(onChange).toHaveBeenLastCalledWith('#123456AA')
+  })
+
+  it('reads the materials once, however often the pick opens', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/filament/catalog/materials', () => {
+        reads += 1
+        return undefined
+      }),
+    )
+    const { user } = pick()
+    await search(user, 'orange')
+    expect(await screen.findByRole('option', { name: /Translucent Orange.*PETG/ })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('combobox', { name: 'Search the colour catalog' })).toBeNull()
+    await search(user, 'orange')
+    expect(await screen.findByRole('option', { name: /Translucent Orange.*PETG/ })).toBeInTheDocument()
+    expect(reads).toBe(1)
+  })
+
+  it('says why a search failed, in an alert', async () => {
+    server.use(
+      http.get('/api/v1/filament/catalog/colours', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'the database did not answer' }, { status: 503, headers: { 'Content-Type': 'application/problem+json' } }),
+      ),
+    )
+    const { onChange, user } = pick()
+    await search(user, 'jade')
+    expect(await screen.findByRole('alert')).toHaveTextContent('the database did not answer')
+    expect(screen.queryByRole('option')).toBeNull()
+    expect(onChange).not.toHaveBeenCalled()
   })
 })
