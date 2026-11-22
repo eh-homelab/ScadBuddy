@@ -92,8 +92,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " until someone says the plate is clear, on the Prints page, in the print dialog"
             " or through the assistant. Off, the next print starts once the printer has"
             " finished, as Bambuddy's queue does by default. A run keeps the setting it"
-            " started with. With it on, a printer that holds a finished or failed print is"
-            " busy for a print sent over the LAN too, until someone says the plate is clear.",
+            ' started with. With it and "Queue when the printer is busy" both on, a printer'
+            " that holds a finished or failed print counts as busy for a print sent over the"
+            " LAN too, which then waits until someone says the plate is clear.",
         ),
         "lan_queue_when_busy": SettingDoc(
             "Queue when the printer is busy",

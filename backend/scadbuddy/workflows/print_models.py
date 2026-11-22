@@ -74,8 +74,9 @@ LAN_UNSURE = "PrintLanUnsure"
 LAN_REFUSED = "PrintLanRefused"
 #: What a run adds to its failure when its start started nothing for sure (#6871,
 #: ruling 4): the first attempt refused (``LAN_REFUSED``) or its upload failed. The
-#: workflow adds it (`PrintRunWorkflow`, ``start_refused``), never ``lan_print``, which
-#: cannot know whether an earlier, unsure attempt started.
+#: workflows add it, never ``lan_print``, which cannot know whether an earlier, unsure
+#: attempt started: `PrintRunWorkflow` (``start_refused``), and
+#: `LanSequenceWorkflow`'s ``_lan_failed`` for a queued run whose first start is refused.
 NOTHING_SENT = "Nothing was sent to print, so it is safe to print again."
 
 
