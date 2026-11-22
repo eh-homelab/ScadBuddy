@@ -658,3 +658,51 @@ def test_a_storefront_slot_takes_its_filament_types_preset_and_own_colour() -> N
     )
     assert [(e.kind, e.slot_id) for e in bare.errors] == [("no-preset", 1), ("no-preset", 2)]
     assert bare.errors[0].message.startswith("Slot 1's filament has no slicer preset")
+
+
+def test_a_spool_less_slot_takes_its_given_colour() -> None:
+    """#6710 decision 5: a storefront file listing slices each slot in the visitor's
+    colour, not the author's. A slot with no spool takes its ``slot_colours`` entry, by
+    slot id; one with no entry takes the file's own colour; a slot with a spool takes the
+    spool's colour, whatever ``slot_colours`` says."""
+    built = FilamentOptions(
+        library_file_id=41,
+        slots=[
+            SlotNeed(slot_id=1, colour="#FF0000"),
+            SlotNeed(slot_id=2, colour="#0000FF"),
+            SlotNeed(slot_id=3, colour="#00FF00"),
+        ],
+        spools=[BASIC],
+    )
+    pla = [_preset("0.4", "GFSA00_22")]
+    priced = resolve(
+        built,
+        FilamentPlan(slots=[SlotChoice(slot_id=3, spool_id=BASIC.spool_id)]),
+        PrintChoices(nozzles=[NozzleChoice(size="0.4")]),
+        recorded(),
+        {BASIC.spool_id: pla},
+        slot_presets={1: pla, 2: pla},
+        slot_colours={1: "#123456", 3: "#ABCDEF"},
+    )
+    assert priced.errors == []
+    assert priced.filament_colours == ["#123456", "#0000FF", "#112233"]
+
+
+async def test_each_plate_takes_the_given_colours() -> None:
+    """#6710: ``resolve_plates`` hands ``slot_colours`` to every plate's ``resolve``."""
+    built = FilamentOptions(
+        library_file_id=41, slots=[SlotNeed(slot_id=1, colour="#FF0000")], spools=[]
+    )
+    pla = [_preset("0.4", "GFSA00_22")]
+    every, errors = await resolve_plates(
+        None,
+        [1, 2],
+        [built, built],
+        FilamentPlan(),
+        PrintChoices(nozzles=[NozzleChoice(size="0.4")]),
+        recorded(),
+        slot_presets={1: pla},
+        slot_colours={1: "#123456"},
+    )
+    assert errors == []
+    assert [resolved.filament_colours for resolved in every] == [["#123456"], ["#123456"]]
