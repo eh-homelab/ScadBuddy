@@ -68,6 +68,10 @@ export async function throwawayDatabase(options: { empty?: boolean } = {}): Prom
 
 /** This process's one connection for `dropLater`: it drops the databases one at a time. */
 let dropper: Sql | undefined
+/** The DROPs `dropLater` queued that have not ended yet, with their database's name. */
+const dropping = new Set<{ name: string; done: Promise<void> }>()
+/** A failed DROP, kept for `flushDrops` to throw from its hook. */
+let dropFailed: Error | undefined
 
 /**
  * Drops a throwaway database after its test, outside the test's hook (#7044). `DROP DATABASE`
@@ -76,14 +80,48 @@ let dropper: Sql | undefined
  * On a slow CI disk one such checkpoint took 20.7 s (sync 15.8 s), and an `afterEach` that
  * waited for it timed out at 20 s, although the test had closed every connection it opened.
  * So `drop()` waits only for `db.close()`, and the DROP runs here, queued on one connection.
- * A failed DROP is an unhandled rejection, which fails the run. A process that ends with a
- * DROP still queued leaves that database behind, as a killed run does.
+ * `flushDrops` waits for the queue before the file's process ends (#7058).
  */
 function dropLater(base: string, name: string): void {
   dropper ??= postgres(base, { max: 1, idle_timeout: 1, onnotice: () => {} })
-  dropper.unsafe(`DROP DATABASE "${name}" WITH (FORCE)`).catch((err: unknown) => {
-    throw new Error(`dropping the test database ${name} failed`, { cause: err })
-  })
+  const entry = { name, done: Promise.resolve() }
+  entry.done = dropper
+    .unsafe(`DROP DATABASE "${name}" WITH (FORCE)`)
+    .then(
+      () => undefined,
+      (err: unknown) => {
+        dropFailed ??= new Error(`dropping the test database ${name} failed`, { cause: err })
+      },
+    )
+    .finally(() => dropping.delete(entry))
+  dropping.add(entry)
+}
+
+/**
+ * Waits for the DROPs `dropLater` queued, at most `waitMs`, and then closes its connection
+ * (#7058). A file's process ends once its last hook resolves (`pool: 'forks'`, `isolate`), so
+ * without this its last DROP raced the exit and could leave a template copy behind. Throws a
+ * DROP that failed. A DROP still waiting after `waitMs` (a checkpoint stalled on a slow disk,
+ * #7044) is left behind, named in the error log, rather than holding the hook past its timeout;
+ * if it fails later, nothing throws it, since the hook has returned.
+ */
+export async function flushDrops(waitMs: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined
+  const waited = await Promise.race([
+    Promise.all([...dropping].map((entry) => entry.done)).then(() => true),
+    new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), waitMs))),
+  ])
+  clearTimeout(timer)
+  if (waited) {
+    await dropper?.end({ timeout: 2 })
+  } else {
+    const left = [...dropping].map((entry) => entry.name).join(', ')
+    console.error(`test databases left behind, their DROP still waiting: ${left}`)
+  }
+  // After a timeout the connection is not ended: ending it would cancel the DROP it still
+  // waits on and report that as a failure. The fork's exit closes it.
+  dropper = undefined
+  if (dropFailed) throw dropFailed
 }
 
 /**
