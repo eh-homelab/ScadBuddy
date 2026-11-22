@@ -14,6 +14,7 @@ import { FILAMENT_HOME } from './pages/filament/tabs'
 // change inside `startTransition` (react-router 8, unless `useTransitions={false}`), so
 // React keeps the old page up until the next one's chunk is in. `lazyRetry`, not `lazy`:
 // a chunk that failed is imported again on the next visit (#3241).
+const CodePage = lazyRetry(async () => ({ default: (await import('./pages/CodePage')).CodePage }))
 const CustomerPage = lazyRetry(async () => ({ default: (await import('./pages/CustomerPage')).CustomerPage }))
 const CustomersPage = lazyRetry(async () => ({ default: (await import('./pages/CustomersPage')).CustomersPage }))
 const CustomizePage = lazyRetry(async () => ({ default: (await import('./pages/CustomizePage')).CustomizePage }))
@@ -133,6 +134,7 @@ export function App() {
         <Route path="filament/metrics" element={<FilamentPage tab="metrics" />} />
         <Route path="filament/shopping-list" element={<FilamentPage tab="shopping-list" />} />
         <Route path="filament/ledger" element={<FilamentPage tab="ledger" />} />
+        <Route path="x/:code" element={<CodePage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />
         <Route path="orders/parts" element={<PartsPage />} />
