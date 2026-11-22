@@ -111,12 +111,14 @@ export async function flushDrops(waitMs: number): Promise<void> {
   ])
   clearTimeout(timer)
   if (waited) {
-    await dropper?.end({ timeout: 5 })
-    dropper = undefined
+    await dropper?.end({ timeout: 2 })
   } else {
     const left = [...dropping.keys()].join(', ')
     console.error(`test databases left behind, their DROP still waiting: ${left}`)
   }
+  // After a timeout the connection is not ended: ending it would cancel the DROP it still
+  // waits on and report that as a failure. The fork's exit closes it.
+  dropper = undefined
   if (dropFailed) throw dropFailed
 }
 
