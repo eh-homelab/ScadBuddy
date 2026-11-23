@@ -462,3 +462,117 @@ def test_snapshot_folds_nothing_itself(pg_pool: PgPool) -> None:
     assert found.low_stock == {"PLA": 0}
     assert found.reorder == {"PLA": 0}
     assert found.currency == "USD"
+
+
+# -- material numbers (#7152) -----------------------------------------------------------
+
+WINDOW = (date(2026, 11, 1), date(2026, 11, 30))
+
+
+def _archive_type(pool: PgPool, type_id: UUID, days_ago: int) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_spool_types SET archived_at = now() - make_interval(days => %s)"
+            " WHERE id = %s",
+            (days_ago, type_id),
+        )
+
+
+def test_material_numbers_fold_case_and_archived_types(pg_pool: PgPool) -> None:
+    """R-7152-5: one key per ``upper(code)``, archived types of that code in it; the label
+    is the live type's code."""
+    old = _type(pg_pool, "pla-wht")
+    _spool(pg_pool, type_id=old, grams_left=300)
+    _archive_type(pg_pool, old, 2)
+    live = _type(pg_pool, "PLA-Wht")
+    _spool(pg_pool, type_id=live, grams_left=700)
+    other = _type(pg_pool, "PETG-BLK")
+    _spool(pg_pool, type_id=other, grams_left=100)
+    found = _store(pg_pool).material_numbers(*WINDOW)
+    assert (found.since, found.until) == WINDOW
+    assert [(r.key, r.label, r.spools, r.grams_left) for r in found.rows] == [
+        ("PLA-WHT", "PLA-Wht", 2, 1000.0),
+        ("PETG-BLK", "PETG-BLK", 1, 100.0),
+    ]
+    types = {t.id: t for t in found.rows[0].types}
+    assert types.keys() == {old, live}
+    assert (types[old].archived, types[live].archived) == (True, False)
+    assert types[old].code == "pla-wht"
+
+
+def test_material_number_label_is_the_newest_archived_code_with_no_live_type(
+    pg_pool: PgPool,
+) -> None:
+    older = _type(pg_pool, "abs-red")
+    _spool(pg_pool, type_id=older, grams_left=10)
+    _archive_type(pg_pool, older, 5)
+    newer = _type(pg_pool, "ABS-RED")
+    _spool(pg_pool, type_id=newer, grams_left=10)
+    _archive_type(pg_pool, newer, 1)
+    [row] = _store(pg_pool).material_numbers(*WINDOW).rows
+    assert (row.key, row.label) == ("ABS-RED", "ABS-RED")
+
+
+def test_material_number_used_is_the_metrics_consumption(pg_pool: PgPool) -> None:
+    """R-7152-6: plates in the range, every outcome, archived spools too, a paired plate
+    once; the failed ones also as waste."""
+    type_id = _type(pg_pool, "PLA-WHT")
+    one = _spool(pg_pool, type_id=type_id, grams_left=900)
+    gone = _spool(pg_pool, type_id=type_id, grams_left=900)
+    at = datetime(2026, 11, 5, 12, tzinfo=UTC)
+    _sb_end(pg_pool, one, at, 30, "a")
+    _bb_end(pg_pool, one, at, 28, "a")
+    _bb_end(pg_pool, one, at, 12, "b", status="failed")
+    _sb_end(pg_pool, gone, at, 5, "c")
+    _sb_end(pg_pool, one, datetime(2026, 10, 31, 23, tzinfo=UTC), 100, "d")
+    _sb_end(pg_pool, one, datetime(2026, 12, 1, 0, 30, tzinfo=UTC), 100, "e")
+    FilamentSpoolStore(pg_pool).archive(gone, True, actor="ann")
+    store = _store(pg_pool)
+    [row] = store.material_numbers(*WINDOW).rows
+    assert (row.used_g, row.wasted_g) == (45.0, 12.0)
+    assert row.spools == 1
+    metrics = store.inventory("type", "month", *WINDOW)
+    assert sum(r.used_g for r in metrics.consumption) == row.used_g
+    assert sum(r.wasted_g for r in metrics.consumption) == row.wasted_g
+
+
+def test_material_number_value_on_hand(pg_pool: PgPool) -> None:
+    """R-7152-7: each spool's cost per kg, else the default's; ``None`` with no cost."""
+    priced = _type(pg_pool, "PLA-WHT", cost_per_kg="20")
+    _spool(pg_pool, type_id=priced, grams_left=500)
+    _spool(pg_pool, type_id=priced, grams_left=250, cost_per_kg="40")
+    plain = _type(pg_pool, "PETG-BLK")
+    _spool(pg_pool, type_id=plain, grams_left=400)
+    rows = {r.key: r for r in _store(pg_pool).material_numbers(*WINDOW).rows}
+    assert rows["PLA-WHT"].value == Decimal("20.00")
+    assert rows["PETG-BLK"].value is None
+    fallback = {
+        r.key: r
+        for r in _store(pg_pool, default_cost_per_kg=Decimal("10")).material_numbers(*WINDOW).rows
+    }
+    assert fallback["PETG-BLK"].value == Decimal("4.00")
+    assert _store(pg_pool, currency="EUR").material_numbers(*WINDOW).currency == "EUR"
+
+
+def test_material_numbers_untyped_row_is_last(pg_pool: PgPool) -> None:
+    type_id = _type(pg_pool, "PLA-WHT")
+    _spool(pg_pool, type_id=type_id, grams_left=10)
+    _spool(pg_pool, grams_left=900)
+    rows = _store(pg_pool).material_numbers(*WINDOW).rows
+    assert [(r.key, r.label, r.types) for r in rows][-1] == (None, "No material number", [])
+    assert rows[0].key == "PLA-WHT"
+
+
+def test_material_numbers_list_only_stock_or_use(pg_pool: PgPool) -> None:
+    """R-7152-8: a key with no spool in stock and no plate in the range is left out."""
+    idle = _type(pg_pool, "PLA-IDLE")
+    spool = _spool(pg_pool, type_id=idle, grams_left=100)
+    _sb_end(pg_pool, spool, datetime(2026, 10, 2, tzinfo=UTC), 10, "a")
+    FilamentSpoolStore(pg_pool).archive(spool, True, actor="ann")
+    _type(pg_pool, "PLA-NONE")
+    used = _type(pg_pool, "PLA-USED")
+    gone = _spool(pg_pool, type_id=used, grams_left=100)
+    _sb_end(pg_pool, gone, datetime(2026, 11, 2, tzinfo=UTC), 10, "b")
+    FilamentSpoolStore(pg_pool).archive(gone, True, actor="ann")
+    rows = _store(pg_pool).material_numbers(*WINDOW).rows
+    assert [(r.key, r.spools, r.used_g) for r in rows] == [("PLA-USED", 0, 10.0)]
