@@ -245,14 +245,19 @@ def rebind_on(conn: Conn, bb_preset_id: int, preset_id: int) -> int:
     return changed
 
 
-def by_bb_id_on(conn: Conn, bb_preset_ids: Collection[int]) -> dict[int, int]:
+def by_bb_id_on(
+    conn: Conn, bb_preset_ids: Collection[int], instance: str | None = None
+) -> dict[int, int]:
     """The ScadBuddy preset that is each of ``bb_preset_ids`` (`FilamentPreset.bb_preset_id`),
-    by Bambuddy id; one with none is left out."""
+    by Bambuddy id; one with none is left out. With ``instance``, only a preset of that
+    Bambuddy (or of an unrecorded one) counts: an id of another Bambuddy names another
+    preset."""
     if not bb_preset_ids:
         return {}
     rows = conn.execute(
-        "SELECT id, bb_preset_id FROM filament_presets WHERE bb_preset_id = ANY(%s)",
-        (sorted(set(bb_preset_ids)),),
+        "SELECT id, bb_preset_id FROM filament_presets WHERE bb_preset_id = ANY(%s)"
+        " AND (%s::text IS NULL OR bb_instance IS NULL OR bb_instance = %s)",
+        (sorted(set(bb_preset_ids)), instance, instance),
     ).fetchall()
     return {row["bb_preset_id"]: row["id"] for row in rows}
 
@@ -378,7 +383,7 @@ def _adopt_one(
     first, whose preset the bindings then name."""
     with pool.connection() as conn, conn.transaction():
         _lock(conn)
-        again = by_bb_id_on(conn, [detail.id])
+        again = by_bb_id_on(conn, [detail.id], instance)
         if again:
             rebind_on(conn, detail.id, again[detail.id])
             # Blob ``key`` stays unheld on purpose: the blob sweep reclaims it once its
@@ -452,7 +457,7 @@ async def adopt_held(
     def bound() -> tuple[set[int], dict[int, int]]:
         with pool.connection() as conn:
             ids = _bound_bb_ids(conn)
-            return ids, by_bb_id_on(conn, ids)
+            return ids, by_bb_id_on(conn, ids, instance)
 
     ids, known = await asyncio.to_thread(bound)
     if not ids:
@@ -491,17 +496,25 @@ async def adopt_held(
 
 
 async def refresh_bambuddy(
-    pool: ConnectionPool[Conn], blobs: BlobStore, held: HeldPresetStore
+    pool: ConnectionPool[Conn],
+    blobs: BlobStore,
+    held: HeldPresetStore,
+    instance: str | None = None,
 ) -> int:
     """A new version of each ``bambuddy`` preset whose Bambuddy ``updated_at`` in the
     kept copy moved since its document was taken (Decision 4); how many changed. A preset
-    gone from Bambuddy stays as it was: ScadBuddy holds it now."""
+    gone from Bambuddy stays as it was: ScadBuddy holds it now. With ``instance``, only
+    a preset of that Bambuddy (or of an unrecorded one) is refreshed: the kept copy is the
+    configured Bambuddy's, whose same id is another preset after a URL change."""
 
     def ours() -> list[dict[str, Any]]:
         with pool.connection() as conn:
             return conn.execute(
                 "SELECT id, bb_preset_id, bb_updated_at, sha256 FROM filament_presets"
                 " WHERE source = 'bambuddy' AND bb_preset_id IS NOT NULL"
+                " AND (%(instance)s::text IS NULL OR bb_instance IS NULL"
+                " OR bb_instance = %(instance)s)",
+                {"instance": instance},
             ).fetchall()
 
     presets = await asyncio.to_thread(ours)
@@ -542,7 +555,7 @@ async def sync_from_held(
     (`filament/preset_mirror.py` `sync_and_mirror`). Each step fails alone, logged by
     type, so a failure never fails the refresh."""
     steps: tuple[Callable[[], Awaitable[int]], ...] = (
-        lambda: refresh_bambuddy(pool, blobs, held),
+        lambda: refresh_bambuddy(pool, blobs, held, instance),
         lambda: adopt_held(pool, blobs, held, instance),
     )
     for name, step in zip(("refresh_bambuddy", "adopt_held"), steps, strict=True):

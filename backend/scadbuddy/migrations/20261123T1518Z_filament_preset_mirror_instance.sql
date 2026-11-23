@@ -15,3 +15,9 @@ ALTER TABLE filament_presets
 UPDATE filament_presets
 SET bb_instance = (SELECT instance FROM filament_bb_sync_state LIMIT 1)
 WHERE bb_preset_id IS NOT NULL;
+
+-- A Bambuddy id is unique per Bambuddy, not across them: another Bambuddy's id 7 is
+-- another preset. The rows of an unrecorded one ('' here) stay unique among themselves.
+ALTER TABLE filament_presets DROP CONSTRAINT filament_presets_bb_preset_id_key;
+CREATE UNIQUE INDEX filament_presets_bb_preset ON filament_presets
+    (coalesce(bb_instance, ''), bb_preset_id) WHERE bb_preset_id IS NOT NULL;
