@@ -986,7 +986,9 @@ read, `GET /api/v1/filament/invoices/{id}/candidates`. The skill is
 Decisions 1, 9, 11, 12 and "Decisions made while building"). Step 7 is not a flow: a
 Temporal workflow `ProfileFetch` runs on its own queue, `profile-fetch`, and a worker in its
 own pod does the browser part only. The API imports the files into Bambuddy's local presets
-(`POST /local-presets/import`) and sets the type's presets, because the worker holds no
+(`POST /local-presets/import`) and sets the type's presets (superseded by #7176: the API
+keeps them as ScadBuddy's own presets and copies them to Bambuddy while
+`filament_preset_mirror` is on, plan `2026-11-23-scadbuddy-filament-presets.md`), because the worker holds no
 database secret and no Bambuddy key. The nozzles are the remembered setting
 `profile_fetch_nozzles`. The printer models are the models of SB's printers, and the 3DFP
 printer option is the model string. Invoice confirm starts a fetch for each type it made that

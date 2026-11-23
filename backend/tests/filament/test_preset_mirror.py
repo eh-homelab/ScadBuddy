@@ -287,3 +287,40 @@ async def test_an_error_that_is_no_answer_is_kept_and_the_rest_are_sent(
     )
     assert _row(pg_pool, broken)["mirror_error"] == "RuntimeError"
     assert _row(pg_pool, fine)["bb_preset_id"] == 6
+
+
+@respx.mock
+async def test_a_version_written_during_a_create_keeps_the_new_id(
+    pg_pool: PgPool, tmp_path: Path, client: BambuddyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-fetch writes version 2 while the create of version 1 is on its way: the id
+    Bambuddy gave is kept, version 2 stays pending, and the next send rewrites that id."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    store = FilamentPresetStore(pg_pool, lambda: blobs)
+    made = await _make(pg_pool, blobs, {"name": "Racing"})
+    second = {"name": "Racing", "nozzle_temperature_range_low": ["200"]}
+    key, sha256 = await keep_document(blobs, document_bytes(second))
+    listed()
+    real = client.create_local_preset
+
+    async def create(name: str, preset_type: str, setting: Any) -> Any:
+        answer = await real(name, preset_type, setting)
+        with pg_pool.connection() as conn, conn.transaction():
+            version_on(conn, made, name=name, key=key, sha256=sha256, doc=second, made_by="t")
+        return answer
+
+    monkeypatch.setattr(client, "create_local_preset", create)
+    respx.post(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(200, json=_preset_json(88, "Racing"))
+    )
+    assert await mirror_with(client, pg_pool, store, HERE) == 1
+    row = _row(pg_pool, made)
+    assert row["bb_preset_id"] == 88
+    assert row["mirrored_sha256"] != row["sha256"] == sha256
+
+    put = respx.put(f"{API}/local-presets/88").mock(
+        return_value=httpx.Response(200, json=_preset_json(88, "Racing"))
+    )
+    assert await mirror_with(client, pg_pool, store, HERE) == 1
+    assert put.call_count == 1
+    assert _row(pg_pool, made)["mirrored_sha256"] == sha256
