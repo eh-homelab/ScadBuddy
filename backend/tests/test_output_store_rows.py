@@ -363,6 +363,9 @@ async def test_lookups_after_a_row_miss_ask_the_rows_once(
     assert store.record(meta.id) is not None
     assert store.bom(meta.id)[0].piece == "wall"
     assert store.manifest(meta.id)
+    assert store.inputs(meta.id)["v"] == 1
+    assert store.arranged_from(meta.id) == []
+    assert store.backfill(meta.id) is None
 
 
 async def test_a_save_orders_by_the_rows_after_a_copy(

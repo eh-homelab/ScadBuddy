@@ -2673,6 +2673,8 @@ class Catalogue:
         self._require(slug)
         # Its output rows first (spec §6.2): they are the outputs' record (#7255), so a
         # failure fails the delete and leaves the model and its outputs whole for a retry.
+        # The rows go before the rename on purpose: a failed rename leaves the files, and
+        # a retried delete removes them.
         self._forget_outputs(slug)
         # Renamed out of `models/` first, so the model leaves the catalogue in one
         # step: an `rmtree` that dies halfway could otherwise leave `model.scad`
@@ -2928,8 +2930,10 @@ class Catalogue:
         try:
             self._clear_derived(slug)
         except Exception:
-            # The earlier model's output rows stand: give the slug back for a retry.
-            directory.rmdir()
+            # The earlier model's output rows stand: give the slug back for a retry. A
+            # claim already gone must not hide the error that failed it.
+            with contextlib.suppress(FileNotFoundError):
+                directory.rmdir()
             raise
         return directory
 
