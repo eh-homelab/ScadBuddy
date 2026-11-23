@@ -67,6 +67,7 @@ from scadbuddy.library.libraries import (
 )
 from scadbuddy.library.lsp import serve
 from scadbuddy.library.lsp_diagnostics import LspDiagnostic, LspDiagnosticsError, lsp_diagnostics
+from scadbuddy.library.mesh_blobs import is_pointer_name
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 
 logger = logging.getLogger(__name__)
@@ -234,13 +235,19 @@ class FileListing(BaseModel):
     )
 
 
-def _listing(root: Path, missing: str) -> FileListing:
+def _listing(root: Path, missing: str, *, model: bool = False) -> FileListing:
     try:
         files, truncated = list_files(root, limit=MAX_LISTED_FILES)
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, missing) from None
     return FileListing(
-        files=[ListedFile(path=path, size=size) for path, size in files], truncated=truncated
+        files=[
+            ListedFile(path=path, size=size)
+            for path, size in files
+            # A mesh's pointer is the history's (#7313): the mesh itself is listed.
+            if not (model and is_pointer_name(path))
+        ],
+        truncated=truncated,
     )
 
 
@@ -251,13 +258,14 @@ def _listing(root: Path, missing: str) -> FileListing:
     description=(
         "The paths `GET /models/{slug}/files/{path}` can read, with their sizes: the "
         "`.scad` files, README.md, model.json, images and `ui/` files, in path order "
-        f"(#1067). No dot-file, dot-directory or symlink is listed; at most "
+        "(#1067). No dot-file, dot-directory or symlink is listed, nor a mesh's pointer in "
+        f"the history (`meshes/*.3mf.blob`, #7313); at most "
         f"{MAX_LISTED_FILES:,} files, with `truncated` true when there were more."
     ),
 )
 def get_model_tree(slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep) -> FileListing:
     require_model_exists(catalogue, slug)
-    return _listing(paths.model_dir(slug), f"no model named {slug!r}")
+    return _listing(paths.model_dir(slug), f"no model named {slug!r}", model=True)
 
 
 @router.get(

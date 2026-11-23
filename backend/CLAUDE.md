@@ -230,6 +230,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   transfer: a painted part's `.paint.json` codes carried onto its rendered solid by the
   render's `paint` stage, `render/jobs.py` `paint_layout`; a layout part names its carried
   codes file, `PartSource.paint`), `locate.py` (the scene object a weak joint is in).
+  The part meshes are not in git (#7313, `library/mesh_blobs.py`): the working tree keeps
+  their bytes, `.gitignore` keeps out `*/meshes/*.3mf` and `_builtin/*/meshes/*.3mf`, and
+  `ModelHistory._stage` writes a pointer `meshes/<name>.3mf.blob` (sha256 and size) for
+  each mesh a commit's paths hold, storing the bytes as the blob `attachment-<sha256>`
+  (`orders/attachments.py` `keep_file`) held in `blob_refs` by `model_mesh` (holder id the
+  sha256), a hold nothing drops. `LoopMeshStore` (set in the API's lifespan, before
+  `ensure_repo`) runs the store's coroutines on the API's loop, so a history call must
+  stay on a thread. Export, restore (`_restore_locked` fetches first, then
+  `_after_checkout`) and `library/upstream.py` `plan_merge` (meshes compared by sha256)
+  fill meshes back in; a revision from before then still holds the bytes and is read as
+  it is. The start's `ensure_repo` turns meshes still tracked as bytes into pointers in
+  one commit, `CONVERT_MESSAGE`. With no mesh store, a commit with a new mesh fails.
   `render/geometry.py` `weak_joints` finds where a print snaps; `render/meshmatch.py`
   matches points and triangles in numpy (trimesh's proximity needs rtree, not installed).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
@@ -1396,7 +1408,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
   `GET /settings/git-remote` is the lag. `GitRepo.push` never forces, allows only the URL's
   protocol and hands the token (`git_remote_token`, a sealed secret; a save needs the KEK)
-  to git through `CREDENTIAL_HELPER` from the child's env, never the argv.
+  to git through `CREDENTIAL_HELPER` from the child's env, never the argv. Mesh models'
+  meshes stay out of the models repository (a pointer each, #7313; see `meshmodel/`),
+  since GitHub refuses a push with a file over 100 MB
+  ([docs](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github#file-size-limits)).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so

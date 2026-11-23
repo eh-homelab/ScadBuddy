@@ -27,12 +27,20 @@ Design: the [mesh-models spec](../superpowers/specs/2026-10-11-mesh-models-desig
 
 ## Data
 
-- The models git repository (scene, meshes, generated `model.scad`).
+- The models git repository (scene, generated `model.scad`, and a pointer per mesh,
+  `meshes/<name>.3mf.blob`).
+- The meshes' bytes: on the data volume beside each pointer, and in the blob store as
+  `attachment-<sha256>`, held in `blob_refs` by `model_mesh` for good
+  (`backend/scadbuddy/library/mesh_blobs.py`, #7313). Git keeps them out
+  (`.gitignore`), so the off-box push never carries a file over GitHub's 100 MB limit
+  ([docs](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github#file-size-limits)).
 
 ## Tests
 
 - Backend: `backend/tests/meshmodel/`, `backend/tests/test_mesh_models_openscad.py`,
-  `test_mesh_models_paint.py`, `backend/tests/api/test_mesh_models.py`.
+  `test_mesh_models_paint.py`, `backend/tests/api/test_mesh_models.py`; the meshes in
+  the blob store: `backend/tests/test_history_meshes.py`,
+  `backend/tests/store/test_mesh_blobs.py`.
 
 ## Limits and known issues
 

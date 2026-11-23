@@ -122,6 +122,7 @@ from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
+from scadbuddy.library.mesh_blobs import LoopMeshStore
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
@@ -2285,6 +2286,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.settings_store.close)
         raise
     state.blobs = state.store.blobs
+    # #7313: a mesh's bytes are a held blob, and git keeps its pointer. Before
+    # `ensure_repo`, whose commit turns meshes still tracked as bytes into pointers.
+    state.history.meshes = LoopMeshStore(state.blobs, state.refs, asyncio.get_running_loop())
     state.render.snapshots = state.store.snapshots
     # From the store's construction to the `try` below, whose `finally` owns shutdown:
     # a failure anywhere here (a refused OpenSCAD probe, a render service or bus that

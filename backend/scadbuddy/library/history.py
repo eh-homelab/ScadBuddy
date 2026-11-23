@@ -11,17 +11,27 @@ pygit2, how every call is kept hermetic, the write lock across replicas -- is
 the model-specific part: the layout (a template per directory, built-ins under
 ``_builtin/``), the ``.gitignore`` of render byproducts, the commit listener, seeding,
 the symlink-safe tree reads, export and merge.
+
+A mesh model's part meshes are not in git (#7313, ``library/mesh_blobs.py``): their
+bytes are in the blob store, and git tracks a pointer beside each one, written when a
+commit is staged (:meth:`ModelHistory._stage`). Export, restore and an upstream merge
+fill the meshes back in from the store; a revision from before then holds them itself.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import io
 import logging
+import os
 import posixpath
 import re
+import shutil
 import tarfile
 import tempfile
 import threading
+import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -59,6 +69,17 @@ from scadbuddy.core.gitrepo import git_env as git_env
 from scadbuddy.core.gitrepo import subject_line as subject_line
 from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME
 from scadbuddy.core.tracing import span
+from scadbuddy.library.mesh_blobs import (
+    CONVERT_MESSAGE,
+    GITIGNORE_LINES,
+    POINTER_SUFFIX,
+    MeshBlobMissingError,
+    MeshPointer,
+    MeshStore,
+    is_mesh_path,
+    is_pointer_path,
+    sha256_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +120,9 @@ def _gitignore_body(wrapper_prefix: str) -> str:
         "*/media/*.webm\n"
         "_builtin/*/media/*.mp4\n"
         "_builtin/*/media/*.webm\n"
+        "# Mesh models' part meshes (#7313) are in the blob store: git keeps the\n"
+        "# <name>.3mf.blob pointer beside each one.\n"
+        + "".join(f"{line}\n" for line in GITIGNORE_LINES)
     )
 
 
@@ -129,12 +153,198 @@ class ModelHistory(GitRepo):
         #: `last_commits` as of a HEAD (#2289): the walk is the whole history, over NFS.
         self._last_commits: tuple[str, dict[str, str]] | None = None
         self._last_commits_lock = threading.Lock()
+        #: Where meshes' bytes are kept (#7313), set once the blob store is built. None:
+        #: a commit with a mesh that has no pointer yet, or a read of a pointer, fails.
+        self.meshes: MeshStore | None = None
+        #: The meshes a restore under way fetched, by path, to put in place once the
+        #: revision is checked out (`_after_checkout`); None for one already in place.
+        self._restoring: dict[str, Path | None] = {}
 
     def _gitignore_body(self) -> str:
         return _gitignore_body(self.wrapper_prefix)
 
     def _commit_retry_seconds(self) -> float:
         return COMMIT_RETRY_SECONDS
+
+    def _recovered_message(self) -> str:
+        """A start that finds meshes still tracked as bytes converts them (#7313):
+        :meth:`ensure_repo` commits everything, and `_stage` makes them pointers."""
+        if self.meshes is not None and self._tracked_meshes(["."]):
+            return CONVERT_MESSAGE
+        return RECOVERED_MESSAGE
+
+    # ── meshes in the blob store (#7313) ──────────────────────────────────────
+
+    def _stage(self, targets: list[str]) -> None:
+        """`GitRepo._stage`, after each mesh under ``targets`` has its bytes stored and
+        its pointer written, each pointer whose mesh is gone is removed, and each mesh
+        still tracked as bytes (a commit from before #7313) has left the index."""
+        meshes, pointers = self._mesh_files(targets)
+        legacy = set(self._tracked_meshes(targets))
+        for mesh in meshes:
+            if self.meshes is None and mesh in legacy:
+                # No store to keep it in: it stays tracked as it was.
+                legacy.discard(mesh)
+                continue
+            self._point(mesh)
+        for pointer in pointers:
+            if not (self.root / pointer.removesuffix(POINTER_SUFFIX)).is_file():
+                (self.root / pointer).unlink(missing_ok=True)
+        if legacy:
+            self._run("rm", "--cached", "--quiet", "--ignore-unmatch", "--", *sorted(legacy))
+        super()._stage(targets)
+
+    def _tracked_meshes(self, targets: list[str]) -> list[str]:
+        """The meshes under ``targets`` the index holds as bytes."""
+        listed = self._out("ls-files", "-z", "--", *targets).split("\0")
+        return [path for path in listed if path and is_mesh_path(path)]
+
+    def _mesh_files(self, targets: list[str]) -> tuple[list[str], list[str]]:
+        """The meshes and the pointers on disk under ``targets``, relative to the root."""
+        meshes: list[str] = []
+        pointers: list[str] = []
+
+        def classify(relative: str) -> None:
+            if is_mesh_path(relative):
+                meshes.append(relative)
+            elif is_pointer_path(relative):
+                pointers.append(relative)
+
+        for target in targets:
+            base = self.root / target
+            if base.is_file():
+                classify(Path(target).as_posix())
+                continue
+            for directory, dirs, files in os.walk(base):
+                relative_dir = Path(directory).relative_to(self.root).as_posix()
+                depth = 0 if relative_dir == "." else relative_dir.count("/") + 1
+                # A mesh is at most three directories down (`_builtin/<slug>/meshes`).
+                dirs[:] = [d for d in dirs if not d.startswith(".") and depth < 3]
+                for name in files:
+                    classify(name if relative_dir == "." else f"{relative_dir}/{name}")
+        return meshes, pointers
+
+    def _point(self, mesh: str) -> None:
+        """Store ``mesh``'s bytes and write its pointer, unless the pointer is newer
+        than the mesh and of its size: then it already names these bytes."""
+        path = self.root / mesh
+        pointer_path = self.root / f"{mesh}{POINTER_SUFFIX}"
+        stat = path.stat()
+        current: MeshPointer | None = None
+        with contextlib.suppress(OSError, ValueError):
+            current = MeshPointer.loads(pointer_path.read_bytes())
+            if current.size == stat.st_size and stat.st_mtime_ns < pointer_path.stat().st_mtime_ns:
+                return
+        if self.meshes is None:
+            raise GitError(
+                f"{mesh} is a mesh, whose bytes are kept in the blob store, and this"
+                " process has no blob store"
+            )
+        sha256 = sha256_file(path)
+        self.meshes.put(path, sha256)
+        pointer = MeshPointer(sha256=sha256, size=stat.st_size)
+        if current == pointer:
+            os.utime(pointer_path)
+        else:
+            pointer_path.write_bytes(pointer.dumps())
+
+    def _store(self) -> MeshStore:
+        if self.meshes is None:
+            raise MeshBlobMissingError("mesh files are in the blob store, and there is none here")
+        return self.meshes
+
+    def _pointer_at(self, commit: str, pointer: str) -> MeshPointer:
+        try:
+            return MeshPointer.loads(self.show(commit, pointer))
+        except ValueError:
+            raise MeshBlobMissingError(f"{pointer} is not a mesh pointer") from None
+
+    def _restore_locked(
+        self,
+        path: str,
+        resolved: str,
+        message: str | None = None,
+        *,
+        trailers: Sequence[str] = (),
+        allow_empty: bool = False,
+    ) -> str | None:
+        """`GitRepo._restore_locked`, with the revision's meshes fetched first: a mesh
+        the store cannot give back fails the restore before anything has changed."""
+        scratch = self.root / ".git" / f"scadbuddy-meshes-{uuid.uuid4().hex}"
+        try:
+            self._restoring = self._fetch_meshes(resolved, path, scratch)
+            return super()._restore_locked(
+                path, resolved, message, trailers=trailers, allow_empty=allow_empty
+            )
+        finally:
+            self._restoring = {}
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    def _fetch_meshes(self, resolved: str, path: str, scratch: Path) -> dict[str, Path | None]:
+        """Each mesh a pointer at ``resolved`` names under ``path``, fetched under
+        ``scratch``; None for one the working tree already holds."""
+        fetched: dict[str, Path | None] = {}
+        for pointer in self._files_at(resolved, path):
+            if not is_pointer_path(pointer):
+                continue
+            mesh = pointer.removesuffix(POINTER_SUFFIX)
+            named = self._pointer_at(resolved, pointer)
+            current = self.root / mesh
+            if (
+                current.is_file()
+                and current.stat().st_size == named.size
+                and sha256_file(current) == named.sha256
+            ):
+                fetched[mesh] = None
+                continue
+            scratch.mkdir(parents=True, exist_ok=True)
+            target = scratch / uuid.uuid4().hex
+            self._store().get(named.sha256, target)
+            fetched[mesh] = target
+        return fetched
+
+    def _after_checkout(self, path: str, present: set[str]) -> None:
+        """The restored revision's meshes put in place, and every mesh it did not have
+        removed: meshes are not tracked, so the checkout left them as they were."""
+        wanted = {p.removesuffix(POINTER_SUFFIX) for p in present if is_pointer_path(p)}
+        wanted |= {p for p in present if is_mesh_path(p)}
+        for mesh in self._mesh_files([path])[0]:
+            if mesh not in wanted:
+                (self.root / mesh).unlink(missing_ok=True)
+        for mesh, fetched in self._restoring.items():
+            if fetched is not None:
+                os.replace(fetched, self.root / mesh)
+            # Newer than its mesh, so `_point` takes it as naming these bytes.
+            os.utime(self.root / f"{mesh}{POINTER_SUFFIX}")
+
+    def mesh_digest(self, commit: str | None, path: str) -> str | None:
+        """The sha256 of the mesh at ``path`` at ``commit``: from its pointer, or from
+        its bytes in a revision from before #7313; None where it has neither."""
+        if commit is None:
+            return None
+        try:
+            return self._pointer_at(commit, f"{path}{POINTER_SUFFIX}").sha256
+        except RevisionNotFoundError:
+            pass
+        try:
+            return hashlib.sha256(self.show(commit, path)).hexdigest()
+        except RevisionNotFoundError:
+            return None
+
+    def mesh_bytes(self, commit: str, path: str) -> bytes | None:
+        """The bytes of the mesh at ``path`` at ``commit``, from the blob store where
+        the revision holds its pointer; None where it has neither."""
+        try:
+            named = self._pointer_at(commit, f"{path}{POINTER_SUFFIX}")
+        except RevisionNotFoundError:
+            try:
+                return self.show(commit, path)
+            except RevisionNotFoundError:
+                return None
+        with tempfile.TemporaryDirectory(prefix="scadbuddy-mesh-") as scratch:
+            target = Path(scratch) / "mesh"
+            self._store().get(named.sha256, target)
+            return target.read_bytes()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -510,7 +720,7 @@ class ModelHistory(GitRepo):
 
         Used to render an old revision without restoring it: the destination is an
         ordinary model directory, so the schema cache and the renderer work on it
-        unchanged.
+        unchanged. Each mesh pointer becomes its mesh, from the blob store (#7313).
         """
         resolved = self.resolve(commit)
         completed = self._run("archive", "--format=tar", resolved, slug, check=False, text=False)
@@ -526,6 +736,15 @@ class ModelHistory(GitRepo):
                 if member.name.startswith(prefix) and member.name != prefix
             ]
             archive.extractall(dest, members=members, filter="data")
+        for member in members:
+            if member.isfile() and is_pointer_path(f"{slug}/{member.name}"):
+                pointer = dest / member.name
+                try:
+                    named = MeshPointer.loads(pointer.read_bytes())
+                except ValueError:
+                    raise MeshBlobMissingError(f"{member.name} is not a mesh pointer") from None
+                self._store().get(named.sha256, dest / member.name.removesuffix(POINTER_SUFFIX))
+                pointer.unlink()
 
     def files_at(self, commit: str, path: str) -> list[str]:
         """The files under ``path`` at ``commit``, relative to ``path``."""

@@ -25,6 +25,7 @@ from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, printabl
 from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelExistsError, ModelMeta, UnsafeModelPathError
+from scadbuddy.library.mesh_blobs import POINTER_SUFFIX
 from scadbuddy.library.operations import PIN_TIMEOUT, answered_as_routes
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, apply_edits, removed_parameters
@@ -63,8 +64,11 @@ if TYPE_CHECKING:
 EDITS: TypeAdapter[list[Edit]] = TypeAdapter(list[Edit])
 SOURCE_NAME = "model.scad"
 #: What a mesh model's writes may name: the scene, its compiled source, and the meshes
-#: (each part's, and a painted part's codes beside it, `ingest.py`).
-SCENE_FILE = re.compile(r"(?:scene\.json|model\.scad|meshes/[A-Za-z0-9_-]+\.(?:3mf|paint\.json))")
+#: (each part's, its pointer in the history, #7313, and a painted part's codes beside
+#: it, `ingest.py`).
+SCENE_FILE = re.compile(
+    r"(?:scene\.json|model\.scad|meshes/[A-Za-z0-9_-]+\.(?:3mf|3mf\.blob|paint\.json))"
+)
 #: The compiled ``model.scad``'s cap. A scene at every other cap compiles to hundreds of
 #: MB (200 objects of 64 parts and 100 ops); a real file's scene is far under it (the
 #: MakerWorld fixtures', `tests/test_mesh_models_fixtures.py`).
@@ -139,7 +143,8 @@ def unused_meshes(directory: Path, scene: Scene) -> list[str]:
     """The scene's own files under ``meshes/`` that no part of ``scene`` uses any more (a
     deleted object's): an edit removes them, so they leave the volume and every later
     revision, and ``restore_version`` brings them back with the scene that used them
-    (#2632). Eject keeps them: the ejected ``model.scad`` imports the meshes."""
+    (#2632). Eject keeps them: the ejected ``model.scad`` imports the meshes. A mesh's
+    pointer (#7313) goes with its mesh."""
     meshes = directory / MESHES_DIR
     if not meshes.is_dir():
         return []
@@ -149,7 +154,7 @@ def unused_meshes(directory: Path, scene: Scene) -> list[str]:
         for path in meshes.iterdir()
         if path.is_file()
         and SCENE_FILE.fullmatch(f"{MESHES_DIR}/{path.name}")
-        and f"{MESHES_DIR}/{path.name}" not in used
+        and f"{MESHES_DIR}/{path.name.removesuffix(POINTER_SUFFIX)}" not in used
     )
 
 

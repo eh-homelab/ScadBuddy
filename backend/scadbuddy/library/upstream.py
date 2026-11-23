@@ -8,11 +8,13 @@ between two branches would do, without a branch per duplicate.
 
 Only ``model.scad`` is merged. Every other file follows the upstream when this
 template has not changed it since ``base``, and is otherwise kept and listed;
-``model.json`` is always this template's own.
+``model.json`` is always this template's own. A mesh (#7313) is compared by its
+sha256, from its pointer or its bytes, and taken as its bytes from the blob store.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.core.paths import BUILTIN_PREFIX, MODEL_META_NAME, SOURCE_NAME, model_path
 from scadbuddy.library.history import ModelHistory, RevisionNotFoundError
+from scadbuddy.library.mesh_blobs import POINTER_SUFFIX, is_mesh_name, is_pointer_name
 
 UpstreamState = Literal["current", "update", "dismissed", "gone"]
 
@@ -178,9 +181,25 @@ def plan_merge(
     if upstream.base is not None:
         names |= set(history.files_at(upstream.base, upstream.path))
     names -= {SOURCE_NAME, MODEL_META_NAME}
+    # A mesh's pointer stands for the mesh: a revision holds one or the other (#7313).
+    names = {name.removesuffix(POINTER_SUFFIX) if is_pointer_name(name) else name for name in names}
     files: dict[str, bytes | None] = {}
     kept: list[str] = []
     for name in sorted(names):
+        if is_mesh_name(name):
+            at_base_sha = history.mesh_digest(upstream.base, f"{upstream.path}/{name}")
+            at_theirs_sha = history.mesh_digest(revision, f"{theirs_path}/{name}")
+            if at_theirs_sha == at_base_sha:
+                continue
+            mine = local[name] = _local(directory / name)
+            at_ours_sha = hashlib.sha256(mine).hexdigest() if mine is not None else None
+            if at_ours_sha == at_theirs_sha:
+                continue
+            if at_ours_sha == at_base_sha:
+                files[name] = history.mesh_bytes(revision, f"{theirs_path}/{name}")
+            else:
+                kept.append(name)
+            continue
         at_base = _read(history, upstream.base, f"{upstream.path}/{name}")
         at_theirs = _read(history, revision, f"{theirs_path}/{name}")
         if at_theirs == at_base:

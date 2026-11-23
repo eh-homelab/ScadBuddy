@@ -13,6 +13,7 @@ from scadbuddy.library.history import GitError, ModelHistory
 from scadbuddy.meshmodel.scene import SceneSource
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.media import MemoryMediaStore
+from tests.support.meshes import MemoryMeshStore
 
 pytestmark = pytest.mark.requires_git
 
@@ -24,6 +25,8 @@ def catalogue(tmp_path: Path) -> Catalogue:
     paths = DataPaths(tmp_path / "data")
     paths.ensure()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    # A mesh's bytes are kept beside the history (#7313).
+    history.meshes = MemoryMeshStore()
     history.ensure_repo()
     return Catalogue(paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
 

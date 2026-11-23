@@ -1,0 +1,316 @@
+"""Mesh files in the blob store, a pointer in git (#7313): a mesh model's part meshes
+stay in the working tree, git tracks `<name>.3mf.blob` beside each, and every path
+that writes a revision into a directory fills the meshes back in from the store."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.catalogue import Catalogue, ModelMeta
+from scadbuddy.library.history import GitError, ModelHistory
+from scadbuddy.library.mesh_blobs import CONVERT_MESSAGE, MeshPointer
+from scadbuddy.meshmodel.operations import SCENE_FILE
+from scadbuddy.render.jobs import export_revision
+from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.support.media import MemoryMediaStore
+from tests.support.meshes import MemoryMeshStore
+
+pytestmark = pytest.mark.requires_git
+
+MESH_A = b"PK\x03\x04mesh A" * 100
+MESH_B = b"PK\x03\x04mesh B" * 50
+
+
+@pytest.fixture
+def models(tmp_path: Path) -> Path:
+    directory = tmp_path / "data" / "models"
+    directory.mkdir(parents=True)
+    return directory
+
+
+@pytest.fixture
+def store() -> MemoryMeshStore:
+    return MemoryMeshStore()
+
+
+@pytest.fixture
+def history(models: Path, store: MemoryMeshStore) -> ModelHistory:
+    history = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
+    history.meshes = store
+    history.ensure_repo()
+    return history
+
+
+def _write(models: Path, path: str, data: bytes) -> None:
+    target = models / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+
+
+def _tracked(history: ModelHistory, commit: str = "HEAD") -> list[str]:
+    return history._out("ls-tree", "-r", "--name-only", commit).splitlines()
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _mesh_model(models: Path, slug: str, mesh: bytes = MESH_A) -> None:
+    _write(models, f"{slug}/model.scad", b'import("meshes/o1-p1.3mf");\n')
+    _write(models, f"{slug}/meshes/o1-p1.3mf", mesh)
+
+
+def _legacy_commit(history: ModelHistory, slug: str, *paths: str) -> str:
+    """A commit made before #7313: the mesh's own bytes tracked in git."""
+    history._run("add", "-f", "--", *paths)
+    history._run("commit", "--no-verify", "-m", f"Add {slug}")
+    head = history.head()
+    assert head is not None
+    return head
+
+
+def test_a_commit_tracks_a_pointer_and_stores_the_bytes(
+    models: Path, history: ModelHistory, store: MemoryMeshStore
+) -> None:
+    _mesh_model(models, "carrot")
+    history.commit("Add carrot", "carrot")
+
+    tracked = _tracked(history)
+    assert "carrot/meshes/o1-p1.3mf.blob" in tracked
+    assert "carrot/meshes/o1-p1.3mf" not in tracked
+    pointer = MeshPointer.loads((models / "carrot/meshes/o1-p1.3mf.blob").read_bytes())
+    assert pointer == MeshPointer(sha256=_sha(MESH_A), size=len(MESH_A))
+    assert store.blobs[_sha(MESH_A)] == MESH_A
+    # The working tree keeps the bytes every reader uses.
+    assert (models / "carrot/meshes/o1-p1.3mf").read_bytes() == MESH_A
+    # And no object in the repository holds them.
+    mesh_id = history._out("hash-object", "--", "carrot/meshes/o1-p1.3mf").strip()
+    assert mesh_id not in history._out("rev-list", "--objects", "--all")
+
+
+def test_a_builtins_mesh_is_a_pointer_too(
+    models: Path, history: ModelHistory, store: MemoryMeshStore
+) -> None:
+    _mesh_model(models, "_builtin/demo")
+    history.commit("Sync demo", "_builtin/demo")
+    tracked = _tracked(history)
+    assert "_builtin/demo/meshes/o1-p1.3mf.blob" in tracked
+    assert "_builtin/demo/meshes/o1-p1.3mf" not in tracked
+    assert _sha(MESH_A) in store.blobs
+
+
+def test_an_unchanged_mesh_is_not_stored_again(
+    models: Path, history: ModelHistory, store: MemoryMeshStore
+) -> None:
+    _mesh_model(models, "carrot")
+    history.commit("Add carrot", "carrot")
+    _write(models, "carrot/model.scad", b"// edited\n")
+    history.commit("Edit carrot", "carrot")
+    assert store.puts == 1
+
+
+def test_a_changed_mesh_moves_its_pointer(
+    models: Path, history: ModelHistory, store: MemoryMeshStore
+) -> None:
+    _mesh_model(models, "carrot")
+    history.commit("Add carrot", "carrot")
+    _write(models, "carrot/meshes/o1-p1.3mf", MESH_B)
+    history.commit("Edit carrot", "carrot")
+    pointer = MeshPointer.loads(history.show("HEAD", "carrot/meshes/o1-p1.3mf.blob"))
+    assert pointer.sha256 == _sha(MESH_B)
+
+
+def test_a_deleted_mesh_deletes_its_pointer(models: Path, history: ModelHistory) -> None:
+    _mesh_model(models, "carrot")
+    history.commit("Add carrot", "carrot")
+    (models / "carrot/meshes/o1-p1.3mf").unlink()
+    history.commit("Edit carrot", "carrot")
+    assert not (models / "carrot/meshes/o1-p1.3mf.blob").exists()
+    assert "carrot/meshes/o1-p1.3mf.blob" not in _tracked(history)
+
+
+def test_a_commit_with_a_mesh_and_no_store_is_refused(models: Path) -> None:
+    history = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
+    history.ensure_repo()
+    _mesh_model(models, "carrot")
+    with pytest.raises(GitError, match="blob store"):
+        history.commit("Add carrot", "carrot")
+
+
+def test_an_export_fills_the_meshes_in(models: Path, history: ModelHistory, tmp_path: Path) -> None:
+    _mesh_model(models, "carrot")
+    first = history.commit("Add carrot", "carrot")
+    assert first is not None
+    _write(models, "carrot/meshes/o1-p1.3mf", MESH_B)
+    history.commit("Edit carrot", "carrot")
+
+    dest = tmp_path / "export"
+    export_revision(history, "carrot", first, dest)
+    assert (dest / "meshes/o1-p1.3mf").read_bytes() == MESH_A
+    # An ordinary model directory: no pointer in it.
+    assert not (dest / "meshes/o1-p1.3mf.blob").exists()
+
+
+def test_an_export_of_a_revision_from_before_the_pointers_keeps_its_meshes(
+    models: Path, history: ModelHistory, tmp_path: Path
+) -> None:
+    _mesh_model(models, "carrot")
+    legacy = _legacy_commit(history, "carrot", "carrot")
+    dest = tmp_path / "export"
+    history.export("carrot", legacy, dest)
+    assert (dest / "meshes/o1-p1.3mf").read_bytes() == MESH_A
+
+
+def test_an_export_whose_mesh_the_store_lacks_fails(
+    models: Path, history: ModelHistory, store: MemoryMeshStore, tmp_path: Path
+) -> None:
+    _mesh_model(models, "carrot")
+    commit = history.commit("Add carrot", "carrot")
+    assert commit is not None
+    store.blobs.clear()
+    with pytest.raises(GitError):
+        history.export("carrot", commit, tmp_path / "export")
+
+
+def test_a_restore_puts_a_pointer_revisions_meshes_back(
+    models: Path, history: ModelHistory
+) -> None:
+    _mesh_model(models, "carrot")
+    first = history.commit("Add carrot", "carrot")
+    assert first is not None
+    _write(models, "carrot/meshes/o1-p1.3mf", MESH_B)
+    _write(models, "carrot/meshes/o2-p1.3mf", MESH_B)
+    history.commit("Edit carrot", "carrot")
+
+    history.restore("carrot", first)
+    assert (models / "carrot/meshes/o1-p1.3mf").read_bytes() == MESH_A
+    # A mesh the revision did not have leaves, and its pointer with it.
+    assert not (models / "carrot/meshes/o2-p1.3mf").exists()
+    tracked = _tracked(history)
+    assert "carrot/meshes/o2-p1.3mf.blob" not in tracked
+    pointer = MeshPointer.loads(history.show("HEAD", "carrot/meshes/o1-p1.3mf.blob"))
+    assert pointer.sha256 == _sha(MESH_A)
+    assert history.clean("carrot")
+
+
+def test_a_restore_of_a_revision_from_before_the_pointers_stores_its_meshes(
+    models: Path, history: ModelHistory, store: MemoryMeshStore
+) -> None:
+    _mesh_model(models, "carrot")
+    legacy = _legacy_commit(history, "carrot", "carrot")
+    # The start's conversion, then a later edit.
+    history.ensure_repo()
+    _write(models, "carrot/meshes/o1-p1.3mf", MESH_B)
+    history.commit("Edit carrot", "carrot")
+
+    history.restore("carrot", legacy)
+    assert (models / "carrot/meshes/o1-p1.3mf").read_bytes() == MESH_A
+    tracked = _tracked(history)
+    assert "carrot/meshes/o1-p1.3mf" not in tracked
+    assert "carrot/meshes/o1-p1.3mf.blob" in tracked
+    assert store.blobs[_sha(MESH_A)] == MESH_A
+
+
+def test_a_restore_whose_mesh_the_store_lacks_changes_nothing(
+    models: Path, history: ModelHistory, store: MemoryMeshStore
+) -> None:
+    _mesh_model(models, "carrot")
+    first = history.commit("Add carrot", "carrot")
+    assert first is not None
+    _write(models, "carrot/meshes/o1-p1.3mf", MESH_B)
+    head = history.commit("Edit carrot", "carrot")
+    del store.blobs[_sha(MESH_A)]
+
+    with pytest.raises(GitError):
+        history.restore("carrot", first)
+    assert history.head() == head
+    assert (models / "carrot/meshes/o1-p1.3mf").read_bytes() == MESH_B
+    assert history.clean("carrot")
+
+
+def test_the_start_converts_meshes_tracked_as_bytes(
+    models: Path, history: ModelHistory, store: MemoryMeshStore
+) -> None:
+    _mesh_model(models, "carrot")
+    _mesh_model(models, "_builtin/demo", MESH_B)
+    _legacy_commit(history, "carrot", "carrot", "_builtin/demo")
+
+    converted = history.ensure_repo()
+    assert converted is not None
+    assert history.log("carrot")[0].message == CONVERT_MESSAGE
+    tracked = _tracked(history)
+    assert "carrot/meshes/o1-p1.3mf" not in tracked
+    assert "_builtin/demo/meshes/o1-p1.3mf" not in tracked
+    assert "carrot/meshes/o1-p1.3mf.blob" in tracked
+    assert "_builtin/demo/meshes/o1-p1.3mf.blob" in tracked
+    assert store.blobs[_sha(MESH_A)] == MESH_A
+    assert store.blobs[_sha(MESH_B)] == MESH_B
+    assert (models / "carrot/meshes/o1-p1.3mf").read_bytes() == MESH_A
+    # Once: the next start finds nothing to do.
+    assert history.ensure_repo() is None
+
+
+def test_the_start_without_a_store_leaves_tracked_meshes_alone(models: Path) -> None:
+    history = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
+    history.ensure_repo()
+    _mesh_model(models, "carrot")
+    _legacy_commit(history, "carrot", "carrot")
+    history.ensure_repo()
+    assert "carrot/meshes/o1-p1.3mf" in _tracked(history)
+
+
+def test_the_gitignore_keeps_meshes_out(models: Path, history: ModelHistory) -> None:
+    body = (models / ".gitignore").read_text()
+    assert "*/meshes/*.3mf" in body.splitlines()
+    assert "_builtin/*/meshes/*.3mf" in body.splitlines()
+
+
+def test_a_scene_write_may_name_a_pointer() -> None:
+    assert SCENE_FILE.fullmatch("meshes/o1-p1.3mf.blob")
+
+
+@pytest.fixture
+def catalogue(tmp_path: Path, store: MemoryMeshStore) -> Catalogue:
+    paths = DataPaths(tmp_path / "data")
+    paths.ensure()
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    history.meshes = store
+    history.ensure_repo()
+    return Catalogue(paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+
+
+def test_a_duplicate_copies_the_meshes(catalogue: Catalogue) -> None:
+    catalogue.create(
+        "carrot", "o1();\n", ModelMeta(name="Carrot"), files={"meshes/o1-p1.3mf": MESH_A}
+    )
+    catalogue.duplicate("carrot", "parsnip", "Parsnip")
+    directory = catalogue.paths.model_dir("parsnip")
+    assert (directory / "meshes/o1-p1.3mf").read_bytes() == MESH_A
+    assert catalogue.history is not None
+    assert "parsnip/meshes/o1-p1.3mf.blob" in _tracked(catalogue.history)
+
+
+def test_a_merge_from_the_upstream_takes_its_new_mesh(catalogue: Catalogue) -> None:
+    catalogue.create(
+        "carrot", "o1();\n", ModelMeta(name="Carrot"), files={"meshes/o1-p1.3mf": MESH_A}
+    )
+    catalogue.duplicate("carrot", "parsnip", "Parsnip")
+    catalogue.update_files(
+        "carrot",
+        lambda _d: {"meshes/o1-p1.3mf": MESH_B, "meshes/o2-p1.3mf": MESH_B},
+        message="Edit the scene",
+    )
+
+    _, plan = catalogue.merge_upstream("parsnip")
+    assert sorted(plan.preview.taken) == ["meshes/o1-p1.3mf", "meshes/o2-p1.3mf"]
+    directory = catalogue.paths.model_dir("parsnip")
+    assert (directory / "meshes/o1-p1.3mf").read_bytes() == MESH_B
+    assert (directory / "meshes/o2-p1.3mf").read_bytes() == MESH_B
+    assert catalogue.history is not None
+    pointer = json.loads(catalogue.history.show("HEAD", "parsnip/meshes/o2-p1.3mf.blob"))
+    assert pointer["sha256"] == _sha(MESH_B)

@@ -561,7 +561,7 @@ class GitRepo:
                     not gitignore.is_file() or gitignore.read_text(encoding="utf-8") != body
                 ):
                     gitignore.write_text(body, encoding="utf-8")
-                message = "Initial revision" if fresh else RECOVERED_MESSAGE
+                message = "Initial revision" if fresh else self._recovered_message()
                 return self._commit_locked(message, ".")
         except (GitError, OSError):
             # A missing binary is not the only way this fails, and the others are
@@ -577,6 +577,10 @@ class GitRepo:
                 extra={"repository": str(self.root)},
             )
             return None
+
+    def _recovered_message(self) -> str:
+        """What :meth:`ensure_repo` calls a commit on a repository with history."""
+        return RECOVERED_MESSAGE
 
     def object_counts(self) -> dict[str, int]:
         """``git count-objects -v`` as numbers: ``count`` (loose), ``packs``, ``size-pack``…"""
@@ -863,10 +867,16 @@ class GitRepo:
         for tracked in self._tracked(path):
             if tracked not in present:
                 (self.root / tracked).unlink(missing_ok=True)
+        self._after_checkout(path, present)
         extra: dict[str, Any] = {"trailers": trailers} if trailers else {}
         if allow_empty:
             extra["allow_empty"] = True
         return self._commit_locked(message or f"Restore {path} to {resolved[:7]}", path, **extra)
+
+    def _after_checkout(self, path: str, present: set[str]) -> None:
+        """Called by a restore once ``path`` holds the files ``present`` at the restored
+        revision, before they are committed: what a repository keeps beside git
+        (`ModelHistory`'s meshes, #7313) is put back here."""
 
     # ── the off-box copy (#4974) ──────────────────────────────────────────────
 

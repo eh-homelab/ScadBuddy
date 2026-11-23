@@ -460,6 +460,20 @@ def test_a_models_tree_lists_every_plain_file_with_its_size(
     assert client.get("/api/v1/models/nobody/tree").status_code == 404
 
 
+def test_a_models_tree_lists_a_mesh_and_not_its_pointer(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """A mesh's pointer is the history's (#7313); the tree lists the mesh itself."""
+    meshes = paths.model_dir(model) / "meshes"
+    meshes.mkdir()
+    (meshes / "o1-p1.3mf").write_bytes(b"PK\x03\x04")
+    (meshes / "o1-p1.3mf.blob").write_text('{"sha256": "00", "size": 4}\n', encoding="utf-8")
+
+    listed = [f["path"] for f in client.get(f"/api/v1/models/{model}/tree").json()["files"]]
+    assert "meshes/o1-p1.3mf" in listed
+    assert "meshes/o1-p1.3mf.blob" not in listed
+
+
 def test_a_listing_past_the_cap_is_cut_and_says_so(tmp_path: Path) -> None:
     for i in range(5):
         (tmp_path / f"f{i}.scad").write_text("x\n", encoding="utf-8")

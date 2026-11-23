@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 import trimesh
@@ -18,10 +19,14 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy import print_source
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.mesh_blobs import HOLDER, MeshPointer
 from scadbuddy.library.presets import ParamPresetCreate
 from scadbuddy.meshmodel import ingest
 from scadbuddy.meshmodel import operations as mesh_operations
 from scadbuddy.meshmodel.scene import MAX_OBJECTS, load_scene, text_sha256
+from scadbuddy.orders.attachments import blob_key
 from scadbuddy.render.bambu3mf import PlateParts, stl_3mf, write_plates_3mf
 from scadbuddy.render.split import ColourPart, Paint
 from tests.api.conftest import wait_for_job
@@ -537,10 +542,37 @@ def test_deleting_an_object_removes_the_meshes_only_it_used(
     assert created.status_code == 201, created.text
     slug = created.json()["slug"]
     meshes = paths.model_dir(slug) / "meshes"
-    assert sorted(p.name for p in meshes.iterdir()) == ["o1-p1.3mf", "o2-p1.3mf"]
+    # Each mesh with its pointer in the history beside it (#7313).
+    assert sorted(p.name for p in meshes.iterdir()) == [
+        "o1-p1.3mf",
+        "o1-p1.3mf.blob",
+        "o2-p1.3mf",
+        "o2-p1.3mf.blob",
+    ]
     done = edit(client, slug, {"edit": "delete", "object": "o2"})
     assert done.status_code == 200, done.text
-    assert sorted(p.name for p in meshes.iterdir()) == ["o1-p1.3mf"]
+    assert sorted(p.name for p in meshes.iterdir()) == ["o1-p1.3mf", "o1-p1.3mf.blob"]
+
+
+def test_a_mesh_is_a_held_blob_and_a_pointer_in_git(
+    client: TestClient, paths: DataPaths, settings: Settings
+) -> None:
+    """#7313: the mesh's bytes are a blob of the store, held by `model_mesh`, and git
+    tracks only its pointer, so the history stays small enough to push."""
+    created = upload(client, data=two_objects_3mf(), filename="two.3mf")
+    assert created.status_code == 201, created.text
+    slug = created.json()["slug"]
+    history = ModelHistory(paths.models)
+    tracked = history._out("ls-tree", "-r", "--name-only", "HEAD", "--", slug).splitlines()
+    assert f"{slug}/meshes/o1-p1.3mf.blob" in tracked
+    assert f"{slug}/meshes/o1-p1.3mf" not in tracked
+    pointer = MeshPointer.loads((paths.model_dir(slug) / "meshes/o1-p1.3mf.blob").read_bytes())
+    with psycopg.connect(settings.database_url) as conn:
+        row = conn.execute(
+            "SELECT key FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (HOLDER, pointer.sha256),
+        ).fetchone()
+    assert row is not None and row[0] == blob_key(pointer.sha256)
 
 
 def test_a_long_upload_name_is_cut_to_fit_the_source(client: TestClient) -> None:
