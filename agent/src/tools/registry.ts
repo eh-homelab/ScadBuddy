@@ -17,6 +17,7 @@ import type { RenderLimiter } from './renderLimits.js'
 import { pinnedOutward } from './pinnedOutward.js'
 import type { CustomerMessaging } from '../orders/messaging.js'
 import type { FetchGrantMinter } from './fetchGrant.js'
+import type { PackageView } from '../plugins/packages/store.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -152,6 +153,18 @@ export type ToolServices = {
    * refuses without it.
    */
   messaging?: CustomerMessaging | undefined
+  /**
+   * A hosted plugin's package read and its latest version offered in-process (#6938, spec
+   * 2026-11-21 §6.2, §6.3 step 5: plugins/packages/operations.ts `offerHosted` over the
+   * package store and `PackageInstaller`). hosted_plugin_publish refuses without it.
+   */
+  hostedPackages?: HostedPackageOffers | undefined
+}
+
+/** ToolServices.hostedPackages. */
+export type HostedPackageOffers = {
+  get(name: string): Promise<PackageView | undefined>
+  offer(name: string, signal?: AbortSignal): Promise<PackageView>
 }
 
 /** One tool's override: a tier other than its own (raised or lowered, #2171), and whether it is disabled. */

@@ -16,6 +16,7 @@ import { flowTools } from './flows.js'
 import { flowTriggerTools } from './flowTriggers.js'
 import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
+import { hostedPluginTools } from './hostedPlugins.js'
 import { inspectTools } from './inspect.js'
 import { libraryTools } from './libraries.js'
 import { meshModelTools } from './meshModels.js'
@@ -83,6 +84,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...orderTools,
   ...entityTools,
   ...storefrontTools,
+  ...hostedPluginTools,
 ]
 
 const byName = new Map<string, Tool>()
