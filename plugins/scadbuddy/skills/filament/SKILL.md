@@ -88,6 +88,19 @@ Sources, relative to the root of
   creates spools, or costs spools that already exist (`update_spool_ids`).
   Confirming an invoice does that in one transaction (filament spec §5.8).
 
+### Weigh a new spool (#7280)
+
+To weigh a spool with its scale reading, call `filament_spool_add_event` with `kind: weighed`
+and `reading_g`, not `grams`. The tool subtracts the empty weight of the spool's insert.
+The answer has `insert_weight`. When the spool is new and unused and the reading is above its
+label weight, `insert_weight.offer` shows what the insert's empty weight would become
+(`derived_g`, `new_empty_weight_g`, the current weight and its basis, `sample_count`).
+Tell the person these numbers. Tell them that makers overfill by about 10 to 30 g, so the
+estimate is slightly heavy, and that a later weighing of an empty spool replaces it.
+`checked_by_default` is only advice. Pass `accept_insert_weight: true` only when the person
+says to take it. With no offer, `accept_insert_weight` is refused and nothing is booked. The tool
+writes ScadBuddy only. Without `reading_g`, pass `grams` as before.
+
 ## Import an invoice
 
 The person presses "Import with the assistant" on Filament, Invoices, on an invoice draft that has a

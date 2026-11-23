@@ -1642,35 +1642,81 @@ const tools: Tool[] = [
       "type's, else its subtype's, else its material's, else the Settings default); `null` records none. " +
       "`kind: consumed_reset` (no grams, temp_c or hours) starts the spool's used counter (`consumed_g`) again from 0 g; the " +
       'grams left stay. Only what the user says. Writes ScadBuddy only; a reset reaches Bambuddy at the next sync when weights ' +
-      'sync to it.',
+      'sync to it. `reading_g` (a weighing only, instead of `grams`) is the scale reading with the spool: the filament ' +
+      "is the reading less the spool's empty weight, and the answer carries `insert_weight` (#7280). When the spool is new " +
+      "and unused and the reading is above its label weight, `insert_weight.offer` says what the insert's empty weight would " +
+      'become (`derived_g`, `new_empty_weight_g`, `current_empty_weight_g`, `current_basis`, `sample_count`). ' +
+      '`checked_by_default` is advice only: pass `accept_insert_weight: true` only when the user says to take it. ' +
+      'Makers overfill by about 10-30 g, so the estimate is slightly heavy. Accepting changes the insert in ScadBuddy only ' +
+      'and runs before the weighing, so the weighing uses the new empty weight; with no offer, it is refused and nothing is booked.',
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried', 'consumed_reset']),
       source: z.enum(['person', 'scale']).default('person'),
       grams: z.number().min(0).optional(),
+      reading_g: z.number().positive().max(100000).optional().describe('Scale reading with the spool, in grams (weighed only)'),
+      accept_insert_weight: z.boolean().optional().describe("Take the offer's empty weight for the insert (needs reading_g)"),
       temp_c: z.number().int().min(0).nullable().optional().describe("Left out: the spool's drying default"),
       hours: z.string().nullable().optional().describe("A decimal, e.g. `8`; left out: the spool's drying default"),
       note: z.string().optional(),
     }),
     risk: 'write',
     source: SOURCE,
-    routes: ['POST /api/v1/filament/spools/{spool_id}/events'],
-    summarize: ({ spool_id, kind, grams }) =>
+    routes: [
+      'POST /api/v1/filament/spools/{spool_id}/events',
+      'GET /api/v1/filament/spools/{spool_id}/insert-weight-offer',
+      'POST /api/v1/filament/spools/{spool_id}/insert-weight',
+    ],
+    summarize: ({ spool_id, kind, grams, reading_g, accept_insert_weight }) =>
       kind === 'weighed'
-        ? `Record ${grams ?? '?'} g on spool ${spool_id}`
+        ? reading_g !== undefined
+          ? `Record a reading of ${reading_g} g on spool ${spool_id}${accept_insert_weight ? ' and take its insert weight' : ''}`
+          : `Record ${grams ?? '?'} g on spool ${spool_id}`
         : kind === 'consumed_reset'
           ? `Reset the used counter of spool ${spool_id}`
           : `Record a drying of spool ${spool_id}`,
-    handler: async ({ spool_id, ...body }, { backend }) =>
-      json(
-        await ok(
-          backend.POST('/api/v1/filament/spools/{spool_id}/events', {
-            params: { path: { spool_id } },
-            body,
+    handler: async ({ spool_id, reading_g, accept_insert_weight, ...body }, { backend }) => {
+      const path = { spool_id }
+      if (reading_g === undefined) {
+        if (accept_insert_weight) throw new ToolError('accept_insert_weight needs reading_g')
+        return json(
+          await ok(
+            backend.POST('/api/v1/filament/spools/{spool_id}/events', { params: { path }, body }),
+            `record on spool ${spool_id}`,
+          ),
+        )
+      }
+      if (body.kind !== 'weighed') throw new ToolError('reading_g is for a weighing (kind: weighed)')
+      if (body.grams !== undefined) throw new ToolError('give reading_g or grams, not both')
+      const check = await ok(
+        backend.GET('/api/v1/filament/spools/{spool_id}/insert-weight-offer', {
+          params: { path, query: { reading_g } },
+        }),
+        `check the insert weight of spool ${spool_id}`,
+      )
+      let filament_g = check.filament_g
+      let accepted: components['schemas']['InsertWeightAccepted'] | null = null
+      if (accept_insert_weight) {
+        if (!check.offer) throw new ToolError(`no insert weight offer: ${check.reason ?? 'none'}; nothing was booked`)
+        accepted = await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/insert-weight', {
+            params: { path },
+            body: { reading_g },
           }),
-          `record on spool ${spool_id}`,
-        ),
-      ),
+          `take the insert weight of spool ${spool_id}`,
+        )
+        filament_g = accepted.filament_g
+      }
+      if (filament_g === null) throw new ToolError('no empty weight known for this spool; pass grams')
+      const event = await ok(
+        backend.POST('/api/v1/filament/spools/{spool_id}/events', {
+          params: { path },
+          body: { ...body, grams: filament_g },
+        }),
+        `record on spool ${spool_id}`,
+      )
+      return json({ event, filament_g, insert_weight: check, insert_weight_accepted: accepted })
+    },
   }),
 
   defineTool({
