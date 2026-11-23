@@ -1627,7 +1627,7 @@ _INSERT_WEIGHT_RULE = (
         "earlier derived one; nothing changes the insert until "
         "`POST /filament/spools/{spool_id}/insert-weight` accepts it.\n\n"
         "The weighing itself is still `POST /filament/spools/{spool_id}/events`, unchanged. "
-        "404 for no such spool; 422 when `reading_g` is missing or not above 0."
+        "404 for no such spool; 422 when `reading_g` is missing, not above 0, or above 100000."
     ),
 )
 async def insert_weight_offer(
