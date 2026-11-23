@@ -1589,17 +1589,55 @@ jobs:
       # committed timings (the step above copied them), which the split reads, and
       # ends as this shard's own tests timed on this runner, for
       # `backend-pytest-split` to merge.
+      #
+      # Memory (#6978). A hosted ubuntu-latest runner of a public repo has 4 vCPU and
+      # 16 GB RAM (https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories).
+      # A shard whose memory filled the VM lost its runner mid-step, and the job kept
+      # no log. `--memory` with an equal `--memory-swap` caps the container (its
+      # /dev/shm included) at 12 GiB with no swap, below the VM's RAM: past it the
+      # kernel kills a process inside the container, xdist reports that worker's test
+      # as crashed, and the job ends with its log. The sampler prints the VM's memory,
+      # the container's (now, its peak, its shmem) and the largest processes every
+      # 30 s; the kernel's OOM lines follow the run.
       - name: pytest
-        run: >-
-          docker run --rm --network host --shm-size=1g
-          -v "$PWD/test-fixtures:/app/test-fixtures:ro"
-          -v "$PWD/results:/results"
-          -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
-          -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
-          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
-          --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration
-          --store-durations --clean-durations --durations-path=/results/durations.json
-          --junitxml=/results/junit.xml --durations=20
+        run: |
+          set -euo pipefail
+          cid="$RUNNER_TEMP/pytest.cid"
+          peak="$RUNNER_TEMP/pytest.peak"
+          (
+            set +e  # the container's cgroup goes away under it at the end
+            cg="" n=0
+            while sleep 2; do
+              if [ -z "$cg" ] && [ -s "$cid" ]; then
+                cg=$(find /sys/fs/cgroup -maxdepth 3 -type d -name "*$(cat "$cid")*" -print -quit)
+              fi
+              [ -n "$cg" ] && cat "$cg/memory.peak" > "$peak" 2>/dev/null
+              n=$((n + 1))
+              [ $((n % 15)) -eq 0 ] || continue
+              line="memory: $(free -m | awk '/^Mem:/ {printf "vm used %d avail %d MiB", $3, $7} /^Swap:/ {printf ", swap used %d MiB", $3}')"
+              if [ -n "$cg" ] && [ -r "$cg/memory.current" ]; then
+                line+=" | container $(($(cat "$cg/memory.current") >> 20)) peak $(($(cat "$peak") >> 20)) shmem $(($(awk '$1 == "shmem" {print $2}' "$cg/memory.stat") >> 20)) MiB"
+              fi
+              echo "$line"
+              ps -eo rss=,pid=,args= --sort=-rss | head -n 5 | awk '{printf "  %6d MiB %7d %s\n", $1 / 1024, $2, substr($0, index($0, $3), 100)}'
+            done
+          ) &
+          sampler=$!
+          rc=0
+          docker run --rm --cidfile "$cid" --network host --shm-size=1g \
+            --memory=12g --memory-swap=12g \
+            -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
+            -v "$PWD/results:/results" \
+            -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test \
+            -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures \
+            -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto \
+            --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration \
+            --store-durations --clean-durations --durations-path=/results/durations.json \
+            --junitxml=/results/junit.xml --durations=20 || rc=$?
+          kill "$sampler"
+          echo "container memory peak: $(($(cat "$peak" 2>/dev/null || echo 0) >> 20)) MiB of 12288"
+          sudo dmesg | grep -iE 'out of memory|oom-kill|killed process' || echo "no OOM kill in the kernel log"
+          exit "$rc"
 
       # The intake sandbox's confinement (#6133, spec 2026-11-13 §7), proved on every
       # run: the step above runs as root under Docker's default seccomp and AppArmor
