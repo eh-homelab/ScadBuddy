@@ -515,6 +515,25 @@ describe('the spool page', () => {
     expect(sent.presets.every((row) => !('migrated' in row))).toBe(true)
   })
 
+  it("an unchanged copied migrated row stays migrated, so the copy's first type drops it (R-7150-11, R-7150-13)", async () => {
+    const before = new Set((await listSpools()).map((one) => one.id))
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(6)}`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    await screen.findAllByLabelText('Slicer filament')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(posts).toHaveLength(1))
+    const copy = await waitFor(async () => {
+      const made = (await listSpools()).find((one) => !before.has(one.id))
+      expect(made).toBeDefined()
+      return made!
+    })
+    expect((await getSpool(copy.id)).presets).toContainEqual(expect.objectContaining({ slicer_filament: 'GFA00', overridden: true, migrated: true }))
+    await patchSpool(copy.id, { type_id: T.JADE })
+    const after = (await getSpool(copy.id)).presets
+    expect(after.some((row) => row.overridden || row.migrated)).toBe(false)
+  })
+
   it('a copy of a spool in a tray does not take the tray (#7150)', async () => {
     const posts = recorded('POST', /\/filament\/spools\/bulk$/)
     const { user } = render(`/filament/spools/new?copy=${spoolId(4)}`)

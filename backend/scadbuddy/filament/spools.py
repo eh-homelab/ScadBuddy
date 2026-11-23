@@ -719,14 +719,26 @@ class FilamentSpoolStore:
         it names no spool."""
         carried: set[_PresetValues] = set()
         if body.copy_of is not None:
-            if (
-                conn.execute(
-                    "SELECT 1 FROM filament_spools WHERE id = %s", (body.copy_of,)
-                ).fetchone()
-                is None
-            ):
+            # One read: the source, and its migrated rows (none: one row of NULLs).
+            rows = conn.execute(
+                "SELECT p.printer_model, p.nozzle_diameter, p.slicer_filament,"
+                " p.slicer_filament_name FROM filament_spools s"
+                " LEFT JOIN filament_spool_presets p ON p.spool_id = s.id AND p.migrated"
+                " WHERE s.id = %s",
+                (body.copy_of,),
+            ).fetchall()
+            if not rows:
                 raise SpoolCopySourceError()
-            carried = _migrated_rows(conn, body.copy_of)
+            carried = {
+                (
+                    r["printer_model"],
+                    r["nozzle_diameter"],
+                    r["slicer_filament"],
+                    r["slicer_filament_name"],
+                )
+                for r in rows
+                if r["printer_model"] is not None
+            }
         if body.location_id is not None:
             place = conn.execute(
                 "SELECT tray_id FROM filament_locations WHERE id = %s", (body.location_id,)
