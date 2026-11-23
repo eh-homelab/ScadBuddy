@@ -92,7 +92,17 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " until someone says the plate is clear, on the Prints page, in the print dialog"
             " or through the assistant. Off, the next print starts once the printer has"
             " finished, as Bambuddy's queue does by default. A run keeps the setting it"
-            " started with.",
+            ' started with. With it and "Queue when the printer is busy" both on, a printer'
+            " that holds a finished or failed print counts as busy for a print sent over the"
+            " LAN too, which then waits until someone says the plate is clear.",
+        ),
+        "lan_queue_when_busy": SettingDoc(
+            "Queue when the printer is busy",
+            "On, a print sent over the LAN first reads the printer. When it is printing, or"
+            " holds a print whose plate must be cleared, nothing is sent: the print waits in"
+            " ScadBuddy's queue (the Prints page) and starts once the printer has finished and"
+            " someone says the plate is clear. Off, the print is sent at once, and a busy"
+            " printer refuses it. A run keeps the setting it started with.",
         ),
         # -- Print watcher -------------------------------------------------------------
         "print_auto_import": SettingDoc(
@@ -318,6 +328,11 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "On, the API registers the built-in order-fulfilment flow at start when it has no"
             " version, or updates an unedited older built-in version.",
         ),
+        "storefront_warm_prices": SettingDoc(
+            "Warm storefront prices",
+            "On, publish renders a listing's default variant and slices its price, and"
+            " Prepare colours slices each prepared variant's, before a visitor asks.",
+        ),
         # -- Fonts ---------------------------------------------------------------------
         "google_fonts_api_key": SettingDoc(
             "Google Fonts API key",
@@ -419,11 +434,41 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "What a kilogram of filament costs when its spool and type name no cost, in the"
             " shop's currency, such as 24.50. Empty sets none.",
         ),
+        "filament_drying_temp_c": SettingDoc(
+            "Default drying temperature, °C",
+            "The temperature a spool's drying starts from when its spool, type, subtype and"
+            " material set none. A value in the catalog wins. 1 to 150. Empty offers none.",
+        ),
+        "filament_drying_hours": SettingDoc(
+            "Default drying time, hours",
+            "The hours a spool's drying starts from when its spool, type, subtype and material"
+            " set none. A value in the catalog wins. 0.1 to 999.9. Empty offers none.",
+        ),
+        "filament_auto_add_unknown_rfid": SettingDoc(
+            "Add spools for unknown RFID tags",
+            "On, ScadBuddy leaves Bambuddy's own auto-add of unknown RFID spools as it is:"
+            " Bambuddy may add a spool for an AMS tag it does not know, and the pull brings it"
+            " in, unless the RFID override mode holds Bambuddy's auto-add off. Off, ScadBuddy"
+            " holds Bambuddy's auto-add off, so no spool is made for an unknown tag and you add"
+            " or link it by hand. The value Bambuddy had comes back when this is on again and"
+            " the override mode is off.",
+        ),
+        "filament_label_base_url": SettingDoc(
+            "Label address",
+            "The address that location labels open, such as https://scadbuddy.example.com."
+            " Keep it stable: a printed label keeps the address it was printed with. Empty uses"
+            " ScadBuddy's public URL. At most 64 characters.",
+        ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",
             "On, a spool whose filament reaches 0 g, or that is archived, adds its type to the"
             " shopping list, with a note that names the spool. Nothing is added while an item"
             " for that type is still to buy. It orders nothing.",
+        ),
+        "filament_sync_pass_ttl_days": SettingDoc(
+            "Keep sync history for (days)",
+            "How long the list of Bambuddy sync passes keeps a pass, failed ones too. 1 to"
+            " 3650. Empty is the default, 30 days.",
         ),
         "filament_burn_window_days": SettingDoc(
             "Burn window, days",

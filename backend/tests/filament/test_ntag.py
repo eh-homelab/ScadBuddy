@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
@@ -50,9 +51,11 @@ def _record(bb_id: int, uid: str | None, origin: str | None = "opentag3d") -> re
     )
 
 
-async def _queue(f: Filament, client: BambuddyClient, spool: UUID, was: str | None) -> None:
-    """Queue a write while the Bambuddy record holds ``was``."""
-    _record(11, was)
+async def _queue(
+    f: Filament, client: BambuddyClient, spool: UUID, was: str | None, bb_id: int = 11
+) -> None:
+    """Queue a write while the Bambuddy record ``bb_id`` holds ``was``."""
+    _record(bb_id, was)
     respx.post(f"{API}/spoolbuddy/nfc/write-tag").mock(
         return_value=httpx.Response(200, json={"status": "queued", "warnings": []})
     )
@@ -277,6 +280,46 @@ async def test_confirm_binds_the_new_uid_as_ntag_opentag(
     assert (tag.kind, tag.tag_uid) == ("ntag_opentag", UID)
     events = [e.kind for e in f.spools.events(spool)]
     assert events.count("tag_bound") == 2  # the old tag's, then the new one
+
+
+@respx.mock
+async def test_confirm_keeps_the_origin_and_the_encode_time(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    """#7149 R-7149-1, R-7149-3: a confirmed write is ``opentag3d``, written when
+    Bambuddy's record says, else at the confirm."""
+    f = _filament(pg_pool)
+    spool = _spool(f, pg_pool, 11)
+    await _queue(f, client, spool, None)
+    respx.get(f"{API}/inventory/spools/11").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 11,
+                "material": "PLA",
+                "tag_uid": UID,
+                "data_origin": "opentag3d",
+                "encode_time": "2026-11-23T05:06:07",
+            },
+        )
+    )
+
+    assert (await ntag.confirm(f, client, spool, actor="ann")).bound is True
+
+    read = f.spools.get(spool)
+    assert read is not None
+    assert read.data_origin == "opentag3d"
+    assert read.tag_encoded_at == datetime(2026, 11, 23, 5, 6, 7, tzinfo=UTC)
+    edited = [e for e in f.spools.events(spool) if e.kind == "edited"][-1]
+    assert set(edited.data["changes"]) == {"data_origin", "tag_encoded_at"}
+
+    other = _spool(f, pg_pool, 12)
+    await _queue(f, client, other, None, bb_id=12)
+    _record(12, "04DDEEFF")
+    assert (await ntag.confirm(f, client, other, actor="ann")).bound is True
+    took = f.spools.get(other)
+    assert took is not None
+    assert took.tag_encoded_at is not None
 
 
 @respx.mock

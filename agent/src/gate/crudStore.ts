@@ -9,12 +9,10 @@ import { REFUSALS, type RefusalCode, type Role } from './validate.js'
 // api/crud_agent_gate.py, agent_data/gate.py): each of gate/store.ts's writers is one route and
 // one transaction on the API, which builds the session events as store.ts does and answers the
 // batches it appended (`logged`), which store.ts hands to the event log once the answer is back.
-// store.ts calls these once the API lists area `gate` (`GateDb.useCrud`), and its own SQL until
-// then, except the run grant's check, which reads the backend's `flow_grants` and goes only here.
 //
 // A request id travels in the body or the query string, never in the path. One longer than the
 // API takes (`REQUEST_ID_MAX`) is never sent: no row can hold it, so a resolve, a decide, a read
-// or a grant of it answers as one of an id that was never asked, as the SQL did.
+// or a grant of it answers as one of an id that was never asked.
 
 /** The longest request id the routes take (backend api/crud_agent_gate.py `REQUEST_ID_MAX`). */
 export const REQUEST_ID_MAX = 2048
@@ -141,7 +139,7 @@ export class CrudGate implements GateRoutes {
       role: args.role,
       check_live: args.checkLive,
       live_run: args.liveRun ?? null,
-      // Of the response as the person sent it, as the SQL path hashed it: `wellFormed` below can
+      // Of the response as the person sent it, as a resolve hashes it: `wellFormed` below can
       // change a lone surrogate, and a retry compares against this hash (#3724).
       response_hash: responseHash(args.response),
     }

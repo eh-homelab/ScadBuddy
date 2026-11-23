@@ -15,18 +15,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import Sequence
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from contextlib import aclosing, asynccontextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from scadbuddy.bambuddy.client import Operation, client_for, maybe_client
+from scadbuddy.bambuddy.client import BambuddyClient, Operation, client_for, maybe_client
 from scadbuddy.bambuddy.costs import archive_cost
 from scadbuddy.bambuddy.models import (
     FINISH_PHOTO_PREFIX,
     ArchiveDetail,
+    FolderCreate,
     LibraryFile,
     LocalPreset,
     PrinterMaintenanceOverview,
@@ -37,11 +38,13 @@ from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_previe
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import LibrarySource, PrintSource
 from scadbuddy.bambuddy.projects import FolderlessProjects, ProjectRequest, ensure_project
+from scadbuddy.bambuddy.send import Sink, upload_raw
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.bambuddy_pull import read_assignments
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.orders.density import density_text
+from scadbuddy.orders.held_print import STOREFRONT_FOLDER, NativeShelf, Shelf, Shelved
 from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
@@ -55,7 +58,14 @@ from scadbuddy.orders.integrations import (
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, NativeReads, reads_for, served_reads
 
+if TYPE_CHECKING:
+    from scadbuddy.orders.storefront.held_file import HeldFile
+    from scadbuddy.print_library.native import NativeLibrary
+
 logger = logging.getLogger(__name__)
+
+#: How a held copy is sent to Bambuddy, as the library page's upload sends a file.
+UPLOAD_MEDIA_TYPE = "application/octet-stream"
 
 
 def _local_densities(presets: list[LocalPreset]) -> dict[str, LocalDensity]:
@@ -297,13 +307,16 @@ async def start_library_quote_preview(
     *,
     lan: bool,
     native_reads: NativeCopies | None,
+    held: HeldFile | None = None,
     **kwargs: Any,
 ) -> list[PreviewStarted]:
     """A library file item's slice (#5544): :func:`start_quote_preview` of the file, read
     as the dialog's background slice of a library file reads it (``bambuddy/operations.py``
     ``preview_run``): its slots from the download it uploads (#2550), and a native run's
     copy into the native library. A sliced file is refused there (422): it has nothing to
-    slice."""
+    slice. With ``held`` (a file listing's price, #6710 §7.3.1) the file is read from its
+    held copy in place of the library, and its copies name the copy's version; the rest of
+    the slice is the same."""
     async with maybe_client(settings, native=lan) as client:
         source = await LibrarySource.load(
             client,
@@ -311,8 +324,9 @@ async def start_library_quote_preview(
             uploads=uploads,
             settings=settings,
             read_own=True,
-            files=reads_for(file_id, client, native_reads),
+            files=held if held is not None else reads_for(file_id, client, native_reads),
             native=native_reads if lan else None,
+            held=held is not None,
         )
         return await start_preview_plates(
             client, source, settings, uploads, request, native_reads=native_reads, **kwargs
@@ -372,6 +386,17 @@ class ServedLibrary:
     async def exists(self, file_id: int) -> bool:
         return await self.file(file_id) is not None
 
+    async def download(self, file_id: int) -> AsyncGenerator[bytes]:
+        """The file's bytes, from the library that serves (a storefront file listing's
+        publish, #6710 §5.1)."""
+        native = await self.native()
+        stored = await asyncio.to_thread(self.settings.load)
+        async with maybe_client(stored, native=native is not None) as client:
+            reads = served_reads(file_id, client, native)
+            async with aclosing(reads.download_library_file(file_id)) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+
     async def colours(self, file_id: int) -> dict[int, str]:
         """The file's slot colours by slot id (from 1), as its filament requirements name
         them; empty when they cannot be read (the slots are then grey)."""
@@ -383,3 +408,65 @@ class ServedLibrary:
         except ApiError:
             return {}
         return {slot.slot_id: slot.color for slot in needs.filaments if slot.color}
+
+
+class BambuddyShelf:
+    """``orders/held_print.py`` ``Shelf`` over Bambuddy's library (#6710 §10.2). Its
+    listing states no hash, so a file of the copy's size has its ``file_hash`` read
+    (``GET /library/files/{id}``)."""
+
+    def __init__(self, client: BambuddyClient, uploads: BambuddyUploadStore) -> None:
+        self.client = client
+        self.uploads = uploads
+
+    async def storefront_folder(self) -> int:
+        tops = [f for f in await self.client.folders() if f.parent_id is None]
+        named = sorted(f.id for f in tops if f.name == STOREFRONT_FOLDER)
+        if named:
+            return named[0]
+        made = await self.client.create_folder(FolderCreate(name=STOREFRONT_FOLDER))
+        return made.id
+
+    async def find(self, folder_id: int, sha256: str, size: int) -> Shelved | None:
+        for row in sorted(await self.client.library_files(folder_id), key=lambda r: r.id):
+            if row.file_size is not None and row.file_size != size:
+                continue
+            try:
+                found = await self.client.library_file(row.id)
+            except ApiError as error:
+                if error.status == 404:
+                    continue
+                raise
+            if (found.file_hash or "").lower() == sha256:
+                return Shelved(found.id, found.filename)
+        return None
+
+    async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
+        # Streamed from the content store into the one spool `upload_raw` keeps.
+        async def write(sink: Sink) -> None:
+            async for chunk in chunks:
+                await asyncio.to_thread(sink.write, chunk)
+
+        made = await upload_raw(
+            self.client,
+            self.uploads,
+            folder_id,
+            filename=filename,
+            media_type=UPLOAD_MEDIA_TYPE,
+            write=write,
+        )
+        return Shelved(made.id, made.filename)
+
+
+@asynccontextmanager
+async def served_shelf(
+    settings: SettingsStore, native: NativeLibrary | None, uploads: BambuddyUploadStore
+) -> AsyncIterator[Shelf]:
+    """``orders/held_print.py``'s shelf of the library that serves: ``native`` when it
+    serves, else Bambuddy's."""
+    if native is not None:
+        yield NativeShelf(native)
+        return
+    stored = await asyncio.to_thread(settings.load)
+    async with client_for(stored) as client:
+        yield BambuddyShelf(client, uploads)

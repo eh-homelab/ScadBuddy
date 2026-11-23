@@ -13,7 +13,7 @@ import base64
 import binascii
 import contextvars
 from collections.abc import Collection, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -26,6 +26,8 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.registry import EntityStore
 from scadbuddy.orders.models import (
     IMPORT_STUCK,
     Actor,
@@ -184,7 +186,7 @@ _ITEM = (
     " slug, commit, inputs, libraries, template_name, render_key, colours, output_id,"
     " delivered_attachment_id, current_revision_id, approval, created_at, updated_at,"
     " revised_after_acceptance, library_file_id, library_filename, library_source,"
-    " origin_archive_ids"
+    " origin_archive_ids, library_sha256, library_copy_key"
 )
 _REVISION = (
     "id, item_id, number, slug, commit, inputs, libraries, template_name, render_key, colours,"
@@ -312,6 +314,8 @@ def _item_of(row: DictRow) -> OrderItem:
             id=row["library_file_id"],
             filename=row["library_filename"],
             library=row["library_source"],
+            sha256=row["library_sha256"],
+            copy_key=row["library_copy_key"],
         ),
         colours=row["colours"],
         output_id=row["output_id"],
@@ -350,6 +354,9 @@ def _revision_of(row: DictRow) -> Revision:
     )
 
 
+#: The ``blob_refs`` holder kind of a storefront line's held copy of its listing's file
+#: (#6710 §10.1), by item id.
+ORDER_ITEM_HOLDER = "order_item"
 #: The ``blob_refs`` holder kind of an attachment's file (§6.2's ``attachment:<id>``),
 #: written and removed with the attachment's row, in its transaction.
 ATTACHMENT_HOLDER = "attachment"
@@ -360,6 +367,8 @@ ATTACHMENT_HOLDER = "attachment"
 PROJECT_LOCK_TIMEOUT_MS = 120_000
 #: As the row pool's (``orders/component.py`` ``CONNECT_TIMEOUT``).
 PROJECT_LOCK_CONNECT_TIMEOUT = 5
+#: The advisory lock key of :meth:`OrderStore.restore_lock`.
+RESTORE_LOCK_KEY = "storefront_held_restore"
 
 
 def item_subject(item_id: str) -> str:
@@ -489,6 +498,7 @@ class SpoolLink:
 class OrderStore:
     def __init__(self, pool: Pool) -> None:
         self._pool = pool
+        self._entities = EntityStore(pool)
 
     # -- connections ------------------------------------------------------------------
 
@@ -1183,7 +1193,14 @@ class OrderStore:
     def delete_draft(self, conn: Conn, order_id: str) -> bool:
         """The unsubmitted storefront cart's row; its items, revisions and audit rows
         cascade. Its attachments must be gone first (`delete_attachment`): their foreign
-        key refuses the delete otherwise. Never a submitted or back office order."""
+        key refuses the delete otherwise. Never a submitted or back office order. Its
+        items' holds on held copies (#6710) go with it."""
+        conn.execute(
+            "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id IN (SELECT i.id"
+            " FROM order_items i JOIN orders o ON o.id = i.order_id WHERE o.id = %s"
+            " AND o.source = 'storefront' AND o.submitted_at IS NULL)",
+            (ORDER_ITEM_HOLDER, order_id),
+        )
         row = conn.execute(
             "DELETE FROM orders WHERE id = %s AND source = 'storefront'"
             " AND submitted_at IS NULL RETURNING id",
@@ -1583,15 +1600,20 @@ class OrderStore:
         notes: str = "",
         sku: str | None = None,
         origin_archive_ids: Sequence[int] = (),
+        colours: Sequence[ColourSlot] = (),
     ) -> OrderItem:
         """A library file item (#5544), appended after the order's items: the file's
-        reference, no template reference, no colours until its first slice quote, no
-        output. ``title`` defaults to the file's name."""
+        reference, no template reference, no output, and no colours until its first slice
+        quote unless ``colours`` gives them (a storefront line's, #6710). ``title``
+        defaults to the file's name. A file with a ``copy_key`` (a storefront line) holds
+        that copy under (`ORDER_ITEM_HOLDER`, item id) in the caller's transaction, so the
+        order keeps the bytes it prints whatever becomes of its listing (§10.1)."""
         row = conn.execute(
             "INSERT INTO order_items (order_id, position, kind, quantity, title, notes, sku,"
-            " library_file_id, library_filename, library_source, origin_archive_ids) VALUES"
+            " library_file_id, library_filename, library_source, origin_archive_ids,"
+            " library_sha256, library_copy_key, colours) VALUES"
             " (%s, (SELECT COALESCE(MAX(position) + 1, 0) FROM order_items WHERE order_id = %s),"
-            f" 'library_file', %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
+            f" 'library_file', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
             (
                 order_id,
                 order_id,
@@ -1603,9 +1625,18 @@ class OrderStore:
                 file.filename,
                 file.library,
                 list(origin_archive_ids),
+                file.sha256,
+                file.copy_key,
+                Jsonb(_dump(list(colours))),
             ),
         ).fetchone()
         assert row is not None
+        if file.copy_key is not None:
+            conn.execute(
+                "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+                " ON CONFLICT DO NOTHING",
+                (file.copy_key, ORDER_ITEM_HOLDER, row["id"]),
+            )
         return _item_of(row)
 
     def item(self, item_id: str, *, conn: Conn | None = None) -> OrderItem | None:
@@ -1704,6 +1735,20 @@ class OrderStore:
             raise LookupError(f"no library file item {item_id}")
         return _item_of(row)
 
+    def move_library_file(
+        self, conn: Conn, item_id: str, from_id: int, to_id: int, filename: str, library: str
+    ) -> OrderItem | None:
+        """A storefront item pointed at ``to_id`` of ``library``, named ``filename`` there
+        (#6710 §10.2), its held copy put back there; only while it still names
+        ``from_id``, else None."""
+        row = conn.execute(
+            "UPDATE order_items SET library_file_id = %s, library_filename = %s,"
+            " library_source = %s, updated_at = now() WHERE id = %s"
+            f" AND kind = 'library_file' AND library_file_id = %s RETURNING {_ITEM}",
+            (to_id, filename, library, item_id, from_id),
+        ).fetchone()
+        return None if row is None else _item_of(row)
+
     def set_design(
         self, conn: Conn, item_id: str, revision: Revision, *, output_id: str | None
     ) -> OrderItem:
@@ -1789,10 +1834,16 @@ class OrderStore:
         return _revision_of(row)
 
     def delete_draft_item(self, conn: Conn, item_id: str) -> bool:
-        """Deletes the item while it is `draft` (Ruling 6, 10); False when it is not."""
+        """Deletes the item while it is `draft` (Ruling 6, 10), with its hold on a held
+        copy (#6710); False when it is not."""
         deleted = conn.execute(
             "DELETE FROM order_items WHERE id = %s AND status = 'draft' RETURNING id", (item_id,)
         ).fetchone()
+        if deleted is not None:
+            conn.execute(
+                "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+                (ORDER_ITEM_HOLDER, item_id),
+            )
         return deleted is not None
 
     def item_inputs(self) -> Iterator[dict[str, Any]]:
@@ -2279,14 +2330,26 @@ class OrderStore:
             "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
             (holder_kind, attempt_id),
         )
-        conn.execute(
-            "UPDATE order_attachments SET subject = 'order_item:' || attempt_item_id,"
-            " attempt_item_id = NULL WHERE subject = %s",
+        moved = conn.execute(
+            "SELECT DISTINCT attempt_item_id FROM entity_attachments WHERE subject = %s",
             (fulfilment_subject(attempt_id),),
-        )
+        ).fetchall()
+        for moving in moved:
+            item_id = moving["attempt_item_id"]
+            entity_id = self._entities.ensure(conn, EntityRef("order_item", item_id))
+            conn.execute(
+                "UPDATE entity_attachments SET subject = %s, entity_id = %s,"
+                " attempt_item_id = NULL WHERE subject = %s AND attempt_item_id = %s",
+                (
+                    f"order_item:{item_id}",
+                    entity_id,
+                    fulfilment_subject(attempt_id),
+                    item_id,
+                ),
+            )
         # A test print's photo stays its revision's, naming no attempt.
         conn.execute(
-            "UPDATE order_attachments SET fulfilment_id = NULL WHERE fulfilment_id = %s",
+            "UPDATE entity_attachments SET fulfilment_id = NULL WHERE fulfilment_id = %s",
             (attempt_id,),
         )
         conn.execute("DELETE FROM order_item_fulfilments WHERE id = %s", (attempt_id,))
@@ -3047,15 +3110,18 @@ class OrderStore:
             " ON CONFLICT DO NOTHING",
             (blob_key, ATTACHMENT_HOLDER, attachment_id),
         )
+        entity_id = self._entities.ensure(conn, EntityRef.parse(subject))
         row = conn.execute(
-            "INSERT INTO order_attachments (id, order_id, subject, kind, role, filename,"
-            " media_type, size_bytes, sha256, blob_key, caption, created_by, attempt_item_id,"
-            " fulfilment_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            "INSERT INTO entity_attachments (id, order_id, subject, entity_id, kind, role,"
+            " filename, media_type, size_bytes, sha256, blob_key, caption, created_by,"
+            " attempt_item_id, fulfilment_id)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             f" RETURNING {_ATTACHMENT}",
             (
                 attachment_id,
                 order_id,
                 subject,
+                entity_id,
                 kind,
                 role,
                 filename,
@@ -3075,10 +3141,13 @@ class OrderStore:
     def attachment(
         self, attachment_id: str, *, conn: Conn | None = None
     ) -> tuple[Attachment, str] | None:
-        """The attachment and its blob key, or None."""
+        """The order's attachment and its blob key, or None (also for another entity's
+        file, which has no ``order_id``)."""
         with self._read(conn) as c:
             row = c.execute(
-                f"SELECT {_ATTACHMENT} FROM order_attachments WHERE id = %s", (attachment_id,)
+                f"SELECT {_ATTACHMENT} FROM entity_attachments"
+                " WHERE id = %s AND order_id IS NOT NULL",
+                (attachment_id,),
             ).fetchone()
         return None if row is None else _attachment_of(row)
 
@@ -3086,7 +3155,7 @@ class OrderStore:
         """Every attachment of the order and of its items, oldest first."""
         with self._read(conn) as c:
             rows = c.execute(
-                f"SELECT {_ATTACHMENT} FROM order_attachments WHERE order_id = %s"
+                f"SELECT {_ATTACHMENT} FROM entity_attachments WHERE order_id = %s"
                 " ORDER BY created_at, id",
                 (order_id,),
             ).fetchall()
@@ -3097,7 +3166,7 @@ class OrderStore:
         oldest first."""
         with self._read(conn) as c:
             rows = c.execute(
-                f"SELECT {_ATTACHMENT} FROM order_attachments WHERE subject = %s"
+                f"SELECT {_ATTACHMENT} FROM entity_attachments WHERE subject = %s"
                 " ORDER BY created_at, id",
                 (subject,),
             ).fetchall()
@@ -3113,7 +3182,7 @@ class OrderStore:
     ) -> Attachment:
         row = _update(
             conn,
-            "order_attachments",
+            "entity_attachments",
             attachment_id,
             {"caption": caption, "role": role},
             _ATTACHMENT,
@@ -3165,7 +3234,7 @@ class OrderStore:
             "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
             (ATTACHMENT_HOLDER, attachment_id),
         )
-        conn.execute("DELETE FROM order_attachments WHERE id = %s", (attachment_id,))
+        conn.execute("DELETE FROM entity_attachments WHERE id = %s", (attachment_id,))
 
     def set_delivered(self, conn: Conn, item_id: str, attachment_id: str | None) -> OrderItem:
         row = _update(
@@ -3176,15 +3245,23 @@ class OrderStore:
 
     # -- Bambuddy projects (§8.1, #4253) ------------------------------------------------
 
-    @contextmanager
-    def project_lock(self, order_id: str) -> Iterator[None]:
+    def project_lock(self, order_id: str) -> AbstractContextManager[None]:
         """The order's project ensures, one at a time across replicas: a session advisory
         lock held while Bambuddy is asked, so an accept's and a print's ensure never make
         two projects for one subject. Waited for and held on a connection of its own,
         never the row pool's: ensures queued on the lock would otherwise take every
         pooled connection, and the holder's reads and writes, and every other orders
         request, would find none. Closing that connection ends the lock with it."""
-        key = "order_projects:" + order_id
+        return self._session_lock("order_projects:" + order_id)
+
+    def restore_lock(self) -> AbstractContextManager[None]:
+        """Storefront items' held-copy restores (#6710 §10.2), one at a time across
+        replicas, as :meth:`project_lock` holds its lock: two prints racing to restore
+        never make two "Storefront" folders, or upload the same bytes twice."""
+        return self._session_lock(RESTORE_LOCK_KEY)
+
+    @contextmanager
+    def _session_lock(self, key: str) -> Iterator[None]:
         conninfo = self._pool.conninfo
         with psycopg.connect(
             conninfo() if callable(conninfo) else conninfo,

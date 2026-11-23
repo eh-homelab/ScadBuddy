@@ -25,9 +25,9 @@ import { ready, type RouteModule } from './module.js'
 // `NOTIFY scadbuddy_settings` so every replica resizes its warm cache.
 
 export type SessionRuntimeRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   settings: SettingsRepo | undefined
-  /** Undefined when there is no database. */
+  /** Undefined when this process was not given it (tests). */
   writer: SettingsWriter | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
@@ -36,8 +36,8 @@ export type SessionRuntimeRouteDeps = {
 
 export const SESSION_RUNTIME_PATH = '/api/v1/ai/settings/session-runtime'
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'assistant session runtime settings'
 
 /** Both sets in one body. */
@@ -51,11 +51,11 @@ async function current(settings: SettingsRepo): Promise<RuntimeSettings & TurnSe
 
 export function registerSessionRuntimeRoutes(app: Hono, deps: SessionRuntimeRouteDeps): void {
   async function repo(): Promise<SettingsRepo | string> {
-    if (!deps.settings) return NO_DATABASE
+    if (!deps.settings) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.settings : NOT_READY
   }
   async function writer(): Promise<SettingsWriter | string> {
-    if (!deps.writer) return NO_DATABASE
+    if (!deps.writer) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.writer : NOT_READY
   }
 

@@ -39,14 +39,25 @@ from scadbuddy.bambuddy.trays import (
     tray_spool_id,
     unknown_trays,
 )
-from scadbuddy.filament.models import EffectivePreset, Spool, TrayHolder, TrayView
+from scadbuddy.filament.models import (
+    EffectivePreset,
+    HeldSpool,
+    HeldTray,
+    HeldTrays,
+    SbSpools,
+    Spool,
+    TrayHolder,
+    TrayView,
+)
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import status_from_report
+from scadbuddy.rack.rank import rack_groups
 from scadbuddy.slicing.catalogue import native_catalogue
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.spools.models import SeenTray
 from tests.bambuddy.conftest import recording
+from tests.rack.helpers import requirement
 from tests.slicing.conftest import PROFILES
 from tests.support.no_bambuddy import forbid_bambuddy
 
@@ -132,6 +143,7 @@ def _sb(
     grams: float | None = 640.0,
     name: str | None = None,
     brand: str | None = "Bambu Lab",
+    subtype: str | None = None,
 ) -> Spool:
     """An SB spool #``number`` of a type (its values the effective ones, #6262)."""
     return Spool.model_validate(
@@ -145,7 +157,7 @@ def _sb(
             "weight_locked": False,
             "grams_left": grams,
             "effective": {"rgba": rgba, "colour_name": name, "label_weight_g": 1000},
-            "names": {"brand": brand, "material": material},
+            "names": {"brand": brand, "material": material, "subtype": subtype},
         }
     )
 
@@ -342,6 +354,39 @@ async def test_an_rfid_tray_shows_its_sb_spool() -> None:
     )
     # The material and the colour stay the tray's: what the AMS feeds.
     assert (option.material, option.colour, option.slicer_filament) == ("PLA", "#000000", "GFA00")
+
+
+def _glow_held(kind: str, spool: Spool) -> HeldTrays:
+    """``spool`` in AMS-A slot 1, as the dialog's inventory reads it (``view``) or as the
+    background slice's request carries it (``request``, `SbSpools`)."""
+    if kind == "view":
+        return _view(_holding(0, 0, spool))
+    return SbSpools(trays=[HeldTray(ams_id=0, tray_id=0, spool=HeldSpool.of(spool))])
+
+
+@pytest.mark.parametrize("kind", ["view", "request"])
+def test_an_sb_glow_spool_in_a_plain_pla_tray_ranks_as_abrasive(kind: str) -> None:
+    """#6876: the AMS reports the tray as plain ``PLA``; the SB spool in it is PLA Glow.
+    The run's rack ranking judges Glow by the SB spool, not by the tray's type."""
+    held = _glow_held(kind, _sb(7, subtype="Glow"))
+    options = loaded_trays(h2c_status(), 0, "Garage", held=held)
+    option = next(o for o in options if o.spool_id == tray_spool_id(0, 0))
+    [group] = rack_groups([requirement(1)], {1: option})
+    assert group.abrasive and not group.glow_unchecked
+
+
+def test_the_sb_spools_subtype_changes_no_label_and_no_profile_field() -> None:
+    """#6876: the SB spool's material and subtype ride on their own fields; the tray's
+    material stays what the AMS feeds, and ``subtype`` (the profile resolution's) stays
+    empty, so the picker's label and the preset are as before."""
+    held = _glow_held("view", _sb(7, subtype="Glow"))
+    [option] = [
+        o
+        for o in loaded_trays(h2c_status(), 0, "Garage", held=held)
+        if o.spool_id == tray_spool_id(0, 0)
+    ]
+    assert (option.material, option.subtype, option.label) == ("PLA", None, "AMS-A slot 1")
+    assert (option.sb_material, option.sb_subtype) == ("PLA", "Glow")
 
 
 async def test_without_held_spools_the_trays_stand_alone() -> None:

@@ -1,18 +1,14 @@
-import type { Sql } from 'postgres'
 import { type CrudTarget, crudOf } from '../api/crudStores.js'
 
 // The /mcp session relay's storage (#2086, sessionRelay.ts): the directory of which replica holds
 // each session (`ai_mcp_sessions`), the relay's message rows (`ai_mcp_relay_messages`) and the
-// NOTIFY that announces each message on `scadbuddy_mcp`. `PgRelayRows` is the agent's own SQL;
-// `CrudRelayRows` is the same, one route per method, on the backend's CRUD routes of area
-// `mcp-relay` (backend api/crud_agent_mcp.py, #5299 step 11), and main.ts picks it per call once
-// the API lists that area (`gated`, api/crudStores.ts). A message's row and its NOTIFY commit in
-// one transaction either way, so the row is readable before its header is heard.
+// NOTIFY that announces each message on `scadbuddy_mcp`, through the backend's CRUD routes of
+// area `mcp-relay` (`CrudRelayRows`, backend api/crud_agent_mcp.py), one route per method. A
+// message's row and its NOTIFY commit in one transaction, so the row is readable before its
+// header is heard.
 
 /** The channel the relay's headers are NOTIFYed on. */
 export const MCP_CHANNEL = 'scadbuddy_mcp'
-/** Relay rows older than this are nobody's any more. */
-const STALE_MESSAGES = '10 minutes'
 
 export interface RelayRows {
   /** Records that `replica` holds the session (or moves it there). */
@@ -33,68 +29,6 @@ export interface RelayRows {
   withdraw(row: string): Promise<boolean>
   /** Deletes the rows nobody took and the directory rows idle for `idleSeconds`. */
   sweep(idleSeconds: number): Promise<void>
-}
-
-export class PgRelayRows implements RelayRows {
-  readonly #sql: Sql
-
-  constructor(sql: Sql) {
-    this.#sql = sql
-  }
-
-  async register(hash: string, replica: string, callerKey: string): Promise<void> {
-    await this.#sql`
-      INSERT INTO ai_mcp_sessions (id_hash, replica, caller_key)
-      VALUES (${hash}, ${replica}, ${callerKey})
-      ON CONFLICT (id_hash) DO UPDATE SET replica = EXCLUDED.replica, caller_key = EXCLUDED.caller_key, last_seen = now()`
-  }
-
-  async touch(hash: string): Promise<void> {
-    await this.#sql`UPDATE ai_mcp_sessions SET last_seen = now() WHERE id_hash = ${hash}`
-  }
-
-  async remove(hash: string, replica?: string): Promise<boolean> {
-    const removed =
-      replica === undefined
-        ? await this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash} RETURNING id_hash`
-        : await this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash} AND replica = ${replica} RETURNING id_hash`
-    return removed.length > 0
-  }
-
-  async owner(hash: string): Promise<string | undefined> {
-    const [found] = await this.#sql<{ replica: string }[]>`SELECT replica FROM ai_mcp_sessions WHERE id_hash = ${hash}`
-    return found?.replica
-  }
-
-  async counts(callerKey: string, idleSeconds: number): Promise<{ total: number; caller: number }> {
-    const [row] = await this.#sql<{ total: number; caller: number }[]>`
-      SELECT count(*)::int AS total, (count(*) FILTER (WHERE caller_key = ${callerKey}))::int AS caller
-      FROM ai_mcp_sessions WHERE last_seen > now() - make_interval(secs => ${idleSeconds})`
-    return row ?? { total: 0, caller: 0 }
-  }
-
-  async send(header: object, body?: { row: string; value: unknown }): Promise<void> {
-    await this.#sql.begin(async (tx) => {
-      if (body) await tx`INSERT INTO ai_mcp_relay_messages (id, body) VALUES (${body.row}, ${tx.json(body.value as never)})`
-      await tx`SELECT pg_notify(${MCP_CHANNEL}, ${JSON.stringify(header)})`
-    })
-  }
-
-  async take(row: string): Promise<unknown> {
-    const [taken] = await this.#sql<{ body: unknown }[]>`DELETE FROM ai_mcp_relay_messages WHERE id = ${row} RETURNING body`
-    return taken?.body
-  }
-
-  async withdraw(row: string): Promise<boolean> {
-    return (await this.#sql`DELETE FROM ai_mcp_relay_messages WHERE id = ${row} RETURNING id`).length > 0
-  }
-
-  async sweep(idleSeconds: number): Promise<void> {
-    await Promise.all([
-      this.#sql`DELETE FROM ai_mcp_relay_messages WHERE created_at < now() - ${STALE_MESSAGES}::interval`,
-      this.#sql`DELETE FROM ai_mcp_sessions WHERE last_seen < now() - make_interval(secs => ${idleSeconds})`,
-    ])
-  }
 }
 
 /** The CRUD routes' bound on an idle window (backend api/crud_agent_mcp.py `IDLE_SECONDS_MAX`). */

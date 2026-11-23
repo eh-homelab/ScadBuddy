@@ -80,6 +80,8 @@ def crud_mock() -> Iterator[respx.Router]:
                     "accounts",
                     "order",
                     "models",
+                    "variants",
+                    "file-prices",
                 ]
             },
             headers=CRUD,

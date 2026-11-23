@@ -68,7 +68,14 @@ def test_a_library_file_is_added_as_an_item(bambuddy: TestClient) -> None:
     order = an_order(bambuddy)
     item = add_item(bambuddy, order["id"], library_file_id=FILE_ID, quantity=2, sku="BR")
     assert (item["kind"], item["reference"], item["output_id"]) == ("library_file", None, None)
-    assert item["library_file"] == {"id": FILE_ID, "filename": "file-89.3mf", "library": "bambuddy"}
+    # A back-office add pins nothing and holds no copy (#6710 §10.1).
+    assert item["library_file"] == {
+        "id": FILE_ID,
+        "filename": "file-89.3mf",
+        "library": "bambuddy",
+        "sha256": None,
+        "copy_key": None,
+    }
     assert (item["title"], item["status"], item["colours"]) == ("file-89.3mf", "draft", [])
     # `kind` may be named; the order's detail shows the source.
     named = add_item(

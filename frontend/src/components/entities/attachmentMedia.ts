@@ -1,0 +1,99 @@
+import { API_BASE, api } from '../../api/client'
+import type { OrderAttachment, OrderAttachmentRole, OrderItem } from '../../api/types'
+import { entityApi, type EntityAttachment } from './api'
+
+/**
+ * #4251 — what the order page knows about an attached file and an item's picture; #6950 —
+ * the same media rules for any entity's files (`AttachmentsPanel`).
+ */
+
+/** Why a file is kept (`AttachmentRole`), as a person reads it. */
+export const ROLE_LABELS: Record<OrderAttachmentRole, string> = {
+  reference: 'Customer reference',
+  issue: 'Print issue',
+  finished: 'Finished print',
+  packed: 'Packed',
+  timelapse: 'Timelapse',
+  render: 'Design render',
+  test_print: 'Test print',
+  other: 'Other',
+}
+/** What a person files a file under; `render` and `test_print` belong to a design revision. */
+export const ROLES = (Object.keys(ROLE_LABELS) as OrderAttachmentRole[]).filter((r) => r !== 'render' && r !== 'test_print')
+/*
+ * The three type sets copy `orders/models.py`'s. The spec publishes the backend's on
+ * `Attachment.media_type` (`x-inline`, `x-shown-images`, `x-thumbnailed`), and
+ * `attachmentMedia.test.ts` fails when these differ from it (#4679).
+ */
+/** What the server serves inline (`INLINE`): opened in a tab. */
+export const OPENS = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif', 'image/heic', 'video/mp4', 'video/quicktime', 'video/webm', 'application/pdf'])
+
+/** The image types a browser draws (`SHOWN_IMAGES`). */
+export const SHOWN_IMAGES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'])
+/** The ones the server shrinks to a thumbnail (`THUMBNAILED`); a GIF or AVIF is shown as it is. */
+export const THUMBNAILED = new Set(['image/png', 'image/jpeg', 'image/webp'])
+
+/** An attached photo's smallest URL the browser can draw, or null when it cannot draw it. */
+export function attachmentImageUrl(orderId: string, attachment: OrderAttachment): string | null {
+  if (attachment.kind !== 'image' || !SHOWN_IMAGES.has(attachment.media_type)) return null
+  return THUMBNAILED.has(attachment.media_type)
+    ? api.orderAttachmentThumbnailUrl(orderId, attachment.id)
+    : api.orderAttachmentUrl(orderId, attachment.id)
+}
+
+/**
+ * #6950 — an entity file's role as a person reads it: open text on the server (spec 6.2's
+ * known values), so a role outside this list is shown as it is (`roleLabel`).
+ */
+export const ENTITY_ROLE_LABELS: Record<string, string> = {
+  ...ROLE_LABELS,
+  receipt: 'Receipt',
+  invoice: 'Invoice',
+  manual: 'Manual',
+  photo: 'Photo',
+  label: 'Label',
+}
+/** What a person files an entity's file under; the order roles stay on the order routes. */
+export const ENTITY_ROLES = ['photo', 'receipt', 'invoice', 'manual', 'label', 'other'] as const
+
+export function roleLabel(role: string): string {
+  return ENTITY_ROLE_LABELS[role] ?? role
+}
+
+/** An entity's photo's smallest URL the browser can draw, or null when it cannot draw it. */
+export function entityImageUrl(entity: string, attachment: EntityAttachment): string | null {
+  if (attachment.source !== 'store' || attachment.kind !== 'image' || !SHOWN_IMAGES.has(attachment.media_type)) return null
+  return THUMBNAILED.has(attachment.media_type) ? entityApi.attachmentThumbnailUrl(entity, attachment.id) : entityApi.attachmentUrl(entity, attachment.id)
+}
+
+type Source = { url: string; label: string; delivered: boolean; finished?: boolean }
+
+/**
+ * Where an item's picture comes from, best first (#4251): the photo marked as what was
+ * delivered, then the item's newest finished-print photo (on the item or on one of its
+ * attempts), then the output it was ordered from, then its template's own thumbnail.
+ * A source that fails to load (an output deleted since) gives way to the next.
+ */
+export function itemPictureSources(orderId: string, item: OrderItem, attachments: OrderAttachment[]): Source[] {
+  const sources: Source[] = []
+  const delivered = attachments.find((a) => a.id === item.delivered_attachment_id)
+  const deliveredUrl = delivered ? attachmentImageUrl(orderId, delivered) : null
+  if (deliveredUrl) sources.push({ url: deliveredUrl, label: `What was delivered: ${item.title}`, delivered: true })
+  const finished = attachments
+    .filter((a) => a.item_id === item.id && !a.revision_id && a.role === 'finished' && a.id !== delivered?.id)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .map((a) => attachmentImageUrl(orderId, a))
+    .find((url) => url !== null)
+  if (finished) sources.push({ url: finished, label: `The finished print: ${item.title}`, delivered: false, finished: true })
+  if (item.output_id) sources.push({ url: api.outputThumbnailUrl(item.output_id), label: `The render of ${item.title}`, delivered: false })
+  // A custom item (#4954) names no template, so it has no template thumbnail.
+  if (item.reference) {
+    sources.push({
+      url: `${API_BASE}/models/${encodeURIComponent(item.reference.slug)}/thumbnail`,
+      label: `${item.reference.template_name}'s picture`,
+      delivered: false,
+    })
+  }
+  return sources
+}
+

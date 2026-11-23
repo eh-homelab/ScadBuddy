@@ -47,16 +47,22 @@ service credential (PR #5211). The owner decided this on 2026-11-05.
   `cnpg-cluster.yaml`, delete its `onepassworditem-*-db.yaml`, and archive the 1Password
   item (#5298; how to read prod: `deploy/CLAUDE.md` "Prod checks").
 
-Today's code still breaks the rule: four processes hold a Postgres secret (the API, the
-agent sidecar, the agent worker and agent-durable), and the agent and the API share
-tables through grants. The render, print and projects workers hold none: #5298 is done,
+Only the API holds a Postgres secret now. #5299 is done: the agent sidecar and the agent
+worker have no SQL client and read no KEK; they reach the `ai_*` tables only through the API's
+CRUD routes, need a service-credential proof to start, and ignore `SCADBUDDY_DATABASE_URL` and
+`SCADBUDDY_SECRET_KEY_FILE` (and `_PREVIOUS_FILE`) with a warning. eh-homelab/clusters#3965
+took both out of their containers and dropped their old role `scadbuddy_agent`, which the API
+still revokes at every start where it exists; agent-durable mounts neither. Measured
+2026-11-22 after that sync: in `kubectl -n bambuddy get deploy`, only the `scadbuddy`
+container names `SCADBUDDY_DATABASE_URL`; CNPG's `managedRolesStatus` lists `scadbuddy_agent`
+`reconciled`, and the API pods started after it log no "a retired caller's role still exists"
+line for it. The render, print and projects workers hold none: #5298 is done,
 and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` role and no
 database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
 #3566 and #3578). The API still revokes those roles at every start where they exist; the
 agent revokes nothing since #6501. Template Python still runs in the render
 worker's pod, which holds no database secret now but holds its `crud.render` credential,
-the S3 keys and the Bambuddy render key. Do the rest in this order: #5299 (the agent),
-#5297 (authenticate `/api/v1/internal/*`; never `enforce` on prod, the owner's decision
+the S3 keys and the Bambuddy render key. Do the rest in this order: #5297 (authenticate `/api/v1/internal/*`; never `enforce` on prod, the owner's decision
 of 2026-11-17), #5296 (untrusted code out of
 pods with a database secret: openscad and `openscad-lsp` still run in the API's), then eh-homelab/clusters#3182 (the network). The evidence and the zones
 are in [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
@@ -126,13 +132,13 @@ Both schemas keep one file per migration, named by UTC timestamp plus a slug, an
 API applies both at its start (#5299 D6): `backend/scadbuddy/migrations/` (ledger
 `scadbuddy_migrations`, `render/pg_store.py` `migrate`), then the agent's
 `backend/scadbuddy/migrations_agent/` (ledger `ai_migrations`, `render/agent_migrations.py`
-`migrate_agent`, under the agent's old advisory lock "SCADAGNT"). The agent no longer
-migrates: its `ready()` waits until `ai_migrations` holds every file in
-`agent/src/db/expected-migrations.json` (`agent/src/db/schema.ts`), so a new agent
+`migrate_agent`, under the agent's old advisory lock "SCADAGNT"). The agent has no SQL
+client and reads no ledger (#5299 step 12). The agent's tests migrate with their own runner,
+`agent/test/support/migrations.ts`, and list the files in
+`agent/test/support/expected-migrations.json`, so a new agent
 migration is a file in `migrations_agent/` plus its entry there
 (`UPDATE_EXPECTED_MIGRATIONS=1 pnpm exec vitest run test/schema.test.ts`, which also checks
-that the API's runner and the agent's tests' runner, `agent/test/support/migrations.ts`,
-read the files alike). To add one, create a NEW file named
+that the API's runner and the tests' runner read the files alike). To add one, create a NEW file named
 `$(date -u +%Y%m%dT%H%MZ)_<slug>.sql` (slug `[a-z0-9_]`) and edit nothing else (an agent
 file adds its entry to `expected-migrations.json` too). Never
 edit, rename or remove a merged file; the agent's ledger keeps each applied file's
@@ -149,9 +155,9 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-11-16@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-11-23@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.11.16). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.11.23). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI

@@ -57,10 +57,12 @@ from scadbuddy.orders.bambuddy import (
     ServedLibrary,
     download_sliced,
     quote_preview_job,
+    served_shelf,
     start_library_quote_preview,
     start_quote_preview,
 )
 from scadbuddy.orders.component import ORDERS
+from scadbuddy.orders.held_print import restore_held
 from scadbuddy.orders.lifecycle import (
     QUOTE_TIMEOUT,
     SETTLED,
@@ -86,6 +88,7 @@ from scadbuddy.orders.quote import (
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
+    SlotColours,
     SlotPresets,
     library_file_gone,
     operation_quote_id,
@@ -121,6 +124,7 @@ if TYPE_CHECKING:
     from scadbuddy.api.deps import PrintCommands
     from scadbuddy.core.components import Components, Core
     from scadbuddy.orders.store import OrderStore
+    from scadbuddy.orders.storefront.held_file import HeldFile
 
 logger = logging.getLogger(__name__)
 
@@ -219,11 +223,26 @@ class PreviewSlicer:
         return await self._start(request, subject, output_id=output_id, slot_presets=slot_presets)
 
     async def start_library(
-        self, file_id: int, request: SliceQuoteRequest, subject: str
+        self,
+        file_id: int,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
+        slot_colours: SlotColours | None = None,
+        held: HeldFile | None = None,
     ) -> list[PreviewStarted]:
         """A library file item's plates (#5544), read as the dialog's background slice
-        of a library file reads it (``bambuddy/operations.py`` ``preview_run``)."""
-        return await self._start(request, subject, file_id=file_id)
+        of a library file reads it (``bambuddy/operations.py`` ``preview_run``). With
+        ``held``, a file listing's held copy is read in place of the library (#6710)."""
+        return await self._start(
+            request,
+            subject,
+            file_id=file_id,
+            slot_presets=slot_presets,
+            slot_colours=slot_colours,
+            held=held,
+        )
 
     async def _start(
         self,
@@ -233,6 +252,8 @@ class PreviewSlicer:
         output_id: str | None = None,
         file_id: int | None = None,
         slot_presets: SlotPresets | None = None,
+        slot_colours: SlotColours | None = None,
+        held: HeldFile | None = None,
     ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
@@ -276,6 +297,9 @@ class PreviewSlicer:
                 route=route,
                 reads=reads,
                 sb=sb,
+                slot_presets=slot_presets,
+                slot_colours=slot_colours,
+                held=held,
             )
         assert output_id is not None
         outputs = LocalOutputs(core.outputs, core.catalogue)
@@ -312,6 +336,7 @@ class PreviewSlicer:
             reads=reads,
             sb=sb,
             slot_presets=slot_presets,
+            slot_colours=slot_colours,
         )
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
@@ -752,6 +777,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 library=served_library(),
                 part_settings=dumped(asked.part_settings),
                 setup=setup,
+                content=core.store.content,
             )
         # The request as it prints: what it left out is the quote's (`_same_setup` passed).
         body = PrintRunRequest.model_validate(filled(sent, checked.get("setup")))
@@ -845,6 +871,24 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 type_=UNAVAILABLE_PROBLEM,
             ) from error
 
+    async def restored_file(request: dict[str, Any], checked_id: int) -> int:
+        """``orders/held_print.py`` ``restore_held`` on the library that serves: the file
+        id a storefront item prints from now on."""
+        library = components.get(PRINT_LIBRARY)
+        async with served_shelf(
+            core.settings_store, await library.serving_native(), core.uploads
+        ) as shelf:
+            return await restore_held(
+                components.get(ORDERS).lifecycle,
+                core.store.content,
+                shelf,
+                core.settings_store,
+                request["order_id"],
+                request["item_id"],
+                checked_id,
+                Actor.model_validate(request["by"]),
+            )
+
     async def item_print_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """The item claimed, then its print started as the print route starts one
         (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``);
@@ -862,6 +906,12 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         # A library file item (#5544) prints its file, as `POST /print/library/{id}/run`.
         file_id: int | None = checked.get("library_file_id")
         output_id: str | None = checked.get("output_id")
+        if file_id is not None and checked.get("restore"):
+            # A storefront item whose pinned bytes the library no longer serves (#6710
+            # §10.2): its held copy put back first, so the run, its key and `existing`
+            # all take the new id. A retry reuses this `checked` and finds the item moved
+            # or the file in "Storefront", uploading nothing.
+            file_id = await restored_file(request, file_id)
         if file_id is not None:
             subject = PrintSubject.library(file_id)
         else:
@@ -1124,6 +1174,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             create_output=create_output,
             slicer=PreviewSlicer(core, components),
             rendered_sha256=rendered_sha256,
+            # A file listing's held copy (#6710 §7.3.1).
+            content=core.store.content,
         )
         try:
             row = await price_variant(run, SliceVariant.model_validate(request))

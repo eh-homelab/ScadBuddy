@@ -1,23 +1,17 @@
 import { type Client, WorkflowNotFoundError } from '@temporalio/client'
-import type { Sql } from 'postgres'
-import { type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
 import type { EventLog } from '../sessions/eventLog.js'
-import { event, type ServerEvent } from '../sessions/protocol.js'
 import type { SweepRoutes } from './crudPending.js'
-import { inputResolved } from './projection.js'
-import { parseRequestId } from './ids.js'
 
 // The orphan sweep of ai_pending_input (spec 2026-10-01 §6.6, "The projection"): a row
 // is the workflow's to remove (resolve_input), but a run that ended without resolving
 // it (terminated, reset, failed) leaves it behind, and the badge would count it
 // forever. Each tick, rows older than `minAgeS` whose run was not checked within
 // `recheckS` are grouped by run, and each run is described once. A closed run's rows
-// are resolved `cancelled` with the same guarded DELETE … RETURNING resolve_input
-// uses, so a row the workflow resolved first is not written twice; an open run's rows
-// are stamped `last_checked_at`; a describe that fails leaves its rows for a later
-// tick. The writes mirror agent-durable's gate/store.py `_resolved`, except the
-// session's status, which goes to `idle`: no run holds the entry any more (plan 5b
-// ruling 13).
+// are resolved `cancelled` on the API (gate/crudPending.ts, area `pending-input`), each
+// entry one transaction with its events, the session's status (`idle` once no run holds
+// an entry, plan 5b ruling 13) and an approval's audit row; a row the workflow resolved
+// first is not written twice. An open run's rows are stamped `last_checked_at`; a
+// describe that fails leaves its rows for a later tick.
 
 export type RunState = 'open' | 'closed'
 /** Whether a workflow run is still running; one that is not found is closed. */
@@ -25,33 +19,15 @@ export type DescribeRun = (workflowId: string, runId: string) => Promise<RunStat
 
 export const ORPHAN_REASON = "the session's workflow run has ended"
 
-type Row = {
-  request_id: string
-  session_id: string
-  kind: 'approval' | 'answer'
-  tool: string
-  summary: string
-  input_hash: string | null
-  requested_by: { label?: string } | null
-  created_at: Date
-  /** `created_at::text`: microseconds, which a Date loses (gate/store.ts PendingRow). */
-  created_at_text: string
-}
-
 export type SweepDeps = {
-  sql: Sql
   describe: DescribeRun
   events: EventLog
-  audit?: AuditSink | undefined
+  /** The API's routes, area `pending-input` (gate/crudPending.ts). */
+  routes: SweepRoutes
   /** A row younger than this is not described (default 600 s): its workflow is still opening it. */
   minAgeS?: number
   /** An open run is described again only after this long (default 600 s). */
   recheckS?: number
-  /**
-   * The API's routes, area `pending-input` (gate/crudPending.ts, #5299 step 10), used while `use()`
-   * holds: each cancel is one transaction there, its audit row in it. The SQL above otherwise.
-   */
-  routes?: { crud: SweepRoutes; use: () => boolean } | undefined
 }
 
 export class PendingInputSweep {
@@ -67,15 +43,7 @@ export class PendingInputSweep {
 
   /** One pass; returns the rows it removed. */
   async sweep(): Promise<number> {
-    const { sql } = this.#deps
-    const crud = this.#deps.routes?.use() ? this.#deps.routes.crud : undefined
-    const runs = crud
-      ? await crud.runs(this.#minAgeS, this.#recheckS)
-      : await sql<{ workflow_id: string; workflow_run_id: string }[]>`
-          SELECT DISTINCT workflow_id, workflow_run_id FROM ai_pending_input
-          WHERE created_at < now() - make_interval(secs => ${this.#minAgeS})
-            AND (last_checked_at IS NULL OR last_checked_at < now() - make_interval(secs => ${this.#recheckS}))
-          LIMIT 100`
+    const runs = await this.#deps.routes.runs(this.#minAgeS, this.#recheckS)
     let removed = 0
     for (const run of runs) {
       let state: RunState
@@ -85,11 +53,7 @@ export class PendingInputSweep {
         continue
       }
       if (state === 'open') {
-        if (crud) await crud.checked(run.workflow_id, run.workflow_run_id)
-        else
-          await sql`
-          UPDATE ai_pending_input SET last_checked_at = now()
-          WHERE workflow_id = ${run.workflow_id} AND workflow_run_id = ${run.workflow_run_id}`
+        await this.#deps.routes.checked(run.workflow_id, run.workflow_run_id)
       } else {
         removed += await this.#cancelRun(run.workflow_id, run.workflow_run_id)
       }
@@ -104,7 +68,7 @@ export class PendingInputSweep {
     const timer = setInterval(() => {
       if (running) return
       running = true
-      // Not until the database answers and its migrations have applied.
+      // Not until `ready` holds (the API answers).
       ready()
         .then((ok) => (ok ? this.sweep() : 0))
         .catch((err: unknown) => options.onError?.(err))
@@ -123,79 +87,19 @@ export class PendingInputSweep {
 
 /**
  * Resolves `cancelled` the entries no workflow run will resolve: one ended run's (the sweep), or
- * every entry of a session whose workflow is gone (a Stop, #4018). The same guarded DELETE …
- * RETURNING resolve_input uses, so an entry the workflow resolved first is not written twice; the
- * session goes `idle` once it holds none. `reason` is the outcome's (a migration's own, #4772).
- * Returns the entries it resolved.
+ * every entry of a session whose workflow is gone (a Stop, #4018). Each entry is one transaction
+ * on the API, an approval's audit row in it; an entry the workflow resolved first is not written
+ * twice, and the session goes `idle` once it holds none. `reason` is the outcome's (a
+ * migration's own, #4772). Returns the entries it resolved.
  */
 export async function cancelOrphanedEntries(
-  deps: Pick<SweepDeps, 'sql' | 'events' | 'audit' | 'routes'>,
+  deps: Pick<SweepDeps, 'events' | 'routes'>,
   of: { workflowId: string; runId: string } | { sessionId: string },
   reason: string = ORPHAN_REASON,
 ): Promise<number> {
-  if (deps.routes?.use()) {
-    // Each entry one transaction on the API, an approval's audit row in it.
-    const { removed, logged } = await deps.routes.crud.cancel(of, reason)
-    for (const l of logged) deps.events.committed(l.session_id, l.events, l.seqs)
-    return removed
-  }
-  const { sql } = deps
-  const ids =
-    'sessionId' in of
-      ? await sql<{ request_id: string }[]>`SELECT request_id FROM ai_pending_input WHERE session_id = ${of.sessionId}`
-      : await sql<{ request_id: string }[]>`
-          SELECT request_id FROM ai_pending_input WHERE workflow_id = ${of.workflowId} AND workflow_run_id = ${of.runId}`
-  let removed = 0
-  for (const { request_id } of ids) {
-    const done = await sql.begin(async (tx) => {
-      const [row] = await tx<Row[]>`
-        DELETE FROM ai_pending_input WHERE request_id = ${request_id}
-        RETURNING request_id, session_id, kind, tool, summary, input_hash, requested_by, created_at, created_at::text AS created_at_text`
-      if (!row) return undefined
-      await tx`
-        INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder, reason, tool, requested_at)
-        VALUES (${row.request_id}, ${row.session_id}, ${row.kind}, 'cancelled', ${tx.json(SYSTEM_ACTOR)}, ${reason}, ${row.tool}, ${row.created_at_text}::timestamptz)`
-      const events: ServerEvent[] = [
-        row.kind === 'approval'
-          ? event({ type: 'approval.resolved', sessionId: row.session_id, id: row.request_id, approved: false, decision: 'cancelled', reason })
-          : event({ type: 'question.resolved', sessionId: row.session_id, id: row.request_id, answered: false, reason }),
-        inputResolved(row.session_id, row.request_id, row.kind, 'cancelled', reason),
-      ]
-      const [idle] = await tx`
-        UPDATE ai_sessions SET status = 'idle', updated_at = now()
-        WHERE id = ${row.session_id} AND status IN ('waiting_approval', 'waiting_input')
-          AND NOT EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = ${row.session_id})
-        RETURNING id`
-      if (idle) events.push(event({ type: 'session.status', sessionId: row.session_id, status: 'idle' }))
-      const seqs = await deps.events.append(row.session_id, events, tx)
-      return { row, events, seqs }
-    })
-    if (!done) continue
-    removed += 1
-    deps.events.committed(done.row.session_id, done.events, done.seqs)
-    if (done.row.kind === 'approval') await auditCancelled(deps.audit, done.row, reason)
-  }
+  const { removed, logged } = await deps.routes.cancel(of, reason)
+  for (const l of logged) deps.events.committed(l.session_id, l.events, l.seqs)
   return removed
-}
-
-async function auditCancelled(audit: AuditSink | undefined, row: Row, reason: string): Promise<void> {
-  const parsed = parseRequestId(row.request_id)
-  await audit?.record({
-    kind: 'approval',
-    action: 'cancelled',
-    surface: 'system',
-    actor: SYSTEM_ACTOR,
-    sessionId: row.session_id,
-    toolUseId: parsed?.store === 'durable' ? parsed.toolUseId : null,
-    tier: 'outward',
-    inputHash: row.input_hash ?? undefined,
-    inputSummary: row.summary,
-    requestId: row.request_id,
-    outcome: 'refused',
-    detail: `${row.tool}: ${reason} (requested by ${row.requested_by?.label ?? '?'})`,
-    startedAt: row.created_at,
-    finishedAt: new Date(),
-  })
 }
 
 /** DescribeRun over a Temporal client: closed unless the run's status is RUNNING. */

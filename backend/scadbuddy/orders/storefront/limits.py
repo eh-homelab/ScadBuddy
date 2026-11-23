@@ -22,6 +22,14 @@ it ends. This fails closed on purpose; the operator sees it as visitors' 429
 
 A row names its job once the submit answers (`attach`); a visitor reads only the jobs its
 rows name (`owns`).
+
+A file listing's price read that claims a slice (#6710) writes a counted row of ``kind``
+``slice`` with no job (`admit_slice`): it counts against the rates, never the concurrency.
+During the roll that added ``kind`` (migration ``20261123T0211Z_storefront_renders_kind``),
+a replica of the build before it counts such a row as an open render (its query has no
+``kind`` and takes a row with no job as open) for up to ``render_timeout``. That fails
+closed, as above, and ends with the roll: a brief 429 ``render_limited`` with limit
+``concurrency`` during that deploy is this.
 """
 
 from __future__ import annotations
@@ -80,6 +88,9 @@ class OwnedRender:
     listing_id: str
     colours: dict[int, str]
     material: str | None = None
+    #: The variant key of the visitor's choices (#6921, `renders.py` `variant_key`); None
+    #: for a row made before.
+    variant_key: str | None = None
 
 
 def _seconds_until(leaves: datetime, at: datetime) -> int:
@@ -102,12 +113,13 @@ class RenderLimits:
         colours: Mapping[int, str],
         material: str | None,
         at: datetime | None,
+        variant_key: str | None,
     ) -> int:
         row = conn.execute(
             "INSERT INTO storefront_renders"
             " (visitor_id, client, listing_id, render_key, counted, colours, material,"
-            " created_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, coalesce(%s, clock_timestamp()))"
+            " variant_key, created_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, coalesce(%s, clock_timestamp()))"
             " RETURNING id",
             (
                 visitor_id,
@@ -117,6 +129,7 @@ class RenderLimits:
                 counted,
                 Jsonb({str(slot): f for slot, f in colours.items()}),
                 material,
+                variant_key,
                 at,
             ),
         ).fetchone()
@@ -160,6 +173,7 @@ class RenderLimits:
         now: datetime | None = None,
         colours: Mapping[int, str] | None = None,
         material: str | None = None,
+        variant_key: str | None = None,
     ) -> int:
         """A counted row for a render that costs a run, and its id; `RenderLimited` when
         the visitor, the client or the open renders are at their limit. ``visitor_id``
@@ -177,6 +191,7 @@ class RenderLimits:
                 colours=colours or {},
                 material=material,
                 at=now,
+                variant_key=variant_key,
             )
 
     def count(self, row_id: int, visitor_id: str, client: str, *, settings: Settings) -> None:
@@ -186,6 +201,34 @@ class RenderLimits:
             self._check(conn, visitor_id, client_key(client), settings, None)
             conn.execute("UPDATE storefront_renders SET counted = true WHERE id = %s", (row_id,))
 
+    def admit_slice(
+        self, visitor_id: str, client: str, *, listing_id: str, price_key: str, settings: Settings
+    ) -> int:
+        """A counted row for a file listing's price read that claims a new slice (#6710
+        §7.5): one render against the visitor's and the client's rates, and its id;
+        `RenderLimited` when either is at its limit. A slice is not a render, so the row is
+        of ``kind`` ``slice``, names no job and its price key as ``render_key``: it never
+        counts against the shop's render concurrency, and the slice's own cap is
+        ``storefront_slices_concurrent``."""
+        client = client_key(client)
+        with self._pool.connection() as conn, conn.transaction():
+            self._check(conn, visitor_id, client, settings, None, concurrency=False)
+            row = conn.execute(
+                "INSERT INTO storefront_renders (visitor_id, client, listing_id, render_key,"
+                " kind, counted) VALUES (%s, %s, %s, %s, 'slice', true) RETURNING id",
+                (visitor_id, client, listing_id, price_key),
+            ).fetchone()
+        assert row is not None
+        row_id: int = row["id"]
+        return row_id
+
+    def refund_slice(self, row_id: int) -> None:
+        """An `admit_slice` row whose read claimed no slice after all: it costs nothing."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM storefront_renders WHERE id = %s AND kind = 'slice'", (row_id,)
+            )
+
     def _check(
         self,
         conn: Conn,
@@ -193,10 +236,12 @@ class RenderLimits:
         client: str,
         settings: Settings,
         now: datetime | None,
+        *,
+        concurrency: bool = True,
     ) -> None:
         """Inside the caller's transaction: the locks, then `RenderLimited` when the
-        visitor, the client or the open renders are at their limit. ``client`` is a
-        `client_key`."""
+        visitor, the client or (with ``concurrency``) the open renders are at their
+        limit. ``client`` is a `client_key`."""
         # The concurrency limit is the whole shop's, so every admit takes one lock
         # (`LOCK_OPEN`) and admits run one at a time. Keep this transaction short: a
         # few counts and one write, never a Temporal call or other I/O.
@@ -219,9 +264,11 @@ class RenderLimits:
             wait = self._rate(conn, visitor_id, client, window=window, limit=most, at=at)
             if wait is not None:
                 raise RenderLimited(limit, wait)  # type: ignore[arg-type]
+        if not concurrency:
+            return
         row = conn.execute(
             "SELECT count(*) AS n FROM storefront_renders r"
-            " WHERE r.counted AND r.created_at > %s"
+            " WHERE r.counted AND r.kind = 'render' AND r.created_at > %s"
             " AND (r.job_id IS NULL OR EXISTS (SELECT 1 FROM render_jobs j"
             "  WHERE j.id = r.job_id AND j.state <> ALL(%s)))",
             (at - timedelta(seconds=settings.render_timeout), list(SETTLED)),
@@ -240,6 +287,7 @@ class RenderLimits:
         render_key: str,
         colours: Mapping[int, str] | None = None,
         material: str | None = None,
+        variant_key: str | None = None,
     ) -> int:
         """A row for a render the visitor shares with another: it costs nothing, and it
         lets the visitor read the job. Its id."""
@@ -253,6 +301,7 @@ class RenderLimits:
             colours=colours or {},
             material=material,
             at=None,
+            variant_key=variant_key,
         )
 
     def attach(self, row_id: int, job_id: str) -> None:
@@ -306,14 +355,19 @@ class RenderLimits:
         for that job."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT listing_id, colours, material FROM storefront_renders"
+                "SELECT listing_id, colours, material, variant_key FROM storefront_renders"
                 " WHERE visitor_id = %s AND job_id = %s ORDER BY id DESC LIMIT 1",
                 (visitor_id, job_id),
             ).fetchone()
         if row is None:
             return None
         colours = {int(slot): str(f) for slot, f in row["colours"].items()}
-        return OwnedRender(listing_id=row["listing_id"], colours=colours, material=row["material"])
+        return OwnedRender(
+            listing_id=row["listing_id"],
+            colours=colours,
+            material=row["material"],
+            variant_key=row["variant_key"],
+        )
 
     def job_of(self, visitor_id: str, render_key: str) -> str | None:
         """The job of the visitor's newest row for ``render_key`` that names one, or None

@@ -499,9 +499,27 @@ def test_one_file_is_read_by_id_whatever_its_type_with_its_folder_path(
         "output_id": None,
         "is_external": False,
         "per_print": False,
+        "file_hash": None,
         "folder_path": ["Supplies", "Storage"],
     }
     assert client.get("/api/v1/print/library/3999").status_code == 404
+
+
+@respx.mock
+def test_one_file_carries_bambuddy_s_file_hash_in_lowercase(client: TestClient) -> None:
+    """#7073: the file read alone states Bambuddy's ``file_hash``, lowercased, so it
+    compares with a listing's pinned sha256. Bambuddy's listing states none, so a listed
+    row has none."""
+    configure(client)
+    rows = [{**_folder_rows(1, folder_id=4)[0], "id": 3001}]
+    listing_routes(rows)
+    respx.get(f"{API}/library/files/3001").mock(
+        return_value=httpx.Response(200, json={**rows[0], "file_hash": "AB" * 32})
+    )
+
+    assert client.get("/api/v1/print/library/3001").json()["file_hash"] == "ab" * 32
+    listed = client.get("/api/v1/print/library", params={"folder_id": 4}).json()
+    assert listed["files"][0]["file_hash"] is None
 
 
 @respx.mock

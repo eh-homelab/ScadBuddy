@@ -250,7 +250,9 @@ def reconcile(
     conn: Conn, printer_id: str, report: Mapping[str, Any], seen_at: datetime, *, actor: str
 ) -> CaptureResult:
     """Book the loads, unloads and AMS readings the report shows, at ``seen_at``, on
-    ``conn``'s transaction. A printer with no row books nothing."""
+    ``conn``'s transaction. A printer with no row books nothing. First, a printer whose
+    AMS unit places or external holder hang under no live place gets its own place
+    (`LocationStore.hang_orphans_on`), so an install from before printer places gets it."""
     row = PrinterStore.read_on(conn, printer_id)
     if row is None:
         return CaptureResult()
@@ -259,6 +261,7 @@ def reconcile(
     filled = {(t.ams_id, t.tray_id): t for t in seen_trays(status)}
     loading = loading_trays(status)
     places, current, _ = _holders(conn, printer_id)
+    LocationStore.hang_orphans_on(conn, printer)
     state = report.get("gcode_state")
     printing = isinstance(state, str) and state in RUNNING
     job = report.get("subtask_name") if printing else None

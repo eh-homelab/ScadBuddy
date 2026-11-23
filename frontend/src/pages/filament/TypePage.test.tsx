@@ -137,6 +137,19 @@ describe('the type page', () => {
     expect(made.label_weight_g).toBe(1000)
   })
 
+  it('fills the colour and the extra colours from a catalog colour, and saves them (#6912)', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'From the catalog' }))
+    await user.type(screen.getByRole('combobox', { name: 'Search the colour catalog' }), 'galaxy')
+    await user.click(await screen.findByRole('option', { name: /Galaxy Duo/ }))
+    expect(screen.getByRole('textbox', { name: 'Colour (hex)' })).toHaveValue('#1B3A8CFF')
+    expect(screen.getByLabelText('Extra colours')).toHaveValue('#2E8B57FF')
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    await waitFor(async () => expect((await getType(T.JADE)).extra_colours).toEqual(['#2E8B57FF']))
+    expect((await getType(T.JADE)).rgba).toBe('#1B3A8CFF')
+  })
+
   it('says a type is gone for a 404', async () => {
     render('/filament/types/62620000-0000-4000-8000-0000000000ff')
     expect(await screen.findByText(/That type is gone/)).toBeInTheDocument()
@@ -280,6 +293,28 @@ describe('the prices panel', () => {
     expect((await getType(T.JADE)).cost_per_kg).toMatch(/^15\.91/)
     await user.click(screen.getByRole('button', { name: 'Save type' }))
     await waitFor(async () => expect((await getType(T.JADE)).cost_per_kg).toMatch(/^17\.305/))
+    expect(writes).toEqual([`PATCH /api/v1/filament/types/${T.JADE}`])
+  })
+
+  it("fills the cost field from the calculator, the label weight as the net weight, and sends nothing until Save (#7152)", async () => {
+    const writes: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method !== 'GET') writes.push(`${request.method} ${new URL(request.url).pathname}`)
+    })
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Work out the cost per kg' }))
+    const calculator = screen.getByRole('region', { name: 'Cost calculator' })
+    expect(within(calculator).getByLabelText('Net weight per spool (g)')).toHaveValue('1000')
+    await user.type(within(calculator).getByLabelText(/^Price paid/), '21.99')
+    await user.type(within(calculator).getByLabelText('Tax'), '1.76')
+    await user.click(within(calculator).getByRole('button', { name: 'Work it out' }))
+    await user.click(await within(calculator).findByRole('button', { name: 'Use as default cost' }))
+    expect(screen.getByLabelText('Cost per kg')).toHaveValue('23.7500')
+    expect(screen.getByRole('status')).toHaveTextContent('Save the type to keep it')
+    expect(writes).toEqual([])
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    await waitFor(async () => expect((await getType(T.JADE)).cost_per_kg).toMatch(/^23\.75/))
     expect(writes).toEqual([`PATCH /api/v1/filament/types/${T.JADE}`])
   })
 

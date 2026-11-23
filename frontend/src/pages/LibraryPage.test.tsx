@@ -3,7 +3,7 @@ import { seedSessionFile } from '../mocks/features/sessionFiles'
 import { seedPickerSession } from '../mocks/features/workspacePicker'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
-import { useLocation, useNavigate } from 'react-router'
+import { Route, Routes, useLocation, useNavigate } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
 import { libraryFiles, libraryFolders } from '../mocks/features/library'
@@ -15,6 +15,12 @@ import { NARROW_QUERY } from '../lib/useMediaQuery'
 import { renderPage } from '../test/utils'
 import { LIBRARY_PAGE_SIZE, LibraryPage } from './LibraryPage'
 import type * as TraceAction from '../lib/traceAction'
+
+/** Where "Sell on storefront…" lands: the address it opened, shown for a test to read. */
+function SellTarget() {
+  const location = useLocation()
+  return <span data-testid="sell-target">{`${location.pathname}${location.search}`}</span>
+}
 
 // Each test's actions only (#2892): `toContain` would otherwise pass on an earlier test's.
 beforeEach(() => {
@@ -918,6 +924,19 @@ describe('LibraryPage, item context (#975)', () => {
     expect(await screen.findByRole('button', { name: 'Delete selected (1)' })).toBeEnabled()
     await waitFor(() => expect(screen.queryByTestId('library-file-122')).toBeNull())
     expect(screen.getByTestId('library-file-121')).toBeInTheDocument()
+  })
+
+  it('sells a 3MF on the storefront from its menu (#6710 §9.5)', async () => {
+    const { user } = renderPage(
+      <Routes>
+        <Route path="/library" element={<LibraryPage />} />
+        <Route path="/storefront/listings/new" element={<SellTarget />} />
+      </Routes>,
+      { route: '/library' },
+    )
+    await user.click((await screen.findAllByRole('button', { name: /^More actions for bag-clip/ }))[0]!)
+    await user.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Sell on storefront…' }))
+    expect(await screen.findByTestId('sell-target')).toHaveTextContent('?sell=library%3A89')
   })
 
   it('moves a file from its actions menu, keeping it under its id (#2670)', async () => {

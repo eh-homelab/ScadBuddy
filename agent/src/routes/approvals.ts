@@ -27,9 +27,9 @@ import { browserUser } from '../auth/browserSession.js'
 export const BROWSER_USER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 
 export type ApprovalRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   approvals: ApprovalService | undefined
-  /** Applies migrations; the routes answer 503 until it resolves true. */
+  /** True once the API serves the agent's CRUD areas; the routes answer 503 until then. */
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
@@ -78,14 +78,14 @@ export function approvalView(a: ApprovalRecord): ApprovalView {
 
 const DecisionBody = z.strictObject({ input_hash: z.string().regex(/^[0-9a-f]{64}$/).optional() })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void {
   const base = '/api/v1/ai/approvals'
 
   async function service(): Promise<ApprovalService | string> {
-    if (!deps.approvals) return NO_DATABASE
+    if (!deps.approvals) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.approvals : NOT_READY
   }
 

@@ -46,7 +46,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime
-from typing import IO, Any
+from typing import IO, Any, Protocol
 
 import aiomqtt
 from fastapi import status
@@ -73,7 +73,7 @@ from scadbuddy.printers.lan import (
     file_url,
     project_file_command,
 )
-from scadbuddy.printers.lan_models import LanReport, LanStarted, ProjectFile
+from scadbuddy.printers.lan_models import LanReport, LanStarted, ProjectFile, busy_with
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.nozzle_mapping import choose_nozzles, read_rack_plan
 from scadbuddy.printers.progress import lan_ended, shows
@@ -95,13 +95,17 @@ from scadbuddy.slicing.slice_info import plate_grams
 from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
+    LAN_CHECK_ACTIVITY,
     LAN_PRINT_ACTIVITY,
     LAN_PROBE_TIMEOUT,
+    LAN_REFUSED,
     LAN_START_WAIT,
     LAN_UNSURE,
     LAN_UPLOAD_ACTIVITY,
     LAN_WAIT_ACTIVITY,
     LAN_WAIT_POLL,
+    LanCheck,
+    LanCheckInput,
     LanPrintInput,
     LanUploaded,
     LanUploadInput,
@@ -130,6 +134,18 @@ def _failed(detail: str, *, status_code: int = status.HTTP_502_BAD_GATEWAY) -> A
         detail,
         PrintRunError(status=status_code, title=title, detail=detail),
         type=FAILED,
+        non_retryable=True,
+    )
+
+
+def _refused(detail: str) -> ApplicationError:
+    """The printer refused this start, so this attempt prints nothing: ``LAN_REFUSED``
+    (#6871). Whether the run printed nothing is the workflow's to say (`NOTHING_SENT`):
+    an earlier, unsure attempt may have started."""
+    return ApplicationError(
+        detail,
+        PrintRunError(status=status.HTTP_502_BAD_GATEWAY, title="Bad Gateway", detail=detail),
+        type=LAN_REFUSED,
         non_retryable=True,
     )
 
@@ -181,6 +197,13 @@ def project_filament_count(file: IO[bytes]) -> int:
     return count
 
 
+class QueuePlaces(Protocol):
+    """Where a run queued on a busy printer stands among the printer's queued runs
+    (#6871): `PrintRunStore`, or the print worker's `RemotePrintRunStore`."""
+
+    async def queue_place(self, printer: str, run_id: str) -> int: ...
+
+
 @dataclass
 class LanDeps:
     printers: PrinterStore
@@ -203,6 +226,8 @@ class LanDeps:
     #: the API's Postgres in-process, the CRUD routes on the print worker (#5295);
     #: ``None`` books nothing.
     uses: PrintUses | None = None
+    #: A queued run's place (#6871); ``None`` leaves it unread.
+    runs: QueuePlaces | None = None
 
 
 class LanActivities:
@@ -299,13 +324,48 @@ class LanActivities:
             grams_by_slot=grams,
         )
 
+    @activity.defn(name=LAN_CHECK_ACTIVITY)
+    async def lan_check(self, input: LanCheckInput) -> LanCheck:
+        """The printer's state before a run's first upload (#6871, ruling 2): whether it
+        runs another print, or holds an ended one whose plate must be cleared first
+        (`lan_models.busy_with`), and the run's place among those queued on it. A printer
+        that cannot be read is not busy here: ``lan_print`` reads it again as it starts,
+        and says it could not be reached, as before."""
+        row, lan = await self._printer(input.printer)
+        try:
+            report = await lan.probe(timeout=LAN_PROBE_TIMEOUT)
+        except CertificateMismatchError as error:
+            raise _failed(str(error), status_code=status.HTTP_409_CONFLICT) from None
+        except (OSError, aiomqtt.MqttError, TimeoutError, ConnectionError):
+            logger.info("the printer was not read before the upload", extra={"printer": row.id})
+            return LanCheck()
+        queued = busy_with(report.print, report.received_at, plate_clear=input.plate_clear)
+        if queued is None:
+            return LanCheck()
+        place = await self._place(row.id, input.run_id)
+        return LanCheck(queued=queued.model_copy(update={"place": place}))
+
+    async def _place(self, printer: str, run_id: str) -> int | None:
+        """The run's place in the printer's queue; ``None`` when it cannot be read: it
+        is only said, and never orders a start."""
+        if self.d.runs is None:
+            return None
+        try:
+            return await self.d.runs.queue_place(printer, run_id)
+        except Exception as error:
+            logger.warning(
+                "a queued run's place could not be read", extra={"error": type(error).__name__}
+            )
+            return None
+
     @activity.defn(name=LAN_PRINT_ACTIVITY)
     async def lan_print(self, input: LanPrintInput) -> LanStarted:
         """Start the uploaded plate and wait up to `LanDeps.start_wait` for the printer to
         report it under ``input.subtask_name``. A non-zero ``print_error`` it reports
-        after the start (or a refused ``project_file``) is ``FAILED`` with the code; no
-        word from it at all is ``LAN_UNSURE``, which the workflow answers by uploading
-        and starting again, and the report read first finds a start it did take."""
+        after the start is ``FAILED`` with the code, and a refused ``project_file`` is
+        ``LAN_REFUSED`` with the printer's reason; no word from it at all is
+        ``LAN_UNSURE``, which the workflow answers by uploading and starting again, and
+        the report read first finds a start it did take."""
         row, lan = await self._printer(input.printer)
         try:
             first = await lan.probe(timeout=LAN_PROBE_TIMEOUT)
@@ -484,6 +544,7 @@ class LanActivities:
                 manual_position=input.rack_position,
                 usage=usage,
                 spools=input.spools,
+                chosen={slot.slot_id: slot.spool_id for slot in input.plan.slots},
             )
             # Only the picks behind a sent wire print: `choose_nozzles` names none else.
             picks = [
@@ -569,7 +630,7 @@ class LanActivities:
         if data.get("command") == "project_file" and data.get("result") == "FAIL":
             reason = data.get("reason")
             detail = f"{row.name} refused the print"
-            raise _failed(f"{detail}: {reason}." if isinstance(reason, str) else f"{detail}.")
+            raise _refused(f"{detail}: {reason}." if isinstance(reason, str) else f"{detail}.")
         ours = data.get("subtask_name") == input.subtask_name
         code = _int(data.get("print_error"))
         # The baseline's error is the last job's, which a printer left in FAILED may still
@@ -586,4 +647,4 @@ class LanActivities:
         return _failed(f"{row.name} reported print error {print_error_text(code)}.")
 
     def all(self) -> list[Callable[..., Any]]:
-        return [self.lan_upload, self.lan_print, self.lan_wait]
+        return [self.lan_upload, self.lan_check, self.lan_print, self.lan_wait]

@@ -1077,6 +1077,8 @@ export const settingsDefaults = {
   orders_thin_margin_percent: '15',
   // #4939 — whether a native run waits for a cleared plate between its prints.
   lan_require_plate_clear: false,
+  // #6871 — whether a native run waits for a busy printer rather than send.
+  lan_queue_when_busy: true,
   fonts_catalogue_ttl: 86400,
   // #4974 — the off-box git remote; the token is reported only as `has_git_remote_token`.
   git_remote_url: null,
@@ -1088,6 +1090,10 @@ export const settingsDefaults = {
   filament_sync: { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' },
   filament_low_stock_pct: 20,
   filament_default_cost_per_kg: null,
+  // #7156 — the drying defaults; null offers none.
+  filament_drying_temp_c: null,
+  filament_drying_hours: null,
+  filament_label_base_url: null,
   filament_burn_window_days: 30,
   filament_lead_time_days: 7,
   filament_safety_margin_days: 3,
@@ -1188,6 +1194,10 @@ export const settings: Settings = {
   print_auto_import_skip_lan_printers: [],
   // #6868: an empty spool adds its type to the shopping list; stored only, on by default.
   filament_shopping_auto_add_empty: true,
+  // #7156: off holds Bambuddy's auto-add of unknown RFID spools off; stored only, on by default.
+  filament_auto_add_unknown_rfid: true,
+  // #6905 — how long the sync's pass history is kept; stored only, null is 30 days.
+  filament_sync_pass_ttl_days: null,
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,

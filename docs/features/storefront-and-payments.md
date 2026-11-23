@@ -48,7 +48,7 @@ sequenceDiagram
 - Edge: `backend/scadbuddy/storefront/__main__.py:24-48`, `app.py`, `routes.py:83`
   (visitor routes `:117-760`), `settings.py:18-26` (what it refuses).
 - CRUD side: `backend/scadbuddy/api/crud_storefront.py:208`, `backend/scadbuddy/orders/storefront/`
-  (`listings.py:230`, `renders.py`, `drafts.py`, `submit.py:138`, `accounts.py`,
+  (`listings.py:230`, `file_listings.py`, `renders.py`, `drafts.py`, `submit.py:138`, `accounts.py`,
   `mail.py`, `turnstile.py`, `prepare.py`, `intake.py`).
 - Back office: `backend/scadbuddy/api/storefront.py:51`, `frontend/src/pages/StorefrontPage.tsx`,
   `frontend/src/components/storefront/ListingEditor.tsx:826`.
@@ -65,7 +65,8 @@ sequenceDiagram
   `storefront_accounts`, `storefront_sessions`, `storefront_mail`, `storefront_uploads`,
   `storefront_order_links`, `payment_credentials`, `payment_requests`, `payment_events`.
 - Blob keys: `listing-media-<sha256>`, `customer-preview-<sha256>`,
-  `customer-file-<sha256>`.
+  `customer-file-<sha256>`; a file listing's held copy `listing-file-<sha256>` and its
+  plate previews `listing-preview-<sha256>` (#6710, `file_listings.py`).
 - Settings: `storefront_*` (`backend/scadbuddy/core/settings.py:279-361`); provider
   credentials are sealed rows, entered in Settings.
 

@@ -1,11 +1,10 @@
-import { createHmac, hkdfSync } from 'node:crypto'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { decide } from '../src/harness/permissions.js'
 import { approvalTools } from '../src/tools/approvals.js'
-import { FETCH_GRANT_HEADER, FETCH_GRANT_KEY_INFO, fetchGrantMinter } from '../src/tools/fetchGrant.js'
+import { FETCH_GRANT_HEADER } from '../src/tools/fetchGrant.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import type { OutwardActions } from '../src/tools/pending.js'
 import { pinnedOutward } from '../src/tools/pinnedOutward.js'
@@ -60,7 +59,7 @@ describe('fetch_asset allow_host (#959)', () => {
         return HttpResponse.json({}, { status: 500 })
       }),
     )
-    const answer = await runTool(fetchAsset, ONCE, ctx({ toolOverrides: lowered, fetchGrant: () => 'grant' }))
+    const answer = await runTool(fetchAsset, ONCE, ctx({ toolOverrides: lowered, fetchGrant: async () => 'grant' }))
     expect(firstText(answer)).toMatchObject({ status: 'pending_approval' })
     expect(sent).toEqual([])
   })
@@ -84,14 +83,14 @@ describe('fetch_asset allow_host (#959)', () => {
       }),
     )
     const minted: [string, string][] = []
-    const approved = ctx({ gate: 'workflow', approvedByPerson: true, fetchGrant: (host, url) => (minted.push([host, url]), 'the-grant') })
+    const approved = ctx({ gate: 'workflow', approvedByPerson: true, fetchGrant: async (host, url) => (minted.push([host, url]), 'the-grant') })
     expect((await runTool(fetchAsset, ONCE, approved)).isError).toBeFalsy()
     expect(minted).toEqual([['icons.example.com', URL_OFF]])
     expect(seen).toEqual([{ body: { url: URL_OFF, allow_host: 'icons.example.com' }, grant: 'the-grant' }])
   })
 
   it('refuses a URL two parsers could read different hosts from, before anything is sent', async () => {
-    const approved = ctx({ gate: 'harness', fetchGrant: () => 'grant' })
+    const approved = ctx({ gate: 'harness', fetchGrant: async () => 'grant' })
     for (const url of ['https://allowed.com\\@evil.com/a.svg', 'https://user@allowed.com/a.svg', 'https://allowed.com/a\u0001.svg']) {
       const answer = await runTool(fetchAsset, { slug: 'box', url, allow_host: 'allowed.com' }, approved)
       expect(answer.isError, url).toBe(true)
@@ -115,7 +114,7 @@ describe('fetch_asset allow_host (#959)', () => {
       const answer = await runTool(
         fetchAsset,
         ONCE,
-        ctx({ gate: 'workflow', ...(approvedByPerson === undefined ? {} : { approvedByPerson }), fetchGrant: (host) => (minted.push(host), 'grant') }),
+        ctx({ gate: 'workflow', ...(approvedByPerson === undefined ? {} : { approvedByPerson }), fetchGrant: async (host) => (minted.push(host), 'grant') }),
       )
       expect(answer.isError).toBe(true)
       expect(JSON.stringify(answer.content)).toContain("needs a person's own approval")
@@ -142,7 +141,7 @@ describe('fetch_asset allow_host (#959)', () => {
       claim: async () => ({ status: 'approved', action, byPerson }),
     })
     const mcp = (byPerson: boolean) =>
-      ctx({ pending: store(byPerson), toolOverrides: lowered, lookup: (name) => ALL_TOOLS.find((t) => t.name === name), fetchGrant: () => 'minted' })
+      ctx({ pending: store(byPerson), toolOverrides: lowered, lookup: (name) => ALL_TOOLS.find((t) => t.name === name), fetchGrant: async () => 'minted' })
 
     // Prepared, not run: lowered in Settings, the one-off still asks.
     expect(firstText(await runTool(fetchAsset, ONCE, mcp(true)))).toMatchObject({ status: 'pending_approval', pending_action_id: 'p1' })
@@ -159,23 +158,24 @@ describe('fetch_asset allow_host (#959)', () => {
     expect(seen).toEqual([{ body: { url: URL_OFF, allow_host: 'icons.example.com' }, grant: 'minted' }])
   })
 
-  it('refuses the one-off without a key to mint its grant', async () => {
+  it('refuses the one-off without a way to ask for its grant', async () => {
     const answer = await runTool(fetchAsset, ONCE, ctx({ gate: 'workflow', approvedByPerson: true }))
     expect(answer.isError).toBe(true)
-    expect(JSON.stringify(answer.content)).toContain('SCADBUDDY_SECRET_KEY_FILE')
+    expect(JSON.stringify(answer.content)).toContain('nothing was sent')
   })
-})
 
-describe('the grant format (#959)', () => {
-  it('matches the vector backend/tests/test_fetch_grants.py verifies', () => {
-    const key = Buffer.from(hkdfSync('sha256', Buffer.alloc(32, 7), Buffer.alloc(0), FETCH_GRANT_KEY_INFO, 32))
-    const mint = fetchGrantMinter(key, () => (2_000_000_000 - 600) * 1000, () => 'ab'.repeat(16))
-    const grant = mint('icons.example.com', URL_OFF)
-    expect(grant).toBe(
-      'YXNzZXQtZmV0Y2gtb25jZQppY29ucy5leGFtcGxlLmNvbQplNjgxNTEzNjE2YjkwNTM3YjdmMTEyNzJmZjFkMTE2MDE0Zjg4NDFjZDgxMGZlMmM0NjE5OWRjODcxNDQzMDhiCjIwMDAwMDAwMDAKYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWI' +
-        '.bVgHQHSbT1v8DfE8-6pNyOYiUMsvYOfIoaJFf-RSPv0',
+  it("sends nothing when the API refuses the grant", async () => {
+    const answer = await runTool(
+      fetchAsset,
+      ONCE,
+      ctx({
+        gate: 'workflow',
+        approvedByPerson: true,
+        fetchGrant: async () => {
+          throw new Error('the backend refused a fetch grant (HTTP 503: no key-encryption key)')
+        },
+      }),
     )
-    const [body, mac] = grant.split('.')
-    expect(createHmac('sha256', key).update(Buffer.from(body!, 'base64url')).digest('base64url')).toBe(mac)
+    expect(answer.isError).toBe(true)
   })
 })

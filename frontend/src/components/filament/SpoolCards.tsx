@@ -1,3 +1,5 @@
+import { filamentLinks } from '../../lib/filamentLinks'
+import { EntityLink } from './EntityLink'
 import { CheckTray, type TrayCheck } from './CheckTray'
 import { NeedsDrying } from './NeedsDrying'
 import { SpoolLink } from './SpoolLink'
@@ -51,7 +53,11 @@ export function SpoolCards({ groups, selected, onSelect, checks }: Props) {
                       />
                     </div>
                     <p className="truncate">{spool.effective?.colour_name ?? spool.names?.material ?? ''}</p>
-                    <p className="truncate text-muted-foreground">{[spool.names?.material, spool.names?.brand].filter(Boolean).join(', ')}</p>
+                    <p className="truncate text-muted-foreground">
+                      {spool.names?.material && <EntityLink to={filamentLinks.catalog('materials')}>{spool.names.material}</EntityLink>}
+                      {spool.names?.material && spool.names?.brand && ', '}
+                      {spool.names?.brand && <EntityLink to={filamentLinks.catalog('brands')}>{spool.names.brand}</EntityLink>}
+                    </p>
                     <p className="text-muted-foreground tabular-nums">
                       {spool.grams_left == null ? 'Weight not known' : `${grams(spool.grams_left)} g${label ? ` of ${grams(label)}` : ''}`}
                     </p>

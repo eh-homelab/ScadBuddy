@@ -4,22 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { inspect } from 'node:util'
 import { describe, expect, it } from 'vitest'
-import {
-  FilePayloadStore,
-  OFFLOAD_BYTES,
-  openPayload,
-  type PayloadStore,
-  PgPayloadKeys,
-  referenceOf,
-  referencePayload,
-  payloadKeyContext,
-  type PayloadKeys,
-  sealPayload,
-  SUBJECT_ENCODING,
-  SubjectForgotten,
-  SubjectPayloadCodec,
-  subjectOf,
-} from '../src/temporal/payloadCodec.js'
+import { FilePayloadStore, OFFLOAD_BYTES, openPayload, type PayloadStore, referenceOf, referencePayload, payloadKeyContext, type PayloadKeys, sealPayload, SUBJECT_ENCODING, SubjectForgotten, SubjectPayloadCodec, subjectOf } from '../src/temporal/payloadCodec.js'
+import { PgPayloadKeys } from './support/sql/payloadKeys.js'
 import { kekFromBase64, openBytes, type RandomSource, sealBytes } from '../src/secrets.js'
 
 // The payload codec of durable subjects (spec 2026-10-01 §6.5, plan 5c Ruling 11).

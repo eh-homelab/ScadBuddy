@@ -23,7 +23,8 @@ Queue names are settings (`scadbuddy/core/config.py:40`, `scadbuddy/core/setting
 | `library` | the API process (`scadbuddy/main.py:1899-1989`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing` (`scadbuddy/main.py:1832-1842`) |
 | `projects` | projects worker, `--queue projects` (`scadbuddy/worker.py:1607`) | `ProjectWorkflow` (flow runs), `Operation` (flow kinds) (`scadbuddy/workflows/projects_worker.py:81-110`) |
 | `slicer` | the Rust slicer (`workers/rust/bins/scadbuddy-slicer/src/main.rs:103-107`) | activity `slice_plate` only (`workers/rust/crates/sb-slicer/src/activity.rs:22-23`) |
-| `profile-fetch` | profile-fetch worker, `python -m scadbuddy.profile_fetch` (`scadbuddy/profile_fetch/worker.py:103`) | `ProfileFetch`, started by the API per run (`scadbuddy/profile_fetch/workflow.py:117`) |
+| `profile-fetch` | profile-fetch worker, `python -m scadbuddy.profile_fetch` (`scadbuddy/profile_fetch/worker.py:92`) | `ProfileFetch`, started by the API per run (`scadbuddy/profile_fetch/workflow.py:126`); `TdfpSearch` and `TdfpCreate`, started by the API per 3DFP search or add and awaited (#7025, `scadbuddy/filament/tdfp.py`) |
+| `profile-fetch-search` | the same process, a second worker (`scadbuddy/profile_fetch/worker.py:102`) | no workflow: a `TdfpSearch`'s activity only, so a search never waits for a preset fetch's export (#7062, `workflow.search_queue`) |
 | `customer-files` | intake worker, `python -m scadbuddy.intake_worker` (`scadbuddy/intake_worker/worker.py:96`) | `CustomerFileCheck` (`scadbuddy/intake_worker/workflow.py:40`) |
 | `agent-sessions`, `agent-tools` and per-replica `.<identity>` queues | the agent ([agent.md](agent.md#temporal)) | `AgentSession`, `ToolCall`, `BridgeCall`, `AgentOperation`, `BackgroundTask` |
 

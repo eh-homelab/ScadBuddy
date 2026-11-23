@@ -941,3 +941,103 @@ def test_one_sync_state_row(pg_conninfo: str) -> None:
             conn.execute("INSERT INTO filament_bb_sync_state (id) VALUES (false)")
         with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
             conn.execute("INSERT INTO filament_bb_sync_state DEFAULT VALUES")
+
+
+@pytest.mark.requires_postgres
+def test_the_compatibility_view_and_its_trigger_are_dropped(pg_conninfo: str) -> None:
+    """#6960: once every replica runs #6950's build, the `order_attachments` view, the
+    trigger that filled `entity_id` and its function are gone."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _index("entities") + 1])
+        assert conn.execute("SELECT to_regclass('order_attachments')").fetchone() == (
+            "order_attachments",
+        )
+        migrate(conn)
+        assert conn.execute("SELECT to_regclass('order_attachments')").fetchone() == (None,)
+        assert conn.execute(
+            "SELECT count(*) FROM pg_trigger WHERE tgname = 'entity_attachments_fill_entity'"
+        ).fetchone() == (0,)
+        assert conn.execute(
+            "SELECT to_regprocedure('entity_attachments_fill_entity()')"
+        ).fetchone() == (None,)
+        # Nothing fills `entity_id` any more: a write that names none is refused.
+        with pytest.raises(psycopg.errors.NotNullViolation), conn.transaction():
+            conn.execute(
+                "INSERT INTO entity_attachments (id, subject, kind, filename, media_type,"
+                " size_bytes, sha256, blob_key, created_by) VALUES ('x', 'supplier:s', 'image',"
+                " 'a.png', 'image/png', 1, repeat('a', 64), 'attachment-x', '{}')"
+            )
+
+
+@pytest.mark.requires_postgres
+def test_the_entities_migration_keeps_order_attachments_for_the_previous_build(
+    pg_conninfo: str,
+) -> None:
+    """#6950: the previous build's replicas read and write `order_attachments` during the
+    roll. The view keeps that name, and an insert through it, which names no
+    `entity_id`, gets its subject's entity."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _index("entities")])
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o', 'ORD-2026-1', 'c', 'USD', '{}')"
+        )
+        old = (
+            "INSERT INTO order_attachments (id, order_id, subject, kind, role, filename,"
+            " media_type, size_bytes, sha256, blob_key, caption, created_by)"
+            " VALUES (%s, 'o', 'order:o', 'image', 'other', 'a.png', 'image/png', 1,"
+            " repeat('a', 64), 'attachment-a', '', '{}')"
+        )
+        conn.execute(old, ("before",))
+        # Only up to `entities`: a later migration drops the view (#6960,
+        # `test_the_compatibility_view_and_its_trigger_are_dropped`).
+        assert (
+            migrate(conn, MIGRATIONS[: _index("entities") + 1])[0]
+            == MIGRATIONS[_index("entities")].id
+        )
+
+        conn.execute(old, ("during",))
+        conn.execute(
+            "INSERT INTO order_attachments (id, order_id, subject, kind, filename, media_type,"
+            " size_bytes, sha256, blob_key, created_by)"
+            " VALUES ('item', 'o', 'order_item:i9', 'image', 'b.png', 'image/png', 1,"
+            " repeat('b', 64), 'attachment-b', '{}')"
+        )
+        rows = conn.execute(
+            "SELECT a.id, e.kind, e.ref FROM entity_attachments a"
+            " JOIN entities e ON e.id = a.entity_id ORDER BY a.id"
+        ).fetchall()
+        assert rows == [
+            ("before", "order", "o"),
+            ("during", "order", "o"),
+            ("item", "order_item", "i9"),
+        ]
+        assert conn.execute("SELECT count(*) FROM entities WHERE kind = 'order'").fetchone() == (1,)
+        # Another entity's file is not the previous build's to read.
+        conn.execute("INSERT INTO entities (kind, ref) VALUES ('supplier', 's')")
+        conn.execute(
+            "INSERT INTO entity_attachments (id, subject, entity_id, kind, filename,"
+            " media_type, size_bytes, sha256, blob_key, created_by)"
+            " SELECT 'supplier', 'supplier:s', id, 'image', 'c.png', 'image/png', 1,"
+            " repeat('c', 64), 'attachment-c', '{}' FROM entities WHERE kind = 'supplier'"
+        )
+        assert conn.execute(
+            "SELECT id, order_id, subject, attempt_item_id, fulfilment_id"
+            " FROM order_attachments ORDER BY id"
+        ).fetchall() == [
+            ("before", "o", "order:o", None, None),
+            ("during", "o", "order:o", None, None),
+            ("item", "o", "order_item:i9", None, None),
+        ]
+        conn.execute("UPDATE order_attachments SET caption = 'x' WHERE id = 'during'")
+        conn.execute("DELETE FROM order_attachments WHERE id = 'item'")
+        assert conn.execute(
+            "SELECT id, caption FROM entity_attachments WHERE id IN ('during', 'item')"
+        ).fetchall() == [("during", "x")]
+        # The previous build's claim release moves a file's subject and names no entity.
+        conn.execute("UPDATE order_attachments SET subject = 'order_item:i9' WHERE id = 'during'")
+        assert conn.execute(
+            "SELECT e.kind, e.ref FROM entity_attachments a JOIN entities e"
+            " ON e.id = a.entity_id WHERE a.id = 'during'"
+        ).fetchone() == ("order_item", "i9")

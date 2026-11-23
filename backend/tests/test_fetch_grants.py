@@ -11,7 +11,7 @@ from scadbuddy.library.fetch_grants import FetchGrantError, fetch_grant_key, min
 
 HOST = "icons.example.com"
 URL = "https://icons.example.com/a.svg"
-#: Minted by the agent (`agent/test/fetchOnce.test.ts`): KEK 32 bytes of 7, expiry
+#: Minted by the agent's own minter before #5299 step 12 moved it here: KEK 32 bytes of 7, expiry
 #: 2000000000, nonce "ab" * 16.
 VECTOR = (
     "YXNzZXQtZmV0Y2gtb25jZQppY29ucy5leGFtcGxlLmNvbQplNjgxNTEzNjE2YjkwNTM3YjdmMTEyNzJm"

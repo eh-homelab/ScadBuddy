@@ -34,6 +34,7 @@ from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.bambuddy.models import as_utc
+from scadbuddy.core.cancel import CancelToken, check, watched
 from scadbuddy.core.settings import FilamentSync, SyncDirection, pushes
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bambuddy_pull import parse_rows, snapshot
@@ -50,7 +51,7 @@ from scadbuddy.filament.bb_sync_models import (
 )
 from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
-from scadbuddy.filament.presets import effective_k_values, effective_presets
+from scadbuddy.filament.presets import effective_k_values_of, effective_presets_of
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import OVERRIDABLE
@@ -84,6 +85,10 @@ _NOT_ON_CREATE = frozenset({"last_dried_at"})
 #: too (`sync-routes.json` ``write_semantics.spool_update_partial``, Bambuddy v1.3.1
 #: ``inventory.py`` lines 1701-1716), so the lock always goes with it.
 _GOES_WITH = {"weight_used": "weight_locked"}
+
+#: The ``pushed_fields`` key of the newest SB consumed reset sent to Bambuddy (#7149
+#: R-7149-5): no Bambuddy field has this name.
+RESET_FIELD = "consumed_reset"
 
 #: The error label of a linked row whose new SB name an unlinked Bambuddy row holds
 #: (R-T4-8); Bambuddy would answer 409.
@@ -119,6 +124,10 @@ _SB_COLUMNS: dict[str, tuple[str, ...]] = {
     "filament_presets": ("presets",),
     "k_profiles": ("k_values",),
     "suppliers": ("type_id", "invoice_line_id"),
+    # #7149: the pull's newer-change rule for these; only ``data_origin`` is pushed.
+    "data_origin": ("data_origin",),
+    "added_full": ("added_full",),
+    "encode_time": ("tag_encoded_at",),
 }
 #: The fields whose change time is the newest event of these kinds (Decision 8).
 _EVENT_KINDS: dict[str, tuple[str, ...]] = {
@@ -212,6 +221,28 @@ class BbRefs:
         )
 
 
+#: The advisory lock one plan or results call of a Bambuddy instance's sync holds.
+SYNC_LOCK = "scadbuddy:filament:bb_sync:"
+
+
+class SyncBusyError(Exception):
+    """Another plan or results call of this Bambuddy instance's sync is running (#6902)."""
+
+
+def hold_sync(conn: Conn, instance: str) -> None:
+    """Take the instance's sync lock for ``conn``'s transaction, without waiting, else
+    `SyncBusyError` (#6902). On prod a call the print worker had given up on ran on, and
+    its retries ran beside it, queued on the state row's lock: so a second copy of a call
+    never runs beside the first, and never waits on its row locks either. The CRUD route
+    answers 503 ``sync_busy``, which the worker's client tries again after a backoff."""
+    held = conn.execute(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS held",
+        (SYNC_LOCK + instance,),
+    ).fetchone()
+    if held is None or not held["held"]:
+        raise SyncBusyError(f"a sync call of Bambuddy {instance} is running")
+
+
 def field_hash(value: Any) -> str:
     """The hash of one field's value (Decision 7): the first 16 hex of SHA-256 of its
     canonical JSON (sorted keys, no spaces). Callers hash the compare form
@@ -237,8 +268,141 @@ def desired_spool(conn: Conn, spool_id: UUID, refs: BbRefs, sync: FilamentSync) 
     return desired_and_unmapped(conn, spool_id, refs, sync)[0]
 
 
+@dataclass(frozen=True)
+class SpoolFacts:
+    """What `desired_and_unmapped` reads of SB for a set of spools, read in a fixed number
+    of queries whatever their number (#6902: per spool, the plan made about 20 queries a
+    spool and timed out on prod's 110 spools). Only the data types ``sync`` pushes are
+    read."""
+
+    spools: Mapping[UUID, m.Spool]
+    codes: Mapping[UUID, str]
+    core_weights: Mapping[UUID, Any]
+    places: Mapping[UUID, dict[str, Any]]
+    presets: Mapping[UUID, list[m.EffectivePreset]]
+    k_values: Mapping[UUID, list[m.EffectiveKValue]]
+    #: Each type's unarchived products of unarchived suppliers, by ``upper(sku)``, id.
+    products: Mapping[UUID, list[dict[str, Any]]]
+    #: Each product's newest price point.
+    prices: Mapping[UUID, Any]
+    #: The unarchived supplier of each spool's invoice.
+    bought: Mapping[UUID, UUID]
+    #: The id of each linked spool's newest ``consumed_reset`` SB made (not the pull's,
+    #: source ``bb``) after its link, read while ``weights`` push (#7149 R-7149-5,
+    #: R-7149-11).
+    resets: Mapping[UUID, UUID] = field(default_factory=dict)
+
+    @classmethod
+    def read(
+        cls, conn: Conn, spool_ids: Iterable[UUID], sync: FilamentSync, *, resets: bool = True
+    ) -> SpoolFacts:
+        ids = list(dict.fromkeys(spool_ids))
+        spools = FilamentSpoolStore.read_many(conn, ids)
+        found = list(spools)
+        type_ids = list({s.type_id for s in spools.values() if s.type_id is not None})
+
+        def by_id(sql: str, wanted: list[UUID], column: str) -> dict[UUID, Any]:
+            if not wanted:
+                return {}
+            return {r["id"]: r[column] for r in conn.execute(sql, (wanted,)).fetchall()}
+
+        codes: dict[UUID, str] = {}
+        core_weights: dict[UUID, Any] = {}
+        if pushes(sync.spools):
+            codes = by_id(
+                "SELECT id, code FROM filament_spool_types WHERE id = ANY(%s)", type_ids, "code"
+            )
+            inserts = list(
+                {
+                    s.effective.insert_type_id
+                    for s in spools.values()
+                    if s.effective.insert_type_id is not None
+                }
+            )
+            core_weights = by_id(
+                "SELECT id, empty_weight_g FROM filament_insert_types WHERE id = ANY(%s)",
+                inserts,
+                "empty_weight_g",
+            )
+        places: dict[UUID, dict[str, Any]] = {}
+        located = list({s.location_id for s in spools.values() if s.location_id is not None})
+        if located:
+            places = {
+                row["id"]: dict(row)
+                for row in conn.execute(
+                    "SELECT l.id, l.printer_id, upper(btrim(p.model)) AS model"
+                    " FROM filament_locations l LEFT JOIN printers p ON p.id = l.printer_id"
+                    " WHERE l.id = ANY(%s)",
+                    (located,),
+                ).fetchall()
+            }
+        presets: dict[UUID, list[m.EffectivePreset]] = {}
+        k_values: dict[UUID, list[m.EffectiveKValue]] = {}
+        if pushes(sync.presets):
+            presets = effective_presets_of(conn, found)
+            k_values = effective_k_values_of(conn, found)
+        products: dict[UUID, list[dict[str, Any]]] = {}
+        prices: dict[UUID, Any] = {}
+        bought: dict[UUID, UUID] = {}
+        if pushes(sync.suppliers):
+            if type_ids:
+                for row in conn.execute(
+                    "SELECT p.id, p.supplier_id, p.sku, p.type_id FROM filament_supplier_products p"
+                    " JOIN filament_suppliers s ON s.id = p.supplier_id"
+                    " WHERE p.type_id = ANY(%s) AND p.archived_at IS NULL"
+                    " AND s.archived_at IS NULL ORDER BY upper(p.sku), p.id",
+                    (type_ids,),
+                ).fetchall():
+                    products.setdefault(row["type_id"], []).append(row)
+            prices = SuppliersStore._newest(conn, [r["id"] for rs in products.values() for r in rs])
+            if found:
+                bought = {
+                    row["id"]: row["supplier_id"]
+                    for row in conn.execute(
+                        "SELECT sp.id, i.supplier_id FROM filament_spools sp"
+                        " JOIN filament_invoice_lines l ON l.id = sp.invoice_line_id"
+                        " JOIN filament_invoices i ON i.id = l.invoice_id"
+                        " JOIN filament_suppliers s ON s.id = i.supplier_id"
+                        " WHERE sp.id = ANY(%s) AND s.archived_at IS NULL",
+                        (found,),
+                    ).fetchall()
+                }
+        newest_resets: dict[UUID, UUID] = {}
+        if resets and pushes(sync.weights) and found:
+            newest_resets = {
+                row["spool_id"]: row["id"]
+                for row in conn.execute(
+                    # R-7149-11: a reset older than the link is history Bambuddy never
+                    # shared, so it is never sent.
+                    "SELECT DISTINCT ON (e.spool_id) e.spool_id, e.id"
+                    " FROM filament_spool_events e"
+                    " JOIN filament_bb_links l ON l.spool_id = e.spool_id"
+                    " WHERE e.spool_id = ANY(%s) AND e.kind = 'consumed_reset'"
+                    " AND e.source IS DISTINCT FROM 'bb' AND e.at > l.linked_at"
+                    " ORDER BY e.spool_id, e.at DESC, e.seq DESC",
+                    (found,),
+                ).fetchall()
+            }
+        return cls(
+            spools,
+            codes,
+            core_weights,
+            places,
+            presets,
+            k_values,
+            products,
+            prices,
+            bought,
+            newest_resets,
+        )
+
+
 def desired_and_unmapped(
-    conn: Conn, spool_id: UUID, refs: BbRefs, sync: FilamentSync
+    conn: Conn,
+    spool_id: UUID,
+    refs: BbRefs,
+    sync: FilamentSync,
+    facts: SpoolFacts | None = None,
 ) -> tuple[dict[str, Any], int]:
     """The spool as Bambuddy should hold it, by BB's names, for the data types that push
     (Decision 14), in SB's own forms (`compare_form` and `body_value` turn them into the
@@ -247,20 +411,19 @@ def desired_and_unmapped(
     label weight, ``core_weight`` and ``core_weight_catalog_id`` with no insert type,
     ``low_stock_threshold_pct`` outside Bambuddy's 1-99, ``weight_used`` with no label
     weight or no grams left. ``archived_at`` is the archive state. Also the number of K
-    values left out for a printer with no Bambuddy id (``unmapped_k``, Decision 14)."""
-    spool = FilamentSpoolStore.read(conn, spool_id)
+    values left out for a printer with no Bambuddy id (``unmapped_k``, Decision 14).
+    ``facts`` is what a caller read once for many spools (`SpoolFacts`, read under the same
+    ``sync``); without it the one spool's are read."""
+    if facts is None:
+        facts = SpoolFacts.read(conn, [spool_id], sync)
+    spool = facts.spools.get(spool_id)
     if spool is None:
         raise LookupError(f"no spool {spool_id}")
     values = spool.effective
     out: dict[str, Any] = {}
     unmapped = 0
     if pushes(sync.spools):
-        code = None
-        if spool.type_id is not None:
-            row = conn.execute(
-                "SELECT code FROM filament_spool_types WHERE id = %s", (spool.type_id,)
-            ).fetchone()
-            code = None if row is None else row["code"]
+        code = None if spool.type_id is None else facts.codes.get(spool.type_id)
         out |= {
             "material": spool.names.material,
             "subtype": spool.names.subtype,
@@ -277,43 +440,48 @@ def desired_and_unmapped(
             "material_number": code,
             "archived_at": spool.archived_at,
         }
+        if spool.data_origin is not None:
+            # #7149 R-7149-1: SB never clears Bambuddy's origin.
+            out["data_origin"] = spool.data_origin
         if values.label_weight_g is not None:
             out["label_weight"] = values.label_weight_g
         pct = values.low_stock_pct
         if pct is not None and 1 <= pct <= 99:
             out["low_stock_threshold_pct"] = pct
         insert = values.insert_type_id
-        if insert is not None:
-            row = conn.execute(
-                "SELECT empty_weight_g FROM filament_insert_types WHERE id = %s", (insert,)
-            ).fetchone()
-            if row is not None:
-                out["core_weight"] = row["empty_weight_g"]
-                out["core_weight_catalog_id"] = refs.insert_types.get(insert) or Pending(
-                    "insert_type", insert
-                )
+        if insert is not None and insert in facts.core_weights:
+            out["core_weight"] = facts.core_weights[insert]
+            out["core_weight_catalog_id"] = refs.insert_types.get(insert) or Pending(
+                "insert_type", insert
+            )
     if pushes(sync.weights):
         label, left = values.label_weight_g, spool.grams_left
         if label is not None and left is not None:
             out["weight_used"] = round(max(0.0, label - left), 1)
         out["weight_locked"] = spool.weight_locked
         out["last_dried_at"] = spool.last_dried_at
-    place = _place(conn, spool.location_id)
+    place = None if spool.location_id is None else facts.places.get(spool.location_id)
     if pushes(sync.presets):
-        presets = effective_presets(conn, spool_id)
+        presets = facts.presets.get(spool_id, [])
         chosen = _preset(presets, place)
-        out["slicer_filament"] = None if chosen is None else chosen.slicer_filament
-        out["slicer_filament_name"] = None if chosen is None else chosen.slicer_filament_name
+        # Bambuddy knows a ScadBuddy preset (#7176) by its mirror's id only: one with no
+        # mirror is sent as none, never as its `sb-` ref.
+        sent = None if chosen is None else chosen.for_bambuddy()
+        out["slicer_filament"] = sent
+        out["slicer_filament_name"] = (
+            None if chosen is None or sent is None else chosen.slicer_filament_name
+        )
         out["filament_presets"] = [
             {
                 "printer_model": p.printer_model,
                 "nozzle_diameter": p.nozzle_diameter,
-                "slicer_filament": p.slicer_filament,
+                "slicer_filament": p.for_bambuddy(),
                 "slicer_filament_name": p.slicer_filament_name,
             }
             for p in presets
+            if p.for_bambuddy() is not None
         ]
-        k_values = effective_k_values(conn, spool_id)
+        k_values = facts.k_values.get(spool_id, [])
         unmapped = sum(1 for k in k_values if k.printer_id not in refs.printers)
         out["k_profiles"] = [
             {
@@ -330,7 +498,7 @@ def desired_and_unmapped(
             if k.printer_id in refs.printers
         ]
     if pushes(sync.suppliers):
-        out["suppliers"] = _supplier_links(conn, spool, refs)
+        out["suppliers"] = _supplier_links(spool, refs, facts)
     if pushes(sync.locations) and (place is None or not is_printer_place(place)):
         out["location_id"] = (
             None
@@ -338,17 +506,6 @@ def desired_and_unmapped(
             else refs.locations.get(place["id"]) or Pending("location", place["id"])
         )
     return out, unmapped
-
-
-def _place(conn: Conn, location_id: UUID | None) -> dict[str, Any] | None:
-    if location_id is None:
-        return None
-    row = conn.execute(
-        "SELECT l.id, l.printer_id, upper(btrim(p.model)) AS model FROM filament_locations l"
-        " LEFT JOIN printers p ON p.id = l.printer_id WHERE l.id = %s",
-        (location_id,),
-    ).fetchone()
-    return None if row is None else dict(row)
 
 
 def _preset(
@@ -362,33 +519,16 @@ def _preset(
     return ordered[0] if ordered else None
 
 
-def _supplier_links(conn: Conn, spool: m.Spool, refs: BbRefs) -> list[dict[str, Any]]:
+def _supplier_links(spool: m.Spool, refs: BbRefs, facts: SpoolFacts) -> list[dict[str, Any]]:
     """One link per supplier of a product of the spool's type (its newest priced product,
     else its first by SKU): the SKU and the newest per-kg price; the supplier of the
     spool's invoice is the purchase source, linked on its own when it has no such
     product (Decision 14). Archived suppliers and products are left out."""
-    rows: list[dict[str, Any]] = []
-    if spool.type_id is not None:
-        rows = conn.execute(
-            "SELECT p.id, p.supplier_id, p.sku FROM filament_supplier_products p"
-            " JOIN filament_suppliers s ON s.id = p.supplier_id"
-            " WHERE p.type_id = %s AND p.archived_at IS NULL AND s.archived_at IS NULL"
-            " ORDER BY upper(p.sku), p.id",
-            (spool.type_id,),
-        ).fetchall()
-    newest = SuppliersStore._newest(conn, [r["id"] for r in rows])
-    bought = conn.execute(
-        "SELECT i.supplier_id FROM filament_spools sp"
-        " JOIN filament_invoice_lines l ON l.id = sp.invoice_line_id"
-        " JOIN filament_invoices i ON i.id = l.invoice_id"
-        " JOIN filament_suppliers s ON s.id = i.supplier_id"
-        " WHERE sp.id = %s AND s.archived_at IS NULL",
-        (spool.id,),
-    ).fetchone()
-    source = None if bought is None else bought["supplier_id"]
+    rows = [] if spool.type_id is None else facts.products.get(spool.type_id, [])
+    source = facts.bought.get(spool.id)
     chosen: dict[UUID, dict[str, Any]] = {}
     for row in rows:
-        price = newest.get(row["id"])
+        price = facts.prices.get(row["id"])
         held = chosen.get(row["supplier_id"])
         if held is None or (held["price"] is None and price is not None):
             chosen[row["supplier_id"]] = {"sku": row["sku"], "price": price}
@@ -666,6 +806,10 @@ class _Planner:
     #: The round's write cap (`plan`'s ``limit``, bounded by `PlanRequest`), which
     #: `missing` checks a probe against.
     limit: int = field(kw_only=True)
+    #: Every spool's SB data, read once by `spools` (#6902).
+    facts: SpoolFacts | None = None
+    #: Stops the plan between spools when its caller went away (#6902).
+    cancel: CancelToken | None = field(default=None, kw_only=True)
 
     @property
     def full(self) -> bool:
@@ -983,6 +1127,9 @@ class _Planner:
         if self.refused(kind, item.sb_id, create=False):
             self.unsure.add(key)
             return
+        # `take` walks phase 0 first, in insertion order, and nothing leaves phase 0, so its
+        # length is the number of writes (updates, adoptions, creates and probes) `take` keeps
+        # ahead of this probe (R-6688-9). A reorder breaks the cap.
         if len(self.phases[0]) >= self.limit:
             self.capped.add(key)
             self.deferred.add(key)
@@ -1040,7 +1187,9 @@ class _Planner:
         ).fetchall()
         linked = {row["bb_spool_id"] for row in rows if row["bb_spool_id"] is not None}
         unlinked_bb = [bb for bb in good if bb.id not in linked]
+        self.facts = SpoolFacts.read(self.conn, [row["id"] for row in rows], self.sync)
         for row in rows:
+            check(self.cancel)
             if row["bb_spool_id"] is not None:
                 self.linked_spool(row, by_id.get(row["bb_spool_id"]))
             elif pushes(self.sync.spools) and row["archived_at"] is None:
@@ -1055,7 +1204,7 @@ class _Planner:
         row whose probe this round plans is ``deferred``, as its answer settles the spool
         in a later round, R-6688-7); else the fields naming a row Bambuddy will not have
         this pass are left out (Decision 35)."""
-        desired, unmapped = desired_and_unmapped(self.conn, sb_id, self.refs, self.sync)
+        desired, unmapped = desired_and_unmapped(self.conn, sb_id, self.refs, self.sync, self.facts)
         self.unmapped_k += unmapped
         out = {}
         for name, value in desired.items():
@@ -1205,6 +1354,21 @@ class _Planner:
                     cast("list[Any]", body_value(name, desired[name])),
                     {name: field_hash(compare[name])},
                 )
+        self.reset(sb_id, bb_id, pushed)
+
+    def reset(self, sb_id: UUID, bb_id: int, pushed: Mapping[str, str]) -> None:
+        """R-7149-5: Bambuddy's consumed-counter reset for the spool's newest SB reset,
+        once: its hash (of the event's id) goes in ``pushed_fields`` as `RESET_FIELD`.
+        Under ``weights`` only; the pull's ``bb`` resets are never sent back, and nor is
+        a reset made before the link (R-7149-11, `SpoolFacts.resets`)."""
+        if not pushes(self.sync.weights) or self.facts is None:
+            return
+        newest = self.facts.resets.get(sb_id)
+        if newest is None:
+            return
+        digest = field_hash(str(newest))
+        if pushed.get(RESET_FIELD) != digest:
+            self.add(3, "spool", sb_id, "reset_consumed", bb_id, {}, {RESET_FIELD: digest})
 
     def seed_spool(
         self,
@@ -1442,7 +1606,12 @@ _ADOPT_FIELDS = frozenset(
 
 
 def _adopt_form(bb: BbSpool) -> dict[str, Any]:
-    return {k: v for k, v in snapshot(bb).items() if k not in ("tag_uid", "tray_uuid")}
+    return {k: v for k, v in snapshot(bb).items() if k not in _NOT_SENT}
+
+
+#: The `snapshot` fields a create never sends (R-T5-6): the tags, and what Bambuddy takes no
+#: write of or SB pushes apart (#7149: ``added_full``, ``encode_time``, the baseline).
+_NOT_SENT = frozenset({"tag_uid", "tray_uuid", "added_full", "tag_encoded_at", "consumed_baseline"})
 
 
 def pendings(value: Any) -> Iterator[Pending]:
@@ -1610,6 +1779,7 @@ def plan(
     *,
     interval_s: float,
     limit: int = 200,
+    cancel: CancelToken | None = None,
 ) -> SyncPlan:
     """The writes SB wants Bambuddy to take next, from what ``snap`` read, at most
     ``limit`` (Decision 11), in this order: suppliers, locations, insert types and
@@ -1621,11 +1791,17 @@ def plan(
     create refused earlier on an event pass, counts ``failed`` (R-T4-1). Each write's
     ``key`` is ``kind:sb_id:op``. A kept create records its intent here, in this
     transaction (Decision 10). Nothing is planned when no data type pushes, or when the
-    links belong to another Bambuddy (``instance_changed``, Decision 12)."""
+    links belong to another Bambuddy (``instance_changed``, Decision 12).
+
+    One plan or results call of an instance's sync runs at a time (`hold_sync`, #6902):
+    another is `SyncBusyError`. ``cancel`` stops the plan, which then writes nothing,
+    unless it had already passed its last check, just before the commit (`core/cancel.py`).
+    A plan sent again finds the intents a committed one recorded."""
     empty = SyncPlan(writes=[], deferred=0, directions=sync, interval_s=interval_s)
     if not pushes_anything(sync):
         return empty
-    with store.spools.transaction() as conn:
+    with store.spools.transaction() as conn, watched(cancel, conn):
+        hold_sync(conn, snap.instance)
         state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
         if state is not None and state["instance"] not in (None, snap.instance):
             return empty.model_copy(update={"instance_changed": True})
@@ -1639,7 +1815,9 @@ def plan(
                 "SELECT kind, sb_id, at FROM filament_bb_push_errors"
             ).fetchall()
         }
-        planner = _Planner(conn, snap, sync, BbRefs.read(conn), intents, sent, errors, limit=limit)
+        planner = _Planner(
+            conn, snap, sync, BbRefs.read(conn), intents, sent, errors, limit=limit, cancel=cancel
+        )
         planner.rows("supplier", _suppliers(conn), snap.suppliers, sync.suppliers, _SUPPLIER_FIELDS)
         planner.rows("location", _locations(conn), snap.locations, sync.locations, _LOCATION_FIELDS)
         planner.rows("insert_type", _insert_types(conn), snap.catalog, sync.spools, _CATALOG_FIELDS)
@@ -1650,6 +1828,8 @@ def plan(
         planner.refs = planner.refs.without(unconfirmed)
         planner.spools()
         writes = planner.take(limit)
+        # `take` records the kept creates' intents: the last step before the commit.
+        check(cancel)
     return SyncPlan(
         writes=writes,
         deferred=len(planner.deferred),

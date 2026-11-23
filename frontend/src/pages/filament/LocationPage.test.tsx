@@ -1,0 +1,106 @@
+import { screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
+import { Link } from 'react-router'
+import { describe, expect, it } from 'vitest'
+import { getLocation, listSpools, moveSpool } from '../../api/filament'
+import { H2C, L, spoolId } from '../../mocks/features/filament/seed'
+import { server } from '../../mocks/server'
+import { renderPage } from '../../test/utils'
+import { LocationPage } from './LocationPage'
+
+const open = (id: string) => renderPage(<LocationPage />, { route: `/filament/locations/${id}`, path: '/filament/locations/:id' })
+
+describe('the location page', () => {
+  it('shows a slot: name, code, path, its spool and a label link', async () => {
+    open(L.AMS_A1)
+    expect(await screen.findByRole('heading', { level: 1, name: 'H2C AMS-A slot 1' })).toBeInTheDocument()
+    expect(screen.getByText('L-4')).toBeInTheDocument()
+    const path = screen.getByRole('navigation', { name: 'Path' })
+    expect(within(path).getByRole('link', { name: '3DP-31B-598' })).toHaveAttribute('href', `/filament/locations/${L.H2C}`)
+    expect(within(path).getByRole('link', { name: 'H2C AMS-A' })).toHaveAttribute('href', `/filament/locations/${L.AMS_A}`)
+    const spool = screen.getByRole('link', { name: /S-4/ })
+    expect(spool).toHaveAttribute('href', `/filament/spools/${spoolId(4)}`)
+    expect(spool).toHaveTextContent('120 g')
+    expect(screen.getByRole('link', { name: 'Print label' })).toHaveAttribute('href', `/filament/labels?locations=${L.AMS_A1}`)
+    expect(screen.queryByRole('link', { name: 'Printer settings' })).toBeNull()
+    expect(screen.queryByRole('link', { name: "Print this printer's labels" })).toBeNull()
+    expect(screen.getByRole('link', { name: 'View spools' })).toHaveAttribute('href', `/filament/spools?place=${L.AMS_A1}`)
+    expect(screen.queryByText('Archived')).toBeNull()
+    expect(screen.getByRole('region', { name: 'Files and links' })).toBeInTheDocument()
+  })
+
+  it('makes a spool from an empty tray and places it there (#7150)', async () => {
+    await moveSpool(spoolId(8), null)
+    const { user } = open(L.AMS_A4)
+    expect(await screen.findByRole('heading', { level: 1, name: 'H2C AMS-A slot 4' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'New spool from this tray' }))
+    await waitFor(async () => expect((await getLocation(L.AMS_A4)).spools).toHaveLength(1))
+    const made = (await listSpools()).find((one) => one.location_id === L.AMS_A4)!
+    expect(made.number).toBe(20)
+  })
+
+  it('carries no error and no key from one tray to the next (#7150)', async () => {
+    await moveSpool(spoolId(4), null)
+    await moveSpool(spoolId(8), null)
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('*/api/v1/printers/:printer/trays/:ams/:tray/new-spool', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return HttpResponse.json({ detail: 'The printer reports no filament in this tray.' }, { status: 409 })
+      }),
+    )
+    const { user } = renderPage(
+      <>
+        <LocationPage />
+        <Link to={`/filament/locations/${L.AMS_A4}`}>Go to slot 4</Link>
+      </>,
+      { route: `/filament/locations/${L.AMS_A1}`, path: '/filament/locations/:id' },
+    )
+    expect(await screen.findByRole('heading', { level: 1, name: 'H2C AMS-A slot 1' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'New spool from this tray' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('no filament in this tray')
+    await user.click(screen.getByRole('link', { name: 'Go to slot 4' }))
+    expect(await screen.findByRole('heading', { level: 1, name: 'H2C AMS-A slot 4' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'New spool from this tray' }))
+    await waitFor(() => expect(keys).toHaveLength(2))
+    expect(keys[1]).toBeTruthy()
+    expect(keys[1]).not.toBe(keys[0])
+  })
+
+  it('offers no new spool on a place that is not a tray, or a tray that holds one (#7150)', async () => {
+    open(L.SHELF_A)
+    expect(await screen.findByRole('heading', { level: 1 })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'New spool from this tray' })).toBeNull()
+  })
+
+  it('shows Archived for an archived place', async () => {
+    const found = await getLocation(L.SHELF_A)
+    server.use(http.get('*/api/v1/filament/locations/:id', () => HttpResponse.json({ ...found, archived_at: '2026-11-01T00:00:00Z' })))
+    open(L.SHELF_A)
+    expect(await screen.findByText('Archived')).toBeInTheDocument()
+  })
+
+  it('shows a printer place: its units, the settings link and its labels link', async () => {
+    open(L.H2C)
+    expect(await screen.findByRole('heading', { level: 1, name: '3DP-31B-598' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'H2C AMS-A' })).toHaveAttribute('href', `/filament/locations/${L.AMS_A}`)
+    expect(screen.getByRole('link', { name: 'Printer settings' })).toHaveAttribute('href', '/settings/printing#printers')
+    expect(screen.getByRole('link', { name: "Print this printer's labels" })).toHaveAttribute('href', `/filament/labels?printers=${H2C.printer_id}`)
+  })
+
+  it('says so for an unknown id', async () => {
+    open('00000000-0000-4000-8000-000000000000')
+    expect(await screen.findByText('No such location')).toBeInTheDocument()
+  })
+
+  it('has no fixed width that is wider than a phone', async () => {
+    // jsdom has no layout, so a real 390 px check is not possible here: the root must be fluid and its long text must wrap or truncate.
+    const { container } = open(L.AMS_A1)
+    await screen.findByRole('heading', { level: 1 })
+    const root = container.firstElementChild as HTMLElement
+    expect(root.className).toMatch(/\bmax-w-/)
+    expect(root.className).not.toMatch(/(^|\s)(min-)?w-\[?[1-9]/)
+    expect(screen.getByRole('heading', { level: 1 }).className).toMatch(/break-words|truncate/)
+  })
+})

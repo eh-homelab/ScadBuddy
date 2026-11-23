@@ -25,23 +25,38 @@ filament of its colour in the material the visitor's colours resolved to (``mate
 kept on the visitor's row, `inputs.py` `resolve_choice`, #6258), else the one it chose
 for its slot, else the first listing filament of that colour (a locked support colour).
 A render with no firm price has none: the visitor never reads a volume estimate.
+
+#6921: the visitor's choices have a key known before any render (`variant_key`): the
+listing, its published version and the choices as `checked_choice` settled them. The
+visitor's render row keeps it, and the ``done`` price of its render records it. The
+instant read (`instant_variant`, ``POST …/listings/{id}/variant``) takes the render's body
+and answers at once, with no render and no slice started: the price of the choices
+(`slice_price.py` `instant_price`), the preview of the output a slice of them saved
+(`variant_preview` streams it), and the visitor's own render of them while the shop holds
+it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import status
+from pydantic import BaseModel
 from temporalio.client import WorkflowUpdateFailedError
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.idempotency import Replay, idempotent_write
+from scadbuddy.library.outputs import PREVIEW_NAME, OutputMeta, OutputNotFoundError
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament, Reference
@@ -63,13 +78,16 @@ from scadbuddy.orders.storefront.limits import OwnedRender, RenderLimited, Rende
 from scadbuddy.orders.storefront.listings import problem, published_listing
 from scadbuddy.orders.storefront.slice_price import (
     NO_PRICE,
+    PriceRow,
+    instant_price,
     model_digest,
     pending,
     slice_estimate,
 )
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.orders.storefront.wire import Listing, RenderBody, StoreRender
-from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError
+from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.job_models import Job, JobNotFoundError, PlateInfo, QueueFullError
 from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.cache import materialize_result
@@ -138,7 +156,7 @@ def store_render(job: Job, *, ready: bool = True) -> StoreRender:
     )
 
 
-def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
+def price_book(orders: OrdersComponent) -> dict[str, Filament]:
     return {f.id: f for f in orders.store.filaments()}
 
 
@@ -230,7 +248,7 @@ async def shown_render(state: AppState, job: Job) -> StoreRender:
     return store_render(job, ready=ready)
 
 
-def _limited(error: RenderLimited) -> ApiError:
+def limited(error: RenderLimited) -> ApiError:
     """429 ``render_limited``, with the limit and the seconds to wait."""
     return problem(
         status.HTTP_429_TOO_MANY_REQUESTS,
@@ -308,8 +326,26 @@ def _shared(state: AppState, conn: Any, render_key: str) -> bool:
 
 
 #: The slot colours (``job.result.colors``) of the visitor's render of a render key, or
-#: None when there is none to read.
-RenderColours = Callable[[str], Awaitable[Sequence[str] | None]]
+#: None when there is none to read. The second argument is the choices' variant key
+#: (#6921): with no render, the slot colours a priced slice of the variant recorded.
+RenderColours = Callable[[str, str], Awaitable[Sequence[str] | None]]
+
+
+def variant_key(listing: Listing, choice: ResolvedChoice, colours: Mapping[int, str]) -> str:
+    """The key of the visitor's choices, known before any render (#6921): the sha256 of
+    the listing id, its published version (``updated_at``, which every render body is
+    checked against) and the choices as `checked_choice` settled them: the values the
+    render takes, the one material and the filament asked for each slot. So the same
+    choices give the same key, whatever the page sent of the listing's defaults."""
+    body = {
+        "listing": listing.id,
+        "version": listing.updated_at.isoformat(),
+        "values": choice.values,
+        "material": choice.material,
+        "colours": {str(slot): f for slot, f in sorted(colours.items())},
+    }
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 async def checked_choice(
@@ -343,16 +379,18 @@ async def checked_choice(
             "listing_changed",
             "This listing has changed. Load it again.",
         )
-    filaments = await asyncio.to_thread(_filaments, orders)
+    filaments = await asyncio.to_thread(price_book, orders)
     materials = effective_materials(listing, shop_materials)
-    try:
+    with listing_refusals():
         values = listing_values(listing, body.values, filaments, materials)
         choice = resolve_choice(
             listing, values, body.values.keys(), filaments, materials, slots=body.colours
         )
         resolved = listing_reference(listing, choice.values, body.colours, filaments=filaments)
         if render_colours is not None:
-            colours = await render_colours(resolved.reference.render_key)
+            colours = await render_colours(
+                resolved.reference.render_key, variant_key(listing, choice, body.colours)
+            )
             given = [name for name in body.values if name in values and _is_colour(listing, name)]
             if not colours and given:
                 # The slots are known only from a done render; without them the order
@@ -367,6 +405,17 @@ async def checked_choice(
                 resolved = listing_reference(listing, choice.values, chosen, filaments=filaments)
         # A print never mixes materials (#6152, always on since #6258).
         check_one_material(resolved.colours, choice, filaments)
+    return listing, resolved, choice
+
+
+@contextmanager
+def listing_refusals() -> Iterator[None]:
+    """The visitor's refusals of a listing's choices, as problems: 409
+    ``listing_unavailable`` (`LockedColoursClashError`), 422 ``listing_colours_clash``
+    (with ``parts``) and 422 ``input_outside_listing`` (with ``name`` and ``reason``). A
+    template's render and a file listing's price and add (#6710) refuse alike."""
+    try:
+        yield
     except LockedColoursClashError:
         # No material can print it (published before publish checked, or broken since):
         # no visitor's colour can fix it, so the refusal names none (#6302 review).
@@ -391,13 +440,11 @@ async def checked_choice(
             name=error.name,
             reason=error.reason,
         ) from None
-    return listing, resolved, choice
 
 
 def _is_colour(listing: Listing, name: str) -> bool:
     """Whether ``name`` is a ``// color`` parameter of the published ``listing``."""
-    assert listing.snapshot is not None
-    return any(p.name == name and p.type == "color" for p in listing.snapshot.schema_.parameters)
+    return any(p.name == name and p.type == "color" for p in listing.design[2].schema_.parameters)
 
 
 def _colour_values(listing: Listing, choice: ResolvedChoice) -> dict[str, ParamValue]:
@@ -428,7 +475,8 @@ async def start_render(
     runtime = await asyncio.to_thread(_runtime, state)
     listing, resolved, choice = await checked_choice(orders, body, runtime.storefront_materials)
     reference = resolved.reference
-    assert listing.snapshot is not None
+    snapshot = listing.design[2]
+    variant = variant_key(listing, choice, body.colours)
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
     limits = _limits(state)
     asked = {
@@ -451,6 +499,7 @@ async def start_render(
                 render_key=reference.render_key,
                 colours=body.colours,
                 material=choice.material,
+                variant_key=variant,
             )
             return Replay(200, {"row": row, "counted": False})
         row = limits.admit(
@@ -462,6 +511,7 @@ async def start_render(
             settings=runtime,
             colours=body.colours,
             material=choice.material,
+            variant_key=variant,
         )
         return Replay(200, {"row": row, "counted": True})
 
@@ -474,7 +524,7 @@ async def start_render(
     try:
         recorded = await asyncio.to_thread(record)
     except RenderLimited as error:
-        raise _limited(error) from None
+        raise limited(error) from None
     row: int = recorded.body["row"]
     counted: bool = recorded.body["counted"]
     if not fresh:
@@ -500,7 +550,7 @@ async def start_render(
             params if isinstance(params, dict) else {},
             model_version=reference.commit,
             inputs=reference.inputs,
-            whole_inputs=listing.snapshot.pipeline,
+            whole_inputs=snapshot.pipeline,
             request_id=key,
             reuse_finished=True,
         )
@@ -538,7 +588,7 @@ async def start_render(
             await asyncio.to_thread(limits.count, row, visitor.id, client, settings=runtime)
         except RenderLimited as error:
             await _withdraw_limited(state, limits, job, row, key)
-            raise _limited(error) from None
+            raise limited(error) from None
     await asyncio.to_thread(limits.attach, row, job.id)
     shown = await shown_render(state, job)
     return shown.model_copy(update={"values": _colour_values(listing, choice)})
@@ -611,19 +661,40 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
         raise _unavailable("The price is ready once the render is done.")
     orders = _orders(state)
     listing = await asyncio.to_thread(orders.listings.get, owned.listing_id)
-    if listing is None or listing.snapshot is None:
+    if listing is None or listing.template_snapshot is None:
         return NO_PRICE
+    return await estimate_of(
+        state, listing, job, owned.colours, owned.material, variant_key=owned.variant_key
+    )
+
+
+async def estimate_of(
+    state: AppState,
+    listing: Listing,
+    job: Job,
+    colours: Mapping[int, str],
+    material: str | None,
+    *,
+    variant_key: str | None,
+) -> StoreEstimate:
+    """`render_estimate` of the done ``job``, a render of the published ``listing`` with
+    ``colours`` and ``material``, whose choices have ``variant_key``. The shop's warming of
+    a listing's prices (#6922, `prepare.py` `warm`) asks the same, so it starts its slices
+    through the visitor's own path. ``pending`` with no ``price_key`` while its files are
+    fetched."""
     if job.slug != listing.slug or job.model_version != listing.commit:
         # The shop moved the listing since this render: the page renders again.
         return NO_PRICE
     if not await _fetch(state, job):
         return NO_PRICE if files_lost(job.id) else pending()
-    digest, slots = await variant_of(state, listing, job, owned.colours, owned.material)
+    digest, slots = await variant_of(state, listing, job, colours, material)
     return await slice_estimate(
         state,
         reference=reference_of(listing, job),
         model_sha256=digest,
         filaments=slots,
+        variant_key=variant_key,
+        listing_id=listing.id,
     )
 
 
@@ -639,7 +710,7 @@ async def variant_of(
     render (`_filament_for`, from ``colours`` and ``material``), or None when a slot's
     colour has no listing filament. The estimate and a cart line's add both read it."""
     assert job.result is not None
-    filaments = await asyncio.to_thread(_filaments, _orders(state))
+    filaments = await asyncio.to_thread(price_book, _orders(state))
     by_colour = _filament_for(listing, filaments, colours, list(job.result.colors), material)
     slots = [by_colour.get(colour.casefold()) for colour in job.result.colors]
     digest = await asyncio.to_thread(model_digest, job.id, state.paths.root / job.result.model_3mf)
@@ -648,17 +719,14 @@ async def variant_of(
 
 def reference_of(listing: Listing, job: Job) -> Reference:
     """The reference of ``job``, a render of the published ``listing``."""
-    snapshot = listing.snapshot
-    assert snapshot is not None
+    slug, commit, snapshot = listing.design
     return Reference(
-        slug=listing.slug,
-        commit=listing.commit,
+        slug=slug,
+        commit=commit,
         inputs=job.inputs,
         libraries=list(snapshot.libraries),
         template_name=snapshot.template_name,
-        render_key=render_key_of(
-            listing.slug, job.inputs, listing.commit, pipeline=snapshot.pipeline
-        ),
+        render_key=render_key_of(slug, job.inputs, commit, pipeline=snapshot.pipeline),
     )
 
 
@@ -666,3 +734,131 @@ async def fetch_files(state: AppState, job: Job) -> bool:
     """`_fetch`: whether the done ``job``'s files are in this process's cache, after a
     wait of at most `READY_WAIT`."""
     return await _fetch(state, job)
+
+
+# -- the instant read (#6921) ------------------------------------------------------------------
+
+
+class VariantPreview(BaseModel):
+    """The preview of a variant priced before (#6921): what ``Preview.tsx`` reads of a
+    render. ``url`` is the edge's own path (`preview_path`), never an output id or a
+    back-office path."""
+
+    url: str
+    colors: list[str]
+    bbox_mm: BoundingBox
+    plates: list[PlateInfo]
+
+
+class StoreVariant(BaseModel):
+    """``POST …/storefront/listings/{id}/variant`` (#6921): what the shop knows of the
+    visitor's choices at once, with no render and no slice started. ``price`` is the
+    instant price (``slice``, ``last`` or ``none``; `slice_price.py` `instant_price`),
+    ``preview`` the preview of the output a slice of the variant saved, or null, and
+    ``render`` the visitor's own render of these choices while the shop holds it, or null.
+    ``values`` are the colour values the render takes, as `StoreRender.values`."""
+
+    price: StoreEstimate
+    preview: VariantPreview | None = None
+    render: str | None = None
+    values: dict[str, ParamValue] | None = None
+
+
+def preview_path(key: str) -> str:
+    """The edge's path of a variant's preview mesh."""
+    return f"{STOREFRONT_PREFIX}/variants/{key}/preview.glb"
+
+
+def output_of(state: AppState, row: PriceRow, listing: Listing) -> OutputMeta | None:
+    """The output a ``done`` row's slice saved, while it is there with its preview mesh
+    and is of the design ``listing`` shows (its slug and commit). Blocking: call it in a
+    thread."""
+    if row.output_id is None:
+        return None
+    try:
+        meta = state.outputs.get(row.output_id)
+    except OutputNotFoundError:
+        return None
+    if (meta.slug, meta.model_version) != (listing.slug, listing.commit):
+        return None
+    if not (state.outputs.directory(row.output_id) / PREVIEW_NAME).is_file():
+        return None
+    return meta
+
+
+def _live_render(state: AppState, visitor_id: str, render_key: str) -> str | None:
+    """The visitor's newest render of ``render_key`` while the shop holds it and it did
+    not fail, or None. Blocking: call it in a thread."""
+    visitor = VisitorStore(state.projection.pool).find(visitor_id)
+    if visitor is None:
+        return None
+    job_id = _limits(state).job_of(visitor.id, render_key)
+    if job_id is None:
+        return None
+    try:
+        job = state.render.store.read(job_id)
+    except JobNotFoundError:
+        return None
+    return job.id if job.state in ("pending", "running", "done") else None
+
+
+async def instant_variant(state: AppState, visitor_id: str, body: RenderBody) -> StoreVariant:
+    """The instant read of the visitor's choices (#6921): checked as `start_render` checks
+    them (the same refusals, but no limit: it costs no run), then answered from what the
+    shop holds. It starts no render and no slice."""
+    orders = _orders(state)
+    runtime = await asyncio.to_thread(_runtime, state)
+    listing, resolved, choice = await checked_choice(orders, body, runtime.storefront_materials)
+    key = variant_key(listing, choice, body.colours)
+    # One row gives the price and the preview, as it gives the cart add its 3MF (#6921
+    # review): the price shown is of the 3MF the line is charged from.
+    row = await asyncio.to_thread(orders.slice_prices.variant_row, key)
+    price = await instant_price(state, reference=resolved.reference, newest=row)
+    preview = None
+    meta = None if row is None else await asyncio.to_thread(output_of, state, row, listing)
+    if meta is not None:
+        preview = VariantPreview(
+            url=preview_path(key),
+            colors=list(meta.colors),
+            bbox_mm=meta.bbox_mm,
+            plates=list(meta.layout_plates),
+        )
+    render = await asyncio.to_thread(_live_render, state, visitor_id, resolved.reference.render_key)
+    return StoreVariant(
+        price=price, preview=preview, render=render, values=_colour_values(listing, choice)
+    )
+
+
+def variant_not_found() -> ApiError:
+    """404 ``variant_not_found``: a key that names no preview, unknown or gone alike."""
+    return problem(
+        status.HTTP_404_NOT_FOUND, "variant_not_found", "There is no preview of these choices."
+    )
+
+
+async def variant_preview(state: AppState, key: str) -> Path:
+    """The preview mesh of the output the priced slice of variant ``key`` saved (#6921,
+    `SlicePrices.variant_row`); 404 ``variant_not_found`` for a key that names none, one
+    whose output is gone, or one whose listing is no longer published or no longer shows
+    the output's design (#6921 review)."""
+    orders = _orders(state)
+    row = await asyncio.to_thread(orders.slice_prices.variant_row, key)
+    if row is None or row.output_id is None or row.listing_id is None:
+        raise variant_not_found()
+    listing_id = row.listing_id
+    try:
+        listing = await asyncio.to_thread(published_listing, orders.listings, listing_id)
+    except ApiError:
+        raise variant_not_found() from None
+    meta = await asyncio.to_thread(output_of, state, row, listing)
+    if meta is None:
+        raise variant_not_found()
+    return state.outputs.directory(row.output_id) / PREVIEW_NAME
+
+
+async def variant_colours(state: AppState, key: str) -> list[str] | None:
+    """The slot colours a priced slice of variant ``key`` recorded (#6921), or None: what
+    a cart add takes when the visitor has no done render of its own."""
+    prices = _orders(state).slice_prices
+    row = await asyncio.to_thread(prices.variant_row, key)
+    return None if row is None else row.slot_colours

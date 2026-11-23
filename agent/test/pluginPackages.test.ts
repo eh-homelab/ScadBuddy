@@ -548,8 +548,9 @@ describe('marketplace entries', () => {
   const url = 'https://git.test/market.git'
   it('resolves a relative path, and github, url and git-subdir sources', () => {
     const m = (source: unknown, extra: object = {}) => ({ plugins: [{ name: 'p', source, ...extra }] })
-    expect(marketplaceTarget(m('./plugins/p'), 'p', url)).toEqual({ url, ref: '', path: 'plugins/p', sameRepo: true })
+    expect(marketplaceTarget(m('./plugins/p'), 'p', url)).toEqual({ kind: 'git', url, ref: '', path: 'plugins/p', sameRepo: true })
     expect(marketplaceTarget(m({ source: 'github', repo: 'o/r', sha: 'a'.repeat(40) }), 'p', url)).toEqual({
+      kind: 'git',
       url: 'https://github.com/o/r.git',
       ref: 'a'.repeat(40),
       path: '',
@@ -560,6 +561,7 @@ describe('marketplace entries', () => {
       ref: 'v1',
     })
     expect(marketplaceTarget(m({ source: 'git-subdir', url: 'o/mono', path: 'tools/p' }), 'p', url)).toEqual({
+      kind: 'git',
       url: 'https://github.com/o/mono.git',
       ref: 'HEAD',
       path: 'tools/p',
@@ -569,7 +571,9 @@ describe('marketplace entries', () => {
 
   it('refuses unpinnable sources, missing entries, escaping paths and entry components', () => {
     const m = (source: unknown, extra: object = {}) => ({ plugins: [{ name: 'p', source, ...extra }] })
-    expect(() => marketplaceTarget(m({ source: 'npm', package: 'x' }), 'p', url)).toThrow(/only git sources/)
+    // An archive or npm entry is pinned to its bytes (#6935, pluginPackagesBytes.test.ts); a command never runs.
+    expect(() => marketplaceTarget(m({ source: 'command', command: 'make' }), 'p', url)).toThrow(/command source/)
+    expect(() => marketplaceTarget(m({ source: 'svn', url: 'x' }), 'p', url)).toThrow(/cannot pin/)
     expect(() => marketplaceTarget(m('./p'), 'q', url)).toThrow(/no plugin named/)
     expect(() => marketplaceTarget(m('../p'), 'p', url)).toThrow(PluginError)
     expect(() => marketplaceTarget(m('./p', { hooks: {} }), 'p', url)).toThrow(/declares hooks/)
@@ -836,7 +840,7 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     await expect(cut.headerSecrets(pin)).rejects.toThrow(/hash to sha256:[0-9a-f]{64}, not the pinned sha256:0{64}/)
     expect(existsSync(cut.cacheDir(pin))).toBe(false)
     await expect(
-      readPluginSecrets({ kek: undefined, packages: { store: { enabledPins: () => Promise.resolve([pin]) }, installer: cut } }),
+      readPluginSecrets({ packages: { store: { enabledPins: () => Promise.resolve([pin]) }, installer: cut } }),
     ).rejects.toThrow(/not the pinned/)
   })
 

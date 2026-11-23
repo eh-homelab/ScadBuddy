@@ -15,7 +15,7 @@ URL never writes SB.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Any, Literal, Protocol
 from uuid import UUID
 
@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.bambuddy.errors import UpstreamAnswer
 from scadbuddy.bambuddy.models import (
     Archive,
+    BbColour,
     BbLocation,
     BbSupplier,
     SpoolAssignment,
@@ -55,6 +56,7 @@ PullId = Annotated[str, Field(pattern=r"^filament-bb-pull-[0-9a-f]{32}$")]
 TYPE_FIELDS: dict[str, str] = {
     "remaining_g": "weights",
     "weight_locked": "weights",
+    "consumed_baseline": "weights",
     "tag_uid": "tags",
     "tray_uuid": "tags",
 }
@@ -141,8 +143,9 @@ class PullReport(BaseModel):
     archived_ids: list[UUID] = Field(default_factory=list)
     failed_bb_ids: list[int] = Field(default_factory=list)
     invalid_bb_ids: list[int] = Field(default_factory=list)
-    #: BB's usage rows the pull booked as print ends, and those of a BB spool no SB
-    #: spool is linked to (`bambuddy_usage.py`).
+    #: BB's usage rows the pull booked as print ends, and the rows of a BB spool no SB
+    #: spool is linked to that are later than the last read an earlier pull booked whole
+    #: (a failed body's rows are counted again; `bambuddy_usage.py`, R-7002-6).
     usage_booked: int = 0
     usage_unlinked: int = 0
     #: BB spools made for a tag a linked SB spool holds: no SB spool is made.
@@ -157,6 +160,13 @@ class PullReport(BaseModel):
     locations: int = 0
     moved: int = 0
     conflicts: int = 0
+    #: #6907: Bambuddy's colour catalog, read under ``pulls.spools`` and sent apart from the
+    #: spools (`ColoursBody`): the colours it added or changed, those a person made or edited
+    #: or another source wrote (left as they are), and whether the read or the write failed
+    #: (logged).
+    colours: int = 0
+    colours_kept: int = 0
+    colours_failed: bool = False
 
 
 class PullInstanceChangedError(Exception):
@@ -268,13 +278,25 @@ class PullApplied(BaseModel):
     archives_since: date | None = None
 
 
+class UsageMark(BaseModel):
+    """A usage row's place in Bambuddy's order: its ``created_at``, then its ``id``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    at: datetime
+    id: int
+
+
 class UsageBody(_Body):
     """BB's usage rows to book on linked spools, with the archives read for them (only
-    ``id``, ``printer_id`` and ``completed_at`` are used, `bambuddy_usage.match_archive`)."""
+    ``id``, ``printer_id`` and ``completed_at`` are used, `bambuddy_usage.match_archive`).
+    ``read_to`` is set on a read's last body only: the newest row the read holds, which
+    becomes the instance's usage mark once this body is booked (R-7002-6)."""
 
     pull_id: PullId
     usage: list[SpoolUsage] = Field(max_length=ROWS_MAX)
     archives: list[Archive] = Field(default_factory=list, max_length=ARCHIVES_MAX)
+    read_to: UsageMark | None = None
 
 
 class UsageBooked(BaseModel):
@@ -287,6 +309,24 @@ class HaBody(_Body):
     Home Assistant sensor on a live place is marked unreachable."""
 
     states: Annotated[dict[str, str | None], Field(max_length=ROWS_MAX)] | None
+
+
+class ColoursBody(_Body):
+    """Bambuddy's colour catalog (``GET /inventory/colors``), sent apart from `PullBody` so
+    an API without the route (a roll) fails it alone (#6907, Decision 207)."""
+
+    colours: list[BbColour] = Field(max_length=ROWS_MAX)
+
+
+class ColoursApplied(BaseModel):
+    """What the colour catalog write did (`colour_catalog.ColourCounts`) and how many
+    entries had no colour."""
+
+    added: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    kept: int = 0
+    skipped: int = 0
 
 
 class TraysBody(_Body):
@@ -310,3 +350,5 @@ class BbPullApi(Protocol):
     async def ha_states(self, body: HaBody) -> None: ...
 
     async def reconcile_trays(self, body: TraysBody) -> int: ...
+
+    async def colours(self, body: ColoursBody) -> ColoursApplied: ...

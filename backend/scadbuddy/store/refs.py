@@ -55,6 +55,15 @@ class BlobRefs:
                 (key, holder_kind, holder_id),
             )
 
+    def holds(self, key: str, holder_kind: str, holder_id: str) -> bool:
+        """Whether that holder holds ``key``."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM blob_refs WHERE key = %s AND holder_kind = %s AND holder_id = %s",
+                (key, holder_kind, holder_id),
+            ).fetchone()
+        return row is not None
+
     def drop_holder(self, holder_kind: str, holder_id: str) -> None:
         with self._pool.connection() as conn:
             conn.execute(

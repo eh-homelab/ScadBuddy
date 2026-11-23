@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { originPolicy } from '../src/http/origins.js'
@@ -6,7 +5,6 @@ import { testAndList } from '../src/routes/plugins.js'
 import type { StoredTool, ToolListings } from '../src/access/listings.js'
 import type { PluginRepo, RemotePlugin } from '../src/plugins/registry.js'
 import type { PluginTest } from '../src/plugins/testConnection.js'
-import { kekFromBase64 } from '../src/secrets.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
 // The guard on the plugin routes (#297; src/routes/guard.ts), without a
@@ -14,7 +12,6 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 // method here fails the test if called. The registry behind the guard is
 // test/plugins.pg.test.ts.
 
-const kek = kekFromBase64(randomBytes(32).toString('base64'))
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 
 function untouchable(): PluginRepo & { calls: string[] } {
@@ -39,7 +36,6 @@ function app(plugins: PluginRepo | undefined, overrides: Partial<AppDeps> = {}) 
   return createApp({
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
-    kek: { ok: true, kek },
     credentials: new MemoryCredentials(),
     plugins,
     testPlugin: vi.fn(),
@@ -264,14 +260,14 @@ describe('the connection test stores its listing (#2171)', () => {
     expect(testPlugin).not.toHaveBeenCalled()
   })
 
-  it("a test whose lock client cannot reach Postgres answers 503, the ready check's answer, and connects nowhere (#4994)", async () => {
+  it("a test whose lease the API cannot grant answers 503, the ready check's answer, and connects nowhere (#4994)", async () => {
     const testPlugin = vi.fn(() => Promise.resolve(result(true)))
     const { a, listings } = setup(testPlugin)
     vi.mocked(listings.exclusive).mockResolvedValueOnce('unreachable')
     const res = await test(a)
     expect(res.status).toBe(503)
     expect(res.headers.get('Retry-After')).toBeNull()
-    expect(((await res.json()) as { detail: string }).detail).toMatch(/AI database is unreachable/)
+    expect(((await res.json()) as { detail: string }).detail).toMatch(/the API does not serve the agent's CRUD areas yet/)
     expect(testPlugin).not.toHaveBeenCalled()
   })
 
@@ -281,7 +277,7 @@ describe('the connection test stores its listing (#2171)', () => {
     const { a, repo, listings } = setup(testPlugin)
     const first = test(a)
     await vi.waitFor(() => expect(finish).toBeDefined())
-    const direct = await testAndList({ plugins: repo, kek: { ok: true, kek }, testPlugin, listings, ready: () => Promise.resolve(true) }, 'mem')
+    const direct = await testAndList({ plugins: repo, testPlugin, listings, ready: () => Promise.resolve(true) }, 'mem')
     expect(direct.status).toBe(429)
     finish!(result(true))
     expect((await first).status).toBe(200)

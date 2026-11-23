@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { shutdown } from '../src/shutdown.js'
 
 describe('shutdown', () => {
-  it('waits for the server to drain before closing the database', async () => {
+  it('waits for the server to drain before the last step', async () => {
     const order: string[] = []
     let finishRequests!: () => void
     const drained = new Promise<void>((resolve) => {
@@ -14,7 +14,7 @@ describe('shutdown', () => {
         await drained
         order.push('server.drained')
       },
-      closeDatabase: async () => {
+      closeLast: async () => {
         order.push('db.close')
       },
     })
@@ -25,11 +25,11 @@ describe('shutdown', () => {
     expect(order).toEqual(['server.close', 'server.drained', 'db.close'])
   })
 
-  it('gives up on a server that never drains, and still closes the database', async () => {
+  it('gives up on a server that never drains, and still runs the last step', async () => {
     let dbClosed = false
     const result = await shutdown({
       closeServer: () => new Promise<void>(() => {}),
-      closeDatabase: async () => {
+      closeLast: async () => {
         dbClosed = true
       },
       timeoutMs: 20,
@@ -38,25 +38,25 @@ describe('shutdown', () => {
     expect(dbClosed).toBe(true)
   })
 
-  it('works without a database and tolerates a failing close', async () => {
+  it('works without a last step and tolerates a failing one', async () => {
     expect(await shutdown({ closeServer: async () => {} })).toBe('clean')
     expect(
       await shutdown({
         closeServer: () => Promise.reject(new Error('Server is not running.')),
-        closeDatabase: () => Promise.reject(new Error('boom')),
+        closeLast: () => Promise.reject(new Error('boom')),
       }),
     ).toBe('clean')
   })
 
-  it("never holds the server's close behind a slow step of closeDatabase (#5881 review)", async () => {
+  it("never holds the server's close behind a slow step of closeLast (#5881 review)", async () => {
     const order: string[] = []
     let endPinned!: () => void
     const pinnedStopped = new Promise<void>((resolve) => (endPinned = resolve))
     const done = shutdown({
       closeServer: async () => void order.push('server closed'),
-      closeDatabase: async () => {
+      closeLast: async () => {
         await pinnedStopped
-        order.push('database closed')
+        order.push('last step done')
       },
       timeoutMs: 1_000,
     })
@@ -64,6 +64,6 @@ describe('shutdown', () => {
     expect(order).toEqual(['server closed'])
     endPinned()
     expect(await done).toBe('clean')
-    expect(order).toEqual(['server closed', 'database closed'])
+    expect(order).toEqual(['server closed', 'last step done'])
   })
 })

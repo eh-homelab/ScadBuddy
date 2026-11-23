@@ -5,15 +5,21 @@ import { spoolId, T } from '../../mocks/features/filament/seed'
 import { PICKER_FILTERS_KEY } from '../../lib/filamentPickerFilters'
 import { renderPage } from '../../test/utils'
 import { FilamentQuickFind } from './FilamentQuickFind'
+import { FilamentSearchBox } from './FilamentSearchBox'
 
 // #6894: the quick find over the spools and types, on the Filament page.
 
 function Here() {
   const location = useLocation()
-  return <output data-testid="here">{location.pathname}</output>
+  return (
+    <>
+      <output data-testid="here">{location.pathname}</output>
+      <output data-testid="back">{JSON.stringify(location.state)}</output>
+    </>
+  )
 }
 
-function render() {
+function render(route = '/filament/spools') {
   return renderPage(
     <Routes>
       <Route
@@ -21,12 +27,14 @@ function render() {
         element={
           <>
             <FilamentQuickFind />
+            <textarea aria-label="Composer" />
+            <FilamentSearchBox value="" onChange={() => {}} label="Search spools" placeholder="Search" />
             <Here />
           </>
         }
       />
     </Routes>,
-    { route: '/filament/spools' },
+    { route },
   )
 }
 
@@ -80,5 +88,40 @@ describe('the filament quick find', () => {
     await waitFor(async () => expect((await options()).map((one) => /#(\d+) ·/.exec(one.textContent ?? '')?.[1] ?? one.textContent)).toEqual(['8', '4', expect.stringContaining('BL-PLA-BASIC-BLACK'), expect.stringContaining('INS-PETG-CLEAR')]))
     await user.click(box)
     expect(JSON.parse(localStorage.getItem(PICKER_FILTERS_KEY)!)).toEqual({ material: null, loadedOnly: false })
+  })
+
+  it('leaves Ctrl+K to another field the person is typing in', async () => {
+    const { user } = render()
+    const composer = screen.getByRole('textbox', { name: 'Composer' })
+    await user.click(composer)
+    const event = new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true })
+    composer.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('opens on Ctrl+K from the tab\'s own search box', async () => {
+    const { user } = render()
+    await user.click(screen.getByRole('searchbox', { name: 'Search spools' }))
+    await user.keyboard('{Control>}k{/Control}')
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('hands the open tab search back only on the Spools and Types tabs', async () => {
+    const spools = render('/filament/spools?q=gold')
+    await spools.user.keyboard('{Control>}k{/Control}')
+    await spools.user.type(await screen.findByRole('combobox'), '#4')
+    await waitFor(async () => expect(await options()).toHaveLength(1))
+    await spools.user.keyboard('{Enter}')
+    await waitFor(() => expect(screen.getByTestId('back').textContent).toBe('{"back":"?q=gold"}'))
+    spools.unmount()
+
+    const ledger = render('/filament/ledger?since=2026-01-01')
+    await ledger.user.keyboard('{Control>}k{/Control}')
+    await ledger.user.type(await screen.findByRole('combobox'), '#4')
+    await waitFor(async () => expect(await options()).toHaveLength(1))
+    await ledger.user.keyboard('{Enter}')
+    await waitFor(() => expect(screen.getByTestId('here').textContent).toBe(`/filament/spools/${spoolId(4)}`))
+    expect(screen.getByTestId('back').textContent).toBe('null')
   })
 })

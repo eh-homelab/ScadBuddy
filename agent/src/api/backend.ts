@@ -1,6 +1,7 @@
 import { context, propagation, type Span, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api'
-import createClient, { type Middleware } from 'openapi-fetch'
+import createClient, { defaultPathSerializer, type Middleware } from 'openapi-fetch'
 import { recordFailure, tracer } from '../telemetry/trace.js'
+import { refusingDotParams } from './pathSegments.js'
 import type { paths } from './schema.js'
 
 // Typed client for the Python backend (spec §4.3). `schema.d.ts` is not
@@ -65,7 +66,18 @@ export function createBackendClient(
   fetchImpl: typeof fetch = globalThis.fetch,
   credential?: Middleware,
 ): BackendClient {
-  const client = createClient<paths>({ baseUrl, fetch: (request) => fetchImpl(request) })
+  // Follows no redirect (#7104): a path parameter of `..` is normalised away by the URL, and the
+  // API's trailing-slash 307 would then send the same method and credential to another route
+  // (`…/files/..` became a DELETE of the plugin itself). The client's paths are the API's own, so
+  // no call needs one; a redirect is an error. The copy takes the original request's body, so a
+  // middleware must not read `request.body` after the fetch (none does). A path parameter of `.`
+  // or `..` mid-path needs no redirect to reach another route, so it is refused before the URL is
+  // built (`refusingDotParams`, #7221).
+  const client = createClient<paths>({
+    baseUrl,
+    pathSerializer: refusingDotParams(defaultPathSerializer),
+    fetch: (request) => fetchImpl(new Request(request, { redirect: 'error' })),
+  })
   client.use(tracingMiddleware())
   // #4975 phase 4: the agent's service credential (`api/serviceCredential.ts`).
   if (credential) client.use(credential)

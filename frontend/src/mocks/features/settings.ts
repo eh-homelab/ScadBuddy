@@ -87,6 +87,9 @@ const NULLABLE = new Set([
   'google_fonts_api_key',
   'temporal_ui_url',
   'filament_default_cost_per_kg',
+  'filament_drying_temp_c',
+  'filament_drying_hours',
+  'filament_label_base_url',
   'store_s3_endpoint',
   'store_s3_bucket',
   'store_s3_access_key_id',
@@ -222,13 +225,16 @@ function putSettings(body: Record<string, unknown>) {
       continue
     }
     if (name === 'storefront_payment_instructions' && typeof value === 'string' && value.length > 2000) return refused(name, 'String should have at most 2000 characters')
+    // #6905 — `SettingsPatch`'s bounds: 1 to 3650 days.
+    if (name === 'filament_sync_pass_ttl_days' && typeof value === 'number' && (value < 1 || value > 3650))
+      return refused(name, value < 1 ? 'Input should be greater than or equal to 1' : 'Input should be less than or equal to 3650')
     if (!envSeeded.has(name)) {
       next[name] =
         name === 'display_unit'
           ? (value ?? 'mm')
           : name === 'asset_fetch_domains'
             ? (value ?? [...fixtures.DEFAULT_ASSET_FETCH_DOMAINS])
-            : name === 'filament_shopping_auto_add_empty'
+            : name === 'filament_shopping_auto_add_empty' || name === 'filament_auto_add_unknown_rfid'
               ? (value ?? true)
               : value
       continue
@@ -286,8 +292,18 @@ function putSettings(body: Record<string, unknown>) {
     if (name === 'filament_low_stock_pct' && typeof value === 'number' && value > 100) {
       return refused(name, 'Input should be less than or equal to 100')
     }
+    // #7156 — `core/settings.py`'s bounds of the drying defaults.
+    if (name === 'filament_drying_temp_c' && typeof value === 'number' && (value < 1 || value > 150)) {
+      return refused(name, value < 1 ? 'Input should be greater than or equal to 1' : 'Input should be less than or equal to 150')
+    }
+    if (name === 'filament_drying_hours' && typeof value === 'string' && !(Number(value) >= 0.1 && Number(value) <= 999.9)) {
+      return refused(name, Number(value) > 999.9 ? 'Input should be less than or equal to 999.9' : 'Input should be greater than or equal to 0.1')
+    }
     if (name === 'filament_default_cost_per_kg' && typeof value === 'string' && !/^\d+(\.\d+)?$/.test(value.trim())) {
       return refused(name, 'Input should be greater than or equal to 0')
+    }
+    if (name === 'filament_label_base_url' && typeof value === 'string' && !/^https:\/\/[^/?#]+$/.test(value)) {
+      return refused(name, `Value error, SCADBUDDY_FILAMENT_LABEL_BASE_URL must be an https:// origin with no path, not '${value}'`)
     }
     if (name === 'temporal_ui_url' && typeof value === 'string' && !/^https?:\/\//.test(value)) {
       return refused(name, `Value error, ${envName(name)} must be an http(s) URL, not '${value}'`)

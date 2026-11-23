@@ -605,11 +605,17 @@ def _depth(doc: Any) -> int:
 def clean_preset(body: bytes) -> tuple[str, bytes]:
     """A site's preset file as Bambuddy may take it: its ``name``, and the document
     without a top-level key whose name ends in ``gcode`` or ``post_process`` (the printer
-    runs that G-code; the preset inherits its base's), as JSON again. 422 unless it is a
-    filament preset: a JSON object, at most `MAX_DEPTH` levels deep and with no NaN,
-    Infinity or number too large for a float, with a ``name`` of 1 to `MAX_NAME` characters, a
-    ``type`` that is absent or ``filament``, a non-empty ``inherits``, and no
+    runs that G-code; the slicer then uses its base's, or its built-in default), as JSON
+    again. 422 unless it is a filament preset: a JSON object, at most `MAX_DEPTH` levels
+    deep and with no NaN, Infinity or number too large for a float, with a ``name`` of 1 to
+    `MAX_NAME` characters, a ``type`` that is absent or ``filament``, and no
     ``printer_settings_id`` or ``print_settings_id`` (a printer or process preset's).
+    ``inherits``, when present, is a string, and may be empty (#7029): 3DFP exports
+    flattened presets, every option written out, with ``"inherits": ""`` (all 72 files
+    exported on 2026-11-22).
+    Bambuddy's import then keeps the document as it is (``services/orca_profiles.py``
+    ``resolve_preset`` returns a preset with no ``inherits`` unchanged), and the native
+    slicer flattens it over nothing (``slicing/profiles.py`` ``flatten``).
     Stable: the bytes it gives are cleaned to themselves."""
     try:
         doc = json.loads(body, parse_constant=_no_constant, parse_float=_finite)
@@ -626,9 +632,8 @@ def clean_preset(body: bytes) -> tuple[str, bytes]:
         )
     if doc.get("type", "filament") != "filament" or SETTINGS_IDS & doc.keys():
         raise _unfit("a preset file is a filament preset, not a printer or process preset")
-    inherits = doc.get("inherits")
-    if not isinstance(inherits, str) or not inherits:
-        raise _unfit("a preset file inherits a base preset: its inherits is a non-empty string")
+    if not isinstance(doc.get("inherits", ""), str):
+        raise _unfit("a preset file's inherits, when it has one, is a string")
     kept = {
         key: value
         for key, value in doc.items()
@@ -914,18 +919,19 @@ def _fetched_ids(conn: Conn, type_id: UUID, run_id: UUID) -> _Fetched:
     """The Bambuddy preset ids an earlier fetch of the type made: the type's preset rows
     that a fetch bound (its ``files`` entry's ``preset_id``), not ones a person chose; the
     ids each earlier run recorded as its import's (``bambuddy_made``); and the runs whose
-    import was never listed (R-PR1)."""
+    import was never listed (R-PR1). A row adopted as a ScadBuddy preset (#7176) counts by
+    that preset's Bambuddy id."""
     rows = conn.execute(
-        "SELECT p.slicer_filament FROM filament_spool_type_presets p"
+        "SELECT COALESCE(sp.bb_preset_id::text, p.slicer_filament) AS bb"
+        " FROM filament_spool_type_presets p"
+        " LEFT JOIN filament_presets sp ON sp.id = p.preset_id"
         " WHERE p.type_id = %s AND EXISTS (SELECT 1 FROM filament_profile_fetches f,"
         " jsonb_each(f.files) AS m(model, nozzles), jsonb_each(m.nozzles) AS n(nozzle, entry)"
         " WHERE f.type_id = p.type_id AND f.id <> %s"
-        " AND n.entry ->> 'preset_id' = p.slicer_filament)",
+        " AND n.entry ->> 'preset_id' = COALESCE(sp.bb_preset_id::text, p.slicer_filament))",
         (type_id, run_id),
     ).fetchall()
-    out = _Fetched(
-        {int(row["slicer_filament"]) for row in rows if row["slicer_filament"].isdigit()}
-    )
+    out = _Fetched({int(row["bb"]) for row in rows if row["bb"].isdigit()})
     for run in conn.execute(
         "SELECT bambuddy_before, bambuddy_made, files FROM filament_profile_fetches"
         " WHERE type_id = %s AND id <> %s AND bambuddy_before IS NOT NULL",

@@ -122,4 +122,17 @@ describe('Printing defaults', () => {
     await waitFor(() => expect(mockSettings().lan_require_plate_clear).toBe(true))
     expect(mockSettings().sources?.['lan_require_plate_clear']).toBe('stored')
   })
+
+  it('queues a LAN print when the printer is busy by default, and turns it off (#6871)', async () => {
+    const { user } = renderSettingsSection(<Printing />)
+    await seeded()
+    const toggle = within(region('Printing defaults')).getByRole('switch', {
+      name: 'Queue when the printer is busy',
+    })
+    expect(toggle).toBeChecked()
+    await user.click(toggle)
+    await user.click(save())
+    await waitFor(() => expect(mockSettings().lan_queue_when_busy).toBe(false))
+    expect(mockSettings().sources?.['lan_queue_when_busy']).toBe('stored')
+  })
 })

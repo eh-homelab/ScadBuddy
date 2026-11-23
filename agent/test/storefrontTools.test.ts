@@ -6,7 +6,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import type { components } from '../src/api/schema.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
-import { colourProblems, defaultsFor, draftMaterials, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
+import { colourProblems, defaultsFor, draftMaterials, fileTitleColours, isSupportMaterial, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #6131 (design 2026-11-13 §6) — the assistant's storefront tools: a draft (`write`) built
@@ -46,7 +46,28 @@ interface Vector {
   input?: unknown
 }
 
-const vectors = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as Vector[]
+/**
+ * #6710 — a library-file case: the file as the library's routes answer it, and the body a new
+ * listing of it saves, but `materials`, which each side sets its own way.
+ */
+interface FileVector {
+  name: string
+  file: {
+    id: number
+    library: 'bambuddy' | 'native'
+    filename: string
+    slots: components['schemas']['SlotNeed'][]
+    plates: components['schemas']['OutputPlate'][]
+  }
+  filaments: Filament[]
+  expected: Record<string, unknown>
+  /** Titles and the colour names in each that a customer can pick (`titleColours` of the new draft). */
+  titles: { title: string; colours: string[] }[]
+}
+
+const shared = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (Vector | FileVector)[]
+const vectors = shared.filter((vector): vector is Vector => !('file' in vector))
+const fileVectors = shared.filter((vector): vector is FileVector => 'file' in vector)
 const owl = vectors[0] as Vector
 
 const OUTPUT = 'a'.repeat(32)
@@ -192,6 +213,81 @@ describe('storefront tools (#6131)', () => {
   it('names exactly one source', async () => {
     await expect(tool('storefront_listing_draft').execute({}, ctx())).rejects.toThrow('exactly one')
     await expect(tool('storefront_listing_draft').execute({ output_id: OUTPUT, slug: 'owl' }, ctx())).rejects.toThrow('exactly one')
+    await expect(tool('storefront_listing_draft').execute({ slug: 'owl', library_file_id: 46 }, ctx())).rejects.toThrow('exactly one')
+  })
+
+  describe('a library file (#6710 §11.3)', () => {
+    /** The vector's file in the library that serves; `onPost` gets the listing a draft posts. */
+    function serveFile(vector: FileVector, onPost: (body: unknown) => void, fileType = '3mf'): void {
+      const { file } = vector
+      server.use(
+        http.get(`${BACKEND}/api/v1/settings`, () => HttpResponse.json({ library_backend: file.library })),
+        http.get(`${BACKEND}/api/v1/print/library/${file.id}`, () =>
+          HttpResponse.json({ id: file.id, filename: file.filename, file_type: fileType, has_thumbnail: true, is_external: false, per_print: false, print_count: 0, printable: true, sliced: false }),
+        ),
+        http.get(`${BACKEND}/api/v1/print/library/${file.id}/filaments`, () => HttpResponse.json({ library_file_id: file.id, source: 'inventory', track_switch: false, slots: file.slots })),
+        http.get(`${BACKEND}/api/v1/print/library/${file.id}/plates`, () => HttpResponse.json(file.plates)),
+        http.get(`${BACKEND}/api/v1/orders/price-book`, () => HttpResponse.json({ filaments: vector.filaments })),
+        http.post(`${BACKEND}/api/v1/storefront/listings`, async ({ request }) => {
+          const body = (await request.json()) as Record<string, unknown>
+          onPost(body)
+          return HttpResponse.json({ id: LISTING, ...body, published: false }, { status: 201 })
+        }),
+      )
+    }
+
+    it('drafts the body the page saves for the same file (the shared vectors)', async () => {
+      expect(fileVectors.length).toBeGreaterThan(0)
+      for (const vector of fileVectors) {
+        let posted: Record<string, unknown> | undefined
+        serveFile(vector, (body) => (posted = body as Record<string, unknown>))
+        const result = firstText(await tool('storefront_listing_draft').execute({ library_file_id: vector.file.id }, ctx())) as Record<string, unknown>
+        const { materials, ...body } = posted ?? {}
+        expect(body, vector.name).toEqual(vector.expected)
+        // The assistant allows the materials it offers, support left out, as for a design (#6302 review).
+        expect(materials, vector.name).toEqual(['PLA'])
+        expect(result, vector.name).toMatchObject({ listing_id: LISTING, published: false, colour_problems: [], page: `/storefront/listings/${LISTING}` })
+        // The page's "Leave … out of the title" warning names the same colours this copy takes out.
+        for (const { title, colours } of vector.titles) {
+          expect(fileTitleColours(title, vector.expected['colours'] as string[], vector.filaments), `${vector.name}: ${title}`).toEqual(colours)
+        }
+      }
+    })
+
+    it('notes what publish would refuse: no filament a customer can pick, or a support part with no support filament', async () => {
+      const vector = fileVectors.find((one) => one.file.slots.some((slot) => isSupportMaterial(slot.material))) as FileVector
+      const support = vector.filaments.filter((filament) => isSupportMaterial(filament.material))
+      const customer = vector.filaments.filter((filament) => !isSupportMaterial(filament.material))
+      const draft = async (filaments: Filament[]) => {
+        serveFile({ ...vector, filaments }, () => {})
+        const result = firstText(await tool('storefront_listing_draft').execute({ library_file_id: vector.file.id }, ctx())) as Record<string, unknown>
+        return result['notes']
+      }
+      expect(await draft(support)).toEqual([
+        'The price book has no priced filament a customer can pick: publish refuses the listing until one is added and ticked on the page.',
+      ])
+      expect(await draft(customer)).toEqual([
+        'The file has a support part and the price book has no priced support filament: publish refuses it (listing_file_support_unset) until one is added and ticked on the page.',
+      ])
+      expect(await draft(vector.filaments)).toEqual([])
+    })
+
+    it('takes a colour on offer out of a title it is given', async () => {
+      const vector = fileVectors[0] as FileVector
+      let posted: { title?: string } | undefined
+      serveFile(vector, (body) => (posted = body as typeof posted))
+      const result = firstText(await tool('storefront_listing_draft').execute({ library_file_id: vector.file.id, title: 'Pencil cup – Navy' }, ctx())) as Record<string, unknown>
+      expect(posted?.title).toBe('Pencil cup')
+      expect(result['notes']).toEqual(['Took Navy out of the title: the customer chooses the colour.'])
+    })
+
+    it('refuses a file a listing cannot sell, and the design-only fields', async () => {
+      const vector = fileVectors[0] as FileVector
+      serveFile(vector, () => {}, 'gcode.3mf')
+      await expect(tool('storefront_listing_draft').execute({ library_file_id: vector.file.id }, ctx())).rejects.toThrow('not a 3MF or an STL')
+      await expect(tool('storefront_listing_draft').execute({ library_file_id: vector.file.id, values: { a: 1 } }, ctx())).rejects.toThrow('values go with slug')
+      await expect(tool('storefront_listing_draft').execute({ library_file_id: vector.file.id, lock: ['a'] }, ctx())).rejects.toThrow('lock goes with')
+    })
   })
 
   it('publishes the listing named', async () => {
@@ -216,6 +312,18 @@ describe('colourProblems (#6144)', () => {
     expect(colourProblems(listing, owl.schema, owl.filaments)).toEqual([])
     const unlisted = { ...listing, params: { ...listing.params, body: { kind: 'choice' as const, choices: [], default: '#FF0000' } } }
     expect(colourProblems(unlisted, owl.schema, owl.filaments)).toEqual([{ name: 'body', label: 'Body', colour: '#FF0000' }])
+  })
+})
+
+describe('isSupportMaterial (#6710, #7189 and #7195 reviews)', () => {
+  it('reads a support material as the backend and the page do: the shared vectors', () => {
+    // `test-fixtures/storefront/support-materials.json`, which the backend's
+    // `tests/orders/storefront/test_support_material.py` and the page's `listingDraft.test.ts` read too.
+    const cases = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/storefront/support-materials.json`, 'utf8')) as { support: string[]; customer: string[] }
+    for (const material of cases.support) expect(isSupportMaterial(material), material).toBe(true)
+    for (const material of cases.customer) expect(isSupportMaterial(material), material).toBe(false)
+    expect(isSupportMaterial(null)).toBe(false)
+    expect(isSupportMaterial(undefined)).toBe(false)
   })
 })
 

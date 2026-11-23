@@ -13,12 +13,27 @@ import { RgbaColourField } from './RgbaColourField'
 import { parseRgba } from '../../lib/rgba'
 import { RgbaSwatch } from './RgbaSwatch'
 import { CATALOGS, type Field } from './catalogs'
+import { ColourSources } from './ColourSources'
 
 type Row = { id: string; name: string; sort_order: number; archived_at: string | null } & Record<string, unknown>
 type Value = string | boolean | null
 type Draft = { id: string | null; name: string; values: Record<string, Value> }
 
 const NONE = '__none'
+/** #6907: the most rows the table draws; a synced colour catalog holds thousands, so a search narrows it. */
+const SHOWN_MAX = 200
+/** How long the search waits after the last key before it asks. */
+const SEARCH_MS = 250
+const SOURCE_NAMES: Record<string, string> = { bambuddy: 'Bambuddy', filamentcolors: 'filamentcolors.xyz', bambu: "Bambu Studio's colour codes" }
+
+/** Where a synced colour came from, and whether a person edited it since (the sync then leaves it alone). */
+function provenance(row: Row): string | null {
+  if (typeof row.source !== 'string') return null
+  const from = `From ${SOURCE_NAMES[row.source] ?? row.source}`
+  // A person's write of a value a sync writes clears `synced_at` (#6907 Decision 217).
+  const edited = row.synced_at === null
+  return edited ? `${from}, edited since (syncs leave it as it is)` : from
+}
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The change could not be saved. Try again.')
 
 /**
@@ -93,25 +108,42 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   const [draft, setDraft] = useState<Draft | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [search, setSearch] = useState('')
+  const [asked, setAsked] = useState('')
+  // A catalog where every row is drawn and may be re-ordered; colours are searched instead.
+  const searched = kind === 'colours'
+
+  useEffect(() => {
+    if (!searched) return
+    const wait = setTimeout(() => setAsked(search.trim()), SEARCH_MS)
+    return () => clearTimeout(wait)
+  }, [search, searched])
 
   const refs = [...new Set(spec.fields.flatMap((field) => (field.ref ? [field.ref] : [])))]
   const needsMore = spec.fields.some((field) => field.required)
 
+  // Each load's number: an answer to any but the newest is dropped, so a late answer to
+  // an older search never replaces a newer one's rows.
+  const loads = useRef(0)
+
   const load = useCallback(async (): Promise<boolean> => {
+    const mineLoad = ++loads.current
     try {
-      const [mine, ...others] = await Promise.all([listCatalog(kind, { includeArchived: archived }), ...refs.map((to) => listCatalog(to, { includeArchived: true }))])
+      const [mine, ...others] = await Promise.all([listCatalog(kind, { includeArchived: archived, q: asked || undefined }), ...refs.map((to) => listCatalog(to, { includeArchived: true }))])
+      if (mineLoad !== loads.current) return true
       setRows(mine as Row[])
       setOptions(Object.fromEntries(refs.map((to, at) => [to, others[at] as Row[]])))
       setNames(new Map(others.flat().map((row) => [row.id, row.archived_at ? `${row.name} (archived)` : row.name])))
       setError(null)
       return true
     } catch (cause) {
+      if (mineLoad !== loads.current) return true
       setError(message(cause))
       return false
     }
     // `refs` is the kind's own constant list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, archived])
+  }, [kind, archived, asked])
 
   useEffect(() => {
     void load()
@@ -318,6 +350,17 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
           </form>
         )}
       </div>
+      {searched && <ColourSources onSynced={() => void load()} />}
+      {searched && (
+        <Input
+          type="search"
+          aria-label="Search colours"
+          placeholder="Search by name, maker, material or hex"
+          value={search}
+          className="max-w-sm text-[13px]"
+          onChange={(event) => setSearch(event.target.value)}
+        />
+      )}
       {addError && (
         <p role="alert" className="text-[13px] text-warn">
           {addError}
@@ -344,8 +387,9 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
               </tr>
             </thead>
             <tbody>
-              {rows.flatMap((row, at) => {
+              {(searched ? rows.slice(0, SHOWN_MAX) : rows).flatMap((row, at) => {
                 const gone = row.archived_at != null
+                const from = provenance(row)
                 return [
                   <tr key={row.id} data-name={row.name} className="border-t">
                     <td className={TD}>
@@ -360,15 +404,22 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                         </span>
                       )}
                     </td>
-                    <td className={`${TD} text-muted-foreground`}>{details(spec.fields, row, names)}</td>
+                    <td className={`${TD} text-muted-foreground`}>
+                      {details(spec.fields, row, names)}
+                      {from && <span className="block text-[12px]">{from}</span>}
+                    </td>
                     <td className={`${TD} text-right tabular-nums`}>{row.sort_order}</td>
                     <td className={`${TD} whitespace-nowrap text-right`}>
-                      <Button type="button" size="xs" variant="ghost" data-move="-1" aria-label={`Move ${row.name} up`} disabled={at === 0} onClick={() => void move(at, -1)}>
-                        <ArrowUpIcon />
-                      </Button>
-                      <Button type="button" size="xs" variant="ghost" data-move="1" aria-label={`Move ${row.name} down`} disabled={at === rows.length - 1} onClick={() => void move(at, 1)}>
-                        <ArrowDownIcon />
-                      </Button>
+                      {!searched && (
+                        <>
+                          <Button type="button" size="xs" variant="ghost" data-move="-1" aria-label={`Move ${row.name} up`} disabled={at === 0} onClick={() => void move(at, -1)}>
+                            <ArrowUpIcon />
+                          </Button>
+                          <Button type="button" size="xs" variant="ghost" data-move="1" aria-label={`Move ${row.name} down`} disabled={at === rows.length - 1} onClick={() => void move(at, 1)}>
+                            <ArrowDownIcon />
+                          </Button>
+                        </>
+                      )}
                       <Button type="button" size="xs" variant="ghost" aria-label={`Edit ${row.name}`} onClick={() => { setFormError(null); setDraft(draftOf(spec.fields, row)) }}>
                         <PencilIcon /> Edit
                       </Button>
@@ -395,10 +446,17 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                     : []),
                 ]
               })}
+              {searched && rows.length > SHOWN_MAX && (
+                <tr className="border-t">
+                  <td colSpan={4} className="px-2 py-3 text-muted-foreground">
+                    Showing {SHOWN_MAX.toLocaleString()} of {rows.length.toLocaleString()} colours. Search to narrow the list.
+                  </td>
+                </tr>
+              )}
               {rows.length === 0 && (
                 <tr className="border-t">
                   <td colSpan={4} className="px-2 py-3 text-muted-foreground">
-                    Nothing here yet. Add the first {spec.title.toLowerCase().replace(/s$/, '')}.
+                    {asked ? `No colour matches "${asked}".` : `Nothing here yet. Add the first ${spec.title.toLowerCase().replace(/s$/, '')}.`}
                   </td>
                 </tr>
               )}

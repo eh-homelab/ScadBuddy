@@ -34,6 +34,13 @@ export const SESSION_GONE = 'SessionGone'
  * placement's claim fences the other out (#6387).
  */
 export const PLACEMENT_MOVED = 'PlacementMoved'
+/**
+ * `session_turn`'s failure when a call to the API's CRUD routes lost its connection (a reset or a
+ * refusal, as a rollout's ending pod gives, #6994), past the call's own retries of a read:
+ * retryable, the workflow places the turn again after a wait, resumed from its transcript, and
+ * that placement's claim fences this one out.
+ */
+export const BACKEND_UNREACHABLE = 'BackendUnreachable'
 export const OPEN_INPUT_UPDATE = 'open_input'
 /** The turn's activity no longer waits on a call it opened (its answer was lost, Claude Code dropped it): its entry is cancelled. */
 export const WITHDRAW_INPUT_UPDATE = 'withdraw_input'

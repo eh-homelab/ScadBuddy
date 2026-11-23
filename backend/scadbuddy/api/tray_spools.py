@@ -18,14 +18,22 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from scadbuddy.api.filament import actor, nudge_after_write
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.bambuddy.trays import EXTERNAL, seen_trays, tray_label
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.idempotency import (
+    MaybeIdempotencyKey,
+    Replay,
+    idempotent_write,
+    required_key,
+    stored,
+)
 from scadbuddy.filament import models as m
-from scadbuddy.filament.catalog import CatalogRefError
+from scadbuddy.filament.catalog import CatalogKeyEmptyError, CatalogRefError
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.printers.models import PrinterRow
@@ -36,6 +44,8 @@ from scadbuddy.spools.models import SeenTray
 router = APIRouter(prefix="/printers", tags=["printers"], dependencies=[Depends(nudge_after_write)])
 
 TRAY_PATH = "/{printer_id}/trays/{ams_id}/{tray_id}/spool"
+NEW_SPOOL_PATH = "/{printer_id}/trays/{ams_id}/{tray_id}/new-spool"
+NEW_SPOOL_ROUTE = f"POST /printers{NEW_SPOOL_PATH}"
 AmsId = Annotated[int, Path(ge=0, le=255)]
 TrayId = Annotated[int, Path(ge=0, le=15)]
 
@@ -179,3 +189,68 @@ async def delete_tray_spool(
         filament.inventory.unlink, UUID(row.id), ams_id, tray_id, actor=actor(caller)
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    NEW_SPOOL_PATH,
+    response_model=m.Spool,
+    status_code=status.HTTP_201_CREATED,
+    summary="Make a spool from what a tray reports",
+    description=(
+        "Create from slot (#7150): a new SB spool from the printer's latest LAN report of the "
+        "tray, placed in it. Its material is the tray's (matched by name or alias, and added "
+        "to the catalog when none has it), its colour the tray's `#RRGGBBAA`, and a tagged "
+        "tray's tag is bound to it. It has no type, label weight or grams yet: it needs a "
+        "type, as a spool the type proposals group. The tray's previous spool moves to no "
+        "place, with a `moved` ledger event. ScadBuddy builds it from its own report; "
+        "nothing reaches Bambuddy. Needs an `Idempotency-Key` (428 without one): a retry "
+        "with the same key answers the first spool and writes nothing. 404 for an unknown "
+        "printer; 409 for a Bambuddy virtual printer, a printer that has not reported the "
+        "tray filled, a tray whose tag is already on a spool (that spool is the tray's) or "
+        "whose two keys name two different tags; 422 for a unit or slot no printer has, or "
+        "a material name with no letter or digit."
+    ),
+)
+async def new_tray_spool(
+    printers: PrintersDep,
+    filament: FilamentDep,
+    caller: CallerDep,
+    printer_id: str,
+    ams_id: AmsId,
+    tray_id: TrayId,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> JSONResponse:
+    who = actor(caller)
+    key = f"{who}\x1f{required_key(idempotency_key)}"
+    _known_slot(ams_id, tray_id)
+    asked = {"printer_id": printer_id, "ams_id": ams_id, "tray_id": tray_id}
+
+    def first() -> Replay | None:
+        with filament.spools.transaction() as conn:
+            return stored(conn, "filament", key, NEW_SPOOL_ROUTE, asked)
+
+    # A retry gets the first answer, even once the tray it read has changed.
+    replay = await asyncio.to_thread(first)
+    if replay is not None:
+        return JSONResponse(replay.body, status_code=replay.status)
+    row = await _row(printers, printer_id)
+    tray = await _tray(printers, row, ams_id, tray_id)
+    printer = UUID(row.id)
+
+    def write() -> Replay:
+        place = filament.inventory.tray_place(printer, ams_id, tray_id, tray)
+        with filament.spools.transaction() as conn:
+
+            def run() -> Replay:
+                try:
+                    made = filament.inventory.create_in_tray_on(
+                        conn, place, printer, ams_id, tray_id, tray, actor=who
+                    )
+                except CatalogKeyEmptyError as error:
+                    raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+                return Replay(status.HTTP_201_CREATED, made.model_dump(mode="json"))
+
+            return idempotent_write(conn, "filament", key, NEW_SPOOL_ROUTE, asked, run)
+
+    done = await asyncio.to_thread(_written, printer_id, write)
+    return JSONResponse(done.body, status_code=done.status)

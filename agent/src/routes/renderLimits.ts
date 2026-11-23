@@ -33,7 +33,7 @@ import { ready, type RouteModule } from './module.js'
 // Guarded and audited like PUT /api/v1/ai/settings/session-limits. Error bodies use `{ detail }`.
 
 export type RenderLimitsRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   settings: SettingsRepo | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
@@ -61,13 +61,13 @@ const PutBody = z
     path: ['overrides'],
   })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'assistant render limits'
 
 export function registerRenderLimitsRoutes(app: Hono, deps: RenderLimitsRouteDeps): void {
   async function repo(): Promise<SettingsRepo | string> {
-    if (!deps.settings) return NO_DATABASE
+    if (!deps.settings) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.settings : NOT_READY
   }
 

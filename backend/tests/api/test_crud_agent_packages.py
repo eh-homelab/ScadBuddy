@@ -6,11 +6,13 @@ tests (``agent/test/pluginPackages.pg.test.ts``) say it keeps."""
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 from scadbuddy.agent_data import packages
 from tests.api.test_crud_agent_cost import token
@@ -349,3 +351,348 @@ def test_each_write_tells_the_warm_caches_and_a_refusal_does_not(
         client.post(f"{BASE}/greeter/delete", headers=agent)
         heard = [(n.channel, n.payload) for n in listener.notifies(timeout=1.0)]
     assert heard == [("scadbuddy_warm_evict", "*")] * 3
+
+
+# Bytes pins and their mirrors (#6935, spec 2026-11-21 §6.5, §6.6).
+MIRRORS = "/api/v1/internal/crud/agent/package-mirrors"
+ZIP = b"PK\x05\x06" + b"\0" * 18
+ZIP_SHA = hashlib.sha256(ZIP).hexdigest()
+OTHER = b"another archive"
+OTHER_SHA = hashlib.sha256(OTHER).hexdigest()
+OCTETS = {"content-type": "application/octet-stream"}
+
+
+def _mirror(client: TestClient, agent: dict[str, str], data: bytes, name: str = "greeter") -> str:
+    sha = hashlib.sha256(data).hexdigest()
+    sent = client.post(f"{MIRRORS}/{name}", content=data, headers={**agent, **OCTETS})
+    assert sent.status_code == 200, sent.text
+    assert sent.json() == {"bytes_sha256": sha}
+    return sha
+
+
+def _archive(name: str = "greeter", sha: str = ZIP_SHA) -> dict[str, Any]:
+    body = _install(name)
+    body.update(
+        source_kind="archive",
+        source_url=f"https://files.test/{name}.zip",
+        source_ref="",
+        fetch_url=f"https://files.test/{name}.zip",
+        fetch_path="greeter-1.0",
+        pin_kind="bytes",
+        bytes_sha256=sha,
+    )
+    del body["commit_sha"]
+    return body
+
+
+def _held(db: Any) -> list[str]:
+    rows = db.execute(
+        "SELECT holder_id FROM blob_refs WHERE holder_kind = 'plugin_package_mirror'"
+    ).fetchall()
+    return sorted(r[0] for r in rows)
+
+
+def _age_holds(db: Any) -> None:
+    db.execute(
+        "UPDATE blob_refs SET created_at = now() - interval '2 days'"
+        " WHERE holder_kind = 'plugin_package_mirror'"
+    )
+
+
+def test_a_mirror_is_read_back_only_by_a_package_that_names_it(
+    client: TestClient, agent: dict[str, str], db: Any
+) -> None:
+    _mirror(client, agent, ZIP)
+    assert _held(db) == [f"greeter/{ZIP_SHA}"]
+    # Kept, but no package names it yet.
+    unnamed = client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent)
+    assert (unnamed.status_code, unnamed.json()["reason"]) == (404, "mirror-not-found")
+    client.post(BASE, json=_archive(), headers=agent)
+    got = client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent)
+    assert (got.status_code, got.content) == (200, ZIP)
+    # Another package's name, or bytes the package does not name, are not served.
+    assert client.get(f"{MIRRORS}/other/{ZIP_SHA}", headers=agent).status_code == 404
+    _mirror(client, agent, OTHER)
+    assert client.get(f"{MIRRORS}/greeter/{OTHER_SHA}", headers=agent).status_code == 404
+    assert (
+        client.post(f"{MIRRORS}/-bad", content=ZIP, headers={**agent, **OCTETS}).status_code == 422
+    )
+    for caller in ("print", "projects"):
+        other = token(client, caller)
+        assert client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=other).status_code == 403
+        sent = client.post(f"{MIRRORS}/greeter", content=ZIP, headers={**other, **OCTETS})
+        assert sent.status_code == 403
+    # Gone with the package, though the blob may still be in the store.
+    client.post(f"{BASE}/greeter/delete", headers=agent)
+    assert client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent).status_code == 404
+
+
+def test_a_pending_repin_reads_its_mirror(client: TestClient, agent: dict[str, str]) -> None:
+    _mirror(client, agent, ZIP)
+    client.post(BASE, json=_archive(), headers=agent)
+    client.post(
+        f"{BASE}/greeter/approve",
+        json={"bytes_sha256": ZIP_SHA, "content_hash": H1},
+        headers=agent,
+    )
+    _mirror(client, agent, OTHER)
+    pending = {
+        **_pending(),
+        "ref": "",
+        "fetch_url": "https://files.test/greeter.zip",
+        "fetch_path": "greeter-1.0",
+        "pin_kind": "bytes",
+        "bytes_sha256": OTHER_SHA,
+    }
+    del pending["commit_sha"]
+    staged = client.post(f"{BASE}/greeter/pending", json=pending, headers=agent)
+    assert staged.status_code == 200, staged.text
+    for sha, data in ((ZIP_SHA, ZIP), (OTHER_SHA, OTHER)):
+        got = client.get(f"{MIRRORS}/greeter/{sha}", headers=agent)
+        assert (got.status_code, got.content) == (200, data)
+
+
+def test_a_bytes_pin_is_stored_only_with_its_mirror(
+    client: TestClient, agent: dict[str, str]
+) -> None:
+    missing = client.post(BASE, json=_archive(), headers=agent)
+    assert (missing.status_code, missing.json()["reason"]) == (409, "mirror-missing")
+    _mirror(client, agent, ZIP)
+    made = client.post(BASE, json=_archive(), headers=agent)
+    assert made.status_code == 201, made.text
+    row = made.json()
+    assert (row["pin_kind"], row["commit_sha"], row["bytes_sha256"]) == ("bytes", None, ZIP_SHA)
+    assert (row["source_kind"], row["source_ref"], row["fetch_path"]) == (
+        "archive",
+        "",
+        "greeter-1.0",
+    )
+    # A repository install is still a commit pin.
+    made = client.post(BASE, json=_install("other"), headers=agent)
+    assert (made.json()["pin_kind"], made.json()["bytes_sha256"]) == ("commit", None)
+
+
+def test_a_pin_must_fit_its_source(client: TestClient, agent: dict[str, str]) -> None:
+    _mirror(client, agent, ZIP)
+    repo_bytes = {**_archive(), "source_kind": "git", "source_ref": "HEAD"}
+    assert client.post(BASE, json=repo_bytes, headers=agent).status_code == 422
+    archive_commit = {**_install(), "source_kind": "archive", "source_ref": ""}
+    assert client.post(BASE, json=archive_commit, headers=agent).status_code == 422
+    both = {**_archive(), "commit_sha": C1}
+    assert client.post(BASE, json=both, headers=agent).status_code == 422
+    no_ref = {**_install(), "source_ref": ""}
+    assert client.post(BASE, json=no_ref, headers=agent).status_code == 422
+    # A marketplace-url entry may be either kind, and names its entry.
+    url_entry = {
+        **_archive(),
+        "source_kind": "marketplace-url",
+        "source_url": "https://plugins.test/marketplace.json",
+        "marketplace_entry": "greeter",
+    }
+    made = client.post(BASE, json=url_entry, headers=agent)
+    assert made.status_code == 201, made.text
+    assert made.json()["marketplace_entry"] == "greeter"
+
+
+def test_a_bytes_repin_is_approved_by_its_sha256(client: TestClient, agent: dict[str, str]) -> None:
+    _mirror(client, agent, ZIP)
+    client.post(BASE, json=_archive(), headers=agent)
+    by_commit = client.post(
+        f"{BASE}/greeter/approve", json={"commit_sha": C1, "content_hash": H1}, headers=agent
+    )
+    assert (by_commit.status_code, by_commit.json()["reason"]) == (409, "pin-mismatch")
+    ok = client.post(
+        f"{BASE}/greeter/approve",
+        json={"bytes_sha256": ZIP_SHA, "content_hash": H1},
+        headers=agent,
+    )
+    assert ok.status_code == 200, ok.text
+    client.post(f"{BASE}/greeter/enabled", json={"enabled": True}, headers=agent)
+
+    pending = {
+        **_pending(),
+        "ref": "",
+        "fetch_url": "https://files.test/greeter.zip",
+        "fetch_path": "greeter-1.0",
+        "pin_kind": "bytes",
+        "bytes_sha256": OTHER_SHA,
+    }
+    del pending["commit_sha"]
+    unheld = client.post(f"{BASE}/greeter/pending", json=pending, headers=agent)
+    assert (unheld.status_code, unheld.json()["reason"]) == (409, "mirror-missing")
+    _mirror(client, agent, OTHER)
+    staged = client.post(f"{BASE}/greeter/pending", json=pending, headers=agent)
+    assert staged.status_code == 200, staged.text
+    assert (staged.json()["pending_pin_kind"], staged.json()["pending_bytes_sha256"]) == (
+        "bytes",
+        OTHER_SHA,
+    )
+    # The current pin is the one that loads until the re-pin is approved.
+    assert staged.json()["bytes_sha256"] == ZIP_SHA
+    same = {**pending, "bytes_sha256": ZIP_SHA, "content_hash": H1}
+    again = client.post(f"{BASE}/greeter/pending", json=same, headers=agent)
+    assert (again.status_code, again.json()["reason"]) == (409, "package-pinned")
+    a_commit = _pending()
+    refused = client.post(f"{BASE}/greeter/pending", json=a_commit, headers=agent)
+    assert refused.status_code == 422, refused.text
+
+    approved = client.post(
+        f"{BASE}/greeter/approve",
+        json={"bytes_sha256": OTHER_SHA, "content_hash": H2},
+        headers=agent,
+    )
+    assert approved.status_code == 200, approved.text
+    row = approved.json()
+    assert (row["bytes_sha256"], row["pending_bytes_sha256"], row["pending_pin_kind"]) == (
+        OTHER_SHA,
+        None,
+        None,
+    )
+    # From the same place: still enabled.
+    assert row["enabled"] is True
+    neither = client.post(f"{BASE}/greeter/approve", json={"content_hash": H2}, headers=agent)
+    assert neither.status_code == 422
+
+
+def test_a_mirror_no_pin_names_is_released_after_its_grace(
+    client: TestClient, agent: dict[str, str], db: Any
+) -> None:
+    _mirror(client, agent, ZIP)
+    _mirror(client, agent, OTHER)
+    client.post(BASE, json=_archive(), headers=agent)
+    _age_holds(db)
+    client.post(BASE, json=_install("other"), headers=agent)
+    assert _held(db) == [f"greeter/{ZIP_SHA}"]
+    # Released once the package that named it is gone.
+    client.post(f"{BASE}/greeter/delete", headers=agent)
+    _age_holds(db)
+    client.post(f"{BASE}/other/delete", headers=agent)
+    assert _held(db) == []
+
+
+def test_a_mirror_is_held_for_the_package_it_was_sent_for(
+    client: TestClient, agent: dict[str, str]
+) -> None:
+    # Sent for "other": "greeter" cannot pin it until it is sent for "greeter" too.
+    _mirror(client, agent, ZIP, name="other")
+    refused = client.post(BASE, json=_archive(), headers=agent)
+    assert (refused.status_code, refused.json()["reason"]) == (409, "mirror-missing")
+    _mirror(client, agent, ZIP)
+    assert client.post(BASE, json=_archive(), headers=agent).status_code == 201
+
+
+# The previous build's statements (origin/main before #6935,
+# `api/crud_agent_packages.py`), word for word: during a roll its API pods run them against
+# the table this file's migration changed.
+OLD_PENDING = (
+    "UPDATE ai_plugin_packages SET pending_ref = %s, pending_fetch_url = %s,"
+    " pending_fetch_path = %s, pending_commit_sha = %s, pending_content_hash = %s,"
+    " pending_files = %s, pending_review = %s, updated_at = now()"
+    " WHERE name = %s RETURNING *"
+)
+OLD_DISCARD = (
+    "UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL,"
+    " pending_fetch_path = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,"
+    " pending_files = NULL, pending_review = NULL, updated_at = now()"
+    " WHERE name = %s RETURNING *"
+)
+OLD_APPROVE = (
+    "UPDATE ai_plugin_packages SET enabled = enabled AND NOT %s,"
+    " source_ref = pending_ref, fetch_url = pending_fetch_url,"
+    " fetch_path = pending_fetch_path, commit_sha = pending_commit_sha,"
+    " content_hash = pending_content_hash, files = pending_files,"
+    " review = pending_review, approved_at = now(), allow_refused = %s,"
+    " pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,"
+    " pending_commit_sha = NULL, pending_content_hash = NULL,"
+    " pending_files = NULL, pending_review = NULL, updated_at = now()"
+    " WHERE name = %s RETURNING *"
+)
+
+
+def _old_pending(db: Any, name: str = "greeter") -> None:
+    body = _pending(name)
+    db.execute(
+        OLD_PENDING,
+        (
+            body["ref"],
+            body["fetch_url"],
+            body["fetch_path"],
+            body["commit_sha"],
+            body["content_hash"],
+            Jsonb(body["files"]),
+            Jsonb(body["review"]),
+            name,
+        ),
+    )
+
+
+def test_the_previous_builds_repin_discard_and_approve_pass_the_checks(
+    client: TestClient, agent: dict[str, str], db: Any
+) -> None:
+    client.post(BASE, json=_install(), headers=agent)
+    # An old pod's re-pin: no pending_pin_kind. This build reads it as a commit re-pin.
+    _old_pending(db)
+    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
+    assert (row["pending_pin_kind"], row["pending_commit_sha"]) == ("commit", C2)
+    # An old pod's discard of it, and of one this build stored (pending_pin_kind set).
+    db.execute(OLD_DISCARD, ("greeter",))
+    assert client.post(f"{BASE}/greeter/pending", json=_pending(), headers=agent).status_code == 200
+    db.execute(OLD_DISCARD, ("greeter",))
+    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
+    # A kind left over with no re-pin means nothing.
+    assert (row["pending_pin_kind"], row["pending_content_hash"]) == (None, None)
+    # An old pod's re-pin over the leftover kind, then its approve.
+    _old_pending(db)
+    db.execute(OLD_APPROVE, (False, False, "greeter"))
+    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
+    assert (row["pin_kind"], row["commit_sha"], row["content_hash"]) == ("commit", C2, H2)
+    assert row["pending_pin_kind"] is None
+    # This build approves an old pod's re-pin by its commit, and writes the kind itself.
+    _old_pending(db, "greeter")
+    db.execute(
+        "UPDATE ai_plugin_packages SET pending_commit_sha = %s, pending_content_hash = %s"
+        " WHERE name = 'greeter'",
+        (C1, H1),
+    )
+    approved = client.post(
+        f"{BASE}/greeter/approve", json={"commit_sha": C1, "content_hash": H1}, headers=agent
+    )
+    assert approved.status_code == 200, approved.text
+    assert (approved.json()["pin_kind"], approved.json()["commit_sha"]) == ("commit", C1)
+
+
+def test_the_previous_builds_approve_never_leaves_a_bytes_pin_with_a_commit(
+    client: TestClient, agent: dict[str, str], db: Any
+) -> None:
+    # A marketplace-url entry pinned to bytes, with a commit re-pin an old pod stored.
+    _mirror(client, agent, ZIP)
+    url_entry = {
+        **_archive(),
+        "source_kind": "marketplace-url",
+        "source_url": "https://plugins.test/marketplace.json",
+        "marketplace_entry": "greeter",
+    }
+    assert client.post(BASE, json=url_entry, headers=agent).status_code == 201
+    _old_pending(db)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        db.execute(OLD_APPROVE, (False, False, "greeter"))
+    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
+    assert (row["pin_kind"], row["bytes_sha256"], row["commit_sha"]) == ("bytes", ZIP_SHA, None)
+    # This build approves it as the commit pin it is.
+    approved = client.post(
+        f"{BASE}/greeter/approve", json={"commit_sha": C2, "content_hash": H2}, headers=agent
+    )
+    assert approved.status_code == 200, approved.text
+    assert (approved.json()["pin_kind"], approved.json()["bytes_sha256"]) == ("commit", None)
+    # An old pod's discard of a bytes re-pin would leave its sha256 behind: refused.
+    _mirror(client, agent, OTHER)
+    pending = {
+        **_pending(),
+        "ref": "",
+        "pin_kind": "bytes",
+        "bytes_sha256": OTHER_SHA,
+    }
+    del pending["commit_sha"]
+    assert client.post(f"{BASE}/greeter/pending", json=pending, headers=agent).status_code == 200
+    with pytest.raises(psycopg.errors.CheckViolation):
+        db.execute(OLD_DISCARD, ("greeter",))

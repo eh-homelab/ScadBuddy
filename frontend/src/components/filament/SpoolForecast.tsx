@@ -1,9 +1,10 @@
 import { TriangleAlertIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router'
 import { ApiError } from '../../api/client'
 import { getForecast, type Forecast, type Spool, type TypeForecast } from '../../api/filament'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { niceMax } from './charts/scale'
+import { EntityLink } from './EntityLink'
 import { TD, TH } from './formClasses'
 import { burnText, byReorder, bySpoolEmpty, dayText } from './forecastText'
 import { RgbaSwatch } from './RgbaSwatch'
@@ -67,11 +68,11 @@ export function TypeForecastTable({ types, windowDays }: { types: readonly TypeF
             {rows.map((row) => (
               <tr key={row.type_id} data-type={row.type_id} className="border-t">
                 <td className={TD}>
-                  <Link to={`/filament/types/${encodeURIComponent(row.type_id)}`} className="font-medium hover:underline">
+                  <EntityLink to={filamentLinks.type(row.type_id)} className="font-medium">
                     {row.label}
-                  </Link>
+                  </EntityLink>
                   <span className="block text-[12px] text-muted-foreground">
-                    {row.material ?? 'No material'}, {row.spools} {row.spools === 1 ? 'spool' : 'spools'}
+                    {row.material ? <EntityLink to={filamentLinks.catalog('materials')}>{row.material}</EntityLink> : 'No material'}, {row.spools} {row.spools === 1 ? 'spool' : 'spools'}
                     {row.low_stock && row.spools > 0 ? ', all low' : ''}
                   </span>
                   {/* Narrower than the table's 44 rem, its container scrolls sideways, so the badge sits here, in view (R-T8-6, R-T8-12). */}

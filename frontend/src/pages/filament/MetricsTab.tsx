@@ -2,7 +2,17 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../../components/ui/collapsible'
 import { ApiError } from '../../api/client'
-import { getForecast, getMetrics, getPurchasingMetrics, type Forecast, type InventoryMetrics, type PurchasingMetrics } from '../../api/filament'
+import {
+  getForecast,
+  getMaterialNumberStats,
+  getMetrics,
+  getPurchasingMetrics,
+  type Forecast,
+  type InventoryMetrics,
+  type MaterialNumberStats,
+  type PurchasingMetrics,
+} from '../../api/filament'
+import { MaterialNumberTable } from '../../components/filament/MaterialNumberTable'
 import { BarList } from '../../components/filament/charts/BarList'
 import { ColumnChart, type Column, type ColumnSeries } from '../../components/filament/charts/ColumnChart'
 import { LineChart } from '../../components/filament/charts/LineChart'
@@ -33,8 +43,27 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { addDecimals } from '../../lib/decimal'
 import { cn } from '@/lib/utils'
+import { filamentLinks } from '../../lib/filamentLinks'
+import { EntityLink } from '../../components/filament/EntityLink'
 
 const DIMENSION_TITLES: Record<Dimension, string> = { material: 'Material', brand: 'Brand', type: 'Type', supplier: 'Supplier', location: 'Location' }
+
+/** A dimension value's page (#6869): its catalog, type, supplier, or a place's page; none for "none" (no key). */
+function dimensionHref(dimension: Dimension, key: string | null | undefined): string | null {
+  if (!key) return null
+  switch (dimension) {
+    case 'material':
+      return filamentLinks.catalog('materials')
+    case 'brand':
+      return filamentLinks.catalog('brands')
+    case 'type':
+      return filamentLinks.type(key)
+    case 'supplier':
+      return filamentLinks.supplier(key)
+    case 'location':
+      return filamentLinks.location(key)
+  }
+}
 const BUCKET_TITLES: Record<MetricsBucket, string> = { week: 'Weeks', month: 'Months' }
 const WASTE_TITLES = { material: 'By material', type: 'By type', printer: 'By printer' } as const
 /**
@@ -172,7 +201,12 @@ function Consumption({ metrics, order }: { metrics: InventoryMetrics; order: rea
                 {metrics.consumption.map((row) => (
                   <tr key={`${row.bucket}|${row.key}`} className="border-t">
                     <td className={TD}>{bucketTitle(row.bucket, bucket)}</td>
-                    <td className={TD}>{row.label}</td>
+                    <td className={TD}>
+                      {(() => {
+                        const href = dimensionHref(dimension, row.key)
+                        return href ? <EntityLink to={href}>{row.label}</EntityLink> : row.label
+                      })()}
+                    </td>
                     <td className={`${TD} text-right tabular-nums`}>{g(row.used_g)}</td>
                     <td className={`${TD} text-right tabular-nums`}>{g(row.wasted_g)}</td>
                   </tr>
@@ -203,7 +237,8 @@ export function MetricsTab() {
   const [rank, setRank] = useState<{ dimension: Dimension; order: string[] } | null>(null)
   const [purchasing, setPurchasing] = useState<PurchasingMetrics | null>(null)
   const [forecast, setForecast] = useState<Forecast | null>(null)
-  const [errors, setErrors] = useState<Partial<Record<'metrics' | 'rank' | 'purchasing' | 'forecast', string>>>({})
+  const [numbers, setNumbers] = useState<MaterialNumberStats | null>(null)
+  const [errors, setErrors] = useState<Partial<Record<'metrics' | 'rank' | 'purchasing' | 'forecast' | 'numbers', string>>>({})
 
   const q: MetricsQuery = params.size === 0 && restore ? restore : parseMetricsQuery(params)
 
@@ -266,6 +301,21 @@ export function MetricsTab() {
       live = false
     }
   }, [range, bucket, dimension])
+
+  useEffect(() => {
+    let live = true
+    getMaterialNumberStats(metricsRange({ range, bucket: 'month', dimension: 'material' })).then(
+      (found) => {
+        if (!live) return
+        setNumbers(found)
+        setErrors(({ numbers: _gone, ...rest }) => rest)
+      },
+      (cause) => live && setErrors((now) => ({ ...now, numbers: message(cause, 'The material number stats') })),
+    )
+    return () => {
+      live = false
+    }
+  }, [range])
 
   useEffect(() => {
     let live = true
@@ -373,6 +423,15 @@ export function MetricsTab() {
         </Section>
       </div>
 
+      <Section
+        id="metrics-material-numbers"
+        title="By material number"
+        note={`Each type code (Bambuddy's material number), with its archived types: spools in stock, grams on hand and their value at cost, and the grams its prints used, ${numbers ? `${dayText(numbers.since)} to ${dayText(numbers.until)}` : span}.`}
+      >
+        {problem(errors.numbers)}
+        {numbers ? <MaterialNumberTable stats={numbers} money={money} /> : !errors.numbers && loading}
+      </Section>
+
       <Section id="metrics-waste" title="Waste" note={`Grams of failed and cancelled prints, ${span}, and their share of what was used.`}>
         {metrics ? (
           <div className="grid gap-6 sm:grid-cols-3">
@@ -417,8 +476,10 @@ export function MetricsTab() {
                   <li key={`${series.type_id}|${series.supplier_id}|${series.currency}`} className="flex min-w-0 flex-col gap-1">
                     <div className="flex items-baseline justify-between gap-3 text-[13px]">
                       <span className="min-w-0 truncate" title={name}>
-                        {series.type_label}
-                        <span className="block truncate text-[12px] text-muted-foreground">{series.supplier_name}</span>
+                        <EntityLink to={filamentLinks.type(series.type_id)}>{series.type_label}</EntityLink>
+                        <span className="block truncate text-[12px] text-muted-foreground">
+                          <EntityLink to={filamentLinks.supplier(series.supplier_id)}>{series.supplier_name}</EntityLink>
+                        </span>
                       </span>
                       <span className="shrink-0 font-medium tabular-nums">{money.format(last.price_per_kg, series.currency)}/kg</span>
                     </div>
@@ -462,8 +523,12 @@ export function MetricsTab() {
                   {spend.map((row) => (
                     <tr key={`${row.month}|${row.supplier_id}|${row.currency}`} data-currency={row.currency} className="border-t">
                       <td className={TD}>{bucketTitle(row.month, 'month')}</td>
-                      <td className={TD}>{row.supplier_name}</td>
-                      <td className={`${TD} text-right tabular-nums`}>{row.invoices}</td>
+                      <td className={TD}>
+                        <EntityLink to={filamentLinks.supplier(row.supplier_id)}>{row.supplier_name}</EntityLink>
+                      </td>
+                      <td className={`${TD} text-right tabular-nums`}>
+                        <EntityLink to={filamentLinks.supplierInvoices(row.supplier_id)}>{row.invoices}</EntityLink>
+                      </td>
                       <td className={`${TD} text-right tabular-nums`}>{money.format(row.total, row.currency)}</td>
                     </tr>
                   ))}

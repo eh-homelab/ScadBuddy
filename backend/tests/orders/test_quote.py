@@ -39,6 +39,7 @@ from scadbuddy.orders.quote import (
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
+    SlotColours,
     SlotPresets,
     ensure_output,
     operation_output_id,
@@ -52,6 +53,7 @@ from scadbuddy.orders.quote import (
 )
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.storefront.held_file import HeldFile
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.store.local import LocalBlobStore
@@ -162,6 +164,8 @@ class FakeSlicer:
         self.subjects: list[str] = []
         #: Each start's ``slot_presets`` (#6574).
         self.slot_presets: list[SlotPresets | None] = []
+        #: Each library file start's request and keywords (#6710).
+        self.library_starts: list[dict[str, Any]] = []
 
     async def start(
         self,
@@ -176,9 +180,24 @@ class FakeSlicer:
         return [PreviewStarted(job_id=plate, plate_id=plate) for plate in sorted(self.files)]
 
     async def start_library(
-        self, file_id: int, request: SliceQuoteRequest, subject: str
+        self,
+        file_id: int,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
+        slot_colours: SlotColours | None = None,
+        held: HeldFile | None = None,
     ) -> list[PreviewStarted]:
         self.subjects.append(f"{subject} file {file_id}")
+        self.library_starts.append(
+            {
+                "request": request,
+                "slot_presets": slot_presets,
+                "slot_colours": slot_colours,
+                "held": held,
+            }
+        )
         return [PreviewStarted(job_id=plate, plate_id=plate) for plate in sorted(self.files)]
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:

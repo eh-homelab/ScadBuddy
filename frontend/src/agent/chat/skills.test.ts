@@ -25,7 +25,11 @@ const builtIn = (name: string, skills: string[], enabled = true): BuiltInPluginP
 const installed = (name: string, skills: string[], over: Partial<PluginPackage> = {}): PluginPackage => ({
   name,
   source: { kind: 'git', url: 'https://example.com/p.git', ref: 'main', path: '' },
+  pin_kind: 'commit',
   commit_sha: 'a'.repeat(40),
+  bytes_sha256: null,
+  version: null,
+  not_offered: null,
   content_hash: 'sha256:x',
   review: review(name, skills),
   approved: true,

@@ -90,7 +90,7 @@ projects (§8.1), which is the only place the word "project" appears in an order
 | F12 | Trigger event kinds are exactly `render.finished` and `model.changed`, matched per template `slug`; `trigger()` falls through to `RenderFinished` for any kind but `model.changed`. A fire runs as the trigger's creator with a per-run grant seeded from the standing grant. | `flow_triggers/models.py:21,114`, `flow_triggers/events.py:30`, `flow_triggers/store.py:343-352,499`, `workflows/flow_tools.py:1159-1190`, `flow_triggers/fire.py:49,100-189` |
 | F13 | Grant rules bound `queue_print`, `arrange` and `tool` by printers, model slugs, library files, `max_prints`, `max_filament_g`, `max_calls` and pointer-bounded `args`; the vocabulary is closed and never reads inputs. | `flows/grants.py:27,70`, 10-11 spec §3 |
 | F14 | Template-owned UIs: the loader (dynamic `import()`, a shadow root, a 15 s mount deadline, fallback to the form) is module-agnostic; Host API v1 is one template's inputs (`inputs.get/set/subscribe`, `schema`, `files.url`, `generate`, `openPrint`, `presets`, `describe`), the serving route is `models/{slug}/ui/**` with suffix and path checks, and the page's CSP is `script-src 'self'; connect-src 'self'`, so a module may call any `/api/v1` route as the user. | `frontend/src/template-ui/host.ts:19-151`, `TemplateUi.tsx:168-299`, `api/template_ui.py:33-146`, `api/static.py:197-211` |
-| F15 | The one JSON-Schema form in the frontend is the flow inputs form: a closed subset (scalars, arrays of scalars, enum, bounds), validated by `flows/inputs.py`. | `frontend/src/lib/flowInputs.ts:35-60`, `components/flows/inputsForm.tsx:10-28`, `flows/inputs.py:1-116` |
+| F15 | The one JSON-Schema form in the frontend is the flow inputs form: a closed subset (scalars, arrays of scalars, enum, bounds), validated by `flows/inputs.py` (its schema check moved to `core/input_schema.py`, #5701). | `frontend/src/lib/flowInputs.ts:35-60`, `components/flows/inputsForm.tsx:10-28`, `flows/inputs.py:1-116` |
 | F16 | Operations: a feature registers kinds by exporting `OPERATION_KINDS` from `scadbuddy/<feature>/operations.py`; a route runs one through `run_operation` with an `Idempotency-Key`; activity kinds the same way through `ACTIVITY_KINDS`; a service is a discovered `Component`. | backend/CLAUDE.md "Layout" (operations, activity, components) |
 
 ## 3. The record
@@ -814,7 +814,8 @@ and a new attempt returns it to `approved`.
 
 A new table `attachments`, keyed by subject, is the "attach media to X" facility F9
 says does not exist. (As built it is `order_attachments`, renamed by #4678 so it does
-not read as a print's `print_attachments`.)
+not read as a print's `print_attachments`, then `entity_attachments` by #6950, which
+keeps a file on any entity; an order's files are its rows with an `order_id`.)
 
 **As built (#4251, the order-entry slice, ahead of the print path).** Any file may be
 attached to the order (`order:<id>`) or to a line item (`order_item:<id>`); attempts'

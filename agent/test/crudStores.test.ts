@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { crudUpsertActivityKinds } from '../src/activity/kinds.js'
-import { CrudReadError } from '../src/api/crudRead.js'
-import { crudCall, CrudPathError, gated, segment, STORE_AREAS, TABS_PER_CALL, UUID_SEGMENT } from '../src/api/crudStores.js'
+import { backendDropped, CrudReadError } from '../src/api/crudRead.js'
+import { crudCall, CrudPathError, segment, STORE_AREAS, TABS_PER_CALL, UUID_SEGMENT } from '../src/api/crudStores.js'
 import { CrudTokenStore, hashToken, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { CrudPairingStore, hashCode, PairingError } from '../src/bridge/pairings.js'
 import { CrudSessionTabStore } from '../src/bridge/sessionTabs.js'
@@ -250,7 +250,7 @@ class FakeNotifyApi {
 
 describe('the small stores through CRUD routes (#5299 step 5)', () => {
   it('lists every small store area the backend serves', () => {
-    expect([...STORE_AREAS]).toEqual(['activity-kinds', 'browser-origins', 'bridge-tabs', 'pairings', 'mcp-tokens', 'notify', 'access', 'plugin-sessions', 'plugins', 'plugin-packages'])
+    expect([...STORE_AREAS]).toEqual(['activity-kinds', 'browser-origins', 'bridge-tabs', 'pairings', 'mcp-tokens', 'notify', 'access', 'plugin-sessions', 'plugins', 'plugin-packages', 'package-mirrors', 'plugin-feeds', 'hosted-plugins'])
   })
 
   it('upserts the activity kinds in one call', async () => {
@@ -260,23 +260,16 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     expect(api.seen.map((s) => `${s.method} ${s.path}`)).toEqual(['POST /activity-kinds'])
   })
 
-  it("keeps a session's approved origins on the API once the area is listed", async () => {
+  it("keeps a session's approved origins on the API", async () => {
     const api = new FakeApi()
-    let listed = false
-    // The SQL side is never reached while the area is listed: a Sql that throws shows it.
-    const noSql = (() => {
-      throw new Error('SQL used')
-    }) as never
-    const origins = new BrowserOrigins(noSql, undefined, { crud: new CrudSessionOrigins(target(api)), use: () => listed })
-    await expect(origins.approved(SESSION)).rejects.toThrow('SQL used')
-    listed = true
+    const origins = new BrowserOrigins(undefined, new CrudSessionOrigins(target(api)))
     expect(await origins.approve(SESSION, 'https://example.com', 'session')).toBe(true)
     expect(await origins.approve(SESSION, 'https://example.com', 'once')).toBe(true)
     expect(await origins.approved(SESSION)).toEqual(new Map([['https://example.com', 'session']]))
     const [row] = await origins.listApproved()
     expect(row).toEqual({ session_id: SESSION, title: 'Chat', origin: 'https://example.com', scope: 'session', approved_at: '2026-11-15T07:35:00.123Z' })
     expect(await origins.revoke(SESSION, 'https://example.com')).toBe(true)
-    // A session id that is not one is answered here, as the SQL store answers it.
+    // A session id that is not one is answered here, with no call.
     expect(await origins.approved('not-a-uuid')).toEqual(new Map())
   })
 
@@ -422,18 +415,10 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     expect(await push.unsubscribe('https://push.example/1')).toBe(true)
   })
 
-  it('keeps notification channels on the API with no KEK in this process, once it serves area notify', async () => {
+  it('keeps notification channels on the API with no KEK in this process', async () => {
     const api = new FakeNotifyApi()
-    let listed = false
-    const noSql = (() => {
-      throw new Error('SQL used')
-    }) as never
     const resolve = () => Promise.resolve(['203.0.113.5'])
-    const channels = new ChannelStore(noSql, undefined, resolve, { crud: new CrudChannelRows({ baseUrl: BASE, fetch: api.fetch }), use: () => listed })
-    // No KEK and no area yet: the routes answer "unavailable".
-    expect(channels.available()).toBe(false)
-    listed = true
-    expect(channels.available()).toBe(true)
+    const channels = new ChannelStore(new CrudChannelRows({ baseUrl: BASE, fetch: api.fetch }), resolve)
 
     const id = await channels.create({ kind: 'home_assistant', name: 'HA', url: 'https://ha.example/', target: 'mobile_app_x', token: 'long-lived-token-1234' })
     const [view] = await channels.list()
@@ -443,22 +428,12 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     const rename = api.seen.find((s) => s.path.endsWith('/update'))!
     expect(rename.body).toEqual({ kind: 'home_assistant', name: 'Home', url: 'https://ha.example', target: 'mobile_app_x', enabled: true, keep_token: true })
     expect((await channels.open(id))?.token).toBe('long-lived-token-1234')
-    // Moving it needs a new token, as over SQL.
+    // Moving it needs a new token.
     await expect(channels.update(id, { url: 'https://other.example' })).rejects.toThrow(/long-lived access token/)
     expect((await channels.enabled()).map((c) => c.id)).toEqual([id])
     await channels.record(id, 'HTTP 500')
     expect((await channels.list())[0]?.last_error).toBe('HTTP 500')
     expect(await channels.delete(id)).toBe(true)
-  })
-
-  it('picks the CRUD store per call once the area is listed', async () => {
-    let listed = false
-    const sql = { name: () => 'sql' }
-    const crud = { name: () => 'crud' }
-    const store = gated(sql, crud, () => listed)
-    expect(store.name()).toBe('sql')
-    listed = true
-    expect(store.name()).toBe('crud')
   })
 
   it("counts only the route's own answer: a proxy's is refused, and an abort stops the wait", async () => {
@@ -470,5 +445,60 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     const call = new CrudSessionTabStore({ baseUrl: BASE, fetch: never }).get(SESSION, stop.signal)
     stop.abort(new Error('the call gave up'))
     await expect(call).rejects.toThrow('the call gave up')
+  })
+
+  it('sends a GET or an idempotent call again when the connection drops, never another write, and an abort stops the wait (#6994)', async () => {
+    const reset = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) })
+    const methods: string[] = []
+    /** Drops the first call of each method, then answers as the route. */
+    const flaky: typeof fetch = async (_input, init) => {
+      const method = init?.method ?? 'GET'
+      methods.push(method)
+      if (methods.filter((m) => m === method).length === 1) throw reset()
+      return new Response('{"ok":true}', { headers: { 'x-scadbuddy-crud': '1' } })
+    }
+    expect(await (await crudCall(flaky, BASE, 'a read', '/session-tabs')).json()).toEqual({ ok: true })
+    await expect(crudCall(flaky, BASE, 'a write', '/session-tabs', { method: 'PUT', body: { a: 1 } })).rejects.toThrow('the backend could not be reached (a write: UND_ERR_SOCKET)')
+    expect(await (await crudCall(flaky, BASE, 'a checked read', '/session-tabs', { body: { a: 1 }, idempotent: true })).json()).toEqual({ ok: true })
+    expect(methods).toEqual(['GET', 'GET', 'PUT', 'POST', 'POST'])
+    const stop = new AbortController()
+    const dropping: typeof fetch = async () => {
+      stop.abort(new Error('the call gave up'))
+      throw reset()
+    }
+    await expect(crudCall(dropping, BASE, 'a read', '/session-tabs', { signal: stop.signal })).rejects.toThrow('the call gave up')
+  })
+
+  it('never sends a GET again after a refusal, which still counts as a dropped connection the turn is placed again for (#6994)', async () => {
+    let calls = 0
+    const refused: typeof fetch = async () => {
+      calls += 1
+      throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) })
+    }
+    const error = await crudCall(refused, BASE, 'a read', '/session-tabs').catch((e: unknown) => e)
+    expect(calls).toBe(1)
+    expect((error as CrudReadError).message).toBe('the backend is not up yet (a read: ECONNREFUSED)')
+    expect(backendDropped(error)).toBe(true)
+  })
+
+  it('keeps one deadline for a call and all its retries: one that fires during a try ends the call there (#6994)', async () => {
+    const deadline = new AbortController()
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal)
+    let calls = 0
+    // The deadline fires while the first try is out; the API then drops the connection.
+    const dropping: typeof fetch = async () => {
+      calls += 1
+      deadline.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+      throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) })
+    }
+    try {
+      const error = await crudCall(dropping, BASE, 'a read', '/session-tabs', { timeoutMs: 600 }).catch((e: unknown) => e)
+      expect(timeout).toHaveBeenCalledOnce()
+      expect(timeout).toHaveBeenCalledWith(600)
+      expect(calls).toBe(1)
+      expect((error as CrudReadError).message).toBe('the backend could not be reached (a read: UND_ERR_SOCKET)')
+    } finally {
+      timeout.mockRestore()
+    }
   })
 })

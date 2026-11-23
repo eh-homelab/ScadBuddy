@@ -148,6 +148,7 @@ from scadbuddy.payments.models import (
     ProviderEvent,
 )
 from scadbuddy.payments.provider import EventTooEarlyError
+from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
@@ -425,6 +426,10 @@ class NewModelItem(NewItem):
 @dataclass(frozen=True, kw_only=True)
 class NewLibraryItem(NewItem):
     file: LibraryFileRef
+    #: The slots a storefront line's customer chose (#6710 §10.1), from 0: each with its
+    #: colour and its price-book filament. Empty for a back-office add, whose slots come
+    #: from its first quote (`library_colours`).
+    colours: tuple[ColourSlot, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1033,16 +1038,21 @@ class Lifecycle:
     def _firm_quotes(
         self, conn: Conn, order: Order, by: Actor, firm: Mapping[str, FirmLine]
     ) -> tuple[Order, list[tuple[OrderItem, Quote]] | None]:
-        """A `storefront` quote of each open model item that ``firm`` prices in the
-        order's currency (#6153), for the item's quantity and its current revision: the
-        item is `quoted`. The order as it then stands, and each item with its quote when
-        every open item has one, else None (the shop prices the others by hand). A line
+        """A `storefront` quote of each open model or library file item (#6710) that
+        ``firm`` prices in the order's currency (#6153), for the item's quantity and its
+        current revision (none for a library file item): the item is `quoted`. The order as
+        it then stands, and each item with its quote when every open item has one, else
+        None (the shop prices the others by hand). A line
         ``firm`` does not name, a request among them, has no quote."""
         items = [i for i in self.store.items(order.id, conn=conn) if i.status != "cancelled"]
         quoted: list[tuple[OrderItem, Quote]] = []
         for item in items:
             line = firm.get(item.id)
-            if line is None or item.kind != "model" or line.currency != order.currency:
+            if (
+                line is None
+                or item.kind not in ("model", "library_file")
+                or line.currency != order.currency
+            ):
                 continue
             quote = self.store.insert_quote(
                 conn,
@@ -3851,6 +3861,7 @@ class Lifecycle:
                 notes=entry.notes,
                 sku=entry.sku,
                 origin_archive_ids=entry.origin_archive_ids,
+                colours=entry.colours,
             )
             self._added(
                 conn,
@@ -5648,6 +5659,40 @@ class Lifecycle:
         if written != attempt:
             self._told(_Change(order, [(item, written.attempt)]))
         return written
+
+    def move_library_file(
+        self, order_id: str, item_id: str, by: Actor, from_id: int, to_id: int, filename: str
+    ) -> OrderItem:
+        """A storefront item's held copy put back into the library as file ``to_id``,
+        named ``filename`` there (#6710 §10.2): the item names it from now on, and the
+        audit line names both ids
+        (`item.library_file_restored`). An item that no longer names ``from_id`` (a retry
+        of the same claim moved it already) is answered as it is, nothing written. Allowed
+        on hold and on an ended order: it changes where the bytes are read, not what is
+        printed."""
+        library = "native" if is_native_id(to_id) else "bambuddy"
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            item = self.store.item(item_id, conn=conn)
+            if item is None or item.order_id != order.id or item.library_file is None:
+                raise LifecycleError(
+                    "item_not_found", f"no library file item {item_id}", not_found=True
+                )
+            moved = self.store.move_library_file(conn, item_id, from_id, to_id, filename, library)
+            if moved is None:
+                return item
+            self._event(
+                conn,
+                order,
+                by,
+                "item.library_file_restored",
+                item_id=item_id,
+                from_library_file_id=from_id,
+                library_file_id=to_id,
+                sha256=item.library_file.sha256,
+            )
+        self._told(_Change(order, [(moved, None)]))
+        return moved
 
     def attach_print(self, claim: Fulfilment, run_id: str, printer: str | None) -> Fulfilment:
         """The run a claim's print started (`print.started` on the audit line); again

@@ -1,7 +1,6 @@
-import type { Sql } from 'postgres'
 import { crudRead, wellFormed } from '../api/crudRead.js'
 import { CrudLeases, type CrudTarget } from '../api/crudStores.js'
-import type { LockClient, LockLease } from '../db.js'
+import { isDotSegment } from '../api/pathSegments.js'
 import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
 import { sessionPath } from './rows.js'
 import type { TouchedCall, TouchedSink } from './touched.js'
@@ -28,14 +27,13 @@ import type { TouchedCall, TouchedSink } from './touched.js'
 // report sends that same share again: an answer lost after the backend wrote the entry loses
 // no spend. A share the backend found under one minor unit of the order's currency (it
 // answers no entry) stays to report, with the next turn's spend; once the session is over
-// (`done`, `failed`, or `idle` with no session activity for IDLE_OVER_AFTER), such a share is
+// (`done`, `failed`, or `idle` with no session activity for an hour), such a share is
 // closed out, reported with nothing carried. A session that works again later loses nothing:
 // the closed-out spend was never carried, so it folds into the next turn's share, split equally
 // across that turn's orders. One turn's reports share one deadline (REPORT_DEADLINE_MS); what it
 // leaves waits for the next turn's end. The
 // finish activity does not wait for `report`. A session runs one report at a time across
-// replicas (a session-level advisory lock on a connection of the lock client, never one of
-// the stores', freed with it if the process dies). `record` waits at most RECORD_WAIT_MS for
+// replicas (a lease row on the API, #5299 D3, which lapses if the process dies). `record` waits at most RECORD_WAIT_MS for
 // its row, so a revision call never waits on it. `sweep` (at start and hourly, main.ts)
 // reports what a session's last turn left, for a session no turn is running, SWEEP_LIMIT
 // sessions at most, the ones tried longest ago (`tried_at`) first.
@@ -55,8 +53,8 @@ export type AssistantCostReport = {
 }
 
 /**
- * `recorded` (written now or before), `refused` (400, 404, 409 or 422 from the route: never sent
- * again), `deferred` (under one minor unit: nothing written, sent again with more spend),
+ * `recorded` (written now or before), `refused` (400, 404, 409 or 422 from the route, or an order
+ * id of `.` or `..`, refused before it is sent, #7221: never sent again), `deferred` (under one minor unit: nothing written, sent again with more spend),
  * `failed` (anything else: the same share sent again at the next report).
  */
 export type ReportAnswer = 'recorded' | 'refused' | 'deferred' | 'failed'
@@ -69,16 +67,6 @@ export const REPORT_TIMEOUT_MS = 5_000
 export const REPORT_DEADLINE_MS = 15_000
 /** The route's refusals that no later try mends: the order gone (an item gone falls back to the order), its currency or an unsubmitted cart, the body or path. */
 const FINAL_REFUSALS: ReadonlySet<number> = new Set([400, 404, 409, 422])
-/** The advisory lock a session's report holds, by `hashtextextended` of this plus the session id. */
-const LOCK_PREFIX = 'ai_session_order_costs:'
-/** How long a row waits before the sweep reports it: past any turn that could still report it. */
-export const SWEEP_AFTER = '15 minutes'
-/**
- * How long an idle session has had no activity (`ai_sessions.updated_at`, which a turn's start
- * and end move, as a handoff and other writes of the row do) before its sub-unit share is
- * closed out.
- */
-export const IDLE_OVER_AFTER = '1 hour'
 /** The most sessions one sweep reports: each may take up to REPORT_DEADLINE_MS. */
 export const SWEEP_LIMIT = 20
 /** Less time left than this, and the rest wait for the next turn's end. */
@@ -88,6 +76,8 @@ const MIN_POST_MS = 1_000
 export function crudCostPoster(backendUrl: string, fetchImpl: typeof fetch): PostCost {
   const base = backendUrl.replace(/\/+$/, '')
   return async (report, timeoutMs = REPORT_TIMEOUT_MS) => {
+    // An order id of `.` or `..` would post to another route (#7221): refused for good, never tried again.
+    if (isDotSegment(report.orderId)) return 'refused'
     try {
       const response = await fetchImpl(`${base}${ASSISTANT_COST_PATH(report.orderId)}`, {
         method: 'POST',
@@ -139,106 +129,13 @@ export interface ReportWrites {
 
 /**
  * Where a session's order-cost rows are kept and its report lock is held (#5299 step 9, part c):
- * `PgOrderCostRows`, an advisory lock on a lock-client connection, or the API's CRUD routes under
- * a lease row (`CrudOrderCostRows`, area `session-order-costs`).
+ * the API's CRUD routes under a lease row (`CrudOrderCostRows`, area `session-order-costs`).
  */
 export interface OrderCostRows {
   insert(sessionId: string, orderId: string, itemId: string): Promise<void>
   sweepSessions(limit: number): Promise<string[]>
   /** Runs `fn` holding the session's report lock; returns without running it while another holder has the lock, or with no lock to take. */
   locked(sessionId: string, fn: (writes: ReportWrites) => Promise<void>): Promise<void>
-}
-
-const SETTLE: Record<Settled, string> = {
-  reported: 'reported_at = now(), reported_usd = COALESCE(attempted_usd, 0), attempted_usd = NULL',
-  unsent: 'attempted_usd = NULL',
-  closed: 'reported_at = now(), reported_usd = 0, attempted_usd = NULL',
-}
-
-export class PgOrderCostRows implements OrderCostRows {
-  readonly #sql: Sql
-  readonly #locks: LockClient
-
-  /** `sql` is the stores' pool, short queries only; `locks` the lock client's own connections, which hold a report's lock across its posts. */
-  constructor(sql: Sql, locks: LockClient) {
-    this.#sql = sql
-    this.#locks = locks
-  }
-
-  async insert(sessionId: string, orderId: string, itemId: string): Promise<void> {
-    await this.#sql`
-      INSERT INTO ai_session_order_costs (session_id, order_id, order_item_id)
-      SELECT ${sessionId}::uuid, ${orderId}, ${itemId}
-      WHERE NOT EXISTS (SELECT 1 FROM ai_session_order_costs
-                        WHERE session_id = ${sessionId}::uuid AND order_id = ${orderId} AND reported_at IS NOT NULL)
-      ON CONFLICT DO NOTHING`
-  }
-
-  async sweepSessions(limit: number): Promise<string[]> {
-    const sessions = await this.#sql<{ session_id: string }[]>`
-      SELECT c.session_id FROM ai_session_order_costs c JOIN ai_sessions s ON s.id = c.session_id
-      WHERE c.reported_at IS NULL AND c.at < now() - ${SWEEP_AFTER}::interval
-        AND s.status NOT IN ('running', 'waiting_approval', 'waiting_input')
-      GROUP BY c.session_id ORDER BY max(c.tried_at) NULLS FIRST, min(c.at) LIMIT ${limit}`
-    return sessions.map((s) => s.session_id)
-  }
-
-  async locked(sessionId: string, fn: (writes: ReportWrites) => Promise<void>): Promise<void> {
-    // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
-    let healthy = false
-    const lease: LockLease | undefined = await this.#locks.take()
-    if (!lease) return
-    try {
-      const key = `${LOCK_PREFIX}${sessionId}`
-      const [lock] = await lease.sql<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS locked`
-      // A report already running for the session (here or on another replica) sends what
-      // this one would; what it leaves waits for the next turn's end or the sweep.
-      if (!lock?.locked) {
-        healthy = true
-        return
-      }
-      try {
-        await fn(this.#writes(sessionId))
-      } finally {
-        await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`
-        healthy = true
-      }
-    } finally {
-      lease.done(healthy)
-    }
-  }
-
-  #writes(sessionId: string): ReportWrites {
-    const sql = this.#sql
-    return {
-      begin: async () => {
-        const pending = await sql<Pending[]>`
-          SELECT order_id, order_item_id, attempted_usd FROM ai_session_order_costs
-          WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL ORDER BY at, order_id, order_item_id`
-        if (pending.length === 0) return undefined
-        await sql`UPDATE ai_session_order_costs SET tried_at = now() WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL`
-        const [row] = await sql<{ cost: number; carried: number; principal: string; over: boolean }[]>`
-          SELECT s.cost_usd AS cost, s.owner_id AS principal,
-                 (s.status IN ('done', 'failed') OR (s.status = 'idle' AND s.updated_at < now() - ${IDLE_OVER_AFTER}::interval)) AS over,
-                 (SELECT COALESCE(SUM(COALESCE(reported_usd, 0) + COALESCE(attempted_usd, 0)), 0)
-                  FROM ai_session_order_costs WHERE session_id = s.id) AS carried
-          FROM ai_sessions s WHERE s.id = ${sessionId}::uuid`
-        if (!row) return undefined
-        return { pending, cost: Number(row.cost), carried: Number(row.carried), principal: row.principal, over: row.over }
-      },
-      attempt: async (orderId, items, amountUsd) => {
-        await sql`
-          UPDATE ai_session_order_costs SET attempted_usd = ${amountUsd / items.length}
-          WHERE session_id = ${sessionId}::uuid AND order_id = ${orderId} AND order_item_id = ANY(${items})
-            AND reported_at IS NULL`
-      },
-      settle: async (orderId, outcome) => {
-        await sql`
-          UPDATE ai_session_order_costs SET ${sql.unsafe(SETTLE[outcome])}
-          WHERE session_id = ${sessionId}::uuid AND order_id = ${orderId} AND reported_at IS NULL`
-      },
-    }
-  }
 }
 
 /** The lease key of a session's report (backend agent_data/leases.py `order-cost:<id>`). */
@@ -348,8 +245,8 @@ export class OrderCosts implements TouchedSink {
   /**
    * Sends each order still to report its share: the share an earlier report sent and heard no
    * answer for, else an equal part of the session's spend not yet carried or sent. The session's
-   * report lock is held throughout (`OrderCostRows.locked`): a lock-client connection over SQL,
-   * never one of the stores', or a lease row on the API; with no lock to take, nothing is sent now
+   * report lock is held throughout (`OrderCostRows.locked`): a lease row on the API; with no
+   * lock to take, nothing is sent now
    * and the next turn's end or the sweep reports it. Never throws.
    */
   async report(sessionId: string): Promise<void> {
@@ -362,7 +259,7 @@ export class OrderCosts implements TouchedSink {
 
   /**
    * Reports the sessions no turn is running that have had orders left to report for
-   * SWEEP_AFTER, at most `sweepLimit` of them: those never tried first, then those tried
+   * 15 minutes (the API's `SWEEP_AFTER`), at most `sweepLimit` of them: those never tried first, then those tried
    * longest ago (`tried_at`), so sessions it cannot report never take every place. Never throws.
    */
   async sweep(): Promise<void> {
@@ -392,7 +289,7 @@ export class OrderCosts implements TouchedSink {
     // sent, and the backend answers it with no entry (`deferred`), which keeps it the same way.
     // Once the session is over no more spend comes: such a share is closed out, reported with
     // nothing carried, so it leaves the sweep for good. Over is `done` or `failed`, or `idle`
-    // with no session activity (`updated_at`) for IDLE_OVER_AFTER: a chat turn that ends well
+    // with no session activity (`updated_at`) for an hour (the API's `IDLE_OVER_AFTER`): a chat turn that ends well
     // leaves the session idle, and the sweep finds it there once that turn's own report has run.
     // Nothing carried means nothing lost: if the session works again, the closed-out spend is
     // still in `cost - carried`, so it folds into the next turn's share, split equally across

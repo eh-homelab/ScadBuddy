@@ -146,13 +146,13 @@ Fetches a new spool type's slicer presets per printer model and nozzle from
 ["Profile-fetch worker"](../../README.md#profile-fetch-worker-6625).
 
 - **Worker.** `python -m scadbuddy.profile_fetch` (`scadbuddy/profile_fetch/__main__.py:32`)
-  polls `profile-fetch` with the `ProfileFetch` workflow (`scadbuddy/profile_fetch/worker.py:103-104`).
+  polls `profile-fetch` with the `ProfileFetch`, `TdfpSearch` and `TdfpCreate` workflows, one activity at a time, and `profile-fetch-search` for a search's activity alone, in a slot of its own (#7062, `scadbuddy/profile_fetch/worker.py:74-109`).
   It reads the API URL, a service proof and Temporal's address, reaches the API only as
   CRUD caller `profile-fetch` (area `runs`, `scadbuddy/api/crud_areas.py:250`), and calls the
   browser service over HTTP. It refuses a database secret, the KEK and the site login
   (`scadbuddy/profile_fetch/settings.py:80-93`).
 - **Browser service.** `python -m scadbuddy.profile_fetch.browser`
-  (`scadbuddy/profile_fetch/browser.py:336`) runs Chromium on the site and holds only the
+  (`scadbuddy/profile_fetch/browser.py:364`) runs Chromium on the site and holds only the
   site login (`SCADBUDDY_TDFP_EMAIL`, `SCADBUDDY_TDFP_PASSWORD`). It refuses a service proof
   and a Temporal or API address (`scadbuddy/profile_fetch/settings.py:38`, `:96-102`).
 - **Image.** `scadbuddy-profile-fetch`, Dockerfile stage `profile-fetch` (`Dockerfile:654`).
@@ -162,12 +162,14 @@ Fetches a new spool type's slicer presets per printer model and nozzle from
 One image, two roles ([agent.md](agent.md#processes-and-roles)). The sidecar serves
 `/api/v1/ai/*` and `/mcp` in the API pod; the worker runs the turns.
 
-- **Reads.** `ENV_VARS` (`agent/src/config.ts:113-138`): today's code includes
-  `SCADBUDDY_DATABASE_URL` and the KEK, plus Temporal, a service proof and the sandbox
-  settings.
-- **Zone.** Today's code still breaks the database rule: both roles connect to Postgres
-  (#5299), though the agent's data now goes through CRUD routes and SQL remains only as a
-  fallback while the API does not list an area ([agent.md](agent.md#trust-zone)). Claude Code and plugin code run in the worker.
+- **Reads.** `ENV_VARS` (`agent/src/config.ts`): the backend URL, Temporal, a required
+  service proof and the sandbox settings. It ignores `SCADBUDDY_DATABASE_URL`,
+  `SCADBUDDY_SECRET_KEY_FILE` and `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` with one warning
+  (`IGNORED_VARS`).
+- **Zone.** Neither role holds a database client or a KEK (#5299 step 12): the agent's data
+  is the API's CRUD routes, and it is not ready until the API lists every area it wants and
+  has released the input-hash key ([agent.md](agent.md#trust-zone)). Claude Code and plugin
+  code run in the worker, with its service credential and its Temporal client.
 
 ## Session sandbox and egress proxy
 
@@ -180,7 +182,7 @@ The agent worker creates the pods through the Kubernetes API (`agent/src/sandbox
 Serves only `/healthz` and runs no Temporal worker
 (`agent-durable/src/scadbuddy_durable/__main__.py:25-37`,
 `agent-durable/src/scadbuddy_durable/worker.py:21-24`). Its Deployment is at zero replicas
-and still mounts the database secret and the KEK; see
+and mounts no database secret and no KEK; see
 [`agent-durable/CLAUDE.md`](../../agent-durable/CLAUDE.md).
 
 ## Slicer worker

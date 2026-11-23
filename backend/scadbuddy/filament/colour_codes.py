@@ -47,6 +47,13 @@ class ColourCodes:
             self._by_code = self._load()
         return self._by_code.get(code)
 
+    def all(self) -> list[ColourCode]:
+        """Every code of the table, in the table's order (the colour catalog's Bambu sync,
+        #6907)."""
+        if self._by_code is None:
+            self._by_code = self._load()
+        return list(self._by_code.values())
+
     def _load(self) -> dict[str, ColourCode]:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))

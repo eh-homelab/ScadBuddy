@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { listEvents, listSpools, type EventQuery, type LedgerRow } from '../../api/filament'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { TD, TH, when } from '../../components/filament/formClasses'
-import { grams, spoolPath } from '../../components/filament/spoolsQuery'
+import { EntityLink } from '../../components/filament/EntityLink'
+import { grams } from '../../components/filament/spoolsQuery'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
@@ -28,6 +30,7 @@ const KINDS: { id: Kind; title: string }[] = [
   { id: 'archived', title: 'Archived' },
   { id: 'restored', title: 'Restored' },
   { id: 'synced_from_bb', title: 'Synced from Bambuddy' },
+  { id: 'consumed_reset', title: 'Used counter reset' },
 ]
 const SOURCES: { id: Source; title: string }[] = [
   { id: 'person', title: 'Person' },
@@ -261,9 +264,9 @@ export function LedgerTab() {
                     <time dateTime={row.at}>{when(row.at)}</time>
                   </td>
                   <td className={TD}>
-                    <Link to={spoolPath({ id: row.spool_id })} className="font-medium underline-offset-4 hover:underline">
+                    <EntityLink to={filamentLinks.spool(row.spool_id)} className="font-medium">
                       {numberOf(row)}
-                    </Link>
+                    </EntityLink>
                   </td>
                   <td className={TD}>{titleOf(KINDS, row.kind)}</td>
                   <td className={TD}>{titleOf(SOURCES, row.source)}</td>

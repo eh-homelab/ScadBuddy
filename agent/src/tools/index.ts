@@ -6,6 +6,7 @@ import { authoringTools } from './authoring.js'
 import { browserTools } from './browser.js'
 import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
+import { entityTools } from './entities.js'
 import { farmTools } from './farm.js'
 import { printerTools } from './printers.js'
 import { fileTools } from './files.js'
@@ -15,6 +16,7 @@ import { flowTools } from './flows.js'
 import { flowTriggerTools } from './flowTriggers.js'
 import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
+import { hostedPluginTools } from './hostedPlugins.js'
 import { inspectTools } from './inspect.js'
 import { libraryTools } from './libraries.js'
 import { meshModelTools } from './meshModels.js'
@@ -80,7 +82,9 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...flowTools,
   ...flowTriggerTools,
   ...orderTools,
+  ...entityTools,
   ...storefrontTools,
+  ...hostedPluginTools,
 ]
 
 const byName = new Map<string, Tool>()

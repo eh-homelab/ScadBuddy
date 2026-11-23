@@ -259,6 +259,34 @@ def test_a_revisions_schema_carries_that_revisions_ui(
     assert bad["ui"] is None and bad["ui_error"].startswith("model.json's ui is not valid")
 
 
+def _with_pipeline(paths: DataPaths, slug: str, pipeline: object) -> None:
+    meta = json.loads(paths.model_meta(slug).read_text(encoding="utf-8"))
+    meta["pipeline"] = pipeline
+    paths.model_meta(slug).write_text(json.dumps(meta), encoding="utf-8")
+
+
+@pytest.mark.requires_git
+def test_a_revisions_schema_carries_the_params_its_pipeline_sets(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#5701 (spec 2026-11-17 §6.1): the listing editor hides them, read at the revision."""
+    before = _commit(paths, "no pipeline yet")
+    declared = {"module": "pipeline/pipeline.py", "api": 1, "sets_params": ["piece", "course"]}
+    _with_pipeline(paths, model, declared)
+    head = _commit(paths, "pipeline")
+    _with_pipeline(paths, model, {**declared, "sets_params": ["not a name"]})
+    broken = _commit(paths, "bad pipeline")
+    old = client.get(f"/api/v1/models/{model}/versions/{before}/schema")
+    assert old.status_code == 200, old.text
+    assert old.json()["pipeline_params"] == []
+    now = client.get(f"/api/v1/models/{model}/versions/{head}/schema").json()
+    assert now["pipeline_params"] == ["piece", "course"]
+    assert (
+        client.get(f"/api/v1/models/{model}/versions/{broken}/schema").json()["pipeline_params"]
+        == []
+    )
+
+
 @pytest.mark.requires_git
 def test_ui_version_moves_only_with_ui(client: TestClient, model: str, paths: DataPaths) -> None:
     """#846: a commit that leaves ``ui/`` alone keeps the interface's revision, so the

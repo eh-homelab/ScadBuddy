@@ -468,7 +468,7 @@ jobs:
       # backend's spec with uv: the spec and the generated clients are not
       # committed (#492). Same pinned action as the `freshness` job.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -536,7 +536,7 @@ jobs:
 
       # `pnpm test` runs `pnpm gen:api` first, which exports the spec with uv.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -599,7 +599,7 @@ jobs:
 
       # `pnpm gen:api` (below, and the webServer's `pnpm build` again) exports the spec with uv.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -781,7 +781,7 @@ jobs:
       # committed (#492). Same pinned action as the `freshness` job. The gate store's
       # parity test (test/gateStore.pg.test.ts) runs agent-durable's port with uv too.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -853,14 +853,20 @@ jobs:
           cache-from: type=gha,scope=agent
           cache-to: type=gha,scope=agent,mode=max
 
-      # The image's own HEALTHCHECK is the assertion, as in `image`. No
-      # database and no backend exist here, so /healthz must say AI is
-      # disabled rather than fail: that is the degraded mode spec §9 requires.
+      # The image's own HEALTHCHECK is the assertion, as in `image`. The agent holds
+      # no database and no KEK (#5299 step 12): it starts with neither, only with a
+      # service-credential proof. No backend exists here, so /healthz must say the API
+      # does not answer rather than fail. A second container sets the old database
+      # and KEK variables: it must start too and say it ignores them.
       - name: Start the agent container and check /healthz
         run: |
           set -euo pipefail
+          proof="$RUNNER_TEMP/agent-proof"
+          printf 'ci-bootstrap-secret' > "$proof"
+          chmod 0444 "$proof"
           docker run -d --name scadbuddy-agent-ci --read-only \
             --tmpfs /tmp --tmpfs /var/lib/scadbuddy-agent:uid=10001,gid=10001 \
+            -v "$proof:/run/scadbuddy/proof:ro" -e SCADBUDDY_SERVICE_BOOTSTRAP_FILE=/run/scadbuddy/proof \
             -p 18081:8081 scadbuddy-agent:ci
           status=""
           for _ in $(seq 1 30); do
@@ -878,8 +884,42 @@ jobs:
           fi
           body="$(curl --fail --silent --show-error http://127.0.0.1:18081/healthz)"
           echo "$body"
-          if ! jq -e '.status == "ok" and .ai == "disabled (no database)"' <<<"$body" >/dev/null; then
+          if ! jq -e '.status == "ok" and .ai == "unavailable (the API does not answer the agent'"'"'s CRUD areas)" and (has("secret_key") | not)' <<<"$body" >/dev/null; then
             echo "::error::unexpected /healthz body from the agent container"
+            exit 1
+          fi
+          # No SQL client ships in the image: `postgres` is a test dependency only.
+          # Exit 3 is the failed import; any other code (0, or a docker run that failed) fails the job.
+          rc=0
+          docker run --rm --entrypoint node scadbuddy-agent:ci -e "import('postgres').then(() => process.exit(0), () => process.exit(3))" || rc=$?
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::the postgres import exited $rc, not 3: the image can load the client, or the check did not run"
+            exit 1
+          fi
+          docker run -d --name scadbuddy-agent-ci-old-env --read-only \
+            --tmpfs /tmp --tmpfs /var/lib/scadbuddy-agent:uid=10001,gid=10001 \
+            -v "$proof:/run/scadbuddy/proof:ro" -e SCADBUDDY_SERVICE_BOOTSTRAP_FILE=/run/scadbuddy/proof \
+            -e SCADBUDDY_DATABASE_URL=postgresql://u:never-used@db:5432/x -e SCADBUDDY_SECRET_KEY_FILE=/nonexistent/kek \
+            scadbuddy-agent:ci
+          started=no
+          for _ in $(seq 1 30); do
+            docker logs scadbuddy-agent-ci-old-env > /tmp/old-env.log 2>&1
+            if grep -q 'listening on' /tmp/old-env.log; then started=yes; break; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' scadbuddy-agent-ci-old-env)" != true ]; then break; fi
+            sleep 1
+          done
+          logs="$(docker logs scadbuddy-agent-ci-old-env 2>&1)"
+          echo "$logs"
+          if [ "$started" != yes ]; then
+            echo "::error::the agent with the old environment exited, or did not listen within 30 s"
+            exit 1
+          fi
+          if ! grep -q 'ignores SCADBUDDY_DATABASE_URL, SCADBUDDY_SECRET_KEY_FILE' <<<"$logs" || ! grep -q 'listening on' <<<"$logs"; then
+            echo "::error::the agent did not start, or did not say it ignores the database and KEK variables"
+            exit 1
+          fi
+          if grep -q 'never-used' <<<"$logs"; then
+            echo "::error::the agent logged the ignored database URL"
             exit 1
           fi
           # The tmpfs hides the image's own claude/ and work/, so these exist
@@ -931,7 +971,7 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker rm -f scadbuddy-agent-ci scadbuddy-sandbox-ci || true
+        run: docker rm -f scadbuddy-agent-ci scadbuddy-agent-ci-old-env scadbuddy-sandbox-ci || true
 
   agent-durable:
     name: Agent-durable lint, test, image
@@ -961,7 +1001,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: agent-durable/uv.lock
@@ -1243,7 +1283,7 @@ jobs:
       # runs `pnpm gen:api`, so it is run here, with uv for the spec's export.
       - name: Set up uv
         if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -1915,7 +1955,7 @@ jobs:
       # python3 the runner already has.
       - name: Set up uv
         if: ${{ steps.select.outputs.count != '0' }}
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Run the selected verify.sh scripts
         if: ${{ steps.select.outputs.count != '0' }}
@@ -2319,7 +2359,7 @@ jobs:
       # github-actions ecosystem bumps this line.
       - name: Set up uv
         if: ${{ steps.detect.outputs.backend == 'true' }}
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -2652,7 +2692,7 @@ jobs:
           fetch-depth: 1
       # As `freshness`: the spec depends on the locked FastAPI/pydantic, not on uv.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock

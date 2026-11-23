@@ -13,7 +13,6 @@ const plugin = (value: string) => ({ header: { name: 'Authorization', value } })
 describe('readPluginSecrets', () => {
   it('gathers header values and OAuth secrets, once each, and leaves out a value under the minimum', async () => {
     const got = await readPluginSecrets({
-      kek: undefined,
       plugins: { enabled: () => Promise.resolve({ plugins: [plugin('Bearer header-token-1'), plugin('abc')], problems: [] }) },
       oauth: { storedSecrets: () => Promise.resolve(['oauth-access-1', 'Bearer oauth-access-1', 'xy', 'oauth-access-1']) },
     })
@@ -23,7 +22,6 @@ describe('readPluginSecrets', () => {
   it("reads every enabled package's header secrets from the installer, not from a turn's load (#5485)", async () => {
     const pins = [{ name: 'a' }, { name: 'b' }] as unknown as PackagePin[]
     const got = await readPluginSecrets({
-      kek: undefined,
       packages: {
         store: { enabledPins: () => Promise.resolve(pins) },
         installer: { headerSecrets: (pin) => Promise.resolve(pin.name === 'a' ? ['Bearer pkg-a-token', 'pkg-a-token'] : ['xy']) },
@@ -33,7 +31,6 @@ describe('readPluginSecrets', () => {
     // One package whose files cannot be had fails the read: the list fails closed.
     await expect(
       readPluginSecrets({
-        kek: undefined,
         packages: { store: { enabledPins: () => Promise.resolve(pins) }, installer: { headerSecrets: () => Promise.reject(new Error('fetch failed')) } },
       }),
     ).rejects.toThrow('fetch failed')
@@ -72,7 +69,7 @@ describe('toolSecrets', () => {
 
   it(`reuses one read for ${PLUGIN_SECRETS_CACHE_MS} ms, then reads again`, async () => {
     const { plugins, reads } = counted('Bearer first-token', 'Bearer second-token')
-    const { secrets } = toolSecrets({ kek: undefined, plugins })
+    const { secrets } = toolSecrets({ plugins })
     expect(await secrets()).toContain('Bearer first-token')
     vi.advanceTimersByTime(PLUGIN_SECRETS_CACHE_MS)
     expect(await secrets()).toContain('Bearer first-token')
@@ -84,7 +81,7 @@ describe('toolSecrets', () => {
 
   it('drops a read that failed, so the next call reads again', async () => {
     const { plugins, reads } = counted(new Error('store down'), 'Bearer after-token')
-    const { secrets } = toolSecrets({ kek: undefined, plugins })
+    const { secrets } = toolSecrets({ plugins })
     await expect(secrets()).rejects.toThrow('store down')
     expect(await secrets()).toContain('Bearer after-token')
     expect(reads()).toBe(2)
@@ -92,7 +89,7 @@ describe('toolSecrets', () => {
 
   it('reads fresh for a pick, past the cache and without filling it', async () => {
     const { plugins, reads } = counted('Bearer one-token', 'Bearer two-token', 'Bearer three-token')
-    const { secrets, fresh } = toolSecrets({ kek: undefined, plugins })
+    const { secrets, fresh } = toolSecrets({ plugins })
     expect(await secrets()).toContain('Bearer one-token')
     expect(await fresh()).toContain('Bearer two-token')
     expect(await fresh()).toContain('Bearer three-token')

@@ -112,8 +112,9 @@ def test_the_worker_opens_no_browser_at_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The worker signs in nowhere at start: once its areas are served it connects to
-    Temporal, and its site is the browser service's (`RemoteSite`), opened only by an
-    export (#6780)."""
+    Temporal, and its site is the browser service's (`RemoteSite`), opened only by a step
+    (#6780): an export or a create opens the fetch's holder, and a search opens the
+    searches' (R-7062-1). Each holder is its own client of the one service."""
     events: list[str] = []
     opened: list[object] = []
 
@@ -141,11 +142,12 @@ def test_the_worker_opens_no_browser_at_start(
     with pytest.raises(ReachedTemporalError):
         asyncio.run(go())
     assert events == ["areas", "connect"]
-    [open_site] = opened
-    site = open_site()  # type: ignore[operator]
-    assert isinstance(site, RemoteSite)
-    assert site._base == "http://browser.example:8091"
-    assert site._token == TOKEN
+    assert len(opened) == 2
+    for open_site in opened:
+        site = open_site()  # type: ignore[operator]
+        assert isinstance(site, RemoteSite)
+        assert site._base == "http://browser.example:8091"
+        assert site._token == TOKEN
 
 
 def test_the_worker_imports_no_browser_service_code() -> None:

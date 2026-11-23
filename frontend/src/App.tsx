@@ -14,12 +14,14 @@ import { FILAMENT_HOME } from './pages/filament/tabs'
 // change inside `startTransition` (react-router 8, unless `useTransitions={false}`), so
 // React keeps the old page up until the next one's chunk is in. `lazyRetry`, not `lazy`:
 // a chunk that failed is imported again on the next visit (#3241).
+const CodePage = lazyRetry(async () => ({ default: (await import('./pages/CodePage')).CodePage }))
 const CustomerPage = lazyRetry(async () => ({ default: (await import('./pages/CustomerPage')).CustomerPage }))
 const CustomersPage = lazyRetry(async () => ({ default: (await import('./pages/CustomersPage')).CustomersPage }))
 const CustomizePage = lazyRetry(async () => ({ default: (await import('./pages/CustomizePage')).CustomizePage }))
 const EditPage = lazyRetry(async () => ({ default: (await import('./pages/EditPage')).EditPage }))
 const SpoolPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SpoolPage')).SpoolPage }))
 const TypePage = lazyRetry(async () => ({ default: (await import('./pages/filament/TypePage')).TypePage }))
+const LocationPage = lazyRetry(async () => ({ default: (await import('./pages/filament/LocationPage')).LocationPage }))
 const LabelsPage = lazyRetry(async () => ({ default: (await import('./pages/filament/LabelsPage')).LabelsPage }))
 const SupplierPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SupplierPage')).SupplierPage }))
 const InvoicePage = lazyRetry(async () => ({ default: (await import('./pages/filament/InvoicePage')).InvoicePage }))
@@ -119,6 +121,7 @@ export function App() {
         <Route path="filament" element={<Navigate to={FILAMENT_HOME} replace />} />
         <Route path="filament/spools/:id" element={<SpoolPage />} />
         <Route path="filament/labels" element={<LabelsPage />} />
+        <Route path="filament/locations/:id" element={<LocationPage />} />
         <Route path="filament/types/:id" element={<TypePage />} />
         <Route path="filament/suppliers/:id" element={<SupplierPage />} />
         <Route path="filament/invoices/:id" element={<InvoicePage />} />
@@ -133,6 +136,7 @@ export function App() {
         <Route path="filament/metrics" element={<FilamentPage tab="metrics" />} />
         <Route path="filament/shopping-list" element={<FilamentPage tab="shopping-list" />} />
         <Route path="filament/ledger" element={<FilamentPage tab="ledger" />} />
+        <Route path="x/:code" element={<CodePage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />
         <Route path="orders/parts" element={<PartsPage />} />

@@ -1,4 +1,3 @@
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import type { AuditEntry } from '../src/audit/log.js'
 import { CrudQuestions } from '../src/gate/crudQuestions.js'
@@ -49,14 +48,6 @@ class FakeApi {
 }
 
 /** SQL that must never be reached. */
-const noSql = new Proxy(() => undefined, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
 
 function service(options: { rateLockWaitMs?: number } = {}) {
   const api = new FakeApi()
@@ -65,10 +56,9 @@ function service(options: { rateLockWaitMs?: number } = {}) {
   const events = { committed: (sessionId: string, evs: ServerEvent[], seqs: number[]) => committed.push({ sessionId, events: evs, seqs }) } as unknown as EventLog
   const audit = { record: async (e: AuditEntry) => void audited.push(e), hash: (tool: string) => `hash-of-${tool}` }
   const questions = new QuestionService({
-    sql: noSql,
     events,
     audit,
-    routes: { crud: new CrudQuestions({ baseUrl: BASE, fetch: api.fetch }), use: () => true },
+    routes: new CrudQuestions({ baseUrl: BASE, fetch: api.fetch }),
     ...options,
   })
   return { api, committed, audited, questions }

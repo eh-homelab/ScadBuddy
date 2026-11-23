@@ -5,7 +5,7 @@ import type { Fulfilment, OrderAttachment, OrderAttachmentRole } from '../../api
 import { NEW_TAB, downloadBlob } from '../../lib/embed'
 import { formatBytes } from '../../lib/format'
 import { failure, formatMegabytes, useUploadLimit } from '../../lib/mediaFiles'
-import { OPENS, ROLE_LABELS, ROLES, attachmentImageUrl } from './attachmentMedia'
+import { OPENS, ROLE_LABELS, ROLES, attachmentImageUrl } from '../entities/attachmentMedia'
 import {
   AlertDialog,
   AlertDialogCancel,

@@ -53,6 +53,11 @@ class SpoolMetrics(BaseModel):
     """One spool's use, cost and forecast."""
 
     used_g: float
+    #: The grams of the plates after the newest ``consumed_reset`` event, all of them with
+    #: none (#7149 R-7149-4): the counter a person resets, as Bambuddy's "Total consumed".
+    consumed_g: float = 0.0
+    #: When that reset was; ``None`` with no reset.
+    consumed_since: datetime | None = None
     prints: int
     grams_per_print: float | None
     #: Grams of ``failed`` and ``cancelled`` plates (plan Decision 7).
@@ -146,6 +151,41 @@ class InventoryMetrics(BaseModel):
     stock: list[StockRow]
     consumption: list[ConsumptionRow]
     waste: list[WasteRow]
+
+
+class MaterialNumberType(BaseModel):
+    """A type whose code is the material number (#7152, R-7152-5)."""
+
+    id: UUID
+    code: str
+    archived: bool
+
+
+class MaterialNumberRow(BaseModel):
+    """One material number (a type code, case folded; ``None``: untyped spools). On hand
+    is the unarchived spools (R-7152-7); ``used_g`` and ``wasted_g`` are the plates of the
+    range, as `ConsumptionRow`'s (R-7152-6). ``value`` is ``None`` when no spool has a
+    cost."""
+
+    key: str | None
+    label: str
+    #: Every type of the code, archived ones too; empty for untyped spools.
+    types: list[MaterialNumberType]
+    spools: int
+    grams_left: float
+    used_g: float
+    wasted_g: float
+    value: Decimal | None
+
+
+class MaterialNumberStats(BaseModel):
+    """The stats by material number from ``since`` to ``until`` (both days included);
+    money in ``currency``, the shop's."""
+
+    currency: str
+    since: date
+    until: date
+    rows: list[MaterialNumberRow]
 
 
 class SpoolForecast(BaseModel):

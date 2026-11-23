@@ -161,6 +161,7 @@ def test_listing_on_native(native_client: TestClient, uploaded: NativeFile) -> N
         "output_id": None,
         "is_external": False,
         "per_print": False,
+        "file_hash": uploaded.sha256,
     }
 
 
@@ -249,6 +250,16 @@ def test_search_finds_by_folder_path(native_client: TestClient, in_folder: Nativ
     assert hits["files"][0]["id"] == in_folder.id and hits["total"] == 1
 
 
+def test_search_takes_types(native_client: TestClient, in_folder: NativeFile) -> None:
+    """#6710 §9.2: the storefront's file picker lists 3MF and STL files only."""
+    search = "/api/v1/print/library/search"
+    stl = native_client.get(search, params=[("q", "dino"), ("types", "stl")]).json()
+    both = native_client.get(search, params=[("q", "dino"), ("types", "3mf"), ("types", "stl")])
+    assert (stl["total"], both.json()["total"]) == (0, 1)
+    refused = native_client.get(search, params=[("q", "dino"), ("types", "gcode.3mf")])
+    assert refused.status_code == 422
+
+
 def test_plates_on_native(native_client: TestClient, uploaded: NativeFile) -> None:
     plates = native_client.get(f"/api/v1/print/library/{uploaded.id}/plates").json()
     assert plates == [{"index": 1, "has_thumbnail": True, "name": "bracket"}]
@@ -295,6 +306,17 @@ def test_an_entry_names_its_live_output(
     assert one["folder_path"] == []
 
 
+def test_a_native_entry_carries_its_sha256(
+    native_client: TestClient, in_folder: NativeFile
+) -> None:
+    """#7073: the listing, the search and the file read alone all state the row's
+    sha256 (lowercase hex, as the native library stores it)."""
+    listed = native_client.get("/api/v1/print/library", params={"folder_id": in_folder.folder_id})
+    assert listed.json()["files"][0]["file_hash"] == in_folder.sha256
+    hits = native_client.get("/api/v1/print/library/search", params={"q": "bracket"}).json()
+    assert hits["files"][0]["file_hash"] == in_folder.sha256
+
+
 def test_one_native_file_is_read_with_where_it_is(
     native_client: TestClient, in_folder: NativeFile
 ) -> None:
@@ -314,6 +336,7 @@ def test_one_native_file_is_read_with_where_it_is(
         "output_id": None,
         "is_external": False,
         "per_print": False,
+        "file_hash": in_folder.sha256,
         "folder_path": ["Dinos"],
     }
     # #5333 review: an id in the native range, so the router's `check_served` lets it

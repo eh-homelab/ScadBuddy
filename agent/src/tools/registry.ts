@@ -17,6 +17,7 @@ import type { RenderLimiter } from './renderLimits.js'
 import { pinnedOutward } from './pinnedOutward.js'
 import type { CustomerMessaging } from '../orders/messaging.js'
 import type { FetchGrantMinter } from './fetchGrant.js'
+import type { PackageView } from '../plugins/packages/store.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -83,7 +84,7 @@ export type ToolServices = {
   backend: BackendClient
   /**
    * Where a gated outward call is prepared and later confirmed (spec §8.2):
-   * `ai_approvals` through approvals/mcp.ts when there is a database, else
+   * the approvals through approvals/mcp.ts when there is a session manager, else
    * the in-memory store in pending.ts, whose actions can never be confirmed.
    */
   pending: OutwardActions
@@ -144,7 +145,7 @@ export type ToolServices = {
    * own tier without it.
    */
   toolOverrides?: ToolOverrides | undefined
-  /** Mints the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts); absent without a KEK. */
+  /** Asks the API for the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts). */
   fetchGrant?: FetchGrantMinter | undefined
   /**
    * The messaging plugin a customer notice is sent through (#5660, orders/messaging.ts):
@@ -152,6 +153,18 @@ export type ToolServices = {
    * refuses without it.
    */
   messaging?: CustomerMessaging | undefined
+  /**
+   * A hosted plugin's package read and its latest version offered in-process (#6938, spec
+   * 2026-11-21 §6.2, §6.3 step 5: plugins/packages/operations.ts `offerHosted` over the
+   * package store and `PackageInstaller`). hosted_plugin_publish refuses without it.
+   */
+  hostedPackages?: HostedPackageOffers | undefined
+}
+
+/** ToolServices.hostedPackages. */
+export type HostedPackageOffers = {
+  get(name: string): Promise<PackageView | undefined>
+  offer(name: string, signal?: AbortSignal): Promise<PackageView>
 }
 
 /** One tool's override: a tier other than its own (raised or lowered, #2171), and whether it is disabled. */
@@ -342,6 +355,14 @@ export type ToolSpec<S extends z.ZodRawShape> = {
    */
   flowBinding?: (args: z.infer<z.ZodObject<S>>, resolved: z.infer<z.ZodObject<S>>) => Record<string, unknown>
   /**
+   * What the model is told when a gated call is refused because what it names resolved to
+   * other input than the call was given, and no approval matches that input (#7199). The gate
+   * cannot tell whether an approval was ever given (#7211), so this is advice for both cases:
+   * if a person approved the call, what it names changed since, and a call again asks for a
+   * new approval. Without it, a generic line (`movedSinceApproval`).
+   */
+  movedSinceApproval?: string
+  /**
    * What a call does, in a few words, for the assistant panel (#782): worded as
    * the action ("Render cable-clip"), since the panel shows whether it is
    * running or done beside it. Defaults to the name in words, with the `slug`
@@ -404,6 +425,8 @@ export type Tool = {
   ): Promise<{ input: Record<string, unknown>; summary: string; binds: Record<string, unknown> }>
   /** Whether it has its own `prepareApproval`: the session gates resolve only those (#4442). */
   readonly resolvesApproval: boolean
+  /** ToolSpec.movedSinceApproval, else a generic line that names the tool (#7199). */
+  readonly movedSinceApproval: string
   /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
   title(args: unknown): string
   /** The arguments as the handler would see them (defaults applied): what an approval's input hash covers. */
@@ -458,6 +481,9 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
     },
     resolvesApproval: spec.prepareApproval !== undefined,
+    movedSinceApproval:
+      spec.movedSinceApproval ??
+      `if a person approved this call, what it names changed since. Call ${spec.name} again to ask for a new approval`,
     async prepareApproval(args, ctx, needs = { summary: true }) {
       const parsed = spec.input.parse(args)
       if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args), binds: {} }

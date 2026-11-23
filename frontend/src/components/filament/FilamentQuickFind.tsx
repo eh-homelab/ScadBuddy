@@ -5,11 +5,12 @@ import { ApiError } from '../../api/client'
 import { getInventory, listCatalog, listTypes, type SpoolType } from '../../api/filament'
 import type { FilamentInventorySpool } from '../../api/types'
 import { trayPlace } from '../../lib/filaments'
+import { isTyping } from '../../lib/isTyping'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
 import { readPickerFilters, writePickerFilters, type PickerFilters } from '../../lib/filamentPickerFilters'
 import { loadTypeSkus, matchesSearch, namesNumber, parseSearch, spoolSearchDoc, traysBySpool, typeSearchDoc } from '../../lib/filamentSearch'
 import { ClearSwatch, Swatch } from '../print/Swatch'
-import { spoolPath } from './spoolsQuery'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
@@ -66,7 +67,8 @@ async function load(): Promise<Loaded> {
  * the swatch, the name, then the number, the place and what is left; it shares the picker's
  * remembered material and "Loaded in a printer" filters (a type counts as loaded when one of
  * its spools is). The search is the tabs' (`lib/filamentSearch.ts`); Enter opens the spool or
- * the type. The lists are read each time it opens.
+ * the type. The lists are read each time it opens. Ctrl+K stays out of every text field except
+ * one marked `data-quick-find` (the tabs' own `FilamentSearchBox`).
  */
 export function FilamentQuickFind() {
   const [open, setOpen] = useState(false)
@@ -74,6 +76,7 @@ export function FilamentQuickFind() {
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (!isQuickFindKey(event) || event.defaultPrevented) return
+      if (isTyping(event.target) && !(event.target as HTMLElement).hasAttribute('data-quick-find')) return
       event.preventDefault()
       setOpen(true)
     }
@@ -156,7 +159,9 @@ function QuickFindList({ onDone }: { onDone: () => void }) {
 
   const go = (path: string) => {
     onDone()
-    void navigate(path, { state: { back: location.search } })
+    // Only the Spools and Types tabs keep a search in the address that the page can go back to.
+    const searchable = location.pathname === '/filament/spools' || location.pathname === '/filament/types'
+    void navigate(path, searchable ? { state: { back: location.search } } : undefined)
   }
 
   return (
@@ -212,7 +217,7 @@ function QuickFindList({ onDone }: { onDone: () => void }) {
                 const grams = spool.grams_left == null ? null : `${Math.round(spool.grams_left)} g`
                 const detail = [`#${spool.number}`, colour === null ? 'clear' : colour.translucent ? 'translucent' : null, where, grams].filter(Boolean).join(' · ')
                 return (
-                  <CommandItem key={spool.id} value={`spool:${spool.id}`} onSelect={() => go(spoolPath(spool))} className="text-xs">
+                  <CommandItem key={spool.id} value={`spool:${spool.id}`} onSelect={() => go(filamentLinks.spool(spool.id))} className="text-xs">
                     {colour === null ? <ClearSwatch size="sm" /> : <Swatch colour={colour.hex} size="sm" />}
                     <span className="flex min-w-0 flex-1 flex-col">
                       <span className="truncate">{spoolName(row)}</span>
@@ -232,7 +237,7 @@ function QuickFindList({ onDone }: { onDone: () => void }) {
                 const spools = data.spools.filter((row) => row.spool.type_id === type.id).length
                 const detail = [type.code, colour === null ? 'clear' : colour.translucent ? 'translucent' : null, `${spools} ${spools === 1 ? 'spool' : 'spools'}`].filter(Boolean).join(' · ')
                 return (
-                  <CommandItem key={type.id} value={`type:${type.id}`} onSelect={() => go(`/filament/types/${encodeURIComponent(type.id)}`)} className="text-xs">
+                  <CommandItem key={type.id} value={`type:${type.id}`} onSelect={() => go(filamentLinks.type(type.id))} className="text-xs">
                     {colour === null ? <ClearSwatch size="sm" /> : <Swatch colour={colour.hex} size="sm" />}
                     <span className="flex min-w-0 flex-1 flex-col">
                       <span className="truncate">{name}</span>

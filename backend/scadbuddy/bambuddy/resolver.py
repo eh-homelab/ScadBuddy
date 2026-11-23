@@ -32,6 +32,7 @@ from scadbuddy.bambuddy.filaments import (
     FilamentPlan,
     FilamentWarning,
     SpoolOption,
+    normalise_colour,
     spool_label,
 )
 from scadbuddy.bambuddy.models import (
@@ -41,6 +42,7 @@ from scadbuddy.bambuddy.models import (
     PresetRef,
     Tier,
 )
+from scadbuddy.slicing.own_presets import sb_id
 
 if TYPE_CHECKING:
     from scadbuddy.filament.models import EffectivePreset
@@ -318,6 +320,7 @@ def resolve(
     spool_presets: Mapping[int, Sequence[EffectivePreset]],
     *,
     slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
+    slot_colours: Mapping[int, str] | None = None,
 ) -> Resolved:
     """Every slicer preset for ``plan`` on ``options``. ``spool_presets`` are each chosen
     spool's effective presets (#6262 F1, `filament.presets.effective_presets`), keyed by
@@ -327,8 +330,11 @@ def resolve(
     A slot needs a spool, except a slot in ``slot_presets`` (a storefront price's slice,
     #6574): the presets of its filament type, by slot id. Such a slot takes its type's
     preset for the H2C and the chosen nozzle as a spool takes its own, in the file's own
-    colour for the slot. That is how a price names a filament that is not loaded. A
-    print still needs a spool for every slot."""
+    colour for the slot, or in its ``slot_colours`` entry, by slot id (a storefront file
+    listing's visitor's colour, #6710), as ``#RRGGBB`` (an entry that is not a colour
+    leaves the file's). A slot with a spool takes the spool's colour, whatever
+    ``slot_colours`` says, and a colour never stands in for a spool. That is how a price
+    names a filament that is not loaded. A print still needs a spool for every slot."""
     chosen = _resolve_choices(choices, catalogue)
     warnings = list(chosen.warnings)
     errors = list(chosen.errors)
@@ -351,7 +357,9 @@ def resolve(
         type_presets = (
             slot_presets.get(slot.slot_id) if option is None and slot_presets is not None else None
         )
-        colours[idx] = (option.colour if option else slot.colour) or "#FFFFFF"
+        # ``#RRGGBB`` only, as the native slicer takes; anything else leaves the file's.
+        given = normalise_colour(slot_colours.get(slot.slot_id)) if slot_colours else None
+        colours[idx] = (option.colour if option else given or slot.colour) or "#FFFFFF"
         label = spool_label(option) if option is not None else f"Slot {slot.slot_id}'s filament"
         if option is None and type_presets is None:
             # Not a preset problem, so Advanced cannot fix it: the slot needs a spool.
@@ -403,15 +411,18 @@ def resolve(
                 else _type_preset(type_presets or (), size)
             )
             own = [] if own_preset is None else [own_preset.slicer_filament]
+            if not catalogue.is_native and own_preset is not None:
+                # Bambuddy knows a ScadBuddy preset (#7176) by its mirror's id only.
+                own = [ref for ref in [own_preset.for_bambuddy()] if ref]
             if catalogue.is_native:
                 # A spool's preset is a preset name, a Bambu Cloud setting_id, a BBL
-                # filament_id (as a tray's tray_info_idx is) or a Bambuddy local id,
-                # which the image lacks; native refs are preset names (#4349), or a kept
-                # local preset's own ref (#4645).
+                # filament_id (as a tray's tray_info_idx is), a Bambuddy local id, which
+                # the image lacks, or a ScadBuddy preset's `sb-` ref (#7176); native refs
+                # are preset names (#4349), or a kept or ScadBuddy preset's own ref (#4645).
                 mapped = {
                     preset_id: (
                         catalogue.native_ref(PresetRef(source="local", id=preset_id), "filament")
-                        if _is_local_id(preset_id)
+                        if _is_local_id(preset_id) or sb_id(preset_id) is not None
                         else catalogue.native_ref(
                             PresetRef(source="standard", id=preset_id), "filament"
                         )
@@ -421,7 +432,7 @@ def resolve(
                     for preset_id in own
                 }
                 if any(
-                    native is None and not _is_local_id(preset_id)
+                    native is None and not _is_local_id(preset_id) and sb_id(preset_id) is None
                     for preset_id, native in mapped.items()
                 ):
                     # Said, so a slot that falls back to a name is not a mystery; a

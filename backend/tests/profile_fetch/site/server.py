@@ -8,10 +8,11 @@ from __future__ import annotations
 import json
 import secrets
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlsplit
 
 HERE = Path(__file__).parent
@@ -22,6 +23,42 @@ SLICERS = ["Bambu Studio", "OrcaSlicer"]
 PRINTERS = ["H2C", "X1C"]
 #: No ``0.2 mm``: `test_an_option_the_dialog_lacks_is_reported`.
 NOZZLES = ["0.4 mm", "0.6 mm"]
+#: #7025: three of the seven rows the live search for "SUNLU Silk Bronze" listed on
+#: 2026-11-22.
+FILAMENTS: list[dict[str, Any]] = [
+    {
+        "id": 8916,
+        "brand": "SUNLU",
+        "material": "PLA",
+        "type": "Silk",
+        "name": "Bronze",
+        "hexes": ["#578A61"],
+    },
+    {
+        "id": 38537,
+        "brand": "SUNLU",
+        "material": "PLA+/Pro",
+        "type": "Silk",
+        "name": "BRONZE (250g)",
+        "hexes": ["#779E7C"],
+    },
+    {
+        "id": 1708,
+        "brand": "SUNLU",
+        "material": "PLA+/Pro",
+        "type": "Silk",
+        "name": "Bronze",
+        "hexes": ["#689471"],
+    },
+]
+#: The results table's columns, as measured.
+COLUMNS = ["Brand", "Material", "Type", "Color", "RGB", "TD", "Retailer", "Actions"]
+#: The add form's lists: brands, materials, types.
+ADD_LISTS = {
+    "brand": ["SUNLU", "eSUN", "Inland"],
+    "material": ["PLA", "PLA+/Pro", "PETG"],
+    "material_type": ["Basic", "Silk", "Silk Dual", "Kevlar"],
+}
 
 
 @dataclass
@@ -35,6 +72,10 @@ class Replica:
     known_ids: set[int] = field(default_factory=lambda: {30173})
     checkpoint: Literal["off", "never", "clears"] = "off"
     login_form: Literal["ok", "disabled"] = "ok"
+    #: Set, the form signs in as the real site does (#6941): its script posts the login to
+    #: ``/api/login``, which sets the session cookie after this many seconds, then the page
+    #: goes to ``/my/dashboard``. Unset, the form posts itself to ``/login``.
+    scripted_login_delay_s: float | None = None
     #: The three option lists of the export dialog: slicer, printer, nozzle.
     options: list[list[str]] = field(default_factory=lambda: [SLICERS, PRINTERS, NOZZLES])
     export_name: str = EXPORT_NAME
@@ -64,6 +105,26 @@ class Replica:
     header_user_agents: list[str] = field(default_factory=list)
     page_user_agents: list[str] = field(default_factory=list)
     posted_bodies: list[str] = field(default_factory=list)
+    #: #7025: what ``/filaments?q=`` lists, and its table's columns.
+    filaments: list[dict[str, Any]] = field(default_factory=lambda: list(FILAMENTS))
+    columns: list[str] = field(default_factory=lambda: list(COLUMNS))
+    searches: list[str] = field(default_factory=list)
+    #: The add form's lists; ``brand_select`` False leaves the brand out of its native
+    #: select, so only typing into the combobox finds it.
+    add_lists: dict[str, list[str]] = field(default_factory=lambda: dict(ADD_LISTS))
+    brand_select: bool = True
+    #: The ``brand|material|type`` keys that have site defaults.
+    defaults: set[str] = field(default_factory=lambda: {"SUNLU|PLA+/Pro|Silk"})
+    #: The add form's duplicate list, as `filaments` rows.
+    duplicates: list[dict[str, Any]] = field(default_factory=list)
+    #: The add form's identifier fields beyond ``#sku-0``: ``(id, label)``.
+    extra_fields: list[tuple[str, str]] = field(
+        default_factory=lambda: [("gtin", "GTIN / UPC"), ("asin", "ASIN")]
+    )
+    #: False: "Save Filament" saves but stays on the form.
+    save_lands: bool = True
+    created: list[dict[str, Any]] = field(default_factory=list)
+    next_id: int = 40000
 
     def expire_sessions(self) -> None:
         """Every session ends: the next page redirects to ``/login``."""
@@ -131,13 +192,50 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
             if path == "/login":
                 error = "Invalid email or password" if "error" in url.query else ""
                 disabled = "disabled" if site.login_form == "disabled" else ""
-                self._send(200, _page("login.html", ERROR=error, DISABLED=disabled))
+                scripted = "true" if site.scripted_login_delay_s is not None else "false"
+                self._send(
+                    200, _page("login.html", ERROR=error, DISABLED=disabled, SCRIPTED=scripted)
+                )
                 return
             if not self._signed_in():
                 self._redirect("/login")
                 return
             if path == "/my/spools":
                 self._send(200, b"<!doctype html><title>My Spools</title><h1>My Spools</h1>")
+                return
+            if path == "/filaments":
+                query = parse_qs(url.query).get("q", [""])[0]
+                site.searches.append(query)
+                words = query.casefold().split()
+                rows = [
+                    row
+                    for row in site.filaments
+                    if all(
+                        word in f"{row['brand']} {row['type']} {row['name']}".casefold()
+                        for word in words
+                    )
+                ]
+                self._send(
+                    200,
+                    _page("search.html", ROWS=json.dumps(rows), COLUMNS=json.dumps(site.columns)),
+                )
+                return
+            if path == "/filament/add":
+                self._send(
+                    200,
+                    _page(
+                        "add.html",
+                        LISTS=json.dumps(site.add_lists),
+                        DEFAULTS=json.dumps(sorted(site.defaults)),
+                        DUPLICATES=json.dumps(site.duplicates),
+                        EXTRA=json.dumps(site.extra_fields),
+                        BRAND_SELECT=json.dumps(site.brand_select),
+                        LANDS=json.dumps(site.save_lands),
+                    ),
+                )
+                return
+            if path == "/my/dashboard":
+                self._send(200, b"<!doctype html><title>Dashboard</title><h1>Dashboard</h1>")
                 return
             for prefix, page in (
                 ("/filament/details/", "filament.html"),
@@ -179,6 +277,28 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
                     self._redirect("/my/spools", cookie=f"session={token}; Path=/")
                 else:
                     self._redirect("/login?error=1")
+                return
+            if path == "/api/login":
+                form = parse_qs(body)
+                if form.get("email") == [site.email] and form.get("password") == [site.password]:
+                    time.sleep(site.scripted_login_delay_s or 0.0)
+                    site.logins += 1
+                    token = secrets.token_hex(8)
+                    site.sessions.add(token)
+                    self.send_response(204)
+                    self.send_header("Set-Cookie", f"session={token}; Path=/")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    self._send(401, b"")
+                return
+            if path == "/api/filaments" and self._signed_in():
+                values = json.loads(body)
+                new_id = site.next_id
+                site.next_id += 1
+                site.created.append({"id": new_id, **values})
+                site.known_ids.add(new_id)
+                self._send(200, json.dumps({"id": new_id}).encode(), "application/json")
                 return
             if path.startswith("/api/spools/") and self._signed_in():
                 tdfp_id = self._id(path, "/api/spools/")

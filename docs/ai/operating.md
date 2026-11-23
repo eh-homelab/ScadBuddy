@@ -65,7 +65,7 @@ covers the same ground more briefly.
 - **Container healthcheck.** `HEALTHCHECK` fetches `http://127.0.0.1:8081/healthz`
   every 30 s with node's `fetch` ([`Dockerfile`](../../Dockerfile)).
 - **Shutdown.** On `SIGTERM`/`SIGINT` the listener drains for up to 10 s, then the
-  database pool closes. The exit code is non-zero if the drain timed out (`main.ts`;
+  process exits. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
   A worker's running turns get 12 s to finish (`TURN_DRAIN_MS`), and any still running is
   then cut and goes on on another replica (§1.2, "Restarts"). A parked call is released, not
@@ -98,8 +98,9 @@ covers the same ground more briefly.
   [browser-bridge.md](browser-bridge.md#replicas)). Until #5862 the workflow ran on the
   shared `agent-tools`; it now runs on the caller's own `agent-tools.<hostname>` (see the
   next item). The Postgres relay of #1916 ran
-  beside it for one release, and #4868 removed it: every replica with the KEK since then
-  claims its tabs in `ai_tab_owners` (one without it claims none, #4949), so a call finds the owner there or answers "not connected".
+  beside it for one release, and #4868 removed it: every replica with the payload codec since then
+  claims its tabs in `ai_tab_owners` (one without it claims none, #4949; since #5299 step 12
+  the codec's data keys come from the API, so that is a replica the API releases no keys to), so a call finds the owner there or answers "not connected".
   A new replica's tab has no row until its host worker polls, so for those first seconds
   of its start a call from another replica answers "not connected" (an old replica could
   reach it through the Postgres relay before).
@@ -363,24 +364,29 @@ its drop PR merges, those columns are gone. Neither changes the behaviour above.
 `ENV_VARS` in [`agent/src/config.ts`](../../agent/src/config.ts) lists the only
 variables the service reads, and `agent/test/config.test.ts` asserts that nothing else
 is read. Spec §9 explains the rule. There are no AI *configuration* variables:
-credentials and AI settings live in the database. The ones below are infrastructure,
+credentials and AI settings are the API's, which the agent reaches through its CRUD routes
+(#5299). The ones below are infrastructure,
 and Settings cannot hold them. `loadConfig()` treats an empty or whitespace-only value
 as unset (`present()`).
 
 | Variable | Default | Read by | Meaning |
 |---|---|---|---|
-| `SCADBUDDY_DATABASE_URL` | unset → AI disabled | `loadConfig()` | Postgres URL, shared with the backend (#241). It must be `postgres://` or `postgresql://`; anything else is a `ConfigError` at start. The URL is not echoed in the error because it normally carries the password. With it unset the service still runs, and `/healthz` reports `"ai": "disabled (no database)"`. Each replica opens up to 4 connections in its shared pool, about 4 more of its own for plugin connection-test locks (briefly more while a failed lock connection is replaced) (`TEST_LOCK_CONNECTIONS` in [`agent/src/db.ts`](../../agent/src/db.ts), #4994), and no `LISTEN` connection (its NOTIFY channels come over the API's change stream, #5299 D4): `AGENT_DB_CONNECTIONS`, 8, is what to count when sizing Postgres `max_connections`. Once the API lists the agent's CRUD area `access` (#5299 step 5), a connection test holds a lease row of the API's `agent_leases` (key `tool-listing:<source>`, through `…/crud/agent/leases/{key}`, #5299 D3) in place of the lock connection. The pool and the lock connections close after 60 s idle (`IDLE_TIMEOUT_SECONDS`, #5226), and show in `pg_stat_activity` as `scadbuddy-agent`. |
+| `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` | unset → `ConfigError` at start | `loadConfig()`, `ExchangeCredential` in [`agent/src/api/serviceCredential.ts`](../../agent/src/api/serviceCredential.ts) | The proof the agent exchanges at the API's `POST /api/v1/auth/service-token` for its 15-minute `agent` credential (README, "Authentication on the deployment"): a projected ServiceAccount token on Kubernetes, or a bootstrap secret elsewhere. One is required (#5299 step 12), and both is a `ConfigError`. All the agent's data goes through the API's CRUD routes with that credential. |
 | `SCADBUDDY_BACKEND_URL` | `http://127.0.0.1:8080` | `loadConfig()` | Where the backend listens. Must be `http(s)`. Trailing slashes are stripped. `/healthz` probes `GET {url}/healthz` with a 2 s timeout (`backendReachable()`, [`agent/src/api/backend.ts`](../../agent/src/api/backend.ts)). |
-| `SCADBUDDY_SECRET_KEY_FILE` | unset → credentials cannot be saved | `loadKek()` in [`agent/src/secrets.ts`](../../agent/src/secrets.ts) | Path of the key-encryption key (KEK) file. See §3. |
-| `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | unset | `main.ts`, `loadKek()` | The old KEK during a rotation. See §3.3. |
 | `SCADBUDDY_PUBLIC_URL` | unset → loopback only | `originPolicy()` in [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts) | The UI's public URL. This is the same variable the backend reads (`public_url` in `backend/scadbuddy/core/settings.py`). Its origin is the only non-loopback origin allowed to write. Must be `http(s)`. See §6. |
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
 | `SCADBUDDY_AGENT_ROLE` | `all` | `loadConfig()` | `all`, `api` or `worker` (§1, "Roles"). Any other value stops the process with exit code 1, naming the value. |
 | `SCADBUDDY_SESSION_DIR` | unset → `work/sessions` under the state directory | `loadConfig()`, `sessionsRoot()` in [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts) | Where each session's working directory, `<dir>/<session id>/`, is: the `cwd` of its Claude Code process, a working copy of its workspace (§13). Set it on the workers to a capped emptyDir of the pod's own, never the NAS share (the copies are plaintext, and the share's backup cannot leave a subPath out); every placement refills it from the workspace, so a turn placed on another pod still finds the files the last one wrote back. Must be an absolute path. The process checks at start that it can write there. |
 | `SCADBUDDY_SANDBOX_NAMESPACE`, `SCADBUDDY_SANDBOX_IMAGE`, `SCADBUDDY_SANDBOX_EGRESS_PROXY`, `SCADBUDDY_SANDBOX_KUBE_TOKEN_FILE`, `SCADBUDDY_SANDBOX_KUBE_CA_FILE` | unset → no sandbox: Bash and PowerShell stay `off` | `loadConfig()`; [`agent/src/sandbox/pods.ts`](../../agent/src/sandbox/pods.ts) | The sessions' sandbox pods (#5864, [security.md](security.md), "Bash and PowerShell in a sandbox pod"). All five or none, else a `ConfigError`. The namespace the worker creates one pod per session in; the `sandbox` image (pinned by digest) those pods run; the egress proxy as `http://<host>:<port>`, which the worker resolves and gives each pod as an address (the pods have no DNS); and an apiserver token and the cluster CA, absolute paths re-read on each call. Read only where turns run (`worker`, `all`). The Kubernetes API is `KUBERNETES_SERVICE_HOST`/`_PORT`, which the kubelet sets. |
 
-`main.ts` logs one line at start naming the backend URL, whether a database is
-configured, and where credential writes are accepted from.
+`main.ts` logs one line at start naming the backend URL and where credential writes are
+accepted from.
+
+`SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and
+`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` are no longer read (#5299 step 12): the agent has no SQL
+client and no KEK. When any of them is set, the agent starts and logs one warning,
+`agent: ignores <names>: the agent has no database and no key-encryption key (#5299 step 12)`
+(`IGNORED_VARS` in `config.ts`). Remove them from the agent's containers.
 
 Variables set in the image, not read by `config.ts`: `HOME`, `CLAUDE_CONFIG_DIR` and
 `NODE_ENV` ([`Dockerfile`](../../Dockerfile)). The Claude Code
@@ -409,92 +415,78 @@ and Anthropic never get one. Design:
 ## 3. The key-encryption key
 
 The Claude credential is stored with envelope encryption (spec §9; see
-[security.md](security.md#envelope-encryption-and-aad-binding)). The KEK is a file.
+[security.md](security.md#envelope-encryption-and-aad-binding)). The KEK is a file on the
+**API container only**: the agent reads no KEK (#5299 step 12). The API seals and opens
+every agent secret (the Claude credentials, the payload keys, the Web Push and channel keys,
+the plugins' header secrets and sign-ins, the workspace file keys and the transcripts) and
+answers each plaintext, or a key derived from the KEK (the approvals' input-hash key, the
+one-off fetch grants), to the `agent` credential from a route for that purpose
+([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py),
+#5299 step 4, #5342; area `keys`, [`agent/src/api/agentKeys.ts`](../../agent/src/api/agentKeys.ts)).
 
 ### 3.1 Generating it
 
-The format comes from the header comment of
-[`agent/src/secrets.ts`](../../agent/src/secrets.ts) and `kekFromBase64()`. The file
-holds exactly 32 random bytes, base64-encoded with standard padding (44 characters).
-Surrounding whitespace, including a trailing newline, is ignored. Hex, passphrases and
-other lengths are refused rather than stretched into a key.
+The format is the API's (README, "Encrypted API keys") and the same as the header comment of
+[`agent/src/secrets.ts`](../../agent/src/secrets.ts): exactly 32 random bytes,
+base64-encoded with standard padding (44 characters). Surrounding whitespace, including a
+trailing newline, is ignored. Hex, passphrases and other lengths are refused.
 
 ```bash
 openssl rand -base64 32 > scadbuddy-secret.key
-kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
+kubectl -n scadbuddy create secret generic scadbuddy-kek \
   --from-file=secret.key=scadbuddy-secret.key
-# container: volumeMount at /etc/scadbuddy/kek, readOnly;
+# API container: volumeMount at /etc/scadbuddy/kek, readOnly;
 # env SCADBUDDY_SECRET_KEY_FILE=/etc/scadbuddy/kek/secret.key
 ```
 
-(The commands are the README's, "The agent sidecar".)
-
 ### 3.2 What happens without it
 
-- `main.ts` reads the file **once at start**. Changing it means restarting the pod.
-- A missing, unreadable or malformed file is not fatal. `loadKek()` never throws. It
-  returns `{ ok: false, reason, detail }`. `reason` names the variable only, never the
-  path or errno, and is what `/healthz` and `GET /api/v1/ai/credentials` show.
-  `detail` goes to the start-up log only.
-- Saving a credential then fails with `503`, "no key-encryption key is configured"
-  (`planPut()` in [`agent/src/credentials.ts`](../../agent/src/credentials.ts)).
-  `/healthz` reports `"ai": "disabled (no key-encryption key: …)"` (`aiStatus()` in
+- With no KEK on the API, saving a credential fails with `503`, "no key-encryption key on
+  the API" (`credentials.ts` in [`agent/src/credentials.ts`](../../agent/src/credentials.ts)
+  asks `GET …/crud/agent/credentials/key`), and `/healthz` reports
+  `"ai": "disabled (no key-encryption key: …)"` (`aiStatus()` in
   [`agent/src/aiStatus.ts`](../../agent/src/aiStatus.ts)).
-- Once the API lists the agent's CRUD areas `credentials` and `payload-keys` (#5299
-  step 4), the API's key is the one that counts for the Claude credentials and the
-  payload keys: the API seals and opens them
-  ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
-  and the agent asks it whether it holds a key (`GET …/crud/agent/credentials/key`). The
-  agent's own file still opens the Web Push and channel keys (area `notify`), the plugins'
-  header secrets and their sign-ins (area `plugins`, #5299 step 5) and its workspace file
-  keys (area `workspace`, #5299 step 7) only while the API does not list their areas yet,
-  until the later steps of #5299. Mount the same key in both.
+- The API then never releases the approvals' input-hash key (`GET …/agent/keys/input-hash`
+  answers `503 kek-missing`), so the agent is never ready: `/mcp` answers `503`, calls that
+  hash nothing included, and no agent Temporal worker polls, so no turn runs. That is
+  deliberate: every tool call's audit row carries a hash of its input made with that key, and
+  a call that cannot be audited does not run (#5299 step 12). The data routes still answer,
+  so Settings → Assistant lists the credentials and says why saving is not possible
+  (`cannot_save_reason`). Give the API its KEK.
 - **Keep a copy.** Each stored row records the KEK's id (the first 16 hex characters of
-  SHA-256 over the key; `kekFromBase64()`). A credential sealed under a lost key cannot
-  be opened. `/healthz` then reports "stored credential was sealed with a different
-  key-encryption key", and the credential must be entered again.
+  SHA-256 over the key). A credential sealed under a lost key cannot be opened. `/healthz`
+  then reports "stored credential was sealed with a different key-encryption key", and the
+  credential must be entered again.
 
 ### 3.3 Rotating it
 
-Spec §9: "Rotating it re-wraps the data keys only." The procedure comes from the
-comment above `previousKek` in `main.ts` and from
-[`backend/scadbuddy/agent_data/rotation.py`](../../backend/scadbuddy/agent_data/rotation.py)
-(`main._rotate_agent_secrets` calls it).
-
-In normal running no container sets `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`: in
-eh-homelab/clusters' `scadbuddy.yaml` neither the API container nor the agent sidecar
-sets it (the API container at line 471, the agent at 652), and the comment at line 651 says it is added only during a rotation (read on clusters main,
-2026-11-15). Since #5299 step 4 the API re-wraps the Claude credentials and the payload
-keys, so a rotation sets the previous key on the API container as well as on the agent's
-containers (the sidecar and the `scadbuddy-agent-worker` Deployment). A rotation that
-sets it on the agent alone leaves `ai_credentials` and `ai_payload_keys` under the old
-key, and they stop opening once the old key's mount is removed.
+Spec §9: "Rotating it re-wraps the data keys only." The API does all of it
+([`backend/scadbuddy/agent_data/rotation.py`](../../backend/scadbuddy/agent_data/rotation.py),
+called by `main._rotate_agent_secrets`); the agent re-wraps nothing. It does keep the
+approvals' input-hash key, which the API derives from its current KEK, for its process's life
+(`agent/src/api/agentKeys.ts` `InputHashKey`), so restart every agent process after step 2.
 
 1. Generate a new key file (§3.1).
 2. Mount the **new** key as `SCADBUDDY_SECRET_KEY_FILE` and the **old** one as
-   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` on the **API container and the agent's
-   containers**, then restart them.
-3. Each one re-wraps its own tables at its start. Only the data key of a row whose
-   `kek_id` is the old key's is sealed again under the new key:
-   - The API, after its migrations: `ai_credentials` (the Claude credentials),
-     `ai_payload_keys` (the durable payload keys), `ai_push_vapid`,
-     `ai_push_subscriptions` and `ai_notify_channels` (the Web Push keys and the
-     notification channels' tokens, #5299 step 5), `ai_plugins` and `ai_plugin_oauth`
-     (the plugins' header secrets and sign-ins, #5299 step 5; the sign-ins under way in
-     `ai_plugin_oauth_flows` that the old key sealed are deleted, as before), and
-     `ai_session_files` (the workspace's principal file keys, #5299 step 7). The log line
-     reads `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`,
-     `notify`, `plugins` or `session_files`), with the counts.
-   - The agent re-wraps nothing itself any more.
-
+   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` on the **API container**, then restart it. Then
+   restart the agent workers (`kubectl -n bambuddy rollout restart
+   deploy/scadbuddy-agent-worker`); the sidecar restarts with the API's pod. Until every
+   agent process has restarted, replicas hash with different keys, and an `/mcp` action
+   prepared on one is refused at `confirm_action` on another. An action prepared before the
+   rotation is refused the same way and must be asked for again.
+3. After its migrations the API re-wraps, for each row whose `kek_id` is the old key's,
+   only the data key: `ai_credentials`, `ai_payload_keys`, `ai_push_vapid`,
+   `ai_push_subscriptions`, `ai_notify_channels`, `ai_plugins`, `ai_plugin_oauth` (the
+   sign-ins under way in `ai_plugin_oauth_flows` that the old key sealed are deleted) and
+   `ai_session_files`. The log line reads `secret key rotation: re-wrapped the agent's
+   credentials` (or `payload_keys`, `notify`, `plugins` or `session_files`), with the counts.
    The sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
    `kek_id`, so two pods rotating at once do not overwrite each other.
 4. A row the old key cannot open (altered, or in the v1 format) is left as it is and
    counted as `failed` in the same log line.
-5. Remove the previous-key mounts from every container and restart again.
+5. Remove the previous-key mount and restart again.
 
-If the previous file cannot be loaded, the log says so and nothing is re-wrapped
-(`main.ts`, and the API's start).
+If the previous file cannot be loaded, the API's log says so and nothing is re-wrapped.
 
 ## 4. Setting up the Claude credential
 
@@ -661,10 +653,12 @@ section itself always shows, so it can be saved first.
 transport as in §6. When an `Origin` is sent, it must be allowed. Otherwise the
 request's own origin must be the public URL, or the loopback pair from a loopback peer,
 and a `Sec-Fetch-Site` other than `same-origin` or `none` is refused. Every route
-answers `503` while there is no database, or while migrations have not applied.
+answers `503` until the API lists the agent's CRUD areas (§5, "Readiness").
 
 Tokens can be managed in every auth mode. In `disabled` mode `/mcp` ignores them, and
 Settings warns about that; they take effect again when the mode returns to `bearer`.
+The same tokens also read the plugin feed (§9, [The marketplace feed](#the-marketplace-feed-6933)):
+revoking one stops its feed reads too.
 The mode is stored in `ai_settings` and changed in Settings (§10, `GET`/`PUT /api/v1/ai/mcp/auth`, `agent/src/routes/mcpAuthMode.ts`); `bearer` is the default until it is set.
 
 To give a client a token, create one with a name that says where it will live, copy it
@@ -691,51 +685,57 @@ curl -sS -X DELETE http://localhost:8081/api/v1/ai/mcp-tokens/<id> -H 'Origin: h
 `GET /healthz` is in `createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts).
 A `worker` process (§1, "Roles") serves its own instead
 ([`agent/src/runtime/health.ts`](../../agent/src/runtime/health.ts)): `GET /healthz`,
-always `200`, with `{ status, role: "worker", database, secret_key, temporal, queues }`
+always `200`, with `{ status, role: "worker", database, temporal, queues }`
 (each worker's state by the queue it polls, and `temporal` the worst of them), and
 `GET /readyz`, `200` only once Temporal lists this process as a fresh poller of each of
 its four queues (`queuesPolled`), else `503` with the reason. Every other path is `404`.
 In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
 
-- **It is liveness, and always `200`** while the process serves HTTP. A missing or
-  unreachable database or backend is *reported*, not failed on, so a Postgres blip
-  does not restart the container (comment in `createApp()`).
-- The body is `{ status: "ok", ai, database, backend, secret_key, credential }` (type `Health`).
+- **It is liveness, and always `200`** while the process serves HTTP. An unreachable API
+  is *reported*, not failed on, so an API restart does not restart the container
+  (comment in `createApp()`).
+- The body is `{ status: "ok", ai, database, backend, credential, temporal }` (type
+  `Health`). There is no `secret_key` field: the agent has no KEK (#5299 step 12).
+- `database` is the agent's data, which is the API's: `ok` once the API lists every CRUD
+  area the agent wants and answers them, else `unreachable`
+  ([`agent/src/api/dataHealth.ts`](../../agent/src/api/dataHealth.ts) `dataHealthOf`; the
+  agent logs each change). The agent has no SQL client and no migration wait: the API
+  applies the agent's migrations at its start (#5299 D6;
+  `backend/scadbuddy/render/agent_migrations.py`), and an edited, already-applied file
+  stops the API's start.
+- **Readiness.** `CrudAreas` ([`agent/src/api/crudAreas.ts`](../../agent/src/api/crudAreas.ts))
+  reads `GET …/crud/agent/areas` from the start, 1 s apart doubling to 30 s, until every
+  wanted area is listed, and asks for the input-hash key until the API releases it
+  (`agent/src/api/agentKeys.ts`). Until every area is listed, the data routes answer `503`
+  (`routes/module.ts` `ready`). Until both, the agent is not ready: `/mcp` answers `503`,
+  `/healthz` and `/readyz` say not ready, an answer to a question (`POST
+  /api/v1/ai/pending-input/{request_id}`, audited with its hash) answers `503` with `retry` (on
+  the chat socket, an `unavailable` error that says to send it again), and
+  no agent Temporal worker polls (§3.2).
 - `ai` is `"enabled"` only when every prerequisite holds. Otherwise it names the
-  **first** one missing, in the order an operator has to fix them (`aiStatus()`):
+  **first** one missing, in the order an operator has to fix them (`aiStatus()`, type
+  `AiStatus` in [`agent/src/aiStatus.ts`](../../agent/src/aiStatus.ts)):
 
   | `ai` value | Meaning |
   |---|---|
-  | `disabled (no database)` | `SCADBUDDY_DATABASE_URL` unset |
-  | `unavailable (database unreachable)` | Ping failed, or the credential read threw |
-  | `unavailable (the API does not answer the agent's CRUD areas)` | Once the API lists every area the agent wants: the Postgres ping held, but `GET …/crud/agent/areas` did not answer (`agent/src/api/dataHealth.ts`, #6501) |
-  | `unavailable (database migrations failed)` | `ready()` returned false |
-  | `unavailable (waiting for the API to apply the database migrations)` | `ai_migrations` lacks a file this build expects: the API has not migrated yet (#5299) |
-  | `unavailable (database timed out)` | `ready()` or the credential read took longer than 2 s (`DEFAULT_HEALTH_TIMEOUT_MS`) |
-  | `unavailable (the API did not answer for its key-encryption key)` | Once the API serves area `credentials` (#5299 step 4): `GET …/crud/agent/credentials/key` failed |
+  | `unavailable (the API does not answer the agent's CRUD areas)` | The API does not list every area the agent wants yet, or did not answer them, or the credential list failed |
+  | `unavailable (the API timed out)` | The credential list took longer than 2 s (`DEFAULT_HEALTH_TIMEOUT_MS`) |
+  | `unavailable (the API did not answer for its key-encryption key)` | `GET …/crud/agent/credentials/key` failed |
   | `unavailable (the API timed out answering for its key-encryption key)` | That read took longer than 2 s |
-  | `disabled (no key-encryption key: <reason>)` | See §3.2 |
+  | `disabled (no key-encryption key: <reason>)` | The API has no KEK; see §3.2 |
+  | `unavailable (waiting for the API's input-hash key)` | The API holds its KEK and lists every area, but has not released the input-hash key yet |
   | `disabled (no Claude credential)` | No row saved |
-  | `unavailable (stored credential was sealed with a different key-encryption key)` | The row's `kek_id` does not match the mounted key |
+  | `unavailable (stored credential was sealed with a different key-encryption key)` | The row's `kek_id` does not match the API's key |
   | `unavailable (stored credential is in an outdated format; save it again)` | A #354-era v1 row (see [security.md](security.md#envelope-encryption-and-aad-binding)) |
+  | `unavailable (every Claude credential is rate limited)`, `unavailable (every Claude credential is disabled)`, `unavailable (no Claude credential is usable now)` | No saved credential can be used now (§4) |
 
-- Keep these strings stable. The CI smoke test asserts
-  `.ai == "disabled (no database)"` on the image
-  ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)). That test is the only
-  reader of `ai` today; no backend or frontend code on `main` reads it (the `AiStatus`
-  comment in `agent/src/app.ts`).
-- **Migrations** (one file each in `backend/scadbuddy/migrations_agent/`) are the
-  API's to apply, at its start, after its own (#5299 D6;
-  `backend/scadbuddy/render/agent_migrations.py`), under the transaction-scoped advisory
-  lock the agent used to take, with `lock_timeout` 10 s and `statement_timeout` 60 s. An
-  already-applied migration whose SQL was edited, or a ledger still keyed by position
-  (before #491) that holds a row main never had, stops the API's start. The agent's
-  `ready()` is true once `ai_migrations` holds every file in
-  `agent/src/db/expected-migrations.json` (`agent/src/db/schema.ts`; one read a call, so
-  a route fails fast while the API is behind). Its start work waits for `untilReady()`
-  (`agent/src/db.ts`: `ready()` again 1 s apart, doubling to 30 s), and it logs
-  `waiting for the API to apply the agent's database migrations` once a wait. A row recorded with other SQL than the agent expects
-  (`MigrationChecksumError`) makes `main.ts` exit 1.
+- Keep these strings stable. The CI smoke test starts the image with a bootstrap proof,
+  no database URL and no KEK, and asserts
+  `.ai == "unavailable (the API does not answer the agent's CRUD areas)"` and no
+  `secret_key` field; it then starts it again with `SCADBUDDY_DATABASE_URL` and
+  `SCADBUDDY_SECRET_KEY_FILE` set and checks the `ignores` warning
+  ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)). The UI reads `ai` through
+  `GET /api/v1/ai/status` (`frontend/src/agent/chat/availability.ts`).
 
 ## 6. Origin allowlist and trusted proxies
 
@@ -786,6 +786,9 @@ Issue #262. With OIDC on, MCP clients such as Claude Code or Claude Desktop sign
 through the homelab IdP instead of being given a pasted `sbmcp_` token. Bearer tokens
 keep working. The design and the specifications followed are in spec §8.3 (`oidc`) and
 [security.md](security.md#mcp-oidc-access-tokens).
+
+OIDC access tokens also read the plugin feed (§9,
+[The marketplace feed](#the-marketplace-feed-6933)), with the same audience as `/mcp`.
 
 **Prerequisites.**
 
@@ -865,16 +868,19 @@ logged as `mcp auth: ai_settings.mcp_oidc is not a valid OIDC configuration`.
 
 ## 7. Database tables
 
-The agent owns its `ai_*` tables (spec §9); the API applies their migrations
+The `ai_*` tables are the agent's data, but the API owns them: it applies their migrations
 ([`backend/scadbuddy/migrations_agent/`](../../backend/scadbuddy/migrations_agent/), by
 [`backend/scadbuddy/render/agent_migrations.py`](../../backend/scadbuddy/render/agent_migrations.py),
-#5299):
+#5299 D6), and the agent reads and writes them only through the API's CRUD routes
+(`/api/v1/internal/crud/agent/*`; the agent has no SQL client, #5299 step 12). The store
+classes named below are the agent's `Crud…` clients:
 
 - `ai_migrations`: the ledger, one row per applied file (its id is the file name
   without `.sql`), with a checksum each. `version` and `story` are set only for the
   two files that predate #491, so an older image can still read the ledger.
 - `ai_credentials`: the sealed credentials, with their priority and health (#1093).
-- `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`.
+- `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`
+  (area `settings`).
   The keys read today are `model`, the Claude model every turn and the connection test
   use (`SETTING_MODEL`; unset or `null` is Claude Code's default), which Settings →
   Assistant model writes through `PUT /api/v1/ai/settings/model`
@@ -926,18 +932,17 @@ The agent owns its `ai_*` tables (spec §9); the API applies their migrations
   `approval_grant` (#300, `20260929T0249Z_mcp_token_approval_grant.sql`: off by default,
   and a `CHECK` allows it only on an `outward` token). Only the
   SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
-  `CHECK`); the plaintext is shown once when minted. `PostgresTokenStore` in
+  `CHECK`); the plaintext is shown once when minted. `CrudTokenStore` (area `mcp-tokens`) in
   [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts). There is no file or
-  in-memory store: without `SCADBUDDY_DATABASE_URL`, `/mcp` and the token routes
-  (§4.1) answer 503. Settings writes this table through §4.1's routes.
+  in-memory store: until the API lists the agent's areas, `/mcp` answers 503. Settings
+  writes this table through §4.1's routes.
 
 - `ai_browser_pairings`: MCP clients the user paired with a tab by typing a code
   (#254, spec §8.5, `20260929T1330Z_browser_pairings.sql`): who asked, the SHA-256 of
   the code (never the code), the status (`pending`, `paired`, `denied`, `ended`), the
-  tab, wrong tries and the expiry. `PostgresPairingStore` in
+  tab, wrong tries and the expiry. `CrudPairingStore` (area `pairings`) in
   [`agent/src/bridge/pairings.ts`](../../agent/src/bridge/pairings.ts); see
-  [browser-bridge.md](browser-bridge.md#pairing-spec-85). Without a database only chat
-  sessions reach a tab.
+  [browser-bridge.md](browser-bridge.md#pairing-spec-85).
 
 - `ai_session_files`: the assistant's workspace (#2329,
   `20261011T1502Z_session_files.sql`; [§13](#13-the-workspace-2329)): files keyed by
@@ -946,8 +951,9 @@ The agent owns its `ai_*` tables (spec §9); the API applies their migrations
   the media type, sha256, size and `source`, and the bytes: a sealed blob of the
   backend's store (`blob_key`, `key_sealed`, #4789, `20261027T0114Z_session_files_blobs.sql`)
   or, where the backend keeps no blobs, a row of `ai_session_file_bytes` it names
-  (`bytes_sha256`), or `data` for a row an older agent wrote. `SessionFiles` in
-  [`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts).
+  (`bytes_sha256`), or `data` for a row an older agent wrote. `CrudSessionFiles` in
+  [`agent/src/workspace/crudStore.ts`](../../agent/src/workspace/crudStore.ts) (area
+  `workspace`).
 
 - `ai_session_file_bytes`: a workspace file's bytes where the backend keeps no blobs
   (`store_backend` local; #4212, `20261114T1609Z_session_file_bytes.sql`), one row per
@@ -964,26 +970,21 @@ The agent's migration advisory lock key is "SCADAGNT", distinct from the backend
 
 The agent also reads the backend's flow tables, which the backend migrates. It asks the
 backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
-`agent/src/flows/backendReads.ts`, #5299), and never over SQL. The API takes back the
-grants of its role `scadbuddy_agent` on `events`, `workflow_runs` and
-`workflow_run_decisions` at every start (`backend/scadbuddy/auth/revoke.py`
-`RETIRED_GRANTS`), but the agent still connects as the database owner, so that revoke binds
-nothing until #5299 step 12 removes the agent's database URL. Until then the guard is
-`agent/test/retiredTables.test.ts`, which fails on agent SQL that names one of those tables.
-Every flow tool call reads its run
-`FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`); the backend's
-route takes that lock in its own transaction. The gate's grant check
-(`agent/src/gate/store.ts` `grantInput`) reads `flow_grants` and `flow_grant_uses` on the
-API, under the grant row's share lock, in the grant route's transaction
-(`backend/scadbuddy/api/crud_agent_gate.py`, area `gate`, #5299 step 10), so the role
-holds no backend table: the API takes back `flow_grants` and `flow_grant_uses` at every
-start too, and `agent/test/retiredTables.test.ts` names them.
+`agent/src/flows/backendReads.ts`, #5299 D7); every flow tool call's run read takes its
+`FOR SHARE` lock in the route's own transaction. The gate's grant check reads
+`flow_grants` and `flow_grant_uses` on the API, under the grant row's share lock, in the
+grant route's transaction (`backend/scadbuddy/api/crud_agent_gate.py`, area `gate`, #5299
+step 10). The API takes back everything the role `scadbuddy_agent` held (among it
+`events`, `workflow_runs`, `workflow_run_decisions`, `flow_grants` and `flow_grant_uses`)
+at every start (`RETIRED_ROLES`, PR #6906)
+(`backend/scadbuddy/auth/revoke.py`), and logs, for each retired role that still exists,
+its granted relations, owned relations and sessions (`retired_state`).
+`agent/test/retiredTables.test.ts` fails on a Postgres driver in `agent/src`.
 
-When the API and the agent connect as different roles, the API's role must own the `ai_*`
-tables: the agent grants nothing since #6501 (it granted `API_AI_GRANTS` at each start
-before), and the API's CRUD routes read and write those tables. The files the API applies
-(#5299 D6) are its role's already; transfer the older ones with `ALTER TABLE … OWNER TO`.
-Production connects both as one role, so it needs nothing.
+The agent grants nothing since #6501 (it granted `API_AI_GRANTS` at each start before).
+The files the API applies (#5299 D6) are its role's already; on a database where an older
+agent made the `ai_*` tables under another role, transfer them with `ALTER TABLE … OWNER TO`.
+Production made them as one role, so it needs nothing.
 
 ## 8. Per-query limits
 
@@ -1012,8 +1013,8 @@ its $1.00 budget.") and offers:
   child records where it cut its parent's (`ai_sessions.fork_parent_id`, `fork_cut`),
   reads the parent's entries through that cut under the parent's key, and stores only
   what it adds. Forgetting the parent (`forgetSubject`) first copies the range each fork
-  reads into that fork, sealed under the fork's own key, so it needs the KEK mounted
-  while the parent has forks. Forks made before this hold a copy. A parent whose turn is
+  reads into that fork, sealed under the fork's own key, so the API needs its KEK while
+  the parent has forks. Forks made before this hold a copy. A parent whose turn is
   running forks at its last finished reply.
   Each fork, from this route or the `sessions_fork` tool, is a `resource`
   audit row (action `session_fork`), written once the fork is complete; a rename or
@@ -1034,13 +1035,22 @@ budget is spent. Money is shown in cents, in the panel and in the agent's error 
 ## 9. Plugin packages (#297)
 
 A plugin package is a Claude plugin (skills, subagents, hooks, `.mcp.json`) fetched from
-a git repository, or from an entry of a marketplace repository, at a pinned commit. The
+a git repository, or from an entry of a marketplace repository, at a pinned commit. Since
+#6935 it may also come from any source Claude Code takes
+([marketplace reference](https://code.claude.com/docs/en/plugins/marketplace-reference.md),
+"Plugin sources"): an entry of a bare `marketplace.json` URL (which Claude Code downloads
+alone, so its entries cannot be relative paths,
+[host-marketplace](https://code.claude.com/docs/en/plugins/host-marketplace.md)), an
+`archive` zip URL, or an `npm` package. These are pinned to the SHA-256 of the file
+fetched at install, a *bytes pin*. The
 Agent SDK loads plugins by local path only: "To use a plugin distributed through a
 marketplace or remote repository, download it first and provide the local directory
 path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 
-- **Postgres is the record.** `ai_plugin_packages` holds the pin (commit SHA and content
-  hash) and everything the admin reviewed
+- **Postgres is the record.** `ai_plugin_packages` holds the pin (`pin_kind` `commit`
+  with the commit SHA, `bytes` with `bytes_sha256`, or `version` with a hosted plugin's
+  `version`; and the content hash) and
+  everything the admin reviewed
   ([`agent/src/plugins/packages/store.ts`](../../agent/src/plugins/packages/store.ts)).
 - **Disk is a cache.** Packages are materialised under `<state dir>/plugins/<name>/<commit>-<hash prefix>`
   (`pluginCacheDir()` in [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)).
@@ -1049,15 +1059,33 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   not hash to the pin, the package is not loaded (`materialise()` in
   [`agent/src/plugins/packages/install.ts`](../../agent/src/plugins/packages/install.ts)).
   The cache can be the same `emptyDir` as the rest of the state directory.
+- **A bytes pin loads from its mirror.** The file of an archive or npm package is kept in
+  the blob store through the API's CRUD area `package-mirrors` (blob
+  `plugin-mirror-<sha256>`, held in `blob_refs` for the package it was sent for, holder
+  `<name>/<sha256>`, while that package's pin or pending re-pin names it; a hold no pin
+  names goes after a day). Its cache directory is
+  `<name>/b<first 40 of the sha256>-<hash prefix>`, and a cache miss unpacks the mirrored
+  copy, never the upstream URL. The area is one of `STORE_AREAS`, so the agent is not ready
+  (its data routes answer 503) until the API lists it.
+- **A hosted plugin loads from its version** (#6934, spec 2026-11-21 §6.5). A `hosted`
+  source is a plugin published under Settings → Tools & plugins → Hosted plugins. It is
+  always installed at its latest published version, read with its zip through the API's
+  CRUD area `hosted-plugins` (`agent/src/plugins/packages/hosted.ts`), never over the
+  network. The zip must hash to the version's `zip_sha256`, its files to the version's
+  `content_hash`, and it is vetted as every package is. The API stores the pin only when
+  that version has that content hash (409 `hosted-version-mismatch`). Its cache directory is
+  `<name>/v<version>-<hash prefix>`, and a cache miss reads that version's zip again. A
+  package of another kind cannot take a hosted plugin's name (409 `hosted-name-taken`).
 - **git in the image.** The `agent` stage installs `git` and `ca-certificates`
   ([`Dockerfile`](../../Dockerfile)). git runs with an environment built by
   [`agent/src/plugins/packages/git.ts`](../../agent/src/plugins/packages/git.ts), so it
   never sees the service's own environment. It passes through only the proxy and CA
   variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, their lower-case forms,
   `GIT_SSL_CAINFO`, `SSL_CERT_FILE` and `SSL_CERT_DIR`).
-- **Egress.** The pod needs outbound HTTPS to each git host it installs from. Fetches,
-  and every URL a package declares, go through the same egress check as the gateway
-  (see [security.md](security.md#plugin-packages)).
+- **Egress.** The pod needs outbound HTTPS to each git host, archive host and npm
+  registry it installs from. Fetches (each redirect hop of a download too), and every URL
+  a package declares, go through the same egress check as the gateway (see
+  [security.md](security.md#plugin-packages)).
 - **Built-in plugins.** The plugin in the image is listed first by
   `GET /api/v1/ai/plugin-packages`, with `built_in: true`
   ([`agent/src/plugins/packages/builtins.ts`](../../agent/src/plugins/packages/builtins.ts)):
@@ -1078,16 +1106,100 @@ other Settings writes
 
 | Route | What it does |
 |---|---|
-| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }` or `{ "kind": "marketplace", "url", "ref"?, "entry" }` | Fetches, pins the commit, vets, and stores the package **unapproved and disabled** (201), with what the rules refuse in `review.refused`. A package no approval can allow (its name, a path outside it, a symlink, an endpoint the egress check refuses) gets 422 with every problem. |
+| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }`, `{ "kind": "marketplace", "url", "ref"?, "entry" }`, `{ "kind": "marketplace-url", "url", "entry" }`, `{ "kind": "archive", "url", "sha256"? }` `{ "kind": "npm", "package", "version"?, "registry"? }` or `{ "kind": "hosted", "name" }` | Fetches, pins the commit (or the file's SHA-256, which it mirrors first, or a hosted plugin's latest version), vets, and stores the package **unapproved and disabled** (201), with what the rules refuse in `review.refused`. A `hosted` source *offers* the latest version: when the hosted package is installed, it is re-pinned into a pending pin instead (still answered 201). A hosted package's view has `not_offered`, the latest version when neither its pin nor its pending pin is that version. A marketplace entry may be a `github`, `url`, `git-subdir`, `archive` or `npm` source (a `command` source is refused; a relative path only from a marketplace repository). An npm `package` is a registry name (with `@version` or `version`: an exact version or a dist-tag; `latest` by default) or an https tarball link. A package no approval can allow (its name, a path outside it, a symlink, an endpoint the egress check refuses) gets 422 with every problem. |
 | `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
 | `GET /:name/files`, `GET /:name/file?path=` (each with `pending=true` for the re-pin's) | Every file of the pin with its size, and one file's content for Settings to show before approval (#1029). Only a path in the pin's own file list is read, from the cached copy that hashes to the pin (fetched again when it does not; never vetted for loading, so a refused package can be read). Text is cut at 64 KiB unless `full=true`; a file that is not UTF-8 is `binary` with no `content`. A built-in's files are read from the image. |
-| `POST /:name/approve` with `{ "commit_sha", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
+| `POST /:name/approve` with `{ "commit_sha", "bytes_sha256" or "version", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
 | `PATCH /:name` | Gone (#4828). A package's switch is `PUT /api/v1/ai/capabilities/package:<name>` (#4757), which Settings uses; it enables an approved pin only, and the table enforces this with a `CHECK` too. |
-| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin. The current pin keeps loading until the pending one is approved. |
+| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin (for an npm package, `ref` is a version or dist-tag; an archive, a tarball link or a bare marketplace URL takes none and is fetched again; a hosted plugin takes none and is re-pinned to its latest version; an archive installed with its `sha256` is refused 409 `repin-fixed-sha256`, since it could only find the same file). The current pin keeps loading until the pending one is approved. |
 | `DELETE /:name/pending`, `DELETE /:name` | Drop the pending re-pin; uninstall and evict the cache. |
 
 Plugins are never updated automatically (issue #297). At most two fetches run at a
 time, and one per package; another request gets 429.
+
+### The assistant's hosted plugin tools (#6938)
+
+The assistant writes and publishes hosted plugins with seven tools
+([`agent/src/tools/hostedPlugins.ts`](../../agent/src/tools/hostedPlugins.ts), spec
+`2026-11-21-hosted-plugin-feeds-design.md` §6.2). They call the API's
+`/api/v1/hosted-plugins` routes with the agent's service credential, as every tool calls
+the API; those routes are `api` routes, which take it.
+
+| Tool | Tier | What it does |
+|---|---|---|
+| `hosted_plugin_list` | `read` | Lists the hosted plugins, or reads one with its draft's files, the caps and the draft against its latest version. |
+| `hosted_plugin_file_read` | `read` | Reads one draft file as text. A file that is not UTF-8 gives its size and sha256 only. |
+| `hosted_plugin_create`, `hosted_plugin_update` | `write` | Creates a plugin, or changes its description, category or tags. |
+| `hosted_plugin_file_write`, `hosted_plugin_file_delete` | `write` | Writes one draft file as UTF-8 text (the route gets the raw bytes), or deletes one. Nothing loads from a draft. |
+| `hosted_plugin_publish` | `outward` | Publishes the draft as the next version, then offers that version to the package model (§6.3 step 5): an install when no package has the name, else a re-pin into the pending pin. |
+
+The file tools check each path with the API's own rules (`hosted_plugins/rules.py`
+`check_path`) before they build the URL, and send no request for a path they refuse. A path
+of `.` or `..` is not percent-encoded, so without this check `files/..` would resolve to
+`DELETE /{name}/`, which the API redirects (307) to `DELETE /{name}`, the whole plugin. Every
+backend call of the agent refuses a path parameter of `.` or `..` before it builds the URL
+(`api/pathSegments.ts`: the typed client's `pathSerializer`, `crudFetch`, the order-cost post),
+since mid-path such a segment reaches another route with no redirect at all
+(`/orders/o1/items/../quote` is `/orders/o1/quote`, #7221). The backend client also follows
+no redirect (`api/backend.ts`), a backstop (#7104).
+
+`hosted_plugin_publish` parks for a person's approval, which names the next version and
+the draft's changes (or, for a draft equal to the latest version, the version it offers).
+The approved input also holds `draft`, the draft-diff's `draft_digest` (the draft's files,
+its description and its latest version, `GET /api/v1/hosted-plugins/{name}/draft-diff`), and
+the publish sends it as `?expect_draft=`. A draft written after the approval is refused 409
+`draft-changed`, and nothing is published (#6931 review M3); the model then asks again.
+In a session on Temporal, a call that sent no `draft` reads the draft's digest again at its
+run, so a draft written after the approval hashes otherwise. The gate refuses that call
+`NotApproved` as matching no approval, with the tool's `movedSinceApproval` advice, and runs
+nothing (#7199, #7211). A call that sent its own `draft` is not read again: the publish's
+`expect_draft` refuses it 409 `draft-changed`. A flow's call that sends no
+`draft` binds the draft as the run page read it (`flowBinding`, backend
+`flows/print_binding.py`); the run sends that digest as `expect_draft` (#7199).
+Once approved, the call publishes, then offers the version in the
+agent's own process (`offerHosted` over `PackageInstaller`, `ToolServices.hostedPackages`),
+never through the UI-guarded package routes. A person still approves the version in
+Settings before it loads. When the draft equals the latest version, the call publishes
+nothing and offers that version only when no pin or pending pin names it, so a call again
+after a failed offer offers it. The error says to call again only for a failure that may
+pass; for a refusal (the package vetting, or a package of another kind under the name) it
+says to fix the draft first. Deleting a plugin and moving a draft file have no tool:
+they stay the Hosted plugins editor's.
+
+### The marketplace feed (#6933)
+
+The agent serves a marketplace feed of plugin packages to Claude Code sessions outside
+ScadBuddy (spec `2026-11-21-hosted-plugin-feeds-design.md` §6.4, §6.7;
+[`agent/src/routes/pluginFeeds.ts`](../../agent/src/routes/pluginFeeds.ts)). It reads its
+data over the API's CRUD areas `plugin-feeds`, `hosted-plugins` and `package-mirrors`.
+
+| Route | Who | What it does |
+|---|---|---|
+| `GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json` | `/mcp`'s auth | The feed's `marketplace.json`: each package at its current approved pin. `Cache-Control: private, max-age=60`. |
+| `GET …/{feed}/plugins/{name}/versions/{N}/{zip_sha256}.zip` | `/mcp`'s auth | A hosted package's listed version, only when the URL's number and sha256 are the listed ones and the bytes hash to it (else 404, or 502 for bytes that differ). `immutable`. |
+| `GET …/{feed}/plugins/{name}/archives/{sha256}.zip` | `/mcp`'s auth | An archive or npm pin's zip, made from ScadBuddy's mirror and named by the served zip's sha256. `immutable`. |
+| `GET /api/v1/ai/plugin-feeds/{feed}` | Read guard | Settings → MCP access → **Plugin feed**: the feed's `marketplace_url`, the auth mode, and each package with whether it is listed and why not. |
+| `PUT`, `DELETE /api/v1/ai/plugin-feeds/{feed}/packages/{name}` | UI only | Adds a package to the feed (201, or 200 when it was in it) or takes it out (204). |
+
+**The feed follows `/mcp`'s auth.** Each request passes the same transport gates and
+`authenticate()` as `/mcp`: the `sbmcp_` tokens of §4.1 (any tier), OIDC access tokens
+while OIDC is on (§6a), and in `disabled` mode anyone, whatever the anonymous cap (§10;
+every cap includes `read`). So an operator who revokes a token, changes the auth mode or
+the anonymous cap, or turns OIDC on or off, changes who reads the feed too. Settings that
+cannot be read fail closed.
+
+**LAN-only.** The feed has no public prefix on the SSO host (owner decision on
+eh-homelab/clusters#4017): it is reached on the LAN host, as `/mcp` is, and off-LAN clients
+get no feed. The zip URLs and `marketplace_url` are made from the origin the request came
+on, not `SCADBUDDY_PUBLIC_URL`, because Claude Code sends a marketplace's `headers` only to
+that origin.
+
+**What is listed.** Only a package's current approved pin; a pending re-pin, a draft, an
+unapproved package or a package not in the feed is 404 on these paths. A package approved
+with `allow_refused` can be listed, and every client of the feed then runs its hooks and
+MCP servers ([security.md](security.md#the-marketplace-feed-6933)).
+A hosted zip read waits at most 120 s for the API (`HOSTED_ZIP_TIMEOUT_MS`, the
+installer's deadline for the same route).
 
 ### Status
 
@@ -1210,8 +1322,9 @@ Monitor watches a WebSocket only (`nativeBuiltins.ts` `monitorAccess`, `live.ts`
   pod. Measured on 2026-11-01 in `scadbuddy-agent-worker` (read-only): `unshare --user
   --map-root-user --pid --fork id` works, but with `--mount` it fails with "cannot change
   root filesystem propagation: Permission denied" (AppArmor `cri-containerd.apparmor.d`,
-  enforce), and the image has no `bwrap`. Unsandboxed, `Bash` could read the KEK mount and
-  every session's directory. A sandbox pod (#779) comes first.
+  enforce), and the image has no `bwrap`. Unsandboxed, `Bash` could read the pod's
+  environment and mounts (the `agent` credential's proof; no database URL or KEK since
+  eh-homelab/clusters#3965) and every session's directory. A sandbox pod (#779) comes first.
 - An `allow_refused` package's `builtinTools` only switch on a built-in that is `off` by
   default, at the package's own tier for it (`outward` by default, so each call parks).
   The source switched off, or the item's own row set to `off`, keeps it off whatever a
@@ -1525,6 +1638,10 @@ DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
 Outward tools still need a human approval in the UI in every mode (spec §8.2; see
 [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
 
+The mode and the cap also govern the plugin feed, `/api/v1/ai/plugin-feeds/*` (§9,
+[The marketplace feed](#the-marketplace-feed-6933)): in `disabled` mode anyone on the LAN
+reads it.
+
 ## 11. Automatic Hindsight memory
 
 When a session's turn loads an enabled remote MCP plugin named `hindsight` (#297,
@@ -1658,7 +1775,7 @@ Settings → Tools & plugins reads and writes `ai_access` through seven agent ro
   unknown one is 404. Every other write answers the source as it is after the write.
 - The refusals: 400 (a bad body or access), 403 (a guard), 404, 409, 413 (a body over
   4 KiB), 429 (a test already running), 502 (a refresh whose test failed with any other status,
-  `refresh` in `agent/src/access/providers.ts`) and 503 (no database, or its migrations have not applied), each as `{ detail }`.
+  `refresh` in `agent/src/access/providers.ts`) and 503 (the API does not list the agent's CRUD areas yet), each as `{ detail }`.
 - The guards are the plugin routes' guards (`agent/src/routes/guard.ts`): reads behind
   `uiReadProblem`, writes and the refresh behind `uiRequestProblem`, JSON bodies of at
   most 4 KiB (`jsonBodyLimit`). These are the user's settings writes. No agent tool
@@ -1712,8 +1829,8 @@ call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
   #2511), never base64 in the result. A longer text body is saved in
   Postgres (`ai_session_http_bodies`, #2374), the 10 newest per session, so any replica pages it with `http_response_read`. That is up to
   10 × 20 MiB of plaintext `bytea` a session: size the database for it beside the other
-  per-session storage. The rows go with the session; once the API lists area `http-bodies`
-  (#5299 step 7), they are written and read by range through its CRUD routes
+  per-session storage. The rows go with the session; they are written and read by range
+  through the API's CRUD routes (area `http-bodies`, #5299 step 7)
   ([`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)). A flow run's bodies stay on the
   replica that ran the call, under `durable-turns/flow-<id>/http/`, removed by every
   pod's hourly sweep after 7 days (#2496); that sweep also clears a `durable-turns/<id>/`
@@ -1731,8 +1848,7 @@ the pod's disk, so every replica, every session and `/mcp` see the same
 files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), tools in
 [`agent/src/tools/workspace.ts`](../../agent/src/tools/workspace.ts)).
 
-- Who keeps them (#5299 step 7): the API, once it lists area `workspace` (`GET
-  …/crud/agent/areas`). Its routes `/api/v1/internal/crud/agent/workspace/*`
+- Who keeps them (#5299 step 7): the API, area `workspace`. Its routes `/api/v1/internal/crud/agent/workspace/*`
   ([`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py),
   the `crud.agent` credential; the agent's
   [`agent/src/workspace/crudStore.ts`](../../agent/src/workspace/crudStore.ts)) take and give
@@ -1741,30 +1857,26 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   row, its blob's hold and its `workspace.file` events are one transaction there, so no hold
   waits for a release, and the API re-wraps principals' file keys at a rotation
   (`agent_data/rotation.py`). The reconcile is one transaction on the API too, under
-  `RECONCILE_LOCK` as a transaction lock, which an agent pod still on SQL takes as a session
-  lock: never two at once. A workspace and a path go in the query or the body, never in a
+  `RECONCILE_LOCK` as a transaction lock. A workspace and a path go in the query or the body, never in a
   route's path. A file is at most `workspace_file_max_bytes` and, whatever that setting says,
-  100 MiB (the Settings form's ceiling, `FILE_BYTES_CEILING`). Until the API lists the area
-  (a rolling deploy) the agent does all of the below itself, over SQL.
+  100 MiB (the Settings form's ceiling, `FILE_BYTES_CEILING`). Everything below runs on the
+  API; the agent sends and gets plaintext only.
 - Where the bytes are (#4789): a blob of the backend's content store (`store_backend` s3
-  or bambuddy), `workspace-<sha256 of the sealed bytes>`. The agent reads which store the
-  backend runs on from its `/healthz` (`store.backend`), and asks its hidden
-  `/api/v1/internal/workspace-blobs` routes for a URL to PUT the bytes to (the internal
-  blob route) and one to GET them (S3's presigned URL on s3); it holds no store credential
-  and mints no token. The bytes are sealed under a key of the file's own, in 1 MiB segments
-  ([`agent/src/workspace/sealing.ts`](../../agent/src/workspace/sealing.ts)); that key is
+  or bambuddy), `workspace-<sha256 of the sealed bytes>`. The bytes are sealed under a key
+  of the file's own, in 1 MiB segments (backend `agent_data/workspace.py`); that key is
   wrapped under the session's data key (`ai_payload_keys`), or under the KEK for a
   principal's file (re-wrapped at a rotation). A fork's row names the parent's blob with
-  the key wrapped again for the child: no bytes are copied. At start the agent moves rows
-  still in Postgres to blobs (`SessionFiles.moveToBlobs`); a later migration drops `data`.
+  the key wrapped again for the child: no bytes are copied. At start the agent asks the API
+  to move rows still in Postgres to blobs (`moveToBlobs`, `…/workspace/blob-moves`); a later
+  migration drops `data`.
 - Only on `store_backend` local (no content store; the routes answer 404) do the bytes
   stay in Postgres, in plaintext: one row of `ai_session_file_bytes` per sha256, which
   every file with those bytes names (`bytes_sha256`). A fork's row names the parent's, so
   here too no bytes are copied (#4212), save a row an older agent kept inline whose bytes do not match its sha256, which is copied inline; a row no file names any more is deleted after a
   write or delete, on the sweep, and when its session is forgotten. On any other backend a write is refused
   (`unavailable`, HTTP 503 on the panel's Files routes) and nothing is kept in plaintext
-  when the agent has no `SCADBUDDY_SECRET_KEY_FILE`, when the backend cannot mint the URLs
-  (no `SCADBUDDY_API_INTERNAL_URL` or KEK: its routes answer 503 saying which), when the
+  when the API cannot seal or store them (no `SCADBUDDY_API_INTERNAL_URL` or KEK: its routes
+  answer 503 saying which), when the
   backend is older than the routes (404), or when it cannot be reached. `moveToBlobs`
   refuses the same way and moves nothing. The agent logs the cause once at start, and
   `GET /api/v1/ai/status` shows it as `workspace_files` (`{store: "blobs" | "postgres" |
@@ -1785,28 +1897,15 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   then carries `unreadable_files`, the count of such rows (also when writes are refused).
   Do not switch a deployment that holds workspace blobs back to local.
 - The holder: each row's blob is held `(ai_session_file, <workspace>/<path>)` in the
-  backend's `blob_refs`, so the blob sweep keeps a blob while a row names it. The agent
-  never writes that table: it holds and releases through its CRUD routes
-  (`backend/scadbuddy/api/crud_agent.py`, `/api/v1/internal/crud/agent/workspace-blob-refs`,
-  the `crud.agent` service credential; #5299, part of #5295). `SessionFiles`
-  (`agent/src/workspace/store.ts`) holds before it writes the row that names a blob
-  (a write, a fork's copy, the move out of `data`), so a write the backend refuses to hold
-  is refused `unavailable` and writes no row; and it releases after the row is gone (a
-  replacement's old blob, a delete, the principals' sweep). A failed release is only logged.
-  `reconcile`, on the sweeper's tick once an hour (a run that failed, or that found no free
-  lock connection, is tried again at the next 10-minute tick) and on one replica at a time (a
-  session advisory lock on a lock connection, `Database.locks`), releases every hold older
-  than an hour whose row is gone or names another blob (a session's cascade, `forgetSubject`,
-  a crash, a failed release), and holds every row no hold names. On `store_backend` local
-  nothing is held.
-  Roll the API before the agent: an agent whose API does not serve the routes yet gets a 404
-  on the hold, and its blob-backed workspace writes are refused `unavailable` until the API
-  has rolled. That fails closed on purpose: a write never leaves a blob that no holder keeps,
-  which the blob sweep could take. The trigger that once did this (migration
-  `20261027T0114Z_session_files_blobs.sql`) is dropped by
-  `20261110T0112Z_drop_session_files_hold_blob.sql`; its rows keep the same holder, so they
-  stay valid, and the API revokes `blob_refs` from the agent's role at every start
-  (`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`).
+  backend's `blob_refs`, so the blob sweep keeps a blob while a row names it. The API holds
+  it in the write's own transaction, before the row that names it, and releases it after
+  the row is gone (a replacement's old blob, a delete, the principals' sweep). The hourly
+  reconcile, on one replica at a time (`RECONCILE_LOCK`), releases every hold older than an
+  hour whose row is gone or names another blob (a session's cascade, `forgetSubject`, a
+  crash), and holds every row no hold names. On `store_backend` local nothing is held. The
+  trigger that once did this (migration `20261027T0114Z_session_files_blobs.sql`) is
+  dropped by `20261110T0112Z_drop_session_files_hold_blob.sql`; its rows keep the same
+  holder, so they stay valid.
   `agent/test/workspaceBlobs.backend.e2e.test.ts` runs the holds against the real API on
   moto's S3 (`backend/tests/support/workspace_backend.py`), both services migrated into one
   database, and checks the `blob_refs` rows the routes write.
@@ -2109,10 +2208,9 @@ How the agent does it
    under the KEK (§3) in `ai_plugin_oauth`. The AAD binds them to the plugin, its URL,
    the resource, the issuer, the token endpoint and the client id. The forwarder asks
    for a token on every request and refreshes it shortly before it expires. The
-   refresh runs under the row's lock, so replicas never spend one refresh token twice.
-   Once the API lists the agent's CRUD area `plugins` (#5299 step 5), the API seals and
-   opens them, and the refresh runs under the lease `plugin-oauth:<plugin>` on the API
-   (#5299 D3) in place of the row's lock.
+   refresh runs under the lease `plugin-oauth:<plugin>` on the API (#5299 D3), so
+   replicas never spend one refresh token twice. The API seals and opens them (area
+   `plugins`, #5299 step 5).
    Claude Code, the browser and every route see only the sign-in's state.
 6. **Failure.** A refused refresh, or a server that refuses a renewed token, marks the
    sign-in `error` and the card shows **Sign in again**. Until then, turns run without
@@ -2153,10 +2251,8 @@ approve:
   it. A push carries the request's id, its session's id and its reason, never the message.
   The VAPID key is made on first use and sealed under the KEK (`ai_push_vapid`).
   Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, and rotation
-  re-wraps both. Once the API lists the agent's CRUD area `notify` (#5299 step 5), the API
-  seals and opens them with its own KEK, so the agent needs none for Web Push or the
-  notification channels; before that, Web Push needs `SCADBUDDY_SECRET_KEY_FILE` in the
-  agent. A subscription's endpoint comes
+  re-wraps both. The API seals and opens them with its KEK (area `notify`, #5299 step 5),
+  so the agent needs none for Web Push or the notification channels. A subscription's endpoint comes
   from the browser, so it is checked strictly
   ([`agent/src/notify/pushEgress.ts`](../../agent/src/notify/pushEgress.ts)), when it is
   stored and again at every push. It must use https, and its host must be on the push-service

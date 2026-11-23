@@ -13,15 +13,8 @@ import { scrubForLog } from './sdkEvents.js'
 /** ai_settings key of the model a turn runs on (non-secret, spec §9). */
 export const SETTING_MODEL = 'model'
 
-/** The session whose budget this one spends from: itself, or a fork's lineage root (#823). */
-const ROOT = 'coalesce(ai_sessions.budget_root_id, ai_sessions.id)'
-/** The budget a session spends from: its root's (20261006T0100Z_session_budget_root.sql). */
-export const POOL_BUDGET = `coalesce((SELECT r.budget_usd FROM ai_sessions r WHERE r.id = ${ROOT}), ai_sessions.budget_usd)`
-/** What every session spending from that budget has spent. Read at the statement's snapshot. */
-export const POOL_COST = `(SELECT sum(m.cost_usd) FROM ai_sessions m WHERE coalesce(m.budget_root_id, m.id) = ${ROOT})`
-
 /**
- * What is left of the budget `sessionId` spends from (POOL_BUDGET less POOL_COST, read in one
+ * What is left of the budget `sessionId` spends from (its root's budget less what its pool spent, read in one
  * snapshot of its row, rows.ts); undefined for a session that is gone.
  */
 export async function poolRemainingUsd(rows: { get(id: string): Promise<{ budget_usd: number; pool_cost_usd: number | null } | undefined> }, sessionId: string): Promise<number | undefined> {

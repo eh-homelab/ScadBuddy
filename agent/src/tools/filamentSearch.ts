@@ -5,8 +5,8 @@ import { ok } from './call.js'
 /**
  * #6894 — the filament text search of `filament_spool_list` and `filament_type_list` `q`, so
  * the assistant finds a spool the way the Filament page does. A copy of the frontend's
- * `frontend/src/lib/filamentSearch.ts`; change both together (`test/filamentSearch.test.ts`
- * checks the same cases). The query is split on white space, and every token must match some
+ * `frontend/src/lib/filamentSearch.ts`; change both together (both tests run
+ * `test-fixtures/filament/search-vectors.json`). The query is split on white space, and every token must match some
  * field, in any case:
  *
  * - `#87` (a `#` and 1 to 5 digits) is a spool number, and matches spool 87 only.

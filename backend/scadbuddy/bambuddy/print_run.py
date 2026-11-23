@@ -190,12 +190,14 @@ from scadbuddy.print_library.copies import (
 )
 from scadbuddy.print_library.reads import LibraryReads, NativeCopies
 from scadbuddy.printers.hot_path import NATIVE_STORES, hot_path_native, native_backends
-from scadbuddy.printers.lan_models import LanReport, LanStarted, LanStopped
+from scadbuddy.printers.lan_models import LanQueued, LanReport, LanStarted, LanStopped
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import is_fresh, status_from_report
 from scadbuddy.rack.rank import (
     RackCandidate,
     RackGroup,
+    UncheckedReason,
+    UncheckedSlot,
     Usage,
     abrasive_type,
     candidates_for,
@@ -208,6 +210,7 @@ from scadbuddy.rack.rank import (
     rack_serials,
     rack_warnings,
     rank_rack,
+    unfound_reason,
 )
 from scadbuddy.rack.usage import (
     PickedHotend,
@@ -541,27 +544,13 @@ class RackSentPick(BaseModel):
     position: int
 
 
-#: Why a rack-side slot's spool could not be checked for Glow (#6872): the plan chose no
-#: spool for it; it chose a tray that holds none; or the spool it names (an SB number, or
-#: the spool in a tray chosen for itself) is not in the inventory.
-UncheckedReason = Literal["no_spool", "empty_tray", "not_in_inventory"]
-
-
-@dataclass(frozen=True)
-class _Unchecked:
-    """One slot the preview could not test Glow on, and the id the plan names for it."""
-
-    slot_id: int
-    reason: UncheckedReason
-    spool_id: int | None = None
-
-
 class RackUncheckedSlot(BaseModel):
     """A rack-side slot whose spool Glow could not be checked on (spec §3, #6872), named
     so a person can act: why, the SB number the plan names, else the tray it names, and
     what that tray or slot holds. ``reason`` is ``no_spool`` when the plan chose no spool,
-    ``empty_tray`` when it chose a tray that holds none, and ``not_in_inventory`` when
-    the spool, or the spool in the tray, is not in the inventory."""
+    ``empty_tray`` when it chose a tray that holds none, ``not_in_inventory`` when the
+    spool, or the spool in the tray, is not in the inventory, and ``no_type`` when that
+    SB spool has no type, so no material to test (R-6876-6)."""
 
     slot_id: int
     reason: UncheckedReason
@@ -637,6 +626,10 @@ class PrintRunResult(BaseModel):
     #: waits for someone to say its plate is clear before it starts it (#4939,
     #: ``lan_require_plate_clear``): ``POST /print/runs/{id}/plate-cleared``.
     lan_awaiting_clear: bool = False
+    #: The printer was busy when the run read it, so it sent nothing and waits to start
+    #: its first print (#6871, ``lan_queue_when_busy``); ``None`` once that print starts,
+    #: or for a run that never waited. The waiting prints are ``lan_waiting``.
+    lan_queued: LanQueued | None = None
     #: The slicer settings per filament slot this print was laid out with (#5571,
     #: #5627), as the request set them (``part_settings.normalised``); ``None`` for none.
     #: Only the request's: a template's ``part_print_settings`` (#5626) are not recorded,
@@ -1079,6 +1072,7 @@ def rack_chooser(
     manual_position: int | None,
     rack: RackUsage | None,
     warnings: list[FilamentWarning],
+    chosen: Mapping[int, int] | None = None,
     requirements: FilamentRequirements | None = None,
     printer: str | None = None,
 ) -> ChooseRack:
@@ -1088,7 +1082,8 @@ def rack_chooser(
     appends its warnings to ``warnings``, the plate's list. It **never raises**: the whole
     body is one ``try``, and on any exception it logs a fixed message with the exception's
     type, appends ``rack-left-to-bambuddy`` and returns ``None``, so Bambuddy picks.
-    ``requirements``, when the run already read the slice's (#4013), is used instead."""
+    ``requirements``, when the run already read the slice's (#4013), is used instead.
+    ``chosen`` is the id the plan names per slot, for the Glow reasons (#6876)."""
 
     known = requirements
 
@@ -1101,6 +1096,9 @@ def rack_chooser(
                 else await client.filament_requirements(sliced, plate_id=plate_id)
             )
             stage = "rack pick failed"
+            # Only for ``manual_for`` and the early return below: it has no status, so it
+            # names no slot's Glow reason. The ranking uses ``ranked``, built again on the
+            # fresh status; the two lists must not stand in for each other.
             groups = rack_groups(read.filaments, spools)
             manual, notes = manual_for(groups, manual_position, algorithm)
             if not groups:
@@ -1121,8 +1119,11 @@ def rack_chooser(
             # version (#1082), though the upsert still locks its rows.
             await record_seen(rack, printer, status_read)
             stage = "rack pick failed"
-            picks = rank_rack(groups, status_read.nozzle_rack, algorithm, usage, manual)
-            found = rack_warnings(groups, status_read.nozzle_rack, algorithm, picks, manual)
+            # Again with the fresh status, which says whether a chosen tray is empty: the
+            # groups the ranking and its warnings use (never ``groups`` above).
+            ranked = rack_groups(read.filaments, spools, chosen=chosen, status=status_read)
+            picks = rank_rack(ranked, status_read.nozzle_rack, algorithm, usage, manual)
+            found = rack_warnings(ranked, status_read.nozzle_rack, algorithm, picks, manual)
             if any(g not in picks or not picks[g].manual for g in manual):
                 # ``rack_warnings`` says the manual position was refused, so drop
                 # ``manual_for``'s "group N got position P" (final review minor 1).
@@ -1168,6 +1169,11 @@ def _spools_by_slot(options: FilamentOptions, plan: FilamentPlan) -> dict[int, S
     """Each plate slot's chosen inventory spool, for the Glow test (spec §3)."""
     by_id = {spool.spool_id: spool for spool in options.spools}
     return {slot.slot_id: by_id[slot.spool_id] for slot in plan.slots if slot.spool_id in by_id}
+
+
+def _chosen_ids(plan: FilamentPlan) -> dict[int, int]:
+    """The id ``plan`` names for each slot, for the rack's Glow reasons (#6876)."""
+    return {slot.slot_id: slot.spool_id for slot in plan.slots}
 
 
 def _chosen_colours(
@@ -1297,6 +1303,7 @@ async def resolve_plates(
     *,
     presets: SpoolPresetSource | None = None,
     slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
+    slot_colours: Mapping[int, str] | None = None,
     early: EarlyPresets | None = None,
 ) -> tuple[list[Resolved], list[str]]:
     """Each plate resolved for ``plan``, and every slot refusal among them in the run's
@@ -1310,7 +1317,8 @@ async def resolve_plates(
     Bambuddy's rows for that spool, read only with a ``client``: a native run has none
     and reads nothing of Bambuddy. A Bambuddy-path row is an SB spool too (Task 7), so it
     reads its presets the same way. ``slot_presets`` are a storefront price's filament
-    types' presets, by slot id (#6574, ``resolver.resolve``). ``early`` is the check's
+    types' presets, by slot id (#6574, ``resolver.resolve``), and ``slot_colours`` the
+    colours a spool-less slot takes, by slot id (#6710). ``early`` is the check's
     read of the chosen spools' presets, started once the inventory was read (#4196):
     awaited here in place of a new read when it read the same spools, so it fails where
     a new read would."""
@@ -1328,7 +1336,13 @@ async def resolve_plates(
     errors: list[str] = []
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(
-            options, plan, choices, catalogue, spool_presets, slot_presets=slot_presets
+            options,
+            plan,
+            choices,
+            catalogue,
+            spool_presets,
+            slot_presets=slot_presets,
+            slot_colours=slot_colours,
         )
         for error in resolved.errors:
             message = (
@@ -2270,6 +2284,11 @@ def _rack_option(candidate: RackCandidate) -> RackOption:
     )
 
 
+def _untyped(spool: Spool) -> bool:
+    """A spool with no type: its material name is missing or blank (R-6876-6)."""
+    return not (spool.names.material or "").strip()
+
+
 def _spool_material(spool: Spool) -> str:
     material, subtype = spool.names.material or "", spool.names.subtype
     return f"{material}-{subtype}" if subtype else material
@@ -2301,15 +2320,8 @@ def _chosen_spools(
     return found
 
 
-def _unfound_reason(spool_id: int, status: PrinterStatus | None) -> UncheckedReason:
-    """A tray chosen for itself that reports no filament is empty (#6872 ruling 3)."""
-    if tray_of_spool_id(spool_id) is not None and tray_material_colour(spool_id, status) is None:
-        return "empty_tray"
-    return "not_in_inventory"
-
-
 def _unchecked_view(
-    item: _Unchecked, status: PrinterStatus | None, nozzle_plan: NozzlePlan | None
+    item: UncheckedSlot, status: PrinterStatus | None, nozzle_plan: NozzlePlan | None
 ) -> RackUncheckedSlot:
     """``item`` named for the dialog (#6872 ruling 2): the SB number, else the tray and
     what it reports, else the slot's own material and colour from the nozzle plan."""
@@ -2369,18 +2381,19 @@ async def rack_preview(
         found = _chosen_spools(slots, inventory, held, printer_id)
         known = [spool for spool in found.values() if spool is not None]
         unchecked = [
-            _Unchecked(
+            UncheckedSlot(
                 slot_id=slot.slot_id,
-                reason=_unfound_reason(slot.spool_id, status),
+                reason=unfound_reason(slot.spool_id, status) if spool is None else "no_type",
                 spool_id=slot.spool_id,
             )
             for slot in slots
-            if found[slot.slot_id] is None
+            # A spool with no type names no material to test Glow on (R-6876-6).
+            if (spool := found[slot.slot_id]) is None or _untyped(spool)
         ]
         if nozzle_plan is not None:
             planned = {slot.slot_id for slot in request.filament_plan.slots}
             unchecked += [
-                _Unchecked(slot_id=slot.slot_id, reason="no_spool")
+                UncheckedSlot(slot_id=slot.slot_id, reason="no_spool")
                 for slot in nozzle_plan.slots
                 if slot.side == rack_letter and slot.slot_id not in planned
             ]
@@ -2391,7 +2404,10 @@ async def rack_preview(
             volume_type=rack_volume_type(request.choices.nozzles, laid_out=laid_out),
             # Zero alpha (a Clear spool's #00000000) is no color, never black.
             color=rack_color(first) if first else None,
-            materials=tuple(dict.fromkeys(_spool_material(spool) for spool in known)),
+            # A spool with no type names no material (R-6876-6).
+            materials=tuple(
+                dict.fromkeys(_spool_material(spool) for spool in known if not _untyped(spool))
+            ),
             abrasive=any(
                 abrasive_type(f"{spool.names.material or ''} {spool.names.subtype or ''}")
                 or glow(spool.names.material or "", spool.names.subtype)
@@ -3446,6 +3462,9 @@ class PlatePlan(BaseModel):
     filaments: QueueFilaments | None = None
     #: Each slot's chosen spool, for the rack's Glow test (#836, spec §3).
     spools: dict[int, SpoolOption] = Field(default_factory=dict)
+    #: The id the filament plan names for each slot, so the rack pick can say why Glow
+    #: was not checked on a slot (#6876). ``None`` in a plan recorded before it.
+    chosen: dict[int, int] | None = None
     #: Whether two of :attr:`plan`'s filament slots still share a preset name after
     #: ``SlotPresets.planned`` (#4649): only then can Bambuddy's slicer have
     #: dropped the prime tower, so only then is the slice read for it. ``None`` (a plan
@@ -3490,8 +3509,14 @@ class PlannedRun(BaseModel):
     lan_start: bool = False
     #: Whether a LAN run of several prints waits, after each, for someone to say the
     #: plate is clear before it starts the next (#4939): ``lan_require_plate_clear`` as
-    #: the plan read it. The default keeps every recorded ``print_plan`` result as before.
+    #: the plan read it. A run planned with ``queue_when_busy`` also reads a printer
+    #: that holds an ended print as busy with it (#6871). The default keeps every
+    #: recorded ``print_plan`` result as before.
     plate_clear: bool = False
+    #: Whether a LAN run reads the printer before its first upload and, finding it busy,
+    #: waits for it rather than send (#6871): ``lan_queue_when_busy`` as the plan read
+    #: it. The default keeps every recorded ``print_plan`` result as before.
+    queue_when_busy: bool = False
 
 
 class QueuedPlate(BaseModel):
@@ -3610,6 +3635,7 @@ async def queue_plate(
             printer=planned.printer or None,
             plate_id=plate.plate_id,
             spools=plate.spools,
+            chosen=plate.chosen,
             algorithm=planned.rack_algorithm,
             manual_position=planned.rack_position,
             rack=rack,
@@ -3657,12 +3683,13 @@ async def plan_run(
     presets: SpoolPresetSource | None = None,
     reads: SbSpoolReads | None = None,
     slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
+    slot_colours: Mapping[int, str] | None = None,
 ) -> PlannedRun:
     """Upload, then resolve every plate, before anything is sliced (spec §4).
 
     With ``slot_presets`` (a storefront price's slice, #6574) a slot with no spool is
-    sliced with its filament type's preset in the file's own colour
-    (``resolver.resolve``).
+    sliced with its filament type's preset in the file's own colour, or in its
+    ``slot_colours`` entry, by slot id (#6710, ``resolver.resolve``).
 
     With ``slicer_backend`` ``native`` the plates are sliced by the native slicer
     (``native``, the image's profiles; a 503 without them), and a reprint reuses a
@@ -3895,6 +3922,7 @@ async def plan_run(
         catalogue,
         presets=presets,
         slot_presets=slot_presets,
+        slot_colours=slot_colours,
     )
     for plate_id, options, resolved in zip(plate_ids, per_plate, every, strict=True):
         if resolved.errors:
@@ -4023,6 +4051,7 @@ async def plan_run(
                 sliced_file_id=reused,
                 filaments=queue_filaments(options, request.filament_plan),
                 spools=_spools_by_slot(options, request.filament_plan),
+                chosen=_chosen_ids(request.filament_plan),
                 slots_share_a_name=shared_names.get(plate_id),
             )
             for plate_id, options, _, plan, reused in planned
@@ -4146,6 +4175,7 @@ async def _plan_sliced(
                 sliced_file_id=printed.id,
                 filaments=queue_filaments(options, request.filament_plan),
                 spools=_spools_by_slot(options, request.filament_plan),
+                chosen=_chosen_ids(request.filament_plan),
             )
             for plate_id, options in zip(prepared.plate_ids, per_plate, strict=True)
         ],
@@ -4190,6 +4220,17 @@ def finish_run(
     for plate_warnings in [*(plate.warnings for plate in queued or []), *lan]:
         # A rack warning repeated on every plate is one fact, shown once (spec §6).
         warnings += [warning for warning in plate_warnings if warning not in warnings]
+    if not outcomes and planned.lan_start:
+        # A LAN run queued on a busy printer (#6871): nothing started yet.
+        return PrintRunResult(
+            library_file_id=planned.library_file_id,
+            printer_id=planned.printer_id,
+            copies=planned.copies,
+            warnings=warnings,
+            project_id=planned.project_id,
+            folder_id=planned.folder_id,
+            path="native",
+        )
     return _queued(
         config,
         outcomes,

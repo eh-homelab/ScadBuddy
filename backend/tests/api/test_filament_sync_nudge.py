@@ -190,3 +190,10 @@ def test_saving_another_setting_does_not_nudge(
     saved = client.put("/api/v1/settings", json={"filament_low_stock_pct": 15})
     assert saved.status_code == 200, saved.text
     assert filament_nudges == []
+
+
+def test_the_printer_labels_do_not_nudge(client: TestClient, filament_nudges: list[bool]) -> None:
+    """#6955: the labels make only the printer and AMS places capture makes, un-nudged."""
+    labels = client.post("/api/v1/filament/printer-labels", json={"printer_ids": None})
+    assert labels.status_code == 200, labels.text
+    assert filament_nudges == []

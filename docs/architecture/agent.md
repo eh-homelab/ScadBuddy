@@ -40,43 +40,32 @@ The variables each role reads are the list `ENV_VARS` (`config.ts:113-138`); see
 
 ## Trust zone
 
-Today's code: every role still connects to Postgres with the owner role's URL
-(`SCADBUDDY_DATABASE_URL`, `main.ts:236-247`, `db.ts:256`), which is the case
-[#5299](https://github.com/eh-homelab/ScadBuddy/issues/5299) removes. The agent's own data
-now goes through the API's CRUD routes area by area. SQL remains only as a fallback while
-the API does not list an area yet (a rolling deploy), plus the health ping, the advisory-lock
-connections and two views (below). It opens no LISTEN connection: its NOTIFY channels
-arrive over the API's change stream (`events/changeStream.ts:6-12`, `main.ts:413-416`). The
-state, step by step, is in
-[trust-boundaries.md](../security/trust-boundaries.md#who-talks-to-the-database-today). It
-holds the KEK (`SCADBUDDY_SECRET_KEY_FILE`) for those fallbacks
-([#5342](https://github.com/eh-homelab/ScadBuddy/issues/5342)) and runs untrusted code
-(Claude Code's tools, plugin code). The agent does not migrate its tables: the API applies
-them, and the agent's `ready()` waits for them, reading the ledger through the API once it
-lists area `migrations` (`main.ts:244-245`; [data.md](data.md#the-two-migration-ledgers)).
+The agent has no SQL client and no KEK
+([#5299](https://github.com/eh-homelab/ScadBuddy/issues/5299) step 12): nothing in
+`agent/src` loads a Postgres driver (`agent/test/retiredTables.test.ts` fails on one), it
+ignores `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and
+`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` with one warning (`config.ts` `IGNORED_VARS`), and every
+store is the API's CRUD routes. The API seals and opens what is sealed, and releases the two
+keys the agent once derived from its own KEK (area `keys`). It opens no LISTEN connection: its
+NOTIFY channels arrive over the API's change stream (`events/changeStream.ts`). It still runs
+untrusted code (Claude Code's tools, plugin code) with its service credential and its Temporal
+client. The API applies the agent's migrations (#5299 D6); the agent waits for no ledger
+([data.md](data.md#the-two-migration-ledgers)). The state, step by step, is in
+[trust-boundaries.md](../security/trust-boundaries.md#who-talks-to-the-database-today).
 
 ## How it reaches the CRUD API
 
-- A backend client generated from `openapi.json` (`api/backend.ts:63-68`), with a
-  `Bearer` service credential on every call (`api/serviceCredential.ts:273-274`). The
-  credential comes from exchanging the pod's projected token or a bootstrap file at
-  `POST /api/v1/auth/service-token` (`api/serviceCredential.ts:103`, `:132`), or, with
-  no proof, from the sealed row in the view `service_credentials_agent` over SQL
-  (`api/serviceCredential.ts:71`).
-- Its own data moves to `/api/v1/internal/crud/agent/*` (`api/crudRead.ts:14`) area by
-  area. `CrudAreas` reads the API's `…/areas` list (`api/crudAreas.ts:110`, `:182`); an
-  area the API does not list yet falls back to SQL (`api/crudAreas.ts:15`, `:21`;
-  `api/crudStores.ts:15`). Events and flows have no SQL fallback
-  (`main.ts:408-412`).
+- A backend client generated from `openapi.json` (`api/backend.ts`), with a `Bearer`
+  service credential on every call. The credential comes only from exchanging the pod's
+  projected token or a bootstrap file at `POST /api/v1/auth/service-token`
+  (`api/serviceCredential.ts` `ExchangeCredential`); with no proof the agent refuses to start.
+- Its data is `/api/v1/internal/crud/agent/*` (`api/crudRead.ts`). `CrudAreas` reads the
+  API's `…/areas` list with back-off until every wanted area is listed, `keys` among them
+  (`api/crudAreas.ts`), and the agent is not ready until then, nor until the API has
+  released the input-hash key (`api/agentKeys.ts` `InputHashKey`, `api/dataHealth.ts`):
+  `/mcp` and the data routes answer 503, and no Temporal worker polls.
 - Every backend operation needs a tool or an entry in `tools/coverage.ts`, which a test
   checks (`test/coverage.test.ts`).
-
-Remaining direct SQL on backend objects: the views `auth_sessions_agent`
-(`auth/browserSession.ts:58`, only until the API lists area `auth-sessions`) and
-`service_credentials_agent` (`api/serviceCredential.ts:71`, only without a proof file).
-The run-grant check runs on the API (`gate/store.ts:481-492`, `gate/crudStore.ts:13`). No
-`ai_*` table is written only over SQL; each store uses SQL only while its area is
-unlisted (`api/crudAreas.ts`, `api/crudStores.ts:15`).
 
 ## Public surface
 
@@ -97,6 +86,7 @@ Routes are auto-registered from every `routes/*.ts` that exports `route`
 | `/api/v1/ai/credentials…` | Claude credentials | `routes/credentials.ts:207-412` |
 | `/api/v1/ai/settings/*`, `/capabilities/*` | model, limits, workspace, tool access | `routes/model.ts:37`, `routes/capabilities.ts:141-180` |
 | `/api/v1/ai/plugins…`, `/plugin-packages…`, `/mcp-tokens…` | plugins, packages, tokens for external MCP clients | `routes/plugins.ts:161`, `routes/pluginPackages.ts:120`, `routes/mcpTokens.ts:116` |
+| `/api/v1/ai/plugin-feeds…` | the marketplace feed for outside Claude Code (its `marketplace.json` and zips on `/mcp`'s auth, LAN-only), and Settings' read and writes of it | `routes/pluginFeeds.ts:159-272` |
 | `/api/v1/ai/notify/*`, `/push/*`, `/audit` | notifications and the audit log | `routes/notifyChannels.ts:24`, `routes/push.ts:29`, `routes/audit.ts:68` |
 | `/api/v1/ai/orders/*` | customer messages through a bound plugin | `routes/orderMessages.ts:85`, `routes/messagingBinding.ts:63` |
 
@@ -196,17 +186,21 @@ security: [browser-bridge.md](../ai/browser-bridge.md).
 
 ## Workspace, plugins, credentials
 
-- **Workspace.** A session's files are sealed blobs in the backend's blob store. Once the
-  API lists area `workspace` it seals, stores and opens them (`CrudSessionFiles`,
-  `main.ts:548-562`); until then `SessionFiles` does it over SQL (`workspace/store.ts:511`). The working
-  directory is under `SCADBUDDY_SESSION_DIR` (`config.ts:61-66`).
+- **Workspace.** A session's files are sealed blobs in the backend's blob store. The API
+  seals, stores and opens them (area `workspace`, `workspace/crudStore.ts`
+  `CrudSessionFiles`); the agent sends and gets plaintext only. The working directory is
+  under `SCADBUDDY_SESSION_DIR` (`config.ts`).
 - **Plugins.** Remote MCP plugins (`ai_plugins`) through the loopback forwarder; packages
-  pinned to a git commit (`ai_plugin_packages`), fetched with a stripped git environment
-  (`plugins/packages/git.ts:1-29`). [User guide "Plugins"](../user-guide.md#plugins).
+  (`ai_plugin_packages`) pinned to a git commit (fetched with a stripped git environment,
+  `plugins/packages/git.ts:1-29`), to an archive or npm file's sha256 (`pin_kind` `bytes`,
+  loaded from the API's mirror, `plugins/packages/mirror.ts`), or to a hosted plugin's
+  version (`pin_kind` `version`, `plugins/packages/hosted.ts`). A hosted plugin is a draft
+  of files kept by the API (`ai_hosted_plugins`, published as immutable versions). A
+  marketplace feed (`ai_plugin_feeds`, `ai_plugin_feed_packages`) lists approved pins to
+  outside Claude Code (`plugins/feed.ts`). [User guide "Plugins"](../user-guide.md#plugins).
 - **Claude credentials.** Kinds `anthropic_api_key`, `claude_oauth_token` and `gateway`
-  (`credentials.ts:36`), sealed with a per-row key under the KEK; once the API lists area `credentials` it seals
-  and opens them with its own KEK and the agent reads them through that area
-  (`credentials.ts:935`, `:1050`).
+  (`credentials.ts`), each sealed with a per-row key under the API's KEK. The API seals and
+  opens them, and the agent reads them through area `credentials` (`CrudCredentials`).
 
 ## Tests and evals
 

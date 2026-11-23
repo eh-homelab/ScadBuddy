@@ -13,6 +13,8 @@ export default defineConfig({
     // Verbose, so a skip shows its reason (the suite name carries it).
     reporters: ['verbose'],
     // The credential gateway every query reaches the model through (src/gateway/server.ts).
-    setupFiles: ['test/support/gateway.ts'],
+    // test/support/flushDrops.ts waits for the throwaway databases' DROPs (evals/durable.ts
+    // drops one, #7058); first, so its hook runs last.
+    setupFiles: ['test/support/flushDrops.ts', 'test/support/gateway.ts'],
   },
 })

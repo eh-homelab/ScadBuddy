@@ -1,16 +1,15 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
-import type { Sql } from 'postgres'
 import { type Attributes, context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import type { AuditLog } from '../audit/log.js'
 import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { type Tier, TIERS } from '../auth/principal.js'
 import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
-import { PgSessionRows, type SessionRows } from '../sessions/rows.js'
+import type { SessionRows } from '../sessions/rows.js'
 import { isUuid } from '../harness/stateDirs.js'
-import { withApprovalLine } from '../approvals/service.js'
+import { canonicalJson, withApprovalLine } from '../approvals/service.js'
 import {
   effectiveTool,
   type FlowImages,
@@ -65,7 +64,7 @@ export interface SessionOwners {
   ownerOf(sessionId: string): Promise<(Owner & { turnTiers?: readonly Tier[] | null; turnId?: string | null }) | undefined>
 }
 
-/** A session's owner from its row (sessions/rows.ts `SessionRows.get`, `gated` in main.ts). */
+/** A session's owner from its row (sessions/rows.ts `SessionRows.get`). */
 export class RowSessionOwners implements SessionOwners {
   readonly #rows: Pick<SessionRows, 'get'>
 
@@ -74,7 +73,7 @@ export class RowSessionOwners implements SessionOwners {
   }
 
   async ownerOf(sessionId: string): Promise<(Owner & { turnTiers: readonly Tier[] | null; turnId: string | null }) | undefined> {
-    // An id that is no UUID throws, as the SQL's uuid cast did.
+    // An id that is no UUID is no session: a throw.
     if (!isUuid(sessionId)) throw new Error(`session ${JSON.stringify(sessionId)} is not a session id`)
     const row = await this.#rows.get(sessionId)
     if (!row) return undefined
@@ -84,13 +83,6 @@ export class RowSessionOwners implements SessionOwners {
     const mine = sent?.by?.kind === row.owner_kind && sent.by.id === row.owner_id && Array.isArray(sent.tiers)
     const turnTiers = mine ? TIERS.filter((t) => (sent.tiers as unknown[]).includes(t)) : null
     return { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers, turnId: row.durable_turn_id }
-  }
-}
-
-/** `RowSessionOwners` on the session rows' SQL (tests, and a process with no API). */
-export class PgSessionOwners extends RowSessionOwners {
-  constructor(sql: Sql) {
-    super(new PgSessionRows(sql))
   }
 }
 
@@ -119,18 +111,13 @@ export interface ApprovalRecords {
 /** A run grant's responder in `ai_input_responses` (#2481): `{kind: 'run_grant', id}`. */
 type Responder = { kind?: unknown; id?: unknown }
 
-export class PgApprovalRecords implements ApprovalRecords {
-  readonly #sql: Sql
+/** The gate's approvals as the API's `pending-input` routes answer them (gate/crudPending.ts, #5299 step 10). */
+export class RecordedApprovals implements ApprovalRecords {
   readonly #grants: Pick<FlowRunReads, 'grantInForce'>
-  readonly #routes: { crud: ApprovalRoutes; use: () => boolean } | undefined
+  readonly #routes: ApprovalRoutes
 
-  /**
-   * `grants`: the backend's `flow_grants`, through its CRUD routes (flows/backendReads.ts, #5299 D7).
-   * `routes`: the API's `pending-input` routes (gate/crudPending.ts, #5299 step 10), which the
-   * approval's read takes while `use()` holds; SQL otherwise.
-   */
-  constructor(sql: Sql, grants: Pick<FlowRunReads, 'grantInForce'>, routes?: { crud: ApprovalRoutes; use: () => boolean }) {
-    this.#sql = sql
+  /** `grants`: the backend's `flow_grants`, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
+  constructor(grants: Pick<FlowRunReads, 'grantInForce'>, routes: ApprovalRoutes) {
     this.#grants = grants
     this.#routes = routes
   }
@@ -147,30 +134,17 @@ export class PgApprovalRecords implements ApprovalRecords {
 
   async byPerson(requestId: string, call?: ApprovalBinding): Promise<boolean> {
     if (call === undefined) return false
-    if (this.#routes?.use()) return (await this.#routes.crud.approval(requestId, call.inputHash))?.kind === 'browser'
-    const rows = await this.#sql`
-      SELECT 1 FROM ai_input_responses r
-      JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
-      WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
-        AND a.input_hash = ${call.inputHash} AND r.responder->>'kind' = 'browser'`
-    return rows.length > 0
+    return (await this.#routes.approval(requestId, call.inputHash))?.kind === 'browser'
   }
 
   /** The approval for this call: undefined for none, null for a person's, a grant id for a run grant's. */
   async #approval(requestId: string, call?: ApprovalBinding): Promise<string | null | undefined> {
     // Without the call's hash nothing can be matched, so nothing is approved.
     if (call === undefined) return undefined
-    const [row] = this.#routes?.use()
-      ? await this.#routes.crud.approval(requestId, call.inputHash).then((responder) => (responder ? [{ responder }] : []))
-      : await this.#sql<{ responder: Responder }[]>`
-      SELECT r.responder FROM ai_input_responses r
-      JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
-      WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
-        AND a.input_hash = ${call.inputHash}
-      LIMIT 1`
-    if (!row) return undefined
-    if (row.responder.kind !== 'run_grant') return null
-    return typeof row.responder.id === 'string' ? row.responder.id : ''
+    const responder: Responder | null = await this.#routes.approval(requestId, call.inputHash)
+    if (!responder) return undefined
+    if (responder.kind !== 'run_grant') return null
+    return typeof responder.id === 'string' ? responder.id : ''
   }
 
   /** Whether the run grant is in force; the backend's table, asked only for a grant's approval. */
@@ -612,8 +586,9 @@ async function runGated(
   // A tool that resolves what its arguments name (#4442) runs what it resolves now, which
   // must be what the approval was given: a printer re-linked since hashes otherwise. A flow's
   // call is the script's raw arguments plus the tool's `flowBinding` (a registry printer's
-  // `printer_id`, or null for a row only the LAN reaches), which the backend binds a person's
-  // approval to (flows/print_binding.py, #4445): a printer re-linked since hashes otherwise.
+  // `printer_id`, or null for a row only the LAN reaches; a hosted plugin's `draft` digest,
+  // #7199), which the backend binds a person's approval to (flows/print_binding.py, #4445): a
+  // printer re-linked or a draft edited since hashes otherwise.
   //
   // Its activity runs once (Temporal never retries a gated call; only a flow's keyed call whose
   // one attempt lost its heartbeat is asked once more, by the flow's workflow, with its commands
@@ -626,6 +601,10 @@ async function runGated(
   // A flow's call as its approval binds it (#4445): the raw arguments plus `binds`, null
   // markers included. Undefined: the raw arguments, as they run.
   let flowBound: Record<string, unknown> | undefined
+  // Whether the resolution gave other input than the call was given (#7199): a call not
+  // approved then is refused as matching no approval, with the tool's `movedSinceApproval`
+  // advice. What it names may have changed after an approval, or none was given (#7211).
+  let resolvedOther = false
   if (effective.gated && tool.resolvesApproval) {
     const ctx = { ...services, principal, ...(session === undefined ? {} : { session }), progress: async () => {}, signal: call.signal, lookup, gate: 'workflow' as const }
     const waits = deps.resolveBackoffMs ?? RESOLVE_BACKOFF_MS
@@ -640,9 +619,12 @@ async function runGated(
       try {
         // Only the input: the line naming the printer was the approval's, so its reads are skipped.
         const { input: resolved, binds } = await tool.prepareApproval(input, ctx, { summary: false })
-        if (flow === undefined) runInput = resolved
-        else if (Object.keys(binds).length > 0) {
+        if (flow === undefined) {
+          runInput = resolved
+          resolvedOther = canonicalJson(resolved) !== canonicalJson(parsedOrRaw(tool, input))
+        } else if (Object.keys(binds).length > 0) {
           flowBound = { ...(input as Record<string, unknown>), ...binds }
+          resolvedOther = true
           // A null marker is hashed only: the handler gets the raw arguments without it.
           runInput = { ...(input as Record<string, unknown>), ...Object.fromEntries(Object.entries(binds).filter(([, value]) => value !== null)) }
         }
@@ -675,6 +657,7 @@ async function runGated(
       // A run grant's raw-argument approval, revoked or expired since: refused GrantRevoked
       // below, as any lapsed grant's call is, never "no approval is recorded".
       binding = raw
+      resolvedOther = false
     }
   }
   if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
@@ -683,6 +666,14 @@ async function runGated(
         "the run's grant was revoked or expired before this call ran",
         `${tool.name}: the run's grant was revoked or expired before this call ran`,
         GRANT_REVOKED,
+      )
+    }
+    if (resolvedOther) {
+      // Never run: the approval, if any, was for what the call named then (#7199, #7211).
+      await refuse(
+        'no approval matches what this call names now',
+        `${tool.name} was not run: no approval matches what it names now; ${tool.movedSinceApproval}`,
+        NOT_APPROVED,
       )
     }
     await refuse(

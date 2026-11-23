@@ -1,9 +1,9 @@
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
-import { AuditLog, type AuditRecord } from '../src/audit/log.js'
+import { type AuditLog, type AuditRecord } from '../src/audit/log.js'
 import type { DurableGate } from '../src/gate/durable.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
@@ -11,6 +11,7 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // #792: forking from a message (`up_to`, #793), the fork's audit row and its 409, and
 // renaming a session or marking it done (PATCH /api/v1/ai/sessions/:id, #795), over the
@@ -36,14 +37,13 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session edi
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     failures.length = 0
-    audit = new AuditLog({ sql: db.sql, onError: (err) => failures.push(err) })
+    audit = sqlAuditLog(db.sql, { onError: (err) => failures.push(err) })
     next = { reply: 'hello there' }
     const { runner } = scriptedRunner(() => next)
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, audit })
     const deps: AppDeps = {
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'unused' },
       credentials: new MemoryCredentials(),
       testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
       remoteAddress: () => '10.0.0.7',
@@ -245,6 +245,28 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session edi
       expect((await m.get(id, browser)).status).toBe('done')
       expect((await patch(id, { title: 'still renamable' })).status).toBe(200)
       expect(ended).toEqual([id])
+    })
+
+    it('archives a session, then ends its workflow (#7031)', async () => {
+      const id = await session(1)
+      const ended: string[] = []
+      m.durable = {
+        end: async (sid: string) => {
+          // Told once the archive is written, never before.
+          expect((await m.get(sid, browser)).archivedAt).not.toBeNull()
+          ended.push(sid)
+        },
+      } as unknown as DurableGate
+      expect((await patch(id, { archived: true })).status).toBe(200)
+      expect(ended).toEqual([id])
+      expect((await m.get(id, browser)).status).not.toBe('done')
+    })
+
+    it('archives a session whose workflow cannot be told: the end is best-effort (#7031)', async () => {
+      const id = await session(1)
+      m.durable = undefined
+      expect((await patch(id, { archived: true })).status).toBe(200)
+      expect((await m.get(id, browser)).archivedAt).not.toBeNull()
     })
 
     it('leaves a session as it was when its workflow cannot be told, with 503', async () => {

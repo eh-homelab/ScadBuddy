@@ -117,7 +117,7 @@ def test_the_inputs_are_checked_off_the_event_loop(
     A value that reaches its pattern shows the run's pattern budget still holds there."""
     import regex
 
-    from scadbuddy.flows import inputs as inputs_module
+    from scadbuddy.core import input_schema
 
     seen: list[tuple[bool, bool]] = []
     search = regex.search
@@ -128,7 +128,7 @@ def test_the_inputs_are_checked_off_the_event_loop(
             on_loop = True
         except RuntimeError:
             on_loop = False
-        seen.append((on_loop, inputs_module._patterns_deadline.get() is not None))
+        seen.append((on_loop, input_schema.patterns_deadline.get() is not None))
         return search(pattern, string, *args, **kwargs)
 
     schema = {

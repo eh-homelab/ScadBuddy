@@ -171,14 +171,11 @@ describe('/api/v1/ai/mcp-tokens', () => {
     expect((await list(fetch)).auth_mode).toBeNull()
   })
 
-  it('answers 503 without a database, or before migrations apply', async () => {
-    const none = testApp({ deps: { database: undefined, credentials: undefined, tokens: undefined } })
+  it('answers 503 without a token store, or before the API serves the agent\'s CRUD areas', async () => {
+    const none = testApp({ deps: { credentials: undefined, tokens: undefined } })
     const res = await ui(none.app)(URL_BASE)
     expect(res.status).toBe(503)
-    expect(((await res.json()) as { detail: string }).detail).toMatch(/SCADBUDDY_DATABASE_URL/)
-    // A store handed in without a database is not used.
-    const orphan = testApp({ deps: { database: undefined, tokens: new InMemoryTokenStore() } })
-    expect((await mint(ui(orphan.app), { name: 'x', tier: 'read' })).status).toBe(503)
+    expect(((await res.json()) as { detail: string }).detail).toMatch(/not set up in this process/)
 
     const tokens = new InMemoryTokenStore()
     const unmigrated = testApp({ deps: { tokens, database: { ping: async () => true, ready: async () => false } } })

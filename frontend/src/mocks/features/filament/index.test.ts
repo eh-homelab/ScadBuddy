@@ -3,6 +3,8 @@ import { ApiError, api, request } from '../../../api/client'
 import {
   archiveSpool,
   bindTag,
+  bulkCreateSpools,
+  copySpool,
   createSpool,
   deleteSpool,
   getForecast,
@@ -14,6 +16,7 @@ import {
   getTag,
   getType,
   importSpools,
+  listCatalog,
   listEvents,
   listLocations,
   listSensors,
@@ -24,6 +27,7 @@ import {
   unbindTag,
   resolveCatalog,
   setCatalogAliases,
+  startColourSync,
   upsertCatalog,
   upsertLocation,
   upsertType,
@@ -278,9 +282,24 @@ describe('the filament mocks', () => {
     expect(await refusal(upsertLocation({ archived: false }, place.id))).toMatchObject({ status: 409 })
   })
 
-  it('keeps a colour name unique per manufacturer, as `filament_colours_name` does', async () => {
+  it("keeps a person's colour as it is when a sync finds it case-blind (#6907)", async () => {
+    // A person's own Black PLA Basic, in other letter case than the sync names it.
+    await upsertCatalog('colours', { name: 'black', manufacturer: 'bambu lab', material_name: 'pla basic', rgba: '#111111FF', sort_order: 0 })
+    const run = await startColourSync('bambu')
+    expect([run.added, run.kept, run.updated]).toEqual([1, 1, 0])
+    const black = (await listCatalog('colours')).filter((row) => row.name.toLowerCase() === 'black')
+    expect(black.map((row) => [row.rgba, row.source])).toEqual([['#111111FF', null]])
+    // A second run finds its own row unchanged and still keeps the person's.
+    const again = await startColourSync('bambu')
+    expect([again.added, again.kept, again.unchanged]).toEqual([0, 1, 1])
+  })
+
+  it('keeps a colour unique per manufacturer, name and material, as `filament_colours_name` does', async () => {
     const black = { name: 'Black', rgba: '#000000FF', sort_order: 0 }
     expect(await upsertCatalog('colours', { ...black, manufacturer: 'Bambu Lab' })).toMatchObject({ name: 'Black' })
+    // The same name of another material is another colour (#6907).
+    expect(await upsertCatalog('colours', { ...black, manufacturer: 'Bambu Lab', material_name: 'PETG HF' })).toMatchObject({ material_name: 'PETG HF' })
+    expect(await refusal(upsertCatalog('colours', { ...black, manufacturer: 'bambu lab', material_name: 'petg hf' }))).toMatchObject({ status: 409 })
     expect(await upsertCatalog('colours', { ...black, manufacturer: 'Polymaker' })).toMatchObject({ name: 'Black' })
     expect(await upsertCatalog('colours', black)).toMatchObject({ manufacturer: null })
     expect(await refusal(upsertCatalog('colours', { ...black, manufacturer: 'bambu lab' }))).toMatchObject({ status: 409 })
@@ -388,6 +407,34 @@ describe('the spools CSV import (Task 15)', () => {
     expect(await importSpools(rows, { dryRun: false, key: 'k-1' })).toEqual(first)
     expect(await listSpools()).toHaveLength(12)
     expect(await refusal(importSpools([{ material: 'PETG' }], { dryRun: false, key: 'k-1' }))).toMatchObject({ status: 422 })
+  })
+
+  it('makes N spools once per key, and refuses a tray place or another body (#7150)', async () => {
+    const body = { spool: { material_id: M.PLA, weight_locked: false }, quantity: 2, location_id: L.SHELF_A, presets: [], k_values: [] }
+    const first = await bulkCreateSpools(body, 'b-1')
+    expect(first.map((one) => one.number)).toEqual([20, 21])
+    expect(first.every((one) => one.location_id === L.SHELF_A)).toBe(true)
+    expect(await bulkCreateSpools(body, 'b-1')).toEqual(first)
+    expect(await listSpools()).toHaveLength(13)
+    expect(await refusal(bulkCreateSpools({ ...body, quantity: 3 }, 'b-1'))).toMatchObject({ status: 422 })
+    expect(await refusal(bulkCreateSpools({ ...body, location_id: L.AMS_A1 }, 'b-2'))).toMatchObject({ status: 422 })
+    expect(await listSpools()).toHaveLength(13)
+  })
+
+  it("copies a spool's own fields and not its tray, weight or lock (#7150)", async () => {
+    const draft = await copySpool(spoolId(4))
+    expect(draft.spool).toMatchObject({ type_id: T.BLACK, weight_locked: false, grams_left: null })
+    expect(draft.location_id).toBeNull()
+    expect((await copySpool(spoolId(6))).spool).toMatchObject({ material_id: M.PLA, colour_name: 'Teal', label_weight_g: 1000 })
+    expect(await refusal(copySpool(NOBODY))).toMatchObject({ status: 404 })
+  })
+
+  it('makes a spool from a tray place once per key (#7150)', async () => {
+    await moveSpool(spoolId(8), null)
+    const made = await api.newTraySpool(H2C.printer_id, 0, 3, 's-1')
+    expect(made.location_id).toBe(L.AMS_A4)
+    expect(await api.newTraySpool(H2C.printer_id, 0, 3, 's-1')).toEqual(made)
+    expect(await refusal(api.newTraySpool(H2C.printer_id, 1, 0, 's-2'))).toMatchObject({ status: 409 })
   })
 
   it('refuses a write with an error line, and writes none of its rows', async () => {

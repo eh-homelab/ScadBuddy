@@ -1,7 +1,7 @@
 import { checkOrigin, isSecureTransport, type OriginPolicy, type RequestFacts } from '../http/origins.js'
 import { mcpResourceUri, type OidcConfig, type OidcConfigRepo, type OidcProvider, resourceMetadataUrl } from './oidc.js'
 import { type Principal, type Tier, TIERS, tiersUpTo } from './principal.js'
-import { TOKEN_PREFIX, type TokenStore } from './tokens.js'
+import { FailClosedTokenStore, TOKEN_PREFIX, type TokenStore } from './tokens.js'
 
 // `/mcp` authentication and transport rules, spec §8.3–§8.4
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md) and issues
@@ -139,6 +139,26 @@ export function mcpAuthSettings(
       for (const w of warnings) warn(w)
     }
     return resolved
+  }
+}
+
+const FAIL_CLOSED_TOKENS = new FailClosedTokenStore()
+
+/**
+ * The configured auth, or fail-closed `bearer` with a token store that verifies nothing when
+ * the settings cannot be read: what every route on the /mcp auth reads per request (mcp/http.ts,
+ * mcp/uploads.ts, routes/pluginFeeds.ts).
+ */
+export function mcpAuthResolver(
+  authSettings: () => McpAuthSettings | Promise<McpAuthSettings>,
+  tokens: TokenStore,
+): () => Promise<{ settings: McpAuthSettings; tokens: TokenStore }> {
+  return async () => {
+    try {
+      return { settings: await authSettings(), tokens }
+    } catch {
+      return { settings: { ...DEFAULT_MCP_AUTH, mode: 'bearer' }, tokens: FAIL_CLOSED_TOKENS }
+    }
   }
 }
 

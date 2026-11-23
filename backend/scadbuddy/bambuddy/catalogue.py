@@ -19,7 +19,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property, partial
 from pathlib import Path
 
@@ -115,6 +115,11 @@ class Catalogue:
     #: ``native_catalogue``, #3818): each field's ``setting_id -> name``, which is what
     #: a ``cloud`` ref resolves by there. ``None`` on Bambuddy's, whose refs are its own.
     native_setting_ids: dict[str, dict[str, str]] | None = None
+    #: On the image's own catalogue, the Bambuddy local id of each ScadBuddy preset it
+    #: offers, to that preset's ``sb-<id>`` (#7176): the kept row of that id is not listed,
+    #: so a ``local`` ref to it (a remembered choice, a binding not yet adopted) resolves to
+    #: the ScadBuddy preset instead.
+    local_aliases: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_native(self) -> bool:
@@ -161,7 +166,8 @@ class Catalogue:
         ``ref`` names in ``field`` (``printer``, ``process``, ``filament``) or any of
         them: a ``standard`` ref as it is when offered, a ``cloud`` ref (a
         ``setting_id``) as the standard ref of the preset it names, a ``local`` ref as it
-        is when the kept copy's row is offered (#4645); ``orca_cloud`` and anything not
+        is when the kept copy's row is offered (#4645), or as the ScadBuddy preset that
+        holds its Bambuddy id (`local_aliases`, #7176); ``orca_cloud`` and anything not
         offered is ``None``. On Bambuddy's catalogue every ref is its own, so ``None``."""
         ids = self.native_setting_ids
         if ids is None:
@@ -173,6 +179,9 @@ class Catalogue:
                 return PresetRef(source="standard", id=ids[name][ref.id])
             if ref.source == "local" and ref.id in self._held[name]:
                 return ref
+            alias = self.local_aliases.get(ref.id) if ref.source == "local" else None
+            if alias is not None and alias in self._held[name]:
+                return PresetRef(source="local", id=alias)
         return None
 
     def with_held(
@@ -180,14 +189,17 @@ class Catalogue:
         printer: list[PresetChoice],
         process: list[PresetChoice],
         filament: list[PresetChoice],
+        aliases: dict[str, str] | None = None,
     ) -> Catalogue:
         """This catalogue with the kept copy's local presets' rows after its own
-        (``slicing/catalogue.py`` ``catalogue_for``, #4645)."""
+        (``slicing/catalogue.py`` ``catalogue_for``, #4645), and ``aliases`` added to its
+        `local_aliases` (#7176)."""
         return dataclasses.replace(
             self,
             printer=[*self.printer, *printer],
             process=[*self.process, *process],
             filament=[*self.filament, *filament],
+            local_aliases={**self.local_aliases, **(aliases or {})},
         )
 
     def names(self) -> dict[tuple[str, str], str]:

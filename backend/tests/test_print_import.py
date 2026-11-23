@@ -1,9 +1,17 @@
 """The printer path a print import may read (#4698 review)."""
 
+import asyncio
+from typing import Any
+
+import httpx
 import pytest
+import respx
 from pydantic import ValidationError
 
+from scadbuddy.api.print_imports import _source_changed
 from scadbuddy.bambuddy.print_import import SourceChoice
+from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.store import Operation
 
 
 @pytest.mark.parametrize(
@@ -46,25 +54,311 @@ def test_library_candidates_are_newest_first_and_undated_last() -> None:
 @pytest.mark.parametrize(
     ("status", "made", "says"),
     [
-        ("succeeded", True, "no longer the file the model 'trophy' was made from"),
+        ("succeeded", True, "made the model 'trophy', which stays"),
         ("succeeded", False, "made the model 'trophy', which was deleted since"),
         ("running", False, "operation op-1, `GET /api/v1/operations/op-1`"),
-        ("running", False, "if it never finishes, send the request with a new Idempotency-Key"),
+        ("running", False, "send the request with a new Idempotency-Key and another model name"),
         ("failed", False, "made no model: its operation op-1 failed"),
     ],
 )
 def test_a_changed_retry_says_what_its_first_send_did(status: str, made: bool, says: str) -> None:
-    """#5979 review: the 409 names a model only by what the key's operation did."""
+    """#5979 review: the 409 names a model only by what the key's operation did. A key
+    first sent for another body may have made it from another print's file (#6984)."""
+    text = _source_changed("x.3mf", "trophy", _op(status), made, same_file=False)
+    assert says in text
+    assert "first sent for another print file, name or description" in text
+    assert "or before this server recorded which print file a request names" in text
+    assert "import the print onto it" not in text
+
+
+@pytest.mark.parametrize(
+    ("status", "made", "says"),
+    [
+        ("succeeded", True, "no longer the file the model 'trophy' was made from"),
+        ("succeeded", False, "made the model 'trophy', which was deleted since"),
+        ("running", False, "once it is done, import the print onto it with `slug`"),
+        ("failed", False, "made no model: its operation op-1 failed"),
+    ],
+)
+def test_a_retry_of_the_same_file_says_it_changed(status: str, made: bool, says: str) -> None:
+    """#7019: the key's first request named this print file, name and description, so
+    only the file's bytes moved (a printer overwrites its files): its model is from this
+    print's file, and may be offered."""
+    text = _source_changed("x.3mf", "trophy", _op(status), made, same_file=True)
+    assert says in text
+    assert text.startswith("x.3mf changed since this request was first sent")
+
+
+def _op(status: str) -> Operation:
     from datetime import UTC, datetime
 
-    from scadbuddy.api.print_imports import _source_changed
-    from scadbuddy.operations.store import Operation
-
-    first = Operation(
+    return Operation(
         id="op-1",
         kind="mesh_model_create",
         subject="trophy",
         status=status,  # type: ignore[arg-type]
         created_at=datetime(2026, 11, 10, tzinfo=UTC),
     )
-    assert says in _source_changed("x.3mf", "trophy", first, made)
+
+
+class _TwoUnderOneKey:
+    """A key with two operations of one subject (#7030): ``older`` names this print file,
+    ``newest`` does not."""
+
+    def __init__(self, older: Operation, newest: Operation) -> None:
+        self.older, self.newest = older, newest
+
+    async def find(self, key: str) -> None:
+        return None
+
+    async def keyed_operation(
+        self, kind: str, subject: str, key: str, *, sent: dict[str, Any] | None = None
+    ) -> Operation:
+        return self.newest if sent is None else self.older
+
+
+def test_a_file_named_only_by_an_older_operation_is_no_change(tmp_path: Any) -> None:
+    """#7022, #7030: the 409 names the key's newest operation, so it says the file
+    changed only when that operation named this file; an older one that did is not it."""
+    from types import SimpleNamespace
+
+    from fastapi import Response
+
+    from scadbuddy.api.mesh_models import create_mesh_model
+    from scadbuddy.operations.component import OperationCommands
+
+    older, newest = _op("succeeded"), _op("succeeded").model_copy(update={"id": "op-2"})
+    ops = OperationCommands(
+        store=_TwoUnderOneKey(older, newest),  # type: ignore[arg-type]
+        client=None,  # type: ignore[arg-type]
+        queues={},
+        kinds={"mesh_model_create": SimpleNamespace(name="mesh_model_create", unkeyed=frozenset())},  # type: ignore[dict-item]
+    )
+    catalogue = SimpleNamespace(paths=SimpleNamespace(claims=tmp_path), exists=lambda slug: True)
+    seen: list[tuple[str, bool]] = []
+
+    def changed(first: Operation, made: bool, same_file: bool) -> str:
+        seen.append((first.id, same_file))
+        return "refused"
+
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(
+            create_mesh_model(
+                ops,
+                Response(),
+                catalogue,  # type: ignore[arg-type]
+                "k1",
+                name="Trophy",
+                description="",
+                source={"kind": "upload", "claim": "c" * 64, "name": "x.3mf", "origin": {}},
+                changed=changed,
+            )
+        )
+
+    assert refused.value.status == 409
+    assert seen == [("op-2", False)]
+
+
+# --- a mesh model from a print's file (#6916) ----------------------------------------
+
+
+def test_a_mesh_model_names_one_source_and_a_print_with_its_place() -> None:
+    from scadbuddy.api.mesh_models import MeshModelCreate
+
+    place = SourceChoice(kind="archive_source")
+    made = MeshModelCreate(name="T", archive_id=193, archive_source=place)
+    assert (made.archive_id, made.archive_source) == (193, place)
+    wrong: list[dict[str, object]] = [
+        {"archive_id": 193},
+        {"archive_source": place},
+        {"archive_id": 193, "archive_source": place, "library_file_id": 7},
+        {"archive_id": 193, "archive_source": place, "output_id": "a" * 32},
+        {},
+    ]
+    for body in wrong:
+        with pytest.raises(ValidationError):
+            MeshModelCreate.model_validate({"name": "T", **body})
+
+
+class _Store:
+    """A settings store that holds a Bambuddy and nothing else."""
+
+    def load(self) -> object:
+        from scadbuddy.library.settings_store import StoredSettings
+        from tests.api.test_send import BASE
+
+        return StoredSettings(bambuddy_url=BASE, bambuddy_api_key="s3cret")
+
+
+@respx.mock
+def test_a_print_s_sliced_file_is_refused_before_it_is_read() -> None:
+    from scadbuddy.api.mesh_models import _read_print_file
+    from tests.api.test_print_imports import ARCHIVE, bambuddy
+
+    bambuddy()
+
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(_read_print_file(_Store(), ARCHIVE, SourceChoice(kind="archive")))  # type: ignore[arg-type]
+
+    assert refused.value.status == 422
+    assert "sliced file" in refused.value.detail
+    assert not [call for call in respx.calls if "/download" in call.request.url.path]
+
+
+@respx.mock
+def test_a_print_s_file_on_the_printer_is_read_and_not_kept() -> None:
+    from scadbuddy.api.mesh_models import _read_print_file
+    from tests.api.test_print_imports import ARCHIVE, a_3mf, bambuddy
+    from tests.api.test_send import API
+
+    bambuddy(
+        printer_files={
+            "path": "/cache",
+            "files": [{"name": "demo_elan.3mf", "path": "/cache/demo_elan.3mf", "size": 10}],
+            "warnings": [],
+        }
+    )
+    data = a_3mf()
+    download = respx.get(
+        f"{API}/printers/1/files/download", params={"path": "/cache/demo_elan.3mf"}
+    ).mock(return_value=httpx.Response(200, content=data))
+    upload = respx.post(f"{API}/library/files")
+
+    read = asyncio.run(
+        _read_print_file(
+            _Store(),  # type: ignore[arg-type]
+            ARCHIVE,
+            SourceChoice(kind="printer", path="/cache/demo_elan.3mf"),
+        )
+    )
+
+    assert (read.name, read.data) == ("demo_elan.3mf", data)
+    assert download.called and not upload.called
+
+
+class _Operations:
+    """The operation record of one key: what a first send's `mesh_model_create` did."""
+
+    def __init__(self, first: object) -> None:
+        self.first = first
+        self.asked: list[tuple[str, str, str, dict[str, Any] | None]] = []
+
+    async def keyed_operation(
+        self, kind: str, subject: str, key: str, *, sent: dict[str, Any] | None = None
+    ) -> object:
+        self.asked.append((kind, subject, key, sent))
+        return self.first
+
+
+def _commands(first: object) -> object:
+    from types import SimpleNamespace
+
+    from scadbuddy.operations.component import OperationCommands
+
+    return OperationCommands(
+        store=_Operations(first),  # type: ignore[arg-type]
+        client=None,  # type: ignore[arg-type]
+        queues={},
+        kinds={"mesh_model_create": SimpleNamespace(name="mesh_model_create")},  # type: ignore[dict-item]
+    )
+
+
+def _first(status: str, **fields: object) -> object:
+    from datetime import UTC, datetime
+
+    from scadbuddy.operations.store import Operation
+
+    return Operation.model_validate(
+        {
+            "id": "op-1",
+            "kind": "mesh_model_create",
+            "subject": "trophy",
+            "status": status,
+            "created_at": datetime(2026, 11, 22, tzinfo=UTC),
+            **fields,
+        }
+    )
+
+
+def _trophy() -> dict[str, object]:
+    from datetime import UTC, datetime
+
+    from scadbuddy.library.catalogue import ModelRecord
+
+    return ModelRecord(
+        name="Trophy",
+        slug="trophy",
+        origin="mine",
+        has_thumbnail=False,
+        has_readme=False,
+        updated_at=datetime(2026, 11, 22, tzinfo=UTC),
+    ).model_dump(mode="json")
+
+
+@respx.mock
+def test_a_resend_gets_the_first_model_and_reads_no_print_again() -> None:
+    """#6969: a resend under the key of a finished create answers its model before the
+    print's file is read, so the printer is not read again, and a file it deleted since
+    is no 404."""
+    from fastapi import Response
+
+    from scadbuddy.api.mesh_models import MeshModelCreate, create_from_mesh
+    from scadbuddy.library.catalogue import ModelRecord
+    from tests.api.test_print_imports import ARCHIVE, bambuddy
+
+    bambuddy()  # The printer's /cache is empty now: the file is gone.
+    body = MeshModelCreate(
+        name="Trophy",
+        archive_id=ARCHIVE,
+        archive_source=SourceChoice(kind="printer", path="/cache/demo_elan.3mf"),
+    )
+    ops = _commands(_first("succeeded", result=_trophy()))
+
+    made = asyncio.run(
+        create_from_mesh(
+            body,
+            Response(),
+            ops,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+            _Store(),  # type: ignore[arg-type]
+            idempotency_key="k1",
+        )
+    )
+
+    assert isinstance(made, ModelRecord) and made.slug == "trophy"
+    origin = {
+        "archive_id": ARCHIVE,
+        "source": {"kind": "printer", "library_file_id": None, "path": "/cache/demo_elan.3mf"},
+    }
+    sent = {"name": "Trophy", "description": "", "source": {"origin": origin}}
+    assert ops.store.asked == [("mesh_model_create", "trophy", "k1", sent)]  # type: ignore[attr-defined]
+    assert not respx.calls
+
+
+@respx.mock
+def test_a_resend_of_a_failed_create_is_its_problem_and_reads_no_print() -> None:
+    """#6969: a first send that failed answers its problem again, and nothing is read."""
+    from fastapi import Response
+
+    from scadbuddy.api.mesh_models import MeshModelCreate, create_from_mesh
+    from tests.api.test_print_imports import ARCHIVE
+
+    error = {"status": 422, "title": "Unprocessable Content", "detail": "too many objects"}
+    body = MeshModelCreate(
+        name="Trophy", archive_id=ARCHIVE, archive_source=SourceChoice(kind="archive_source")
+    )
+
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(
+            create_from_mesh(
+                body,
+                Response(),
+                _commands(_first("failed", error=error)),  # type: ignore[arg-type]
+                None,  # type: ignore[arg-type]
+                _Store(),  # type: ignore[arg-type]
+                idempotency_key="k1",
+            )
+        )
+
+    assert (refused.value.status, refused.value.detail) == (422, "too many objects")
+    assert not respx.calls

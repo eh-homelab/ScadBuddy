@@ -2062,3 +2062,153 @@ def test_a_refused_preview_is_a_bare_404(
     r = edge.get("/api/store/v1/draft/sources/not-an-id/preview")
     assert (r.status_code, r.content) == (404, b"")
     assert len(crud_mock.calls) == before + 2
+
+
+# -- the instant read of a visitor's choices (#6921) --------------------------------------
+
+VARIANT = f"/api/v1/internal/crud/storefront/listings/{LISTING_ID}/variant"
+VARIANT_KEY = "ab" * 32
+
+
+def test_the_instant_read_relays_the_body_and_binds_the_visitor(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """The edge sends the render body on as it came, with the verified visitor and the
+    browser's address, and no ``Idempotency-Key``: a read. It answers only the public
+    fields: the price's `ESTIMATE_FIELDS` and the preview's URL and shape, never an
+    output id, a cost or the cache key."""
+    public_price = {
+        "source": "last",
+        "price_minor": 500,
+        "currency": "USD",
+        "minor_exponent": 2,
+        "retry_after": None,
+    }
+    preview = {
+        "url": f"/api/store/v1/variants/{VARIANT_KEY}/preview.glb",
+        "colors": ["#FF0000"],
+        "bbox_mm": {"min": [0, 0, 0], "max": [1, 1, 1]},
+        "plates": [],
+    }
+    leaky = {
+        "price": {**public_price, "price_key": "a" * 64, "grams": {"0": "1"}},
+        "preview": {**preview, "output_id": "out-secret"},
+        "render": JOB,
+        "values": {"colour": "#FF0000"},
+    }
+    route = crud_mock.post(VARIANT).respond(200, json=leaky, headers=CRUD)
+    raw = json.dumps(BODY)
+    r = edge.post(
+        f"/api/store/v1/listings/{LISTING_ID}/variant",
+        content=raw,
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "price": public_price,
+        "preview": preview,
+        "render": JOB,
+        "values": {"colour": "#FF0000"},
+    }
+    for hidden in ("out-secret", "price_key", "grams"):
+        assert hidden not in r.text
+    sent = route.calls.last.request
+    assert sent.content == raw.encode()
+    assert len(sent.headers[VISITOR_HEADER]) == 43 and sent.headers[CLIENT_HEADER] == CLIENT[0]
+    assert "idempotency-key" not in sent.headers
+
+
+def test_the_instant_read_is_counted_as_a_read() -> None:
+    """#6921: the page reads its choices on each change, as it reads the estimate: a POST
+    of the instant read is counted against the reads, not the writes."""
+    path = f"/api/store/v1/listings/{LISTING_ID}/variant"
+    app = FastAPI(routes=[Route(path, _ok, methods=["POST"])])
+    app.add_middleware(RequestLimit, prefix="/api/store/v1", trusted=(), clock=Clock())
+    client = TestClient(app, client=CLIENT)
+    codes = [client.post(path).status_code for _ in range(WRITE_LIMIT + 1)]
+    assert codes == [200] * (WRITE_LIMIT + 1)
+
+
+def test_a_variant_preview_is_streamed(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.get(
+        f"/api/v1/internal/crud/storefront/variants/{VARIANT_KEY}/preview.glb"
+    ).respond(200, content=b"glTF-bytes", headers={**CRUD, "Content-Type": "model/gltf-binary"})
+    r = edge.get(f"/api/store/v1/variants/{VARIANT_KEY}/preview.glb")
+    assert r.status_code == 200 and r.content == b"glTF-bytes"
+    assert r.headers["content-type"] == "model/gltf-binary"
+    assert len(route.calls.last.request.headers[VISITOR_HEADER]) == 43
+
+
+@pytest.mark.parametrize("key", ["..", "AB" * 32, "ab" * 31, "not-a-key"])
+def test_a_variant_key_that_is_not_one_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    key: str,
+) -> None:
+    before = len(crud_mock.calls)
+    r = edge.get(f"/api/store/v1/variants/{key}/preview.glb")
+    assert r.status_code == 404
+    assert len(crud_mock.calls) == before
+
+
+# -- the price of a file listing's colours (#6710) ----------------------------------------
+
+PRICE = f"/api/v1/internal/crud/storefront/listings/{LISTING_ID}/price"
+
+
+def test_a_file_listings_price_is_relayed_with_the_public_fields_only(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """The edge sends the colours on as they came, with the verified visitor and the
+    browser's address and no ``Idempotency-Key``, and answers `ESTIMATE_FIELDS` only."""
+    public = {
+        "source": "slice",
+        "price_minor": 700,
+        "currency": "USD",
+        "minor_exponent": 2,
+        "retry_after": None,
+    }
+    route = crud_mock.post(PRICE).respond(
+        200, json={**public, "price_key": "a" * 64, "grams": {"0": "1"}}, headers=CRUD
+    )
+    raw = json.dumps({"listing_updated_at": "2026-11-22T00:00:00Z", "colours": {"0": "f-1"}})
+    r = edge.post(
+        f"/api/store/v1/listings/{LISTING_ID}/price",
+        content=raw,
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == public
+    sent = route.calls.last.request
+    assert sent.content == raw.encode()
+    assert len(sent.headers[VISITOR_HEADER]) == 43 and sent.headers[CLIENT_HEADER] == CLIENT[0]
+    assert "idempotency-key" not in sent.headers
+
+
+def test_a_price_of_an_id_that_is_not_one_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    before = len(crud_mock.calls)
+    r = edge.post(
+        "/api/store/v1/listings/not-an-id/price",
+        content="{}",
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 404
+    assert len(crud_mock.calls) == before
+
+
+def test_a_file_listings_price_is_counted_as_a_read() -> None:
+    """The page reads the price again while the slice runs: counted as a read."""
+    path = f"/api/store/v1/listings/{LISTING_ID}/price"
+    app = FastAPI(routes=[Route(path, _ok, methods=["POST"])])
+    app.add_middleware(RequestLimit, prefix="/api/store/v1", trusted=(), clock=Clock())
+    client = TestClient(app, client=CLIENT)
+    codes = [client.post(path).status_code for _ in range(WRITE_LIMIT + 1)]
+    assert codes == [200] * (WRITE_LIMIT + 1)

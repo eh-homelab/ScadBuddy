@@ -102,7 +102,7 @@ test.describe('settings', () => {
     library: 'Preview',
     assistant: 'Notifications',
     tools: 'Remote MCP plugins',
-    mcp: 'Connect snippet',
+    mcp: 'Plugin feed',
     audits: 'Audit log',
     system: 'About',
   } as const

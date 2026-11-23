@@ -672,9 +672,46 @@ Inputs versions: set `INPUTS_VERSION = n` in `pipeline.py` and have your UI stam
 `migrate(inputs, from_version) -> inputs`. It runs when an older preset or output
 opens. If it raises, the user sees the raw inputs, read-only, with your error.
 
+Declared inputs (#5701; `docs/superpowers/specs/2026-11-17-storefront-pipeline-listings-design.md`
+§4.1 and §6.1): a pipeline template that may be sold on the storefront declares its
+own inputs, and the parameters its pipeline sets, in `model.json`:
+
+```json
+"pipeline": {"module": "pipeline/pipeline.py", "api": 1, "inputs": "pipeline/inputs.json",
+             "sets_params": ["piece", "course"]}
+```
+
+- `inputs` names a JSON file directly under `pipeline/`. It is a JSON Schema of every
+  input key except `params` and `v`, which belong to the host and must not appear. The
+  subset is the flows' one (`backend/scadbuddy/core/input_schema.py`): the top level is
+  `{"type": "object", "properties": {…}, "required": […], "additionalProperties": false}`,
+  and each property is a `string`, `integer`, `number`, `boolean` or an `array` of one,
+  with `title`, `description`, `default` and the type's own limits. A top-level property
+  may also be one `object` of such scalars, with its own `required` and
+  `additionalProperties: false`; never an object in an object. At most 16 KiB, and a
+  `pattern` needs a `maxLength` of at most 1024. `models/dollhouse-kit/pipeline/inputs.json`
+  is a worked example (its `house` object). Names are refused when they are Python
+  keywords or the names of pydantic `BaseModel` attributes (`copy`, `json`, `schema` and
+  the like), as for flows. An object takes no `default`, so list it in `required` when
+  a listing must always state it. The dollhouse requires `house`, so a listing always
+  fixes the house size; its `pipeline.py` still falls back to `DEFAULT_HOUSE` when a
+  render gives no `house`.
+- `sets_params` lists the `model.scad` parameters your pipeline sets itself on each
+  render (the dollhouse's `pipeline.py` `SHAPE`). The storefront listing editor hides
+  them (`GET /api/v1/models/{slug}/versions/{commit}/schema` returns them as
+  `pipeline_params`).
+- Both are optional: a `model.json` without them still loads
+  (`backend/scadbuddy/library/catalogue.py` `PipelineDeclaration`). A bad value makes
+  the whole `pipeline` unreadable, and the error names the key.
+- Keep the schema's bounds equal to the limits your pipeline enforces, and keep
+  `sets_params` equal to what it sets; `backend/tests/test_dollhouse_pipeline.py` holds
+  the dollhouse to both.
+
 `verify.sh`: list inputs cases in `pipeline/verify-inputs.json`, and run
 `python -m scadbuddy.workflows.verify_pipeline <template> --inputs …` in the
-`test` image, as `models/dollhouse-kit/verify.sh` does.
+`test` image, as `models/dollhouse-kit/verify.sh` does. When `model.json` declares
+`pipeline.inputs`, it first checks that the schema is in the subset and that every
+case, less `params` and `v`, fits it (`declared_inputs_failures`).
 
 ## 14. Mesh models: editing a 3MF or STL as a scene
 
@@ -689,8 +726,10 @@ for geometry you do not have. Nothing is written to Bambuddy. Sources: design
 Workflow:
 
 1. Open the mesh with `create_model_from_mesh`. Give exactly one source: a Bambuddy
-   `library_file_id` (from `list_library`), an `output_id`, or a 3MF/STL in your
-   workspace as `workspace_path` + `workspace_sha256` (a file the user uploaded in the
+   `library_file_id` (from `list_library`), an `output_id`, a print's file as
+   `archive_id` with `archive_source` (one place `get_print_sources` lists as
+   available; a sliced file is refused, and a `printer` source waits for a person's
+   approval), or a 3MF/STL in your workspace as `workspace_path` + `workspace_sha256` (a file the user uploaded in the
    panel, or one saved by `http_request` `save_to_workspace` or `workspace_save`; bytes
    are never a tool argument, #2510, `agent/src/tools/workspaceUploads.ts`). Over an
    external `/mcp` install there is no panel: put a local file in with

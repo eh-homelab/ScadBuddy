@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import type { CustomerOrder, Draft, Listing, ListingCard, ParamValue, StoreEstimate, StoreRender } from '../../storefront/api/client'
+import type { CustomerOrder, Draft, Listing, ListingCard, ParamValue, StoreEstimate, StoreRender, StoreVariant } from '../../storefront/api/client'
 import { colourPlan } from '../../storefront/colours'
 import { keychainGlb } from '../glb'
 import { problem } from '../handlers'
@@ -145,8 +145,41 @@ const SHIPPING = [
 let orders = 0
 
 let draft: Draft | null = null
-let renders = new Map<string, { render: StoreRender; polls: number }>()
+let renders = new Map<string, { render: StoreRender; polls: number; variant: string; estimates: number }>()
 let serial = 0
+/**
+ * #6921: what the shop holds of each variant (the listing and the values): the price and
+ * preview its render's estimate priced. The instant read answers it, with no render.
+ */
+let variants = new Map<string, StoreVariant>()
+
+/** The mock's variant key: the listing and the values, as the CRUD side's `variant_key` keys them. */
+export function variantOf(body: { listing_id?: string; listing_updated_at?: string; values?: Record<string, unknown> }): string {
+  const values = Object.fromEntries(Object.entries(body.values ?? {}).sort(([a], [b]) => a.localeCompare(b)))
+  return JSON.stringify([body.listing_id, body.listing_updated_at, values])
+}
+
+/** A preview of the keychain, as a priced variant's output gives it. */
+export function cachedPreview(key: string): StoreVariant['preview'] {
+  return {
+    url: `${base}/variants/${key}/preview.glb`,
+    colors: ['#1B6CA8', '#E8532F'],
+    bbox_mm: { min: [-30, -10, 0], max: [30, 10, 6], size: [60, 20, 6] },
+    plates: [],
+  }
+}
+
+/** Holds a variant as priced before (#6921): a test seeds the instant read with it. */
+export function holdVariant(body: Parameters<typeof variantOf>[0], held: Omit<StoreVariant, 'values'>): void {
+  variants.set(variantOf(body), { values: null, ...held })
+}
+
+/** The visitor's choices as one hex key: what the edge's preview path takes. */
+function hexKey(variant: string): string {
+  let hash = 0
+  for (const char of variant) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
+  return hash.toString(16).padStart(8, '0').repeat(8)
+}
 
 export function save(): void {
   try {
@@ -313,7 +346,7 @@ export const handlers = [
       // the page's copy of that rule.
       values: colourPlan(checked, (body.values ?? {}) as Record<string, ParamValue>).shown,
     }
-    renders.set(id, { render, polls: 0 })
+    renders.set(id, { render, polls: 0, variant: variantOf(body), estimates: 0 })
     return HttpResponse.json(render, { status: 202 })
   }),
   http.get(`${base}/renders/:id`, ({ params }) => {
@@ -336,10 +369,33 @@ export const handlers = [
       headers: { 'Content-Type': 'model/gltf-binary' },
     }),
   ),
-  http.get(`${base}/renders/:id/estimate`, ({ params }) =>
-    renders.get(String(params.id))?.render.status === 'done'
-      ? HttpResponse.json(ESTIMATE)
-      : refused(404, 'render_not_found', 'There is no such render.'),
+  http.get(`${base}/renders/:id/estimate`, ({ params }) => {
+    const held = renders.get(String(params.id))
+    if (held?.render.status !== 'done') return refused(404, 'render_not_found', 'There is no such render.')
+    // The slice works the price out first: one `pending` answer per render, as the shop
+    // gives while its slice runs, then the price. The page reads again after its first
+    // poll wait (`POLL.firstMs`, 1 s), so each render's price shows about 1 s later.
+    held.estimates += 1
+    if (held.estimates === 1) return HttpResponse.json({ ...PENDING_PRICE, retry_after: 0 })
+    // #6921: the priced slice records the variant, with the output it saved.
+    variants.set(held.variant, { price: ESTIMATE, preview: cachedPreview(hexKey(held.variant)), render: null, values: null })
+    return HttpResponse.json(ESTIMATE)
+  }),
+  // #6921: the instant read. It checks the body as the render does, starts nothing, and
+  // answers what the shop holds of the choices: a priced variant's price and preview, or none.
+  http.post(`${base}/listings/:id/variant`, async ({ request, params }) => {
+    const body = (await request.json()) as Body
+    if (body.listing_id !== params.id) return refused(422, 'render_body_invalid', 'This request is not a render of a listing.')
+    const checked = outside(body)
+    if (checked instanceof Response) return checked
+    const held = variants.get(variantOf(body))
+    const answer: StoreVariant = held ?? { price: NO_PRICE, preview: null, render: null, values: null }
+    return HttpResponse.json({ ...answer, values: colourPlan(checked, (body.values ?? {}) as Record<string, ParamValue>).shown })
+  }),
+  http.get(`${base}/variants/:key/preview.glb`, () =>
+    HttpResponse.arrayBuffer(keychainGlb(['#1B6CA8', '#E8532F'], { x: 60, y: 20, z: 6 }).slice().buffer as ArrayBuffer, {
+      headers: { 'Content-Type': 'model/gltf-binary' },
+    }),
   ),
   http.get(`${base}/draft`, () => {
     // A cart read moves each model check on (`storefrontModels.ts`).
@@ -477,6 +533,7 @@ export function reset(): void {
   order = freshOrder()
   orders = 0
   renders = new Map()
+  variants = new Map()
   serial = 0
   try {
     sessionStorage.removeItem(STORAGE_KEY)

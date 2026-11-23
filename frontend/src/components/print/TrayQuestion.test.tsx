@@ -178,6 +178,26 @@ describe('TrayQuestion on the native path', () => {
     expect(link).toHaveBeenCalledWith(printer, 3, 3, { spool_id: SB })
   })
 
+  it('makes a new spool from the tray, with one key per question, and re-reads (#7150)', async () => {
+    const make = vi.spyOn(api, 'newTraySpool').mockRejectedValueOnce(new Error('lost')).mockResolvedValue(placed)
+    const onAssigned = vi.fn()
+    render(<TrayQuestion native={{ printer }} tray={{ ...tray, candidates: [] }} spools={[]} onAssigned={onAssigned} onDecline={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'New spool from this tray' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not make the spool')
+    fireEvent.click(screen.getByRole('button', { name: 'New spool from this tray' }))
+    await waitFor(() => expect(onAssigned).toHaveBeenCalledWith({ spool_id: SB }))
+    expect(make).toHaveBeenCalledTimes(2)
+    const [first, second] = make.mock.calls
+    expect(first!.slice(0, 3)).toEqual([printer, 3, 3])
+    // A retry after a lost answer sends the same key, so the server makes one spool.
+    expect(second![3]).toBe(first![3])
+  })
+
+  it("does not offer a new spool on Bambuddy's path, which names no registry printer (#7150)", () => {
+    render(<TrayQuestion printerId={1} tray={tray} spools={[black, empty]} onAssigned={vi.fn()} onDecline={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: 'New spool from this tray' })).not.toBeInTheDocument()
+  })
+
   it('offers no candidate with no SB spool', () => {
     render(
       <TrayQuestion

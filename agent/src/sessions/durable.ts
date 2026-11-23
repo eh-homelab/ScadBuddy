@@ -1,12 +1,10 @@
 import {
   type Client,
   WithStartWorkflowOperation,
-  WorkflowExecutionAlreadyStartedError,
   WorkflowUpdateFailedError,
 } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import { context as otelContext, trace } from '@opentelemetry/api'
-import type { Sql } from 'postgres'
 import { CrudReadError } from '../api/crudRead.js'
 import { traceparentOf } from '../telemetry/trace.js'
 import type { Tier } from '../auth/principal.js'
@@ -16,16 +14,15 @@ import { TASK_QUEUE } from '../temporal/names.js'
 import { liveHostQueues } from '../temporal/session/affinity.js'
 import { EDIT_QUEUED_UPDATE, QUEUE_MESSAGE_UPDATE, REMOVE_QUEUED_UPDATE, SESSION_QUEUE, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { NOT_QUEUED, QUEUE_FULL, type QueueAnswer, type QueuedMessage, type QueueState } from '../temporal/session/models.js'
-import { SessionBlobs, type SessionImages, sentImageBlobs } from './blobs.js'
+import { type SessionImages, sentImageBlobs } from './blobs.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow, TURN_STATUSES } from './durableSweep.js'
 import { cancelOrphanedEntries } from '../gate/sweep.js'
 import type { SweepRoutes } from '../gate/crudPending.js'
-import type { AuditSink } from '../audit/log.js'
 import type { EventLog } from './eventLog.js'
 import type { UserAttachment } from './images.js'
 import { SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
 import { event, type Owner, type QueuedEntry, type SentImage, type ServerEvent, type SessionStatus } from './protocol.js'
-import { PgTurnRows, type SendClaim, type SendClaimed, type TurnRows } from './turnRows.js'
+import type { SendClaim, SendClaimed, TurnRows } from './turnRows.js'
 
 // A session's turns (unified runtime spec 2026-10-13 §5, plan Step 6.3): every session is an
 // AgentSession, `session-<id>` on `agent-sessions`; this service hands it the message and reads
@@ -35,12 +32,13 @@ import { PgTurnRows, type SendClaim, type SendClaimed, type TurnRows } from './t
 // - send: claim the row (`status = 'running'`, `durable_turn_id`: the workflow owns the turn),
 //   put the turn's images in ai_session_blobs (the claim check, by name), write `user.turn` and
 //   `session.status running`, then update-with-start `send_message` (update id: the turn id),
-//   starting the workflow on the first message. An ended workflow still retained is refused
-//   `closed` (REJECT_DUPLICATE). Once retention removes it, the same session's next send starts
-//   it again, on purpose: the turn resumes the transcript in ai_session_entries, so it never runs
-//   empty (#2078 refused it for good because DurableSession's history held the chat; plan
-//   Phase 10). Only a definite refusal (the validator's
-//   `busy`, a failed Update, an ended workflow)
+//   starting the workflow on the first message. A send to a session whose workflow ended (an
+//   archive or a forget ended it, #7031; a failure; a terminate) starts a new run under the same
+//   id (ALLOW_DUPLICATE), on purpose: the turn resumes the transcript in ai_session_entries, so it
+//   never runs empty (#2078 refused it for good because DurableSession's history held the chat;
+//   plan Phase 10). The row decides who may send: the claim refuses a session that is done
+//   (`closed`), archived or spent. Only a definite refusal (the validator's
+//   `busy`, a failed Update)
 //   gives the claim back. An Update not accepted in time keeps it: Temporal may already hold the
 //   message, which a worker delivers later, so the turn is handed back and `done` follows the log.
 // - `done` follows the event log from the turn's own `session.status running` to the status the
@@ -89,6 +87,8 @@ const ACTIVITY_TASK_QUEUE = 2
 
 /** What the workflow's validator refuses a second turn with (temporal/session/workflow.ts). */
 const BUSY = 'busy'
+/** What the validator refuses a message with once the run was told to end. */
+const ENDED = 'ended'
 const RUNNING: readonly SessionStatus[] = ['running', 'waiting_approval', 'waiting_input']
 export const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
 
@@ -145,11 +145,10 @@ export type DurableTurn = {
 
 export type DurableTurnsDeps = {
   client: Client
-  sql: Sql
-  /** A session's images (`SessionBlobs` on `sql` when omitted). */
-  blobs?: SessionImages
-  /** The row's turn writes (turnRows.ts): `PgTurnRows` on `sql` when omitted; gated in main.ts (#6449). */
-  turns?: TurnRows
+  /** A session's images. */
+  blobs: SessionImages
+  /** The row's turn writes (turnRows.ts, #6449). */
+  turns: TurnRows
   events: EventLog
   /** Tests only: a queue other than `agent-sessions`. */
   sessionQueue?: string
@@ -161,15 +160,17 @@ export type DurableTurnsDeps = {
    * the API's process (`SCADBUDDY_AGENT_ROLE=api`, §14.3) hosts none itself.
    */
   liveHosts?: () => Promise<ReadonlySet<string>>
-  /** Where a Stop records the approvals it cancels on a session whose workflow is gone (#4018). */
-  audit?: AuditSink | undefined
-  /** The API's `pending-input` routes, which a Stop's cancels take while `use()` holds (gate/sweep.ts, #5299 step 10). */
-  pendingRoutes?: { crud: SweepRoutes; use: () => boolean } | undefined
+  /** The API's `pending-input` routes, which a Stop's cancels take, with their audit rows (gate/sweep.ts, #5299 step 10). */
+  pendingRoutes: SweepRoutes
   /** How long send waits for the `send_message` Update to be accepted (default 10 s); past it the outcome is unknown and the claim is kept. */
   sendTimeoutMs?: number
   /** How long `cancel_input` may take (DurableGate, default 10 s). */
   cancelTimeoutMs?: number
-  /** Tests only: how Stop describes a gone workflow (default durableDescriber). */
+  /**
+   * Tests only: how Stop and the unanswered-send re-send describe a workflow (default
+   * durableDescriber). A send refused `ended` does not use it: it describes the run it waits for
+   * itself, to pin the wait to that run's id.
+   */
   describe?: DescribeSession
   /** How long after an unanswered send its Update is sent once more (default RESEND_AFTER_MS). */
   resendAfterMs?: number
@@ -185,6 +186,8 @@ export type DurableTurnsDeps = {
  * and its own deadline end before the sweep looks at the row.
  */
 export const RESEND_AFTER_MS = 30_000
+/** close()'s wait for a running re-send, past the send's own deadline (#7163). */
+const CLOSE_MARGIN_MS = 1_000
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
 
@@ -199,13 +202,21 @@ class OutcomeUnknown extends Error {}
 
 type ServerEventOf<T extends string> = Extract<ServerEvent, { type: T }>
 
+/** The workflow refused the Update because its run was told to end and is closing (#7031). */
+function refusedEnded(err: unknown): boolean {
+  const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
+  return cause instanceof ApplicationFailure && cause.type === ENDED
+}
+
 /** A queue Update's failure as the caller hears it (#6386). */
 function queueRefusal(err: unknown, id: string, what: string): SessionError {
   const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
   if (cause instanceof ApplicationFailure) {
     if (cause.type === QUEUE_FULL) return new SessionError('queue_full', cause.message)
     if (cause.type === NOT_QUEUED) return new SessionError('not_queued', cause.message)
-    if (cause.type === 'ended') return new SessionError('closed', `session ${id} is done`)
+    // The row refuses a done session first (manager.ts `mayQueue`): a run refuses `ended` only while
+    // it closes after an `end` (an archive, #7031, or a done whose edit has not landed).
+    if (cause.type === ENDED) return new SessionError('unavailable', `session ${id}'s workflow is ending; send the message again in a moment`)
     if (cause.type === 'invalid') return new SessionError('invalid', cause.message)
   }
   if (err instanceof WorkflowNotFoundError) return new SessionError('unavailable', `session ${id}'s workflow is not running; send the message again once its turn has ended`)
@@ -214,9 +225,7 @@ function queueRefusal(err: unknown, id: string, what: string): SessionError {
 
 export class DurableTurns {
   readonly #client: Client
-  readonly #sql: Sql
   readonly #events: EventLog
-  readonly #audit: AuditSink | undefined
   readonly #pendingRoutes: DurableTurnsDeps['pendingRoutes']
   readonly #gate: DurableGate
   readonly #blobs: SessionImages
@@ -228,16 +237,20 @@ export class DurableTurns {
   #ready: { until: number; why: string | undefined } | undefined
   readonly #describe: DescribeSession
   readonly #resendAfterMs: number
+  /** The re-sends not yet due (#resendLater), which `close` clears. */
+  readonly #resends = new Set<NodeJS.Timeout>()
+  /** The re-sends whose timer fired and whose describe or Update still runs, which `close` waits for. */
+  readonly #resending = new Set<Promise<void>>()
+  /** Set by `close`: a send still in flight then arms no re-send. */
+  #closed = false
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
-    this.#sql = deps.sql
     this.#events = deps.events
-    this.#audit = deps.audit
     this.#pendingRoutes = deps.pendingRoutes
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
-    this.#blobs = deps.blobs ?? new SessionBlobs(deps.sql)
-    this.#turns = deps.turns ?? new PgTurnRows(deps.sql)
+    this.#blobs = deps.blobs
+    this.#turns = deps.turns
     this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
     this.#toolsQueue = deps.toolsQueue ?? TASK_QUEUE
     this.#liveHosts = deps.liveHosts ?? (() => liveHostQueues(deps.client))
@@ -378,7 +391,7 @@ export class DurableTurns {
    * Queues a turn whose claim found the row running another (#6386), or undefined when the row
    * cannot take it (another owner, done, archived, spent, a closed DurableSession, or no turn runs
    * after all: the manager says why, or the caller sends again). Refused `queue_full` past the
-   * workflow's cap, `closed` once the session was marked done.
+   * workflow's cap, `unavailable` while its workflow ends after an `end`.
    */
   async #queue(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
     const id = session.id
@@ -416,7 +429,7 @@ export class DurableTurns {
     } catch (err) {
       const refusal = queueRefusal(err, id, 'queue the message')
       // Refused, it was never queued: what its write made goes. Any other failure may have queued it.
-      if (refusal.code === 'queue_full' || refusal.code === 'closed') {
+      if (refusal.code === 'queue_full' || refusedEnded(err)) {
         for (const write of made) {
           await this.#blobs.delete(id, write).catch(() => {
             console.warn(`durable send: session ${id}: a refused message's images were not deleted`)
@@ -502,12 +515,41 @@ export class DurableTurns {
    * as before when the workflow still holds none past RUNNING_GRACE_MS. Payload-free warnings.
    */
   #resendLater(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[]): void {
+    if (this.#closed) return
     const timer = setTimeout(() => {
-      this.#resend(session, turn, sent).catch(() => {
-        console.warn(`durable send: session ${session.id}'s unanswered message could not be sent again`)
-      })
+      this.#resends.delete(timer)
+      const resending: Promise<void> = this.#resend(session, turn, sent)
+        .catch(() => {
+          console.warn(`durable send: session ${session.id}'s unanswered message could not be sent again`)
+        })
+        .finally(() => this.#resending.delete(resending))
+      this.#resending.add(resending)
     }, this.#resendAfterMs)
     timer.unref()
+    this.#resends.add(timer)
+  }
+
+  /**
+   * Clears the re-sends not yet due, arms none after (a send still in flight), and waits for the
+   * ones already running (#7103, #7146): the process stops, so its Temporal client closes. A
+   * re-send that ran after that could not reach Temporal anyway, and its call's retry would throw
+   * outside any promise. The wait is bounded by the send's own deadline plus a second (the
+   * deadline runs from the send's start, before the close, and its rejection can come late on a
+   * loaded host), so a stop never hangs on one. The running sweep ends a turn that no workflow took, as for any lost send.
+   */
+  async close(): Promise<void> {
+    this.#closed = true
+    for (const timer of this.#resends) clearTimeout(timer)
+    this.#resends.clear()
+    if (this.#resending.size === 0) return
+    let bound: NodeJS.Timeout | undefined
+    await Promise.race([
+      Promise.allSettled([...this.#resending]),
+      new Promise((resolve) => {
+        bound = setTimeout(resolve, this.#sendTimeoutMs + CLOSE_MARGIN_MS)
+      }),
+    ])
+    clearTimeout(bound)
   }
 
   async #resend(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[]): Promise<void> {
@@ -520,6 +562,8 @@ export class DurableTurns {
     if (state !== 'between_turns' && state !== 'not_found') return
     const row = await this.#turns.state(session.id)
     if (!row || row.durable_turn_id !== turn.turnId.toLowerCase() || !TURN_STATUSES.includes(row.status)) return
+    // Closed while it read: the process stops, so nothing is sent (#7146).
+    if (this.#closed) return
     await this.#sendMessage(session, turn, sent)
   }
 
@@ -557,34 +601,64 @@ export class DurableTurns {
       words: turn.prompt,
       ...(traceparent ? { traceparent } : {}),
     }
-    const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(SESSION_WORKFLOW, {
+    // One per attempt: an operation can be executed only once.
+    const operation = () => new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(SESSION_WORKFLOW, {
       workflowId: sessionWorkflowId(session.id),
       taskQueue: this.#sessionQueue,
       args: [start],
       workflowIdConflictPolicy: 'USE_EXISTING',
-      // A session whose workflow ended (failed, or terminated) is refused `closed` while Temporal
-      // still holds that run: its end (a failure, a terminate) is what the panel shows, and a send
-      // must not paper over it at once. Once retention removes the run, a send starts it again
-      // and the turn resumes from ai_session_entries (see the header).
-      workflowIdReusePolicy: 'REJECT_DUPLICATE',
+      // A session whose workflow ended (archived and unarchived since, #7031; failed; terminated)
+      // starts a new run, which resumes from ai_session_entries (see the header). The claim above
+      // already refused a session that is done, archived or spent.
+      workflowIdReusePolicy: 'ALLOW_DUPLICATE',
     })
     // The turn id as the update id: a re-send of the same turn is the same Update.
     const update = { args: [message] as [DurableMessage], updateId: turn.turnId }
-    try {
-      await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
+    // One deadline for the whole send: the Update, and, when it meets a run that is ending, the
+    // wait for that run to close and the Update once more.
+    const deadline = Date.now() + this.#sendTimeoutMs
+    const send = () =>
+      this.#client.withDeadline(deadline, () =>
         this.#client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, SendAnswer, [DurableMessage]>(
           SEND_MESSAGE_UPDATE,
-          { ...update, startWorkflowOperation: operation },
+          { ...update, startWorkflowOperation: operation() },
         ),
       )
+    const stillEnding = () => new SessionError('unavailable', `session ${session.id}'s workflow is still ending; send the message again in a moment`)
+    try {
+      try {
+        await send()
+      } catch (err) {
+        if (!refusedEnded(err)) throw err
+        // The run was told to end (an archive just before an unarchive, #7031; a done whose edit
+        // did not land) and is closing. The claim passed, so the row is not done: once that run
+        // closes, the same Update starts a new one. The closing run refused it, so it never took it.
+        // The wait is pinned to the run current at this describe, which is the run that refused it
+        // unless that run closed and another started in between (the SDK's update-with-start handle
+        // does not expose the run its start found). A run started after the describe is not waited
+        // for: the retry reaches it, and it takes the Update or answers busy.
+        const workflowId = sessionWorkflowId(session.id)
+        const closed = await this.#client
+          .withDeadline(deadline, async () => {
+            const { runId } = await this.#client.workflow.getHandle(workflowId).describe()
+            const run = this.#client.workflow.getHandle(workflowId, runId, { followRuns: false })
+            await run.result().catch(() => undefined)
+            return (await run.describe()).status.name !== 'RUNNING'
+          })
+          .catch((err: unknown) => err instanceof WorkflowNotFoundError)
+        // Still closing, or no time left for the Update: nothing took the message, so the claim is given back.
+        if (!closed || Date.now() >= deadline) throw stillEnding()
+        // A new run told to end in the meantime (another archive) refuses it too.
+        await send().catch((retryErr: unknown) => {
+          throw refusedEnded(retryErr) ? stillEnding() : retryErr
+        })
+      }
     } catch (err) {
+      // A refusal made here (the run still ending), which gives the claim back.
+      if (err instanceof SessionError) throw err
       const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
       if (cause instanceof ApplicationFailure && cause.type === BUSY) {
         throw new SessionError('busy', `a turn is already running in session ${session.id}; wait for it to finish or interrupt it`)
-      }
-      // An ended workflow still retained refuses the start (REJECT_DUPLICATE).
-      if (err instanceof WorkflowExecutionAlreadyStartedError) {
-        throw new SessionError('closed', `session ${session.id}'s workflow has ended; continue in a new chat`)
       }
       if (err instanceof WorkflowUpdateFailedError) {
         throw new SessionError('unavailable', `session ${session.id}'s workflow did not take the message; send it again in a moment`)
@@ -719,7 +793,7 @@ export class DurableTurns {
     // A parked turn's entries (#4018): no run will resolve them now, so they are cancelled here
     // rather than left for PendingInputSweep's next look, ten minutes or more away.
     const cancelled = await cancelOrphanedEntries(
-      { sql: this.#sql, events: this.#events, audit: this.#audit, routes: this.#pendingRoutes },
+      { events: this.#events, routes: this.#pendingRoutes },
       { sessionId: row.id },
     )
     return ended || cancelled > 0

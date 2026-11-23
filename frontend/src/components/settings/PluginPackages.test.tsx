@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { aiPlugins } from '../../api/aiPlugins'
 import { aiCapabilities } from '../../api/capabilities'
-import { BUILT_IN_ANSWER, seedStoredPackage, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
+import { BUILT_IN_ANSWER, seedHostedPackage, seedStoredPackage, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
 import { GREETER_SKILL, LONG_CHANGELOG, PREVIEW_CHARS } from '../../mocks/features/pluginPackageFiles'
 import { setPackageProblem } from '../../mocks/features/capabilities'
 import { server } from '../../mocks/server'
@@ -61,7 +61,7 @@ describe('PluginPackagesPanel', () => {
   it('answers an install of ScadBuddy\'s own plugin with a notice, not a refusal', async () => {
     const { user } = renderPage(<PluginPackagesPanel />)
     await screen.findByText('No plugin packages installed.')
-    await user.click(screen.getByLabelText('Marketplace entry'))
+    await user.click(screen.getByLabelText('Marketplace repository'))
     await user.type(screen.getByLabelText('Marketplace repository URL'), 'https://github.com/eh-homelab/ScadBuddy')
     await user.type(screen.getByLabelText('Plugin name in the marketplace'), 'scadbuddy')
     await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
@@ -91,7 +91,7 @@ describe('PluginPackagesPanel', () => {
   it('installs a marketplace entry', async () => {
     const { user } = renderPage(<PluginPackagesPanel />)
     await screen.findByText('No plugin packages installed.')
-    await user.click(screen.getByLabelText('Marketplace entry'))
+    await user.click(screen.getByLabelText('Marketplace repository'))
     await user.type(screen.getByLabelText('Marketplace repository URL'), 'https://git.example/market.git')
     await user.type(screen.getByLabelText('Plugin name in the marketplace'), 'greeter')
     await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
@@ -163,6 +163,57 @@ describe('PluginPackagesPanel', () => {
     expect(await within(card).findByText('Approved, disabled')).toBeInTheDocument()
   })
 
+  // #6935: an archive is pinned to its file's sha256, and approved by it.
+  it('installs a zip archive and approves its file by sha256', async () => {
+    let installed: unknown
+    let approved: unknown
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/approve')) void request.clone().json().then((b) => (approved = b))
+      else if (request.method === 'POST' && request.url.endsWith('/plugin-packages')) void request.clone().json().then((b) => (installed = b))
+    })
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await user.click(screen.getByLabelText('Archive'))
+    expect(screen.queryByLabelText('Branch, tag or commit')).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('Archive URL'), 'https://files.example/greeter-1.0.0.zip')
+    await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    expect(installed).toEqual({ source: { kind: 'archive', url: 'https://files.example/greeter-1.0.0.zip' } })
+    expect(within(card).getByText('File SHA-256')).toBeInTheDocument()
+    expect(within(card).queryByLabelText('Re-pin to branch, tag or commit')).not.toBeInTheDocument()
+
+    await user.click(within(card).getByRole('button', { name: 'Approve…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Approve greeter' })
+    expect(within(dialog).getByText('File SHA-256')).toBeInTheDocument()
+    expect(within(dialog).getByTestId('approve-commit')).toHaveTextContent('f'.repeat(64))
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(within(dialog).getByRole('button', { name: 'Approve this pin' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(approved).toEqual({ bytes_sha256: 'f'.repeat(64), content_hash: GREETER_V1.hash })
+    expect(within(card).getByText('Approved, disabled')).toBeInTheDocument()
+  })
+
+  it('offers no re-pin for an archive installed with its sha256, and does for one without', async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await user.click(screen.getByLabelText('Archive'))
+    await user.type(screen.getByLabelText('Archive URL'), 'https://files.example/greeter-1.0.0.zip')
+    await user.type(screen.getByLabelText('Expected SHA-256 (optional)'), 'f'.repeat(64))
+    await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    expect(within(card).queryByRole('button', { name: 'Fetch re-pin' })).not.toBeInTheDocument()
+    expect(within(card).getByText(/Installed with its file’s SHA-256, so it always loads that file/)).toBeInTheDocument()
+
+    await user.click(within(card).getByRole('button', { name: 'Remove' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Remove package' }))
+    await screen.findByText('No plugin packages installed.')
+    await user.click(screen.getByLabelText('Archive'))
+    await user.type(screen.getByLabelText('Archive URL'), 'https://files.example/greeter-1.0.0.zip')
+    await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
+    const open = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    expect(within(open).getByRole('button', { name: 'Fetch re-pin' })).toBeInTheDocument()
+  })
+
   it('shows the server refusing an approval', async () => {
     server.use(
       http.post('/api/v1/ai/plugin-packages/:name/approve', () =>
@@ -215,7 +266,7 @@ describe('PluginPackagesPanel', () => {
   it('flags a re-pin that moved to another repository, and approving it leaves the package disabled', async () => {
     const { user } = renderPage(<PluginPackagesPanel />)
     await screen.findByText('No plugin packages installed.')
-    await user.click(screen.getByLabelText('Marketplace entry'))
+    await user.click(screen.getByLabelText('Marketplace repository'))
     await user.type(screen.getByLabelText('Marketplace repository URL'), 'https://git.example/market.git')
     await user.type(screen.getByLabelText('Plugin name in the marketplace'), 'greeter')
     await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
@@ -272,6 +323,28 @@ describe('PluginPackagesPanel', () => {
     await install(user, 'https://git.example/greeter.git')
     expect(await screen.findByRole('listitem', { name: 'Plugin package greeter' })).toBeInTheDocument()
     expect(screen.getAllByRole('listitem', { name: /^Plugin package / })).toHaveLength(1)
+  })
+
+  it('marks a published hosted version not offered, offers it as a re-pin, and approves it by version (#6934)', async () => {
+    seedHostedPackage('greeter', 1, 2)
+    const { user } = renderPage(<PluginPackagesPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    expect(within(card).getByText('Hosted plugin greeter')).toBeInTheDocument()
+    expect(within(card).getByText('Version 2 not offered')).toBeInTheDocument()
+    expect(within(card).queryByRole('button', { name: 'Fetch re-pin' })).not.toBeInTheDocument()
+
+    await user.click(within(card).getByRole('button', { name: 'Offer version 2' }))
+    const pending = await within(card).findByLabelText('Pending re-pin')
+    expect(pending).toHaveTextContent('Re-pin at version 2. The current pin keeps loading until you approve this one.')
+    expect(within(card).queryByText('Version 2 not offered')).not.toBeInTheDocument()
+
+    await user.click(within(pending).getByRole('button', { name: 'Approve re-pin…' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByTestId('approve-commit')).toHaveTextContent('2')
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(within(dialog).getByRole('button', { name: 'Approve this pin' }))
+    await waitFor(() => expect(within(card).queryByLabelText('Pending re-pin')).not.toBeInTheDocument())
+    expect(within(card).getByText('Publish a new version in Hosted plugins to re-pin it.')).toBeInTheDocument()
   })
 
   it('keeps a package stored under a built-in name marked not loaded, saying why, and removable', async () => {

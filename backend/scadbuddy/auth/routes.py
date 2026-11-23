@@ -131,9 +131,9 @@ PERSON_ENDPOINTS = frozenset(
 )
 #: The public routes the projects worker's flow host functions and grant checks call
 #: (#5298): `workflows/flow_tools.py` through `workflows/flow_routes.py`,
-#: `workflows/flow_grants.py` `facts_of`, and `flows/print_binding.py` `api_lookup` for the
-#: `flow_decide` operation. They take everyone `api` takes, as `api`; the projects
-#: credential holds `flow.host`, not `api`, and reaches only these.
+#: `workflows/flow_grants.py` `facts_of`, and `flows/print_binding.py` `api_lookup` and
+#: `api_drafts` for the `flow_decide` operation. They take everyone `api` takes, as `api`;
+#: the projects credential holds `flow.host`, not `api`, and reaches only these.
 #: `tests/flows/test_flow_host_paths.py` fails for a call to a route not listed here,
 #: and for a listed one nothing calls.
 FLOW_HOST_ENDPOINTS = frozenset(
@@ -149,6 +149,8 @@ FLOW_HOST_ENDPOINTS = frozenset(
         "scadbuddy.api.printing.get_run",
         "scadbuddy.api.settings.get_print_options",
         "scadbuddy.api.printers.get_printer",
+        # A publish's approval binds the hosted plugin's draft digest (#7199).
+        "scadbuddy.api.hosted_plugins.hosted_plugin_draft_diff",
         # A line item's print and the read its grant check makes (#4252, orders §7.2).
         "scadbuddy.api.orders.get_order",
         "scadbuddy.api.orders.print_item",
@@ -200,6 +202,14 @@ SCRIPTLESS_GETS = frozenset(
         (
             "scadbuddy.api.order_attachments",
             "/orders/{order_id}/attachments/{attachment_id}/thumbnail",
+        ),
+        (
+            "scadbuddy.api.entity_attachments",
+            "/entities/{ref}/attachments/{attachment_id}/content",
+        ),
+        (
+            "scadbuddy.api.entity_attachments",
+            "/entities/{ref}/attachments/{attachment_id}/thumbnail",
         ),
         ("scadbuddy.api.flows", "/workflow-runs/{run_id}/images/{name}"),
     }

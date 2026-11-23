@@ -8,7 +8,7 @@ import type { RouteModule } from './module.js'
 // it is not `running`. The backend's GET /api/v1/operations/{id} for the agent's own.
 
 export const NO_COMMANDS =
-  "the agent's commands run on Temporal: SCADBUDDY_TEMPORAL_ADDRESS and SCADBUDDY_DATABASE_URL must both be set"
+  "the agent's commands run on Temporal: SCADBUDDY_TEMPORAL_ADDRESS must be set"
 
 /** A command's outcome as the route answers it: the body with `status`, a 202, or the problem. */
 export function commandResponse(c: Context, outcome: CommandOutcome, status: 200 | 201) {

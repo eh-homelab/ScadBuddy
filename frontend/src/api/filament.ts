@@ -2,7 +2,7 @@
  * #6262 — the Filament section's client for `/api/v1/filament/*`
  * (`backend/scadbuddy/api/filament.py`), typed from the generated `schema.d.ts`.
  */
-import { request } from './client'
+import { command, request } from './client'
 import type { components, operations } from './schema'
 
 type Schemas = components['schemas']
@@ -11,13 +11,15 @@ type Query<Op extends keyof operations> = NonNullable<operations[Op]['parameters
 export type Spool = Schemas['Spool']
 /** The spec lists a field the server always sends (it has a default) as optional; here it is required. */
 export type SpoolDetail = Schemas['SpoolDetail'] & Required<Pick<Schemas['SpoolDetail'], 'effective' | 'overridden' | 'names' | 'presets' | 'k_values' | 'low_stock' | 'in_use' | 'type_suppliers'>>
-export type SpoolCreate = Schemas['SpoolCreate']
+export type SpoolCreate = Schemas['SpoolCreate-Input']
 export type SpoolPatch = Schemas['SpoolPatch']
+export type SpoolDraft = Schemas['SpoolDraft']
+export type SpoolBulkCreate = Schemas['SpoolBulkCreate']
 export type TagBind = Schemas['TagBind']
 export type TagBinding = Schemas['TagBinding']
 export type PresetInput = Schemas['SpoolPresetCreate']
 export type EffectivePreset = Schemas['EffectivePreset']
-export type KValueInput = Schemas['SpoolKValueCreate']
+export type KValueInput = Schemas['SpoolKValueCreate-Input']
 export type EffectiveKValue = Schemas['EffectiveKValue']
 export type SpoolType = Schemas['SpoolType']
 export type SpoolTypeDetail = Schemas['SpoolTypeDetail']
@@ -33,6 +35,12 @@ export type FillRequest = Schemas['FillRequest']
 export const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm', 'drying_temp_c', 'drying_hours'] as const
 export type FillField = (typeof FILL_FIELDS)[number]
 export type Location = Schemas['Location']
+export type LocationDetail = Schemas['LocationDetail']
+export type PathStep = Schemas['PathStep']
+export type PlacedSpool = Schemas['PlacedSpool']
+export type Resolved = Schemas['Resolved']
+export type PrinterLabels = Schemas['PrinterLabels']
+export type PrinterLabel = Schemas['PrinterLabel']
 export type LocationNode = Schemas['LocationNode']
 export type LocationCreate = Schemas['LocationCreate']
 export type LocationPatch = Schemas['LocationPatch']
@@ -65,6 +73,19 @@ export type PriceSeries = Schemas['PriceSeries']
 export type SpendRow = Schemas['SpendRow']
 export type MetricsQueryParams = Query<'get_metrics_api_v1_filament_metrics_get'>
 export type PurchasingQueryParams = Query<'get_purchasing_metrics_api_v1_filament_metrics_purchasing_get'>
+export type MaterialNumberStats = Schemas['MaterialNumberStats']
+export type MaterialNumberRow = Schemas['MaterialNumberRow']
+export type MaterialNumberQueryParams = Query<'get_material_number_stats_api_v1_filament_metrics_material_numbers_get'>
+export type CostCalculation = Schemas['CostCalculation']
+/**
+ * #7152 — the route's query, with money narrowed to exact decimal strings (the spec also
+ * allows a number, which would go through a float); `tax`, `shipping` and `quantity` may be left out.
+ */
+export type CostQueryParams = Omit<Query<'get_cost_per_kg_api_v1_filament_cost_per_kg_get'>, 'price' | 'tax' | 'shipping'> & {
+  price: string
+  tax?: string
+  shipping?: string
+}
 export type FilamentInventoryView = Schemas['FilamentInventoryView']
 export type CsvRow = Schemas['CsvRow']
 export type ImportPreview = Schemas['ImportPreview']
@@ -94,7 +115,7 @@ export type CatalogKind = keyof CatalogRows
  * carry, so this is the row's own fields, all optional, and `archived`.
  */
 export type CatalogInput<K extends CatalogKind> = Partial<
-  Omit<CatalogRows[K], 'id' | 'created_at' | 'updated_at' | 'archived_at' | 'bb_catalog_id' | 'aliases'>
+  Omit<CatalogRows[K], 'id' | 'created_at' | 'updated_at' | 'archived_at' | 'bb_catalog_id' | 'aliases' | 'source' | 'synced_at' | 'bb_colour_id'>
 > & { archived?: boolean }
 
 /**
@@ -137,6 +158,17 @@ export const importSpools = (rows: CsvRow[], options: { dryRun: true } | { dryRu
   })
 
 export const createSpool = (body: SpoolCreate) => request<Spool>(`${BASE}/spools`, json('POST', body))
+
+/**
+ * #7150 — `quantity` identical spools, each with its own number, with their place, presets
+ * and K values, in one transaction. `key` is one `Idempotency-Key` per opened form, so a
+ * retry or a double click answers the first spools and makes no more.
+ */
+export const bulkCreateSpools = (body: SpoolBulkCreate, key: string) =>
+  request<Spool[]>(`${BASE}/spools/bulk`, { ...json('POST', body), headers: { 'Idempotency-Key': key } })
+
+/** #7150 — a new spool's draft from an existing one: not its number, tags, tray, ledger or weight lock. */
+export const copySpool = (id: string) => request<SpoolDraft>(`${BASE}/spools/${seg(id)}/copy`)
 
 /** Only the fields sent change; `null` clears an override. */
 export const patchSpool = (id: string, body: SpoolPatch) => request<Spool>(`${BASE}/spools/${seg(id)}`, json('PATCH', body))
@@ -182,6 +214,13 @@ export const getSyncStatus = () => request<SyncStatus>(`${BASE}/sync/status`)
  * 409 (`code` `no_bambuddy` or `nothing_pushes`) when no pass can run, 503 when it could not be asked for.
  */
 export const runSync = () => request<Schemas['SyncRun']>(`${BASE}/sync/run`, { method: 'POST' })
+
+export type SyncPass = Schemas['SyncPass']
+export type SyncPassPage = Schemas['SyncPassPage']
+
+/** #6905 — a page of sync passes, newest first, failed ones too; pass `next_cursor` back as `cursor`. */
+export const listSyncPasses = (params: Query<'list_filament_sync_passes_api_v1_filament_sync_passes_get'> = {}) =>
+  request<SyncPassPage>(`${BASE}/sync/passes${query(params)}`)
 
 export type LinksResetCounts = Schemas['LinksResetCounts']
 export type LinksResetPreview = Schemas['LinksResetPreview']
@@ -319,8 +358,21 @@ export const getProfileFetch = (typeId: string) => request<ProfileFetchStatus>(`
 
 // -- catalogs, locations ----------------------------------------------------------------
 
-export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeArchived?: boolean } = {}) =>
-  request<CatalogRows[K][]>(`${BASE}/catalog/${seg(kind)}${query({ include_archived: options.includeArchived || undefined })}`)
+/** A catalog in sort order; `q` keeps the rows where every word matches some text (a colour's maker, material and hex too, #6907). */
+export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeArchived?: boolean; q?: string } = {}) =>
+  request<CatalogRows[K][]>(`${BASE}/catalog/${seg(kind)}${query({ include_archived: options.includeArchived || undefined, q: options.q?.trim() || undefined })}`)
+
+// -- the colour catalog's syncs (#6907) -------------------------------------------------
+
+export type ColourSync = Schemas['ColourSync']
+export type ColourSyncSource = ColourSync['source']
+
+/** Each source's newest run, with its progress while it runs. */
+export const listColourSyncs = () => request<ColourSync[]>(`${BASE}/colour-syncs`)
+
+/** Runs a sync as a command (followed past its 202); a failed read is a run with `state: 'failed'`, not an error. */
+export const startColourSync = (source: ColourSyncSource, force = false) =>
+  command<ColourSync>(`${BASE}/colour-syncs`, json('POST', { source, force }))
 
 /** Adds a row, or with `id` changes one (only the fields sent). */
 /** Replace a row's aliases; a key another name or alias holds is a 409 that names the holder. */
@@ -338,6 +390,16 @@ export const upsertCatalog = <K extends CatalogKind>(kind: K, body: CatalogInput
 
 export const listLocations = (options: { includeArchived?: boolean } = {}) =>
   request<LocationNode[]>(`${BASE}/locations${query({ include_archived: options.includeArchived || undefined })}`)
+
+/** #6955 — one place with its code, kind, path, children and spools; an archived place still answers. */
+export const getLocation = (id: string) => request<LocationDetail>(`${BASE}/locations/${seg(id)}`)
+
+/** #6955 — what a short code (`L-12`, `S-142`) names; the route is `/api/v1/codes/{code}`, outside `BASE`. */
+export const resolveCode = (code: string) => request<Resolved>(`/codes/${seg(code)}`)
+
+/** #6955 — the printers' place labels; `null` is every printer. */
+export const printerLabels = (printerIds: string[] | null) =>
+  request<PrinterLabels>(`${BASE}/printer-labels`, json('POST', { printer_ids: printerIds }))
 
 /** Adds a place, or with `id` changes one (only the fields sent). */
 export function upsertLocation(body: LocationCreate): Promise<Location>
@@ -369,6 +431,13 @@ export const getMetrics = (params: MetricsQueryParams = {}) => request<Inventory
 /** #6269 — price per kg over time and confirmed invoice spend, each in its own currency. */
 export const getPurchasingMetrics = (params: PurchasingQueryParams = {}) =>
   request<PurchasingMetrics>(`${BASE}/metrics/purchasing${query(params)}`)
+
+/** #7152 — stock, use in the range and value by material number (a type code, case folded). */
+export const getMaterialNumberStats = (params: MaterialNumberQueryParams = {}) =>
+  request<MaterialNumberStats>(`${BASE}/metrics/material-numbers${query(params)}`)
+
+/** #7152 — what a price, tax, shipping and net weight come to per kg, in the shop's currency; writes nothing. */
+export const calculateCostPerKg = (params: CostQueryParams) => request<CostCalculation>(`${BASE}/cost-per-kg${query(params)}`)
 
 /** Every spool with the tray it is in, and each registry printer's trays (Task 9). */
 export const getInventory = (options: { includeArchived?: boolean } = {}) =>

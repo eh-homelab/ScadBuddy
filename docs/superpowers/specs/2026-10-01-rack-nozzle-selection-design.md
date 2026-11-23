@@ -132,8 +132,14 @@ usage to win over color picks the position by hand.
      spool is unknown (no inventory spool assigned) is judged by `type` alone,
      and the dialog says Glow could not be checked. Since #6872 it names each such slot
      (`RackPickView.unchecked`): no spool chosen, an empty tray chosen, or a spool (an SB
-     number, or the spool in a tray chosen for itself) that is not in the inventory. A
-     tray chosen for itself (a negative id) names the SB spool in that tray.
+     number, or the spool in a tray chosen for itself) that is not in the inventory, or an
+     SB spool with no type, which names no material (`no_type`, R-6876-6). A
+     tray chosen for itself (a negative id) names the SB spool in that tray. Since #6876
+     the run's own ranking does too: a native tray choice carries the SB spool's
+     material and subtype (`sb_material`, `sb_subtype`) for this test only, a tray that
+     holds no SB spool or an SB spool with no type counts as unchecked, and each unchecked
+     slot of a group judged not abrasive is named in a `rack-glow-unchecked` warning with
+     the same four reasons.
 
    A group is abrasive when **any** of its filaments is: several filaments can
    share one hotend, and taking only the first (as the group's color does) could

@@ -2,7 +2,8 @@ import type { components } from '../api/schema.js'
 
 // #6131 (design 2026-11-13 §4) — the smart defaults of a storefront listing, the agent's
 // copy of the Storefront page's (`frontend/src/components/storefront/listingDraft.ts`
-// `defaultsFor`, `colourProblems`, `titleColours`, `withoutWords`, `sellMedia`). The two
+// `defaultsFor`, `colourProblems`, `titleColours`, `withoutWords`, `sellMedia`, and a library
+// file's draft below, #6710). The two
 // packages share no code, so `test-fixtures/storefront/sell-draft-vectors.json` holds the
 // cases both tests check, and a change to one copy must keep them passing in both.
 
@@ -17,7 +18,7 @@ type Value = boolean | number | string
 const HIDDEN_GROUP = 'Hidden'
 /** The longest text a customer may type (`orders/storefront/wire.py` `MAX_TEXT_LENGTH`). */
 const MAX_TEXT_LENGTH = 200
-/** A support material (`orders/storefront/wire.py` `SUPPORT_MATERIAL`, `frontend/src/storefront/params.ts`): change all together. */
+/** A support material (`orders/storefront/wire.py` `SUPPORT_MATERIAL`, `frontend/src/storefront/params.ts`): change all together; all three are tested against `test-fixtures/storefront/support-materials.json`. */
 const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 
 export interface ListingDefaults {
@@ -246,4 +247,102 @@ export function withoutWords(title: string, words: readonly string[]): string {
 /** The model media a customer can see: images only (a revision's `.glb` is kept as octet-stream). */
 export function sellMedia(media: readonly MediaView[]): string[] {
   return media.filter((item) => item.kind === 'image' && !item.missing && item.content_type.startsWith('image/')).map((item) => item.id)
+}
+
+// #6710 (design 2026-11-21 §9.3, §11.3) — a library file's draft, the agent's copy of the
+// editor's (`listingDraft.ts` `fileTitle`, `fileColours`, `supportFilament`, `declaredSlots`,
+// `platePictures`, and `titleColours` of a file draft), checked against the file case of the
+// same shared vectors.
+
+type SlotNeed = components['schemas']['SlotNeed']
+type OutputPlate = components['schemas']['OutputPlate']
+
+/** One part of a file a listing sells, as the editor reads it before a publish. */
+export interface FileSlot {
+  /** From 0. */
+  slot: number
+  colour: string
+  material: string | null
+  used: boolean
+  support: boolean
+}
+
+/** The types a listing can sell (`orders/storefront/file_listings.py` `LISTED_TYPES`). */
+export const LISTED_TYPES: readonly string[] = ['3mf', 'stl']
+
+/** Whether `material` is a support material, which a customer never picks. */
+export function isSupportMaterial(material: string | null | undefined): boolean {
+  return typeof material === 'string' && SUPPORT_MATERIAL.test(material)
+}
+
+function customerFilaments(filaments: readonly Filament[]): Filament[] {
+  return filaments.filter((filament) => !SUPPORT_MATERIAL.test(filament.material))
+}
+
+/**
+ * The file's declared slots (`GET /print/library/{id}/filaments` `slots`) as its parts before a
+ * publish: every one counted as used, a support material's as support, one with no colour grey.
+ */
+export function declaredSlots(slots: readonly SlotNeed[]): FileSlot[] {
+  return slots.map((slot) => ({
+    slot: slot.slot_id - 1,
+    colour: slot.colour || '#808080',
+    material: slot.material ?? null,
+    used: true,
+    support: isSupportMaterial(slot.material),
+  }))
+}
+
+/** The picture ids (`plate:<n>`) of the file's plates that have a picture, in plate order. */
+export function platePictures(plates: readonly OutputPlate[]): string[] {
+  return plates.filter((plate) => plate.has_thumbnail).map((plate) => `plate:${plate.index}`)
+}
+
+/**
+ * A file listing's title at first: the file's name without its ending, its underscores read
+ * as spaces, and without the names of the colours a customer can pick.
+ */
+export function fileTitle(filename: string, filaments: readonly Filament[]): string {
+  const name = filename.replace(/(\.gcode)?\.[a-z0-9]+$/i, '').replace(/_+/g, ' ')
+  const colours = customerFilaments(filaments).flatMap((filament) => (filament.colour_name ? [filament.colour_name] : []))
+  return withoutWords(name, colours).slice(0, 200) || name.slice(0, 200)
+}
+
+/**
+ * The support filament publish locks support part `slot` to: the first of `colours`' support
+ * filaments of the part's material, else its first support filament.
+ */
+function supportFilament(slot: FileSlot, colours: readonly string[], filaments: readonly Filament[]): Filament | undefined {
+  const supports = colours.flatMap((id) => filaments.find((filament) => filament.id === id && isSupportMaterial(filament.material)) ?? [])
+  const same = supports.filter((filament) => slot.material !== null && filament.material.trim().toLowerCase() === slot.material.trim().toLowerCase())
+  return same[0] ?? supports[0]
+}
+
+/**
+ * The filaments a file listing offers at first: the priced customer filaments of the material
+ * whose colour one of the offered parts has (`offeredFilaments`), and, for each support part,
+ * the support filament publish would lock it to.
+ */
+export function fileColours(slots: readonly FileSlot[], filaments: readonly Filament[]): string[] {
+  const offered = slots.filter((slot) => slot.used && !slot.support)
+  const customer = offeredFilaments(
+    offered.map((slot) => slot.colour),
+    customerFilaments(filaments),
+  )
+  const priced = filaments.filter((filament) => filament.density_g_cm3 != null && isSupportMaterial(filament.material))
+  const support = slots
+    .filter((slot) => slot.used && slot.support)
+    .flatMap((slot) => supportFilament(slot, priced.map((filament) => filament.id), priced) ?? [])
+  return [...new Set([...customer, ...support].map((filament) => filament.id))]
+}
+
+/**
+ * The names of the colours a customer can pick on a file listing that `title` holds: every
+ * part takes any listing filament's colour but a support material's.
+ */
+export function fileTitleColours(title: string, colours: readonly string[], filaments: readonly Filament[]): string[] {
+  const listed = filaments.filter((filament) => colours.includes(filament.id))
+  const offered = customerFilaments(listed).map((filament) => filament.colour)
+  const names = listed.flatMap((filament) => (filament.colour_name && offered.some((colour) => sameColour(colour, filament.colour)) ? [filament.colour_name] : []))
+  return [...new Set(names)].filter((name) => wordPattern(name, 'iu').test(title))
 }

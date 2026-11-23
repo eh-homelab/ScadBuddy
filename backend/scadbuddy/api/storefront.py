@@ -16,13 +16,14 @@ import dataclasses
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, File, Path, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import StateDep
 from scadbuddy.core.authorship import by_a_person
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.component import OrdersDep
+from scadbuddy.orders.storefront.file_listings import pinned_plate_image, upload_picture
 from scadbuddy.orders.storefront.listings import (
     change_media,
     listing_not_found,
@@ -35,6 +36,7 @@ from scadbuddy.orders.storefront.prepare import (
     PrepareStarted,
     progress,
     start_run,
+    warm_default,
 )
 from scadbuddy.orders.storefront.wire import (
     Listing,
@@ -159,9 +161,53 @@ async def set_listing_media(
     ``listing_media_not_image`` or ``listing_media_duplicate`` (``name`` is the id); a
     republish refused answers as ``POST …/publish`` does, with ``pictures_saved: true``:
     the pictures are kept and the public site shows what was last published."""
-    return await change_media(
+    listing = await change_media(
         state, orders.listings, listing_id, body.media_ids, expected_updated_at=body.updated_at
     )
+    # A republish is a new version: its variants have new keys (#6922).
+    await warm_default(state, listing)
+    return listing
+
+
+class UploadedPicture(BaseModel):
+    """A picture the shop uploaded to a file listing: its id for ``media_ids``."""
+
+    id: str
+
+
+@router.post(
+    "/listings/{listing_id}/pictures",
+    response_model=UploadedPicture,
+    summary="Upload a picture to a file listing",
+)
+async def post_listing_picture(
+    listing_id: str, orders: OrdersDep, state: StateDep, file: Annotated[UploadFile, File()]
+) -> UploadedPicture:
+    """A picture for a file listing (#6710 §5.4), which has no template media to upload
+    into: an image (PNG, JPEG or WebP by its bytes; 415 otherwise) of at most 10 MB (413),
+    kept for the listing and answered as its id ``upload:<sha256>``, which the editor adds
+    to ``media_ids``. A save or a pictures change that no longer names it lets it go, once
+    an hour has passed since its upload. 404 ``listing_not_found``; 422
+    ``listing_source_invalid`` for a template listing."""
+    return UploadedPicture(id=await upload_picture(state, orders.listings, listing_id, file))
+
+
+@router.get(
+    "/listings/{listing_id}/plates/{plate}.png",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+    summary="A plate picture of a file listing's published version",
+)
+async def get_listing_plate(
+    listing_id: str, plate: Annotated[int, Path(ge=1, le=9999)], orders: OrdersDep, state: StateDep
+) -> Response:
+    """Plate ``plate``'s picture in the copy of the file the listing pins (#6710 §9.3):
+    the picture publish copies for ``plate:<n>``, also once the file is gone from the
+    library. 404 for a listing with no pin, or a plate with no picture."""
+    image = await pinned_plate_image(state, orders.listings, listing_id, plate)
+    if image is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no picture of plate {plate}")
+    return Response(content=image, media_type="image/png")
 
 
 @router.post(
@@ -182,8 +228,12 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     ``listing_material_unsliceable``: the shop slice profile has no filament type for a material
     of the listing's filaments, #6153); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process
-    runs as many publishes as it allows."""
-    return await publish(state, orders.listings, listing_id)
+    runs as many publishes as it allows. Once published, the shop renders the default
+    variant and starts its storefront slice price (#6922, `prepare.py` `warm_default`),
+    so its price is there before a visitor asks."""
+    listing = await publish(state, orders.listings, listing_id)
+    await warm_default(state, listing)
+    return listing
 
 
 @router.get(
@@ -214,8 +264,11 @@ async def post_prepare(listing_id: str, orders: OrdersDep, state: StateDep) -> P
     published listing, at the values a visitor's page sends for it, so a visitor's render
     of it reuses the job. Every other parameter stays at its default. The run renders a few
     at a time (`PREPARE_IN_FLIGHT`), at the default priority (#6299 review), so it never
-    holds up a visitor's render or the shop's own. It answers at once: ``started`` is false
-    when a run was open already, and this POST joined it. 404 ``listing_not_found``, 409
+    holds up a visitor's render or the shop's own. Once they settle, it starts each
+    combination's storefront slice price, one at a time under
+    ``storefront_slices_concurrent`` (#6922); a combination priced before is not sliced
+    again. It answers at once: ``started`` is false when a run was open already, and this
+    POST joined it. 404 ``listing_not_found``, 409
     ``listing_not_published``, 422 ``listing_no_colours``, 422
     ``listing_combinations_over_cap`` (with ``count`` and ``cap``), 503
     ``render_unavailable``.

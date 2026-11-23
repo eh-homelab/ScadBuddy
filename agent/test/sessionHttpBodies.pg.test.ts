@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
-import { PgHttpBodies } from '../src/sessions/httpBodies.js'
+import { PgHttpBodies } from './support/sql/httpBodies.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -32,7 +32,6 @@ describe.skipIf(skip !== undefined)(`saved HTTP response bodies${skip ? ` (skipp
     const deps: AppDeps = {
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'unused' },
       credentials: new MemoryCredentials(),
       testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
       remoteAddress: () => '10.0.0.7',

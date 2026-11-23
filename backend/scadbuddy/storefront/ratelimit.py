@@ -2,10 +2,10 @@
 
 Each client (`client_key`: an IPv4 address, or the /64 of an IPv6 one, since one host
 is given a whole /64 and can rotate through it) may make `READ_LIMIT` reads and
-`WRITE_LIMIT` writes under the prefix in any `WINDOW` seconds: a sliding window of the
-request times. One more is 429 ``…/storefront/rate_limited`` with ``Retry-After``, the
-whole seconds until the oldest counted request leaves the window. A refused request is
-not counted.
+`WRITE_LIMIT` writes under the prefix in any `WINDOW` seconds (a POST of `READ_POSTS` is a
+read, #6921): a sliding window of the request times. One more is 429
+``…/storefront/rate_limited`` with ``Retry-After``, the whole seconds until the oldest
+counted request leaves the window. A refused request is not counted.
 
 The counts are in memory, per replica. The render limits, which cost money, are counted
 in Postgres by the CRUD side (spec §5.4). A client with no request in the last window is
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
+import re
 import threading
 import time
 from collections import Counter, deque
@@ -56,6 +57,10 @@ OVERFLOW: Final = "overflow"
 FULL_SWEEP_EVERY: Final = 1.0
 RATE_LIMITED: Final = f"{STOREFRONT_PROBLEMS}rate_limited"
 _READS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
+#: The POSTs under the prefix that only read (#6921: the instant read of a visitor's
+#: choices takes a render's body; #6710: a file listing's price takes its colours):
+#: counted as reads, as the estimate read is.
+READ_POSTS: Final = re.compile(r"/listings/[^/]+/(variant|price)")
 #: The key of a request with no client address at all.
 _UNKNOWN: Final = "unknown"
 
@@ -201,7 +206,10 @@ class RequestLimit:
         peer = scope["client"][0] if scope.get("client") else None
         forwarded = Headers(scope=scope).get("x-forwarded-for")
         address = client_address(peer, forwarded, self._trusted) or _UNKNOWN
-        retry_after = self.note(address, write=scope["method"] not in _READS)
+        write = scope["method"] not in _READS and not (
+            scope["method"] == "POST" and READ_POSTS.fullmatch(path[len(self._prefix) :])
+        )
+        retry_after = self.note(address, write=write)
         if retry_after is None:
             await self.app(scope, receive, send)
             return

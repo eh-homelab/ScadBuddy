@@ -105,7 +105,7 @@ export class SessionEventPublisher {
   /** Payloads sent (tests, metrics). */
   sent = 0
 
-  /** `publish`: over SQL or the API's route, `gated` in main.ts (sessions/publish.ts). */
+  /** `publish`: the API's route (sessions/publish.ts). */
   constructor(publish: Pick<Publisher, 'sessionEvent'>, options: { replica?: string; throttleMs?: number; onError?: (err: unknown) => void } = {}) {
     this.#publish = publish
     this.replica = options.replica ?? randomUUID()

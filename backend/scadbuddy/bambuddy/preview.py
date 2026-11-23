@@ -134,9 +134,11 @@ async def _planned(
     sb: SbSpools | None = None,
     reads: SbSpoolReads | None = None,
     slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
+    slot_colours: Mapping[int, str] | None = None,
 ) -> PlannedRun:
     """The run's own layout, upload and presets for ``request``, never into a project.
-    ``slot_presets`` is :func:`~scadbuddy.bambuddy.print_run.plan_run`'s.
+    ``slot_presets`` and ``slot_colours`` are
+    :func:`~scadbuddy.bambuddy.print_run.plan_run`'s.
 
     On a native ``route`` (plan 2026-10-18 D2) it is the native run's plan, with no
     Bambuddy call (``client`` is ``None``, D3): its copy goes where the run's would with
@@ -192,6 +194,7 @@ async def _planned(
         presets=sb if lan else None,
         reads=reads,
         slot_presets=slot_presets,
+        slot_colours=slot_colours,
     )
     if not planned.plates:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "There is no plate to slice.")
@@ -329,6 +332,7 @@ async def start_preview_plates(
     sb: SbSpools | None = None,
     reads: SbSpoolReads | None = None,
     slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
+    slot_colours: Mapping[int, str] | None = None,
 ) -> list[PreviewStarted]:
     """:func:`start_preview` for every plate the source lays out (#4250 Ruling 2): a
     quote is the whole output's price, so ``request``'s ``plate_id``, ``plate_ids`` and
@@ -337,7 +341,8 @@ async def start_preview_plates(
     plate, in plate order. A plate that fails to start leaves the earlier plates'
     records to the preview sweeps, as the dialog leaves its own. A storefront price names
     a filament that is not loaded (#6574): each slot in ``slot_presets`` has no spool and
-    is sliced with its filament type's preset in the file's own colour for the slot."""
+    is sliced with its filament type's preset in the file's own colour for the slot, or in
+    its ``slot_colours`` entry, by slot id (#6710)."""
     every = request.model_copy(update={"all_plates": True, "plate_ids": None, "plate_id": 1})
     planned = await _planned(
         client,
@@ -350,6 +355,7 @@ async def start_preview_plates(
         sb=sb,
         reads=reads,
         slot_presets=slot_presets,
+        slot_colours=slot_colours,
     )
     return [
         await _start_plate(

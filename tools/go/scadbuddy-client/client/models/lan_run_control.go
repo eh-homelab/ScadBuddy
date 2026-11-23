@@ -13,6 +13,12 @@ type LanRunControl struct {
 	additionalData map[string]any
 	// The awaiting_clear property
 	awaiting_clear *bool
+	// The printer_idle property
+	printer_idle *bool
+	// The queued property
+	queued *bool
+	// The queued_for_print property
+	queued_for_print *bool
 	// The run_id property
 	run_id *string
 	// The waiting property
@@ -25,6 +31,12 @@ func NewLanRunControl() *LanRunControl {
 	m.SetAdditionalData(make(map[string]any))
 	awaiting_clearValue := false
 	m.SetAwaitingClear(&awaiting_clearValue)
+	printer_idleValue := false
+	m.SetPrinterIdle(&printer_idleValue)
+	queuedValue := false
+	m.SetQueued(&queuedValue)
+	queued_for_printValue := false
+	m.SetQueuedForPrint(&queued_for_printValue)
 	return m
 }
 
@@ -60,6 +72,36 @@ func (m *LanRunControl) GetFieldDeserializers() map[string]func(i878a80d2330e89d
 		}
 		return nil
 	}
+	res["printer_idle"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetBoolValue()
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPrinterIdle(val)
+		}
+		return nil
+	}
+	res["queued"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetBoolValue()
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetQueued(val)
+		}
+		return nil
+	}
+	res["queued_for_print"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetBoolValue()
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetQueuedForPrint(val)
+		}
+		return nil
+	}
 	res["run_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetStringValue()
 		if err != nil {
@@ -83,6 +125,24 @@ func (m *LanRunControl) GetFieldDeserializers() map[string]func(i878a80d2330e89d
 	return res
 }
 
+// GetPrinterIdle gets the printer_idle property value. The printer_idle property
+// returns a *bool when successful
+func (m *LanRunControl) GetPrinterIdle() *bool {
+	return m.printer_idle
+}
+
+// GetQueued gets the queued property value. The queued property
+// returns a *bool when successful
+func (m *LanRunControl) GetQueued() *bool {
+	return m.queued
+}
+
+// GetQueuedForPrint gets the queued_for_print property value. The queued_for_print property
+// returns a *bool when successful
+func (m *LanRunControl) GetQueuedForPrint() *bool {
+	return m.queued_for_print
+}
+
 // GetRunId gets the run_id property value. The run_id property
 // returns a *string when successful
 func (m *LanRunControl) GetRunId() *string {
@@ -99,6 +159,24 @@ func (m *LanRunControl) GetWaiting() *int32 {
 func (m *LanRunControl) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
 	{
 		err := writer.WriteBoolValue("awaiting_clear", m.GetAwaitingClear())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteBoolValue("printer_idle", m.GetPrinterIdle())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteBoolValue("queued", m.GetQueued())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteBoolValue("queued_for_print", m.GetQueuedForPrint())
 		if err != nil {
 			return err
 		}
@@ -134,6 +212,21 @@ func (m *LanRunControl) SetAwaitingClear(value *bool) {
 	m.awaiting_clear = value
 }
 
+// SetPrinterIdle sets the printer_idle property value. The printer_idle property
+func (m *LanRunControl) SetPrinterIdle(value *bool) {
+	m.printer_idle = value
+}
+
+// SetQueued sets the queued property value. The queued property
+func (m *LanRunControl) SetQueued(value *bool) {
+	m.queued = value
+}
+
+// SetQueuedForPrint sets the queued_for_print property value. The queued_for_print property
+func (m *LanRunControl) SetQueuedForPrint(value *bool) {
+	m.queued_for_print = value
+}
+
 // SetRunId sets the run_id property value. The run_id property
 func (m *LanRunControl) SetRunId(value *string) {
 	m.run_id = value
@@ -148,9 +241,15 @@ type LanRunControlable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetAwaitingClear() *bool
+	GetPrinterIdle() *bool
+	GetQueued() *bool
+	GetQueuedForPrint() *bool
 	GetRunId() *string
 	GetWaiting() *int32
 	SetAwaitingClear(value *bool)
+	SetPrinterIdle(value *bool)
+	SetQueued(value *bool)
+	SetQueuedForPrint(value *bool)
 	SetRunId(value *string)
 	SetWaiting(value *int32)
 }

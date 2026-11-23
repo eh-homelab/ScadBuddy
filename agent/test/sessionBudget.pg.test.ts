@@ -1,9 +1,9 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
-import { AuditLog, type AuditRecord } from '../src/audit/log.js'
-import { SettingsStore } from '../src/credentials.js'
-import type { Database } from '../src/db.js'
+import { type AuditLog, type AuditRecord } from '../src/audit/log.js'
+import { type SettingsStore } from '../src/credentials.js'
+import type { Database } from './support/database.js'
 import type { CredentialSource, PooledCredential } from '../src/harness/fallback.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
@@ -14,11 +14,13 @@ import {
   type SessionManager,
 } from '../src/sessions/manager.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // #790: the session limits in Settings (routes/sessionLimits.ts), raising one
 // session's budget (POST /api/v1/ai/sessions/:id/budget, manager.ts
@@ -48,8 +50,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session bud
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     failures.length = 0
-    audit = new AuditLog({ sql: db.sql, settings: () => settings, onError: (err) => failures.push(err) })
-    settings = new SettingsStore(db.sql, audit)
+    audit = sqlAuditLog(db.sql, { settings: () => settings, onError: (err) => failures.push(err) })
+    settings = sqlSettings(db.sql, audit)
     next = { reply: 'hello there', costUsd: 0.4 }
     const { runner, runs: made, prompts: pushed } = scriptedRunner(() => next)
     runs = made
@@ -58,7 +60,6 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session bud
     const deps: AppDeps = {
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'unused' },
       credentials: new MemoryCredentials(),
       testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
       remoteAddress: () => '10.0.0.7',
@@ -225,6 +226,22 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session bud
       expect(runs.at(-1)!.maxBudgetUsd).toBeCloseTo(1 - 0.4 - CUT, 10)
       expect(after).toMatchObject({ kind: 'result', subtype: 'success', turns: 2 })
       if (after.kind !== 'result') throw new Error('unreachable')
+      expect(after.costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
+    })
+
+    it('still charges a request Claude Code closed after the stop when the process dies before its result', async () => {
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      next = { stall, closes: true }
+      await stopMidReply(session.id, 'write a long essay')
+      // A finished request no result priced: the turn's running spend counts it (turnHost.ts).
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT, 10)
+
+      // The next turn resumes on a fresh process, whose total never held it.
+      next = { reply: 'OK', costUsd: 0.05 }
+      const after = await (await m.send(session.id, browser, 'reply OK')).done
+      if (after.kind !== 'result') throw new Error(`next turn: ${JSON.stringify(after)}`)
       expect(after.costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
       expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
     })

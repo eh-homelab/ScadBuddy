@@ -30,6 +30,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { NeedsTypeBadge } from './filament/NeedsTypeBadge'
+import { SpoolNumberLink } from './filament/SpoolNumberLink'
 import { RgbaSwatch } from './filament/RgbaSwatch'
 import { Swatch } from './print/Swatch'
 
@@ -85,6 +86,8 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'rack-unsafe-material': 'text-warn',
   'rack-left-to-bambuddy': 'text-subtle',
   'rack-manual-partial': 'text-subtle',
+  // #6876 — a rack group ranked by its type alone: Glow went unchecked on a named slot.
+  'rack-glow-unchecked': 'text-warn',
   // #956 — a by-object plate the toolhead or the gantry would hit; never a refusal.
   'sequence-clearance': 'text-warn',
   'profile-not-applied': 'text-warn',
@@ -319,7 +322,7 @@ function SpoolTile({
         <span className="relative z-10 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
           {spool.sb_number != null && (
             <span className="sb-num" data-testid={`sb-spool-${spool.spool_id}`}>
-              #{spool.sb_number}
+              <SpoolNumberLink spool={spool}>#{spool.sb_number}</SpoolNumberLink>
             </span>
           )}
           <NeedsTypeBadge spool={spool} />

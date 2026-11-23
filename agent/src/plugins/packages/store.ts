@@ -1,23 +1,23 @@
-import type { Sql, TransactionSql } from 'postgres'
-import { builtinItem, itemKindIn, skillItem, subagentItem } from '../../access/items.js'
-import { packageSource } from '../../access/model.js'
-import { notifyWarmEvict } from '../../sessions/warmEvict.js'
 import { CrudReadError } from '../../api/crudRead.js'
 import { type CrudCallInit, type CrudTarget, crudOf, qs, segment } from '../../api/crudStores.js'
 import { PluginError } from '../registry.js'
 import { diffFiles, type FileDiff, type FileList } from './hash.js'
-import type { PackageSource } from './source.js'
+import { type PackageSource, type SourceKind, sourceColumns } from './source.js'
 import type { PackageReview } from './vet.js'
 
-// `ai_plugin_packages` (backend/scadbuddy/migrations_agent/20260928T0750Z_plugin_packages.sql):
-// the one authoritative record of an installed plugin package. What is on
-// disk (cache.ts) is rebuilt from `fetch_url`, `fetch_path` and
-// `commit_sha`, and used only when it hashes to `content_hash`.
+// `ai_plugin_packages` (backend/scadbuddy/migrations_agent/20260928T0750Z_plugin_packages.sql,
+// 20261122T0323Z_plugin_package_pins.sql): the one authoritative record of an installed
+// plugin package. What is on disk (install.ts) is rebuilt from the pin, and used only when
+// it hashes to `content_hash`: a commit pin (`pin_kind` `commit`) from `fetch_url`,
+// `fetch_path` and `commit_sha`; a bytes pin (`bytes`, #6935: an archive or npm package)
+// from the mirrored file `bytes_sha256` (mirror.ts) and `fetch_path` inside it, never
+// from upstream; a version pin (`version`, #6934: a hosted plugin) from that published
+// version's zip, read over the API's CRUD area `hosted-plugins` (hosted.ts).
 //
 // LIFECYCLE (issue #297 "Review before enable"; spec §8.2, installing is a
 // settings write and outward):
 //   install   fetched, vetted and hashed; stored UNAPPROVED and disabled
-//   approve   the admin approves exactly the (commit, hash) the review showed;
+//   approve   the admin approves exactly the (commit or bytes, hash) the review showed;
 //             anything else is a 409, so a pin cannot change under an approval
 //             A pin whose review lists refusals (vet.ts `refused`: a command
 //             hook, a hooks module, a stdio MCP server, ...) is approved only
@@ -34,7 +34,12 @@ export type PreparedPackage = {
   source: PackageSource
   fetchUrl: string
   fetchPath: string
+  /** The pinned commit; '' for a bytes pin. */
   commit: string
+  /** A bytes pin's file's sha256 (mirrored before the pin is stored); absent for a commit pin. */
+  bytesSha256?: string
+  /** A hosted plugin's published version (pin kind `version`); absent for the other kinds. */
+  version?: number
   contentHash: string
   files: FileList
   review: PackageReview
@@ -44,18 +49,28 @@ export type PackagePin = {
   name: string
   fetchUrl: string
   fetchPath: string
+  /** The pinned commit; '' for a bytes pin. */
   commit: string
+  /** A bytes pin's file's sha256: the pin loads from its mirror (mirror.ts). */
+  bytesSha256?: string
+  /** A hosted plugin's version: the pin loads from that version's zip (hosted.ts). */
+  version?: number
   contentHash: string
   /** Approved with `allow_refused`: loaded despite what the rules refuse (vet.ts). */
   allowRefused?: boolean
 }
+
+export type PinKind = 'commit' | 'bytes' | 'version'
 
 export type PendingPin = {
   ref: string
   /** Where the new commit is fetched from; replaces the pin's on approval. */
   plugin_url: string
   plugin_path: string
-  commit_sha: string
+  pin_kind: PinKind
+  commit_sha: string | null
+  bytes_sha256: string | null
+  version: number | null
   content_hash: string
   review: PackageReview
   diff: FileDiff
@@ -66,8 +81,20 @@ export type PackageView = {
   name: string
   source:
     | { kind: 'git'; url: string; ref: string; path: string }
-    | { kind: 'marketplace'; url: string; ref: string; entry: string; plugin_url: string; plugin_path: string }
-  commit_sha: string
+    | { kind: 'marketplace' | 'marketplace-url'; url: string; ref: string; entry: string; plugin_url: string; plugin_path: string }
+    | { kind: 'archive' | 'npm'; url: string; ref: string; plugin_path: string }
+    | { kind: 'hosted'; name: string }
+  /** `commit` (commit_sha), `bytes` (bytes_sha256: the sha256 of the archive or tarball), or `version` (a hosted plugin's). */
+  pin_kind: PinKind
+  commit_sha: string | null
+  bytes_sha256: string | null
+  version: number | null
+  /**
+   * A hosted package's latest published version when neither its pin nor its pending re-pin
+   * is that version ("version N not offered", spec 2026-11-21 §6.3 step 5); null otherwise.
+   * Offering it is an install, or a re-pin when the package is installed.
+   */
+  not_offered: number | null
   content_hash: string
   review: PackageReview
   approved: boolean
@@ -80,15 +107,19 @@ export type PackageView = {
   updated_at: string
 }
 
-type Row = {
+/** A row of `ai_plugin_packages`. */
+export type PackageRow = {
   name: string
-  source_kind: 'git' | 'marketplace'
+  source_kind: SourceKind | 'hosted'
   source_url: string
   source_ref: string
   marketplace_entry: string | null
   fetch_url: string
   fetch_path: string
-  commit_sha: string
+  pin_kind: PinKind
+  commit_sha: string | null
+  bytes_sha256: string | null
+  version: number | null
   content_hash: string
   files: FileList
   review: PackageReview
@@ -98,34 +129,62 @@ type Row = {
   pending_ref: string | null
   pending_fetch_url: string | null
   pending_fetch_path: string | null
+  pending_pin_kind: PinKind | null
   pending_commit_sha: string | null
+  pending_bytes_sha256: string | null
+  pending_version: number | null
   pending_content_hash: string | null
   pending_files: FileList | null
   pending_review: PackageReview | null
   created_at: Date
   updated_at: Date
+  /** A hosted package's hosted plugin's latest version (the API's, #6934); null otherwise. */
+  hosted_latest_version: number | null
 }
 
 /** A review stored before `refused` existed had none: it would have been refused outright. */
-function withRefused(review: PackageReview): PackageReview & { refused: string[] } {
+export function withRefused(review: PackageReview): PackageReview & { refused: string[] } {
   return { ...review, refused: review.refused ?? [] }
 }
 
-function view(row: Row): PackageView {
+function viewSource(row: PackageRow): PackageView['source'] {
+  switch (row.source_kind) {
+    case 'git':
+      return { kind: 'git', url: row.source_url, ref: row.source_ref, path: row.fetch_path }
+    case 'marketplace':
+    case 'marketplace-url':
+      return {
+        kind: row.source_kind,
+        url: row.source_url,
+        ref: row.source_ref,
+        entry: row.marketplace_entry ?? '',
+        plugin_url: row.fetch_url,
+        plugin_path: row.fetch_path,
+      }
+    case 'hosted':
+      return { kind: 'hosted', name: row.name }
+    default:
+      return { kind: row.source_kind === 'npm' ? 'npm' : 'archive', url: row.source_url, ref: row.source_ref, plugin_path: row.fetch_path }
+  }
+}
+
+/** A hosted package's latest version that neither its pin nor its re-pin names, else null. */
+function notOffered(row: PackageRow): number | null {
+  const latest = row.hosted_latest_version
+  if (row.source_kind !== 'hosted' || latest === null) return null
+  return latest === row.version || latest === row.pending_version ? null : latest
+}
+
+/** A row as routes see it. */
+export function view(row: PackageRow): PackageView {
   return {
     name: row.name,
-    source:
-      row.source_kind === 'git'
-        ? { kind: 'git', url: row.source_url, ref: row.source_ref, path: row.fetch_path }
-        : {
-            kind: 'marketplace',
-            url: row.source_url,
-            ref: row.source_ref,
-            entry: row.marketplace_entry ?? '',
-            plugin_url: row.fetch_url,
-            plugin_path: row.fetch_path,
-          },
+    source: viewSource(row),
+    pin_kind: row.pin_kind,
     commit_sha: row.commit_sha,
+    bytes_sha256: row.bytes_sha256,
+    version: row.version,
+    not_offered: notOffered(row),
     content_hash: row.content_hash,
     review: withRefused(row.review),
     approved: row.approved_at !== null,
@@ -133,13 +192,16 @@ function view(row: Row): PackageView {
     allow_refused: row.allow_refused,
     enabled: row.enabled,
     pending:
-      row.pending_commit_sha && row.pending_content_hash && row.pending_review && row.pending_files && row.pending_ref &&
+      row.pending_pin_kind && row.pending_content_hash && row.pending_review && row.pending_files && row.pending_ref !== null &&
       row.pending_fetch_url !== null && row.pending_fetch_path !== null
         ? {
             ref: row.pending_ref,
             plugin_url: row.pending_fetch_url,
             plugin_path: row.pending_fetch_path,
+            pin_kind: row.pending_pin_kind,
             commit_sha: row.pending_commit_sha,
+            bytes_sha256: row.pending_bytes_sha256,
+            version: row.pending_version,
             content_hash: row.pending_content_hash,
             review: withRefused(row.pending_review),
             diff: diffFiles(row.files, row.pending_files),
@@ -150,95 +212,18 @@ function view(row: Row): PackageView {
   }
 }
 
-function pin(row: Row): PackagePin {
+/** A row's pin, for a harness run. */
+export function pin(row: PackageRow): PackagePin {
   return {
     name: row.name,
     fetchUrl: row.fetch_url,
     fetchPath: row.fetch_path,
-    commit: row.commit_sha,
+    commit: row.commit_sha ?? '',
+    ...(row.bytes_sha256 !== null ? { bytesSha256: row.bytes_sha256 } : {}),
+    ...(row.version !== null ? { version: row.version } : {}),
     contentHash: row.content_hash,
     allowRefused: row.allow_refused,
   }
-}
-
-/** Where `package:<name>`'s servers' sources start: compared with `starts_with`, never `LIKE` (a name may hold `_`). */
-const serverPrefix = (name: string): string => `${packageSource(name)}/mcp:`
-
-/** Every `ai_access` row and `ai_tool_listings` row of `package:<name>` and its servers (#4757). */
-async function forgetPackage(tx: TransactionSql, name: string): Promise<void> {
-  const source = packageSource(name)
-  await tx`DELETE FROM ai_access WHERE source = ${source} OR starts_with(source, ${serverPrefix(name)})`
-  await tx`DELETE FROM ai_tool_listings WHERE source = ${source} OR starts_with(source, ${serverPrefix(name)})`
-}
-
-/** The servers `review` declares, by name; undefined for a review stored without `local_servers`. */
-function declaredServers(review: PackageReview): Set<string> | undefined {
-  if (review.local_servers === undefined) return undefined
-  return new Set([...review.mcp_servers.map((s) => s.name), ...review.local_servers])
-}
-
-/**
- * Whether `review` names a package's items as this code keys them: one written by an older vet
- * (no `described`, or a hook without an id) may name a root skill by its vet folder, not
- * `rootSkillName`, and cannot tell a kept hook from a lost one (#4757 Task 7 review I1).
- */
-function namesItems(review: PackageReview): boolean {
-  return review.described !== undefined && review.hooks.every((h) => h.id !== undefined)
-}
-
-/**
- * Deletes what `package:<name>` stores for items `review` (the pin current after the write)
- * no longer has (#4757): a skill or command (`skill:`), a subagent, a built-in and a hook
- * (by its id), and the rows and listings of the servers it no longer declares. A root skill
- * keyed by an old folder name (`skill:pkg`) goes too: the review names it `rootSkillName`.
- * What the review cannot tell is kept: no item row for an older vet's review (`namesItems`),
- * no built-in's without `builtin_tools`, no server's without `local_servers`. Runs in every
- * write's transaction, so rows an older replica's approval left go with the next write to the
- * package vetted by this code. Returns whether it deleted anything.
- *
- * An access write for a lost item that commits after the read below (it does not lock the
- * package row) leaves its row until the next write: harmless, since it is for an item the pin
- * no longer has, and a kept item's row is never deleted here, so no write is lost.
- */
-export async function pruneStaleRows(tx: TransactionSql, name: string, review: PackageReview): Promise<boolean> {
-  let deleted = false
-  if (namesItems(review)) {
-    const source = packageSource(name)
-    const bare = (qualified: string) => (qualified.startsWith(`${name}:`) ? qualified.slice(name.length + 1) : qualified)
-    const kept = new Set([
-      ...[...review.skills, ...review.commands].map((s) => skillItem(bare(s))),
-      ...review.agents.map((a) => subagentItem(bare(a))),
-      ...(review.builtin_tools ?? []).map(builtinItem),
-    ])
-    const hookIds = new Set(review.hooks.map((h) => h.id!))
-    const stale = (item: string): boolean => {
-      const kind = itemKindIn(source, item)
-      if (kind === 'tool') return false
-      if (kind === 'hook') return !hookIds.has(item.slice(item.lastIndexOf(':') + 1))
-      if (kind === 'builtin' && review.builtin_tools === undefined) return false
-      return !kept.has(item)
-    }
-    const rows = await tx<{ item: string }[]>`SELECT item FROM ai_access WHERE source = ${source}`
-    const items = rows.map((r) => r.item).filter(stale)
-    if (items.length) {
-      await tx`DELETE FROM ai_access WHERE source = ${source} AND item IN ${tx(items)}`
-      deleted = true
-    }
-  }
-
-  const declared = declaredServers(review)
-  if (declared === undefined) return deleted
-  const prefix = serverPrefix(name)
-  const sources = await tx<{ source: string }[]>`
-    SELECT source FROM ai_access WHERE starts_with(source, ${prefix})
-    UNION SELECT source FROM ai_tool_listings WHERE starts_with(source, ${prefix})`
-  const gone = sources.map((r) => r.source).filter((s) => !declared.has(s.slice(prefix.length)))
-  if (gone.length) {
-    await tx`DELETE FROM ai_access WHERE source IN ${tx(gone)}`
-    await tx`DELETE FROM ai_tool_listings WHERE source IN ${tx(gone)}`
-    deleted = true
-  }
-  return deleted
 }
 
 /** The package store as routes and the run loader see it. */
@@ -250,8 +235,12 @@ export type PackageRepo = {
   create(prepared: PreparedPackage): Promise<PackageView>
   setPending(name: string, prepared: PreparedPackage): Promise<PackageView>
   discardPending(name: string): Promise<PackageView>
-  /** `allowRefused` must be true when the reviewed pin's `refused` is not empty. */
-  approve(name: string, commit: string, contentHash: string, allowRefused?: boolean): Promise<PackageView>
+  /**
+   * Approves the pin the review showed: `pin` is its commit, with `kind` `bytes` its
+   * file's sha256, with `kind` `version` its version (as text). `allowRefused` must be true
+   * when the reviewed pin's `refused` is not empty.
+   */
+  approve(name: string, pin: string, contentHash: string, allowRefused?: boolean, kind?: PinKind): Promise<PackageView>
   setEnabled(name: string, enabled: boolean): Promise<PackageView>
   delete(name: string): Promise<boolean>
   /** Every enabled (so approved) pin, for a harness run. */
@@ -260,218 +249,110 @@ export type PackageRepo = {
   filesOf(name: string, pending: boolean): Promise<{ pin: PackagePin; files: FileList } | undefined>
 }
 
-export class PackageStore implements PackageRepo {
-  private readonly sql: Sql
-  constructor(sql: Sql) {
-    this.sql = sql
-  }
-
-  async list(): Promise<PackageView[]> {
-    const rows = await this.sql<Row[]>`SELECT * FROM ai_plugin_packages ORDER BY name`
-    return rows.map(view)
-  }
-
-  async get(name: string): Promise<PackageView | undefined> {
-    const [row] = await this.sql<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name}`
-    return row ? view(row) : undefined
-  }
-
-  async pinOf(name: string): Promise<(PackagePin & { source: PackageSource }) | undefined> {
-    const [row] = await this.sql<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name}`
-    return row ? { ...pin(row), source: sourceOf(row) } : undefined
-  }
-
-  async create(p: PreparedPackage): Promise<PackageView> {
-    return this.sql.begin(async (tx) => {
-      const rows = await tx<Row[]>`
-      INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref, marketplace_entry, fetch_url,
-                                      fetch_path, commit_sha, content_hash, files, review)
-      VALUES (${p.review.name}, ${p.source.kind}, ${p.source.url}, ${p.source.ref},
-              ${p.source.kind === 'marketplace' ? p.source.entry : null}, ${p.fetchUrl}, ${p.fetchPath},
-              ${p.commit}, ${p.contentHash}, ${tx.json(p.files)}, ${tx.json(p.review)})
-      ON CONFLICT (name) DO NOTHING
-      RETURNING *`
-      const row = rows[0]
-      if (!row) {
-        throw new PluginError(`a plugin package named "${p.review.name}" is already installed; re-pin it instead`, 409)
-      }
-      // What an older replica's remove left: a re-install starts at the defaults.
-      await forgetPackage(tx, row.name)
-      // A warm Claude Code loaded the packages of its time (spec 2026-10-13 §5.3): every write here tells the caches (sessions/warmEvict.ts).
-      await notifyWarmEvict(tx, '*')
-      return view(row)
-    })
-  }
-
-  async setPending(name: string, p: PreparedPackage): Promise<PackageView> {
-    if (p.review.name !== name) {
-      throw new PluginError(`the new commit names the plugin "${p.review.name}", not "${name}"`, 409)
-    }
-    return this.sql.begin(async (tx) => {
-      const [current] = await tx<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name} FOR UPDATE`
-      if (!current) throw new PluginError(`no plugin package named "${name}"`, 404)
-      if (
-        current.commit_sha === p.commit &&
-        current.content_hash === p.contentHash &&
-        current.fetch_url === p.fetchUrl &&
-        current.fetch_path === p.fetchPath
-      ) {
-        throw new PluginError(`"${name}" is already pinned to ${p.commit}`, 409)
-      }
-      const [row] = await tx<Row[]>`
-        UPDATE ai_plugin_packages SET
-          pending_ref = ${p.source.ref}, pending_fetch_url = ${p.fetchUrl}, pending_fetch_path = ${p.fetchPath},
-          pending_commit_sha = ${p.commit}, pending_content_hash = ${p.contentHash},
-          pending_files = ${tx.json(p.files)}, pending_review = ${tx.json(p.review)}, updated_at = now()
-        WHERE name = ${name}
-        RETURNING *`
-      await pruneStaleRows(tx, name, row!.review)
-      await notifyWarmEvict(tx, '*')
-      return view(row!)
-    })
-  }
-
-  async discardPending(name: string): Promise<PackageView> {
-    return this.sql.begin(async (tx) => {
-      const [row] = await tx<Row[]>`
-        UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,
-          pending_commit_sha = NULL, pending_content_hash = NULL,
-          pending_files = NULL, pending_review = NULL, updated_at = now()
-        WHERE name = ${name}
-        RETURNING *`
-      if (!row) throw new PluginError(`no plugin package named "${name}"`, 404)
-      await pruneStaleRows(tx, name, row.review)
-      await notifyWarmEvict(tx, '*')
-      return view(row)
-    })
-  }
-
-  async approve(name: string, commit: string, contentHash: string, allowRefused = false): Promise<PackageView> {
-    return this.sql.begin(async (tx) => {
-      const [current] = await tx<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name} FOR UPDATE`
-      if (!current) throw new PluginError(`no plugin package named "${name}"`, 404)
-      const isPending = current.pending_commit_sha === commit && current.pending_content_hash === contentHash
-      const isCurrent = current.commit_sha === commit && current.content_hash === contentHash
-      if (!isPending && !isCurrent) {
-        throw new PluginError(
-          'the commit and content hash do not match the pin under review; reload the review and approve what it shows',
-          409,
-        )
-      }
-      // Only what the admin was shown is allowed: a pin with nothing refused
-      // is stored without the flag, so a later rule still refuses it.
-      const refused = withRefused(isPending ? current.pending_review! : current.review).refused
-      if (refused.length && !allowRefused) {
-        throw new PluginError(
-          `the review lists what the rules refuse (${refused.length}); approve with allow_refused to load the package as it is`,
-          409,
-        )
-      }
-      const allow = allowRefused && refused.length > 0
-      if (isPending) {
-        // The re-pin under review becomes the pin. A new commit from the same
-        // place keeps `enabled`; one fetched from another repository or path
-        // (a marketplace entry that moved) is a new source to trust, so it is
-        // approved disabled and loads only once an admin enables it again.
-        const moved = current.pending_fetch_url !== current.fetch_url || current.pending_fetch_path !== current.fetch_path
-        const [row] = await tx<Row[]>`
-          UPDATE ai_plugin_packages SET
-            enabled = enabled AND NOT ${moved}, source_ref = pending_ref, fetch_url = pending_fetch_url, fetch_path = pending_fetch_path,
-            commit_sha = pending_commit_sha, content_hash = pending_content_hash,
-            files = pending_files, review = pending_review, approved_at = now(), allow_refused = ${allow},
-            pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,
-            pending_files = NULL, pending_review = NULL, updated_at = now()
-          WHERE name = ${name}
-          RETURNING *`
-        await pruneStaleRows(tx, name, row!.review)
-        await notifyWarmEvict(tx, '*')
-        return view(row!)
-      }
-      if (current.approved_at !== null && current.allow_refused === allow) {
-        if (await pruneStaleRows(tx, name, current.review)) await notifyWarmEvict(tx, '*')
-        return view(current)
-      }
-      const [row] = await tx<Row[]>`
-        UPDATE ai_plugin_packages SET approved_at = now(), allow_refused = ${allow}, updated_at = now()
-        WHERE name = ${name} RETURNING *`
-      await pruneStaleRows(tx, name, row!.review)
-      await notifyWarmEvict(tx, '*')
-      return view(row!)
-    })
-  }
-
-  async setEnabled(name: string, enabled: boolean): Promise<PackageView> {
-    return this.sql.begin(async (tx) => {
-      const [current] = await tx<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name} FOR UPDATE`
-      if (!current) throw new PluginError(`no plugin package named "${name}"`, 404)
-      if (enabled && current.approved_at === null) {
-        throw new PluginError('approve the pin before enabling the package (issue #297, "Review before enable")', 409)
-      }
-      const [row] = await tx<Row[]>`
-        UPDATE ai_plugin_packages SET enabled = ${enabled}, updated_at = now() WHERE name = ${name} RETURNING *`
-      await pruneStaleRows(tx, name, row!.review)
-      await notifyWarmEvict(tx, '*')
-      return view(row!)
-    })
-  }
-
-  async delete(name: string): Promise<boolean> {
-    return this.sql.begin(async (tx) => {
-      const rows = await tx`DELETE FROM ai_plugin_packages WHERE name = ${name}`
-      if (rows.count === 0) return false
-      await forgetPackage(tx, name)
-      await notifyWarmEvict(tx, '*')
-      return true
-    })
-  }
-
-  async enabledPins(): Promise<PackagePin[]> {
-    const rows = await this.sql<Row[]>`SELECT * FROM ai_plugin_packages WHERE enabled ORDER BY name`
-    return rows.map(pin)
-  }
-
-  async filesOf(name: string, pending: boolean): Promise<{ pin: PackagePin; files: FileList } | undefined> {
-    const [row] = await this.sql<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name}`
-    return row ? filesOfRow(row, pending) : undefined
+/** Where a row's package was fetched from. */
+export function sourceOf(row: PackageRow): PackageSource {
+  switch (row.source_kind) {
+    case 'git':
+      return { kind: 'git', url: row.source_url, ref: row.source_ref, path: row.fetch_path }
+    case 'marketplace':
+      return { kind: 'marketplace', url: row.source_url, ref: row.source_ref, entry: row.marketplace_entry ?? '' }
+    case 'marketplace-url':
+      return { kind: 'marketplace-url', url: row.source_url, ref: '', entry: row.marketplace_entry ?? '' }
+    case 'archive':
+    case 'npm':
+      return { kind: row.source_kind, url: row.source_url, ref: row.source_ref }
+    case 'hosted':
+      return { kind: 'hosted', name: row.name }
+    default:
+      throw new PluginError(`plugin package ${row.name} has a ${row.source_kind} source, which this installer does not fetch`, 409)
   }
 }
 
-function sourceOf(row: Row): PackageSource {
-  return row.source_kind === 'git'
-    ? { kind: 'git', url: row.source_url, ref: row.source_ref, path: row.fetch_path }
-    : { kind: 'marketplace', url: row.source_url, ref: row.source_ref, entry: row.marketplace_entry ?? '' }
+/** The entry a marketplace source names, for its column; null for the other kinds. */
+export function entryOf(source: PackageSource): string | null {
+  return source.kind === 'marketplace' || source.kind === 'marketplace-url' ? source.entry : null
 }
 
 /** The name a package may have (the table's CHECK): any other is never sent to the API. */
-const PACKAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+export const PACKAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
-/** A row as the API answers it: every column, its times as ISO text. */
-type WireRow = Omit<Row, 'approved_at' | 'created_at' | 'updated_at'> & {
+/**
+ * A row as the API answers it: every column, its times as ISO text. An API of the build
+ * before #6935 (during a roll) answers no pin kind and none of the bytes or version columns,
+ * and one before #6934 no `hosted_latest_version` (read as none: nothing shows as not offered).
+ */
+type WireRow = Omit<
+  PackageRow,
+  | 'approved_at'
+  | 'created_at'
+  | 'updated_at'
+  | 'pin_kind'
+  | 'bytes_sha256'
+  | 'version'
+  | 'pending_pin_kind'
+  | 'pending_bytes_sha256'
+  | 'pending_version'
+  | 'hosted_latest_version'
+> & {
   approved_at: string | null
   created_at: string
   updated_at: string
+  pin_kind?: PinKind
+  bytes_sha256?: string | null
+  version?: number | null
+  pending_pin_kind?: PinKind | null
+  pending_bytes_sha256?: string | null
+  pending_version?: number | null
+  hosted_latest_version?: number | null
 }
 
-function fromWire(row: WireRow): Row {
+function fromWire(row: WireRow): PackageRow {
   return {
     ...row,
+    // Every row such an API knows is a commit pin, and so is every re-pin it stores.
+    pin_kind: row.pin_kind ?? 'commit',
+    bytes_sha256: row.bytes_sha256 ?? null,
+    version: row.version ?? null,
+    pending_pin_kind:
+      row.pending_pin_kind !== undefined
+        ? row.pending_pin_kind
+        : row.pending_content_hash !== null && row.pending_commit_sha !== null
+          ? 'commit'
+          : null,
+    pending_bytes_sha256: row.pending_bytes_sha256 ?? null,
+    pending_version: row.pending_version ?? null,
+    hosted_latest_version: row.hosted_latest_version ?? null,
     approved_at: row.approved_at === null ? null : new Date(row.approved_at),
     created_at: new Date(row.created_at),
     updated_at: new Date(row.updated_at),
   }
 }
 
-/** A prepared pin as the routes take it. */
+/**
+ * A prepared pin as the routes take it. A commit pin is sent in the shape of the build
+ * before #6935 (no `pin_kind`), so during a roll an API pod of that build still takes its
+ * install and its re-pin; that pod stores, discards and approves a commit re-pin without
+ * `pending_pin_kind`, which the migration's checks read as a commit
+ * (`20261122T0323Z_plugin_package_pins.sql`). Such a pod refuses a bytes pin (422), and its
+ * discard of a bytes re-pin, or its approve of a commit re-pin over a bytes pin, fails with
+ * nothing written: send it again once the roll is over.
+ */
 function pinBody(p: PreparedPackage) {
-  return { fetch_url: p.fetchUrl, fetch_path: p.fetchPath, commit_sha: p.commit, content_hash: p.contentHash, files: p.files, review: p.review }
+  const pinned =
+    p.version !== undefined
+      ? { pin_kind: 'version', version: p.version }
+      : p.bytesSha256 === undefined
+        ? { commit_sha: p.commit }
+        : { pin_kind: 'bytes', bytes_sha256: p.bytesSha256 }
+  return { fetch_url: p.fetchUrl, fetch_path: p.fetchPath, ...pinned, content_hash: p.contentHash, files: p.files, review: p.review }
 }
 
 /**
- * The packages through the API's CRUD routes, area `plugin-packages` (#5299 step 5; backend
+ * The packages through the API's CRUD routes, area `plugin-packages` (backend
  * api/crud_agent_packages.py): each method one route and one transaction there, the row lock,
  * the prune of stale access rows and listings, and the warm eviction included. The API answers
- * raw rows, so `view` and `pin` shape them here as for the SQL store. A route's 404 or 409 is the
- * PluginError the SQL store throws, with the API's text.
+ * raw rows, so `view` and `pin` shape them here. A route's 404 or 409 is a PluginError, with the
+ * API's text.
  */
 export class CrudPackageStore implements PackageRepo {
   readonly #call: ReturnType<typeof crudOf>
@@ -480,7 +361,7 @@ export class CrudPackageStore implements PackageRepo {
     this.#call = crudOf(target)
   }
 
-  async #row(step: string, path: string, init?: CrudCallInit): Promise<Row> {
+  async #row(step: string, path: string, init?: CrudCallInit): Promise<PackageRow> {
     try {
       return fromWire(await this.#call<WireRow>(step, path, init))
     } catch (err) {
@@ -491,7 +372,7 @@ export class CrudPackageStore implements PackageRepo {
     }
   }
 
-  async #rowOf(name: string): Promise<Row | undefined> {
+  async #rowOf(name: string): Promise<PackageRow | undefined> {
     if (!PACKAGE_NAME_RE.test(name)) return undefined
     const { package: row } = await this.#call<{ package: WireRow | null }>('a plugin package', `/plugin-packages/${segment(name, PACKAGE_NAME_RE, 'a package name')}`)
     return row ? fromWire(row) : undefined
@@ -518,12 +399,13 @@ export class CrudPackageStore implements PackageRepo {
   }
 
   async create(p: PreparedPackage): Promise<PackageView> {
+    const { url, ref } = sourceColumns(p.source)
     const body = {
       name: p.review.name,
       source_kind: p.source.kind,
-      source_url: p.source.url,
-      source_ref: p.source.ref,
-      marketplace_entry: p.source.kind === 'marketplace' ? p.source.entry : null,
+      source_url: url,
+      source_ref: ref,
+      marketplace_entry: entryOf(p.source),
       ...pinBody(p),
     }
     return view(await this.#row('a plugin package installed', '/plugin-packages', { body }))
@@ -533,7 +415,7 @@ export class CrudPackageStore implements PackageRepo {
     if (p.review.name !== name) {
       throw new PluginError(`the new commit names the plugin "${p.review.name}", not "${name}"`, 409)
     }
-    const body = { ref: p.source.ref, ...pinBody(p) }
+    const body = { ref: sourceColumns(p.source).ref, ...pinBody(p) }
     return view(await this.#row('a plugin package re-pinned', this.#path(name, 'pending'), { body }))
   }
 
@@ -541,8 +423,9 @@ export class CrudPackageStore implements PackageRepo {
     return view(await this.#row("a plugin package's re-pin discarded", this.#path(name, 'discard-pending'), { method: 'POST' }))
   }
 
-  async approve(name: string, commit: string, contentHash: string, allowRefused = false): Promise<PackageView> {
-    const body = { commit_sha: commit, content_hash: contentHash, allow_refused: allowRefused }
+  async approve(name: string, commit: string, contentHash: string, allowRefused = false, kind: PinKind = 'commit'): Promise<PackageView> {
+    const pinned = kind === 'bytes' ? { bytes_sha256: commit } : kind === 'version' ? { version: Number(commit) } : { commit_sha: commit }
+    const body = { ...pinned, content_hash: contentHash, allow_refused: allowRefused }
     return view(await this.#row('a plugin package approved', this.#path(name, 'approve'), { body }))
   }
 
@@ -566,16 +449,18 @@ export class CrudPackageStore implements PackageRepo {
   }
 }
 
-function filesOfRow(row: Row, pending: boolean): { pin: PackagePin; files: FileList } | undefined {
+export function filesOfRow(row: PackageRow, pending: boolean): { pin: PackagePin; files: FileList } | undefined {
   if (!pending) return { pin: pin(row), files: row.files }
-  if (!row.pending_commit_sha || !row.pending_content_hash || !row.pending_files) return undefined
+  if (!row.pending_pin_kind || !row.pending_content_hash || !row.pending_files) return undefined
   if (row.pending_fetch_url === null || row.pending_fetch_path === null) return undefined
   return {
     pin: {
       name: row.name,
       fetchUrl: row.pending_fetch_url,
       fetchPath: row.pending_fetch_path,
-      commit: row.pending_commit_sha,
+      commit: row.pending_commit_sha ?? '',
+      ...(row.pending_bytes_sha256 !== null ? { bytesSha256: row.pending_bytes_sha256 } : {}),
+      ...(row.pending_version !== null ? { version: row.pending_version } : {}),
       contentHash: row.pending_content_hash,
     },
     files: row.pending_files,

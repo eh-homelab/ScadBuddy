@@ -22,6 +22,10 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``…/turnstile/verify``, the bot check (#5283). The storefront ``accounts`` area is
 #: ``…/storefront/account`` and its ``verify``, ``sign-out`` and ``orders`` (#5283). The
 #: storefront ``order`` area is ``…/storefront/order/*``, the customer's order page (#5283).
+#: The storefront ``variants`` area is ``…/storefront/listings/{id}/variant`` and
+#: ``…/storefront/variants/{key}/preview.glb``, the instant read of a visitor's choices
+#: (#6921). The storefront ``file-prices`` area is ``…/storefront/listings/{id}/price``,
+#: the price of a visitor's colours on a file listing (#6710).
 #: The agent's ``workspace-blob-refs`` area is ``…/agent/workspace-blob-refs`` and its
 #: ``/release`` (#5299), the holds of its workspace files' blobs. Its ``events`` area is
 #: ``…/agent/events`` and ``…/events/head``, the event log's gap and head; its ``flows``
@@ -116,7 +120,13 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: remote plugins and their sign-ins, sealed and opened with the API's KEK
 #: (`api/crud_agent_plugins.py`); its ``plugin-packages`` area is
 #: ``…/agent/plugin-packages`` and every route under it, the installed packages' pins
-#: (`api/crud_agent_packages.py`). Its ``gate`` area is ``…/agent/gate/*``: the tool-call
+#: (`api/crud_agent_packages.py`); its ``package-mirrors`` area is ``…/agent/package-mirrors``
+#: and every route under it, the bytes of the archive and npm pins kept as blobs (#6935);
+#: its ``hosted-plugins`` area is ``…/agent/hosted-plugins/*``, a hosted plugin's latest
+#: version and a version's zip (#6932, the same module); its ``plugin-feeds`` area is
+#: ``…/agent/plugin-feeds/{feed}``, a marketplace feed's packages at their current pins
+#: (#6933, the same module), and ``…/plugin-feeds/{feed}/packages/{name}``, a package added
+#: to the feed or removed (#6936). Its ``gate`` area is ``…/agent/gate/*``: the tool-call
 #: gate's writes, an entry opened, a run grant's approval checked against ``flow_grants``, a
 #: flow's refusal, an entry resolved, a response decided against the row's record by the
 #: gate's validator, and the record read, each with its session events, status, audit row and
@@ -160,6 +170,11 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: row, for its directory sweeps; its ``forget-rows`` area is
 #: ``…/agent/sessions/{id}/forget-rows``, a forgotten session's last rows deleted with its
 #: unnamed workspace bytes and its warm-evict NOTIFY (#6501, `api/crud_agent_sweeps.py`).
+#: Its ``keys`` area is ``…/agent/keys/input-hash``, the approvals' input-hash key, and
+#: ``…/agent/fetch-grants``, a one-off fetch's grant minted here, so the agent mounts no KEK
+#: (#5299 step 12, `api/crud_agent_keys.py`).
+#: The print ``own-presets`` area is ``…/print/own-presets`` and its
+#: ``/documents``: ScadBuddy's own filament presets a native run reads (#7176).
 #: The profile-fetch ``runs`` area is ``…/profile-fetch/runs/{id}/files/{sha256}``,
 #: ``…/import`` and ``…/failed``: a fetch's preset files, their import into Bambuddy as the
 #: type's presets, and its failure (#6625, `api/crud_profile_fetch.py`).
@@ -187,6 +202,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "filament-sync",
         "filament-pull",
         "sensor-notify",
+        "own-presets",
     ],
     "storefront": [
         "listings",
@@ -198,6 +214,8 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "accounts",
         "order",
         "models",
+        "variants",
+        "file-prices",
     ],
     "agent": [
         "order-costs",
@@ -222,6 +240,9 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "plugin-sessions",
         "plugins",
         "plugin-packages",
+        "package-mirrors",
+        "hosted-plugins",
+        "plugin-feeds",
         "background-tasks",
         "operations",
         "sessions",
@@ -245,6 +266,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "auth-sessions",
         "session-sweeps",
         "forget-rows",
+        "keys",
     ],
     "intake": ["sources"],
     "profile-fetch": ["runs"],

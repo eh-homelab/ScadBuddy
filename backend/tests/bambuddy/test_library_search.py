@@ -52,12 +52,51 @@ def test_every_word_matches_the_name_or_the_folder_whatever_the_case_or_separato
     assert (found.total, found.hidden) == (1, 1)
 
 
+def test_a_hit_states_its_row_s_file_hash_in_lowercase() -> None:
+    """#7073: a row's ``file_hash`` (the native library's sha256) is lowercased, so it
+    compares with a listing's pinned sha256; a row with none states none."""
+    stated = LibraryListRow(
+        id=20, filename="hashed.3mf", file_type="3mf", folder_id=None, file_hash="CD" * 32
+    )
+    rows = [stated, row(21, "hashed-too.3mf", None)]
+
+    found = search_library(FOLDERS, rows, "hashed", show_all=False)
+
+    assert {hit.id: hit.file_hash for hit in found.files} == {20: "cd" * 32, 21: None}
+
+
+def test_a_listing_row_states_its_file_hash_in_lowercase() -> None:
+    """#7073 review: a row's ``file_hash`` is lowercase at the source, so every reader of
+    the row (the CRUD listing route included) compares it with a pinned sha256 as is."""
+    stated = LibraryListRow(id=1, filename="a.3mf", file_type="3mf", file_hash="EF" * 32)
+
+    assert stated.file_hash == "ef" * 32
+    assert row(2, "b.3mf", None).file_hash is None
+
+
 def test_a_file_is_found_by_the_folders_it_is_in() -> None:
     found = search_library(FOLDERS, ROWS, "name keychains", show_all=False)
 
     assert [(hit.id, hit.folder_path) for hit in found.files] == [
         (12, ["3D Name Keychains", "Work"])
     ]
+
+
+def test_types_lists_only_those_types_whatever_all_says() -> None:
+    rows = [*ROWS, row(14, "dino.stl", 3, "stl"), row(15, "dino.step", 3, "step")]
+
+    found = search_library(FOLDERS, rows, "dino", show_all=False, types=["3mf", "stl"])
+
+    # #6710 §9.2: a sliced file and another type are never listed, and none is hidden.
+    assert sorted(hit.id for hit in found.files) == [10, 14]
+    assert (found.total, found.hidden) == (2, 0)
+    only_stl = search_library(FOLDERS, rows, "dino", show_all=True, types=["stl"])
+    assert [hit.id for hit in only_stl.files] == [14]
+    assert (only_stl.total, only_stl.hidden) == (1, 0)
+    # The answer never says every type was searched when only some were.
+    assert not found.all and not only_stl.all
+    only_3mf = search_library(FOLDERS, rows, "dino", show_all=True, types=["3mf"])
+    assert [hit.id for hit in only_3mf.files] == [10]
 
 
 def test_a_match_in_the_name_comes_before_one_in_the_folder() -> None:

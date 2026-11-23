@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import type { SpoolEvent, TimelineRow } from '../../api/filament'
 import { Button } from '@/components/ui/button'
-import { actorText, changeLines, eventNames, fromTypeText, KIND_TEXT, type EventNames } from './eventText'
+import { actorText, changeEntries, eventNames, fromTypeText, KIND_TEXT, valueText, type EventNames } from './eventText'
+import { EntityLink } from './EntityLink'
 import { when } from './formClasses'
 
 /** The timeline's filters, each the kinds it keeps; "All" keeps every kind. */
@@ -10,7 +11,7 @@ const FILTERS = [
   { label: 'All', kinds: null },
   { label: 'Prints', kinds: ['print_started', 'print_ended'] },
   { label: 'Weighings', kinds: ['weighed', 'ams_reading'] },
-  { label: 'Edits', kinds: ['edited', 'synced_from_bb', 'archived', 'restored'] },
+  { label: 'Edits', kinds: ['edited', 'synced_from_bb', 'archived', 'restored', 'consumed_reset'] },
   { label: 'Moves', kinds: ['moved', 'loaded', 'unloaded'] },
   { label: 'Tags', kinds: ['tag_bound', 'tag_unbound'] },
 ] as const satisfies readonly { label: string; kinds: readonly SpoolEvent['kind'][] | null }[]
@@ -40,11 +41,6 @@ function detail(event: SpoolEvent, names: EventNames): string {
     case 'created':
       parts.push(event.grams_after != null ? `with ${grams(event.grams_after)}` : null)
       break
-    case 'moved': {
-      const place = (id: string | null | undefined) => (id ? (names.get(id) ?? 'a place no longer listed') : 'nowhere')
-      parts.push(`from ${place(data.from)} to ${place(data.to)}`)
-      break
-    }
     case 'loaded':
     case 'unloaded':
       parts.push(tray(event))
@@ -60,6 +56,30 @@ function detail(event: SpoolEvent, names: EventNames): string {
   return parts.filter(Boolean).join(', ')
 }
 
+/** An id's name, as a link to its page when `hrefs` has one (#6869); any other value as text. */
+function Ref({ field, value, names, hrefs }: { field: string; value: unknown; names: EventNames; hrefs: ReadonlyMap<string, string> }) {
+  const text = valueText(field, value, names)
+  const href = typeof value === 'string' && field.endsWith('_id') ? hrefs.get(value) : undefined
+  return href ? <EntityLink to={href}>{text}</EntityLink> : text
+}
+
+/** A move's places, each linked to the spools in it when it has a page (#6869). */
+function moveText(event: SpoolEvent, names: EventNames, hrefs: ReadonlyMap<string, string>): ReactNode {
+  const data = event.data as { from?: string | null; to?: string | null }
+  const place = (id: string | null | undefined) => {
+    if (!id) return 'nowhere'
+    const name = names.get(id)
+    if (!name) return 'a place no longer listed'
+    const href = hrefs.get(id)
+    return href ? <EntityLink to={href}>{name}</EntityLink> : name
+  }
+  return (
+    <>
+      from {place(data.from)} to {place(data.to)}
+    </>
+  )
+}
+
 /** The dot on the rail: readings in the accent and prints in ink, as the grams chart draws its anchors and plate ticks; the rest recessive. */
 const dot = (kind: SpoolEvent['kind']) =>
   kind === 'weighed' || kind === 'ams_reading' ? 'bg-primary' : kind === 'print_started' || kind === 'print_ended' ? 'bg-foreground' : 'bg-muted-foreground/50'
@@ -70,13 +90,17 @@ interface Props {
   /** Every catalog's rows and the places, by id and name, for the ids an event names. */
   catalogs: readonly (readonly { id: string; name: string }[])[]
   types: readonly { id: string; code: string }[]
+  /** Each id's page (a type, a place's spools, a catalog), for the ids an event names (#6869). */
+  hrefs?: ReadonlyMap<string, string>
 }
+
+const NO_HREFS: ReadonlyMap<string, string> = new Map()
 
 /**
  * #6269 — a spool's timeline (spec §5.7): every ledger event, newest first, with what
  * changed and who made it, the print and order each plate links to, and a filter by kind.
  */
-export function SpoolTimeline({ rows, catalogs, types }: Props) {
+export function SpoolTimeline({ rows, catalogs, types, hrefs = NO_HREFS }: Props) {
   const [filter, setFilter] = useState<Filter>('All')
   const names = useMemo(() => eventNames(catalogs, types), [catalogs, types])
   if (rows === null) return <p className="text-[13px] text-muted-foreground">Loading the history…</p>
@@ -97,7 +121,8 @@ export function SpoolTimeline({ rows, catalogs, types }: Props) {
       ) : (
         <ol aria-label="History of this spool" className="flex flex-col border-l text-[13px]">
           {shown.map(({ event, order_id: orderId, archive_id: archiveId }) => {
-            const lines = event.kind === 'edited' ? changeLines((event.data as { changes?: unknown }).changes, names) : []
+            const lines = event.kind === 'edited' ? changeEntries((event.data as { changes?: unknown }).changes) : []
+            const move = event.kind === 'moved' ? moveText(event, names, hrefs) : null
             const text = detail(event, names)
             return (
               <li key={event.id} className="relative grid grid-cols-1 gap-x-4 gap-y-0.5 py-2 pl-4 sm:grid-cols-[11rem_minmax(0,1fr)_auto]">
@@ -108,13 +133,25 @@ export function SpoolTimeline({ rows, catalogs, types }: Props) {
                 <div className="flex min-w-0 flex-col gap-0.5">
                   <p className="break-words">
                     <span className="font-medium">{KIND_TEXT[event.kind] ?? event.kind.replace(/_/g, ' ')}</span>
+                    {move && <span className="text-muted-foreground">, {move}</span>}
                     {text && <span className="text-muted-foreground tabular-nums">{`, ${text}`}</span>}
                   </p>
                   {lines.length > 0 && (
                     <ul aria-label="Changes" className="flex flex-col text-[12px]">
                       {lines.map((line, i) => (
                         <li key={i} className="break-words tabular-nums">
-                          {line}
+                          {line.whole ?? (
+                            <>
+                              {line.label}:{' '}
+                              {line.before !== undefined && (
+                                <>
+                                  <Ref field={line.field} value={line.before} names={names} hrefs={hrefs} />
+                                  {' → '}
+                                </>
+                              )}
+                              <Ref field={line.field} value={line.after} names={names} hrefs={hrefs} />
+                            </>
+                          )}
                         </li>
                       ))}
                     </ul>

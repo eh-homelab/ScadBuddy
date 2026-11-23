@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
+import { command } from './command.js'
+import { linkingTools, type LinkKind } from './filamentLinks.js'
 import {
   catalogNames,
   matchesSearch,
@@ -23,6 +26,10 @@ import { defineTool, idempotencyKey, json, ToolError, type Tool } from './regist
 // Routes: backend/scadbuddy/api/filament.py.
 
 const SOURCE = "ScadBuddy's own filament inventory"
+
+type SpoolCreate = components['schemas']['SpoolCreate-Input']
+type SpoolDraft = components['schemas']['SpoolDraft']
+type SpoolBulkCreate = components['schemas']['SpoolBulkCreate']
 
 /** A SpoolBuddy device id, as the backend's `DeviceId` accepts it (`filament/models.py`). */
 const DEVICE_ID = z.string().regex(/^[A-Za-z0-9._:-]{1,50}$/)
@@ -92,6 +99,7 @@ const EVENT_KINDS = [
   'archived',
   'restored',
   'synced_from_bb',
+  'consumed_reset',
 ] as const
 
 /** A calendar day, as the metrics routes' `date` query takes it. */
@@ -103,6 +111,9 @@ const DATE = z
     return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v
   }, 'Not a real calendar date')
   .describe('A date, YYYY-MM-DD')
+
+/** #7152: a money amount as `purchasing_models.Money` takes it: at most 8 whole digits and 4 places. */
+const MONEY = z.string().regex(/^\d{1,8}(\.\d{1,4})?$/, 'a decimal string, e.g. "21.40"')
 
 /** The events `filament_spool_history` returns: the route sends them newest first. */
 const HISTORY_EVENTS = 50
@@ -123,7 +134,7 @@ const csvRows = z
   .max(5000)
   .describe('One object per CSV row, column name to cell text')
 
-export const filamentTools: Tool[] = [
+const tools: Tool[] = [
   defineTool({
     name: 'filament_catalog_list',
     label: 'List a filament catalog',
@@ -131,16 +142,23 @@ export const filamentTools: Tool[] = [
       "One of ScadBuddy's filament catalogs, in sort order: materials (print and drying defaults, handling " +
       'flags), subtypes, brands, categories, effects, insert-materials, insert-types, colours (a maker\'s named ' +
       'colours, `#RRGGBBAA`) or location-kinds. Archived rows only with `include_archived`. A material, ' +
-      'subtype, brand, category or effect has `aliases`: its other names (filament_catalog_set_aliases).',
-    input: z.object({ kind, include_archived: z.boolean().default(false) }),
+      'subtype, brand, category or effect has `aliases`: its other names (filament_catalog_set_aliases). The ' +
+      "colours catalog holds thousands of rows once synced (filament_colour_sync): pass `q` (every word must match a " +
+      "row's name, maker, `material_name` or `#RRGGBBAA`, e.g. `bambu jade white`) rather than listing it whole. A " +
+      'colour with `source` came from a sync; one with `source` and a null `synced_at` was edited by a person since (syncs leave it as it is).',
+    input: z.object({
+      kind,
+      include_archived: z.boolean().default(false),
+      q: z.string().max(200).optional().describe('Text search: every word must match some text of the row, in any case'),
+    }),
     risk: 'read',
     source: SOURCE,
     routes: ['GET /api/v1/filament/catalog/{kind}'],
-    handler: async ({ kind, include_archived }, { backend }) =>
+    handler: async ({ kind, include_archived, q }, { backend }) =>
       json(
         await ok(
           backend.GET('/api/v1/filament/catalog/{kind}', {
-            params: { path: { kind }, query: { include_archived } },
+            params: { path: { kind }, query: { include_archived, q } },
           }),
           `list the ${kind} catalog`,
         ),
@@ -245,6 +263,50 @@ export const filamentTools: Tool[] = [
           `set the aliases of ${kind} row ${row_id}`,
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'filament_colour_sync',
+    label: 'Fill the colour catalog',
+    description:
+      "Fill ScadBuddy's colour catalog from a public source (#6907). `filamentcolors`: every swatch of " +
+      'filamentcolors.xyz (maker, name, material, hex; a translucent swatch gets alpha `80`), skipped when the site has ' +
+      "no new swatch since the last run unless `force`. `bambu`: Bambu Studio's colour codes as Bambu Lab's colours, " +
+      'exact RGBA (`80` for a translucent one). A colour is added, or updated by its maker, name and material; a row ' +
+      'a person made or edited, or another source wrote, is left as it is (`kept`), and nothing is deleted. Answers the run: `state` `done`, ' +
+      '`unchanged` or `failed` (`error` says why, e.g. the site did not answer; what it wrote stays) with its counts. ' +
+      'A filamentcolors run reads about 23 pages: an answer with `status: running` is still running; follow it with ' +
+      'get_operation, or read its progress with filament_colour_sync_status. 409 while a run of that source runs. ' +
+      'Only when the user asks. Reads the source only and writes ScadBuddy only.',
+    input: z.object({
+      source: z.enum(['filamentcolors', 'bambu']).describe('Which source to read'),
+      force: z.boolean().default(false).describe('filamentcolors only: read every page even when the site has no new swatch'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/colour-syncs'],
+    keyed: true,
+    summarize: ({ source }) => `Fill the colour catalog from ${source === 'bambu' ? "Bambu's colour codes" : 'filamentcolors.xyz'}`,
+    handler: async ({ source, force }, ctx) =>
+      json(
+        await command(ctx, `sync the colour catalog from ${source}`, (headers) =>
+          ctx.backend.POST('/api/v1/filament/colour-syncs', { body: { source, force }, headers }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_colour_sync_status',
+    label: "Read the colour catalog's syncs",
+    description:
+      'The newest run of each colour sync (filament_colour_sync): `state` `running` (with `pages_read` of `pages_total` ' +
+      'and the counts so far), `done`, `unchanged` or `failed` with `error`. A source never run is absent.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/colour-syncs'],
+    handler: async (_, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/colour-syncs'), "read the colour catalog's syncs")),
   }),
 
   defineTool({
@@ -430,7 +492,7 @@ export const filamentTools: Tool[] = [
         z.object({
           printer_model: z.string().describe('A printer model, e.g. `H2C`'),
           nozzle_diameter: z.string().describe('e.g. `0.4`'),
-          slicer_filament: z.string().describe("The slicer's filament id, e.g. `GFA00`"),
+          slicer_filament: z.string().describe("The slicer's filament id, e.g. `GFA00`, or a ScadBuddy preset as `sb-<id>`"),
           slicer_filament_name: z.string().optional(),
         }),
       ),
@@ -497,6 +559,93 @@ export const filamentTools: Tool[] = [
         await ok(
           backend.GET('/api/v1/filament/types/{type_id}/profile-fetch', { params: { path: { type_id } } }),
           `read the 3DFP preset fetch of spool type ${type_id}`,
+        ),
+      ),
+  }),
+
+  // #7025: 3DFP search and create run on the profile-fetch worker, the one process with the
+  // site's browser and login (backend `filament/tdfp.py`).
+  defineTool({
+    name: 'filament_tdfp_search',
+    label: 'Search 3dfilamentprofiles.com',
+    description:
+      "Find a filament's 3dfilamentprofiles.com (3DFP) id, for a spool type's `tdfp_id`. ScadBuddy's profile-fetch " +
+      "worker searches the site's filament list and answers its first page: each candidate's `tdfp_id`, `brand`, " +
+      '`material`, `material_type`, colour `name`, `hexes` and `nominal_weight_g` (from a "(250g)" suffix on the ' +
+      "name; null when it has none). The site filters only by text, sent as the brand, the material type and the " +
+      'colour (`query`); the `material` ranks the candidates (its matches first, then the type\'s) and filters ' +
+      'nothing, so check each candidate\'s brand, material and type before you take its id. The site misses some ' +
+      'brands: no candidate is not proof that 3DFP lacks the filament. Use it in place of a web search for 3DFP ' +
+      'ids. 503 `no_worker` or `not_started` when the worker is not running or is busy with other searches (try ' +
+      'again later), 502 when the site failed. Reads only.',
+    input: z.object({
+      brand: z.string().min(1).max(200).describe('The brand as 3DFP files it, e.g. `SUNLU`'),
+      material: z.string().min(1).max(200).optional().describe('e.g. `PLA+/Pro`'),
+      material_type: z.string().min(1).max(200).optional().describe('e.g. `Silk`, `Basic`, `Matte`'),
+      colour: z.string().min(1).max(200).optional().describe('The colour name, e.g. `Bronze`'),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/tdfp/search'],
+    handler: async (body, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/tdfp/search', { body }), 'search 3dfilamentprofiles.com')),
+  }),
+
+  defineTool({
+    name: 'filament_tdfp_create',
+    label: 'Add a filament to 3dfilamentprofiles.com',
+    description:
+      'Add a filament that 3dfilamentprofiles.com (3DFP) lacks, through its add form, on the profile-fetch ' +
+      'worker. Search with filament_tdfp_search first: create only when no candidate is the filament. The form ' +
+      'gets `brand`, `material` and `material_type` (each must be an entry the form offers, else 422 ' +
+      '`option_missing`; a combination with no site defaults is refused, 422 `no_defaults`), the colour name, ' +
+      '`hexes` (1 to 4), `nominal_weight_g`, and the identifiers `mpn`, `gtin`, `asin`, `manufacturer_url`, ' +
+      '`empty_spool_weight_g` and `td` where the form has a field for them (`sent`, `not_sent`; ScadBuddy stores ' +
+      'none of them). Before it saves, it reads the form\'s duplicate list: one there of the same brand, material ' +
+      'and type with a close name or colour stops it with `create.status` `duplicate`, the list and why ' +
+      '(`likely`), and nothing is saved; show them to the user, and only when the user says those are other ' +
+      'filaments, call again with their ids in `not_duplicates`. Else it answers `created` with the new ' +
+      "`tdfp_id`, which becomes `type_id`'s `tdfp_id` when you send one (409 `type_has_tdfp_id` when that type " +
+      'already has one). Tried once: 502 `not_created` means it may exist, so search again before another create. ' +
+      'Writes 3dfilamentprofiles.com, a shared public database, and the type. Approved first.',
+    input: z.object({
+      brand: z.string().min(1).max(200),
+      material: z.string().min(1).max(200),
+      material_type: z.string().min(1).max(200),
+      colour: z.string().min(1).max(200).describe('The colour name, e.g. `Bronze`'),
+      hexes: z
+        .array(z.string().regex(/^#[0-9A-Fa-f]{6}$/))
+        .min(1)
+        .max(4)
+        .describe('One `#RRGGBB` per colour of the filament, the first the main one'),
+      nominal_weight_g: z.number().int().positive().max(100000).optional().describe('The net filament weight'),
+      mpn: z.string().min(1).max(200).optional().describe("The maker's part number (SKU)"),
+      gtin: z.string().regex(/^[0-9]{8,14}$/).optional().describe('The UPC or EAN barcode'),
+      asin: z.string().regex(/^[A-Z0-9]{10}$/).optional(),
+      manufacturer_url: z.string().url().max(1000).optional().describe("The maker's product page"),
+      empty_spool_weight_g: z.number().int().positive().max(10000).optional(),
+      td: z.number().positive().max(100).optional().describe('HueForge transmission distance'),
+      not_duplicates: z
+        .array(z.number().int().positive())
+        .max(25)
+        .optional()
+        .describe('3DFP ids from a `duplicate` answer that the user said are other filaments'),
+      type_id: z.string().uuid().optional().describe('The spool type whose `tdfp_id` the new id becomes'),
+    }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/tdfp/filaments'],
+    summarize: ({ brand, material, material_type, colour }) =>
+      `Add ${brand} ${material} ${material_type} ${colour} to 3dfilamentprofiles.com`,
+    handler: async (body, ctx) =>
+      json(
+        await ok(
+          ctx.backend.POST('/api/v1/filament/tdfp/filaments', {
+            body,
+            // One key per call: a re-send after a lost answer gets the first create's outcome.
+            headers: { 'Idempotency-Key': idempotencyKey(ctx) },
+          }),
+          'add the filament to 3dfilamentprofiles.com',
         ),
       ),
   }),
@@ -677,8 +826,9 @@ export const filamentTools: Tool[] = [
       '`unit_cost`; `null` if none), `type_suppliers` (the unarchived products of its type from unarchived suppliers, each with its ' +
       'newest price and price per kg), and `drying_defaults`: the `temp_c` and `hours` a drying records when it leaves them out ' +
       "(filament_spool_add_event), each from the spool's own `drying_temp_c`/`drying_hours`, else its type's, else its " +
-      "subtype's, else its material's, with `temp_from` and `hours_from` naming the level (`spool`, `type`, `subtype`, " +
-      '`material`; `null` when none sets it).',
+      "subtype's, else its material's, else the Settings default (`filament_drying_temp_c`, `filament_drying_hours`), " +
+      'with `temp_from` and `hours_from` naming the level (`spool`, `type`, `subtype`, `material`, `setting`; `null` when ' +
+      'none sets it).',
     input: z.object({ spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list") }),
     risk: 'read',
     source: SOURCE,
@@ -701,19 +851,62 @@ export const filamentTools: Tool[] = [
       "string) override its type's drying values, which a drying that leaves them out records. A new spool needs a `type_id` (filament_type_list) " +
       'or, while it needs a type, a `material_id`; `grams_left` is its first reading. Each edit is one `edited` ' +
       'ledger event. To record a weighing use filament_spool_add_event; to archive use filament_spool_archive. ' +
+      'When adding, `quantity` (1 to 100) makes that many identical spools in one request, each with its own number, ' +
+      "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
+      'values and its place unless that is a tray, never its number, tag, tray, weight or weight lock; `fields` ' +
+      'then change the copy. Either answers the list of spools made, and a resend of the same call makes none twice; ' +
+      'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
       'material. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       spool_id: z.string().uuid().optional().describe("A spool's `id`; omit to add"),
       fields: z.record(z.string(), z.unknown()).default({}).describe('The spool fields to set'),
+      quantity: z.number().int().min(1).max(100).optional().describe('When adding: how many identical spools to make'),
+      copy_of: z.string().uuid().optional().describe("When adding: the `id` of a spool to copy"),
     }),
     risk: 'write',
     source: SOURCE,
-    routes: ['POST /api/v1/filament/spools', 'PATCH /api/v1/filament/spools/{spool_id}'],
-    summarize: ({ spool_id }) => (spool_id ? `Edit spool ${spool_id}` : 'Add a spool'),
-    handler: async ({ spool_id, fields }, { backend }) => {
+    routes: [
+      'POST /api/v1/filament/spools',
+      'PATCH /api/v1/filament/spools/{spool_id}',
+      'POST /api/v1/filament/spools/bulk',
+      'GET /api/v1/filament/spools/{spool_id}/copy',
+    ],
+    summarize: ({ spool_id, quantity, copy_of }) =>
+      spool_id
+        ? `Edit spool ${spool_id}`
+        : `Add ${quantity && quantity > 1 ? `${quantity} spools` : 'a spool'}${copy_of ? ` copied from ${copy_of}` : ''}`,
+    handler: async ({ spool_id, fields, quantity, copy_of }, ctx) => {
+      const { backend } = ctx
+      if (spool_id !== undefined && (quantity !== undefined || copy_of !== undefined)) {
+        throw new ToolError('`quantity` and `copy_of` are for adding a spool; leave out `spool_id`')
+      }
+      if (spool_id === undefined && quantity === undefined && copy_of === undefined) {
+        return json(await ok(backend.POST('/api/v1/filament/spools', { body: fields as SpoolCreate }), 'add a spool'))
+      }
       if (spool_id === undefined) {
-        return json(await ok(backend.POST('/api/v1/filament/spools', { body: fields }), 'add a spool'))
+        const draft: SpoolDraft = copy_of
+          ? await ok(
+              backend.GET('/api/v1/filament/spools/{spool_id}/copy', { params: { path: { spool_id: copy_of } } }),
+              `copy spool ${copy_of}`,
+            )
+          : { spool: {} as SpoolDraft['spool'] }
+        // One key per call: a resend after a lost answer makes no second set of spools. A
+        // resend reads the copy again, so its key names that draft too (R-7150-8): a changed
+        // source is a new request, never a 422 for a key sent with another body.
+        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1 } as SpoolBulkCreate
+        const key = copy_of
+          ? createHash('sha256').update(`${idempotencyKey(ctx)}\x1f${JSON.stringify(draft)}`).digest('hex')
+          : idempotencyKey(ctx)
+        return json(
+          await ok(
+            backend.POST('/api/v1/filament/spools/bulk', {
+              body,
+              headers: { 'Idempotency-Key': key },
+            }),
+            'add the spools',
+          ),
+        )
       }
       return json(
         await ok(
@@ -741,7 +934,7 @@ export const filamentTools: Tool[] = [
         z.object({
           printer_model: z.string().describe('A printer model, e.g. `H2C`'),
           nozzle_diameter: z.string().describe('e.g. `0.4`'),
-          slicer_filament: z.string().describe("The slicer's filament id, e.g. `GFA00`"),
+          slicer_filament: z.string().describe("The slicer's filament id, e.g. `GFA00`, or a ScadBuddy preset as `sb-<id>`"),
           slicer_filament_name: z.string().optional(),
         }),
       ),
@@ -1094,11 +1287,63 @@ export const filamentTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_material_number_stats',
+    label: 'Read stock and use by material number',
+    description:
+      "Per material number (a spool type's `code`, which Bambuddy calls `material_number`, case folded; " +
+      '`key` null for untyped spools): every type of that code with `archived`, the unarchived spools, their ' +
+      "grams left and value at cost (in `currency`, the shop's), and `used_g` and `wasted_g`, the plates' " +
+      'grams from `since` to `until` counted as `filament_metrics` counts consumption. `since` and `until` ' +
+      'are dates (`YYYY-MM-DD`), both included; default the 180 days before today. 422 when `since` is ' +
+      'after `until` or the range is over 1096 days.',
+    input: z.object({ since: DATE.optional(), until: DATE.optional() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/metrics/material-numbers'],
+    handler: async ({ since, until }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/metrics/material-numbers', { params: { query: { since, until } } }),
+          'read the material number stats',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_cost_per_kg',
+    label: 'Work out a cost per kg',
+    description:
+      'What `price` (paid for `quantity` spools, default 1), `tax` and `shipping` (default 0) come to per kg ' +
+      'when each spool holds `net_weight_g` grams of filament: `cost_per_kg` with all three in (what an ' +
+      'invoice line gives its spools) and `price_per_kg` with shipping out (a supplier price point). Money is ' +
+      "a decimal string of at most four places; the answer is exact, rounded half up to four, in the shop's " +
+      '`currency`. It writes nothing: to keep the result, set the type\'s `cost_per_kg`.',
+    input: z.object({
+      price: MONEY,
+      tax: MONEY.optional(),
+      shipping: MONEY.optional(),
+      quantity: z.number().int().min(1).max(1000).optional().describe('Spools the price paid for; default 1'),
+      net_weight_g: z.number().int().min(1).max(100_000).describe('Grams of filament in one spool, without the spool'),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/cost-per-kg'],
+    handler: async ({ price, tax, shipping, quantity, net_weight_g }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/cost-per-kg', { params: { query: { price, tax, shipping, quantity, net_weight_g } } }),
+          'work out the cost per kg',
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_rfid_status',
     label: 'Read the RFID override mode',
     description:
-      "Whether the RFID override mode is on and where Bambuddy's auto-add of unknown RFID spools stands: " +
-      '`applied` (mode on, Bambuddy\'s value is false), `pending` (a write has not landed or Bambuddy is down; ' +
+      "Whether the RFID override mode is on, whether the setting `filament_auto_add_unknown_rfid` is on (off holds " +
+      "Bambuddy's auto-add off too), and where Bambuddy's auto-add of unknown RFID spools stands: " +
+      '`applied` (the mode or the setting holds it, and Bambuddy\'s value is false), `pending` (a write has not landed or Bambuddy is down; ' +
       '`detail` names the error), `blocked` (Bambuddy refused the write because its auth is on) or `off`. ' +
       'Lists the SpoolBuddy devices. Reads Bambuddy; writes nothing.',
     input: z.object({}),
@@ -1177,6 +1422,32 @@ export const filamentTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_sync_passes',
+    label: 'Read the Bambuddy sync history',
+    description:
+      "The ScadBuddy-to-Bambuddy filament sync's passes, newest first, failed ones too (filament_sync_status " +
+      'holds only the last). Each has its `id`, the Bambuddy `instance`, its `trigger` (`timer`, `change`: a ' +
+      'write\'s nudge, `full`: a full pass asked for such as Sync now, `more`: the pass before it left writes; ' +
+      'null when unknown), `started_at`, `ended_at`, the counts `written`, `failed`, `deferred`, `conflicts` and ' +
+      '`unmapped_k`, `skipped` (`no_bambuddy` or `nothing_pushes`), `instance_changed` and `error` (a label, null ' +
+      "when it worked; `crud_unavailable:<failure>` or `crud_refused:<status>` when ScadBuddy's own API failed " +
+      'during the pass, `internal` for any other failure outside Bambuddy). A page holds up to `limit` passes (at most 200); when `next_cursor` is set, pass it back ' +
+      'as `cursor` for the next page. Passes older than the setting `filament_sync_pass_ttl_days` (30 by default) ' +
+      'are gone. Reads ScadBuddy only.',
+    input: z.object({
+      cursor: z.string().optional(),
+      limit: z.number().int().min(1).max(200).default(20),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/sync/passes'],
+    handler: async (query, { backend }) =>
+      json(
+        await ok(backend.GET('/api/v1/filament/sync/passes', { params: { query } }), 'read the Bambuddy sync history'),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_sync_run',
     label: 'Sync with Bambuddy now',
     description:
@@ -1207,7 +1478,10 @@ export const filamentTools: Tool[] = [
       "`expect_kept: true`: it reads the configured Bambuddy's spools, and when that Bambuddy holds every linked " +
       'spool as ScadBuddy last saw it (the same Bambuddy at a new address), nothing is deleted: every link now ' +
       'belongs to it, and the answer has `kept: true` and zero counts. When it cannot prove that (Bambuddy could ' +
-      'not be read, or it is another Bambuddy), it answers 409 `proof_changed` and deletes nothing. Only then, ' +
+      'not be read, or it is another Bambuddy, or every linked spool ScadBuddy could compare (a time on both sides) was edited in Bambuddy since the last pull so ' +
+      'none matches what ScadBuddy saw and the proof has nothing to stand on), it answers 409 `proof_changed` and ' +
+      'deletes nothing; tell the user which case it is if you know (the dry run `GET /filament/sync/reset-links` ' +
+      'has `changed_since_pull`). Only then, ' +
       'and only after the user agreed to the delete below, call it again with `expect_kept: false` (the default), ' +
       'which reads no Bambuddy and deletes, in one transaction, every spool link, the ' +
       'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +
@@ -1360,15 +1634,18 @@ export const filamentTools: Tool[] = [
 
   defineTool({
     name: 'filament_spool_add_event',
-    label: 'Record a weighing or a drying',
+    label: 'Record a weighing, drying or counter reset',
     description:
       'Record on a spool a weighing (`kind: weighed`, `grams` = the filament left, without the empty spool; ' +
       '`grams_left` starts again from it) or a drying (`kind: dried`, `temp_c`, `hours`). A drying that leaves ' +
       "out `temp_c` or `hours` records the spool's `drying_defaults` (filament_spool_get: its own drying values, else its " +
-      "type's, else its subtype's, else its material's); `null` records none. Only what the user says. Writes ScadBuddy only.",
+      "type's, else its subtype's, else its material's, else the Settings default); `null` records none. " +
+      "`kind: consumed_reset` (no grams, temp_c or hours) starts the spool's used counter (`consumed_g`) again from 0 g; the " +
+      'grams left stay. Only what the user says. Writes ScadBuddy only; a reset reaches Bambuddy at the next sync when weights ' +
+      'sync to it.',
     input: z.object({
       spool_id: z.string().uuid(),
-      kind: z.enum(['weighed', 'dried']),
+      kind: z.enum(['weighed', 'dried', 'consumed_reset']),
       source: z.enum(['person', 'scale']).default('person'),
       grams: z.number().min(0).optional(),
       temp_c: z.number().int().min(0).nullable().optional().describe("Left out: the spool's drying default"),
@@ -1379,7 +1656,11 @@ export const filamentTools: Tool[] = [
     source: SOURCE,
     routes: ['POST /api/v1/filament/spools/{spool_id}/events'],
     summarize: ({ spool_id, kind, grams }) =>
-      kind === 'weighed' ? `Record ${grams ?? '?'} g on spool ${spool_id}` : `Record a drying of spool ${spool_id}`,
+      kind === 'weighed'
+        ? `Record ${grams ?? '?'} g on spool ${spool_id}`
+        : kind === 'consumed_reset'
+          ? `Reset the used counter of spool ${spool_id}`
+          : `Record a drying of spool ${spool_id}`,
     handler: async ({ spool_id, ...body }, { backend }) =>
       json(
         await ok(
@@ -1390,6 +1671,22 @@ export const filamentTools: Tool[] = [
           `record on spool ${spool_id}`,
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'filament_spools_reset_consumed',
+    label: 'Reset the used counter of spools',
+    description:
+      'Start the used counter (`consumed_g`) of 1 to 500 spools again from 0 g, as Bambuddy\'s "reset consumed" does (#7149). ' +
+      'The grams left, the lifetime use and the cost stay. Answers `reset` (how many) and `not_found` (ids with no spool). ' +
+      'Writes ScadBuddy; a linked spool has its Bambuddy counter reset at the next sync when weights sync to Bambuddy.',
+    input: z.object({ spool_ids: z.array(z.string().uuid()).min(1).max(500) }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/reset-consumed'],
+    summarize: ({ spool_ids }) => `Reset the used counter of ${spool_ids.length} ${spool_ids.length === 1 ? 'spool' : 'spools'}`,
+    handler: async (body, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/spools/reset-consumed', { body }), 'reset the used counters')),
   }),
 
   defineTool({
@@ -1408,6 +1705,65 @@ export const filamentTools: Tool[] = [
         await ok(
           backend.GET('/api/v1/filament/locations', { params: { query: { include_archived } } }),
           'list the filament locations',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_code_resolve',
+    label: 'Resolve a label code',
+    description:
+      'What a typed label code names: `L-12` is a place, `S-142` a spool. Any case, with or without the dash. ' +
+      'Returns the kind, the id, the name and `archived`; an archived thing still resolves. 404 `code_unknown` ' +
+      'for a code that names nothing.',
+    input: z.object({ code: z.string().min(1).describe('A label code, such as `L-12` or `s142`') }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/codes/{code}'],
+    handler: async ({ code }, { backend }) =>
+      json(await ok(backend.GET('/api/v1/codes/{code}', { params: { path: { code } } }), `resolve code ${code}`)),
+  }),
+
+  defineTool({
+    name: 'filament_location_get',
+    label: 'Get a filament location',
+    description:
+      'One place with its code, its path, its children and its spools. 404 for no such place. ' +
+      '`location_id` is a place `id` from filament_location_list.',
+    input: z.object({ location_id: z.string().uuid() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/locations/{location_id}'],
+    handler: async ({ location_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/locations/{location_id}', { params: { path: { location_id } } }),
+          `get location ${location_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_printer_labels',
+    label: 'List printer label codes',
+    description:
+      "The label of each printer's own place, each AMS unit with its slots, and the external holder, each with its " +
+      '`code`, `name` and `depth` (0 printer, 1 unit or external holder, 2 slot), and the `base_url` a QR opens. ' +
+      '`printer_ids` limits it; omit for every printer. It may create the printer\'s own place and the place of each ' +
+      'AMS unit, slot and external holder the printer\'s latest report lists. That is derived data: capture makes ' +
+      'the same places (the printer\'s own once it has an AMS unit or holder place, a slot\'s when a spool loads there), so this ' +
+      'tool is `read` tier. `no_report` names the printers with no report that lists a unit or a holder: their ' +
+      'empty slots get labels only once a spool has been loaded. 409 `no_printer_kind` when no location kind is ' +
+      'marked as a printer.',
+    input: z.object({ printer_ids: z.array(z.string().uuid()).optional() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/printer-labels'],
+    handler: async ({ printer_ids }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/printer-labels', { body: { printer_ids: printer_ids ?? null } }),
+          'list the printer labels',
         ),
       ),
   }),
@@ -1551,7 +1907,8 @@ export const filamentTools: Tool[] = [
       'rows it could not read (`invalid`) or pull (`failed_bb_ids`). Also: `rfid_duplicates` (Bambuddy spools made ' +
       'for a tag a linked spool holds, left alone), `catalog_failed` and `catalog_skipped` (Bambuddy\'s spool ' +
       'catalog), `names_skipped` (catalog names with no letter or digit, left out), and `usage_booked` and ' +
-      '`usage_unlinked` (Bambuddy usage rows booked, and those of an unlinked spool). ' +
+      '`usage_unlinked` (Bambuddy usage rows booked, and the rows of an unlinked spool later than the last ' +
+      "read an earlier pull booked whole; a failed body's rows are counted again). " +
       '409 when no Bambuddy is configured, or when the Bambuddy URL changed during the import (import again). ' +
       '503 when the print worker did not finish in time: it may still be running, so check the spools before ' +
       'importing again. 502 when ScadBuddy refused what the worker read (importing again gets the same answer). ' +
@@ -1705,3 +2062,24 @@ export const filamentTools: Tool[] = [
       ),
   }),
 ]
+
+const catalogRow = (args: Record<string, unknown>): LinkKind => `catalog:${String(args.kind)}`
+
+/** #6869: each answer's entities carry their `ui_path` (`filamentLinks.ts`); these tools answer one kind of entity, or a list of it. */
+export const filamentTools: Tool[] = linkingTools(tools, {
+  filament_catalog_list: catalogRow,
+  filament_catalog_upsert: catalogRow,
+  filament_catalog_resolve: catalogRow,
+  filament_catalog_set_aliases: catalogRow,
+  filament_type_list: 'type',
+  filament_type_get: 'type',
+  filament_type_upsert: 'type',
+  filament_spool_list: 'spool',
+  filament_spool_get: 'spool',
+  filament_spool_upsert: 'spool',
+  filament_spool_archive: 'spool',
+  filament_spool_move: 'spool',
+  filament_location_list: 'location',
+  filament_location_get: 'location',
+  filament_location_upsert: 'location',
+})

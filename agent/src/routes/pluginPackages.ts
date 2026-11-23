@@ -16,7 +16,7 @@ import { INSTALL_KIND, REPIN_KIND } from '../plugins/packages/operations.js'
 import { UI_ACTOR } from '../audit/writes.js'
 import type { PackagePin, PackageRepo, PackageView } from '../plugins/packages/store.js'
 import type { PackageReview } from '../plugins/packages/vet.js'
-import { type PackageSource, validateRef, validateSource } from '../plugins/packages/source.js'
+import { type PackageSource, validateNpmVersion, validateRef, validateSource } from '../plugins/packages/source.js'
 import { PluginError } from '../plugins/registry.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
@@ -24,15 +24,24 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 
 // /api/v1/ai/plugin-packages (issue #297, "Installing a plugin"): Claude plugin
 // packages (skills, subagents, hooks, .mcp.json) from a git URL or a
-// marketplace entry, pinned to a commit in Postgres (plugins/packages/).
+// marketplace entry, pinned to a commit in Postgres (plugins/packages/); or (#6935) from
+// any source Claude Code takes, a bare marketplace.json URL's entry, an archive or an npm
+// package, pinned to the sha256 of the file fetched at install and mirrored; or (#6934) a
+// ScadBuddy hosted plugin, `{ kind: 'hosted', name }`, pinned to its latest published
+// version. An install of a hosted source OFFERS that version: it re-pins the hosted package
+// when it is installed (operations.ts `offerHosted`), and its view says `not_offered` while
+// a newer version is published (spec 2026-11-21 §6.3 step 5).
 //
 //   GET    /api/v1/ai/plugin-packages                  list
 //   GET    /api/v1/ai/plugin-packages/:name            one, with its review and any pending re-pin + diff
 //   GET    /api/v1/ai/plugin-packages/:name/files      { files: [{ path, size }] } (?pending=true: the re-pin's)
 //   GET    /api/v1/ai/plugin-packages/:name/file       ?path=…[&pending=true][&full=true]: one file's content (files.ts)
 //   POST   /api/v1/ai/plugin-packages                  install: fetch, pin, vet → stored UNAPPROVED (201), a command
-//   POST   /api/v1/ai/plugin-packages/:name/approve    approve { commit_sha, content_hash, allow_refused? } as reviewed
-//   POST   /api/v1/ai/plugin-packages/:name/repin      fetch { ref } → pending pin + file diff, a command
+//   POST   /api/v1/ai/plugin-packages/:name/approve    approve { commit_sha | bytes_sha256 | version, content_hash, allow_refused? } as reviewed
+//   POST   /api/v1/ai/plugin-packages/:name/repin      fetch { ref? } → pending pin + file diff, a command
+//                                                      (ref: a branch, tag or commit; an npm version or tag;
+//                                                      none for an archive, a tarball link, a bare marketplace URL or
+//                                                      a hosted plugin, which takes its latest version)
 //   DELETE /api/v1/ai/plugin-packages/:name/pending    drop the pending re-pin
 //   DELETE /api/v1/ai/plugin-packages/:name            uninstall (and evict the cache)
 //
@@ -66,9 +75,9 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 // GET /api/v1/ai/operations/{id}.
 
 export type PackageRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   packages: PackageRepo | undefined
-  /** The plugins that ship with the agent (builtins.ts), listed first; undefined without the database. */
+  /** The plugins that ship with the agent (builtins.ts), listed first; undefined when this process was not given it (tests). */
   builtIns: BuiltInPackages | undefined
   installer: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile'> | undefined
   /** A pending re-pin's review with its hooks' ids, for one stored without them (#4757); kept as stored when omitted or failing. */
@@ -80,8 +89,8 @@ export type PackageRouteDeps = {
   origins: OriginPolicy
 }
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 const Source = z.discriminatedUnion('kind', [
   z.strictObject({
@@ -96,15 +105,47 @@ const Source = z.discriminatedUnion('kind', [
     ref: z.string().max(200).optional(),
     entry: z.string().max(64),
   }),
+  // https://code.claude.com/docs/en/plugins/marketplace-reference.md, "Plugin sources" (#6935).
+  z.strictObject({ kind: z.literal('marketplace-url'), url: z.string().max(2048), entry: z.string().max(64) }),
+  z.strictObject({ kind: z.literal('archive'), url: z.string().max(2048), sha256: z.string().max(80).optional() }),
+  z.strictObject({
+    kind: z.literal('npm'),
+    package: z.string().max(2048),
+    version: z.string().max(200).optional(),
+    registry: z.string().max(2048).optional(),
+  }),
+  // A ScadBuddy hosted plugin (#6934): its latest published version.
+  z.strictObject({ kind: z.literal('hosted'), name: z.string().max(64) }),
 ])
 const InstallBody = z.strictObject({ source: Source })
-const ApproveBody = z.strictObject({
-  commit_sha: z.string().max(64),
-  content_hash: z.string().max(80),
-  /** Load the pin despite what its review's `refused` lists (store.ts). */
-  allow_refused: z.boolean().optional(),
-})
+const ApproveBody = z
+  .strictObject({
+    /** The pin the review showed: its commit, or for an archive or npm package its file's sha256 (#6935). */
+    commit_sha: z.string().max(64).optional(),
+    bytes_sha256: z.string().max(64).optional(),
+    /** A hosted package's version (#6934). */
+    version: z.number().int().min(1).max(2_147_483_647).optional(),
+    content_hash: z.string().max(80),
+    /** Load the pin despite what its review's `refused` lists (store.ts). */
+    allow_refused: z.boolean().optional(),
+  })
+  .refine((b) => [b.commit_sha, b.bytes_sha256, b.version].filter((v) => v !== undefined).length === 1, {
+    message: 'name the pin by one of commit_sha, bytes_sha256 or version',
+  })
 const RepinBody = z.strictObject({ ref: z.string().max(200).optional() })
+
+/** A re-pin's ref: a git ref, or else an npm version or dist-tag; the first refusal when it is neither. */
+function repinRef(raw: string): string {
+  try {
+    return validateRef(raw)
+  } catch (err) {
+    try {
+      return validateNpmVersion(raw)
+    } catch {
+      throw err
+    }
+  }
+}
 
 async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T> | string> {
   try {
@@ -119,7 +160,7 @@ async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.
 export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): void {
   const base = '/api/v1/ai/plugin-packages'
   async function store(): Promise<PackageRepo | string> {
-    if (!deps.packages) return NO_DATABASE
+    if (!deps.packages) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.packages : NOT_READY
   }
 
@@ -185,7 +226,9 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
       name: view.name,
       fetchUrl: pending.plugin_url,
       fetchPath: pending.plugin_path,
-      commit: pending.commit_sha,
+      commit: pending.commit_sha ?? '',
+      ...(pending.bytes_sha256 !== null ? { bytesSha256: pending.bytes_sha256 } : {}),
+      ...(pending.version !== null ? { version: pending.version } : {}),
       contentHash: pending.content_hash,
     }
     try {
@@ -281,7 +324,13 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     const body = await parseBody(c, ApproveBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
     try {
-      return c.json(await repo.approve(c.req.param('name'), body.commit_sha, body.content_hash, body.allow_refused ?? false))
+      const [pin, kind] =
+        body.version !== undefined
+          ? [String(body.version), 'version' as const]
+          : body.bytes_sha256 !== undefined
+            ? [body.bytes_sha256, 'bytes' as const]
+            : [body.commit_sha!, 'commit' as const]
+      return c.json(await repo.approve(c.req.param('name'), pin, body.content_hash, body.allow_refused ?? false, kind))
     } catch (err) {
       return refusal(c, err)
     }
@@ -296,7 +345,9 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (typeof body === 'string') return c.json({ detail: body }, 400)
     let ref: string | undefined
     try {
-      ref = body.ref === undefined ? undefined : validateRef(body.ref)
+      // A branch, tag or commit, or an npm version or dist-tag, checked here before anything
+      // crosses; the command's check holds it to the package's kind (source.ts `withRepinRef`).
+      ref = body.ref === undefined ? undefined : repinRef(body.ref)
     } catch (err) {
       return refusal(c, err)
     }
@@ -333,7 +384,7 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
 
 declare module '../app.js' {
   interface AppDeps {
-    /** Installed plugin packages (#297, plugins/packages/); undefined when there is no database. */
+    /** Installed plugin packages (#297, plugins/packages/); undefined when this process was not given it (tests). */
     pluginPackages?: PackageRepo | undefined
     /** Fetches and caches plugin packages; undefined disables installing. */
     packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile' | 'acquire'> | undefined

@@ -419,11 +419,14 @@ def loaded_trays(
 def _from_spool(spool: Spool | HeldSpool) -> dict[str, Any]:
     """What a picker row says of SB spool ``spool``: its effective values (its own over
     its type's) and the names behind them (`Spool.names`), with the ledger's grams, as
-    :class:`HeldSpool` keeps them."""
+    :class:`HeldSpool` keeps them. Its material and subtype go to ``sb_material`` and
+    ``sb_subtype``, which only the rack's Glow and abrasive tests read (#6876)."""
     held = HeldSpool.of(spool) if isinstance(spool, Spool) else spool
     return {
         "sb_spool_id": held.id,
         "sb_number": held.number,
+        "sb_material": held.material,
+        "sb_subtype": held.subtype,
         "brand": held.brand,
         "color_name": held.colour_name,
         "remaining_g": held.grams_left,

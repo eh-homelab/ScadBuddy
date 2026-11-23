@@ -79,3 +79,15 @@ def test_a_pool_that_cannot_start_does_not_stop_the_worker(
     monkeypatch.setattr(monty_stepper.ScriptRun, "start", cannot_spawn)
     warm_sandbox()
     assert "the flow sandbox did not warm" in caplog.text
+
+
+def test_one_flow_tool_serves_every_run_of_a_schema() -> None:
+    """#7066, #7083: the Code Mode tool is made once per inputs schema and shared, so a
+    run's first activation does not build it in the sandbox. The same schema with its keys
+    in another order is the same tool; another schema, or none, is another."""
+    schema = {"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]}
+    reordered = {"required": ["slug"], "properties": {"slug": {"type": "string"}}, "type": "object"}
+    assert run_flow_tool() is run_flow_tool()
+    assert run_flow_tool(schema) is run_flow_tool(reordered)
+    assert run_flow_tool(schema) is not run_flow_tool()
+    assert run_flow_tool(schema) is not run_flow_tool({"type": "object"})

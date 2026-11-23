@@ -4,291 +4,221 @@ These notes cover `agent/`; paths are repo-relative; the root CLAUDE.md has the 
 
 ## Database access
 
-The rule is in the root CLAUDE.md, "Database access (#5295)". Today the agent sidecar and
-the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep the
-`ai_*` tables, and run no SQL on a backend table: the gate's run grant check reads
-`flow_grants` and `flow_grant_uses` on the API (`src/gate/crudStore.ts`, area `gate`, #5299
-step 10), and the agent's other reads of backend tables (the event log, flow runs, their
-decisions and grants) go only through CRUD routes (#5299 D7, below); the API revokes its
-role's grants on `events`, `workflow_runs`, `workflow_run_decisions`, `flow_grants` and
-`flow_grant_uses` at every start
-(`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`), which binds nothing while the agent
-connects as the owner (until #5299 step 12); `test/retiredTables.test.ts` is the guard. The workspace files' `blob_refs` holds go through CRUD routes
-(#5299, below), no longer a trigger. The agent grants and revokes nothing at its start
-(#6501): the API's role owns or is the `ai_*` tables' owner, and the API revokes the retired
-roles itself (`backend/scadbuddy/auth/revoke.py`).
-Claude Code, and any plugin package approved with `allow_refused`, runs in the same pod
-as the owner URL and the KEK (`docs/ai/security.md`, "Plugin packages").
+The rule is in the root CLAUDE.md, "Database access (#5295)". The agent sidecar and the
+agent workers have no SQL client and read no KEK (#5299 step 12): no `agent/src` file
+loads `postgres` or another Postgres driver (`postgres` is a devDependency only), and every
+store is its `Crud…` client over the API's `/api/v1/internal/crud/agent/*` routes (class
+`crud.agent`, #5330). `test/retiredTables.test.ts` is the guard: it fails on a driver import
+in `src` and on SQL that names a backend table the API took back. The tests keep SQL
+implementations of the stores as test-only fakes (`test/support/sql/`, over
+`test/support/database.ts`). The API owns the `ai_*` tables, applies their migrations at its
+start (#5299 D6; root CLAUDE.md "Migrations (#491)"), and revokes the agent's old role
+`scadbuddy_agent` at every start (`backend/scadbuddy/auth/revoke.py` `RETIRED_ROLES`, PR
+#6906). eh-homelab/clusters#3965 took `SCADBUDDY_DATABASE_URL` and the KEK mount out of the sidecar
+and the agent-worker Deployment and dropped the role. Claude Code, and any plugin package
+approved with `allow_refused`, runs in the agent's container, which holds no database URL and
+no KEK; the sidecar still shares the API's pod, whose API container holds both (#5296;
+`docs/ai/security.md`, "Plugin packages").
 
-Under the rule the agent holds no database secret. Its data (sessions, transcripts,
-approvals, credentials, payload keys) goes behind CRUD routes, the cross-service reads
-become routes, and Claude Code and plugin code run where no database secret exists
-(#5299). Its 8081 routes get a service-credential guard in #5297 part 2; prod never runs
-`enforce` (the owner's decision of 2026-11-17). Never add a backend table read, a new
-`ai_*` grant or a trigger on another service's table; add a CRUD route that requires a
-service credential instead.
+`src/config.ts` ignores `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and
+`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (`IGNORED_VARS`, `config.ignored`) with one warning:
+`agent: ignores <names>: the agent has no database and no key-encryption key (#5299 step 12)`.
+Never add a backend table read, an `ai_*` grant, a trigger on another service's table or an SQL
+client here; add a CRUD route that requires a service credential instead. Its 8081 routes get a
+service-credential guard in #5297 part 2; prod never runs `enforce` (the owner's decision of
+2026-11-17). Claude Code, and any plugin package approved with `allow_refused`, still run in a
+pod that holds the `agent` credential and the Temporal client (D10; `docs/ai/security.md`,
+"Plugin packages").
 
-The agent's service credential (`src/api/serviceCredential.ts`, wired in `main.ts`): with
-`SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` (both is a `ConfigError`)
-`ExchangeCredential` exchanges that proof at the backend's `POST /api/v1/auth/service-token`
+The service credential (`src/api/serviceCredential.ts`, wired in `main.ts`) is required:
+`SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` (neither, or both, is a
+`ConfigError`). `ExchangeCredential` exchanges the proof at `POST /api/v1/auth/service-token`
 for a 15-minute credential and renews it at half-life and after a 401; it reads no view (a 404
-is a failed exchange, #6501). A failed exchange is tried again after 5 s doubling to 60 s,
-but a refused connection (the backend not up yet, `src/api/backendUp.ts` `backendNotUp`, #5868)
-is tried again at the next call and logged once as "waiting for the backend". Without a proof `ServiceCredential` reads the sealed one from
-`service_credentials_agent` over SQL, as before (#5494), until #5299 step 12 makes a proof
-required. A signed-in person's session (`src/auth/browserSession.ts`) is looked up through the
-API's `…/agent/auth-sessions/lookup` once it lists area `auth-sessions` (`CrudSessionLookup`,
-only the cookie's hash travels, at most `LOOKUPS_IN_FLIGHT` requests at once, the rest waiting their turn up to `LOOKUP_WAIT_MS`, then failing as no session), the view `auth_sessions_agent` over SQL until then. The ledger
-`ready()` waits for is read through `…/agent/migrations/ledger` once the API lists area
-`migrations` (`src/db/schema.ts` `crudLedger`), and `/healthz`'s `database` is the Postgres
-ping and, once the API lists every area, whether it answers them (`src/api/dataHealth.ts` `dataHealthOf`, `CrudAreas.answers`; the `ai` status then names the API); the ping
-stays while the agent still runs SQL, until #5299 step 12 (backend `api/crud_agent_start.py`, #6501; test `test/crudStart.test.ts`).
+is a failed exchange, #6501). A failed exchange is tried again after 5 s doubling to 60 s; a
+refused connection (`src/api/backendUp.ts` `backendNotUp`, #5868) is tried again at the next
+call and logged once as "waiting for the backend". With no token held, a backend call
+(`withServiceCredential`, `serviceCredentialMiddleware`) waits for the next exchange when it ends
+within `CREDENTIAL_WAIT_MS` (15 s, counted from the first answer; #6647), so a call can take that
+much longer in a back-off; the call's own signal ends the wait.
 
-The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
-holds of the workspace files' blobs (`workspace-blob-refs`, #5299; see the workspace under
-"Layout"), the assistant's spend on an order, and its reads of the backend's tables (#5299
-D7): area `flows` (a run's starter, its decision checks, a grant in force,
-a run's queue and steps, the waiting runs, the parent-hop approvals and which of them still
-wait: `src/flows/backendReads.ts` `CrudFlowRunReads`, used by `temporal/flowRuns.ts`,
-`flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`
-`PgApprovalRecords`), all over `src/api/crudRead.ts` `crudRead`. There is no SQL fallback:
-`test/retiredTables.test.ts` fails on agent SQL that names `events`, `workflow_runs` or
-`workflow_run_decisions`, and the Postgres tests answer the flow reads with
-`test/support/sqlFlowRunReads.ts` (the backend's queries on the test database). Its settings, Claude credentials and payload data keys (#5299 step 4, D5;
-#5342; `SECRET_AREAS`): area `settings` (`src/credentials.ts` `SettingsStore`'s `remote`,
-`CrudSettings`: a compare-and-set sends what its check read as `expect`, and the API sends the
-warm-evict and runtime NOTIFYs in the write's transaction, which reach every replica over its
-change stream),
-area `credentials` (`CrudCredentials`, `gatedCredentials`: the API seals and opens with the
-KEK, the routes and the turn's pool read the API's key through the repo's `opener`, and a turn's
-credentials come from `…/credentials/reveal`, audited per call) and area `payload-keys`
-(`src/temporal/payloadCodec.ts` `CrudPayloadKeys`, `gatedPayloadKeys`: a subject's data key,
-made under the subject's lock and never for a forgotten subject, audited as kind `payload_key`
-(a release once per subject in 10 minutes), cached 30 s here).
-None needs a KEK in this process once listed. Area `forget` (#5299 step 6, `FORGET_AREAS`;
-backend `api/crud_agent_forget.py`): `forgetSubject`'s key transaction (`src/sessions/forget.ts`
-`CrudSubjectKeys.forget`: under the subject's lock, the tombstone, a flow run's images and the
-key, a session's forks first taking their ranges of its transcript, events and images in that
-transaction, opened and sealed by the API (backend `transcripts.py` `copy_fork_ranges`, #5299 step
-9, part c); only an API with no KEK, whose forks take transcript entries, refuses it
-`forks-take-ranges`, and the agent forgets it in its own transaction, whose `copyForkRanges` opens
-and seals its transcript, unless the API also lists `forget-rows`: then the forget throws
-`ForksNeedKeys` and deletes nothing more), a browser call's key dropped and the hourly key sweep (`gatedKeyDeletes`), and a
-flow run's images (`src/temporal/flowBlobs.ts` `CrudFlowBlobs`, `gatedFlowBlobs`: sealed here,
-sent as multipart bytes, the tombstone check and the cap in the API's transaction).
-Area `workspace` (#5299 step 7, `WORKSPACE_AREAS`; backend `api/crud_agent_workspace.py`):
-the workspace files (`src/workspace/crudStore.ts` `CrudSessionFiles`, `gatedWorkspaceFiles`
-over the `WorkspaceFiles` interface `SessionFiles` also takes): the API seals, stores and opens
-each file and re-wraps principals' keys, a write's row, blob hold and `workspace.file` events
-are one transaction there (`WriteOptions.log`, `DeleteOptions.log`), and the reconcile is one
-transaction under `RECONCILE_LOCK`; this process sends and gets plaintext only.
-Areas `session-blobs`, `attachments` and `http-bodies` (#5299 step 7, `BLOB_AREAS`; backend
-`api/crud_agent_blobs.py`): a session's images and PDFs (the sessions route `src/routes/sessions.ts` serves a PDF with `Content-Disposition: attachment`; `src/sessions/crudBlobs.ts` `CrudSessionBlobs`
-behind the `SessionImages` interface; a durable tool call's images replaced whole, and a turn
-placement's write fenced by `TurnFence`, checked `FOR SHARE` in the API's transaction; a queued
-message's images deleted once it leaves the queue unrun or is refused, `…/session-blobs/deletes`,
-only what its own write made and no write stored since, #6413), the
-staged attachments (`src/attachments/crudStore.ts` `CrudAttachmentStore` behind `Attachments`)
-and the saved http_request bodies (`CrudHttpBodies`, read by range), each chosen per call by
-`gated` in `main.ts`; the bytes are multipart parts and answer bodies. A forget through the API
-copies a fork's images there (#5299 step 9, part c); `copyForkBlobs` is the agent's own forget
-transaction's.
-A session's background tasks, a Monitor's events
-and a Workflow's journal and child chats (area `background-tasks`, `src/background/store.ts`
-`BackgroundTaskStore`'s `remote`, `CrudBackgroundTasks`) and the command record `ai_operations`
-(area `operations`, `src/operations/store.ts` `CrudOperations`; the API writes the operation's
-activity row in its transaction) are #5299 step 8 (`TASK_AREAS`, backend
-`api/crud_agent_tasks.py`); their bodies go through `crudRead.ts` `wellFormed`, since the API
-refuses a lone surrogate. A session's row as the session manager reads and writes it (area
-`sessions`, `src/sessions/rows.ts` `SessionRows`: `PgSessionRows`, `CrudSessionRows`; one read of
-the whole row answers the record, a turn's claim and `poolRemainingUsd`, and an insert's owner
-limit and a fork's tombstone check run under their locks in the API's transaction) and what its
-calls touched (area `session-resources`, `src/sessions/touched.ts` `ResourceRows`) are #5299
-step 9, part a (`SESSION_AREAS`, backend `api/crud_agent_sessions.py`); a session id goes into a
-route's path only as a lowercase UUID, encoded (`rows.ts` `sessionPath`). A durable turn's writes
-of the row (area `session-turns`, #6449, `TURN_AREAS`, backend `api/crud_agent_turns.py`;
-`src/sessions/turnRows.ts` `TurnRows`: `PgTurnRows`, `CrudTurnRows`) are one route each, its
-events in its transaction and its fence checked there: a send's claim and give-back, the
-queueable read, the turn's state read (a placement's hold, a Stop's read and flag, a resend's
-check), a placement's claim (the only writer of `turn_attempt`, only while the row runs the turn),
-its spend (each write with a key of its own, sent again under that key when its answer was lost,
-so the API adds it once), the turn's end only while the row runs that turn (`durable_turn_id`; its closing events
-sent unworded and worded with the lineage's spend and budget under the row's lock) with the
-queue's head claimed in the same transaction, a head begun alone, the queue's `session.queue`
-event and its read, and the running sweep's page and its end of a lost turn (only at the
-`event_seq` it read); a turn id is sent only as a lowercase UUID. A send's claim whose answer
-was lost is read back and given back when the row still runs that turn (`durable.ts` `#claim`;
-the give-back is fenced on the turn id). An edit of a session (area
-`session-edits`, backend `api/crud_agent_edits.py`; `src/sessions/edits.ts` `EditRows`:
-`PgEditRows`, `CrudEditRows`) is one transaction on the API: under the row's lock and only while
-the principal owns it, the rename, done and archive, the warm eviction, an archive's `done`
-summaries dismissed and their events. The edit is sent untold first, and the route refuses a newly
-done session not `told` (`untold`) only after every other check passed, writing nothing; only then
-is the workflow told and the edit sent again, so a refusal, a 503 or a lost answer on the first
-call ends no workflow, and nothing is written that the workflow was not told of. A
-session's transcript (area `transcripts`, part b, backend `api/crud_agent_transcripts.py`;
-`src/sessions/store.ts` `TranscriptRows`: `PgTranscriptRows`, and `src/sessions/crudTranscripts.ts`
-`CrudTranscriptRows`) is sealed and opened by the API under the session's data key with the
-agent's AAD, so its entries travel as their JSON text; an append is one route per batch
-(`appendBatches`: at most 1000 entries and about 30 MiB), each batch its own transaction with the
-tombstone check and the turn's fence (`AppendFence`, `{ attempt, turnId }`, checked `FOR SHARE`),
-and a fork's transcript, its head, its tail check (`moved`) and whether a user entry landed are
-each one read in one snapshot on the API. `PostgresSessionStore` keeps the per-session append order
-over either. A session's event log (area `session-events`, part b, backend
-`api/crud_agent_events.py`; `src/sessions/eventLog.ts` `EventRows`: `PgEventRows`, and
-`src/sessions/crudEvents.ts` `CrudEventRows`): an append, a turn's append fenced on its
-placement (`appendFenced`, `FOR UPDATE` in its transaction), the reads (a fork's through its chain
-in one snapshot, an inherited event addressed to the session here), a flow's turn reader
-(`turnEvents`) and a new fork's log (`forkLog`, under the parent's payload-key lock, shared).
-`EventLog` keeps its followers, wakes and 1 s polls (D4) over either. An append in a caller's own
-transaction (`PgTurnRows`, `PgEditRows`, and, until the API lists their areas, the workspace,
-approvals and the gate) stays `appendEventsIn` on SQL until that caller's area is listed.
-These seventeen have a
-rolling-deploy fallback:
-`src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start with back-off
-(1 s doubling to 30 s) until every one is listed, and until then each stays on SQL, for an API
-pod older than the routes. The small stores (#5299 step 5, `src/api/crudStores.ts`
-`STORE_AREAS`, backend `api/crud_agent_stores.py` and `api/crud_agent_notify.py`) take the same
-fallback, chosen per call by `gated` (a store's SQL class until its area is listed, its `Crud…`
-class after): area `activity-kinds` (`activity/kinds.ts` `crudUpsertActivityKinds`),
-`browser-origins` (`browser/store.ts` `BrowserOrigins`'s `remote`, `CrudSessionOrigins`),
-`bridge-tabs` (`CrudSessionTabStore`, `CrudTabOwnerStore`, `CrudTabImageStore`: an image's bytes
-are the body either way, `crudCall`), `pairings` (`CrudPairingStore`: only the code's hash
-leaves this process; the API holds the advisory lock and the `FOR UPDATE`), `mcp-tokens`
-(`CrudTokenStore`: a mint and a verify send the token's hash only, expiry by the database's
-clock) and `notify` (`notify/pushStore.ts` `CrudPushStore`, `notify/channels.ts`
-`CrudChannelRows` through `ChannelStore`'s `remote`: the API seals and opens the VAPID key,
-the subscriptions' keys and the channels' tokens, and re-wraps them at a rotation). With no
-KEK here Web Push and the channels work once `notify` is listed (`available`); the test is
-`test/crudStores.test.ts`. The plugin stores take the same fallback (#5299 step 5, backend
-`api/crud_agent_access.py`, `api/crud_agent_plugins.py`, `api/crud_agent_packages.py`): area
-`access` (`access/store.ts` `AccessStore`'s `remote`, `CrudAccessRows`: the model is checked
-and the audit row written here, the API runs the write with its warm eviction; and
-`access/listings.ts` `ToolListings`'s `remote`, `CrudToolListings`: a connection test holds
-the lease `tool-listing:<source>` on the API, `api/crudStores.ts` `CrudLeases`, renewed every
-30 s, in place of the session advisory lock, and its listing is stored only while the lease
-holds, else 409 `lease-lost`), `plugin-sessions` (`plugins/pluginSessions.ts`
-`CrudPluginSessions`, a `PluginSessionRows`, the sweep's ledger too), `plugins`
-(`plugins/registry.ts` `CrudPluginStore`, `plugins/oauthStore.ts` `PluginOAuth`'s `remote`,
-`CrudOAuthRows`: the API seals and opens the header secrets and the sign-ins with its KEK,
-and a token refresh holds the lease `plugin-oauth:<plugin>`) and `plugin-packages`
-(`plugins/packages/store.ts` `CrudPackageStore`: the API runs each write with its prune and
-warm eviction). With no KEK here the plugins and their sign-ins work once `plugins` is listed;
-the tests are `test/crudAccess.test.ts`, `test/crudPlugins.test.ts` and
-`test/crudPackages.test.ts`. During a roll an agent pod on SQL still takes the old advisory
-lock, and the API's lease acquire tries that lock too, so a lease is `busy` while such a pod
-tests the plugin; such a pod does not read the lease, so it can start a test while a lease
-holds (two tests of one plugin at once, the last listing kept; backend `agent_data/leases.py`). The tool-call gate's writes (#5299 step 10, `GATE_AREAS`,
-backend `api/crud_agent_gate.py`) take the same fallback: `src/gate/store.ts`'s `openInput`,
-`resolveInput`, `denyInput`, `decideInput` and `readInput` call `src/gate/crudStore.ts`
-`CrudGate` once the API lists area `gate` (`GateDb.useCrud`), and their SQL until then; the API
-builds the session events, writes them with the rows, the status, the audit row and the
-`scadbuddy_input` NOTIFY in one transaction, and answers them (`logged`), which the store hands
-to `EventLog.committed`. `decideInput` runs the validator on the API; with `live` the API first
-answers the row's run (`live_check`), writing nothing, and the store asks Temporal, then asks
-again naming the run it found; it sends its hash of the response as the person sent it, as a
-resolve does (#3724). `grantInput` always calls the API (no SQL fallback: it reads the
-backend's `flow_grants`); an API with no such route yet (an agent that rolled first) answers no
-grant, so the call parks for a person. A request id goes in the body or the query, never the path, and one
-over `REQUEST_ID_MAX` is answered as never asked with no call. Tests `test/crudGate.test.ts` and
-`test/gateBackend.pg.test.ts` (the API's port writes the same rows and events as the SQL; it
-runs `backend/` with `uv`, as the agent-durable parity test does). Area `pending-input`
-(backend `api/crud_agent_pending.py`, `src/gate/crudPending.ts` `CrudPending`) takes the rest of
-the gate's SQL on `ai_pending_input` and `ai_input_responses` the same way: `PendingProjection`'s
-reads (`SessionManager.projection` is `gated`), the orphan sweep and a Stop's cancels
-(`cancelOrphanedEntries` with `routes`; each entry one transaction on the API, an approval's
-audit row in it), `TurnHost`'s held-call read and its parked call's span mark (fenced on the API:
-it lands only while the turn's `turn_attempt` and `durable_turn_id` hold the session, read `FOR
-SHARE` in the mark's transaction), and `PgApprovalRecords`' approval read. Test
-`test/crudPending.test.ts`. Area `audit` (backend `api/crud_agent_audit.py`,
-`src/audit/crudAudit.ts`) takes `AuditLog`'s write, list and prune; a write the API refuses or
-never answers goes to `onError`, as a failed SQL write did. Test `test/crudAudit.test.ts`. Area
-`approvals` (backend `api/crud_agent_approvals.py`, `src/approvals/crudApprovals.ts`) takes
-`ApprovalService`'s SQL; its access checks run here first, as before. A decision on the API
-carries the span started here from the row as read (a decision that loses never ends it, so
-never exports it), and its audit row is written in the decision's transaction, not by `AuditLog`.
-Test `test/crudApprovals.test.ts`. Area `questions` (backend `api/crud_agent_questions.py`,
-`src/gate/crudQuestions.ts`) takes `QuestionService`'s SQL: the reads, a summary's dismissal (its
-events and audit row in one transaction on the API), the attention count (read only while this
-process holds the lease `attention-rate`, which the API grants only while no SQL-path pod holds
-`ATTENTION_RATE_LOCK`; a busy lease is tried again until the rate lock's wait, and a lost lease,
-a busy one past the wait or an API error refuses the request, never lets it through; the lease
-is taken for 15 s, so a holder that dies blocks the limit no longer; an SQL-path pod does not read
-the lease, so during a roll it can count while a lease holds), and a turn's
-`done` post: the facts are read through the API, the summary is written here with the turn's
-secrets redacted, and the post lands only while the turn's `turn_attempt` and `durable_turn_id`
-hold the session, with its cap, the summaries it replaces, its events and its audit rows in one
-transaction. Test `test/crudQuestions.test.ts`. Area `escalations` (backend
-`api/crud_agent_escalations.py`, `src/flows/crudEscalations.ts`) takes `Escalations`' SQL on
-`ai_pending_input` and `ai_escalation_deliveries` and `FlowQueue.forRun`'s read of a run's child
-entries; who may answer is still checked here first, and every write of an answer or a delivery
-names the parent session again (the hop's timeout sweep and the record of a run's own calls sent
-name none). A delivery's claim is committed on the API before its turn starts, and handed back
-(`unclaim`) when the turn does not start; a process that dies between the two leaves the calls
-marked sent, and each still reaches the person when its hop ends. The parent's owner is read
-from the `sessions` area's row, and the child's reasoning through area `session-reads` (#6501).
-Test `test/crudEscalations.test.ts`. The NOTIFYs sent outside a store's write (#6501, backend
-`api/crud_agent_publish.py`, `src/sessions/publish.ts` `Publisher`: `PgPublisher`,
-`CrudPublisher`) go through area `publish`: a `session.*` bus event (`SessionEventPublisher`)
-and a warm eviction (a handoff's), which the API NOTIFYs on the same channels. A session's open
-calls (a restarted turn's finished calls, a forget's terminations) and a child's reasoning
-before a call go through area `session-reads` (`src/sessions/sessionReads.ts`
-`PgSessionReads`, `CrudSessionReads`), and a session's owner as a tool call
-(`toolActivities.ts` `RowSessionOwners`), a flow run's call (`flowRuns.ts`, `flowSessions.ts`)
-and an escalation read it, from the `sessions` area's row (`SessionRows.get`). Test
-`test/crudPublish.test.ts`. Which sessions still have a row, for each pod's directory sweeps
-(`temporal/turnServers.ts` `sweepTurnDirs`, `workspace/directory.ts` `SessionDirectory`), goes
-through area `session-sweeps` (#6501, backend `api/crud_agent_sweeps.py`, `src/sessions/presence.ts`
-`SessionPresence`: `PgSessionPresence`, `CrudSessionPresence`, in pages of `LIVE_IDS_MAX`); a read
-that fails throws, so a sweep removes nothing it could not check. A forget's last step (its
-transcript rows and session row, then its unnamed workspace bytes and the warm eviction) goes
-through area `forget-rows` (`forget.ts` `CrudForgetRows`, refused 409 `not-forgotten` for a session
-with no tombstone), and its background tasks through `BackgroundTaskStore`. The transcript sealing
-backfill (`sealBackfill`) and the `recover-durable-sessions` CLI are gone (#6501): prod had no
-plaintext transcript row and one `durable` session row, archived (measured 2026-11-16 with `psql`
-on `scadbuddy-db-1`, deploy/CLAUDE.md "Prod checks"). Test `test/crudSweeps.test.ts`. Area `mcp-relay` (#5299 step 11, `RELAY_AREAS`, backend
-`api/crud_agent_mcp.py`, `src/mcp/relayRows.ts` `CrudRelayRows` behind `RelayRows`, which
-`SharedMcpSessionRelay` takes) takes the /mcp session relay's directory (`ai_mcp_sessions`) and
-messages (`ai_mcp_relay_messages`): a session hash, a replica, a request and a row id travel in the
-body only, and a message's row and its `scadbuddy_mcp` NOTIFY commit in one transaction on the API.
-`test/mcpSessions.pg.test.ts` runs every relay case over both `PgRelayRows` and `CrudRelayRows`.
-Area `changes` (#5299 D4, step 11, backend `api/crud_agent_changes.py` and `agent_changes/hub.py`):
-`src/events/changeStream.ts` `ChangeStream` is the agent's one source of NOTIFYs, a server-sent
-event stream `GET …/agent/changes` opened with the service credential, which carries the six
-channels (`scadbuddy_events`, `_input`, `_pending`, `_mcp`, `_warm_evict`, `_settings`) in the
-order the API's one LISTEN connection heard them. The agent opens no LISTEN connection. A dropped
-stream is opened again with back-off and `Last-Event-ID`; the API replays its `events` log after
-it, or says `resync`, and the stream then runs `onReconnect` so what had no log row is re-read.
-It needs no area wait: a stream an older API pod does not serve is retried, and the 1 s polls
-(`sessions/eventLog.ts` followers, `sessions/turnHost.ts` held calls) cover it meanwhile (D4). The
-Postgres tests hear their own NOTIFYs through `test/support/pgListener.ts`, a LISTEN stand-in for
-the stream; `test/changeStream.test.ts` tests the client against a fake API.
-A route's
-answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
-error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
-`_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
-`OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
-(`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
-turn) reports the session's `cost_usd` since its last report, split equally between its
-orders still to report, to `POST …/crud/agent/orders/{id}/assistant-cost` (5 s each, 15 s
-for the turn's reports in all, one report per session at a time across replicas, by an
-advisory lock on a `database.locks` connection, never the stores' pool, and none while every
-lock connection is out; once the API lists area `session-order-costs` (#5299 step 9, part c,
-`OrderCostRows`: `PgOrderCostRows`, `CrudOrderCostRows`, backend `api/crud_agent_order_costs.py`)
-the rows go through its routes and the lock is a lease row, `order-cost:<session id>`, renewed
-while the report runs, each of the report's writes refused `lease-lost` once its token no
-longer holds it; `sweep` at start and hourly reports what a session's last turn left,
-20 sessions at most, the ones tried longest ago, `tried_at`, first; a share under one minor
-unit is closed out with nothing carried once its session is over: `done`, `failed`, or `idle`
-with no session activity, `updated_at`, for an hour, `IDLE_OVER_AFTER`; if it works again,
-that spend folds into its next turn's share, split equally across the orders that turn revises). `record` waits at most `RECORD_WAIT_MS` for its row (#1076). Only the
-route's own 400 or 422 (a path or body it cannot take), 404 (the order gone: an item gone
-falls back to the order) or 409 (a currency no rate reaches, a visitor's unsubmitted cart) drops
-that order's report, its share in no entry. Anything else (401 or 403 while there
-is no live credential, 429, a 5xx, a transport failure, a non-CRUD answer) keeps it with the
-share it sent (`attempted_usd`), sent again as it was at the next turn's end, so a lost
-answer loses no spend; an answer with no entry (under one minor unit) or the deadline keeps
-it too.
+Readiness: `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start
+(back-off 1 s doubling to 30 s) until every wanted area is listed, and until then the agent is
+not ready: `/mcp` and the data routes answer 503. It is not ready either until the API has
+released the input-hash key (`InputHashKey.isReleased`, `dataHealthOf`'s `keyReleased`), but only
+`/mcp`, health, the workers and the pending-input respond (an answer is audited with its hash,
+503 with `retry`; the chat socket's `question.answer` gets an `unavailable` error to send again,
+`routes/chat.ts` `errorEvent`) wait for the key, not the other data routes (`AgentData.areasReady`,
+`routes/module.ts` `ready`), so Settings still answers on an API with no KEK: a tool
+call hashes its input for the audit log after it ran, so no Temporal worker polls before then
+(`AgentWorker`'s `before`), the worker's `/readyz` names the missing areas or the key, and `ai` says
+`unavailable (waiting for the API's input-hash key)` once the API holds its KEK. `/healthz`'s `database` is `ok` once the API
+lists and answers the areas (`src/api/dataHealth.ts` `dataHealthOf`, `CrudAreas.answers`),
+else `unreachable`, and `ai` then says `unavailable (the API does not answer the agent's CRUD
+areas)` (`src/aiStatus.ts`). There is no migration wait: the tests' ledger wait is
+`test/support/schema.ts`, and their file list `test/support/expected-migrations.json`. Backend
+`api/crud_agent_start.py` (#6501; test `test/crudStart.test.ts`) serves area `auth-sessions`.
+A route's answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's
+error path (a lookup failure the activity retries, a 500, a resync). A GET, or a call marked
+`idempotent`, whose connection drops (`crudRead.ts` `TRANSIENT_KINDS`, not a refusal, which its caller
+waits out) is sent again after `RETRY_DELAYS_MS`; a write never is. A turn that still fails on one is placed again
+(`BackendUnreachable`, #6994). Each area, its client
+and its backend module:
+
+- `auth-sessions`: a signed-in person's session (`src/auth/browserSession.ts`,
+  `CrudSessionLookup`; only the cookie's hash travels, at most `LOOKUPS_IN_FLIGHT` at once, the
+  rest waiting up to `LOOKUP_WAIT_MS`, then failing as no session).
+- `keys` (backend `api/crud_agent_keys.py`): the approvals' input-hash key (`GET …/agent/keys/input-hash`,
+  `src/api/agentKeys.ts` `InputHashKey`) and the one-off fetch grants (`POST …/agent/fetch-grants`,
+  `CrudFetchGrants`). Both keys are derived from the API's KEK. The input-hash key is
+  released once and kept for the process's life (every replica hashes with one key); the
+  grants' key stays on the API.
+- `flows` (#5299 D7, `api/crud_agent.py`): a run's starter, its decision checks, a grant in force, a run's queue and
+  steps, the waiting runs and the parent-hop approvals (`src/flows/backendReads.ts`
+  `CrudFlowRunReads` over `src/api/crudRead.ts` `crudRead`, used by `temporal/flowRuns.ts`,
+  `flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`). The API revokes
+  everything the agent's old role `scadbuddy_agent` held, these tables among it, at every
+  start (`revoke.py` `RETIRED_ROLES`).
+- `settings`, `credentials`, `payload-keys` (#5299 step 4, D5, #5342; `SECRET_AREAS`):
+  `CrudSettings` (a compare-and-set sends what its check read as `expect`; the API sends the
+  warm-evict and runtime NOTIFYs in the write's transaction); `CrudCredentials` (the API seals
+  and opens with its KEK, the routes and the turn's pool read its key through the repo's
+  `opener`, and a turn's credentials come from `…/credentials/reveal`, audited per call);
+  `src/temporal/payloadCodec.ts` `CrudPayloadKeys` (a subject's data key, made under the
+  subject's lock and never for a forgotten subject, audited as kind `payload_key` once per
+  subject in 10 minutes, cached 30 s here).
+- `forget` (#5299 step 6, `api/crud_agent_forget.py`): `src/sessions/forget.ts`
+  `CrudSubjectKeys.forget` (under the subject's lock, the tombstone, a flow run's images and the
+  key, a session's forks first taking their ranges of its transcript, events and images,
+  backend `transcripts.py` `copy_fork_ranges`; an API with no KEK whose forks take transcript
+  entries refuses it `forks-take-ranges`, and the forget throws `ForksNeedKeys` and deletes
+  nothing more), a browser call's key and the hourly key sweep, and a flow run's images
+  (`src/temporal/flowBlobs.ts` `CrudFlowBlobs`, multipart bytes; the tombstone check and the
+  cap in the API's transaction).
+- `workspace` (#5299 step 7, `api/crud_agent_workspace.py`): `src/workspace/crudStore.ts`
+  `CrudSessionFiles`. The API seals, stores and opens each file and re-wraps principals' keys;
+  a write's row, blob hold and `workspace.file` events are one transaction there, and the
+  reconcile one transaction under `RECONCILE_LOCK`. This process sends and gets plaintext only.
+- `session-blobs`, `attachments`, `http-bodies` (#5299 step 7, `api/crud_agent_blobs.py`):
+  a session's images and PDFs (`src/sessions/crudBlobs.ts` `CrudSessionBlobs`; the sessions
+  route serves a PDF with `Content-Disposition: attachment`; a durable tool call's images
+  replaced whole; a placement's write fenced by `TurnFence`, checked `FOR SHARE`; a queued
+  message's images deleted once it leaves the queue unrun or is refused, only what its own
+  write made, #6413), the staged attachments (`CrudAttachmentStore`) and the saved
+  http_request bodies (`CrudHttpBodies`, read by range). Bytes are multipart parts and answer
+  bodies.
+- `background-tasks`, `operations` (#5299 step 8, `api/crud_agent_tasks.py`):
+  `CrudBackgroundTasks` (tasks, a Monitor's events, a Workflow's journal and child chats) and
+  `CrudOperations` (`ai_operations`; the API writes the activity row in its transaction).
+  Bodies go through `crudRead.ts` `wellFormed`: the API refuses a lone surrogate.
+- `sessions`, `session-resources`, `transcripts`, `session-events`, `session-order-costs`
+  (#5299 step 9, `api/crud_agent_sessions.py`, `_transcripts.py`, `_events.py`,
+  `_order_costs.py`): `CrudSessionRows` (one read of the row answers the record, a turn's claim
+  and `poolRemainingUsd`; an insert's owner limit and a fork's tombstone check run under their
+  locks), `CrudResourceRows`, `src/sessions/crudTranscripts.ts` `CrudTranscriptRows` (sealed and
+  opened by the API under the session's data key with the agent's AAD, so entries travel as
+  JSON text; an append is one route per batch, `appendBatches`, at most 1000 entries and about
+  30 MiB, with the tombstone check and the fence `AppendFence` `{ attempt, turnId }`; a fork's
+  transcript, head, tail check `moved` and user-entry check are one snapshot each),
+  `src/sessions/crudEvents.ts` `CrudEventRows` (an append; a turn's append fenced on its
+  placement, `appendFenced`; the reads, a fork's through its chain in one snapshot; `turnEvents`;
+  `forkLog` under the parent's payload-key lock). `TranscriptStore` (`src/sessions/store.ts`) keeps the per-session
+  append order and `EventLog` its followers, wakes and 1 s polls (D4). A session id goes into a
+  path only as a lowercase UUID, encoded (`rows.ts` `sessionPath`).
+- `session-turns`, `session-edits` (#6449, `api/crud_agent_turns.py`, `_edits.py`):
+  `CrudTurnRows` is one route per write, its events in its transaction and its fence checked
+  there: a send's claim and give-back, the queueable read, the turn's state read, a
+  placement's claim (the only writer of `turn_attempt`), its spend (each write under a key of
+  its own, sent again under that key when its answer was lost), the turn's end only while the
+  row runs that turn (`durable_turn_id`) with the queue's head claimed in the same
+  transaction, and the running sweep. A lost claim's answer is read back and given back
+  (`durable.ts` `#claim`). `CrudEditRows`: under the row's lock and only while the principal
+  owns it, the rename, done and archive, the warm eviction, an archive's `done` summaries; the
+  edit is sent untold first, and a newly done session not `told` is refused `untold` only
+  after every other check passed, so a refusal, a 503 or a lost answer ends no workflow. An
+  archive is not told first: once it is written, its workflow is sent `end`, best-effort
+  (#7031), and the first send after an unarchive starts a new run (`durable.ts`,
+  `ALLOW_DUPLICATE`).
+- `gate`, `pending-input`, `audit`, `approvals`, `questions`, `escalations` (#5299 step 10,
+  `GATE_AREAS`, `api/crud_agent_gate.py` and siblings): `src/gate/crudStore.ts` `CrudGate`
+  (`openInput`, `resolveInput`, `denyInput`, `decideInput`, `readInput`, `grantInput`; the API
+  writes the rows, events, status, audit row and `scadbuddy_input` NOTIFY in one transaction
+  and answers the events, `logged`; `decideInput` runs the validator there, and with `live` the
+  API first answers the row's run, the store asks Temporal, then asks again naming it; a
+  request id goes in the body or the query, never the path); `src/gate/crudPending.ts`
+  `CrudPending` (the projection's reads, the orphan sweep, a Stop's cancels, `TurnHost`'s
+  held-call read and span mark, fenced on `turn_attempt` and `durable_turn_id`);
+  `src/audit/crudAudit.ts` (a refused or unanswered write goes to `onError`);
+  `src/approvals/crudApprovals.ts` (access checks here first; the decision's audit row in its
+  transaction); `src/gate/crudQuestions.ts` (the attention count only while this process holds
+  the lease `attention-rate`, 15 s, refused on a lost lease or an API error; a turn's `done`
+  post lands only while the turn holds the session, with its cap, events and audit rows in one
+  transaction); `src/flows/crudEscalations.ts` (who may answer is checked here; a delivery's
+  claim is committed before its turn starts and handed back, `unclaim`, when it does not).
+- `publish`, `session-reads` (#6501, `api/crud_agent_publish.py`): `CrudPublisher` (a
+  `session.*` bus event, a handoff's warm eviction) and `CrudSessionReads` (a session's open
+  calls, a child's reasoning).
+- `session-sweeps`, `forget-rows` (#6501, `api/crud_agent_sweeps.py`):
+  `src/sessions/presence.ts` `CrudSessionPresence` (pages of `LIVE_IDS_MAX`; a failed read
+  throws, so a sweep removes nothing it could not check) and `forget.ts` `CrudForgetRows`
+  (refused 409 `not-forgotten` with no tombstone).
+- The small stores (#5299 step 5, `src/api/crudStores.ts` `STORE_AREAS`,
+  `api/crud_agent_stores.py`, `_notify.py`): `activity-kinds`, `browser-origins`
+  (`CrudSessionOrigins`), `bridge-tabs` (`CrudSessionTabStore`, `CrudTabOwnerStore`,
+  `CrudTabImageStore`), `pairings` (only the code's hash leaves this process), `mcp-tokens`
+  (a mint and a verify send the hash only) and `notify` (`CrudPushStore`, `CrudChannelRows`: the
+  API seals and opens the VAPID key, the subscriptions' keys and the channels' tokens). Test
+  `test/crudStores.test.ts`.
+- The plugin stores (#5299 step 5, `api/crud_agent_access.py`, `_plugins.py`, `_packages.py`):
+  `access` (`CrudAccessRows`; `CrudToolListings`, whose connection test holds the lease
+  `tool-listing:<source>`, `crudStores.ts` `CrudLeases`, renewed every 30 s, and stores its
+  listing only while the lease holds, else 409 `lease-lost`), `plugin-sessions`, `plugins`
+  (`CrudPluginStore`, `CrudOAuthRows`: the API seals and opens the header secrets and the
+  sign-ins; a refresh holds the lease `plugin-oauth:<plugin>`) and `plugin-packages`;
+  `plugin-feeds` and `hosted-plugins` (`src/plugins/feed.ts` `CrudPluginFeeds`, #6933): a
+  marketplace feed's packages and a hosted version's zip, which `src/routes/pluginFeeds.ts`
+  serves to outside Claude Code at `/api/v1/ai/plugin-feeds/{feed}/marketplace.json` and
+  `…/plugins/{name}/versions/{N}/{zip_sha256}.zip` behind /mcp's gates and auth (`mcpAuthResolver`,
+  `mcpTransportProblem`, `authenticate`), only approved pins, each zip URL on the origin the
+  `marketplace.json` request came on (`effectiveRequest`; Claude Code sends the marketplace's
+  `headers` only to that origin), a zip request reading only its own package;
+  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read (its `marketplace_url` is on the request's origin too); the feed is LAN-only like /mcp, with no public prefix on the SSO host (clusters#4017). #6936: a commit pin of any source
+  (a bare `marketplace.json` URL's git entry too) is listed with its `sha`; a bytes pin (archive,
+  npm) as an `archive` at `…/plugins/{name}/archives/{sha256}.zip` (the served zip's sha256),
+  served from its mirror (`package-mirrors`): a zip pin as its exact bytes, a tarball as a
+  stored zip of its approved files under the plugin root (`plugins/packages/zip.ts`, the same
+  bytes on every replica). `ArchiveMaker` keeps each digest and the last zips (64 MiB) per
+  process, runs at most `ARCHIVE_BUILDS_AT_ONCE` (3) mirror reads at once for feed reads and
+  downloads, and keeps a failed one for `ARCHIVE_FAILURE_KEPT_MS` (60 s, the feed's `max-age`;
+  a missing mirror is not kept); `PUT`/`DELETE …/{feed}/packages/{name}` are Settings' UI-only
+  writes, 503 `not-served` while the API does not serve them yet (a rolling deploy).
+- `mcp-relay` (#5299 step 11, `api/crud_agent_mcp.py`): `src/mcp/relayRows.ts` `CrudRelayRows`
+  (the /mcp session directory and messages; a message's row and its `scadbuddy_mcp` NOTIFY
+  commit in one transaction). `test/mcpSessions.pg.test.ts` runs the relay against the
+  backend's port.
+- `changes` (#5299 D4, `api/crud_agent_changes.py`, `agent_changes/hub.py`):
+  `src/events/changeStream.ts` `ChangeStream`, the agent's one source of NOTIFYs, a server-sent
+  event stream `GET …/agent/changes` carrying the six channels (`scadbuddy_events`, `_input`,
+  `_pending`, `_mcp`, `_warm_evict`, `_settings`). A dropped stream is opened again with
+  back-off and `Last-Event-ID`; the API replays its `events` log after it, or says `resync`,
+  and `onReconnect` re-reads what had no log row. It needs no area wait: the 1 s polls cover a
+  gap (D4). Tests hear their own NOTIFYs through `test/support/pgListener.ts`.
+
+A session's successful `order_item_revision_add` (or `_after_acceptance`) is a
+`session-order-costs` row (`src/sessions/orderCosts.ts` `OrderCosts`, a `TouchedSink` beside
+`SessionResources`); each turn's end (`temporal/session/finishActivity.ts`, a retry too, not
+awaited) reports the session's `cost_usd` since its last report, split equally between its
+orders still to report, to `POST …/crud/agent/orders/{id}/assistant-cost` (5 s each, 15 s in
+all), one report per session at a time across replicas under the lease
+`order-cost:<session id>`, renewed while the report runs; each write is refused `lease-lost`
+once its token no longer holds it. `sweep` at start and hourly reports what a session's last
+turn left, 20 sessions at most, oldest `tried_at` first; a share under one minor unit is
+closed out with nothing carried once its session is over (`done`, `failed`, or `idle` with no
+activity for `IDLE_OVER_AFTER`, an hour). `record` waits at most `RECORD_WAIT_MS` (#1076).
+Only the route's own 400 or 422, 404 (the order gone) or 409 (no rate reaches the currency, a
+visitor's unsubmitted cart), or an order id of `.` or `..` (refused before it is sent, #7221)
+drops that order's report. Anything else (401 or 403 with no live
+credential, 429, a 5xx, a transport failure, a non-CRUD answer) keeps it with the share it
+sent (`attempted_usd`), sent again at the next turn's end, so a lost answer loses no spend.
 
 ## Commands
 
@@ -344,13 +274,13 @@ opens every one and seals it again byte for byte).
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container of the API pod (role
   `api`) and as the `scadbuddy-agent-worker` Deployment (role `worker`, clusters#3014). `src/config.ts`
-  reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
-  `SCADBUDDY_BACKEND_URL`, `SCADBUDDY_SECRET_KEY_FILE`,
-  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation), `SCADBUDDY_PUBLIC_URL` (the same
-  variable the backend reads; the one origin allowed to write),
-  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed) and the
-  backend's `SCADBUDDY_TEMPORAL_ADDRESS`, `_NAMESPACE` and `_SEARCH_ATTRIBUTES`. No AI
-  env vars; AI settings live in the database.
+  reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_BACKEND_URL`, the
+  service-credential proof (`SCADBUDDY_SERVICE_TOKEN_FILE` or `_BOOTSTRAP_FILE`, required),
+  `SCADBUDDY_PUBLIC_URL` (the same variable the backend reads; the one origin allowed to
+  write), `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed) and
+  the backend's `SCADBUDDY_TEMPORAL_ADDRESS`, `_NAMESPACE` and `_SEARCH_ATTRIBUTES`; it
+  ignores `IGNORED_VARS` with a warning ("Database access"). No AI env vars; AI settings
+  are the API's, through area `settings`.
   `SCADBUDDY_AGENT_ROLE` (#2726 Step 6.1; `all` by default, `api`, `worker`) picks what
   `main.ts` starts (`src/runtime/role.ts` `roleParts`): `api` is the HTTP half and polls
   only its own `agent-tools.<hostname>` (browser calls for its tabs), so it runs no
@@ -464,27 +394,16 @@ opens every one and seals it again byte for byte).
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
-  - Database: the agent owns the `ai_*` tables (today's state; #5295 moves them behind
-    CRUD routes and takes the agent's database secret away, #5299). The agent does not
-    migrate them: the API applies their files at its start (root CLAUDE.md "Migrations
-    (#491)", #5299 D6), and `ready()` (`src/db.ts`) is true once `ai_migrations` holds
-    every file in `src/db/expected-migrations.json` (`src/db/schema.ts` `awaitMigrations`;
-    one read a call, so a route that asks fails fast; a row with other SQL than listed is
-    `MigrationChecksumError`, and `main.ts` exits on it). Work a process does once at start
-    waits for `untilReady()`, which calls `ready()` again 1 s apart, doubling to 30 s,
-    until it is true, so an API that migrates late drops none of it; the agent logs
-    `waiting for the API to apply the agent's database migrations` once a wait; meanwhile
-    `/healthz` says `unavailable (waiting for the API to apply the database migrations)`
-    (`waitingForMigrations`). The
-    tests make their schemas with the agent's old runner, `test/support/migrations.ts`
-    (`test/support/postgres.ts` `migrateSchema`, the `schema` option of
-    `connectDatabase`), and `test/schema.test.ts` checks the list against both runners. Secrets are
-    envelope-encrypted with `src/secrets.ts` under the KEK in
-    `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
-    value to its row and to the columns that say where it is sent (for the credential:
-    `kind` and `base_url`). Comparable tokens are stored hashed instead.
-  - Temporal (#1055, spec 2026-10-01 §6.3): with `SCADBUDDY_TEMPORAL_ADDRESS` (and the
-    database) `src/temporal/worker.ts` runs one worker on `agent-tools`, a version of
+  - Data: the agent has no database ("Database access" above); the API owns the `ai_*`
+    tables and applies their migrations (#5299 D6). The tests make their schemas with
+    `test/support/migrations.ts` (`test/support/postgres.ts` `migrateSchema`), and
+    `test/schema.test.ts` checks the list against the API's runner. Secrets are
+    envelope-encrypted by the API under its KEK; `src/secrets.ts` keeps the format the
+    vectors pin (`test/fixtures/secret-vectors.json`); the AAD binds each value to its row and
+    to the columns that say where it is sent (for the credential: `kind` and `base_url`).
+    Comparable tokens are stored hashed instead.
+  - Temporal (#1055, spec 2026-10-01 §6.3): with `SCADBUDDY_TEMPORAL_ADDRESS`
+    `src/temporal/worker.ts` runs one worker on `agent-tools`, a version of
     `scadbuddy-agent` with `agent-sessions` when the build has an id (#2726 Phase 11; the
     host queues stay unversioned, `agent/test/temporal.versioning.temporal.test.ts`):
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
@@ -503,8 +422,7 @@ opens every one and seals it again byte for byte).
     state lives on the pod, `http_request` and the browser, is `pinned`: its calls run on
     `agent-tools.<hostname>`, which each agent also polls); and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
-    the agent's commands, recorded in `ai_operations` (`src/operations/`; through the API's CRUD
-    routes once it lists area `operations`, #5299 step 8). A change to
+    the agent's commands, recorded in `ai_operations` (`src/operations/`, area `operations`, #5299 step 8). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
     replays. Temporal tests (`test/*temporal*.test.ts`)
     skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
@@ -527,24 +445,24 @@ opens every one and seals it again byte for byte).
     sent on the chat socket (`routes/chat.ts` `sentToPanel`).
   - Durable payloads (#1056 phase 5c, spec §6.5): `src/temporal/payloadCodec.ts` seals
     every payload of a `session-<uuid>` / `flow-<uuid>` workflow under that subject's
-    data key (`ai_payload_keys`, sealed under the KEK; the API re-wraps them at its start on
-    rotation). The agent-tools worker and the service's Temporal client carry it; once the
-    API lists area `payload-keys` the API releases each key (`CrudPayloadKeys`, #5299 step 4,
-    #5342), so no KEK is needed here, and until then it opens them with its own
-    (`gatedPayloadKeys`; with neither, a call that needs one is `PayloadKeyUnavailable`). `src/sessions/forget.ts` `forgetSubject` (key row, then the workflow, then
-    the rows; the key row through the API once it lists area `forget`, above) is the one way a durable subject is deleted; operators run
+    data key (`ai_payload_keys`, sealed under the API's KEK, which re-wraps them at its start
+    on rotation). The agent-tools worker and the service's Temporal client carry it; the API
+    releases each key (`CrudPayloadKeys`, area `payload-keys`, #5299 step 4, #5342); a call
+    whose key the API does not release is `PayloadKeyUnavailable`. `src/sessions/forget.ts`
+    `forgetSubject` (key row, then the workflow, then the rows, all through the API, above) is
+    the one way a durable subject is deleted; operators run
     `node dist/forget-subject.js session-<uuid>`. A fork reads its parent's transcript
-    through the cut (`ai_sessions.fork_parent_id`, `fork_cut`; `src/sessions/store.ts`,
-    plan Step 6.5), and its event log and images through `fork_event_cut` (#4212:
-    `src/sessions/eventLog.ts` `read`, `blobs.ts` `get`; its own `session.started` is seq 1,
-    its own later events come after the cut), so forgetting a parent first copies each fork's
-    range into it, the transcript under the fork's key (`copyForkRanges`, `inherited` rows),
-    and refuses without the KEK when a fork takes transcript entries (`fork_cut` above 0; a
-    fork of a closed DurableSession takes none). Every read through the fork chain stops at
-    the least cut below each ancestor (`LEAST(bound, cut)`: `eventLog.ts` `forkChain`,
-    `store.ts` `chainRows`, `blobs.ts` `getThroughChain`); a new chain read must do the same.
-    When it is made, a fork copies none of its parent's transcript, event or image rows; its workspace file rows
-    are copied, naming the same bytes (`SessionFiles.copy`). A gated tool's activity runs only
+    through the cut (`ai_sessions.fork_parent_id`, `fork_cut`, plan Step 6.5), and its event
+    log and images through `fork_event_cut` (#4212; its own `session.started` is seq 1, its own
+    later events come after the cut), so forgetting a parent first copies each fork's range
+    into it, the transcript under the fork's key (backend `agent_data/transcripts.py`
+    `copy_fork_ranges`), and an API with no KEK refuses it when a fork takes transcript
+    entries (`fork_cut` above 0; a fork of a closed DurableSession takes none). The API
+    answers every read through the fork chain in one snapshot, stopping at the least cut below
+    each ancestor (`LEAST(bound, cut)`: backend `agent_data/transcripts.py`, `events.py`,
+    `api/crud_agent_blobs.py`); a new chain read must do the same. When it is made, a fork
+    copies none of its parent's transcript, event or image rows; its workspace file rows are
+    copied, naming the same bytes (`SessionFiles.copy`). A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
   - DurableSession, the retired Python turn (plan 2026-10-13 Steps 7.2 and 8.1, #4772): its
     open sessions were moved to AgentSession on 2026-11-01 (their conversations in
@@ -562,24 +480,22 @@ opens every one and seals it again byte for byte).
     Never a file on the pod; a session's working directory, `<SCADBUDDY_SESSION_DIR>/<id>/`
     (each worker's own capped emptyDir, Step 9.5; not the NAS share, whose backup cannot leave
     the plaintext copies out), is a copy of it that each turn's placement fills and each park
-    and its end write back by sha256 (`src/workspace/directory.ts`). The bytes (#4789) are a blob of the backend's content store,
-    sealed under a per-file key wrapped under the session's data key (`src/workspace/sealing.ts`,
-    `blobs.ts`; backend `api/internal_workspace.py` mints the URLs; the `blob_refs` holder
-    `(ai_session_file, <workspace>/<path>)` goes through the agent's CRUD routes, backend
-    `api/crud_agent.py` `…/crud/agent/workspace-blob-refs`, #5299: `SessionFiles` holds before
-    the row that names a blob and releases after the row is gone, and `reconcile`, on the
-    sweeper's tick hourly (a failed or `no_connection` run is tried again at the next tick),
-    on one replica at a time (`RECONCILE_LOCK` on a `database.locks` connection), releases what cascades, `forgetSubject` and crashes left and holds
-    a row no hold names; no trigger; once the API lists area `workspace` all of this runs on the
-    API instead, above;
-    `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
-    `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
-    in Postgres, one `ai_session_file_bytes` row per sha256 that every file with those bytes
-    names, so a fork shares them (#4212); on any other backend a write that cannot be sealed and stored is refused
-    `unavailable`, never kept in plaintext. Rows of `ai_session_file_bytes` are shared and swept: a
-    writer locks them `FOR KEY SHARE` first, inserts only the missing ones and locks again, in a
-    loop (`putBytes`, `copy`); `INSERT … ON CONFLICT DO NOTHING` takes no lock on the existing row,
-    and the table's CHECK (sha256 of the bytes) runs before the conflict check (`ExecInsert`,
+    and its end write back by sha256 (`src/workspace/directory.ts`). The rows, the bytes and
+    their holds are the API's (area `workspace`, above; backend `agent_data/workspace.py`): the
+    bytes (#4789) are a blob of the content store, sealed under a per-file key wrapped under
+    the session's data key, held in `blob_refs` as `(ai_session_file, <workspace>/<path>)`
+    before the row that names them and released after it is gone, and the hourly reconcile
+    (one replica at a time, `RECONCILE_LOCK`) releases what cascades, `forgetSubject` and
+    crashes left and holds a row no hold names; no trigger.
+    `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto
+    (`backend/tests/support/workspace_backend.py`). Only on `store_backend` local do the bytes
+    stay in Postgres, one `ai_session_file_bytes` row per sha256 that every file with those
+    bytes names, so a fork shares them (#4212); on any other backend a write that cannot be
+    sealed and stored is refused `unavailable`, never kept in plaintext. Rows of
+    `ai_session_file_bytes` are shared and swept: the API's writer locks them `FOR KEY SHARE`
+    first, inserts only the missing ones and locks again, in a loop; `INSERT … ON CONFLICT DO
+    NOTHING` takes no lock on the existing row, and the table's CHECK (sha256 of the bytes) runs
+    before the conflict check (`ExecInsert`,
     [nodeModifyTable.c](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeModifyTable.c)). Uploads take `workspace_path` + `workspace_sha256` instead of
     inline content (`src/tools/workspaceUploads.ts`: binary streamed by
     `SessionFiles.chunks` into the multipart route, text decoded as UTF-8).
@@ -615,7 +531,7 @@ opens every one and seals it again byte for byte).
     instead (#780, `src/plugins/oauth.ts`, `oauthStore.ts`, `ai_plugin_oauth`): only
     Settings starts discovery (`POST …/:name/oauth/start`, then the browser's
     `/api/v1/ai/plugin-oauth/authorize` and `/callback`, `routes/pluginOAuth.ts`), the
-    tokens stay sealed (opened by the API once it lists area `plugins`, #5299 step 5) and never reach Claude Code, and the forwarder asks the plugin's `oauth` token
+    tokens stay sealed (opened by the API, area `plugins`, #5299 step 5) and never reach Claude Code, and the forwarder asks the plugin's `oauth` token
     source for each request's header; a refused refresh marks the grant for "Sign in again". Claude Code renames tool-name characters outside
     `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
     colliding tools are hidden. Unlisted plugin tools are `outward`.
@@ -651,15 +567,34 @@ opens every one and seals it again byte for byte).
     `storefront_listing_draft` (`write`: a listing from an output or a model, unpublished,
     with the Storefront page's smart defaults in `tools/storefrontDraft.ts`, a copy of the
     frontend's `listingDraft.ts` tested against `test-fixtures/storefront/sell-draft-vectors.json`;
-    a colour the customer can choose is taken out of the title) and
+    a colour the customer can choose is taken out of the title; or, with `library_file_id`, a
+    file listing, #6710 spec 2026-11-21 §11.3: the body the editor saves for a new listing of that
+    file, `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`, which the vectors' file
+    case pins, but `materials`, which is the offered filaments' (`draftMaterials`) where the page
+    leaves the shop's default) and
     `storefront_listing_publish` (`outward`). The listings' other routes stay the page's.
-  - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
+  - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry, or,
+    #6935, a bare `marketplace.json` URL's entry, an archive or an npm package) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
-    `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);
+    `src/routes/pluginPackages.ts`). Postgres holds the pin (a commit, or for an archive
+    or npm package the file's sha256, `pin_kind` `bytes`, plus the content hash);
     `<state dir>/plugins/` is only a cache, re-hashed before every load and
-    re-fetched from the pin. Install stores the pin unapproved; approving needs the
-    exact commit and hash. `vet.ts` adds rules on top of `harness/plugins.ts`. Tests
-    use local git repos (`test/support/gitRepo.ts`). Their MCP servers' http ones go
+    re-fetched from the pin: a commit from git, a bytes pin from its mirror in the
+    API's area `package-mirrors` (`mirror.ts`), never upstream. Downloads go through
+    the egress check at every hop (`download.ts`), archives are unpacked by
+    `unpack.ts` (no links, devices or paths out). Install stores the pin unapproved;
+    approving needs the exact commit (or `bytes_sha256`, or `version`) and hash. `vet.ts` adds rules
+    on top of `harness/plugins.ts`. Tests use local git repos (`test/support/gitRepo.ts`),
+    and archives built byte by byte (`test/support/archives.ts`) on a local HTTP server
+    (`test/pluginPackagesBytes.test.ts`). A hosted plugin (#6934, source `{ kind: 'hosted',
+    name }`, `pin_kind` `version`) is read over the API's area `hosted-plugins`
+    (`hosted.ts` `CrudHostedPlugins`): its zip checked against the version's sha256 and its
+    files against the content hash, then vetted; an install of a hosted source re-pins the
+    installed hosted package instead (`operations.ts` `offerHosted`), and its view's
+    `not_offered` names a published version no pin names (`test/pluginPackagesHosted.test.ts`). The
+    assistant's `hosted_plugin_*` tools (#6938, `src/tools/hostedPlugins.ts`) write a draft over the
+    API's `api` routes; `hosted_plugin_publish` (`outward`) publishes, then offers in-process through
+    `ToolServices.hostedPackages` (`offerHosted`), never the UI-guarded routes. A package's http MCP servers go
     through the forwarder (`plugins/packages/mcp.ts`), and on Temporal each call is a
     `turn:<server>__<tool>` ToolCall.
   - Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every session offers `Read`,
@@ -723,8 +658,9 @@ opens every one and seals it again byte for byte).
     with its process; the panel's list and cancel are `routes/backgroundTasks.ts`).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
-    (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless
-    `SCADBUDDY_TEST_DATABASE_URL` is set, as in the backend; the `agent` CI job sets it. The design is
+    (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`, over the test-only SQL fakes in
+    `test/support/sql/`) skip unless `SCADBUDDY_TEST_DATABASE_URL` is set, as in the backend;
+    the `agent` CI job sets it. The design is
   `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250).
   The 09-22 design spec's "No database" statement (`2026-09-22-scadbuddy-design.md`
   §4, "Architecture") describes the backend container; the

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // The tool-call gate's durable tables (spec 2026-10-01 §6.6): the projection

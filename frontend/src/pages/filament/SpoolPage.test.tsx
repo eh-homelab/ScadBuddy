@@ -2,9 +2,9 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
+import { copySpool, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
-import { INVOICE } from '../../mocks/features/filamentPurchasingSeed'
+import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
@@ -37,15 +37,41 @@ function recorded(method: string, match: RegExp) {
 }
 
 describe('the spool page', () => {
-  it('has the six sections, each a landmark with a heading, and an index', async () => {
+  it('has the seven sections, each a landmark with a heading, and an index', async () => {
     open(1)
     await heading(1)
-    for (const name of ['Identity', 'Weight', 'Colour and cost', 'Printers', 'Storage', 'History']) {
+    for (const name of ['Identity', 'Weight', 'Colour and cost', 'Printers', 'Storage', 'Files and links', 'History']) {
       expect(screen.getByRole('region', { name })).toBeInTheDocument()
       expect(screen.getByRole('heading', { level: 2, name })).toBeInTheDocument()
       expect(within(screen.getByRole('navigation', { name: 'Sections' })).getByRole('link', { name })).toHaveAttribute('href', `#${name.toLowerCase().replace(/ /g, '-')}`)
     }
     expect(screen.getByRole('combobox', { name: 'Go to section' })).toBeInTheDocument()
+  })
+
+  it('says how the tag came in and when it was written (#7149)', async () => {
+    open(4)
+    await heading(4)
+    const identity = screen.getByRole('region', { name: 'Identity' })
+    expect(within(identity).getByText('Bambuddy added this spool when an AMS read its unknown tag.')).toBeInTheDocument()
+    expect(within(identity).queryByText(/Tag written/)).toBeNull()
+  })
+
+  it('names a written tag and its date (#7149)', async () => {
+    open(8)
+    await heading(8)
+    const identity = screen.getByRole('region', { name: 'Identity' })
+    expect(within(identity).getByText('Its tag was written through SpoolBuddy.')).toBeInTheDocument()
+    expect(within(identity).getByText(`Tag written ${new Date('2026-11-10T15:30:00Z').toLocaleDateString(undefined, { dateStyle: 'medium' })}.`)).toBeInTheDocument()
+  })
+
+  it('saves whether the spool was added full (#7149)', async () => {
+    const patches = recorded('PATCH', /\/spools\//)
+    const { user } = open(4)
+    await heading(4)
+    await choose(user, screen.getByRole('combobox', { name: 'Added full' }), 'No')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(patches).toEqual([{ added_full: false }]))
+    expect((await getSpool(spoolId(4))).added_full).toBe(false)
   })
 
   it('resets an overridden colour with one PATCH of null, and the mark stays until the answer', async () => {
@@ -231,6 +257,19 @@ describe('the spool page', () => {
     expect(screen.getByRole('group', { name: 'Colour' })).toContainElement(screen.getByLabelText('Colour (hex)'))
   })
 
+  it('overrides the colour and the extra colours with a catalog colour (#6912)', async () => {
+    const patches = recorded('PATCH', /\/spools\//)
+    const { user } = open(1)
+    await heading(1)
+    await user.click(screen.getByRole('button', { name: 'From the catalog' }))
+    await user.type(screen.getByRole('combobox', { name: 'Search the colour catalog' }), 'galaxy')
+    await user.click(await screen.findByRole('option', { name: /Galaxy Duo/ }))
+    expect(screen.getByLabelText('Extra colours')).toHaveValue('#2E8B57FF')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(patches).toEqual([{ rgba: '#1B3A8CFF', extra_colours: ['#2E8B57FF'] }])
+  })
+
   it('jumps to the same section twice from the select', async () => {
     const scroll = vi.fn()
     Element.prototype.scrollIntoView = scroll
@@ -252,8 +291,9 @@ describe('the spool page', () => {
     expect(mark()).toBeInTheDocument()
   })
 
-  it('loads the history of a spool whose later writes failed after it was made', async () => {
-    server.use(http.put('*/api/v1/filament/spools/:id/presets', () => HttpResponse.json({ type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'two rows name the same printer and nozzle' }, { status: 422, headers: { 'Content-Type': 'application/problem+json' } })))
+  it('makes no spool when its presets are refused, and keeps the form (#7150: one request)', async () => {
+    server.use(http.post('*/api/v1/filament/spools/bulk', () => HttpResponse.json({ type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'two rows name the same printer and nozzle' }, { status: 422, headers: { 'Content-Type': 'application/problem+json' } })))
+    const before = (await listSpools()).length
     const { user } = render('/filament/spools/new')
     await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
     await user.click(screen.getByRole('button', { name: 'Add preset' }))
@@ -262,8 +302,9 @@ describe('the spool page', () => {
     await user.type(within(row).getByLabelText('Slicer filament'), 'GFA00')
     await user.click(screen.getByRole('button', { name: 'Save spool' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('two rows name')
-    const history = await screen.findByRole('list', { name: 'History of this spool' })
-    expect(within(history).getByText('Added')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    expect(within(row).getByLabelText('Slicer filament')).toHaveValue('GFA00')
+    expect((await listSpools()).length).toBe(before)
   })
 
   it('shows what the grams left are made of', async () => {
@@ -407,14 +448,93 @@ describe('the spool page', () => {
   })
 
   it('makes a new spool with one POST and opens it', async () => {
-    const posts = recorded('POST', /\/filament\/spools$/)
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
     const { user } = render('/filament/spools/new')
     await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
     await user.type(screen.getByLabelText('Grams left'), '900')
     await user.click(screen.getByRole('button', { name: 'Save spool' }))
     await waitFor(async () => expect((await listSpools()).length).toBe(12))
     expect(posts).toHaveLength(1)
+    expect(posts[0]).toMatchObject({ quantity: 1, spool: { grams_left: 900 } })
     expect(await heading(20)).toBeInTheDocument()
+  })
+
+  it('makes several identical spools with one POST, each with its own number (#7150)', async () => {
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render('/filament/spools/new')
+    await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
+    const count = screen.getByLabelText('How many spools')
+    await user.clear(count)
+    await user.type(count, '3')
+    await user.click(screen.getByRole('button', { name: 'Save 3 spools' }))
+    expect(await screen.findByText('The spools tab')).toBeInTheDocument()
+    expect(posts).toHaveLength(1)
+    expect(posts[0]).toMatchObject({ quantity: 3 })
+    const numbers = (await listSpools()).map((one) => one.number).filter((n) => n >= 20)
+    expect(numbers).toEqual([20, 21, 22])
+  })
+
+  it('refuses a count outside 1 to 100 and sends nothing (#7150)', async () => {
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render('/filament/spools/new')
+    await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
+    const count = screen.getByLabelText('How many spools')
+    await user.clear(count)
+    await user.type(count, '101')
+    await user.click(screen.getByRole('button', { name: 'Save 101 spools' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('from 1 to 100')
+    expect(posts).toHaveLength(0)
+  })
+
+  it('copies a spool into a new one, leaving its number and weight behind (#7150)', async () => {
+    const { user } = open(6)
+    await heading(6)
+    expect(screen.getByRole('link', { name: 'Copy' })).toHaveAttribute('href', `/filament/spools/new?copy=${spoolId(6)}`)
+    await user.click(screen.getByRole('link', { name: 'Copy' }))
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    expect(await screen.findByLabelText('Colour name')).toHaveValue('Teal')
+    expect(screen.getByLabelText('Grams left')).toHaveValue('')
+    expect(screen.getByText(/stay with it/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    expect(await heading(20)).toBeInTheDocument()
+    const twin = (await listSpools()).find((one) => one.number === 20)!
+    expect(twin).toMatchObject({ colour_name: 'Teal', label_weight_g: 1000, grams_left: null })
+  })
+
+  it("sends a copied migrated preset row back migrated, and an edited one as the person's (R-7150-11)", async () => {
+    const real = await copySpool(spoolId(6))
+    const row = { printer_model: 'H2C', slicer_filament: 'P1', slicer_filament_name: null }
+    server.use(
+      http.get(`*/api/v1/filament/spools/${spoolId(6)}/copy`, () =>
+        HttpResponse.json({
+          ...real,
+          presets: [
+            { ...row, nozzle_diameter: '0.4', migrated: true },
+            { ...row, nozzle_diameter: '0.6', migrated: true },
+          ],
+        }),
+      ),
+    )
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(6)}`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    const filaments = await screen.findAllByLabelText('Slicer filament')
+    await user.type(filaments[1]!, 'X')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(posts).toHaveLength(1))
+    expect((posts[0] as { presets: unknown[] }).presets).toEqual([
+      { ...row, nozzle_diameter: '0.4', migrated: true },
+      { ...row, nozzle_diameter: '0.6', slicer_filament: 'P1X', migrated: false },
+    ])
+  })
+
+  it('a copy of a spool in a tray does not take the tray (#7150)', async () => {
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(4)}`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(posts).toHaveLength(1))
+    expect(posts[0]).toMatchObject({ location_id: null })
   })
 
   it('shows a server refusal and keeps the edits', async () => {
@@ -427,12 +547,13 @@ describe('the spool page', () => {
     expect(temp).toHaveValue('300')
   })
 
-  it("links the invoice the spool was bought on, and lists the type's suppliers", async () => {
+  it("links the invoice line the spool was bought on and its supplier, and lists the type's suppliers (#6869)", async () => {
     open(1)
     await heading(1)
-    const link = await screen.findByRole('link', { name: /Invoice US-441907 · Bambu Lab/ })
-    expect(link).toHaveAttribute('href', `/filament/invoices/${INVOICE.CONFIRMED_A}`)
-    expect(link.parentElement).toHaveTextContent(/line 1/)
+    const link = await screen.findByRole('link', { name: 'Invoice US-441907' })
+    expect(link).toHaveAttribute('href', `/filament/invoices/${INVOICE.CONFIRMED_A}#line-${LINE.CONFIRMED_A1}`)
+    expect(link.parentElement).toHaveTextContent(/from Bambu Lab \(line 1/)
+    expect(within(link.parentElement!).getByRole('link', { name: 'Bambu Lab' })).toHaveAttribute('href', `/filament/suppliers/${SUPPLIER.BAMBU}`)
     const purchasing = screen.getByText('Purchasing').parentElement!
     expect(purchasing).toHaveTextContent('Bambu Lab')
     expect(purchasing).toHaveTextContent('A00-W1')
@@ -471,6 +592,22 @@ describe('the spool page\'s history (#6269)', () => {
     expect(within(timeline).getByText('Assistant')).toBeInTheDocument()
     // A BB plate is booked as the API books it: its grams off, measured, and no grams left.
     expect(within(timeline).getByText(', −55 g, measured, AMS A1')).toBeInTheDocument()
+  })
+
+  it('resets the used counter after a confirm, and the tile counts from then (#7149)', async () => {
+    const posts = recorded('POST', /\/spools\/[^/]+\/events$/)
+    const { user } = open(2)
+    await heading(2)
+    const history = screen.getByRole('region', { name: 'History' })
+    const used = () => within(within(history).getByLabelText('Spool metrics')).getByText('Used').parentElement!
+    await waitFor(() => expect(used()).toHaveTextContent('120 g'))
+    await user.click(within(history).getByRole('button', { name: 'Reset the used counter' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Reset the used counter of spool #2?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Reset counter' }))
+    await waitFor(() => expect(posts).toEqual([{ kind: 'consumed_reset' }]))
+    await waitFor(() => expect(used()).toHaveTextContent(/^Used0 g/))
+    expect(used()).toHaveTextContent('120 g in all')
+    expect((await getSpool(spoolId(2))).grams_left).toBe(820)
   })
 
   it('says why the burn rate is empty, with the window the settings hold', async () => {

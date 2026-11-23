@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Context, MiddlewareHandler } from 'hono'
 import { getCookie } from 'hono/cookie'
-import type { Sql } from 'postgres'
 import { crudOf, type CrudTarget } from '../api/crudStores.js'
 import type { AuthMode } from '../config.js'
 import type { BusEvent, EventSource } from '../events/bus.js'
@@ -9,10 +8,9 @@ import { BROWSER_USER } from '../routes/approvals.js'
 import type { Owner } from '../sessions/protocol.js'
 
 // #4975 phase 5 (spec 2026-11-01 §5.6): the ingress sends `/api/v1/ai/*` to the agent, so
-// the agent reads the person's session cookie itself. It looks the cookie's SHA-256 up in
-// `auth_sessions_agent`, the backend's view of live `auth_sessions` rows granted to the
-// agent's role (principal, name, kind, the expiries; nothing else), through the API's
-// `…/agent/auth-sessions/lookup` once it lists area `auth-sessions` (#6501), caches each
+// the agent reads the person's session cookie itself. It looks the cookie's SHA-256 up
+// through the API's `…/agent/auth-sessions/lookup` (#6501), which answers from live
+// `auth_sessions` rows (principal, name, kind; nothing else), caches each
 // answer a few seconds, and drops it when the backend publishes `auth.session_revoked`.
 //
 // The browser user (routes/approvals.ts `BROWSER_USER`, `id: 'browser'`) becomes the
@@ -45,23 +43,7 @@ export interface SessionLookup {
   byHash(id: string): Promise<PersonSession | undefined>
 }
 
-/** The view `auth_sessions_agent` over the agent's own SQL. */
-export class PgSessionLookup implements SessionLookup {
-  readonly #sql: Sql
-
-  constructor(sql: Sql) {
-    this.#sql = sql
-  }
-
-  async byHash(id: string): Promise<PersonSession | undefined> {
-    const rows = await this.#sql<PersonSession[]>`
-      SELECT principal, name, kind FROM auth_sessions_agent
-      WHERE id_hash = ${Buffer.from(id, 'hex')}`
-    return rows[0]
-  }
-}
-
-/** The same lookup through the API's route (area `auth-sessions`, backend api/crud_agent_start.py, #6501): only the hash travels. */
+/** The lookup through the API's route (area `auth-sessions`, backend api/crud_agent_start.py, #6501): only the hash travels. */
 export class CrudSessionLookup implements SessionLookup {
   readonly #call: ReturnType<typeof crudOf>
   readonly #max: number
@@ -128,7 +110,7 @@ export class BrowserSessions {
   private readonly sessions: SessionLookup
   private readonly now: () => number
 
-  /** `sessions`: `gated` in main.ts, the view over SQL until the API lists area `auth-sessions`. */
+  /** `sessions`: the API's lookup (`CrudSessionLookup`). */
   constructor(sessions: SessionLookup, now: () => number = Date.now) {
     this.sessions = sessions
     this.now = now

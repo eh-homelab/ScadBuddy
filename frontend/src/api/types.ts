@@ -423,6 +423,13 @@ export type VirtualPrinters = Schemas['VirtualPrintersView']
 export type VirtualPrinterCreate = Schemas['VirtualPrinterCreate']
 export type VirtualPrinterUpdate = Schemas['VirtualPrinterUpdate']
 export type VirtualPrinterDiagnostic = Schemas['VirtualPrinterDiagnostic']
+/** #7154 — a printer's K-profiles (pressure advance), through Bambuddy. */
+export type KProfile = Schemas['KProfile']
+export type KProfileTable = Schemas['KProfileTable']
+export type KProfileNotes = Schemas['KProfileNotes']
+export type KProfileWriteResult = Schemas['KProfileWriteResult']
+export type KProfileSet = Schemas['KProfileSet']
+export type KProfileRemove = Schemas['KProfileRemove']
 /** The LAN link as typed: the access code goes once and never comes back. */
 export type LanLink = Schemas['LanLink']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
@@ -576,6 +583,8 @@ export type StorefrontListingInput = Defaulted<
   Schemas['ListingInput'],
   'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'materials'
 >
+/** #6710 §4.2 — what publish read from a file listing's library file. */
+export type StorefrontFileSnapshot = Schemas['FileSnapshot']
 /** #6237 — a listing's colour combinations and how far their renders are; a prepare's answer. */
 export type ListingPrepareProgress = Schemas['PrepareProgress']
 export type ListingPrepareStarted = Schemas['PrepareStarted']
@@ -635,6 +644,7 @@ export type PrintDetail = Schemas['PrintDetail']
 export type PrintSources = Schemas['PrintSources']
 export type LibraryFileSuggestion = Schemas['LibraryFileSuggestion']
 export type FoundSource = Schemas['FoundSource']
+export type SourceChoice = Schemas['SourceChoice']
 export type PrintImportRequest = Schemas['ImportRequest']
 export type ImportedPrint = Schemas['ImportedPrint']
 /** #4699 — a print the print watcher took: linked to a model, in Unsorted imports, or dismissed. */

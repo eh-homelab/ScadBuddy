@@ -1,18 +1,16 @@
 import type { Client } from '@temporalio/client'
-import type { Sql } from 'postgres'
 import { CrudReadError, crudRead } from '../api/crudRead.js'
-import type { CrudAreas } from '../api/crudAreas.js'
 import { crudOf, type CrudTarget } from '../api/crudStores.js'
 import { backgroundWorkflowId } from '../background/service.js'
+import { DurableGate, sessionWorkflowId } from '../gate/durable.js'
+import { durableDescriber } from './durableSweep.js'
 import { BackgroundTaskStore, CrudBackgroundTasks } from '../background/store.js'
 import { unscheduleTask } from '../background/temporal.js'
 import { terminateOpenToolCalls, workflowNotFound as notFound } from '../tools/activityProjection.js'
-import { dropPayloadKey, type PayloadKeys, payloadKeyLock, subjectOf, sweepBridgeKeys } from '../temporal/payloadCodec.js'
-import { dropUnnamedBytes } from '../workspace/store.js'
-import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
+import { type ForgetsKeys, subjectOf } from '../temporal/payloadCodec.js'
+import { ForksNeedKeys } from './store.js'
 import { sessionPath } from './rows.js'
-import { CrudSessionReads, PgSessionReads, type SessionReads } from './sessionReads.js'
-import { notifyWarmEvict } from './warmEvict.js'
+import { CrudSessionReads, type SessionReads } from './sessionReads.js'
 
 // forgetSubject (spec 2026-10-01 §6.5, plan 5c Ruling 12): the one operation every
 // deletion of a durable session or a flow run goes through. In this order:
@@ -20,6 +18,10 @@ import { notifyWarmEvict } from './warmEvict.js'
 //      workflows `bgtask-<session>-<id>`, terminated, so none encodes again under the key;
 //      and its tool calls still open (`session-<id>-call-<tool_use_id>`, plan 2026-10-13
 //      Step 9.2: every `tool.call` in its events with no `tool.result`) are terminated too;
+//      then the session's workflow is sent `end` (#7031), best-effort, as a done or archived
+//      session's is, and given FORGET_END_WAIT_MS to close, so it releases its warm place
+//      (only a run between turns: one in a turn, parked or not, ends after it; step 2 terminates
+//      it if it did not close);
 //   1. a session's forks that read its transcript through it (store.ts, plan 2026-10-13
 //      Step 6.5) take the range each references, sealed under their own keys, with the
 //      events and images they read through it (#4212), in the
@@ -41,33 +43,26 @@ import { notifyWarmEvict } from './warmEvict.js'
 //      which is not keyed to it; then its files' bytes kept in Postgres
 //      (`ai_session_file_bytes`) that no other workspace, a fork's among them, names. The
 //      audit log keeps its rows, as it does for every session.
-// Step 1's transaction is the API's once it lists area `forget` (#5299 step 6, backend
-// api/crud_agent_forget.py): `CrudSubjectKeys.forget` asks `POST …/crud/agent/forgotten-subjects/
-// {subject}`, which takes the lock, writes the tombstone and deletes a flow run's images and the
-// key in one transaction, a session's forks first taking their ranges of its transcript, events
-// and images there (backend transcripts.py `copy_fork_ranges`, #5299 step 9, part c). Only an API
-// with no KEK, whose forks take transcript entries, refuses it (`forks`): its forget then runs the
-// transaction below, only when the agent has no route for step 3 either (no `rows`): with one,
-// the forget refuses it (ForksNeedKeys) and deletes nothing more. Under the same lock, so either
-// way a fork made later sees the tombstone.
-// Step 3's rows, their unnamed bytes and the warm eviction are the API's once it lists area
-// `forget-rows` (#6501, backend api/crud_agent_sweeps.py, `CrudForgetRows`); step 0 reads the
-// tasks and the open calls through `tasks` and `reads`, which are the API's once it lists their
-// areas.
+// Step 1's transaction is the API's (#5299 step 6, backend api/crud_agent_forget.py):
+// `CrudSubjectKeys.forget` asks `POST …/crud/agent/forgotten-subjects/{subject}`, which takes the
+// lock, writes the tombstone and deletes a flow run's images and the key in one transaction, a
+// session's forks first taking their ranges of its transcript, events and images there (backend
+// transcripts.py `copy_fork_ranges`, #5299 step 9, part c). Only an API with no KEK, whose forks
+// take transcript entries, refuses it (`forks`): the forget then throws ForksNeedKeys and deletes
+// nothing more.
+// Step 3's rows, their unnamed bytes and the warm eviction are the API's too (#6501, area
+// `forget-rows`, backend api/crud_agent_sweeps.py, `CrudForgetRows`); step 0 reads the tasks and
+// the open calls through the API.
 // Its callers: an operator (`node dist/forget-subject.js <subject>`) and any delete
 // route added later. `SessionStore.delete` is never reached for a durable session,
 // whose conversation is in its workflow, not in ai_session_entries.
 
 export type ForgetDeps = {
-  sql: Sql
   /** The Temporal client; without one, the workflow is left to the namespace's retention. */
   client?: Client | undefined
   namespace?: string
-  /**
-   * Drops the subject's data key from this process's cache too, and opens and seals the
-   * transcript a session's forks take (step 1); a session with forks is not forgotten without it.
-   */
-  keys?: (PayloadKeys & { forget(subject: string): void }) | undefined
+  /** Drops the subject's data key from this process's cache too. */
+  keys?: ForgetsKeys | undefined
   /** Where its large payloads are kept (FilePayloadStore); without one, they stay, unreadable. */
   payloads?: { forget(subject: string): Promise<void> } | undefined
   /** Its saved http bodies on this pod (turnServers.ts `removeTurnDir`); other pods' go to their sweep. */
@@ -77,14 +72,33 @@ export type ForgetDeps = {
    * plaintext copy, on this pod; another worker's copy goes with its sweep once the row is gone.
    */
   sessionDirs?: ((sessionId: string) => Promise<void>) | undefined
-  /** Step 1 through the API (`CrudSubjectKeys`, above), when it lists area `forget`; the SQL below otherwise. */
-  crud?: Pick<CrudSubjectKeys, 'forget'> | undefined
-  /** A session's background tasks (step 0); `BackgroundTaskStore` over `sql` without it. */
-  tasks?: Pick<BackgroundTaskStore, 'list' | 'finish'> | undefined
-  /** A session's open tool calls (step 0); `PgSessionReads` over `sql` without it. */
-  reads?: Pick<SessionReads, 'openCalls'> | undefined
-  /** Step 3 through the API (`CrudForgetRows`), when it lists area `forget-rows`; the SQL below otherwise. */
-  rows?: Pick<CrudForgetRows, 'forget'> | undefined
+  /** Step 1 (`CrudSubjectKeys`, above). */
+  crud: Pick<CrudSubjectKeys, 'forget'>
+  /** A session's background tasks (step 0). */
+  tasks: Pick<BackgroundTaskStore, 'list' | 'finish'>
+  /** A session's open tool calls (step 0). */
+  reads: Pick<SessionReads, 'openCalls'>
+  /** Step 3 (`CrudForgetRows`). */
+  rows: Pick<CrudForgetRows, 'forget'>
+}
+
+/** How long a forget waits for the session's workflow to close after `end` (#7031). */
+export const FORGET_END_WAIT_MS = 10_000
+
+/**
+ * `end` to the session's workflow, then a bounded wait for it to close; best-effort: step 2
+ * terminates it. The wait is only for a run between turns: `end` takes effect only once a turn
+ * ends, a parked one included, so the terminate ends such a run instead.
+ */
+async function endSessionWorkflow(client: Client, sessionId: string): Promise<void> {
+  try {
+    await new DurableGate(client).end(sessionId)
+    const workflowId = sessionWorkflowId(sessionId)
+    if ((await durableDescriber(client)(workflowId)) !== 'between_turns') return
+    await client.withDeadline(Date.now() + FORGET_END_WAIT_MS, () => client.workflow.getHandle(workflowId).result())
+  } catch {
+    // Not reached, still closing, or gone: the terminate below ends it.
+  }
 }
 
 export type Forgotten = {
@@ -94,7 +108,7 @@ export type Forgotten = {
 }
 
 async function endBackgroundTasks(deps: ForgetDeps, sessionId: string): Promise<void> {
-  const tasks = deps.tasks ?? new BackgroundTaskStore(deps.sql)
+  const tasks = deps.tasks
   for (const { id } of await tasks.list(sessionId)) {
     await tasks.finish(id, 'cancelled', 'the chat was forgotten')
     // A recurring cron job's Schedule and its running fire (plan 2026-10-13 Step 9.8), or any
@@ -111,35 +125,20 @@ async function endBackgroundTasks(deps: ForgetDeps, sessionId: string): Promise<
 export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<Forgotten> {
   if (subjectOf(subject) !== subject) throw new Error(`${subject} is not a session-<uuid> or flow-<uuid> subject`)
   const sessionId = subject.startsWith('session-') ? subject.slice('session-'.length) : undefined
-  // Without the API's route, said before anything ends; the check that holds is copyForkRanges's,
-  // under the lock. With the route the API decides under its lock and copies the ranges with its
-  // own KEK. Only an API with no KEK refuses (`forks-take-ranges`), and then the fallback below
-  // throws ForksNeedKeys after the tasks have ended: the subject stays, and the forget can run again.
-  if (sessionId !== undefined && !deps.crud && !deps.keys && (await hasForks(deps.sql, sessionId))) throw new ForksNeedKeys(sessionId)
   deps.keys?.forget(subject)
   if (sessionId !== undefined) await endBackgroundTasks(deps, sessionId)
-  if (sessionId !== undefined && deps.client) await terminateOpenToolCalls({ reads: deps.reads ?? new PgSessionReads(deps.sql), client: deps.client }, sessionId, 'forgotten (forgetSubject)')
+  if (sessionId !== undefined && deps.client) await terminateOpenToolCalls({ reads: deps.reads, client: deps.client }, sessionId, 'forgotten (forgetSubject)')
+  // Before the tombstone: `end` is a payload sealed under the subject's key.
+  if (sessionId !== undefined && deps.client) await endSessionWorkflow(deps.client, sessionId)
   // The tombstone with the deletion: no encoder still running for the subject (a
   // workflow task or an activity before the termination below) can make it a new key.
-  const answered = deps.crud ? await deps.crud.forget(subject) : 'forks'
-  // An API with no KEK whose forks take transcript entries, while step 3 is the API's: no SQL here.
-  if (answered === 'forks' && deps.crud && deps.rows && sessionId !== undefined) throw new ForksNeedKeys(sessionId, { terminated: deps.client !== undefined })
-  const key =
-    answered !== 'forks'
-      ? answered
-      : await deps.sql.begin(async (tx) => {
-          // The lock key creation takes (payloadCodec.ts), so no encoder's tombstone check
-          // reads from before this commits.
-          await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
-          // While the key still opens its transcript; a fork made later sees the tombstone (manager.ts insert).
-          if (sessionId !== undefined) await copyForkRanges(tx, deps.keys, sessionId)
-          await tx`INSERT INTO ai_forgotten_subjects (subject) VALUES (${subject}) ON CONFLICT (subject) DO NOTHING`
-          // A flow run's images go with its key (#2477, temporal/flowBlobs.ts).
-          if (subject.startsWith('flow-')) await tx`DELETE FROM ai_flow_blobs WHERE subject = ${subject}`
-          const deleted = await tx`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
-          return deleted.count > 0
-        })
-  // Again: copyForkRanges read the key to open the transcript, which cached it in this process.
+  const key = await deps.crud.forget(subject)
+  // An API with no KEK whose forks take transcript entries: the subject stays, and the forget can run again.
+  if (key === 'forks') {
+    if (sessionId === undefined) throw new Error(`the API refused the forget of ${subject}: forks-take-ranges`)
+    throw new ForksNeedKeys(sessionId, { terminated: deps.client !== undefined })
+  }
+  // Again: a call that read the key meanwhile cached it in this process.
   deps.keys?.forget(subject)
   let workflow: Forgotten['workflow'] = 'not_reached'
   if (deps.client) {
@@ -163,31 +162,14 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   await deps.payloads?.forget(subject)
   await deps.turnDirs?.(subject)
   if (sessionId !== undefined) await deps.sessionDirs?.(sessionId)
-  let rows = 0
-  if (sessionId !== undefined && deps.rows) {
-    rows = await deps.rows.forget(sessionId)
-  } else if (subject.startsWith('session-')) {
-    const id = subject.slice('session-'.length)
-    const shared = await deps.sql<{ bytes_sha256: string }[]>`
-      SELECT DISTINCT bytes_sha256 FROM ai_session_files WHERE session_id = ${id} AND bytes_sha256 IS NOT NULL`
-    const entries = await deps.sql`DELETE FROM ai_session_entries WHERE session_id = ${id}`
-    const sessions = await deps.sql`DELETE FROM ai_sessions WHERE id = ${id}`
-    rows = entries.count + sessions.count
-    // A write naming the same bytes meanwhile fails this on the foreign key: the sweep deletes them later.
-    await dropUnnamedBytes(
-      deps.sql,
-      shared.map((row) => row.bytes_sha256),
-    ).catch((err: unknown) => console.error(`forgetSubject: could not delete unnamed workspace bytes; the sweep deletes them later: ${(err as Error).message}`))
-    // A classic session's warm process, on whichever replica holds it (spec 2026-10-13 §5.3, warmEvict.ts).
-    await notifyWarmEvict(deps.sql, id)
-  }
+  const rows = sessionId !== undefined ? await deps.rows.forget(sessionId) : 0
   return { key, workflow, rows }
 }
 
 /**
  * forgetSubject's step 3 through the API's CRUD route (#6501, area `forget-rows`): a forgotten
  * session's transcript rows and its row, then its unnamed workspace bytes and the warm eviction,
- * as the SQL above. The API refuses a session with no tombstone (409 `not-forgotten`).
+ * in one transaction. The API refuses a session with no tombstone (409 `not-forgotten`).
  */
 export class CrudForgetRows {
   readonly #call: ReturnType<typeof crudOf>
@@ -205,37 +187,6 @@ export class CrudForgetRows {
   }
 }
 
-/** How old a session's payload key is before sweepOrphanedSessionKeys looks at it: well past any insert it could race. */
-export const ORPHAN_KEY_MIN_AGE_S = 24 * 3600
-
-/**
- * Deletes the payload keys of sessions whose `ai_sessions` row is gone (#3317), and returns how
- * many. forgetSubject deletes its own; what this catches is a durable fork whose workflow could
- * not be started (SessionManager.fork deletes the child's row), whose start had already made the
- * child's key. Older than `minAgeS` only, and checked again under the subject's lock, which a key's
- * creation takes too. Not a forget: no tombstone, as no session can take that id again.
- */
-export async function sweepOrphanedSessionKeys(sql: Sql, minAgeS = ORPHAN_KEY_MIN_AGE_S): Promise<number> {
-  const subjects = await sql<{ subject: string }[]>`
-    SELECT k.subject FROM ai_payload_keys k
-    WHERE k.subject LIKE 'session-%' AND k.created_at < now() - make_interval(secs => ${minAgeS})
-      AND NOT EXISTS (SELECT 1 FROM ai_sessions s WHERE s.id::text = substr(k.subject, 9))
-    LIMIT 100`
-  let deleted = 0
-  for (const { subject } of subjects) {
-    const id = subject.slice('session-'.length)
-    deleted += await sql.begin(async (tx) => {
-      await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
-      const gone = await tx`
-        DELETE FROM ai_payload_keys WHERE subject = ${subject}
-          AND NOT EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = ${id})
-          AND NOT EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id::text = ${id})`
-      return gone.count
-    })
-  }
-  return deleted
-}
-
 /** The deletes of payload keys no forget makes: a browser call's once it has its answer, and the hourly sweep. */
 export interface KeyDeletes {
   /** A browser call's key (`bridge-<uuid>`); no tombstone. */
@@ -244,27 +195,11 @@ export interface KeyDeletes {
   sweep(): Promise<number>
 }
 
-/** The SQL the agent runs itself (`dropPayloadKey`, `sweepOrphanedSessionKeys`, `sweepBridgeKeys`) until the API lists area `forget`. */
-export class PgKeyDeletes implements KeyDeletes {
-  readonly #sql: Sql
-
-  constructor(sql: Sql) {
-    this.#sql = sql
-  }
-
-  dropBridgeKey(subject: string): Promise<void> {
-    return dropPayloadKey(this.#sql, undefined, subject)
-  }
-
-  async sweep(): Promise<number> {
-    return (await sweepOrphanedSessionKeys(this.#sql)) + (await sweepBridgeKeys(this.#sql))
-  }
-}
-
 /**
  * Forgetting a subject, and deleting the keys nothing forgets, through the API's CRUD routes
  * (#5299 step 6, area `forget`, backend api/crud_agent_forget.py): each one transaction there,
- * under the subject's lock, as the SQL here runs it.
+ * under the subject's lock. The hourly sweep deletes the keys of sessions whose row is gone
+ * (#3317) and of browser calls long over.
  */
 export class CrudSubjectKeys implements KeyDeletes {
   readonly #base: string
@@ -277,8 +212,7 @@ export class CrudSubjectKeys implements KeyDeletes {
 
   /**
    * forgetSubject's step 1: whether the subject had a key; `forks` for a session whose forks take
-   * transcript entries when the API has no KEK to copy them, which forgetSubject's own
-   * transaction then does.
+   * transcript entries when the API has no KEK to copy them.
    */
   async forget(subject: string): Promise<boolean | 'forks'> {
     try {
@@ -308,33 +242,12 @@ export class CrudSubjectKeys implements KeyDeletes {
   }
 }
 
-/** `crud` once `useCrud()` holds (the API lists area `forget`), `pg` until then, chosen per call (#5299 D9). */
-export function gatedKeyDeletes(pg: KeyDeletes, crud: KeyDeletes, useCrud: () => boolean): KeyDeletes {
+/** The forget's routes on the API, for `forget-subject.ts`. */
+export function forgetRoutes(target: CrudTarget): Pick<ForgetDeps, 'crud' | 'tasks' | 'reads' | 'rows'> {
   return {
-    dropBridgeKey: (subject) => (useCrud() ? crud : pg).dropBridgeKey(subject),
-    sweep: () => (useCrud() ? crud : pg).sweep(),
-  }
-}
-
-/** The areas the operator's forget (`forget-subject.ts`) asks the API for (#6501). */
-export const FORGET_CLI_AREAS = ['forget', 'background-tasks', 'session-reads', 'forget-rows'] as const
-
-/**
- * The forget's routes as the API lists them, for `forget-subject.ts`: the key transaction once
- * `forget` is listed; the background tasks per call; a session's open calls once
- * `session-reads` is; and step 3's rows only when both `forget` and `forget-rows` are, so a
- * forget never deletes, through the API, the rows of a session it did not tombstone there.
- */
-export function forgetRoutes(
-  areas: Pick<CrudAreas, 'has'>,
-  target: CrudTarget,
-  sql: Sql,
-): Pick<ForgetDeps, 'crud' | 'tasks' | 'reads' | 'rows'> {
-  const crud = areas.has('forget') ? new CrudSubjectKeys(target.baseUrl, { fetch: target.fetch }) : undefined
-  return {
-    crud,
-    tasks: new BackgroundTaskStore(sql, { crud: new CrudBackgroundTasks(target.baseUrl, { fetch: target.fetch }), use: () => areas.has('background-tasks') }),
-    reads: areas.has('session-reads') ? new CrudSessionReads(target) : undefined,
-    rows: crud && areas.has('forget-rows') ? new CrudForgetRows(target) : undefined,
+    crud: new CrudSubjectKeys(target.baseUrl, { fetch: target.fetch }),
+    tasks: new BackgroundTaskStore(new CrudBackgroundTasks(target.baseUrl, { fetch: target.fetch })),
+    reads: new CrudSessionReads(target),
+    rows: new CrudForgetRows(target),
   }
 }

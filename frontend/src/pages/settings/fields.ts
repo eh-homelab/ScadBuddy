@@ -157,6 +157,12 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'printing',
     kind: 'bool',
   },
+  // #6871 — a native run waits for a busy printer, in ScadBuddy's queue, rather than send.
+  {
+    name: 'lan_queue_when_busy',
+    section: 'printing',
+    kind: 'bool',
+  },
   // #4953 — whether a fulfilled line item may be unfulfilled (#4952), by a person or the agent.
   {
     name: 'orders_allow_unfulfil',
@@ -184,6 +190,22 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     name: 'filament_default_cost_per_kg',
     section: 'filament',
     kind: 'text',
+  },
+  // #7156 — the drying a spool is offered when the catalog sets none; empty offers none.
+  {
+    name: 'filament_drying_temp_c',
+    section: 'filament',
+    kind: 'text',
+  },
+  {
+    name: 'filament_drying_hours',
+    section: 'filament',
+    kind: 'text',
+  },
+  {
+    name: 'filament_label_base_url',
+    section: 'filament',
+    kind: 'url',
   },
   {
     name: 'filament_burn_window_days',

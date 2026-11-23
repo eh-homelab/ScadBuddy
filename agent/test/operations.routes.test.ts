@@ -40,13 +40,12 @@ class FakeCommands implements Commands {
   }
 }
 
-function app(commands: Commands | undefined) {
+function app(commands: Commands | undefined, packages: PackageRepo = {} as PackageRepo) {
   const deps: AppDeps = {
     database: { ping: async () => true, ready: async () => true },
     backend: async () => true,
-    kek: { ok: false, reason: 'not configured' },
     credentials: new MemoryCredentials(),
-    pluginPackages: {} as PackageRepo,
+    pluginPackages: packages,
     packageInstaller: { prepare: async () => undefined as never, evict: async () => undefined, readFile: async () => undefined as never, acquire: async () => undefined as never },
     commands,
     testConnection: async () => ({ ok: true, detail: '', duration_ms: 0, model: null }),
@@ -154,5 +153,32 @@ describe('GET /api/v1/ai/operations/{id}', () => {
     expect((await a.request('/api/v1/ai/operations/nope', { headers: READ })).status).toBe(404)
     expect((await a.request('/api/v1/ai/operations/op1', { headers: { ...READ, 'sec-fetch-site': 'cross-site' } })).status).toBe(403)
     expect((await app(undefined).request('/api/v1/ai/operations/op1', { headers: READ })).status).toBe(503)
+  })
+
+  it('offers a hosted plugin through the install command, and approves it by its version (#6934)', async () => {
+    const commands = new FakeCommands({ status: 'done', result: { name: 'greeter' } })
+    const res = await app(commands).request('/api/v1/ai/plugin-packages', post({ source: { kind: 'hosted', name: 'greeter' } }, KEY))
+    expect(res.status).toBe(201)
+    expect(commands.calls).toEqual([['plugin_package_install', { source: { kind: 'hosted', name: 'greeter' } }, KEY]])
+    for (const bad of [{ kind: 'hosted', name: 'Not A Name' }, { kind: 'hosted', name: 'greeter', url: 'https://x.test' }]) {
+      expect((await app(commands).request('/api/v1/ai/plugin-packages', post({ source: bad }))).status).toBe(400)
+    }
+    expect(commands.calls).toHaveLength(1)
+
+    const approved: unknown[][] = []
+    const packages = {
+      approve: async (...args: unknown[]) => {
+        approved.push(args)
+        return { name: 'greeter' }
+      },
+    } as unknown as PackageRepo
+    const ok = await app(commands, packages).request('/api/v1/ai/plugin-packages/greeter/approve', post({ version: 2, content_hash: 'sha256:x' }))
+    expect(ok.status).toBe(200)
+    expect(approved).toEqual([['greeter', '2', 'sha256:x', false, 'version']])
+    const two = await app(commands, packages).request(
+      '/api/v1/ai/plugin-packages/greeter/approve',
+      post({ version: 2, commit_sha: 'a'.repeat(40), content_hash: 'sha256:x' }),
+    )
+    expect(two.status).toBe(400)
   })
 })

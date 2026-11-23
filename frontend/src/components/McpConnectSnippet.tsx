@@ -82,8 +82,8 @@ export function McpConnectSnippet({ publicUrl, authMode, token }: Props) {
         </a>{' '}
         instead; it asks for this address without <code className="sb-num">/mcp</code> and the token.
       </p>
-      <Snippet id="mcp-snippet-claude-code" title="Claude Code" copyLabel="Copy the Claude Code command" text={claudeCode} />
-      <Snippet
+      <CopySnippet id="mcp-snippet-claude-code" title="Claude Code" copyLabel="Copy the Claude Code command" text={claudeCode} />
+      <CopySnippet
         id="mcp-snippet-claude-desktop"
         title="Claude Desktop (claude_desktop_config.json, needs Node.js)"
         copyLabel="Copy the Claude Desktop config"
@@ -93,7 +93,8 @@ export function McpConnectSnippet({ publicUrl, authMode, token }: Props) {
   )
 }
 
-function Snippet({ id, title, copyLabel, text }: { id: string; title: string; copyLabel: string; text: string }) {
+/** A titled, copyable block of setup text; USER_ONLY, so a token in it never reaches the browser agent. */
+export function CopySnippet({ id, title, copyLabel, text }: { id: string; title: string; copyLabel: string; text: string }) {
   const ref = useRef<HTMLPreElement>(null)
   const [copied, setCopied] = useState<'copied' | 'manual' | null>(null)
   return (

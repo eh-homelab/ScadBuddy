@@ -31,7 +31,7 @@ import { ready, type RouteModule } from './module.js'
 // The read passes `uiReadProblem`. Error bodies use `{ detail }`.
 
 export type SessionLimitsRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   settings: SettingsRepo | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
@@ -47,8 +47,8 @@ const PutBody = z.strictObject({
   max_turns: z.number().int().min(1).max(MAX_SESSION_MAX_TURNS),
 })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'assistant session limits'
 
 /** What limits() would give a new session: the stored value when it is a positive number. */
@@ -58,7 +58,7 @@ function stored(value: unknown, fallback: number): number {
 
 export function registerSessionLimitsRoutes(app: Hono, deps: SessionLimitsRouteDeps): void {
   async function repo(): Promise<SettingsRepo | string> {
-    if (!deps.settings) return NO_DATABASE
+    if (!deps.settings) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.settings : NOT_READY
   }
 

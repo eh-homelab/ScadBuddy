@@ -22,6 +22,7 @@ const (
 	RACKUNSAFEMATERIAL_FILAMENTWARNING_KIND
 	RACKLEFTTOBAMBUDDY_FILAMENTWARNING_KIND
 	RACKMANUALPARTIAL_FILAMENTWARNING_KIND
+	RACKGLOWUNCHECKED_FILAMENTWARNING_KIND
 	SEQUENCECLEARANCE_FILAMENTWARNING_KIND
 	PROFILENOTAPPLIED_FILAMENTWARNING_KIND
 	SUPPORTSNOTAPPLIED_FILAMENTWARNING_KIND
@@ -42,7 +43,7 @@ const (
 )
 
 func (i FilamentWarning_kind) String() string {
-	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "mixed-flows", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "prime-tower-unconfirmed", "process-override-unchecked", "host-setting-dropped", "prime-tower-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked", "sliced-same-family", "slice-reused", "mixed-materials", "inlet-shared", "object-conflict", "by-object-one-object"}[i]
+	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "mixed-flows", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "rack-glow-unchecked", "sequence-clearance", "profile-not-applied", "supports-not-applied", "prime-tower-unconfirmed", "process-override-unchecked", "host-setting-dropped", "prime-tower-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked", "sliced-same-family", "slice-reused", "mixed-materials", "inlet-shared", "object-conflict", "by-object-one-object"}[i]
 }
 
 func ParseFilamentWarning_kind(v string) (any, error) {
@@ -80,6 +81,8 @@ func ParseFilamentWarning_kind(v string) (any, error) {
 		result = RACKLEFTTOBAMBUDDY_FILAMENTWARNING_KIND
 	case "rack-manual-partial":
 		result = RACKMANUALPARTIAL_FILAMENTWARNING_KIND
+	case "rack-glow-unchecked":
+		result = RACKGLOWUNCHECKED_FILAMENTWARNING_KIND
 	case "sequence-clearance":
 		result = SEQUENCECLEARANCE_FILAMENTWARNING_KIND
 	case "profile-not-applied":

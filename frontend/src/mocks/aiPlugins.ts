@@ -148,7 +148,127 @@ export function setListedToolNames(names: readonly string[]): void {
   listedTools = names
 }
 
+/** Each hosted plugin's latest published version (#6934), for an Offer. */
+const hostedLatest = new Map<string, number>()
+
+const hostedHash = (version: number) => `sha256:${String(version).repeat(64).slice(0, 64)}`
+
+/**
+ * A hosted package `name` installed at `version` (approved and enabled), whose hosted plugin's
+ * latest version is `latest`: a newer one is "not offered" until an Offer re-pins it.
+ */
+export function seedHostedPackage(name: string, version: number, latest = version): void {
+  hostedLatest.set(name, latest)
+  const greeter = packageFor('https://git.example/greeter.git', 'HEAD', 'git') as PluginPackage
+  putPackage(name, {
+    ...greeter,
+    name,
+    source: { kind: 'hosted', name },
+    pin_kind: 'version',
+    commit_sha: null,
+    version,
+    not_offered: latest === version ? null : latest,
+    content_hash: hostedHash(version),
+    review: { ...greeter.review, name },
+    approved: true,
+    approved_at: now(),
+    enabled: true,
+  })
+}
+
+/** What the hosted plugins mock (`features/hostedPlugins.ts`, #6937) holds of a plugin: its latest version and that version's review. */
+export interface HostedMockVersion {
+  latest: number
+  review: PackageReview
+}
+let hostedLookup: (name: string) => HostedMockVersion | undefined = () => undefined
+
+/** The hosted plugins mock tells this one how to read a published plugin, so an Offer installs what the editor published. */
+export function setHostedLookup(lookup: (name: string) => HostedMockVersion | undefined): void {
+  hostedLookup = lookup
+}
+
+/** The hosted plugin's latest version and review: the editor's when it holds the name, else a seeded one. */
+function hostedVersion(name: string): HostedMockVersion | undefined {
+  const published = hostedLookup(name)
+  if (published) return published
+  const latest = hostedLatest.get(name)
+  return latest === undefined ? undefined : { latest, review: state.packages.get(name)?.review ?? REVIEW_V1 }
+}
+
+/** Deleting a hosted plugin deletes its package (spec §6.3). */
+export function dropHostedPackage(name: string): void {
+  const pkg = state.packages.get(name)
+  if (pkg?.source.kind === 'hosted') dropPackage(name)
+}
+
+/** Whether a package (or a built-in) has `name`: a hosted plugin cannot take it (plan ruling R3). */
+export function packageNameTaken(name: string): boolean {
+  return state.packages.has(name) || state.builtIns.has(name)
+}
+
+/**
+ * The agent's install of a hosted source (#6934): the latest version installed unapproved
+ * and disabled when no package has the name, else a re-pin of the hosted package into `pending`.
+ */
+function offerHosted(name: string, status = 201) {
+  const pkg = state.packages.get(name)
+  const found = hostedVersion(name)
+  if (found === undefined) return detail(404, `no hosted plugin named "${name}"`)
+  const { latest, review } = found
+  if (!pkg) {
+    const installed: PluginPackage = {
+      name,
+      source: { kind: 'hosted', name },
+      pin_kind: 'version',
+      commit_sha: null,
+      bytes_sha256: null,
+      version: latest,
+      not_offered: null,
+      content_hash: hostedHash(latest),
+      review,
+      approved: false,
+      approved_at: null,
+      allow_refused: false,
+      enabled: false,
+      pending: null,
+      created_at: now(),
+      updated_at: now(),
+    }
+    putPackage(name, installed)
+    return HttpResponse.json(installed, { status })
+  }
+  if (pkg.source.kind !== 'hosted') return detail(409, `a plugin package named "${name}" is installed from a ${pkg.source.kind} source, not this hosted plugin`)
+  if (pkg.version === latest) return detail(409, `"${name}" is already pinned to ${latest}`)
+  const published = hostedLookup(name) !== undefined
+  const next: PluginPackage = {
+    ...pkg,
+    not_offered: null,
+    pending: {
+      ref: '',
+      plugin_url: `hosted:${name}`,
+      plugin_path: '',
+      pin_kind: 'version',
+      commit_sha: null,
+      bytes_sha256: null,
+      version: latest,
+      content_hash: hostedHash(latest),
+      review,
+      diff: published
+        ? {
+            added: review.files.filter((f) => !pkg.review.files.includes(f)),
+            removed: pkg.review.files.filter((f) => !review.files.includes(f)),
+            changed: ['.claude-plugin/plugin.json'],
+          }
+        : { added: ['commands/bow.md'], removed: [], changed: ['.claude-plugin/plugin.json'] },
+    },
+  }
+  putPackage(name, next)
+  return HttpResponse.json(next, { status })
+}
+
 export function resetAiPluginMocks(): void {
+  hostedLatest.clear()
   listedTools = LISTED_TOOLS
   state.remote.clear()
   state.packages.clear()
@@ -174,14 +294,32 @@ resetAiPluginMocks()
 const detail = (status: number, text: string, extra: Record<string, unknown> = {}) =>
   HttpResponse.json({ detail: text, ...extra }, { status })
 
-function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry?: string): PluginPackage | string[] | undefined {
+/** The mock's one archive (#6935): the greeter as a zip, pinned to its file's sha256. */
+const ARCHIVE_URL = 'https://files.example/greeter-1.0.0.zip'
+const ARCHIVE_SHA = 'f'.repeat(64)
+
+function packageFor(url: string, ref: string, kind: PluginPackage['source']['kind'], entry?: string): PluginPackage | string[] | undefined {
+  if (kind === 'archive') {
+    if (url !== ARCHIVE_URL) return undefined
+    return {
+      ...(packageFor('https://git.example/greeter.git', 'HEAD', 'git') as PluginPackage),
+      source: { kind: 'archive', url, ref: ref.startsWith('sha256:') ? ref : '', plugin_path: 'greeter-1.0.0' },
+      pin_kind: 'bytes',
+      commit_sha: null,
+      bytes_sha256: ARCHIVE_SHA,
+    }
+  }
   const known = url === 'https://git.example/greeter.git' || (kind === 'marketplace' && url === 'https://git.example/market.git' && entry === 'greeter')
   if (url === 'https://git.example/reserved.git') return RESERVED_PROBLEMS
   if (url === 'https://git.example/shell.git') {
     return {
       name: 'shell',
       source: { kind: 'git', url, ref, path: '' },
+      pin_kind: 'commit',
       commit_sha: SHELL.commit,
+      bytes_sha256: null,
+      version: null,
+      not_offered: null,
       content_hash: SHELL.hash,
       review: REVIEW_SHELL,
       approved: false,
@@ -202,7 +340,11 @@ function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry
       kind === 'git'
         ? { kind: 'git', url, ref, path: '' }
         : { kind: 'marketplace', url, ref, entry: entry ?? '', plugin_url: ref === 'moved' ? MOVED_URL : url, plugin_path: ref === 'moved' ? '' : 'plugins/greeter' },
+    pin_kind: 'commit',
     commit_sha: v.commit,
+    bytes_sha256: null,
+    version: null,
+    not_offered: null,
     content_hash: v.hash,
     review: ref === 'v2' ? REVIEW_V2 : REVIEW_V1,
     approved: false,
@@ -341,7 +483,15 @@ export function setRemotePluginAccess(
  * own plugin's switch, from here on every request, so both routes read one state.
  */
 export function packageList(): ListedPackage[] {
-  return [...state.builtIns.values(), ...state.packages.values()]
+  return [...state.builtIns.values(), ...[...state.packages.values()].map(withNotOffered)]
+}
+
+/** A hosted package's `not_offered`, as the agent works it out from the hosted plugin the editor publishes (#6934). */
+function withNotOffered(pkg: PluginPackage): PluginPackage {
+  if (pkg.source.kind !== 'hosted') return pkg
+  const latest = hostedLookup(pkg.name)?.latest
+  if (latest === undefined) return pkg
+  return { ...pkg, not_offered: latest === pkg.version || latest === pkg.pending?.version ? null : latest }
 }
 
 /**
@@ -430,8 +580,15 @@ export const aiPluginHandlers = [
   http.post(`${base}/plugin-packages`, async ({ request }) => {
     await delay(150)
     const { source } = (await request.json()) as {
-      source: { kind: 'git' | 'marketplace'; url: string; ref?: string; path?: string; entry?: string }
+      source: { kind: PluginPackage['source']['kind']; url?: string; ref?: string; path?: string; entry?: string; package?: string; sha256?: string; name?: string }
     }
+    if (source.kind === 'hosted') return offerHosted(source.name ?? '')
+    if (source.kind === 'npm') return detail(502, `npm registry: no package ${source.package ?? ''} in the demo`)
+    if (source.kind === 'archive' && source.sha256 !== undefined) {
+      if (source.sha256 !== ARCHIVE_SHA) return detail(422, `the archive's sha256 is ${ARCHIVE_SHA}, not ${source.sha256}`)
+      source.ref = `sha256:${source.sha256}`
+    }
+    source.url ??= ''
     if (!/^https?:\/\//.test(source.url)) return detail(400, 'source url must be https (or http to loopback)')
     if (source.url === 'https://git.example/scadbuddy.git' || source.entry === 'scadbuddy') {
       return detail(409, BUILT_IN_ANSWER, { built_in: true })
@@ -449,10 +606,16 @@ export const aiPluginHandlers = [
   http.post(`${base}/plugin-packages/:name/approve`, async ({ params, request }) => {
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
-    const body = (await request.json()) as { commit_sha: string; content_hash: string; allow_refused?: boolean }
-    const isPending = pkg.pending && body.commit_sha === pkg.pending.commit_sha && body.content_hash === pkg.pending.content_hash
+    const body = (await request.json()) as { commit_sha?: string; bytes_sha256?: string; version?: number; content_hash: string; allow_refused?: boolean }
+    const names = (pin: { pin_kind: string; commit_sha: string | null; bytes_sha256: string | null; version: number | null }) =>
+      pin.pin_kind === 'version'
+        ? body.version === pin.version
+        : pin.pin_kind === 'bytes'
+          ? body.bytes_sha256 === pin.bytes_sha256
+          : body.commit_sha === pin.commit_sha
+    const isPending = pkg.pending && names(pkg.pending) && body.content_hash === pkg.pending.content_hash
     const refused = (isPending ? pkg.pending!.review : pkg.review).refused ?? []
-    if (refused.length && !body.allow_refused && (isPending || body.commit_sha === pkg.commit_sha)) {
+    if (refused.length && !body.allow_refused && (isPending || names(pkg))) {
       return detail(409, `the review lists what the rules refuse (${refused.length}); approve with allow_refused to load the package as it is`)
     }
     const allow_refused = Boolean(body.allow_refused) && refused.length > 0
@@ -462,11 +625,18 @@ export const aiPluginHandlers = [
       const next: PluginPackage = {
         ...pkg,
         source:
-          pkg.source.kind === 'marketplace'
-            ? { ...pkg.source, ref: pkg.pending.ref, plugin_url: pkg.pending.plugin_url, plugin_path: pkg.pending.plugin_path }
-            : { ...pkg.source, ref: pkg.pending.ref, path: pkg.pending.plugin_path },
+          pkg.source.kind === 'git'
+            ? { ...pkg.source, ref: pkg.pending.ref, path: pkg.pending.plugin_path }
+            : pkg.source.kind === 'marketplace' || pkg.source.kind === 'marketplace-url'
+              ? { ...pkg.source, ref: pkg.pending.ref, plugin_url: pkg.pending.plugin_url, plugin_path: pkg.pending.plugin_path }
+              : pkg.source.kind === 'hosted'
+                ? pkg.source
+                : { ...pkg.source, ref: pkg.pending.ref, plugin_path: pkg.pending.plugin_path },
         enabled: pkg.enabled && !moved,
+        pin_kind: pkg.pending.pin_kind,
         commit_sha: pkg.pending.commit_sha,
+        bytes_sha256: pkg.pending.bytes_sha256,
+        version: pkg.pending.version,
         content_hash: pkg.pending.content_hash,
         review: pkg.pending.review,
         approved: true,
@@ -477,7 +647,7 @@ export const aiPluginHandlers = [
       putPackage(pkg.name, next)
       return HttpResponse.json(next)
     }
-    if (body.commit_sha === pkg.commit_sha && body.content_hash === pkg.content_hash) {
+    if (names(pkg) && body.content_hash === pkg.content_hash) {
       const next = { ...pkg, approved: true, approved_at: pkg.approved_at ?? now(), allow_refused }
       putPackage(pkg.name, next)
       return HttpResponse.json(next)
@@ -490,18 +660,30 @@ export const aiPluginHandlers = [
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
     const { ref } = (await request.json()) as { ref?: string }
-    const found = packageFor(pkg.source.url, ref || pkg.source.ref, pkg.source.kind, pkg.source.kind === 'marketplace' ? pkg.source.entry : undefined)
+    if (pkg.source.kind === 'hosted') return offerHosted(pkg.name, 200)
+    if (pkg.source.kind === 'archive' && pkg.source.ref.startsWith('sha256:')) {
+      return detail(409, 'this archive was installed with its sha256, so a re-pin could only fetch the same file', {
+        reason: 'repin-fixed-sha256',
+      })
+    }
+    const entry = pkg.source.kind === 'marketplace' || pkg.source.kind === 'marketplace-url' ? pkg.source.entry : undefined
+    const found = packageFor(pkg.source.url, ref || pkg.source.ref, pkg.source.kind, entry)
     if (!found || Array.isArray(found)) return detail(502, 'git fetch failed')
-    if (found.commit_sha === pkg.commit_sha) return detail(409, `"${pkg.name}" is already pinned to ${pkg.commit_sha}`)
+    if (found.commit_sha === pkg.commit_sha && found.bytes_sha256 === pkg.bytes_sha256) {
+      return detail(409, `"${pkg.name}" is already pinned to ${pkg.bytes_sha256 ?? pkg.commit_sha}`)
+    }
     const removed = pkg.review.files.filter((f) => !found.review.files.includes(f))
     const added = found.review.files.filter((f) => !pkg.review.files.includes(f))
     const next: PluginPackage = {
       ...pkg,
       pending: {
-        ref: found.source.ref,
+        ref: found.source.kind === 'hosted' ? '' : found.source.ref,
         plugin_url: packageFetch(found).url,
         plugin_path: packageFetch(found).path,
+        pin_kind: found.pin_kind,
         commit_sha: found.commit_sha,
+        bytes_sha256: found.bytes_sha256,
+        version: null,
         content_hash: found.content_hash,
         review: found.review,
         diff: { added, removed, changed: ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'skills/hello/SKILL.md'] },

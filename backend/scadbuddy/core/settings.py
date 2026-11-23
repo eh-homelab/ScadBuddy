@@ -166,6 +166,10 @@ class Settings(BaseSettings):
     # start when its name never had a version, or this build's script when the newest
     # version is an unedited older built-in (orders spec §7.2, #4252, #4673).
     orders_builtin_flow: bool = True
+    # SCADBUDDY_STOREFRONT_WARM_PRICES: publish renders a listing's default variant and
+    # starts its storefront slice price, and Prepare colours starts each prepared
+    # variant's, before a visitor asks (#6922).
+    storefront_warm_prices: bool = True
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
     realtime_sockets: int = DEFAULT_REALTIME_SOCKETS
@@ -326,7 +330,14 @@ class Settings(BaseSettings):
     # to say the plate is clear before it starts the next, as Bambuddy's queue does with
     # its `require_plate_clear` on (off by default there too: maziggy/bambuddy 98ecaf50,
     # `backend/app/services/print_scheduler.py`). Read by each run's plan, which keeps it.
+    # #6871: a run queued on a busy printer also reads a printer that holds an ended
+    # print as busy while this is on.
     lan_require_plate_clear: bool = False
+    # #6871: whether a native (LAN) run reads the printer before its first upload and,
+    # finding it busy, sends nothing and waits until it is free and someone says the plate
+    # is clear. Off, the run sends at once and a busy printer refuses it. Read by each
+    # run's plan, which keeps it.
+    lan_queue_when_busy: bool = True
     # SCADBUDDY_SLICER_BACKEND: who slices a print: Bambuddy, or the `scadbuddy-slicer`
     # worker on `temporal_task_queue_slicer` (`native`, which needs a content store).
     slicer_backend: Slicer = "bambuddy"
@@ -526,6 +537,11 @@ class Settings(BaseSettings):
     @classmethod
     def _storefront_is_an_https_origin(cls, value: str | None) -> str | None:
         return None if value is None else https_origin(value, "SCADBUDDY_STOREFRONT_PUBLIC_URL")
+
+    @field_validator("filament_label_base_url")
+    @classmethod
+    def _label_base_is_an_https_origin(cls, value: str | None) -> str | None:
+        return None if value is None else https_origin(value, "SCADBUDDY_FILAMENT_LABEL_BASE_URL")
 
     @field_validator("trusted_proxies")
     @classmethod
@@ -781,6 +797,16 @@ class Settings(BaseSettings):
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
     filament_low_stock_pct: int = Field(default=20, ge=0, le=100)
     filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
+    # SCADBUDDY_FILAMENT_DRYING_TEMP_C and _FILAMENT_DRYING_HOURS (#7156, R-7156-5): the
+    # drying a spool is offered when nothing in the catalog (spool, type, subtype,
+    # material) sets one (`filament/spools.py` `_drying_defaults`). Unset offers none.
+    filament_drying_temp_c: int | None = Field(default=None, ge=1, le=150)
+    filament_drying_hours: Decimal | None = Field(
+        default=None, ge=Decimal("0.1"), le=Decimal("999.9")
+    )
+    # SCADBUDDY_FILAMENT_LABEL_BASE_URL (#6955): the stable https origin a printed location
+    # label's QR opens. Unset, `public_url` is used (`filament/labels.py` `label_base_url`).
+    filament_label_base_url: str | None = Field(default=None, max_length=64)
     # #6269: `filament_burn_window_days` is the span of print history the burn rate and the
     # forecast read; a type that sets no `lead_time_days` or `safety_margin_days` takes the two
     # defaults.
@@ -960,6 +986,11 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Whether the API registers the built-in order-fulfilment flow at its start"
             " (#4252); the deployment's choice, read once, and nothing a running server"
             " can undo."
+        ),
+        "storefront_warm_prices": (
+            "Whether publish and Prepare colours start the storefront's slices before a"
+            " visitor asks (#6922); the deployment's choice, read at each publish and at each"
+            " price step of a run."
         ),
         "service_account_namespace": (
             "Whose ServiceAccounts may exchange for a service credential (#5494): the"
@@ -1141,6 +1172,9 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "filament_sync": "live",
         "filament_low_stock_pct": "live",
         "filament_default_cost_per_kg": "live",
+        "filament_drying_temp_c": "live",
+        "filament_drying_hours": "live",
+        "filament_label_base_url": "live",
         "filament_burn_window_days": "live",
         "filament_lead_time_days": "live",
         "filament_safety_margin_days": "live",
@@ -1209,6 +1243,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "orders_allow_unfulfil": "live",
         # Read from the store by each print run's plan; a run keeps what it read.
         "lan_require_plate_clear": "live",
+        "lan_queue_when_busy": "live",
         # Read from the store by every slice's start.
         "slicer_backend": "live",
         "bambuddy_render_api_key": "restart",

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router'
 import {
   listProducts,
   listSuppliers,
@@ -9,6 +8,8 @@ import {
   type TypePricePoint,
 } from '../../../api/filamentPurchasing'
 import { formatCost } from '../../../lib/decimal'
+import { filamentLinks } from '../../../lib/filamentLinks'
+import { EntityLink } from '../EntityLink'
 import { Button } from '@/components/ui/button'
 import { TD, TH } from '../formClasses'
 import { AddPriceForm } from './AddPriceForm'
@@ -97,10 +98,10 @@ export function PricePanel({ typeId, currency, exponent, onUseAsCost }: PricePan
             <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b bg-muted/40 px-3 py-2">
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-medium">
-                  <Link to={`/filament/suppliers/${product.supplier_id}`} className="underline-offset-4 hover:underline">
-                    {supplier?.name ?? 'Supplier'}
-                  </Link>
-                  <span className="ml-2 font-mono text-[12px] font-normal">{product.sku}</span>
+                  <EntityLink to={filamentLinks.supplier(product.supplier_id)}>{supplier?.name ?? 'Supplier'}</EntityLink>
+                  <EntityLink to={filamentLinks.supplierProduct(product.supplier_id, product.id)} className="ml-2 font-mono text-[12px] font-normal">
+                    {product.sku}
+                  </EntityLink>
                   {archived && <span className="ml-2 text-[12px] font-normal">Archived</span>}
                 </p>
                 <p className="text-[12px] text-muted-foreground">Pack of {product.pack_size}</p>
@@ -158,7 +159,17 @@ export function PricePanel({ typeId, currency, exponent, onUseAsCost }: PricePan
                       </td>
                       <td className={`${TD} text-right tabular-nums`}>{money(point.price, point.currency)}</td>
                       <td className={`${TD} text-right tabular-nums`}>{point.price_per_kg ? money(point.price_per_kg, point.currency) : <span className="text-muted-foreground">No weight</span>}</td>
-                      <td className={TD}>{point.source === 'invoice' ? 'Invoice' : 'Added by hand'}</td>
+                      <td className={TD}>
+                        {point.source !== 'invoice' ? (
+                          'Added by hand'
+                        ) : point.invoice_id && point.invoice_line_id ? (
+                          <EntityLink to={filamentLinks.invoiceLine(point.invoice_id, point.invoice_line_id)} className="underline">
+                            Invoice
+                          </EntityLink>
+                        ) : (
+                          'Invoice'
+                        )}
+                      </td>
                     </tr>
                   ))}
                   {history.length === 0 && (

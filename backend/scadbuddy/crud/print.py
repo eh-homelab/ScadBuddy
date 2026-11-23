@@ -49,6 +49,10 @@ watch's `settle_lan_ended`, whose one long activity repeats `WriteKeys`' keys ac
 attempts. The watch's call is bounded by `WATCH_CALL_BUDGET`. ``spool_history`` is the
 API's (the rack usage route).
 
+`RemoteFilamentPresets` is ScadBuddy's own filament presets (area ``own-presets``,
+#7176): the rows and documents a native run reads, from `filament/sb_presets.py`
+`FilamentPresetStore` on the API.
+
 `RemoteHeldPresets` and `RemoteNativeSlices` are `slicing/held_presets.py`
 `HeldPresetStore` and `slicing/store.py` `NativeSliceStore` (Q30, #5298 Task 31) for the
 methods the print worker calls: the kept presets a native run reads (``rows``,
@@ -166,6 +170,8 @@ from scadbuddy.crud.render import WriteKeys
 from scadbuddy.crud.wire import NOT_CONFIGURED
 from scadbuddy.filament.bb_pull_models import (
     INSTANCE_CHANGED,
+    ColoursApplied,
+    ColoursBody,
     HaBody,
     PullApplied,
     PullBody,
@@ -215,6 +221,7 @@ from scadbuddy.printers.store import (
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from scadbuddy.slicing.held_presets import HeldPresetStore, HeldRow
+from scadbuddy.slicing.own_presets import OwnRow
 from scadbuddy.slicing.store import NativeSlice, NativeSliceStore, SliceSubjectError
 from scadbuddy.spools.models import SeenTray
 
@@ -239,6 +246,9 @@ class RemoteSettingsStore:
 
     def plate_clear_required(self) -> bool:
         return self.load().lan_require_plate_clear
+
+    def queue_when_busy(self) -> bool:
+        return self.load().lan_queue_when_busy
 
     def close(self) -> None:
         self._client.close()
@@ -302,6 +312,10 @@ class RemotePrintRunStore:
             return {}
         body = await self._read(f"{BASE}/runs/lan-waiting", {"printers": printers})
         return {printer: PrintRun.model_validate(run) for printer, run in body.items()}
+
+    async def queue_place(self, printer: str, run_id: str) -> int:
+        body = await self._read(f"{_run(run_id)}/queue-place", {"printer": printer})
+        return int(body)
 
     async def running_for(self, output_id: str) -> list[PrintRun]:
         return (await self.running_for_outputs([output_id]))[output_id]
@@ -1463,10 +1477,36 @@ class RemoteFilamentSync:
     ``filament-sync``, #6265 Task 6): the plan, what Bambuddy answered, and a pass's
     state row. Each is natural, so each is sent again on the client's retries: a plan
     finds the intent it recorded, results sent again carry the plan's ``pass_id`` and add
-    no attempt (R-T6-5), and the pass row is set, not added to."""
+    no attempt (R-T6-5), and the pass row is set, not added to.
+
+    A plan or results call of a full round (200 writes on about 110 spools) took longer
+    than the client's 10 s default on prod (#6902), so each has `ROUND_TIMEOUT`. The API
+    stops and rolls back the call's work when the client goes away (`api/disconnect.py`),
+    so a read timeout means the work was cancelled, unless it had already reached its
+    commit. Either way a retry is safe, because each call is natural (above), not because
+    the call rolled back. The client does not send it again: its
+    retry budget (`BUSY_BUDGET`) ends before the timeout, so the pass activity's retry is
+    the next try. The budget is how long a call waits out the API's 503 ``sync_busy``
+    (another call of the instance not ended yet, `bb_sync_plan.hold_sync`), a 5xx or a
+    missing route, trying again with the client's backoff."""
+
+    #: Well inside the pass activity's 15-minute start-to-close timeout; the pass
+    #: heartbeats while the call runs (`bb_sync_run`).
+    ROUND_TIMEOUT = 120.0
+    BUSY_BUDGET = 60.0
 
     def __init__(self, client: CrudClient) -> None:
         self._client = client
+
+    async def _post(self, path: str, body: Any) -> Any:
+        response = await self._client.request(
+            "POST",
+            f"{BASE}/filament/sync/{path}",
+            json=body,
+            timeout=self.ROUND_TIMEOUT,
+            budget=self.BUSY_BUDGET,
+        )
+        return response.json()
 
     async def directions(self) -> FilamentSync:
         response = await self._client.request("GET", f"{BASE}/filament/sync/directions")
@@ -1474,8 +1514,7 @@ class RemoteFilamentSync:
 
     async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
         body = PlanRequest(snapshot=snap, limit=limit).model_dump(mode="json")
-        response = await self._client.request("POST", f"{BASE}/filament/sync/plan", json=body)
-        return SyncPlan.model_validate(response.json())
+        return SyncPlan.model_validate(await self._post("plan", body))
 
     async def results(
         self,
@@ -1495,14 +1534,15 @@ class RemoteFilamentSync:
                 unconfirmed=list(unconfirmed),
             )
         )
-        response = await self._client.request("POST", f"{BASE}/filament/sync/results", json=body)
-        return ResultsReport.model_validate(response.json())
+        return ResultsReport.model_validate(await self._post("results", body))
 
     async def record_pass(self, result: SyncPassResult) -> None:
         body = result.model_dump(mode="json")
-        if result.started_at is None:
-            # The API's model forbids extra keys: one from before #6836 refuses the key.
-            del body["started_at"]
+        for key in ("started_at", "pass_id", "instance", "trigger"):
+            if body[key] is None:
+                # The API's model forbids extra keys: one from before #6836 (``started_at``)
+                # or #6905 (the others) refuses the key.
+                del body[key]
         await self._client.request("POST", f"{BASE}/filament/sync/pass", json=body)
 
 
@@ -1548,6 +1588,9 @@ class RemoteBbPull:
 
     async def reconcile_trays(self, body: TraysBody) -> int:
         return TraysReconciled.model_validate(await self._post("/trays", body)).moved
+
+    async def colours(self, body: ColoursBody) -> ColoursApplied:
+        return ColoursApplied.model_validate(await self._post("/colours", body))
 
 
 class RemoteSensorNotifications:
@@ -1651,6 +1694,47 @@ class RemoteHeldPresets(HeldPresetStore):
 
 
 _refuse(RemoteHeldPresets, "HeldPresetStore", HELD_PRESETS_API_ONLY)
+
+
+#: The most ids one ``…/print/own-presets/documents`` request names, so its URL stays
+#: short; `RemoteFilamentPresets.documents` sends more in batches.
+OWN_PRESET_DOCUMENTS_MAX = 200
+
+
+class RemoteFilamentPresets:
+    """ScadBuddy's own filament presets (#7176, `slicing/own_presets.py` `OwnPresets`)
+    over ``…/print/own-presets`` (area ``own-presets``): what a native run's
+    catalogue and presets read. Reads only. No pool."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def rows(self) -> list[OwnRow]:
+        body = (await self._client.request("GET", f"{BASE}/own-presets")).json()
+        return [
+            OwnRow(
+                id=row["id"],
+                name=row["name"],
+                sha256=row["sha256"],
+                filament_type=row.get("filament_type"),
+                filament_colour=row.get("filament_colour"),
+                compatible_printers=list(row.get("compatible_printers") or []),
+                bb_preset_id=row.get("bb_preset_id"),
+            )
+            for row in body
+        ]
+
+    async def documents(self, ids: Collection[int]) -> dict[int, dict[str, Any]]:
+        unique = sorted(set(ids))
+        out: dict[int, dict[str, Any]] = {}
+        # The route takes at most `OWN_PRESET_DOCUMENTS_MAX` ids a request.
+        for start in range(0, len(unique), OWN_PRESET_DOCUMENTS_MAX):
+            batch = unique[start : start + OWN_PRESET_DOCUMENTS_MAX]
+            url = f"{BASE}/own-presets/documents?{urlencode({'id': batch}, doseq=True)}"
+            body = (await self._client.request("GET", url)).json()
+            # The route already strips them; stripped here too, as the kept presets are.
+            out |= {int(found): strip_credentials(doc) for found, doc in body.items()}
+        return out
 
 
 #: The `NativeSliceStore` methods only the API calls: the `SliceWorkflow`'s activities

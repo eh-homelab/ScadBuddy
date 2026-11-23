@@ -347,7 +347,7 @@ lack them (§2.3).
 | activities run under the session context | `session_turn` (and `release_worker`) scheduled on `home` | `home` |
 | the session heartbeat / `ErrSessionFailed` | `session_turn`'s `heartbeatTimeout: 20s` and `scheduleToStartTimeout: 5s`, both timeout failures the workflow catches | workflow |
 | `workflow.RecreateSession` | on a lost home (`ScheduleToStart`, `Heartbeat`, `ShuttingDown`, `NoCapacity`): `acquire_worker` again, naming the homes the turn was lost on (`exclude`: a lost home that is asked refers the turn to the other live replicas, and takes it only when none can; the last placement names none), then `session_turn` with `continuation: restarted` (§5.5) | workflow |
-| `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs when the workflow ends (handoff, archive and forget end it). A move releases nothing: the old home is gone, or its placement has cut itself off and closed its process (the fence below) | `home` |
+| `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs when the workflow ends on `end`: marking the session done, archiving it and forgetting it send `end` (#7031; archive and forget best-effort, after the edit or before the forget's tombstone). A handoff does not end it: the workflow takes the new owner (`owner_changed`). A move releases nothing: the old home is gone, or its placement has cut itself off and closed its process (the fence below) | `home` |
 
 - **Why not `agent-tools.<hostname>`.** That queue carries `DurableSession`'s pinned calls
   (`http_request`, the browser, kept plugin clients, and the `turn_tools` listing with its
@@ -437,6 +437,15 @@ lack them (§2.3).
     requests are its own, so writing them cannot count anything twice, and the budget holds
     whichever replicas ran the turn. A new placement on the same replica cuts an older one
     of the session first, so the warm process is free.
+  - **A dropped connection to the API** (`UND_ERR_SOCKET`, `UND_ERR_CLOSED`, `ECONNRESET`,
+    `ECONNREFUSED`, `EPIPE`, as a rollout's ending API pod gives) is retried by the CRUD
+    client for a GET, or a read marked idempotent, after 0.25 s, 1 s and 3 s
+    (`crudRead.ts` `crudFetch`, within the call's one deadline; a refusal is left to its caller's wait); a write is never sent twice. A placement whose turn still
+    failed on one, or whose own claim or spend write did, fails the retryable
+    `BackendUnreachable`: the workflow places the turn again, `restarted`, within the same
+    cycles, after PLACEMENT_BACKOFF's wait, not steered away from its live home, once its
+    process's last appends landed (at most 15 s), and the
+    new placement's claim fences the old one out (#6994).
   - **Spend is written as it goes.** A placement adds what its model requests cost at the
     table's prices (each finished request, and every second) to `cost_usd` and
     `unpriced_cost_usd`, so the budget sees a placement that dies before its result. At its
@@ -704,7 +713,10 @@ never did (`questions/service.ts:34-38`).
   (`durable.ts:198-214`) and starts or updates `AgentSession`
   (`executeUpdateWithStart('send_message')`, update id = turn id, `durable.ts:264-300`).
   The answers keep their meanings: `busy`, `closed`, `budget_exhausted` and
-  `OutcomeUnknown`.
+  `OutcomeUnknown`. As built (#7031): the start is `USE_EXISTING` with `ALLOW_DUPLICATE`, so
+  a send to a session whose workflow has ended (archived, then unarchived) starts a new run
+  under `session-<id>`, which resumes from `ai_session_entries`. The row's claim decides who
+  may send: a done session is refused `closed`, an archived one `archived`.
 - **Events.** The activity writes `ai_session_events` directly through the classic
   translation (`agent/src/sessions/sdkEvents.ts`), with `event_seq` and `pg_notify`. So
   the chat socket, attach and the panel are unchanged.

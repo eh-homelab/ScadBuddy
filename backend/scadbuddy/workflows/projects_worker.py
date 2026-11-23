@@ -47,7 +47,10 @@ def warm_sandbox() -> None:
     the one each run's step takes when no other step is running. A warm-up the watchdog
     stopped had its process killed, so it is tried once more on the replacement. Nothing
     here stops the worker's start: a pool that will not warm fails only the steps that
-    would have failed anyway. Blocking: run it off the loop."""
+    would have failed anyway. Blocking: run it off the loop.
+
+    It also makes the shared Code Mode tool of a flow without inputs (`run_flow_tool`,
+    #7066), so no run's first workflow task makes it."""
     try:
         stubs = run_flow_tool().__code_mode_stubs__
         for _ in range(2):

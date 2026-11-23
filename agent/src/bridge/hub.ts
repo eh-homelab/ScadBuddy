@@ -34,14 +34,14 @@ import { type SessionImage, sessionImage } from '../sessions/blobs.js'
 //
 // The tabs are held in this process. A classic turn runs on the replica whose
 // chat socket started it, a durable session's tool call on whichever replica's
-// `agent-tools` worker took the activity (so the session's tab is also kept in
-// Postgres, bridge/sessionTabs.ts, #2086), and an MCP call on the replica that
+// `agent-tools` worker took the activity (so the session's tab is also kept by
+// the API, bridge/sessionTabs.ts, #2086), and an MCP call on the replica that
 // holds its session; so the
 // tab a call is for may be connected to another replica: then the call goes to
 // that replica through Temporal (bridge/relay.ts, #4780), and it answers "not
 // connected" only when no replica holds the tab (docs/ai/browser-bridge.md,
 // "Replicas"). Pairing requests reach every tab whatever the replica: each
-// replica re-reads them from Postgres every PAIRINGS_POLL_MS.
+// replica re-reads them from the API every PAIRINGS_POLL_MS.
 
 /** How long a call waits for the tab when the tool names no wait of its own. */
 export const CALL_TIMEOUT_MS = 30_000
@@ -135,21 +135,21 @@ const NO_PAIRING =
   'no browser attached: no ScadBuddy tab is paired with this caller. Call browser_pair, give the user the code it ' +
   'returns, and ask them to type it into the prompt that appears in their ScadBuddy tab.'
 const NO_STORE =
-  'no browser attached: pairing an agent with a tab needs the database (SCADBUDDY_DATABASE_URL, spec §9)'
+  'no browser attached: pairing an agent with a tab needs the API\'s stores (spec §9)'
 const NOT_CONNECTED =
   'no browser attached: the paired ScadBuddy tab is not connected (it was closed or reloaded, or lost its ' +
   'connection). Ask the user to open ScadBuddy again; an agent that paired by code must then pair again with ' +
   'browser_pair.'
 
 export type TabHubOptions = {
-  /** Undefined without a database: only chat sessions can reach a tab then. */
+  /** Undefined without the API's stores: only chat sessions can reach a tab then. */
   pairings?: PairingStore | undefined
-  /** Undefined without a database: only tabs connected to this process can be reached then. */
+  /** Undefined without the API's stores: only tabs connected to this process can be reached then. */
   relay?: TabRelay | undefined
   /**
    * Chat sessions' tabs, for a call that runs on a replica the session's
    * messages never reached (a durable session's tool activity, #2086).
-   * Undefined without a database: a session's tab is known only where it paired.
+   * Undefined without the API's stores: a session's tab is known only where it paired.
    */
   sessionTabs?: SessionTabStore | undefined
   /** Where a tab's images wait for the call that asked; this process's memory by default. */
@@ -723,7 +723,7 @@ export class TabHub implements BrowserTabs {
 
   async acceptPairing(tab: TabConnection, id: string, code: string): Promise<void> {
     if (!this.#pairings) {
-      return tab.send(agentFrame({ type: 'pairing.result', id, ok: false, message: 'pairing needs the database' }))
+      return tab.send(agentFrame({ type: 'pairing.result', id, ok: false, message: 'pairing needs the API\'s stores' }))
     }
     const result = await this.#pairings.accept(id, code, tab.tabId!)
     const message = result.ok

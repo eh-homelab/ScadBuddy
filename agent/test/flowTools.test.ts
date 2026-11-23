@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto'
 import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
@@ -8,7 +7,6 @@ import { originPolicy } from '../src/http/origins.js'
 import { BUILTIN_SOURCES, type ToolAccess } from '../src/access/model.js'
 import { BuiltInTools } from '../src/plugins/builtInTools.js'
 import { FLOW_TOOLS_PATH } from '../src/routes/flowTools.js'
-import { kekFromBase64 } from '../src/secrets.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTiers } from '../src/temporal/flowTools.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -124,7 +122,7 @@ describe("a flow's tool tiers (#2704)", () => {
   it('flags exactly the tools whose only write is one keyed command (#6345)', () => {
     // Each handler is a single command() to a run_operation route; a handler that writes any other
     // way must not be flagged, or a flow's retry of it could do it twice.
-    expect(ALL_TOOLS.filter((t) => t.keyed).map((t) => t.name).sort()).toEqual(['create_print_project', 'import_makerworld_model'])
+    expect(ALL_TOOLS.filter((t) => t.keyed).map((t) => t.name).sort()).toEqual(['create_print_project', 'filament_colour_sync', 'import_makerworld_model'])
   })
 
   it('refuses a tool the agent does not have, one a flow cannot call, and any other caller', async () => {
@@ -140,12 +138,10 @@ describe("a flow's tool tiers (#2704)", () => {
   })
 
   describe('the loopback route', () => {
-    const KEK = kekFromBase64(randomBytes(32).toString('base64'))
     const app = (peer: string, svc: ReturnType<typeof rig>['svc'] | undefined) =>
       createApp({
         database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
         backend: () => Promise.resolve(true),
-        kek: { ok: true, kek: KEK },
         credentials: new MemoryCredentials(),
         remoteAddress: () => peer,
         origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),

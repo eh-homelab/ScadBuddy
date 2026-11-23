@@ -14,7 +14,7 @@ import type { SettingsWriter } from './mcpAuthMode.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/workspace (#2329): the caps on the assistant's workspace
-// (workspace/store.ts), in bytes. `SessionFiles` reads them at every write, so
+// (workspace/store.ts), in bytes. `CrudSessionFiles` reads them at every write, so
 // a change applies to the next one; files already stored stay.
 //
 //   GET /api/v1/ai/settings/workspace   { file_max_bytes, workspace_max_bytes, min, file_max, workspace_max }
@@ -35,9 +35,9 @@ export const MAX_FILE_BYTES = 100 * 1024 * 1024
 export const MAX_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024
 
 export type WorkspaceSettingsRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   settings: SettingsRepo | undefined
-  /** Writes both caps at once; undefined when there is no database. */
+  /** Writes both caps at once; undefined when this process was not given it (tests). */
   writer: SettingsWriter | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
@@ -60,13 +60,13 @@ const PutBody = z
     message: 'file_max_bytes may not be larger than workspace_max_bytes',
   })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'assistant workspace settings'
 
 /**
  * The caps as stored, each the default for anything the PUT could not have
- * written. The store (`SessionFiles.limits`) takes any positive integer, so a
+ * written. The store (`WorkspaceFiles.limits`) takes any positive integer, so a
  * value written some other way still applies there; this shows what the
  * form can save.
  */
@@ -84,11 +84,11 @@ export function workspaceSettings(file: unknown, total: unknown): WorkspaceSetti
 
 export function registerWorkspaceSettingsRoutes(app: Hono, deps: WorkspaceSettingsRouteDeps): void {
   async function repo(): Promise<SettingsRepo | string> {
-    if (!deps.settings) return NO_DATABASE
+    if (!deps.settings) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.settings : NOT_READY
   }
   async function writer(): Promise<SettingsWriter | string> {
-    if (!deps.writer) return NO_DATABASE
+    if (!deps.writer) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.writer : NOT_READY
   }
 

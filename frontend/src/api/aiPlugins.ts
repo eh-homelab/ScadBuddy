@@ -164,12 +164,24 @@ export interface FileDiff {
 
 export type PackageSource =
   | { kind: 'git'; url: string; ref: string; path: string }
-  | { kind: 'marketplace'; url: string; ref: string; entry: string; plugin_url: string; plugin_path: string }
+  | { kind: 'marketplace' | 'marketplace-url'; url: string; ref: string; entry: string; plugin_url: string; plugin_path: string }
+  /** An archive (`ref`: the `sha256:` it must have, or '') or an npm package (`url` `<registry>/<name>` and `ref` its version, or a tarball link and ''), #6935. */
+  | { kind: 'archive' | 'npm'; url: string; ref: string; plugin_path: string }
+  /** A ScadBuddy hosted plugin (#6934), pinned to a published version. */
+  | { kind: 'hosted'; name: string }
+
+/** A pin: a commit, for an archive or npm package the sha256 of its file (#6935), or a hosted plugin's version (#6934). */
+export type PinKind = 'commit' | 'bytes' | 'version'
 
 export interface PluginPackage {
   name: string
   source: PackageSource
-  commit_sha: string
+  pin_kind: PinKind
+  commit_sha: string | null
+  bytes_sha256: string | null
+  version: number | null
+  /** A hosted package's latest published version that neither its pin nor its re-pin is (#6934), else null. */
+  not_offered: number | null
   content_hash: string
   review: PackageReview
   approved: boolean
@@ -182,7 +194,10 @@ export interface PluginPackage {
     /** Where the re-pin is fetched from; replaces the pin's on approval. */
     plugin_url: string
     plugin_path: string
-    commit_sha: string
+    pin_kind: PinKind
+    commit_sha: string | null
+    bytes_sha256: string | null
+    version: number | null
     content_hash: string
     review: PackageReview
     diff: FileDiff
@@ -193,9 +208,23 @@ export interface PluginPackage {
 
 /** Where a package's pinned files are fetched from: the repository and the path in it. */
 export function packageFetch(pkg: PluginPackage): { url: string; path: string } {
-  return pkg.source.kind === 'marketplace'
-    ? { url: pkg.source.plugin_url, path: pkg.source.plugin_path }
-    : { url: pkg.source.url, path: pkg.source.path }
+  const source = pkg.source
+  if (source.kind === 'git') return { url: source.url, path: source.path }
+  if (source.kind === 'marketplace' || source.kind === 'marketplace-url') return { url: source.plugin_url, path: source.plugin_path }
+  if (source.kind === 'hosted') return { url: `hosted:${source.name}`, path: '' }
+  return { url: source.url, path: source.plugin_path }
+}
+
+/** What a pin names: its commit, or its file's sha256. */
+export type PinId = { commit_sha: string } | { bytes_sha256: string } | { version: number }
+
+/** The pin (or with `pending`, the re-pin) as approval names it. */
+export function pinId(pin: { pin_kind: PinKind; commit_sha: string | null; bytes_sha256: string | null; version: number | null }): PinId {
+  if (pin.pin_kind === 'version') {
+    if (pin.version === null) throw new Error('a version pin has no version')
+    return { version: pin.version }
+  }
+  return pin.pin_kind === 'bytes' ? { bytes_sha256: pin.bytes_sha256 ?? '' } : { commit_sha: pin.commit_sha ?? '' }
 }
 
 /** A pending re-pin fetched from another repository or path than the pin. */
@@ -257,6 +286,11 @@ export interface PackageFilesOf {
 export type PackageInstall =
   | { kind: 'git'; url: string; ref?: string; path?: string }
   | { kind: 'marketplace'; url: string; ref?: string; entry: string }
+  | { kind: 'marketplace-url'; url: string; entry: string }
+  | { kind: 'archive'; url: string; sha256?: string }
+  | { kind: 'npm'; package: string; version?: string; registry?: string }
+  /** A hosted plugin's latest version: installed, or a re-pin when it is installed (#6934). */
+  | { kind: 'hosted'; name: string }
 
 export const AI_BASE = '/api/v1/ai'
 
@@ -314,11 +348,14 @@ export const aiPlugins = {
   // 202 followed at the agent's /api/v1/ai/operations/{id}.
   installPackage: (source: PackageInstall) =>
     command<PluginPackage>('/ai/plugin-packages', json('POST', { source }), '/ai/operations'),
-  approvePackage: (name: string, commit_sha: string, content_hash: string, allow_refused = false) =>
-    request<PluginPackage>(
+  /** `pin` is a commit (a string, or `{ commit_sha }`), `{ bytes_sha256 }` for an archive or npm package, or `{ version }` for a hosted plugin. */
+  approvePackage: (name: string, pin: string | PinId, content_hash: string, allow_refused = false) => {
+    const id = typeof pin === 'string' ? { commit_sha: pin } : pin
+    return request<PluginPackage>(
       `/plugin-packages/${seg(name)}/approve`,
-      json('POST', allow_refused ? { commit_sha, content_hash, allow_refused } : { commit_sha, content_hash }),
-    ),
+      json('POST', allow_refused ? { ...id, content_hash, allow_refused } : { ...id, content_hash }),
+    )
+  },
   repinPackage: (name: string, ref?: string) =>
     command<PluginPackage>(`/ai/plugin-packages/${seg(name)}/repin`, json('POST', ref ? { ref } : {}), '/ai/operations'),
   discardRepin: (name: string) =>

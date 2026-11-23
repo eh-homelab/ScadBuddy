@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from typing import Final
 from urllib.parse import quote, urlencode
 
@@ -34,6 +34,7 @@ from scadbuddy.crud.client import CrudClient, CrudRefusedError, activity_key
 from scadbuddy.crud.wire import PREFIX
 from scadbuddy.profile_fetch.steps import Kind, Site, SiteError, SiteHolder
 from scadbuddy.profile_fetch.wire import (
+    CREATE_ACTIVITY,
     EXPORT_ACTIVITY,
     FAILED_ACTIVITY,
     IMPORT_ACTIVITY,
@@ -41,17 +42,22 @@ from scadbuddy.profile_fetch.wire import (
     MAX_FAILURE_REASON,
     MAX_FILE_BYTES,
     NOT_RUNNING,
+    SEARCH_ACTIVITY,
+    CreateAnswer,
+    CreateAsk,
     ExportFailure,
     ExportReport,
     FailedAsk,
     FetchAsk,
     ImportOutcome,
+    SearchAnswer,
+    SearchAsk,
 )
 from scadbuddy.profile_fetch.workflow import IMPORT_REQUEST_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ProfileFetchActivities", "Site", "SiteHolder", "site_failure"]
+__all__ = ["ProfileFetchActivities", "Site", "SiteHolder", "TdfpActivities", "site_failure"]
 
 BASE: Final = f"/api/v1{PREFIX}/profile-fetch/runs"
 #: Decision 13: worth another attempt. A refused login, an unknown 3DFP id, a missing
@@ -73,6 +79,11 @@ EXPORTS = Counter(
     "Profile-fetch export keys by outcome: exported, a failure that skips the key"
     " (option_missing, too_large, refused) or the site failure that failed the attempt.",
     ["outcome"],
+)
+TDFP_STEPS = Counter(
+    "scadbuddy_profile_fetch_tdfp_steps",
+    "3DFP searches and creates (#7025) by step and outcome: done, or the site failure's kind.",
+    ["step", "outcome"],
 )
 
 
@@ -225,3 +236,48 @@ class ProfileFetchActivities:
             if not _not_running(refusal):
                 raise
             activity.logger.info("profile-fetch run %s had already ended", run_id)
+
+
+class TdfpActivities:
+    """#7025: the search of 3DFP and the create of a filament on it, each one step on the
+    browser service (`steps.Site.search`, `steps.Site.create`). They call no CRUD route:
+    the workflow returns the answer to the API that started it. A failure of the site is
+    `site_failure`'s, raised with no cause; a crash or a timeout drops the holder, as an
+    export's does: for a create that closes the browser, and for a search only its own
+    client, which sends no ``DELETE /session`` (`remote.RemoteSite` ``closes_browser``,
+    R-7062-3); the service closes the browser itself for a search that failed so, under its
+    lock (R-7062-4). The create is never retried (`workflow.CREATE_RETRY`): a failure after
+    "Save Filament" is ``not_created``, and the filament may exist."""
+
+    def __init__(self, sites: SiteHolder) -> None:
+        self._sites = sites
+
+    @activity.defn(name=SEARCH_ACTIVITY)
+    async def search(self, ask: SearchAsk) -> SearchAnswer:
+        return await self._run("search", lambda site: site.search(ask))
+
+    @activity.defn(name=CREATE_ACTIVITY)
+    async def create(self, ask: CreateAsk) -> CreateAnswer:
+        return await self._run("create", lambda site: site.create(ask))
+
+    async def _run[T](self, step: str, call: Callable[[Site], Awaitable[T]]) -> T:
+        try:
+            return await heartbeating(self._on_site(step, call))
+        except asyncio.CancelledError:
+            await self._sites.drop()
+            raise
+
+    async def _on_site[T](self, step: str, call: Callable[[Site], Awaitable[T]]) -> T:
+        try:
+            answer = await call(await self._sites.get())
+        except Exception as error:
+            failure, name = site_failure(error), type(error).__name__
+        else:
+            TDFP_STEPS.labels(step=step, outcome="done").inc()
+            return answer
+        TDFP_STEPS.labels(step=step, outcome=failure.type or "browser").inc()
+        if failure.type in FRESH_BROWSER_KINDS:
+            await self._sites.drop()
+        # The type's name only: the error's own text might quote the login.
+        logger.warning("3DFP %s failed: %s (%s)", step, failure.type, name)
+        raise failure

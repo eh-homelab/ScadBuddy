@@ -1,7 +1,7 @@
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { AuditLog } from '../src/audit/log.js'
-import type { Database } from '../src/db.js'
+import { type AuditLog } from '../src/audit/log.js'
+import type { Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ASK_USER_QUESTION } from '../src/harness/questions.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
@@ -12,6 +12,7 @@ import { expectPanelAccepts, frontendRespondBodies } from './support/frontendPro
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // #940 end to end: a browser chat session on the real SDK and its bundled
 // binary (against the local fake Anthropic endpoint) asks AskUserQuestion, the
@@ -86,7 +87,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`questions a
               },
             },
           }
-    const audit = new AuditLog({ sql: db.sql, settings: () => ({ get: () => Promise.resolve(undefined), set: () => Promise.resolve() }), hashKey: Buffer.alloc(32, 3) })
+    const audit = sqlAuditLog(db.sql, { settings: () => ({ get: () => Promise.resolve(undefined), set: () => Promise.resolve() }), hashKey: () => Buffer.alloc(32, 3) })
     const m = await replica(audit)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'draft an issue, let me approve it' })
     const events = await m.attach(session.id, browser, { signal: stop.signal })

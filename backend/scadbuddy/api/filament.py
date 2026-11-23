@@ -35,9 +35,21 @@ from typing import Annotated, Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
+from fastapi.responses import JSONResponse
+from psycopg import errors as pg_errors
 from pydantic import AwareDatetime, BaseModel, ValidationError
+from temporalio.service import RPCError
 
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import SettingsStoreDep, StateDep
+from scadbuddy.api.operations import (
+    OPERATION_RESPONSES,
+    IdempotencyKey,
+    operation_answer,
+    run_operation,
+    temporal_refused,
+    temporal_unavailable,
+)
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
 from scadbuddy.bambuddy.client import client_for
@@ -72,11 +84,13 @@ from scadbuddy.filament.bb_sync_models import (
     LinksResetDone,
     LinksResetPreview,
     LinksResetRequest,
+    SyncPassPage,
     SyncRun,
     SyncStatus,
     skip_reason,
 )
 from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.bb_sync_passes import PAGE_MAX, BadPassCursorError
 from scadbuddy.filament.bb_sync_results import (
     Listing,
     ResetRefusedError,
@@ -92,7 +106,9 @@ from scadbuddy.filament.catalog import (
     CatalogRefError,
     CatalogSpec,
 )
+from scadbuddy.filament.colour_catalog import ColourSync, ColourSyncRequest, ColourSyncs
 from scadbuddy.filament.component import Filament, FilamentDep
+from scadbuddy.filament.cost_calc import CostCalculation, CostQuery, CostTooHighError, calculate
 from scadbuddy.filament.csv_import import (
     ImportPreview,
     ImportRefusedError,
@@ -100,13 +116,19 @@ from scadbuddy.filament.csv_import import (
     import_on,
     import_rows,
 )
+from scadbuddy.filament.labels import label_base_url
+from scadbuddy.filament.labels import printer_labels as label_logic
 from scadbuddy.filament.ledger import BadCursorError
 from scadbuddy.filament.locations import (
     LocationCycleError,
     LocationExistsError,
     MoveTargetError,
+    NoPrinterKindError,
 )
+from scadbuddy.filament.operations import KIND as COLOUR_SYNC_KIND
+from scadbuddy.filament.operations import subject as colour_sync_subject
 from scadbuddy.filament.profile_fetch import (
+    PROBE_TIMEOUT_SECONDS,
     PROBLEMS,
     START_TIMEOUT_SECONDS,
     FetchNotStartedError,
@@ -130,23 +152,48 @@ from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
     OverrideKindError,
+    ResetBeforeLinkError,
     SpoolBambuddyLinkedError,
     SpoolInUseError,
+    SpoolTrayPlaceError,
     SpoolTypelessError,
     TagKeysClashError,
     TagUnnamedError,
 )
-from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError
+from scadbuddy.filament.tdfp import CREATE_WAIT, SEARCH_WAIT, Tdfp, tdfp
+from scadbuddy.filament.types import (
+    PresetUnknownError,
+    TypeRowsDuplicateError,
+    TypeTempError,
+    names_preset,
+)
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
 from scadbuddy.printers.component import PrintersDep
+from scadbuddy.profile_fetch.wire import (
+    CreateAnswer,
+    CreateAsk,
+    SearchAnswer,
+    SearchAsk,
+    TdfpOutcome,
+)
+from scadbuddy.profile_fetch.workflow import NOT_STARTED as TDFP_NOT_STARTED
+from scadbuddy.rows.component import ROWS, Rows
+from scadbuddy.workflows.commands import (
+    TemporalUnavailableError,
+    TemporalUnreachableError,
+    temporal_failure,
+)
 
 #: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
 #: (Decision 17, R-T8-3); "Sync now" and the links' reset (#6773) nudge a full pass
 #: themselves; the Bambuddy import pulls
-#: and the RFID scan writes nothing, so neither has anything to push (Decision 163).
+#: and the RFID scan writes nothing, so neither has anything to push (Decision 163);
+#: the printer labels (#6955) make only the printer and AMS places that capture makes
+#: too, un-nudged, and every labels-page load and agent read calls them.
 NOT_NUDGED = frozenset(
     {
         "sync_ams_weights",
@@ -154,6 +201,7 @@ NOT_NUDGED = frozenset(
         "reset_filament_sync_links",
         "import_bambuddy",
         "scan_rfid_tag",
+        "printer_labels",
     }
 )
 
@@ -248,14 +296,21 @@ def _refused(exc: ValueError) -> ApiError:
         "`brands`, `categories`, `effects`, `insert-materials`, `insert-types`, `colours` "
         "or `location-kinds`. In sort order; archived rows only with `include_archived`. "
         "A material, subtype, brand, category or effect has `aliases`, its other names. "
+        "`q` keeps the rows where every word matches some text, in any case: the name, and "
+        "for a colour its manufacturer, `material_name` and `#RRGGBBAA` (#6907). "
         "404 for an unknown kind."
     ),
 )
 async def list_catalog(
-    filament: FilamentDep, kind: str, include_archived: bool = False
+    filament: FilamentDep,
+    kind: str,
+    include_archived: bool = False,
+    q: Annotated[str | None, Query(max_length=200)] = None,
 ) -> list[CatalogRow]:
     _spec(kind)
-    rows = await asyncio.to_thread(filament.catalog.list, kind, include_archived=include_archived)
+    rows = await asyncio.to_thread(
+        filament.catalog.list, kind, include_archived=include_archived, q=q
+    )
     return cast("list[CatalogRow]", rows)
 
 
@@ -375,6 +430,60 @@ async def resolve_catalog_row(
     return cast("CatalogRow", row)
 
 
+# -- the colour catalog's syncs (#6907) -------------------------------------------------
+
+
+@router.get(
+    "/colour-syncs",
+    response_model=list[ColourSync],
+    summary="The colour catalog's newest sync of each source",
+    description=(
+        "The newest run of each colour sync (`filamentcolors`, `bambu`): `state` `running` "
+        "(with `pages_read` of `pages_total` and the counts so far), `done`, `unchanged` "
+        "(filamentcolors.xyz had no new swatch since the last run, so no page was read) or "
+        "`failed` (`error` says why; what it wrote stays). A source never run is absent."
+    ),
+)
+async def list_colour_syncs(
+    rows: Annotated[Rows, component_dep(ROWS)],
+) -> list[ColourSync]:
+    return await asyncio.to_thread(ColourSyncs(rows.pool).latest)
+
+
+@router.post(
+    "/colour-syncs",
+    response_model=ColourSync,
+    summary="Fill the colour catalog from filamentcolors.xyz or Bambu's colour codes",
+    description=(
+        "`source` `filamentcolors`: every swatch of https://filamentcolors.xyz/api/swatch/ "
+        "(about 23 pages), unless its `GET /api/version/` is unchanged since the last run "
+        "(`force` reads them anyway). `bambu`: Bambu Studio's colour codes as Bambu Lab's "
+        "colours, alpha as the table gives it (`80` for a translucent one). A colour is "
+        "added, or updated by its maker, name and material; a row a person made or edited "
+        "is left as it is, and no row is deleted. A failed read answers the run `failed` "
+        "with `error`, not an error status. Past the command deadline the answer is 202 "
+        "with the operation to follow; `GET /filament/colour-syncs` shows its progress. "
+        "409 `colour_sync_running` while a run of that source runs."
+    ),
+    responses=OPERATION_RESPONSES,
+)
+async def post_colour_sync(
+    body: ColourSyncRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ColourSync | JSONResponse:
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[COLOUR_SYNC_KIND],
+        subject=colour_sync_subject(body),
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, ColourSync)
+
+
 # -- spool types ----------------------------------------------------------------------
 
 _TYPE_REFUSED = (
@@ -383,6 +492,7 @@ _TYPE_REFUSED = (
     CatalogRefError,
     TypeTempError,
     TypeRowsDuplicateError,
+    PresetUnknownError,
 )
 
 
@@ -687,6 +797,219 @@ async def get_type_profile_fetch(
     return ProfileFetchStatus(run=run, gaps=gaps)
 
 
+# -- 3DFP search and create (#7025) ---------------------------------------------------------
+
+TDFP_PROBLEMS = "https://scadbuddy.dev/problems/tdfp/"
+#: The failure kinds that are the ask's fault (422); any other is the site's or the
+#: browser's (502), or no worker took the step (503).
+_TDFP_REFUSED = frozenset({"option_missing", "no_defaults"})
+
+
+def _tdfp_problem(status_code: int, code: str, detail: str) -> ApiError:
+    return ApiError(status_code, detail, type_=TDFP_PROBLEMS + code, code=code)
+
+
+def _tdfp_failed(outcome: TdfpOutcome) -> ApiError:
+    kind = outcome.kind or "browser"
+    detail = outcome.reason or "the 3dfilamentprofiles.com step failed"
+    if kind in _TDFP_REFUSED:
+        return _tdfp_problem(status.HTTP_422_UNPROCESSABLE_CONTENT, kind, detail)
+    if kind == TDFP_NOT_STARTED:
+        return _tdfp_problem(status.HTTP_503_SERVICE_UNAVAILABLE, kind, detail)
+    return _tdfp_problem(status.HTTP_502_BAD_GATEWAY, kind, detail)
+
+
+async def _tdfp_worker(runner: Tdfp) -> None:
+    """503 ``no_worker`` when Temporal says no profile-fetch worker polls; a Temporal that
+    does not answer leaves the call to the step's own timeouts."""
+    try:
+        async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
+            served = await runner.has_worker()
+    except Exception:
+        logger.warning("could not read the pollers of the profile-fetch queue", exc_info=True)
+        return
+    if not served:
+        raise _tdfp_problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "no_worker", "no profile-fetch worker is running"
+        )
+
+
+def _tdfp_temporal(
+    error: BaseException, what: str, *, may_have_started: bool | None
+) -> ApiError | None:
+    """A call to Temporal that failed, read as every route reads one (`temporal_failure`,
+    R-7025-15, R-7025-16): unavailable or busy (a call that timed out among them), or
+    unreached (the lazy client's first connect failed) is 503 `temporal-unavailable` with
+    `Retry-After`, worth sending again; a refusal is 500 `temporal-refused`. ``None`` for a
+    failure that is not Temporal's, which the caller raises again. A client that never
+    connected wrote no request, so nothing can have started (`may_have_started` false where
+    the route says it)."""
+    failure = temporal_failure(error, what)
+    if failure is None:
+        return None
+    if isinstance(failure, TemporalUnreachableError) and may_have_started is not None:
+        may_have_started = False
+    if isinstance(failure, TemporalUnavailableError):
+        return temporal_unavailable(
+            what,
+            f"ScadBuddy's background service did not answer for {what}; send it again",
+            may_have_started=may_have_started,
+        )
+    return temporal_refused(
+        what, f"ScadBuddy's background service refused {what}", may_have_started=may_have_started
+    )
+
+
+@router.post(
+    "/tdfp/search",
+    response_model=SearchAnswer,
+    summary="Search 3dfilamentprofiles.com",
+    description=(
+        "Searches 3dfilamentprofiles.com (3DFP) on the profile-fetch worker, the one process "
+        "with its browser and login, and answers the first page of filaments: each one's "
+        "`tdfp_id`, brand, material, material type, colour name (`name`), `hexes` and the "
+        '`nominal_weight_g` its name carries ("(250g)"; null when it carries none). The site '
+        "filters only by its `?q=` text, which is the brand, the material type and the colour "
+        "(`query`); the material ranks the rows (its matches first, then the type's) and "
+        "filters nothing. Its index misses some brands: none found is not proof that 3DFP "
+        "lacks the filament. Reads only; ScadBuddy stores nothing. 503 `no_worker` when no "
+        "profile-fetch worker runs, 503 `not_started` when the worker, busy with other "
+        "searches, did not take the search within a minute (a preset fetch never holds a "
+        "search up), 502 when the site or the browser "
+        "failed (`code` is the failure's kind; the search is tried once, so send it again), "
+        "504 when no outcome came within the wait, 503 `temporal-unavailable` (with "
+        "`Retry-After`) when ScadBuddy's background service did not answer, 500 "
+        "`temporal-refused` when it refused the call (sending it again will not help)."
+    ),
+)
+async def search_tdfp(state: StateDep, caller: CallerDep, body: SearchAsk) -> SearchAnswer:
+    runner = tdfp(state)
+    await _tdfp_worker(runner)
+    try:
+        outcome = await runner.search(body, wait=SEARCH_WAIT)
+    except TimeoutError:
+        raise _tdfp_problem(
+            status.HTTP_504_GATEWAY_TIMEOUT, "no_outcome", "the 3DFP search gave no answer in time"
+        ) from None
+    except (RPCError, RuntimeError) as error:
+        # A TimeoutError here is the wait's (504 above), not Temporal's.
+        if (problem := _tdfp_temporal(error, "the 3DFP search", may_have_started=None)) is None:
+            raise
+        raise problem from None
+    if outcome.search is None:
+        raise _tdfp_failed(outcome)
+    return outcome.search
+
+
+class TdfpCreateRequest(CreateAsk):
+    """``POST /filament/tdfp/filaments``: the filament to add, and the spool type whose
+    ``tdfp_id`` the new id becomes (optional)."""
+
+    type_id: UUID | None = None
+
+
+class TdfpCreated(BaseModel):
+    """What the create did (`CreateAnswer`), and whether the type took the new id."""
+
+    create: CreateAnswer
+    type_id: UUID | None
+    type_tdfp_id_set: bool
+
+
+@router.post(
+    "/tdfp/filaments",
+    response_model=TdfpCreated,
+    summary="Add a missing filament to 3dfilamentprofiles.com",
+    description=(
+        "Adds a filament to 3dfilamentprofiles.com (3DFP) on the profile-fetch worker: its "
+        "add form gets the brand, material and material type (each must be one the form "
+        "offers, else 422 `option_missing`), the colour name, `hexes` (1 to 4), the nominal "
+        "weight and the identifiers `mpn`, `gtin`, `asin`, `manufacturer_url`, "
+        "`empty_spool_weight_g` and `td` where the form has a field for them (`sent`, "
+        "`not_sent`; ScadBuddy stores none of them). A brand, material and type with no site "
+        "defaults are refused, 422 `no_defaults`. Before it saves, the form's own duplicate "
+        "list is read: a filament there of the same brand, material and type with a close "
+        "name or colour (CIEDE2000 within 5) stops the create with `status` `duplicate`, the "
+        "list (`duplicates`, `duplicate_text`) and why (`likely`), and nothing is saved; a "
+        "person who judges those to be other filaments sends their ids in `not_duplicates`. "
+        "Else it saves and answers `status` `created` with the new `tdfp_id`, which becomes "
+        "the `tdfp_id` of `type_id` when one is sent. Needs an `Idempotency-Key` (428 "
+        "without): the same key, body and `type_id` answer the first create's outcome and "
+        "never add a second filament, except after a failure before the save (422, 503 "
+        "`not_started`, or a site failure before the save), which the same key tries again. "
+        "The create is tried once: 502 `not_created`, or a 502 whose detail says the filament "
+        "may exist, means it may exist, so search before sending another key. 404 for no "
+        "such type, 409 `type_has_tdfp_id` for a type that already has one. "
+        "503 `no_worker`, 503 `not_started` (the worker busy with a preset fetch), 502 "
+        "and 504 as for the search; on 504 the "
+        "create may still run, and the same request with the same key waits for it; 503 "
+        "`temporal-unavailable` and 500 `temporal-refused` as for the search "
+        "(`may_have_started` says whether a create may run). The type's `tdfp_id` is set "
+        "only while it has none (R-7025-14)."
+    ),
+)
+async def create_tdfp_filament(
+    state: StateDep,
+    filament: FilamentDep,
+    caller: CallerDep,
+    body: TdfpCreateRequest,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> TdfpCreated:
+    who = actor(caller)
+    # The caller's key under their own name, and the type the new id goes to: the same key
+    # for another type is another create, never the first one's id on it (R-7025-12).
+    key = f"{who}\x1f{required_key(idempotency_key)}\x1f{body.type_id or ''}"
+    ask = CreateAsk.model_validate(body.model_dump(exclude={"type_id"}))
+    runner = tdfp(state)
+    if body.type_id is not None:
+        kind = await asyncio.to_thread(filament.types.get, body.type_id)
+        if kind is None:
+            raise _no_type(body.type_id)
+        try:
+            started = kind.tdfp_id is not None and await runner.started(ask, key=key)
+        except (RPCError, RuntimeError, TimeoutError) as error:
+            problem = _tdfp_temporal(error, "the 3DFP create's check", may_have_started=False)
+            if problem is None:
+                raise
+            raise problem from None
+        if kind.tdfp_id is not None and not started:
+            raise _tdfp_problem(
+                status.HTTP_409_CONFLICT,
+                "type_has_tdfp_id",
+                f"spool type {body.type_id} already has 3DFP id {kind.tdfp_id}",
+            )
+    await _tdfp_worker(runner)
+    try:
+        outcome = await runner.create(ask, key=key, wait=CREATE_WAIT)
+    except TimeoutError:
+        raise _tdfp_problem(
+            status.HTTP_504_GATEWAY_TIMEOUT,
+            "no_outcome",
+            "the 3DFP create gave no answer in time; it may still run: send the same request"
+            " with the same Idempotency-Key to wait for it",
+        ) from None
+    except (RPCError, RuntimeError) as error:
+        # The start may have reached Temporal before it failed: the same key joins it. A
+        # TimeoutError here is the wait's (504 above), not Temporal's.
+        if (problem := _tdfp_temporal(error, "the 3DFP create", may_have_started=True)) is None:
+            raise
+        raise problem from None
+    if outcome.create is None:
+        raise _tdfp_failed(outcome)
+    made = outcome.create
+    taken = False
+    if made.status == "created" and made.tdfp_id is not None and body.type_id is not None:
+        taken = await asyncio.to_thread(set_type_tdfp_id, filament, body.type_id, made.tdfp_id)
+    return TdfpCreated(create=made, type_id=body.type_id, type_tdfp_id_set=taken)
+
+
+def set_type_tdfp_id(filament: Filament, type_id: UUID, tdfp_id: int) -> bool:
+    """Set the type's ``tdfp_id`` to the created one, unless it has another by now; whether
+    the type holds it. One conditional write (`SpoolTypeStore.set_tdfp_id`, R-7025-14), so
+    two creates for one type under different keys never replace each other's id."""
+    return filament.types.set_tdfp_id(type_id, tdfp_id)
+
+
 # -- spools, tags, the ledger ---------------------------------------------------------
 
 _SPOOL_REFUSED = (
@@ -699,6 +1022,7 @@ _SPOOL_REFUSED = (
     TagUnnamedError,
     TagKeysClashError,
     TypeRowsDuplicateError,
+    PresetUnknownError,
 )
 
 
@@ -755,6 +1079,89 @@ async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCr
         return await asyncio.to_thread(filament.spools.create, body, actor=actor(caller))
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None
+
+
+BULK_ROUTE = "POST /filament/spools/bulk"
+
+
+@router.post(
+    "/spools/bulk",
+    response_model=list[m.Spool],
+    status_code=status.HTTP_201_CREATED,
+    summary="Add several identical spools",
+    description=(
+        "`quantity` (1 to 100) spools of one `spool` body, in one transaction (#7150): each "
+        "gets its own number and its own `created` event (`grams_left` is each one's first "
+        "reading), its move to `location_id`, and its own `presets` and `k_values`. Answers "
+        "the spools in number order. Needs an `Idempotency-Key` (428 without one): a retry "
+        "with the same key answers the first result and writes nothing, and the key with "
+        "another body is a 422. 422 for a bad field, a row it names that does not exist, an "
+        "effective minimum temperature above its maximum, two preset or K rows of one key, "
+        "or a place that does not exist, is archived, is an AMS unit's or is a printer's "
+        "tray (a tray takes one spool, through its own link). Nothing is written on a "
+        "refusal."
+    ),
+)
+async def bulk_create_spools(
+    filament: FilamentDep,
+    caller: CallerDep,
+    body: m.SpoolBulkCreate,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> JSONResponse:
+    who = actor(caller)
+    # A person's key, under their own name, as the CSV import keys it.
+    key = f"{who}\x1f{required_key(idempotency_key)}"
+    asked = body.model_dump(mode="json")
+
+    def write() -> Replay:
+        defaults = filament.spools.defaults()
+        with filament.spools.transaction() as conn:
+
+            def run() -> Replay:
+                try:
+                    with conn.transaction():
+                        ids = filament.spools.bulk_on(conn, body, actor=who)
+                except pg_errors.ForeignKeyViolation as error:
+                    # As `PUT …/presets` maps it: an unknown `sb-<id>` preset is its own 422.
+                    if names_preset(error):
+                        raise PresetUnknownError() from None
+                    raise CatalogRefError() from None
+                except pg_errors.UniqueViolation:
+                    raise TypeRowsDuplicateError() from None
+                spools = []
+                for spool_id in ids:
+                    made = filament.spools.read(conn, spool_id, defaults=defaults)
+                    assert made is not None
+                    spools.append(made.model_dump(mode="json"))
+                return Replay(status.HTTP_201_CREATED, spools)
+
+            return idempotent_write(conn, "filament", key, BULK_ROUTE, asked, run)
+
+    try:
+        done = await asyncio.to_thread(write)
+    except (*_SPOOL_REFUSED, SpoolTrayPlaceError, MoveTargetError, CatalogRefError) as exc:
+        raise _refused(exc) from None
+    return JSONResponse(done.body, status_code=done.status)
+
+
+@router.get(
+    "/spools/{spool_id}/copy",
+    response_model=m.SpoolDraft,
+    summary="Start a new spool from an existing one",
+    description=(
+        "The body `POST /filament/spools/bulk` takes, less its `quantity`, filled from the "
+        "spool (#7150): its type, its own overrides, its note, its own presets and K values, "
+        "and its place unless that is a printer's tray or archived. It leaves out what stays "
+        "the first spool's own: its number, tags, tray, ledger (so no `grams_left`) and "
+        "weight lock. An archived spool can be copied. Writes nothing; 404 for no such "
+        "spool."
+    ),
+)
+async def copy_spool(filament: FilamentDep, spool_id: UUID) -> m.SpoolDraft:
+    draft = await asyncio.to_thread(filament.spools.copy, spool_id)
+    if draft is None:
+        raise _no_spool(spool_id)
+    return draft
 
 
 @router.get(
@@ -1003,6 +1410,8 @@ async def bind_spool_tag(
                 kind=body.kind,
                 override=body.override,
                 actor=actor(caller),
+                # R-7149-10: the origin follows the tag's stored kind.
+                marks_origin=True,
             )
         )
     except _SPOOL_REFUSED as exc:
@@ -1151,22 +1560,57 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
     "/spools/{spool_id}/events",
     response_model=m.SpoolEvent,
     status_code=status.HTTP_201_CREATED,
-    summary="Record a weighing or a drying",
+    summary="Record a weighing, a drying or a consumed reset",
     description=(
         "`weighed` with `grams` (the filament left, without the empty spool) is a new "
         "reading: `grams_left` starts again from it. `dried` takes `temp_c` and `hours`; "
         "one left out is the spool's `drying_defaults` value (its type's, else its "
-        "subtype's, else its material's), and `null` records none. "
+        "subtype's, else its material's, else the setting `filament_drying_temp_c` or "
+        "`filament_drying_hours`), and `null` records none. `consumed_reset` takes "
+        "nothing and starts the spool's consumed counter again (`consumed_g`); the grams "
+        "left stay. On a spool linked to Bambuddy a `consumed_reset` whose `at` is not "
+        "after the link is a 422 with `code` `reset_before_link` (#7149 R-7149-12): the sync "
+        "never sends such a reset to Bambuddy, so the counters would disagree. "
         "404 for no such spool, 422 for a field the kind does not take."
     ),
 )
 async def add_spool_event(
     filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.SpoolEventAdd
 ) -> m.SpoolEvent:
-    made = await asyncio.to_thread(filament.spools.add_event, spool_id, body, actor=actor(caller))
+    try:
+        made = await asyncio.to_thread(
+            filament.spools.add_event, spool_id, body, actor=actor(caller)
+        )
+    except ResetBeforeLinkError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(exc),
+            code="reset_before_link",
+            linked_at=exc.linked_at.isoformat(),
+        ) from None
     if made is None:
         raise _no_spool(spool_id)
     return made
+
+
+@router.post(
+    "/spools/reset-consumed",
+    response_model=m.ConsumedResetDone,
+    summary="Reset the consumed counter of several spools",
+    description=(
+        "A `consumed_reset` ledger event on each spool named (1 to 500 ids; there is no "
+        '"reset all"). The grams left stay; the spool\'s `consumed_g` metric counts the '
+        "plates after it, and the Bambuddy sync resets Bambuddy's counter of a linked spool "
+        "under the `weights` data type. An id that names no spool is in `not_found`. One "
+        "spool: `POST /spools/{spool_id}/events` with `kind: consumed_reset`."
+    ),
+)
+async def reset_consumed(
+    filament: FilamentDep, caller: CallerDep, body: m.ConsumedReset
+) -> m.ConsumedResetDone:
+    return await asyncio.to_thread(
+        filament.spools.reset_consumed, body.spool_ids, actor=actor(caller)
+    )
 
 
 @router.get(
@@ -1358,6 +1802,59 @@ async def get_purchasing_metrics(
     return await asyncio.to_thread(filament.metrics.purchasing, start, end)
 
 
+@router.get(
+    "/metrics/material-numbers",
+    response_model=mm.MaterialNumberStats,
+    summary="Stock, use and value by material number",
+    description=(
+        "Per material number (a spool type's `code`, which Bambuddy calls `material_number`, "
+        "case folded; `key` `null` for untyped spools, listed last): every type of that code "
+        "with `archived`, the unarchived spools, their grams left and their value at each "
+        "spool's cost per kg (else the default cost; `null` when none has a cost) in "
+        "`currency`, the shop's; and `used_g` and `wasted_g`, the grams of the plates that "
+        "ended from `since` to `until`, both included (default the 180 days before today), "
+        "counted as `GET /filament/metrics` counts consumption: archived spools too, a plate "
+        "SB and Bambuddy both booked once, failed and cancelled plates also as waste. A "
+        "material number with no spool in stock and no plate in the range is left out. 422 "
+        "when `since` is after `until` or the range is longer than three years."
+    ),
+)
+async def get_material_number_stats(
+    filament: FilamentDep, since: date | None = None, until: date | None = None
+) -> mm.MaterialNumberStats:
+    start, end = _range(since, until, 180)
+    return await asyncio.to_thread(filament.metrics.material_numbers, start, end)
+
+
+@router.get(
+    "/cost-per-kg",
+    response_model=CostCalculation,
+    summary="Work out a cost per kg",
+    description=(
+        "What `price` (paid for `quantity` spools, default 1), `tax` and `shipping` (default "
+        "0) come to per kg of filament when each spool holds `net_weight_g` grams: "
+        "`cost_per_kg` with all three in (what an invoice line gives its spools), and "
+        "`price_per_kg` with shipping out (a price point's basis). Money is a decimal string "
+        "of at most four places, the results rounded half up to four, in `currency`, the "
+        "shop's (`orders_currency`). It writes nothing. 422 for an unknown parameter, an "
+        "amount out of bounds or a cost per kg of 10^8 or more."
+    ),
+)
+async def get_cost_per_kg(
+    store: SettingsStoreDep, query: Annotated[CostQuery, Query()]
+) -> CostCalculation:
+    try:
+        settings = await asyncio.to_thread(store.snapshot)
+    except DATABASE_ERRORS as error:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "the settings could not be read; try again"
+        ) from error
+    try:
+        return calculate(query, settings.runtime.orders_currency)
+    except CostTooHighError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+
+
 async def _assignments(store: SettingsStore, cache: AssignmentsCache) -> list[SpoolAssignment]:
     """Bambuddy's tray assignments, through the filament component's `AssignmentsCache`.
     503 when the settings cannot be read, as when the spools cannot."""
@@ -1471,6 +1968,55 @@ async def create_location(filament: FilamentDep, body: m.LocationCreate) -> m.Lo
         return await asyncio.to_thread(filament.locations.create, body)
     except _LOCATION_REFUSED as exc:
         raise _refused(exc) from None
+
+
+@router.get(
+    "/locations/{location_id}",
+    response_model=m.LocationDetail,
+    summary="A location's page",
+    description=(
+        "The place with its `code` (`L-12`), its kind's name, its `path` (the places above "
+        "it, root first), its unarchived `children` and the unarchived `spools` in it. An "
+        "archived place still answers. 404 for no such place."
+    ),
+)
+async def get_location(filament: FilamentDep, location_id: UUID) -> m.LocationDetail:
+    found = await asyncio.to_thread(filament.locations.detail, location_id)
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no location {location_id}")
+    return found
+
+
+@router.post(
+    "/printer-labels",
+    response_model=m.PrinterLabels,
+    summary="The labels of the printers' places",
+    description=(
+        "For each printer (the `printer_ids`, or every printer when null; by name): its own "
+        "place, each AMS unit with its slots, and the external holder, in that order, each "
+        "with its `code`, `name` and `depth` (0 printer, 1 unit or external holder, 2 "
+        "slot); with `base_url`, the address a label's QR opens (`filament_label_base_url`, "
+        "else `public_url`, else null). It makes a printer's place when it has none, and "
+        "the place of each AMS unit, slot and external holder the printer's latest report "
+        "lists, so it is a POST; `no_report` names the printers with no report that lists "
+        "a unit or a holder (their slots appear once a spool has been loaded). "
+        "409 `no_printer_kind` when no location kind is marked as a printer, "
+        "422 for an unknown printer id."
+    ),
+)
+async def printer_labels(
+    filament: FilamentDep, store: SettingsStoreDep, body: m.PrinterLabelsRequest
+) -> m.PrinterLabels:
+    try:
+        labels, no_report = await asyncio.to_thread(
+            label_logic, filament.locations, body.printer_ids
+        )
+    except NoPrinterKindError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code="no_printer_kind") from None
+    except CatalogRefError as exc:
+        raise _refused(exc) from None
+    read = await asyncio.to_thread(store.read, {"filament_label_base_url", "public_url"})
+    return m.PrinterLabels(base_url=label_base_url(read), labels=labels, no_report=no_report)
 
 
 @router.patch(
@@ -1765,9 +2311,12 @@ async def import_bambuddy(
     response_model=m.RfidStatus,
     summary="Read the RFID override mode",
     description=(
-        "Whether the RFID override mode is on, and where Bambuddy's `auto_add_unknown_rfid` "
-        "stands: `applied` (mode on, Bambuddy's value is false), `pending` (a write has not "
-        "landed, or Bambuddy could not be reached; `detail` names the error), `blocked` "
+        "Whether the RFID override mode is on, whether the setting "
+        "`filament_auto_add_unknown_rfid` is on (`auto_add_unknown_rfid`; off holds Bambuddy's "
+        "value off as the mode does, #7156), and where Bambuddy's `auto_add_unknown_rfid` "
+        "stands: `applied` (the mode or the setting holds it, and Bambuddy's value is false), "
+        "`pending` (a write has not landed, or Bambuddy could not be reached; `detail` names "
+        "the error), `blocked` "
         "(Bambuddy refused the write because its auth is on) or `off`. Also lists the "
         "SpoolBuddy devices. Reads Bambuddy and writes nothing; when Bambuddy fails, "
         "`bambuddy_auto_add` is null and `devices` is empty."
@@ -1783,7 +2332,8 @@ async def get_rfid_status(filament: FilamentDep, store: SettingsStoreDep) -> m.R
     summary="Turn the RFID override mode on or off",
     description=(
         "While the mode is on, Bambuddy's auto-add of unknown RFID spools is turned off; "
-        "the value Bambuddy had is saved first and put back when the mode turns off. The "
+        "the value Bambuddy had is saved first and put back when the mode turns off, unless "
+        "the setting `filament_auto_add_unknown_rfid` is off and still holds it (#7156). The "
         "mode is written first, then Bambuddy is reconciled once, and the answer is the "
         "status. It is 200 even when Bambuddy refuses the write (`blocked`: its auth is "
         "on) or cannot be reached (`pending`); the mode then stays as asked and the "
@@ -1806,7 +2356,8 @@ async def set_rfid_override_mode(
     summary="Reconcile RFID with Bambuddy now",
     description=(
         "Runs once what the spool refresh Schedule runs: Bambuddy's `auto_add_unknown_rfid` "
-        "is brought to the override mode, then the queued tag changes are pushed (only with "
+        "is brought to the override mode and the setting `filament_auto_add_unknown_rfid`, "
+        "then the queued tag changes are pushed (only with "
         "`filament_sync.tags` `sb_to_bb` or `two_way`), then the AMS slot of each override tag is "
         "configured with its type's preset. Answers the mode's status and the tag push "
         "counts, and the override slots' counts (`slots` is null with no Bambuddy)."
@@ -1880,6 +2431,39 @@ async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDe
     )
 
 
+@router.get(
+    "/sync/passes",
+    response_model=SyncPassPage,
+    summary="Bambuddy sync pass history",
+    description=(
+        "The ScadBuddy-to-Bambuddy sync's passes (#6905), newest first by when each ended, "
+        "failed ones too; `GET /filament/sync/status` holds the last one. Each has its `id`, "
+        "the Bambuddy `instance` it served, its `trigger` (`timer`: the interval ran out; "
+        "`change`: a write's nudge; `full`: a full pass asked for, such as Sync now; `more`: "
+        "the pass before it left writes; null when the worker did not say), `started_at` (by "
+        "the worker's clock) and `ended_at` (the server's), the counts `written`, `failed`, "
+        "`deferred`, `conflicts` and `unmapped_k`, `skipped` (`no_bambuddy` or "
+        "`nothing_pushes`), `instance_changed` (the links or the pass's instance were another "
+        "Bambuddy's, so it wrote nothing) and `error` (a label, null when it worked; "
+        "`crud_unavailable:<failure>` or `crud_refused:<status>` when a call to ScadBuddy's "
+        "own API failed, `internal` for any other failure outside Bambuddy). A page holds up "
+        f"to `limit` passes (at most {PAGE_MAX}); `next_cursor` is opaque, and passing it "
+        "back as `cursor` gives the next page with no row lost or repeated. 422 for a cursor "
+        "no page gave. Rows older than the setting `filament_sync_pass_ttl_days` (30 by "
+        "default) are deleted. Reads ScadBuddy only."
+    ),
+)
+async def list_filament_sync_passes(
+    filament: FilamentDep,
+    cursor: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=PAGE_MAX)] = 20,
+) -> SyncPassPage:
+    try:
+        return await asyncio.to_thread(filament.sync_passes.page, cursor=cursor, limit=limit)
+    except BadPassCursorError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+
+
 def _configured(url: str | None) -> str | None:
     """The configured Bambuddy's instance, ``None`` with none configured."""
     return instance_for(url) if url else None
@@ -1926,7 +2510,14 @@ async def _listing(settings: StoredSettings) -> tuple[Listing, bool]:
         "RFID tag, a supplier, location or insert type by its name), so every untagged "
         "spool is made again on the side its direction sends it to. Reads ScadBuddy and "
         "the configured Bambuddy's spools (`GET`). When Bambuddy cannot be read the answer "
-        "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. The "
+        "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. "
+        "`changed_since_pull` is true when `same_bambuddy` is false although the "
+        "configured Bambuddy holds every linked spool and none is older than its link, and "
+        "at least half the links have a time on both sides (Decision 199): every linked "
+        "spool ScadBuddy could compare (a time on both sides) was edited in "
+        "Bambuddy since the last pull, so none matches exactly and ScadBuddy cannot prove "
+        "it is the same Bambuddy; only the delete is "
+        "then offered. The "
         "counts are approximate: they are read without a lock, so a pass that runs "
         "meanwhile can change them. The answer of the `POST` gives the counts it deleted."
     ),

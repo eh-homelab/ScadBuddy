@@ -155,6 +155,20 @@ class TypeRowsDuplicateError(ValueError):
         super().__init__("two rows name the same printer and nozzle")
 
 
+class PresetUnknownError(ValueError):
+    """A preset row names a ScadBuddy preset (``sb-<id>``, #7176) that does not exist."""
+
+    def __init__(self) -> None:
+        super().__init__("a preset row names a ScadBuddy preset (sb-<id>) that does not exist")
+
+
+def names_preset(error: errors.ForeignKeyViolation) -> bool:
+    """Whether ``error`` is a preset row's ``preset_id`` foreign key (the migration
+    ``20261123T0711Z_filament_presets.sql``), not another of its keys."""
+    constraint = error.diag.constraint_name or ""
+    return constraint.endswith("_preset_id_fkey")
+
+
 def effective(
     spool_row: Row | None,
     type_row: Row | None,
@@ -291,6 +305,20 @@ class SpoolTypeStore:
         """Take a type off the lists (``True``), freeing its code, or put it back."""
         return self.update(type_id, m.SpoolTypePatch(archived=archived), actor=actor)
 
+    def set_tdfp_id(self, type_id: UUID, tdfp_id: int) -> bool:
+        """Give the type ``tdfp_id`` when it has none (#7025, R-7025-14): one conditional
+        UPDATE, so of two sets that race, the second finds the first's id and writes
+        nothing. Whether the type holds ``tdfp_id`` after it (true when it already did);
+        false for no such type. ``tdfp_id`` is no `OVERRIDABLE` or priced field, so no
+        spool event and no price-book link follow, as with `update`."""
+        with self._orders.transaction() as conn:
+            row = conn.execute(
+                "UPDATE filament_spool_types SET tdfp_id = %s, updated_at = now()"
+                " WHERE id = %s AND (tdfp_id IS NULL OR tdfp_id = %s) RETURNING id",
+                (tdfp_id, type_id, tdfp_id),
+            ).fetchone()
+        return row is not None
+
     def set_presets(self, type_id: UUID, rows: _Presets, *, actor: str) -> _Presets | None:
         """The type's presets, replaced by ``rows``; ``None`` for no such type. A change
         writes one ``edited`` event (``changes.presets``), as ``actor``, on each
@@ -318,6 +346,10 @@ class SpoolTypeStore:
                         )
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
+        except errors.ForeignKeyViolation as error:
+            if not names_preset(error):
+                raise
+            raise PresetUnknownError() from None
         return self.presets(type_id)
 
     def set_k_values(self, type_id: UUID, rows: _KValues, *, actor: str) -> _KValues | None:

@@ -210,6 +210,71 @@
         }
       }
     },
+    "/api/v1/inventory/spools/{spool_id}/reset-consumed-counter": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Reset Spool Consumed Counter",
+        "description": "Zero the displayed \"Total Consumed\" counter without touching remaining.\n\nStamps `weight_used_baseline = weight_used` so the Inventory page's\n`weight_used - baseline` display reads 0, while `label_weight -\nweight_used` (remaining) is unchanged. weight_locked is also left\nalone — the spool keeps receiving AMS auto-sync updates.",
+        "operationId": "reset_spool_consumed_counter_api_v1_inventory_spools__spool_id__reset_consumed_counter_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "spool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Spool Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpoolResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "x-recorded-note": "#7149: not read from the live instance. The operationId is the one in backend/tests/fixtures/bambuddy-openapi-1.2.6b1.json; the description, parameters and the SpoolResponse answer are read from the Bambuddy source at https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1811-L1840; the rest is the shape of the archive route beside it."
+    },
     "/api/v1/inventory/spools/{spool_id}/restore": {
       "post": {
         "tags": [
@@ -3489,6 +3554,25 @@
       "apikey_scope_flag": "can_manage_inventory",
       "scadbuddy_scope": "Manage Inventory",
       "scadbuddy_operation": "spools.archive"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/inventory/spools/{spool_id}/reset-consumed-counter",
+      "operationId": "reset_spool_consumed_counter_api_v1_inventory_spools__spool_id__reset_consumed_counter_post",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": null,
+      "success_status": 200,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1815",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "scadbuddy_operation": "spools.reset_consumed"
     },
     {
       "method": "POST",

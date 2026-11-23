@@ -391,8 +391,9 @@ Known limits of the time rule (#6261 and #6263):
   plate that ends within that skew of the reading.
 - During a plate, the spool shows the anchor before the plate minus the
   estimate, because AMS readings taken while printing are no anchor (rule 2).
-- The pull reads the newest 200 usage rows. More than 200 rows between two pulls
-  are not all booked. They are inside the next BB reading's value.
+- The pull reads the newest 5,000 usage rows (#7002; Bambuddy's listing has no
+  offset or date). More than 5,000 rows between two pulls are not all booked. They
+  are inside the next BB reading's value. Prod wrote 471 rows in 60 days.
 - A plate end that no report showed (the next plate began, the printer went
   `IDLE`) is booked at the settle's clock time, an upper bound.
 
@@ -420,6 +421,11 @@ BB has a flat list (`/inventory/locations`) plus location sensors
 - Each printer's AMS units and external spool holder are locations too, made
   automatically. A loaded spool's location is its AMS slot, so "where is it" is
   always one answer.
+- As built in #6955: a location has a `number` and the code `L-<n>`, and its QR label
+  opens `<base>/x/L-<n>` (spec `2026-11-22-printer-location-labels-design.md`). A printer has
+  its own place (`printer_root`, a kind flagged `printer`), and its AMS units and external holder
+  hang under it (`filament/locations.py` `ensure_printer_on`; migrations
+  `20261122T0603Z_filament_location_numbers.sql` and `20261122T0700Z_filament_printer_place.sql`).
 - Sensors: humidity and temperature per location, read from Home Assistant as
   BB does (`LocationHASensor`: entity id, alert above or below, notify) and from
   the AMS reports for AMS locations. Readings are kept as history.
@@ -658,6 +664,13 @@ holds each decision and what it costs if wrong.
   - Labels: 50 x 25 mm, a QR code of the text `scadbuddy:spool:<spool id>` (no host), with a quiet
     zone of 4 modules, and the spool number, material, colour and brand. The page is
     `/filament/labels`; the layout (roll or sheet) is kept in `localStorage`.
+  - As built in #6955: spool labels keep that payload. Place labels, and labels for a printer, its
+    AMS units and slots, carry the URL `<base>/x/L-<number>` (at most 84 bytes, QR version 5 or
+    less, so a 19.8 mm square QR keeps modules of 0.5 mm). `<base>` is the setting
+    `filament_label_base_url`, else `public_url`, each reduced to an https origin
+    (`filament/labels.py` `label_base_url`), else the page's own origin. A phone camera opens the
+    URL; `/x/:code` resolves it (`backend/scadbuddy/codes/`). Modes `?locations=` and `?printers=`
+    of the labels page print them.
 
 ## 8. Sync with BB
 
@@ -790,7 +803,8 @@ below are the plan's):
   worker: the spool refresh's activity, and the import route, start `FilamentBbPull` on
   the `bambuddy` queue and wait for it. Its activity (`filament/bb_pull_run.py`) reads
   Bambuddy and sends the rows to the CRUD area `filament-pull`
-  (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`), which
+  (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`, and since
+  #6907 `…/pull/colours`), which
   applies them (`filament/bb_pull_apply.py`). The CRUD service makes no Bambuddy call for
   the pull. The worker never names the actor the events are booked to: a person's import
   is kept by the API under the run's id (`filament_pull_actors`), else `bambuddy`.

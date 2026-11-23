@@ -157,7 +157,7 @@ export const B = {
 }
 export const E = { TRANSLUCENT: catalogId(40), CLEAR: catalogId(41), SILK: catalogId(42) }
 export const IT = { BAMBU_REUSABLE: catalogId(60), CARDBOARD: catalogId(61) }
-export const LK = { ROOM: catalogId(80), SHELF: catalogId(81), DRY_BOX: catalogId(82), AMS: catalogId(83) }
+export const LK = { ROOM: catalogId(80), SHELF: catalogId(81), DRY_BOX: catalogId(82), AMS: catalogId(83), PRINTER: catalogId(84) }
 
 export type Catalogs = {
   materials: S['Material'][]
@@ -202,28 +202,35 @@ function catalogs(): Catalogs {
       { ...row(61, 'Cardboard spool', 1), empty_weight_g: 180, insert_material_id: catalogId(51), note: null, bb_catalog_id: null },
     ],
     colours: [
-      { ...row(70, 'Jade White'), manufacturer: 'Bambu Lab', rgba: '#FFFFFFFF', material_id: M.PLA, extra_colours: null, effect_id: null },
-      { ...row(71, 'Hot Pink'), manufacturer: 'Bambu Lab', rgba: '#F5547CFF', material_id: M.PLA, extra_colours: null, effect_id: null },
-      { ...row(72, 'Translucent Orange'), manufacturer: 'Bambu Lab', rgba: '#FF6A1380', material_id: M.PETG, extra_colours: null, effect_id: E.TRANSLUCENT },
+      // #6907: a synced row (`source`, `synced_at` its `updated_at`), and a person's own.
+      { ...row(70, 'Jade White'), manufacturer: 'Bambu Lab', rgba: '#FFFFFFFF', material_id: M.PLA, material_name: 'PLA Basic', extra_colours: null, effect_id: null, source: 'bambu', synced_at: AT, bb_colour_id: null },
+      { ...row(71, 'Hot Pink'), manufacturer: 'Bambu Lab', rgba: '#F5547CFF', material_id: M.PLA, material_name: null, extra_colours: null, effect_id: null, source: null, synced_at: null, bb_colour_id: null },
+      { ...row(72, 'Translucent Orange'), manufacturer: 'Bambu Lab', rgba: '#FF6A1380', material_id: M.PETG, material_name: null, extra_colours: null, effect_id: E.TRANSLUCENT, source: null, synced_at: null, bb_colour_id: null },
+      // #6912: a multi-colour row, whose pick fills the extra colours, and an archived one no pick offers.
+      { ...row(73, 'Galaxy Duo'), manufacturer: 'Elegoo', rgba: '#1B3A8CFF', material_id: M.PLA, material_name: 'PLA Silk Dual', extra_colours: ['#2E8B57FF'], effect_id: E.SILK, source: 'filamentcolors', synced_at: AT, bb_colour_id: null },
+      { ...row(74, 'Retired Grey'), archived_at: AT, manufacturer: 'Sunlu', rgba: '#808080FF', material_id: M.PLA, material_name: null, extra_colours: null, effect_id: null, source: null, synced_at: null, bb_colour_id: null },
     ],
     'location-kinds': [
-      { ...row(80, 'Room'), dry_storage: false, ams: false },
-      { ...row(81, 'Shelf', 1), dry_storage: false, ams: false },
-      { ...row(82, 'Dry box', 2), dry_storage: true, ams: false },
-      { ...row(83, 'AMS tray', 3), dry_storage: false, ams: true },
+      { ...row(80, 'Room'), dry_storage: false, ams: false, printer: false },
+      { ...row(81, 'Shelf', 1), dry_storage: false, ams: false, printer: false },
+      { ...row(82, 'Dry box', 2), dry_storage: true, ams: false, printer: false },
+      { ...row(83, 'AMS tray', 3), dry_storage: false, ams: true, printer: false },
+      { ...row(84, 'Printer', 4), dry_storage: false, ams: false, printer: true },
     ],
   }
 }
 
 // -- places ---------------------------------------------------------------------------
 
-export const L = { WORKSHOP: locationId(1), SHELF_A: locationId(2), DRY_BOX: locationId(3), AMS_A1: locationId(4), AMS_A4: locationId(5), AMS_A: locationId(6) }
+export const L = { WORKSHOP: locationId(1), SHELF_A: locationId(2), DRY_BOX: locationId(3), AMS_A1: locationId(4), AMS_A4: locationId(5), AMS_A: locationId(6), H2C: locationId(7) }
 
 function place(n: number, name: string, kind_id: string, values: Partial<S['Location']> = {}): S['Location'] {
   return {
     ...row(n, name),
     id: locationId(n),
     kind_id,
+    number: n,
+    printer_root: false,
     parent_id: null,
     identifier: null,
     capacity: null,
@@ -241,7 +248,8 @@ function locations(): S['Location'][] {
     place(2, 'Shelf A', LK.SHELF, { parent_id: L.WORKSHOP, capacity: 12 }),
     place(3, 'Dry box 1', LK.DRY_BOX, { parent_id: L.WORKSHOP, capacity: 4, sort_order: 1 }),
     place(4, 'H2C AMS-A slot 1', LK.AMS, { parent_id: L.AMS_A, printer_id: H2C.printer_id, ams_id: 0, tray_id: 0, sort_order: 2 }),
-    place(6, 'H2C AMS-A', LK.AMS, { printer_id: H2C.printer_id, ams_id: 0, sort_order: 4 }),
+    place(6, 'H2C AMS-A', LK.AMS, { parent_id: L.H2C, printer_id: H2C.printer_id, ams_id: 0, sort_order: 4 }),
+    place(7, '3DP-31B-598', LK.PRINTER, { printer_id: H2C.printer_id, printer_root: true, sort_order: 5 }),
     place(5, 'H2C AMS-A slot 4', LK.AMS, { parent_id: L.AMS_A, printer_id: H2C.printer_id, ams_id: 0, tray_id: 3, sort_order: 3 }),
   ]
 }
@@ -371,6 +379,9 @@ function spool(number: number, values: Partial<SpoolRow>): SpoolRow {
     location_id: null,
     weight_locked: false,
     note: null,
+    data_origin: null,
+    added_full: null,
+    tag_encoded_at: null,
     grams_left: null,
     last_weighed_g: null,
     last_weighed_at: null,
@@ -392,13 +403,15 @@ function spools(): SpoolRow[] {
     spool(1, { type_id: T.JADE, grams_left: 640, location_id: L.SHELF_A, last_weighed_g: 640, last_weighed_at: '2026-11-14T18:00:00Z' }),
     spool(2, { type_id: T.ORANGE, created_at: '2026-11-01T09:00:00Z', grams_left: 820, location_id: L.DRY_BOX, last_weighed_g: 820, last_weighed_at: '2026-11-13T09:00:00Z', last_used_at: '2026-11-09T11:00:00Z', hours_outside_dry: 61.5, last_dried_at: '2026-11-12T09:00:00Z', last_dried_temp_c: 65, last_dried_hours: '8' }),
     spool(3, { type_id: T.PINK, grams_left: 930, location_id: L.SHELF_A }),
-    spool(4, { type_id: T.BLACK, grams_left: 120, location_id: L.AMS_A1, last_used_at: '2026-11-14T21:30:00Z' }),
+    // Bambuddy added it when its AMS read the tag (#7149: `data_origin`).
+    spool(4, { type_id: T.BLACK, grams_left: 120, location_id: L.AMS_A1, last_used_at: '2026-11-14T21:30:00Z', data_origin: 'rfid_auto', added_full: true }),
     spool(5, { type_id: T.POLY_CLEAR, grams_left: 700, location_id: L.DRY_BOX }),
     // Added by hand with only its material: it needs a type.
     spool(6, { material_id: M.PLA, colour_name: 'Teal', rgba: '#1B9AAAFF', label_weight_g: 1000, grams_left: 500 }),
     // Pulled from Bambuddy with no material, and no label weight: no grams arc.
     spool(7, { material_id: M.UNKNOWN, rgba: '#808080FF', grams_left: 300, note: 'Pulled from Bambuddy spool 41.' }),
-    spool(8, { type_id: T.INSIGNIA_CLEAR, grams_left: 400, location_id: L.AMS_A4 }),
+    // Its NTAG was written through SpoolBuddy (#7149).
+    spool(8, { type_id: T.INSIGNIA_CLEAR, grams_left: 400, location_id: L.AMS_A4, data_origin: 'opentag3d', tag_encoded_at: '2026-11-10T15:30:00Z' }),
     spool(9, { type_id: T.GOLD, grams_left: 1000 }),
     spool(10, { type_id: T.TPU_RED, grams_left: 250, low_stock_pct: 30 }),
     spool(11, { type_id: T.MISTLETOE, grams_left: 1000 }),

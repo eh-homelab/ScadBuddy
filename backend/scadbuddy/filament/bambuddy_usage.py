@@ -108,6 +108,11 @@ def unbooked(conn: Conn, rows: Sequence[SpoolUsage]) -> set[int]:
     event names yet."""
     links = _links(conn, rows)
     ids = {row.id for row in rows if _books(row, links.get(row.spool_id))}
+    return ids - _booked(conn, ids)
+
+
+def _booked(conn: Conn, ids: set[int]) -> set[int]:
+    """The ``ids`` a `ledger.BB_USAGE` event names already."""
     if not ids:
         return set()
     booked = conn.execute(
@@ -115,7 +120,7 @@ def unbooked(conn: Conn, rows: Sequence[SpoolUsage]) -> set[int]:
         " WHERE ref_kind = %s AND ref_id = ANY(%s)",
         (ledger.BB_USAGE, [str(i) for i in ids]),
     ).fetchall()
-    return ids - {int(row["ref_id"]) for row in booked}
+    return {int(row["ref_id"]) for row in booked}
 
 
 def match_archive(row: SpoolUsage, archives: Sequence[Archive]) -> int | None:
@@ -136,31 +141,79 @@ def match_archive(row: SpoolUsage, archives: Sequence[Archive]) -> int | None:
     return None if best is None else best[1]
 
 
+#: A usage row's place in Bambuddy's order: its ``created_at``, then its ``id``.
+Mark = tuple[datetime, int]
+
+
+def usage_mark(conn: Conn, instance: str) -> Mark | None:
+    """The newest usage row a pull of ``instance`` has read and booked whole (R-7002-6);
+    ``None`` when none is recorded, or it was read from another instance. It locks the
+    state row ``FOR UPDATE`` until ``conn``'s transaction ends, so two bookings take turns
+    and the second counts against the mark the first left (R-7002-7). Call it first in the
+    transaction, before any spool lock: the state row, then the spools, as
+    `bb_sync_results.apply_results` locks them."""
+    row = conn.execute(
+        "SELECT usage_read_instance, usage_read_at, usage_read_id FROM filament_bb_sync_state"
+        " FOR UPDATE"
+    ).fetchone()
+    if (
+        row is None
+        or row["usage_read_instance"] != instance
+        or row["usage_read_at"] is None
+        or row["usage_read_id"] is None
+    ):
+        return None
+    return (row["usage_read_at"], row["usage_read_id"])
+
+
+def advance_mark(conn: Conn, instance: str, mark: Mark) -> None:
+    """Record ``mark`` as ``instance``'s usage mark; never moves it back for one instance."""
+    at, row_id = mark
+    conn.execute(
+        "UPDATE filament_bb_sync_state SET usage_read_instance = %s, usage_read_at = %s,"
+        " usage_read_id = %s WHERE usage_read_instance IS DISTINCT FROM %s"
+        " OR usage_read_at IS NULL OR (usage_read_at, usage_read_id) < (%s, %s)",
+        (instance, at, row_id, instance, at, row_id),
+    )
+
+
 def book_usage(
-    conn: Conn, rows: Sequence[SpoolUsage], archives: Sequence[Archive], *, actor: str
+    conn: Conn,
+    rows: Sequence[SpoolUsage],
+    archives: Sequence[Archive],
+    *,
+    actor: str,
+    mark: Mark | None = None,
 ) -> UsageReport:
     """Book ``rows`` on ``conn``'s transaction, as the module says (`_books`). A row of
-    a BB spool with no link is counted ``unlinked``; a row of an archived SB spool is
-    counted neither way. Each row is booked, and its estimate covered (`_cover`), in one
-    savepoint: a row whose booking or cover fails is logged and skipped, nothing of it is
-    kept, and the next pull retries both; the rest are booked. The spools it books are locked
-    first, in id order, as `capture.lock` does for a report write, so the two cannot deadlock."""
+    a BB spool with no link is counted ``unlinked`` only when it is later than ``mark``,
+    the newest row an earlier pull read and booked whole (`usage_mark`), by ``created_at``
+    then ``id``; with no mark every such row counts. So a row an earlier pull read is not
+    counted again (R-7002-6). A row of an archived SB spool is counted neither way. Each row is
+    booked, and its estimate covered (`_cover`), in one savepoint: a row whose booking or
+    cover fails is logged and skipped, nothing of it is kept, and the next pull retries
+    both; the rest are booked. A row a `ledger.BB_USAGE` event names already is left out
+    in one query, never tried again: the pull sends every row it read, not only the new
+    ones (R-7002-3). The spools it books are locked first, in id order, as `capture.lock`
+    does for a report write, so the two cannot deadlock."""
     report = UsageReport()
     links = _links(conn, rows)
-    spools = {
-        link.spool_id
-        for row in rows
-        if (link := links.get(row.spool_id)) is not None and _books(row, link)
-    }
-    if spools:
-        capture.lock(conn, sorted(spools))
-    todo = [
+    wanted = [
         (row, link)
         for row in rows
         if (link := links.get(row.spool_id)) is not None and _books(row, link)
     ]
+    done = _booked(conn, {row.id for row, _ in wanted})
+    todo = [(row, link) for row, link in wanted if row.id not in done]
+    spools = {link.spool_id for _, link in todo}
+    if spools:
+        capture.lock(conn, sorted(spools))
     for row in rows:
-        if row.weight_used > 0 and links.get(row.spool_id) is None:
+        if (
+            row.weight_used > 0
+            and links.get(row.spool_id) is None
+            and (mark is None or (row.created_at, row.id) > mark)
+        ):
             report.unlinked += 1
     for i, (row, link) in enumerate(todo):
         try:

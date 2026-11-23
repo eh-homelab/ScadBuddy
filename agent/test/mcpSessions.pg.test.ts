@@ -7,10 +7,11 @@ import { delay, http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { AgentApp } from '../src/app.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { MemoryEventSource } from '../src/events/bus.js'
 import { PgEventListener } from './support/pgListener.js'
-import { CrudRelayRows, PgRelayRows, RELAY_SEND_MAX_BYTES, type RelayRows } from '../src/mcp/relayRows.js'
+import { CrudRelayRows, RELAY_SEND_MAX_BYTES, type RelayRows } from '../src/mcp/relayRows.js'
+import { PgRelayRows } from './support/sql/relayRows.js'
 import { SharedMcpSessionRelay, type SessionOwner, sessionHash } from '../src/mcp/sessionRelay.js'
 import { ResourceHub } from '../src/resources/hub.js'
 import { BACKEND, LOOPBACK, MCP_URL, testApp } from './helpers/mcp.js'
@@ -135,10 +136,10 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
   const clients: Client[] = []
   let liveness: Liveness = LIVE
 
-  /** A replica; `hears` drops the relay notifications it returns false for. */
+  /** A replica; `hears` drops the relay notifications it returns false for (`self`: the replica's own id). */
   function replica(
     mcp: { maxSessionsPerCaller?: number } = {},
-    hears: (payload: string) => boolean = () => true,
+    hears: (payload: string, self: string) => boolean = () => true,
     log: (message: string) => void = () => {},
     Relay: typeof SharedMcpSessionRelay = SharedMcpSessionRelay,
   ): Replica {
@@ -146,7 +147,8 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
     const sql = new PgRelayRows(db.sql)
     const rows = over === 'sql' ? sql : new CrudRelayRows({ baseUrl: BACKEND, fetch: crudRoutes(sql) })
     const relay = new Relay(rows, {
-      listen: (c, f) => listener.listenAlso(c, (payload) => (hears(payload) ? f(payload) : undefined)),
+      listen: (c, f) => listener.listenAlso(c, (payload) => (hears(payload, relay.replica) ? f(payload) : undefined)),
+      onReconnect: (f) => listener.onReconnect(f),
       ackTimeoutMs: liveness.ackTimeoutMs,
       beatMs: liveness.beatMs,
       log,
@@ -633,7 +635,13 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
   it('ends an answer with an error, not as whole, when its owner stops it for the relaying replica going silent', async () => {
     await quickLiveness()
     // #4384: A never hears B's beats, so it takes B for gone once the call's head has left.
-    await swap('a', () => replica({}, (payload) => JSON.parse(payload).t !== 'beat'))
+    // A still hears its own messages come back, so it knows the channel works (#6563).
+    await swap('a', () =>
+      replica({}, (payload, self) => {
+        const header = JSON.parse(payload) as { t: string; to: string }
+        return header.t !== 'beat' || header.to !== self
+      }),
+    )
     backend.use(
       http.get(`${BACKEND}/api/v1/models`, async () => {
         await delay(BEAT_MS * 6)

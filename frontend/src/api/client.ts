@@ -307,6 +307,11 @@ import type {
   VirtualPrinterCreate,
   VirtualPrinterUpdate,
   VirtualPrinterDiagnostic,
+  KProfileNotes,
+  KProfileRemove,
+  KProfileSet,
+  KProfileTable,
+  KProfileWriteResult,
   ProfileOptions,
 } from './types'
 import type {
@@ -316,6 +321,7 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
+import type { PluginFeedView } from './pluginFeeds'
 import type {
   AiConnectionTest,
   AiCredentialCreate,
@@ -449,6 +455,13 @@ async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{
     return { status: 204, body: undefined as T }
   }
   return { status: response.status, body: (await response.json()) as T }
+}
+
+/** A call whose answer is not JSON (a hosted plugin's draft file, #6937), as the `Response`; a non-2xx answer throws `ApiError`. */
+export async function requestRaw(path: string, init?: RequestInit): Promise<Response> {
+  const response = await send(`${API_BASE}${path}`, init)
+  if (!response.ok) throw new ApiError(await readProblem(response))
+  return response
 }
 
 /**
@@ -935,7 +948,7 @@ export async function command<T>(
  * upload progress; a video runs to a gigabyte. `onProgress` gets the fraction sent, 0
  * to 1. `form` builds the body afresh for each re-send.
  */
-function uploadForm<T>(path: string, form: () => FormData, onProgress?: (fraction: number) => void): Promise<T> {
+export function uploadForm<T>(path: string, form: () => FormData, onProgress?: (fraction: number) => void): Promise<T> {
   // A command (#1054): one key for this upload, kept on a re-send after an answer
   // that never arrived, so the server adds the item once.
   const key = newRequestId()
@@ -2425,6 +2438,25 @@ export const api = {
     command<BambuddyVirtualPrinter>(`/printers/virtual/${vpId}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteVirtualPrinter: (vpId: number) =>
     command<{ deleted: number }>(`/printers/virtual/${vpId}`, { method: 'DELETE' }),
+  /** #7154: a printer's K table for one nozzle, read from the printer through Bambuddy. */
+  listKProfiles: (id: string, nozzle: string) =>
+    request<KProfileTable>(`/printers/${seg(id)}/kprofiles?nozzle_diameter=${encodeURIComponent(nozzle)}`),
+  kProfileNotes: (id: string) => request<KProfileNotes>(`/printers/${seg(id)}/kprofiles/notes`),
+  /** The writes are commands, each sent once: Bambuddy dedupes none of them (R-7154-5). */
+  setKProfile: (id: string, body: KProfileSet) =>
+    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles`, { method: 'POST', body: JSON.stringify(body) }),
+  setKProfilesBatch: (id: string, profiles: KProfileSet[]) =>
+    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles/batch`, {
+      method: 'POST',
+      body: JSON.stringify({ profiles }),
+    }),
+  deleteKProfile: (id: string, body: KProfileRemove) =>
+    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles/delete`, { method: 'POST', body: JSON.stringify(body) }),
+  setKProfileNote: (id: string, key: string, note: string) =>
+    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles/notes`, {
+      method: 'PUT',
+      body: JSON.stringify({ setting_id: key, note }),
+    }),
   /** #4439, #4747: import and link Bambuddy's printers and virtual printers; idempotent. */
   syncPrintersFromBambuddy: (dryRun = false) =>
     request<PrinterSyncResult>(`/printers/sync-bambuddy?dry_run=${dryRun}`, { method: 'POST' }),
@@ -2446,6 +2478,16 @@ export const api = {
     request<FilamentSpool>(`/printers/${seg(printer)}/trays/${amsId}/${trayId}/spool`, {
       method: 'PUT',
       body: JSON.stringify(body),
+    }),
+
+  /**
+   * #7150 — create from slot: a new SB spool from what the printer last reported in the
+   * tray (material, colour, tag), placed in it. `key` is one `Idempotency-Key` per click.
+   */
+  newTraySpool: (printer: string, amsId: number, trayId: number, key: string) =>
+    request<FilamentSpool>(`/printers/${seg(printer)}/trays/${amsId}/${trayId}/new-spool`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': key },
     }),
 
   /** #2351 — Bambuddy's queue in its order; `status` narrows it (finished items stay in it). */
@@ -2898,6 +2940,15 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ media_ids: mediaIds, updated_at: updatedAt }),
     }),
+  /** #6710 §5.4 — an image for a file listing, kept for it; answers its id, `upload:<sha256>`. */
+  uploadStorefrontListingPicture: (id: string, file: File) =>
+    uploadForm<{ id: string }>(`/storefront/listings/${seg(id)}/pictures`, () => {
+      const body = new FormData()
+      body.append('file', file)
+      return body
+    }),
+  /** #6710 §9.3 — plate `plate`'s picture in the copy of the file the listing pins. */
+  storefrontListingPlateUrl: (id: string, plate: number) => `${API_BASE}/storefront/listings/${seg(id)}/plates/${plate}.png`,
   publishStorefrontListing: (id: string) =>
     request<StorefrontListing>(`/storefront/listings/${seg(id)}/publish`, { method: 'POST' }),
   unpublishStorefrontListing: (id: string) =>
@@ -3001,9 +3052,11 @@ export const api = {
   },
 
   /** #3630 — library files whose name or folder holds every word, from every folder. */
-  searchLibrary: (query: { q: string; all: boolean; fresh?: boolean }, signal?: AbortSignal) => {
+  searchLibrary: (query: { q: string; all: boolean; fresh?: boolean; types?: readonly ('3mf' | 'stl')[] }, signal?: AbortSignal) => {
     const search = new URLSearchParams({ q: query.q })
     if (query.all) search.set('all', 'true')
+    // #6710 §9.2 — only files of these types; `all` is then ignored.
+    for (const type of query.types ?? []) search.append('types', type)
     if (query.fresh) search.set('fresh', 'true')
     return request<LibrarySearch>(`/print/library/search?${search}`, { signal })
   },
@@ -3629,6 +3682,20 @@ export const api = {
 
   revokeMcpToken: (id: string) =>
     request<undefined>(`/ai/mcp-tokens/${seg(id)}`, { method: 'DELETE' }),
+
+  /** #6933 — the marketplace feed Claude Code installs plugins from, as Settings shows it. */
+  getPluginFeed: (feed: string) => request<PluginFeedView>(`/ai/plugin-feeds/${seg(feed)}`),
+
+  /** #6936 — lists an installed plugin package in the feed (a settings write from the UI only). */
+  addPluginFeedPackage: (feed: string, name: string) =>
+    request<{ name: string; added: boolean }>(`/ai/plugin-feeds/${seg(feed)}/packages/${seg(name)}`, {
+      method: 'PUT',
+      body: '{}',
+    }),
+
+  /** #6936 — takes a plugin package out of the feed. */
+  removePluginFeedPackage: (feed: string, name: string) =>
+    request<undefined>(`/ai/plugin-feeds/${seg(feed)}/packages/${seg(name)}`, { method: 'DELETE' }),
 
   /** #251 — the /mcp auth mode and anonymous cap (AI design spec §8.3). */
   getMcpAuth: () => request<McpAuthSetting>('/ai/mcp/auth'),

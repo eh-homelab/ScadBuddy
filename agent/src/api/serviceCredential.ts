@@ -1,95 +1,22 @@
 import { readFile } from 'node:fs/promises'
-import type { Sql } from 'postgres'
 import type { Middleware } from 'openapi-fetch'
-import { type Kek, openSecret } from '../secrets.js'
 import { backendNotUp } from './backendUp.js'
 
 // #4975 phase 4 (spec 2026-11-01 §7.1, §7.2): the agent's service credential on every call
-// to the backend: the openapi-fetch client (`serviceCredentialMiddleware`) and the workspace
-// blob routes' plain fetches (`withServiceCredential`). The backend issues and rotates it; the agent reads the newest live one
-// from `service_credentials_agent` (the view its own Postgres role alone is granted, when the
-// deployment made one), unseals it under the KEK, and reads again every hour. Without the KEK
-// or a credential it sends none, which `SCADBUDDY_AUTH_MODE=off` still serves.
+// to the backend: the openapi-fetch client (`serviceCredentialMiddleware`), the CRUD routes and
+// the workspace blob routes' plain fetches (`withServiceCredential`). It is exchanged for the
+// proof the pod mounts (`ExchangeCredential`, below); the agent has no database view to read a
+// sealed one from (#5299 step 12), so a proof is required (`config.ts` `serviceProof`).
 
-export const REREAD_MS = 60 * 60 * 1000
-/** How soon it reads again while it has no token (review of #5211): started before the API minted one, or a failed read. */
-export const RETRY_MS = 60 * 1000
-
-/** The AAD binding a sealed token to its row (`backend/scadbuddy/auth/service_credentials.py` `aad`). */
-export function credentialAad(id: string, caller: string, scopes: readonly string[]): string {
-  return `service_credentials|${id}|${caller}|${[...scopes].sort().join(',')}`
-}
-
-type Row = {
-  id: string
-  caller: string
-  scopes: string[]
-  secret_sealed: Buffer
-  dek_sealed: Buffer
-  kek_id: string
-}
-
-export class ServiceCredential implements CredentialSource {
-  private token: string | undefined
-  private readAt: number | undefined
-  private reading: Promise<string | undefined> | undefined
-
-  private readonly sql: Sql
-  private readonly kek: Kek | undefined
-  private readonly now: () => number
-  private readonly log: (message: string) => void
-
-  constructor(
-    sql: Sql,
-    kek: Kek | undefined,
-    now: () => number = Date.now,
-    log: (message: string) => void = (message) => console.error(message),
-  ) {
-    this.sql = sql
-    this.kek = kek
-    this.now = now
-    this.log = log
-  }
-
-  async current(): Promise<string | undefined> {
-    if (this.kek === undefined) return undefined
-    const wait = this.token === undefined ? RETRY_MS : REREAD_MS
-    if (this.readAt !== undefined && this.now() - this.readAt < wait) return this.token
-    this.reading ??= this.read(this.kek).finally(() => {
-      this.reading = undefined
-    })
-    return this.reading
-  }
-
-  /** Nothing: a sealed credential is replaced by the backend's rotation, read within the hour. */
-  invalidate(_token: string): void {}
-
-  private async read(kek: Kek): Promise<string | undefined> {
-    try {
-      const rows = await this.sql<Row[]>`
-        SELECT id, caller, scopes, secret_sealed, dek_sealed, kek_id
-        FROM service_credentials_agent ORDER BY expires_at DESC, created_at DESC, id DESC LIMIT 1`
-      const row = rows[0]
-      this.token =
-        row === undefined
-          ? undefined
-          : openSecret(
-              kek,
-              { secretSealed: row.secret_sealed, dekSealed: row.dek_sealed, kekId: row.kek_id },
-              credentialAad(row.id, row.caller, row.scopes),
-            )
-    } catch (error) {
-      // Keep the last token: it stays good through the seven days' overlap.
-      this.log(`could not read the agent's service credential (${(error as Error).name})`)
-    }
-    this.readAt = this.now()
-    return this.token
-  }
-}
-
-/** Where the agent's credential comes from: its view (`ServiceCredential`) or the exchange (`ExchangeCredential`). */
+/** Where the agent's credential comes from: the exchange (`ExchangeCredential`); tests give a fixed one. */
 export type CredentialSource = {
   current(): Promise<string | undefined>
+  /**
+   * `current()`, but with no token held it first waits, within a bound, for the next exchange
+   * (#6647), so a call made in a back-off does not go out without a credential. It ends with no
+   * token as soon as `signal` (the call's own) aborts.
+   */
+  untilCurrent?(signal?: AbortSignal): Promise<string | undefined>
   /** The backend answered 401 to `token`. */
   invalidate(token: string): void
 }
@@ -97,7 +24,7 @@ export type CredentialSource = {
 // #5494 (spec 2026-11-05 §6.2, §6.3, §8 step 1): with SCADBUDDY_SERVICE_TOKEN_FILE (the projected
 // ServiceAccount token, audience `scadbuddy`) or SCADBUDDY_SERVICE_BOOTSTRAP_FILE, the agent exchanges
 // its proof at the backend's POST /api/v1/auth/service-token for a 15-minute credential with no
-// sealed copy, instead of reading its view. Mirrors `backend/scadbuddy/auth/service_credentials.py`
+// sealed copy. Mirrors `backend/scadbuddy/auth/service_credentials.py`
 // `ExchangeReader`.
 
 export const EXCHANGE_PATH = '/api/v1/auth/service-token'
@@ -116,6 +43,13 @@ export const EXCHANGE_RETRY_MAX_MS = 60_000
 /** A 401 exchanges again at once, but never sooner than this after the last exchange. */
 export const REEXCHANGE_MIN_MS = 10_000
 const EXCHANGE_TIMEOUT_MS = 10_000
+/**
+ * How long a backend call waits for the next exchange when no token is held (#6647). At pod start
+ * the first exchange can fail while the API comes up; a call made in that back-off went out with no
+ * credential and got 401. The bound counts the exchange after the wait (up to EXCHANGE_TIMEOUT_MS):
+ * a wait that could end past it is not taken, and the call goes out as before.
+ */
+export const CREDENTIAL_WAIT_MS = 15_000
 const TOKEN_RE = /^sbsvc_[0-9a-f]{16}\.[A-Za-z0-9_-]{43}$/
 
 export type ExchangeOptions = {
@@ -127,6 +61,8 @@ export type ExchangeOptions = {
   readProof?: (path: string) => Promise<string>
   now?: () => number
   log?: (message: string) => void
+  /** Waits `ms`, or less when `signal` aborts. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
 }
 
 export class ExchangeCredential implements CredentialSource {
@@ -146,6 +82,7 @@ export class ExchangeCredential implements CredentialSource {
   private readonly readProof: (path: string) => Promise<string>
   private readonly now: () => number
   private readonly log: (message: string) => void
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>
 
   constructor(options: ExchangeOptions) {
     this.options = options
@@ -154,6 +91,8 @@ export class ExchangeCredential implements CredentialSource {
     this.readProof = options.readProof ?? ((path) => readFile(path, 'utf8'))
     this.now = options.now ?? Date.now
     this.log = options.log ?? ((message) => console.error(message))
+    // Not unref'd: a one-shot process (forget-subject.ts) must wait too, and the wait is bounded.
+    this.sleep = options.sleep ?? sleepUnlessAborted
   }
 
   async current(): Promise<string | undefined> {
@@ -166,6 +105,27 @@ export class ExchangeCredential implements CredentialSource {
     }
     if (this.token !== undefined && this.now() < this.expiresAt) return this.token
     return undefined
+  }
+
+  async untilCurrent(signal?: AbortSignal): Promise<string | undefined> {
+    // The bound starts once the first answer is in: a call made while an exchange is in flight
+    // (up to EXCHANGE_TIMEOUT_MS, which it waited for before #6647 too) still waits for the retry.
+    let deadline: number | undefined
+    const aborted = abortOf(signal)
+    try {
+      for (;;) {
+        const token = await Promise.race([this.current(), aborted.promise])
+        if (token !== undefined || signal?.aborted) return token
+        deadline ??= this.now() + CREDENTIAL_WAIT_MS
+        // A backend not up yet sets no back-off (nextTry is due): the call would be refused too.
+        const wait = this.nextTry - this.now()
+        if (wait <= 0 || this.now() + wait + EXCHANGE_TIMEOUT_MS > deadline) return undefined
+        await Promise.race([this.sleep(wait, signal), aborted.promise])
+        if (signal?.aborted) return undefined
+      }
+    } finally {
+      aborted.dispose()
+    }
   }
 
   invalidate(token: string): void {
@@ -251,30 +211,68 @@ export class ExchangeCredential implements CredentialSource {
 }
 
 /**
+ * Resolves after `ms`, or at once when `signal` aborts, and then clears its timer (#7144): the timer
+ * is ref'd, so a one-shot process does not stay alive for a wait whose call has settled.
+ */
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    if (signal?.aborted) done()
+    else signal?.addEventListener('abort', done, { once: true })
+  })
+}
+
+/** Resolves (with no token) when `signal` aborts; never without one. */
+function abortOf(signal: AbortSignal | undefined): { promise: Promise<undefined>; dispose: () => void } {
+  if (!signal) return { promise: new Promise(() => {}), dispose: () => undefined }
+  let onAbort = (): void => undefined
+  const promise = new Promise<undefined>((resolve) => {
+    onAbort = () => resolve(undefined)
+    if (signal.aborted) resolve(undefined)
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
+  return { promise, dispose: () => signal.removeEventListener('abort', onAbort) }
+}
+
+/**
  * `fetchImpl` with the bearer added to requests under `baseUrl` (the backend) only, so a
  * presigned transfer URL elsewhere never sees it. A 401 drops that token, so the next
  * request carries a fresh one; the refused request is not sent again (a write might run twice).
+ * A request to the backend follows no redirect (#7180).
  */
 export function withServiceCredential(fetchImpl: typeof fetch, credential: CredentialSource, baseUrl: string): typeof fetch {
   const base = baseUrl.replace(/\/+$/, '') + '/'
   return async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     if (!url.startsWith(base)) return fetchImpl(input, init)
-    const token = await credential.current()
-    if (token === undefined) return fetchImpl(input, init)
+    // A backend call follows no redirect (#7180, as `createBackendClient`, #7104): the API's
+    // trailing-slash 307 would send the same method and credential to another route. A presigned
+    // transfer URL elsewhere (above) keeps following them: S3 can answer 307 for its region.
+    const backendInit: RequestInit = { ...init, redirect: 'error' }
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+    const token = await (credential.untilCurrent?.(signal ?? undefined) ?? credential.current())
+    if (token === undefined) return fetchImpl(input, backendInit)
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
     if (!headers.has('authorization')) headers.set('authorization', `Bearer ${token}`)
-    const response = await fetchImpl(input, { ...init, headers })
+    const response = await fetchImpl(input, { ...backendInit, headers })
     if (response.status === 401 && headers.get('authorization') === `Bearer ${token}`) credential.invalidate(token)
     return response
   }
 }
 
-/** `Authorization: Bearer <token>` on every backend call, when there is one; a 401 drops it. */
+/**
+ * `Authorization: Bearer <token>` on every backend call, when there is one (after the bounded wait
+ * of `untilCurrent`, which the request's signal ends); a 401 drops it.
+ */
 export function serviceCredentialMiddleware(credential: CredentialSource): Middleware {
   return {
     async onRequest({ request }) {
-      const token = await credential.current()
+      const token = await (credential.untilCurrent?.(request.signal) ?? credential.current())
       if (token !== undefined && !request.headers.has('authorization')) {
         request.headers.set('authorization', `Bearer ${token}`)
       }

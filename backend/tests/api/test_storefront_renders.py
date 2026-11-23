@@ -455,6 +455,21 @@ class FakeSlicer:
         FakeSlicer.started.append((output_id, request, subject, slot_presets))
         return [PreviewStarted(job_id=1, plate_id=1)]
 
+    async def start_library(
+        self,
+        file_id: int,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
+        slot_colours: Any = None,
+        held: Any = None,
+    ) -> list[PreviewStarted]:
+        """A file listing's slice (#6710): always of the listing's held copy."""
+        assert held is not None and held.file.id == file_id
+        FakeSlicer.started.append((f"library:{file_id}", request, subject, slot_presets))
+        return [PreviewStarted(job_id=1, plate_id=1)]
+
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
         return SlicedPlate(plate_id=started.plate_id, slicer="bambuddy", file_id=1)
 

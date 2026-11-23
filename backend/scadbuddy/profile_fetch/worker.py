@@ -7,7 +7,10 @@ and refuses to start with one (`settings.check_environment`). It runs no browser
 with the RPC token). So no untrusted web content runs in the pod that holds the CRUD
 credential and reaches Temporal (#6780). It exchanges its proof for a ``profile-fetch``
 service credential (`exchange_source`), waits until the CRUD service serves its areas, then
-polls `DEFAULT_QUEUE` for `ProfileFetch` runs, one activity at a time (Decision 16). It does
+polls `DEFAULT_QUEUE` for `ProfileFetch` runs and for 3DFP searches and creates (`TdfpSearch`,
+`TdfpCreate`, #7025), one activity at a time on the one browser (Decision 16), and a
+search's activity on a queue of its own (`workflow.search_queue`, #7062), whose one slot
+never waits for an export (R-7062-1). It does
 not sign in at start: the browser service does, and the first export asks it to again when it
 has no signed-in browser. It imports no database code (`tests/profile_fetch/test_worker.py`).
 It is not versioned (no worker deployment), so a change to the workflow goes behind
@@ -21,7 +24,8 @@ import asyncio
 import logging
 import signal
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
+from typing import Any
 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from temporalio.client import Client
@@ -31,11 +35,16 @@ from temporalio.worker import Worker
 
 from scadbuddy.auth.service_auth import ServiceAuth, exchange_source
 from scadbuddy.crud.client import AREAS_POLL, CrudClient, wait_for_areas
-from scadbuddy.profile_fetch.activities import ProfileFetchActivities, Site, SiteHolder
+from scadbuddy.profile_fetch.activities import (
+    ProfileFetchActivities,
+    Site,
+    SiteHolder,
+    TdfpActivities,
+)
 from scadbuddy.profile_fetch.remote import RemoteSite
 from scadbuddy.profile_fetch.settings import HEALTH_PORT, ProfileFetchSettings
 from scadbuddy.profile_fetch.wire import AREAS
-from scadbuddy.profile_fetch.workflow import ProfileFetch
+from scadbuddy.profile_fetch.workflow import ProfileFetch, TdfpCreate, TdfpSearch, search_queue
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +71,44 @@ async def _healthz(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -
     writer.close()
 
 
+def temporal_workers(
+    client: Client,
+    queue: str,
+    *,
+    fetch: list[Callable[..., Any]],
+    create: Callable[..., Any],
+    search: Callable[..., Any],
+    **options: Any,
+) -> list[Worker]:
+    """The process's two workers. One polls ``queue`` for the three workflows and runs a
+    preset fetch's activities and a create, one activity at a time on the one browser
+    (Decision 16): a create never runs beside an export. The other polls
+    `workflow.search_queue` for a search's activity alone, one at a time, so a search never
+    waits for a fetch's whole export (R-7062-1); on the browser service it takes its turn
+    between the export's steps (R-7062-2). The first registers the search's activity too, so
+    a `TdfpSearch` that started before the patch, whose activity is on ``queue``, still runs
+    during a roll (R-7062-1). ``options`` go to both (a test's runner)."""
+    return [
+        Worker(
+            client,
+            task_queue=queue,
+            workflows=[ProfileFetch, TdfpSearch, TdfpCreate],
+            # The search too: an unpatched `TdfpSearch` schedules it here (R-7062-1).
+            activities=[*fetch, create, search],
+            # One browser, one login: one export at a time (Decision 16).
+            max_concurrent_activities=1,
+            **options,
+        ),
+        Worker(
+            client,
+            task_queue=search_queue(queue),
+            activities=[search],
+            max_concurrent_activities=1,
+            **options,
+        ),
+    ]
+
+
 async def run(
     settings: ProfileFetchSettings,
     *,
@@ -79,8 +126,20 @@ async def run(
     def browser_service() -> Site:
         return RemoteSite(settings.profile_fetch_browser_url, settings.browser_token)
 
+    def search_browser_service() -> Site:
+        return RemoteSite(
+            settings.profile_fetch_browser_url, settings.browser_token, closes_browser=False
+        )
+
     sites = SiteHolder(open_site or browser_service)
     activities = ProfileFetchActivities(crud, sites)
+    tdfp = TdfpActivities(sites)
+    # A search's own RPC client. Dropping it (a search cancelled, or failed `browser` or
+    # `timeout`) closes only its connection and sends no DELETE /session (R-7062-3). A
+    # search that fails `browser` or `timeout` is closed by the service itself, under its
+    # lock, so never while an export step runs (R-7062-4).
+    search_sites = SiteHolder(open_site or search_browser_service)
+    searches = TdfpActivities(search_sites)
     health = (
         await asyncio.start_server(_healthz, "0.0.0.0", health_port)
         if health_port is not None
@@ -98,23 +157,26 @@ async def run(
             data_converter=pydantic_data_converter,
             interceptors=[TracingInterceptor()],
         )
-        worker = Worker(
-            client,
-            task_queue=settings.temporal_task_queue_profile_fetch,
-            workflows=[ProfileFetch],
-            activities=[activities.export, activities.import_, activities.failed],
-            # One browser, one login: one export at a time (Decision 16).
-            max_concurrent_activities=1,
-        )
-        async with worker:
+        async with AsyncExitStack() as running:
+            for each in temporal_workers(
+                client,
+                settings.temporal_task_queue_profile_fetch,
+                fetch=[activities.export, activities.import_, activities.failed],
+                create=tdfp.create,
+                search=searches.search,
+            ):
+                await running.enter_async_context(each)
             logger.info(
-                "profile-fetch worker polling %s", settings.temporal_task_queue_profile_fetch
+                "profile-fetch worker polling %s and %s",
+                settings.temporal_task_queue_profile_fetch,
+                search_queue(settings.temporal_task_queue_profile_fetch),
             )
             await stop.wait()
     finally:
         if health is not None:
             health.close()
         await sites.aclose()
+        await search_sites.aclose()
         await crud.aclose()
 
 

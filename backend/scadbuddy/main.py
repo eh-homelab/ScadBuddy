@@ -32,9 +32,11 @@ from scadbuddy.agent_data.rotation import kek_at
 from scadbuddy.agent_data.rotation import rotate as rotate_agent_secrets
 from scadbuddy.api import (
     crud_agent_events,
+    crud_agent_packages,
     crud_agent_transcripts,
     crud_agent_turns,
     crud_print,
+    entity_attachments,
     health,
     internal_blobs,
     internal_library,
@@ -56,6 +58,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import (
     ATTACHMENT_UPLOAD_PATH,
     BODY_LIMITS,
+    ENTITY_ATTACHMENT_UPLOAD_PATH,
     INVOICE_FILE_UPLOAD_PATH,
     LIBRARY_UPLOAD_PATH,
     MEDIA_UPLOAD_PATH,
@@ -70,12 +73,10 @@ from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
 from scadbuddy.auth.authorship_rule import AuthorshipRule
-from scadbuddy.auth.caller_grants import grant_callers
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
-from scadbuddy.auth.revoke import revoke_retired
-from scadbuddy.auth.service_credentials import grant_caller_views
+from scadbuddy.auth.revoke import RetiredState, retired_state, revoke_retired
 from scadbuddy.auth.start_check import check_enforce
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
@@ -97,14 +98,17 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.entities.component import ENTITIES
+from scadbuddy.entities.sweep import sweep_orphan_entities
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, execute_pull
 from scadbuddy.filament.bb_pull_run import FilamentPullActivities
 from scadbuddy.filament.bb_sync_nudge import instance_for
-from scadbuddy.filament.bb_sync_results import LocalFilamentSync, adopt_instance
+from scadbuddy.filament.bb_sync_results import InProcessFilamentSync, adopt_instance
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.print_uses import PoolPrintUses
+from scadbuddy.filament.sb_presets import sync_from_held
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
 from scadbuddy.filament.sensors import PoolSensorNotifications
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
@@ -211,6 +215,7 @@ from scadbuddy.workflows.housekeeping import (
     AUTO_IMPORT_SWEEP,
     BACKFILL_SWEEP,
     BANK_DEPOSITS_SWEEP,
+    ENTITY_ORPHANS_SWEEP,
     FLOWS_SWEEP,
     GIT_REMOTE_SWEEP,
     GIT_SWEEP,
@@ -220,6 +225,7 @@ from scadbuddy.workflows.housekeeping import (
     LOST_SLICES_SWEEP,
     MAINTENANCE_IMPORT_SWEEP,
     NATIVE_COPIES_SWEEP,
+    NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CLOSES_SWEEP,
@@ -229,6 +235,7 @@ from scadbuddy.workflows.housekeeping import (
     QUOTE_HOLDS_SWEEP,
     REAP_SWEEP,
     RUN_HOLDS_SWEEP,
+    RUN_HOLDS_TIMEOUT,
     STOREFRONT_DRAFTS_SWEEP,
     STOREFRONT_MAIL_SWEEP,
     SWEEPS,
@@ -709,6 +716,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_print_attachments() -> None:
         await _heartbeating(_sweep_print_attachments_logged(state))
 
+    @activity.defn(name=ENTITY_ORPHANS_SWEEP)
+    async def sweep_entity_orphans() -> None:
+        await _heartbeating(_sweep_entity_orphans_logged(state))
+
     @activity.defn(name=LIBRARY_SWEEP)
     async def sweep_print_library() -> None:
         await _heartbeating(_sweep_print_library_logged(state))
@@ -795,6 +806,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         maintain_models_git,
         sweep_activity,
         sweep_print_attachments,
+        sweep_entity_orphans,
         sweep_print_library,
         sweep_native_slice_rows,
         prune_transfer_puts,
@@ -978,19 +990,22 @@ async def _sweep_print_library_logged(state: AppState) -> None:
 
 async def _sweep_native_copies_logged(state: AppState) -> None:
     """#4337: a native run's per-print copies and slices nothing keeps, to the trash;
-    nothing on ``bambuddy``."""
+    no copies on ``bambuddy``. The LAN runs whose sequence is gone are recorded stopped
+    on every backend first (#6871)."""
     try:
-        native = await state.components.get(PRINT_LIBRARY).serving_native()
-        if native is None:
-            return
-        # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`). Without
-        # Temporal every LAN run with prints still to start is kept as in use.
+        # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`), and its
+        # controls no longer stand first on the Prints page (#6871): checked on every
+        # backend, since the strip only reads. Without Temporal every LAN run with prints
+        # still to start is kept as in use.
         try:
-            await end_gone_sequences(state.print_runs)
+            await end_gone_sequences(state.print_runs, NATIVE_COPIES_TIMEOUT / 2)
         except Exception:
             logger.warning(
                 "could not check the LAN runs' sequences; their files are kept", exc_info=True
             )
+        native = await state.components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            return
         await sweep_print_copies(
             native,
             state.uploads,
@@ -1017,6 +1032,21 @@ async def _sweep_print_attachments_logged(state: AppState) -> None:
             logger.info("forgot the attachments of deleted archives", extra={"count": gone})
 
     await _with_bambuddy(state, sweep)
+
+
+async def _sweep_entity_orphans_logged(state: AppState) -> None:
+    """#6950 (spec D4, phase 1): the entities whose owner's row is gone, with their files
+    and links."""
+    entities = state.components.get(ENTITIES)
+    try:
+        removed = await asyncio.to_thread(
+            sweep_orphan_entities, entities.store, entities.attachments
+        )
+    except Exception:
+        logger.exception("could not sweep the entities whose owner is gone")
+        raise
+    if removed:
+        logger.info("removed entities whose owner is gone", extra={"count": removed})
 
 
 async def _sweep_activity_logged(state: AppState) -> None:
@@ -1059,6 +1089,19 @@ async def _sweep_activity_logged(state: AppState) -> None:
     else:
         if pruned:
             logger.info("pruned sensor notifications", extra={"count": pruned})
+    # #6905: the filament sync's old pass rows, at most `PRUNE_BATCH` a run, by the setting
+    # read above (a failed load prunes nothing), in this activity for the same reason.
+    try:
+        pruned = await asyncio.to_thread(
+            state.components.get(FILAMENT).sync_passes.prune,
+            settings.filament_sync_pass_ttl_days,
+        )
+    except Exception:
+        logger.exception("could not prune the filament sync passes")
+        failed = True
+    else:
+        if pruned:
+            logger.info("pruned filament sync passes", extra={"count": pruned})
     if failed:
         raise RuntimeError("the activity sweep failed")
 
@@ -1222,9 +1265,9 @@ def _rotate_service_credentials(state: AppState) -> None:
 
 def _migrate_agent_at_start(state: AppState) -> None:
     """The agent's migrations (`render/agent_migrations.py`, #5299 D6), after the
-    backend's: the agent no longer migrates, and waits until `ai_migrations` holds the
-    files it expects (`agent/src/db/schema.ts`). Neither set reads the other's tables, so
-    the order is the start's, not the schema's. A failure stops the start."""
+    backend's: the agent neither migrates nor waits for its ledger (#5299 step 12). Neither
+    set reads the other's tables, so the order is the start's, not the schema's. A failure
+    stops the start."""
     with state.settings_store.pool.connection() as conn:
         applied = migrate_agent(conn)
     if applied:
@@ -1232,26 +1275,35 @@ def _migrate_agent_at_start(state: AppState) -> None:
 
 
 def _grant_and_rotate_at_start(state: AppState) -> None:
-    """At start, after the migrations: each caller's role its own view, a retired
-    caller's role nothing (#5298 Tasks 11, 22 and 35), a table dropped from a caller's list
-    taken back (`auth/revoke.py` `RETIRED_GRANTS`), and the credentials due. A failure is
+    """At start, after the migrations: a retired caller's role nothing (#5298 Tasks 11, 22
+    and 35, #5299 step 12), what each retired role still has logged (`auth/revoke.py`
+    `retired_state`, the retirement order's checks), and the credentials due. A failure is
     logged, never fatal."""
     try:
         with state.settings_store.pool.connection() as conn:
-            granted = grant_caller_views(conn)
-            tables = grant_callers(conn)
             revoked: list[str] = []
+            states: list[RetiredState] = []
             try:
                 revoked = revoke_retired(conn)
             except Exception:
                 # A revoke that fails must not cost the start its credentials' rotation.
                 logger.exception("could not revoke the retired callers' roles")
-        if granted:
-            logger.info("granted the callers' credential views", extra={"roles": granted})
-        if tables:
-            logger.info("granted the callers' tables", extra={"roles": tables})
+            try:
+                states = retired_state(conn)
+            except Exception:
+                logger.exception("could not read what the retired callers' roles still have")
         if revoked:
             logger.info("revoked the retired callers' roles", extra={"roles": revoked})
+        for left in states:
+            logger.info(
+                "a retired caller's role still exists",
+                extra={
+                    "role": left.role,
+                    "granted_relations": left.granted,
+                    "owned_relations": left.owned,
+                    "sessions": left.sessions,
+                },
+            )
         _rotate_service_credentials(state)
     except Exception:
         logger.exception("could not issue the service credentials")
@@ -1489,7 +1541,14 @@ async def _import_maintenance_logged(state: AppState) -> None:
 
 
 async def _reap_run_holds_logged(state: AppState) -> None:
-    """#6122: the LAN runs' holds on their sliced files that a run's end left."""
+    """#6122: the LAN runs' holds on their sliced files that a run's end left. First
+    (#6871) the LAN runs whose sequence is gone are recorded stopped, which drops their
+    holds too and lets the next queued run head its printer's card, every
+    `PRUNE_INTERVAL` whatever the asset sweep's interval."""
+    try:
+        await end_gone_sequences(state.print_runs, RUN_HOLDS_TIMEOUT / 2)
+    except Exception:
+        logger.warning("could not check the LAN runs' sequences", exc_info=True)
     try:
         dropped = await asyncio.to_thread(reap_run_holds, state.refs)
     except Exception:
@@ -1755,6 +1814,8 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
         uses=PoolPrintUses(state.settings_store.pool),
+        # A run queued on a busy printer says its place (#6871).
+        runs=state.print_runs.store,
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities: list[Callable[..., Any]] = [
@@ -1770,9 +1831,10 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists),
         ).lan_auto_import,
         # The filament sync's pass (#6265) on this process's own stores, as the CRUD
-        # routes run it for the print worker.
+        # routes run it for the print worker; it waits out a busy sync as that worker's
+        # client waits out the routes' 503 `sync_busy` (#6910 review).
         FilamentSyncActivities(
-            LocalFilamentSync(state.components.get(FILAMENT), state.settings_store),
+            InProcessFilamentSync(state.components.get(FILAMENT), state.settings_store),
             settings_loader(state.settings_store.load),
         ).sync_pass,
         # The Bambuddy pull's reads (#6772) on this process's own stores, as the CRUD
@@ -1968,8 +2030,11 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
         ),
         # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
+        # Then ScadBuddy's own filament presets take what the copy read (#7176).
         held_presets_activity(
-            lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
+            lambda: HeldPresetStore(state.projection.pool),
+            lambda: state.settings_store.load(),
+            lambda held: sync_from_held(state.settings_store.pool, state.store.blobs, held),
         ),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
@@ -2454,6 +2519,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             ),
             RouteLimit(
                 "POST",
+                ENTITY_ATTACHMENT_UPLOAD_PATH,
+                lambda: state.settings.media_upload_max_bytes,
+                "an entity's attachment",
+                "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            ),
+            RouteLimit(
+                "POST",
                 INVOICE_FILE_UPLOAD_PATH,
                 lambda: state.settings.media_upload_max_bytes,
                 "an invoice's file",
@@ -2486,6 +2558,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             crud_agent_transcripts.ROUTE_LIMIT,
             crud_agent_turns.ROUTE_LIMIT,
             crud_agent_events.ROUTE_LIMIT,
+            # A plugin package's archive or npm tarball, mirrored by the agent (#6935).
+            crud_agent_packages.MIRROR_ROUTE_LIMIT,
         ],
     )
     # Who the request is from (#4975), inside the cross-site gate (spec 2026-11-01 §8.1).
@@ -2523,6 +2597,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         print_attachments.PrintAttachmentUpload,
         order_attachments.OrderAttachmentUpload,
         order_attachments.RevisionAttachmentUpload,
+        entity_attachments.EntityAttachmentUpload,
         outputs.NeedsBackfillProblem,
     )
 

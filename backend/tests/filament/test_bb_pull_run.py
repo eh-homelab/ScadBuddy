@@ -12,11 +12,17 @@ import httpx
 import pytest
 import respx
 
+from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES
 from scadbuddy.bambuddy.errors import UpstreamAnswer
+from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudRefusedError
+from scadbuddy.filament import bb_pull_run
 from scadbuddy.filament.bambuddy_pull import PullReport, Pulls
 from scadbuddy.filament.bb_pull_models import (
+    ARCHIVES_MAX,
+    ColoursApplied,
+    ColoursBody,
     HaBody,
     PullApplied,
     PullBody,
@@ -80,6 +86,12 @@ class FakeApi:
         self.calls.append(("trays", body))
         return 0
 
+    async def colours(self, body: ColoursBody) -> ColoursApplied:
+        self.calls.append(("colours", body))
+        if self.refused is not None:
+            raise self.refused
+        return ColoursApplied(added=len(body.colours), kept=1)
+
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
 
@@ -126,6 +138,53 @@ async def test_the_worker_reads_bambuddy_and_sends_sb_one_body() -> None:
     assert body.catalog is not None and [c.id for c in body.catalog] == [5]
     assert (body.suppliers, body.locations, body.usage_failed) == (None, None, False)
     assert api.body("usage").archives == []
+
+
+COLOUR = {
+    "id": 9,
+    "manufacturer": "Bambu Lab",
+    "color_name": "Jade White",
+    "hex_color": "#FFFFFF",
+    "material": "PLA Basic",
+    "is_default": True,
+}
+
+
+async def test_the_colour_catalog_goes_to_sb_after_the_spools() -> None:
+    """#6907: under ``spools`` the worker reads ``GET /inventory/colors`` and sends it on
+    its own route, after the pull's body."""
+    api = FakeApi()
+    with respx.mock(assert_all_called=False) as router:
+        _bambuddy(router)
+        colours = router.get(f"{API}/inventory/colors").respond(json=[COLOUR])
+        outcome = await run_pull(api, _load, _start())
+        assert colours.called
+    assert api.names() == ["apply", "colours", "trays"]
+    assert [c.id for c in api.body("colours").colours] == [9]
+    assert outcome.report is not None
+    assert (outcome.report.colours, outcome.report.colours_kept) == (1, 1)
+    assert not outcome.report.colours_failed
+
+
+@pytest.mark.parametrize("answer", [httpx.Response(404), httpx.Response(200, json={"no": 1})])
+async def test_a_failed_colour_read_fails_alone(answer: httpx.Response) -> None:
+    api = FakeApi()
+    with respx.mock(assert_all_called=False) as router:
+        _bambuddy(router)
+        router.get(f"{API}/inventory/colors").mock(return_value=answer)
+        outcome = await run_pull(api, _load, _start())
+    assert outcome.outcome == "pulled" and outcome.report is not None
+    assert outcome.report.colours_failed and outcome.report.created == 1
+    assert "colours" not in api.names()
+
+
+async def test_no_colours_are_read_without_the_spools() -> None:
+    api = FakeApi()
+    with respx.mock(assert_all_called=False) as router:
+        _bambuddy(router)
+        colours = router.get(f"{API}/inventory/colors").respond(json=[COLOUR])
+        await run_pull(api, _load, _start(pulls=Pulls(spools=False)))
+        assert not colours.called
 
 
 async def test_the_archives_are_read_from_the_date_sb_names() -> None:
@@ -330,3 +389,39 @@ async def test_the_trays_are_reconciled_only_after_a_pull_that_asks(status: int)
         )
         await run_pull(api, _load, _start())
     assert ("trays" in api.names()) is (status == 200)
+
+
+def test_a_full_usage_body_stays_under_the_body_gate() -> None:
+    """#6860 R-6860-2: a booking body at its most (`USAGE_BODY_ROWS` rows and
+    `ARCHIVES_MAX` archives, every field filled) is well under the API's gate."""
+    row = SpoolUsage.model_validate(
+        USAGE
+        | {"id": 2**31, "spool_id": 2**31, "printer_id": 2**31, "print_name": "x" * 64}
+        | {"percent_used": 100.0, "status": "completed"}
+    )
+    archive = Archive(id=2**31, printer_id=2**31, completed_at=datetime(2026, 11, 14, 10, 0, 0, 1))
+    body = UsageBody(
+        instance=INSTANCE,
+        pull_id=PULL_ID,
+        usage=[row] * bb_pull_run.USAGE_BODY_ROWS,
+        archives=[archive] * ARCHIVES_MAX,
+    )
+    assert len(body.model_dump_json()) < MAX_TEXT_BODY_BYTES // 2
+
+
+def test_a_full_usage_read_is_one_body_and_a_small_part_of_the_pull_body() -> None:
+    """#7002 R-7002-1, R-7002-2: the read's most (`USAGE_READ_ROWS` rows of distinct prints,
+    every field filled) books in one body, so `_cover` sees every row of the read, and it
+    is about 1.2 MiB of the pull's body (measured), under a sixth of the gate."""
+    rows = [
+        SpoolUsage.model_validate(
+            USAGE
+            | {"id": 2**31 - i, "spool_id": 2**31, "printer_id": 2**31, "print_name": "x" * 64}
+            | {"percent_used": 100.0, "status": "completed", "weight_used": 1234.5678}
+            | {"created_at": datetime(2026, 11, 14, 10, 0, 0, 1 + i).isoformat()}
+        )
+        for i in range(bb_pull_run.USAGE_READ_ROWS)
+    ]
+    assert len(bb_pull_run.usage_bodies(rows, [], bb_pull_run.USAGE_BODY_ROWS)) == 1
+    body = PullBody(instance=INSTANCE, pull_id=PULL_ID, pulls=Pulls(), spools=[], usage=rows)
+    assert len(body.model_dump_json()) < MAX_TEXT_BODY_BYTES // 6

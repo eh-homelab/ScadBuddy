@@ -6,9 +6,9 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { bundleWorkflowCode, Worker } from '@temporalio/worker'
 import type { Sql } from 'postgres'
 import { afterAll, afterEach, beforeAll } from 'vitest'
-import { AuditLog } from '../../src/audit/log.js'
+import type { AuditLog } from '../../src/audit/log.js'
 import { DurableGate, sessionWorkflowId } from '../../src/gate/durable.js'
-import { SessionBlobs } from '../../src/sessions/blobs.js'
+import { SessionBlobs } from './sql/sessionBlobs.js'
 import { DurableTurns, type DurableTurn } from '../../src/sessions/durable.js'
 import type { SessionManager, SessionManagerDeps, SessionRecord, Turn } from '../../src/sessions/manager.js'
 import { readRuntimeSettings, RUNTIME_DEFAULTS } from '../../src/sessions/runtimeSettings.js'
@@ -26,7 +26,14 @@ import {
   sessionHostQueue,
 } from '../../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../../src/temporal/session/turnActivity.js'
-import { gateActivities, PgSessionOwners } from '../../src/temporal/toolActivities.js'
+import { gateActivities } from '../../src/temporal/toolActivities.js'
+import { PgSessionOwners } from './sql/approvalRecords.js'
+import { sqlAuditLog } from './sql/audit.js'
+import { sqlGateDb } from './sql/gate.js'
+import { sqlSettings } from './sql/settings.js'
+import { SqlSweep } from './sql/sweep.js'
+import { PgTurnRows } from './sql/turnRows.js'
+import { SqlTurnRoutes } from './sql/turnRoutes.js'
 import { AgentWorker, workerIdentity } from '../../src/temporal/worker.js'
 import { localTemporal, polledHosts, TEMPORAL_CLI, TEMPORAL_SKIP } from './temporal.js'
 
@@ -119,7 +126,7 @@ export function agentSessions(): void {
     const routed = (build: (served: Served) => Record<string, (args: never) => Promise<unknown>>, names: readonly string[]) =>
       Object.fromEntries(names.map((name) => [name, (args: never) => build(now())[name]!(args)]))
     const finishNames = Object.keys(sessionFinishActivities(undefined as never, undefined as never))
-    const gateNames = Object.keys(sessionGateActivities(undefined as never))
+    const gateNames = Object.keys(sessionGateActivities(undefined as never, undefined as never))
     const describeNames = Object.keys(gateActivities({ audit: undefined, sessions: undefined as never }))
     const tools = AgentWorker.start({
       address: env.address,
@@ -128,8 +135,8 @@ export function agentSessions(): void {
       identity: workerIdentity(identity),
       activities: {
         [ACQUIRE_WORKER_ACTIVITY]: acquire,
-        ...routed((x) => sessionFinishActivities(x.sql, x.m.events) as never, finishNames),
-        ...routed((x) => sessionGateActivities({ sql: x.sql, events: x.m.events }) as never, gateNames),
+        ...routed((x) => sessionFinishActivities(new PgTurnRows(x.sql), x.m.events) as never, finishNames),
+        ...routed((x) => sessionGateActivities(sqlGateDb(x.sql, x.m.events), x.settings ?? sqlSettings(x.sql)) as never, gateNames),
         ...routed((x) => gateActivities({ audit: x.audit, sessions: new PgSessionOwners(x.sql) }) as never, describeNames),
       },
       shutdownGraceMs: 1_000,
@@ -220,7 +227,7 @@ export async function sessionWorkflow(id: string): Promise<{ type: string; taskQ
  * `manager()` calls it): DurableTurns and DurableGate on the dev server, and a TurnHost over its
  * warm cache. Its stop and abort reach the turns hosted for it too.
  */
-export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, 'sql' | 'settings' | 'approvalHashKey'>): void {
+export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, 'settings'> & { sql: Sql }): void {
   const stack = active
   if (!stack) {
     turnless(m, deps.sql)
@@ -230,11 +237,11 @@ export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, '
     m,
     sql: deps.sql,
     settings: deps.settings,
-    // Keyed as the manager's approvals are, as main.ts keys both (approvalHashKey).
-    audit: new AuditLog({ sql: deps.sql, ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}) }),
+    // Keyed as the manager's approvals are (support/sessions.ts), as main.ts keys both.
+    audit: sqlAuditLog(deps.sql),
     turnHost: new TurnHost({
       core: m.turnCore,
-      sql: deps.sql,
+      ...hostStores(deps.sql),
       images: new SessionBlobs(deps.sql),
       hostQueue: stack.hostQueue,
       fenceMs: 100,
@@ -243,9 +250,9 @@ export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, '
     }),
   }
   stack.served.push(served)
-  m.durable = new DurableGate(stack.env.client, { db: { sql: deps.sql, events: m.events } })
+  m.durable = new DurableGate(stack.env.client, { db: sqlGateDb(deps.sql, m.events) })
   m.durableTurns = new ServedTurns(
-    { client: stack.env.client, sql: deps.sql, events: m.events, liveHosts: polledHosts(stack.env.client, stack.hostQueue) },
+    { ...durableStores(deps.sql), client: stack.env.client, events: m.events, liveHosts: polledHosts(stack.env.client, stack.hostQueue) },
     (id) => stack.bySession.set(id, served),
   )
   const stopTurns = m.stopTurns.bind(m)
@@ -300,8 +307,18 @@ class TurnlessTurns extends DurableTurns {
  * fails with NO_TURNS_HERE, and a session's workflow is never found.
  */
 function turnless(m: SessionManager, sql: Sql): void {
-  m.durableTurns = new TurnlessTurns({ client: noWorkflows, sql, events: m.events })
+  m.durableTurns = new TurnlessTurns({ ...durableStores(sql), client: noWorkflows, events: m.events })
   m.durable = new DurableGate(noWorkflows)
+}
+
+/** DurableTurns' stores straight on the test database (support/sql/). */
+export function durableStores(sql: Sql) {
+  return { blobs: new SessionBlobs(sql), turns: new PgTurnRows(sql), pendingRoutes: new SqlSweep(sql) }
+}
+
+/** A TurnHost's row writes and held-call reads straight on the test database (support/sql/). */
+export function hostStores(sql: Sql) {
+  return { turns: new PgTurnRows(sql), pendingRoutes: new SqlTurnRoutes(sql) }
 }
 
 /** DurableTurns that says which manager sent each session's turn. */

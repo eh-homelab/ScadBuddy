@@ -58,6 +58,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The Storefront page's pictures and a model media's \"Storefront…\" dialog (#6213); an agent tool follows with #5283.",
   },
   {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/pictures',
+    reason: "A picture the shop uploads to a file listing (#6710 spec 2026-11-21 §5.4), a multipart image from the listing editor; the editor's file listing UI comes in a later PR of #6710.",
+  },
+  {
+    operation: 'GET /api/v1/storefront/listings/{listing_id}/plates/{plate}.png',
+    reason: "A file listing's plate picture as image bytes (#6710 spec 2026-11-21 §9.3), for the listing editor's pictures; a tool gains nothing from a PNG the editor shows.",
+  },
+  {
     operation: 'GET /api/v1/storefront/listings/{listing_id}/prepare',
     reason: "The Storefront editor's \"Prepare every colour combination\" shows the count and the progress (#6237); a back-office action, as publish is on the page.",
   },
@@ -560,6 +568,17 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "each item's `delivered_attachment_id`, and the bytes and thumbnails are for the page to draw. The agent " +
       'adds, edits and removes them with order_attach, order_attachment_update and order_attachment_delete (#4722).',
   })),
+  ...(
+    [
+      'POST /api/v1/entities/{ref}/attachments',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/content',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "An entity's files (#6950): a multipart upload, and the bytes and thumbnails the page draws. The agent lists, edits and removes them with entity_attachment_list, entity_attachment_update and entity_attachment_delete; an upload by the agent is out of scope in phase 1.",
+  })),
   {
     operation: 'GET /api/v1/orders/{order_id}/sources/{source_id}/preview',
     reason:
@@ -643,6 +662,22 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The Prints page's live camera view (#981): an MJPEG stream that never ends, for an <img>. An agent " +
       'reads the camera a frame at a time through get_printer_camera.',
   },
+  ...(
+    [
+      'GET /api/v1/printers/{printer_id}/kprofiles',
+      'POST /api/v1/printers/{printer_id}/kprofiles',
+      'POST /api/v1/printers/{printer_id}/kprofiles/batch',
+      'POST /api/v1/printers/{printer_id}/kprofiles/delete',
+      'GET /api/v1/printers/{printer_id}/kprofiles/notes',
+      'PUT /api/v1/printers/{printer_id}/kprofiles/notes',
+      'DELETE /api/v1/printers/{printer_id}/kprofiles/notes/{setting_id}',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "A printer's K-profiles through Bambuddy (#7154), on Settings > Printers. The tools follow in #7162 " +
+      '(plan 2026-11-23-printer-kprofiles R-7154-10).',
+  })),
   {
     operation: 'PUT /api/v1/printers/{printer_id}/lan',
     reason:
@@ -669,6 +704,26 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "Settings' \"Read from Bambuddy\" button (#5774 PR 3). The spec gives the agent no import tool " +
       '(2026-11-17-machine-rate-actuals §5): machine_rate_get already reads the log after its live task read, ' +
       'and the housekeeping sweep reads it on its Schedule (§3.7).',
+  },
+  {
+    operation: 'DELETE /api/v1/hosted-plugins/{name}',
+    reason:
+      "Deleting a hosted plugin deletes its versions and its package, so it leaves every feed and the assistant (spec " +
+      "2026-11-21 §6.3). The spec gives the assistant no tool for it (§6.2): it is a person's, in Settings → Tools & " +
+      'plugins → Hosted plugins.',
+  },
+  {
+    operation: 'POST /api/v1/hosted-plugins/{name}/files/moves',
+    reason:
+      "A rename in the Hosted plugins editor's file tree. The spec gives the assistant no move tool (2026-11-21 §6.2): " +
+      'it writes the new path with hosted_plugin_file_write and deletes the old one with hosted_plugin_file_delete.',
+  },
+  {
+    operation: 'GET /api/v1/hosted-plugins/{name}/versions',
+    reason:
+      "A hosted plugin's published versions, newest first, for the Versions list in Settings → Tools & plugins → " +
+      'Hosted plugins (#6937). The spec gives the assistant no versions tool (2026-11-21 §6.2): an offer always ' +
+      "takes the plugin's latest_version (§6.3), which the plugin's own read answers.",
   },
 ]
 
@@ -759,6 +814,29 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     'PUT /api/v1/ai/capabilities/{source}/items/{item}/loading',
     'DELETE /api/v1/ai/capabilities/{source}/items/{item}/loading',
   ].map((route) => ({ route, reason: CAPABILITIES_WRITE })),
+  // The marketplace feed (#6933, routes/pluginFeeds.ts).
+  ...[
+    'GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json',
+    'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{version}/{file}',
+    'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/archives/{file}',
+  ].map(
+    (route) => ({
+      route,
+      reason:
+        'A Claude Code marketplace feed for sessions outside ScadBuddy, fetched by `/plugin marketplace add` and ' +
+        '`/plugin install` on the /mcp auth; an assistant reads packages with the plugin package routes, not a catalog.',
+    }),
+  ),
+  {
+    route: 'GET /api/v1/ai/plugin-feeds/{feed}',
+    reason: "Settings → MCP access' view of the feed and its setup snippet, for the person to copy into Claude Code.",
+  },
+  ...['PUT /api/v1/ai/plugin-feeds/{feed}/packages/{name}', 'DELETE /api/v1/ai/plugin-feeds/{feed}/packages/{name}'].map((route) => ({
+    route,
+    reason:
+      "Settings → MCP access' choice of which packages the feed lists to every outside client (#6936): a settings write from the " +
+      'ScadBuddy UI only, as installing and approving a package are.',
+  })),
   {
     route: 'POST /api/v1/ai/capabilities/{source}/refresh',
     reason: "Connects to the plugin with its stored secret to list its tools for the Settings page, at the user's click in the UI",

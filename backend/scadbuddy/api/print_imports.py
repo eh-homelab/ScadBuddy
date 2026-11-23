@@ -25,14 +25,21 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Self
+from typing import Annotated, Any, Self
 
 from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.api.deps import CatalogueDep, PrintLinksDep, SettingsStoreDep, UploadsDep
-from scadbuddy.api.mesh_models import MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, create_mesh_model
+from scadbuddy.api.mesh_models import (
+    MAX_DESCRIPTION_CHARS,
+    MAX_NAME_CHARS,
+    create_from_read,
+    key_sent_before,
+    made_before,
+    print_file_origin,
+)
 from scadbuddy.api.models import _slug_from_name, require_model_exists
 from scadbuddy.api.operations import (
     KEY_REQUIRED_DETAIL,
@@ -49,6 +56,7 @@ from scadbuddy.bambuddy.print_import import (
     ModelSuggestion,
     SourceChoice,
     SourceFile,
+    archive_detail,
     chosen,
     find_sources,
     forget_copy,
@@ -71,7 +79,6 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
-from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
@@ -183,17 +190,6 @@ def _owner(link: LinkedPrint) -> PrintOwner:
     )
 
 
-async def _archive(client: BambuddyClient, archive_id: int) -> ArchiveDetail:
-    try:
-        return await client.archive(archive_id)
-    except ApiError as error:
-        if error.status == status.HTTP_404_NOT_FOUND:
-            raise ApiError(
-                status.HTTP_404_NOT_FOUND, f"Bambuddy has no archive {archive_id}"
-            ) from None
-        raise
-
-
 async def _file_suggestions(
     library: PrintLibrary, archive: ArchiveDetail
 ) -> list[LibraryFileSuggestion]:
@@ -250,7 +246,7 @@ async def get_sources(
     ] = False,
 ) -> PrintSources:
     async with client_for(store.load()) as client:
-        archive = await _archive(client, archive_id)
+        archive = await archive_detail(client, archive_id)
         await link_archive(client, uploads, links, archive)
         linked = await links.linked(archive_id)
         sources = await find_sources(client, archive, printer=printer)
@@ -538,7 +534,9 @@ async def link_lan_auto_import(
         "Links the archive to exactly one target (#4698): `slug`, a model that exists; "
         "`new_model`, a mesh model made from the source's 3MF (a sliced file has no "
         "meshes, so that is a 422; it needs an `Idempotency-Key`, 428 without one, and "
-        "answers 202 while the model is still being made: send the same request again); "
+        "answers 202 while the model is still being made: send the same request again; once "
+        "that model is made, the resend links it without reading the source again, except "
+        "a printer file, which is read to keep it); "
         "or `library_file_id` (#6394), a file of ScadBuddy's own library that stands "
         "(404 for a trashed or missing file, or while that library does not serve; a "
         "file purged from the trash forgets its imports; a restore keeps them). "
@@ -582,7 +580,7 @@ async def import_print(
     # One import of an archive at a time, from the owner check to the record: two at once
     # never both make a model or keep a printer file (#4698 review).
     async with _one_import(links, archive_id), client_for(settings) as client:
-        archive = await _archive(client, archive_id)
+        archive = await archive_detail(client, archive_id)
         # A print ScadBuddy made is linked to its run here, if no read linked it yet.
         await link_archive(client, uploads, links, archive)
         owner = await links.linked(archive_id)
@@ -610,15 +608,42 @@ async def import_print(
                 "a printer file is kept in Bambuddy's library inbox folder:"
                 " choose that folder in Settings first",
             )
+        made: str | None = None
+        origin = print_file_origin(archive_id, body.source)
+        if body.new_model is not None and source.kind != "printer":
+            assert idempotency_key is not None
+            # #6969: a resend after a lost answer links the model its first send made,
+            # while it exists, and reads the source no more. A printer file is read again
+            # all the same, to keep it, so other bytes there are named (`_source_changed`).
+            first = await made_before(
+                ops,
+                response,
+                idempotency_key,
+                name=body.new_model.name,
+                description=body.new_model.description,
+                origin=origin,
+            )
+            if first is not None and catalogue.exists(first.slug):
+                made = first.slug
         read: SourceFile | None = None
-        if body.new_model is not None or source.kind == "printer":
+        if (body.new_model is not None and made is None) or source.kind == "printer":
             read = await read_source(client, archive, source)
         created = False
         if body.new_model is not None:
-            assert read is not None
-            made = await _new_model(ops, response, catalogue, idempotency_key, body.new_model, read)
-            if isinstance(made, JSONResponse):
-                return made
+            if made is None:
+                assert read is not None
+                new = await _new_model(
+                    ops,
+                    response,
+                    catalogue,
+                    idempotency_key,
+                    body.new_model,
+                    read,
+                    origin,
+                )
+                if isinstance(new, JSONResponse):
+                    return new
+                made = new
             target, created = PrintSubject.model(made), True
         library_file_id = source.library_file_id
         kept: int | None = None
@@ -682,31 +707,39 @@ async def _record(
     return owner
 
 
-def _source_changed(name: str, slug: str, first: Operation, made: bool) -> str:
-    """The 409 of a new-model retry whose source changed since its first send (#5979):
-    what that send's operation (``first``) did, and whether its model is there now."""
-    changed = f"{name} changed since this request was first sent"
-    again = (
-        "send the request with a new Idempotency-Key to make the model from the file as it"
-        " is now, or choose another source"
-    )
+def _source_changed(name: str, slug: str, first: Operation, made: bool, same_file: bool) -> str:
+    """The 409 of a new-model request under a key on record for another body (#5979,
+    #6984): what that send's operation (``first``) did, and whether its model is there
+    now. Its model is offered only when that request named this print file (#7019): a
+    key first sent for another body may have made it from another print's file."""
+    why = key_sent_before(name, same_file)
+    again = "send the request with a new Idempotency-Key"
     if first.status == "running":
+        if same_file:
+            return (
+                f"{why}, and the model {slug!r} that request started is still being made, as"
+                f" its record says (operation {first.id}, `GET /api/v1/operations/{first.id}`):"
+                " once it is done, import the print onto it with `slug`; if it never"
+                f" finishes, {again} to make the model from the file as it is now"
+            )
         return (
-            f"{changed}, and the model {slug!r} that request started is still being made, as"
-            f" its record says (operation {first.id}, `GET /api/v1/operations/{first.id}`):"
-            " once it is done, import the print onto it with `slug`; if it never finishes,"
-            f" {again}"
+            f"{why}; the model {slug!r} that request started is still being made, as its"
+            f" record says (operation {first.id}, `GET /api/v1/operations/{first.id}`);"
+            f" {again} and another model name"
         )
     if first.status == "failed":
+        return f"{why}; that request made no model: its operation {first.id} failed; {again}"
+    if made and same_file:
         return (
-            f"{changed}, and that request made no model: its operation {first.id} failed; {again}"
+            f"{why}, so it is no longer the file the model {slug!r} was made from: that model"
+            f" stays; import the print onto it with `slug`, or {again} and another model name"
         )
     if made:
         return (
-            f"{changed}, so it is no longer the file the model {slug!r} was made from: that"
-            " model stays; import the print onto it with `slug`, or choose another source"
+            f"{why}; that request made the model {slug!r}, which stays; {again} and another"
+            " model name"
         )
-    return f"{changed}; that request made the model {slug!r}, which was deleted since; {again}"
+    return f"{why}; that request made the model {slug!r}, which was deleted since; {again}"
 
 
 async def _new_model(
@@ -716,26 +749,23 @@ async def _new_model(
     idempotency_key: str | None,
     new_model: NewModel,
     read: SourceFile,
+    origin: dict[str, Any],
 ) -> str | JSONResponse:
-    """Make the mesh model from the bytes read, as an upload is made one
-    (`create_mesh_model`); its slug, or the 202 while it is still being made."""
-
-    async def claim(claims: ClaimStore) -> Held:
-        return await asyncio.to_thread(claims.hold, read.data)
-
-    made = await create_mesh_model(
+    """Make the mesh model from the bytes read (`create_from_read`); its slug, or the 202
+    while it is still being made."""
+    made = await create_from_read(
         ops,
         response,
         catalogue,
         idempotency_key,
         name=new_model.name,
         description=new_model.description,
-        source={"kind": "upload", "claim": read.sha256, "name": read.name},
-        claim=claim,
+        read=read,
+        origin=origin,
         # A retry reads its source again, and a printer overwrites its files: a model the
         # first read made is no longer this file's, so it is named, never linked.
-        changed=lambda first, made: _source_changed(
-            read.name, _slug_from_name(new_model.name), first, made
+        changed=lambda first, made, same_file: _source_changed(
+            read.name, _slug_from_name(new_model.name), first, made, same_file
         ),
     )
     if isinstance(made, JSONResponse):

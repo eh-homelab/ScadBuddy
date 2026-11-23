@@ -84,6 +84,17 @@ same way, `vite.config.ts`).
   `vite dev` and
   `vite preview` serve the page under `/store` (`storefrontPreview`); its mocks are
   `src/mocks/features/storefrontPublic.ts`, its e2e `e2e/storefront.spec.ts` (390 px wide).
+  The price (#6153, #6921): `pages/CustomizePage.tsx` reads `store.variant` (the instant
+  read, `POST /listings/{id}/variant`) first on load and on each change. A cached preview
+  shows at once; with it and a `slice` price the page posts no render (the add takes the
+  variant the shop priced). Otherwise it renders and reads the estimate as before. A
+  price, once known, stays on screen: `components/Estimate.tsx` `updating` marks one that
+  is not yet the firm price of the choices on screen, and a `last` price is always marked,
+  never firm. A render that ends with no price (refused, failed, too slow, or its estimate
+  read failed) drops any other price and a `last` one, so nothing shows as updating when
+  nothing is. "Working out the price…" shows only with no price known; "We price this
+  design by hand" only when the render's estimate answers `none`. The mock holds a variant
+  once its render's estimate answered (`holdVariant` seeds one).
   The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)
   and loads Cloudflare's script only when `components/Turnstile.tsx` mounts. A form that
   takes the check sends the widget's token as `X-Turnstile-Token` and draws a new widget
@@ -137,7 +148,8 @@ same way, `vite.config.ts`).
   a support setting is never offered, `isSupport`; an offered colour whose template default
   no colour on offer has starts at one that is, `fittedDefault`, #6144), pinned by
   `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
-  (`agent/src/tools/storefrontDraft.ts`) is tested against too; a
+  (`agent/src/tools/storefrontDraft.ts`) is tested against too (its case with `file` is a new
+  file listing's body, #6710: `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`); a
   colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
 
 - The Storefront back office (#6157): `pages/StorefrontPage.tsx` is the list, a table the
@@ -175,6 +187,16 @@ same way, `vite.config.ts`).
   dialog has "Storefront…" per image (`components/storefront/StorefrontPicture.tsx`),
   which sets the image on each listing of that template through `PUT
   /storefront/listings/{id}/media`; a published listing is published again at once.
+  File listings (#6710, spec 2026-11-21 §9): the editor's Source block chooses a design or a
+  library file (`ListingDraft.source`, `switchSource`); a file comes from `LibraryFilePicker`
+  with `types` (3MF and STL). `components/storefront/listedFile.ts` `useListedFile` reads the
+  file, its plates and its parts (the publish snapshot's once published, else the file's
+  declared slots); `FileSource.tsx` has the picked file, the §9.4 notes ("Use the library's
+  version", "Keep the published version"), Parts (a support part read-only) and
+  `FilePictures` (`plate:<n>`, `upload:<sha256>`; an upload saves a new listing first). The
+  page asks before a save drops a pin (another file picked, or a switch to a design). The Library page's file menu
+  has "Sell on storefront…" (`?sell=library:<id>`). The changed-file note compares the
+  library entry's `file_hash` (#7073) with the pin, and shows nothing when no hash is stated.
   Prepared colours (#6237): `components/storefront/PrepareColours.tsx`, under a published
   listing's actions, shows the count (`GET …/prepare`), confirms, starts (`POST …/prepare`)
   and shows "n of N ready", read again while the run is open (`running`) or renders are in
@@ -230,10 +252,18 @@ same way, `vite.config.ts`).
 - `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
   2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
   Catalog, Metrics, Shopping list and Ledger.
+  Codes and labels (#6955): `/x/:code` (`pages/CodePage.tsx`) asks `GET /api/v1/codes/{code}` and opens
+  the spool or place; `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
+  Locations tab's name opens that page, its count badge opens the spools filter, and "Print printer
+  labels" opens the labels page with `?printers=`. The labels page also takes `?locations=<id>,<id>`
+  (`LocationLabel`; a place that cannot be read is named and the rest are drawn;
+  `labelSheet.ts` `httpsOrigin`, `labelBase` and `locationPayload`: the QR is `<base>/x/L-<n>`, and a
+  payload over 84 bytes is refused with an alert). Both place modes draw at most `MAX_LABELS` (100)
+  labels, as spool labels do, and none past it (#7081).
   History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
   the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
   `charts/LineChart`) and metrics panel (`SpoolMetricsPanel`); the Metrics tab (`pages/filament/MetricsTab.tsx`:
-  range, bucket and group in the address through `metricsQuery.ts`, behind "Remember my view"); the
+  range, bucket and group in the address through `metricsQuery.ts`, behind "Remember my view"; its "By material number" table, `MaterialNumberTable`, #7152); the type page's cost calculator (`CostCalculator`, #7152: the sum is `GET /filament/cost-per-kg`'s, and "Use as default cost" only fills the cost field); the
   forecast view of the Spools tab (`SpoolForecast`, `TypeForecastTable`) and the "Consumed" tile. The
   charts are plain SVG in `components/filament/charts/` (`ColumnChart`, `LineChart`, `BarList`, `useWidth`).
   A value's colour follows the value, ranked over 365 days (`MetricsTab` `ranked`); until that request
@@ -283,9 +313,14 @@ same way, `vite.config.ts`).
   products, trays from `/filament/inventory`), and every Filament tab has the quick find
   (`FilamentQuickFind`, Ctrl+K or ⌘K: spools and types in groups, Enter opens one), which shares the
   colour picker's remembered filters (`lib/filamentPickerFilters.ts`). The agent's
-  `filament_spool_list` and `filament_type_list` `q` run a copy (`agent/src/tools/filamentSearch.ts`). The price book is edited on Filament → Types, not in Settings; the ledger
+  `filament_spool_list` and `filament_type_list` `q` run a copy (`agent/src/tools/filamentSearch.ts`); both tests run `test-fixtures/filament/search-vectors.json`. The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
-  configuration (`pages/settings/sections/filament.tsx`). #6265 (plan
+  configuration (`pages/settings/sections/filament.tsx`). The Catalog tab's Colours (#6907) adds
+  `ColourSources` ("Sync from filamentcolors", "Add Bambu Lab colours", each run's progress read
+  while it runs) and a server search (`q`, at most `SHOWN_MAX` rows drawn, no re-order); mocks in
+  `mocks/features/filament/index.ts` (`MOCK_SYNC_COLOURS`). The type and spool pages'
+  `RgbaColourField` has "From the catalog" (`CatalogColourPick`, #6912, R-6912-1 to 5): the
+  same server search, and a pick sets the whole `#RRGGBBAA` and the extra colours. #6265 (plan
   `docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 3, 16, 19): "Sync with
   Bambuddy" has one `ChoiceSelect` row per data type (spools and types, weights, tags,
   suppliers and prices, locations, presets and K values; `SYNC_ROWS`, `SYNC_KINDS` in
@@ -294,14 +329,18 @@ same way, `vite.config.ts`).
   (`getSyncStatus`, `GET /filament/sync/status`: the last pass, why none runs, and each
   item whose last write failed or was held back, with `syncErrorText`); and "Sync now"
   (`runSync`, `POST /filament/sync/run`), after which the status is read again until a
-  pass has started at or after the run's `requested_at` (R-T11-2, #6836). While the status says
+  pass has started at or after the run's `requested_at` (R-T11-2, #6836). Under the status,
+  "Recent passes" (#6905, `SyncPassesRow`, `listSyncPasses`, `GET /filament/sync/passes`) lists
+  the passes newest first, 10 a page with "Show older passes", read again when the status's last
+  pass moves, and "Keep sync history for (days)" is the stored `filament_sync_pass_ttl_days`
+  (empty is 30). While the status says
   `instance_changed` it offers "Reset Bambuddy links" (#6773, `ResetLinks`: a dry run's
   counts in a confirm dialog, then `resetSyncLinks` with the dry run's `instance`; the mock's
   `linkOtherBambuddy` sets that state; with the dry run's `same_bambuddy` the dialog is "Keep the
   Bambuddy links?" and the reset sends `expect_kept` and deletes nothing, #6845,
   `linkOtherBambuddy(id, { same: true })`; a 409 `proof_changed` reads the dry run again and
-  says why, `loseSameBambuddy`; a dry run that cannot read Bambuddy notes it and offers the
-  delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264;
+  says why, `loseSameBambuddy`; a dry run with `changed_since_pull` says every linked spool with a time on both sides changed since the last pull and offers the delete, `linkOtherBambuddy(id, { changed: true })`; a dry run that cannot read Bambuddy notes it and offers the
+  delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264, and above it the stored switch `filament_auto_add_unknown_rfid` (#7156; the mode's status line says when that setting holds Bambuddy's auto-add off, and both statuses are read again after "Save Filament"), and the drying defaults `filament_drying_temp_c` and `filament_drying_hours` (empty offers none; the spool page then says "the default in Settings");
   the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
   `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
@@ -332,6 +371,19 @@ same way, `vite.config.ts`).
   requests with the `sessionStorage` key `scadbuddy.mock.pending-input`
   (`mocks/features/pendingInput.ts`). The mocks hold two requested grants by default
   (`run-ask`, `trig-render`), so the tab title of the mocked app starts with `(2)`.
+- Hosted plugins (#6937, spec 2026-11-21 §6.2, §6.3): Settings → Tools & plugins → Hosted
+  plugins (`pages/settings/sections/hosted-plugins.tsx`, `components/settings/HostedPlugins.tsx`,
+  `HostedPluginEditor.tsx`; client `api/hostedPlugins.ts`, file bytes as the raw body through
+  `client.ts` `requestRaw`). A draft file opens in Monaco (`HostedFileEditor.tsx`, a lazy chunk;
+  unit tests mock it with a textarea). `hostedDraft.ts` checks paths first (the API's refusal is
+  shown as it is) and works out `offerState` from the package row. A Publish offers the new
+  version at once (spec §6.3 step 5): the agent's package install with `{ kind: 'hosted', name }`,
+  an unapproved install or a re-pin, never an approval. Offer runs the same install for a version
+  a failed offer left unoffered. Publish, Offer and Delete are `USER_ONLY`. Close, or Edit on
+  another plugin, asks before it drops unsaved files. The two
+  package panels tell each other of a change (`packagesChanged.ts`). Mocks
+  `src/mocks/features/hostedPlugins.ts` (seeds `print-notes`, version 1 never offered), which
+  tell `mocks/aiPlugins.ts` what an Offer installs (`setHostedLookup`). e2e `e2e/hosted-plugins.spec.ts`.
 - `frontend/src/lib/appLinks.ts` (`appUrl`, `useAppUrl`, `components/AppLink.tsx`) — links
   to ScadBuddy's own pages use the host the user is on: a path, or a URL on a known origin
   (`public_url` plus `SCADBUDDY_ALLOWED_ORIGINS`), is put on `window.location.origin`

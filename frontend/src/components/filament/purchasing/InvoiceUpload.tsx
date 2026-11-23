@@ -2,6 +2,7 @@ import { FileUpIcon } from 'lucide-react'
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from 'react'
 import { Link } from 'react-router'
 import { ApiError } from '../../../api/client'
+import { filamentLinks } from '../../../lib/filamentLinks'
 import { createInvoice, listSuppliers, uploadInvoiceFile, type Supplier } from '../../../api/filamentPurchasing'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -158,7 +159,7 @@ export function InvoiceUpload({ onCreated }: { onCreated: (invoiceId: string) =>
           {kept && (
             <>
               {' '}
-              <Link to={`/filament/invoices/${kept}`} className="underline underline-offset-4">
+              <Link to={filamentLinks.invoice(kept)} className="underline underline-offset-4">
                 Open the draft
               </Link>
             </>

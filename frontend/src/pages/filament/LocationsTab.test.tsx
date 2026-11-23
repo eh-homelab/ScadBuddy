@@ -14,12 +14,17 @@ const place = async (id: string) => {
 }
 
 describe('the Locations tab', () => {
+  it('links to the printer labels', async () => {
+    renderPage(<LocationsTab />)
+    expect(await screen.findByRole('link', { name: 'Print printer labels' })).toHaveAttribute('href', '/filament/labels?printers=all')
+  })
+
   it('shows the tree with each place spool count and its spools', async () => {
     renderPage(<LocationsTab />)
     await tree()
     const shelf = await place(L.SHELF_A)
     await waitFor(() => expect(within(shelf).getByRole('link', { name: /#1/ })).toBeInTheDocument())
-    expect(within(shelf).getByLabelText('2 spools')).toBeInTheDocument()
+    expect(within(shelf).getByLabelText('2 spools in Shelf A')).toBeInTheDocument()
     expect(within(shelf).getByRole('link', { name: /#1/ })).toHaveAttribute('href', `/filament/spools/${spoolId(1)}`)
     expect(within(shelf).getByRole('link', { name: /#3/ })).toBeInTheDocument()
     expect(within(await place(L.WORKSHOP)).getAllByText('Shelf A').length).toBeGreaterThan(0)
@@ -40,6 +45,13 @@ describe('the Locations tab', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('a place cannot be its own parent or sit under one of its own')
     expect((await listLocations()).find((node) => node.id === L.WORKSHOP)?.parent_id).toBeNull()
+  })
+
+  it('links a place name to its page and its spool count to the spools filter', async () => {
+    renderPage(<LocationsTab />)
+    const shelf = await place(L.SHELF_A)
+    expect(within(shelf).getByRole('link', { name: 'Shelf A' })).toHaveAttribute('href', `/filament/locations/${L.SHELF_A}`)
+    expect(within(shelf).getByRole('link', { name: /spools? in Shelf A/ })).toHaveAttribute('href', `/filament/spools?place=${L.SHELF_A}`)
   })
 
   it('renames a place', async () => {

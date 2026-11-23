@@ -47,18 +47,29 @@ from scadbuddy.crud.idempotency import Replay, has_reply, idempotent_write, stor
 from scadbuddy.orders.attachments import SNIFF_BYTES, clean_filename, keep_file, sniff
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.currency import minor_exponent
-from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem, NewRequestItem
+from scadbuddy.orders.lifecycle import (
+    LifecycleError,
+    NewLibraryItem,
+    NewModelItem,
+    NewRequestItem,
+)
 from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
 from scadbuddy.orders.store import item_subject
+from scadbuddy.orders.storefront.file_prices import checked_file_choice, library_file
 from scadbuddy.orders.storefront.limits import RenderLimits
-from scadbuddy.orders.storefront.line_prices import LinePrices, price_of, variant_at_add
+from scadbuddy.orders.storefront.line_prices import (
+    LinePrices,
+    Variant,
+    price_of,
+    variant_at_add,
+)
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
 from scadbuddy.orders.storefront.model_requests import (
     checked_purchase_links,
     draft_sources,
     insert_links,
 )
-from scadbuddy.orders.storefront.renders import checked_choice
+from scadbuddy.orders.storefront.renders import checked_choice, variant_colours, variant_key
 from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import (
@@ -84,7 +95,7 @@ from scadbuddy.storefront.uploads import (
     file_too_large,
     too_many_files,
 )
-from scadbuddy.storefront.wire import ITEM_ID, unescape_filename
+from scadbuddy.storefront.wire import ITEM_ID, LISTING_ID, unescape_filename
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -196,12 +207,13 @@ def _captions(listings: Sequence[Listing]) -> dict[tuple[str, str], dict[str, st
     seen: dict[tuple[str, str], dict[str, set[str]]] = {}
     captions: dict[tuple[str, str], dict[str, str | None]] = {}
     for listing in listings:
-        if listing.snapshot is None:
+        if listing.template_snapshot is None:
             continue
-        pair = (listing.slug, listing.commit)
+        slug, commit, snapshot = listing.design
+        pair = (slug, commit)
         bounds = listing.params
         names = seen.setdefault(pair, {})
-        for p in listing.snapshot.schema_.parameters:
+        for p in snapshot.schema_.parameters:
             captions.setdefault(pair, {})[p.name] = p.caption
             votes = names.setdefault(p.name, set())
             # Only a listing that offers the parameter has a say in its label.
@@ -292,7 +304,7 @@ async def _view(state: AppState, order: Order) -> DraftView:
                 )
         line = prices.get(item.id)
         firm = (
-            item.kind == "model"
+            item.kind in ("model", "library_file")
             and line is not None
             and line.unit_price_minor is not None
             and line.currency == currency
@@ -375,10 +387,13 @@ async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
     return None if order is None else await _view(state, order)
 
 
-async def _render_colours(state: AppState, visitor_id: str, render_key: str) -> list[str] | None:
-    """The slot colours of the visitor's own done render of ``render_key``, or None when
-    it has none (#6152): the add fills each slot the page left out with the filament of
-    its colour in the resolved material (#6258)."""
+async def _render_colours(
+    state: AppState, visitor_id: str, render_key: str, variant: str
+) -> list[str] | None:
+    """The slot colours of the visitor's own done render of ``render_key``, else those a
+    priced slice of the choices' variant ``variant`` recorded (#6921: the page showed its
+    preview with no render), or None when there are none (#6152): the add fills each slot
+    the page left out with the filament of its colour in the resolved material (#6258)."""
 
     def read() -> list[str] | None:
         visitor = VisitorStore(state.projection.pool).find(visitor_id)
@@ -395,7 +410,32 @@ async def _render_colours(state: AppState, visitor_id: str, render_key: str) -> 
             return None
         return list(job.result.colors)
 
-    return await asyncio.to_thread(read)
+    found = await asyncio.to_thread(read)
+    return found if found is not None else await variant_colours(state, variant)
+
+
+def _still_pinned(conn: Any, listing_id: str, sha256: str | None) -> None:
+    """409 ``listing_changed`` unless the published listing still pins ``sha256``, read
+    under a share lock in the add's transaction (#7075 review): a publish of other bytes
+    since the check drops the old copy's hold, and a line must never hold a copy its
+    listing no longer sells."""
+    row = conn.execute(
+        "SELECT 1 FROM storefront_listings WHERE id = %s AND published"
+        " AND library_file->>'pinned' = %s FOR SHARE",
+        (listing_id, sha256),
+    ).fetchone()
+    if row is None:
+        raise problem(
+            status.HTTP_409_CONFLICT,
+            "listing_changed",
+            "This listing has changed. Load it again.",
+        )
+
+
+def _sells_file(orders: OrdersComponent, listing_id: str) -> bool:
+    """Whether ``listing_id`` names a listing of a library file (#6710). Blocking."""
+    found = orders.listings.get(listing_id) if LISTING_ID.fullmatch(listing_id) else None
+    return found is not None and found.source == "library_file"
 
 
 async def add_listing_item(
@@ -408,38 +448,69 @@ async def add_listing_item(
     ``name`` and ``reason``), 422 ``listing_colours_clash`` (with ``parts``), 409
     ``render_pending`` (`checked_choice`, #6152, #6258), 422 ``draft_full``, 409
     ``draft_changed``. Each slot takes the filament of its colour in the one material
-    the visitor's colours resolve to (`inputs.py` `resolve_choice`)."""
+    the visitor's colours resolve to (`inputs.py` `resolve_choice`). A file listing's
+    line (#6710 §7.6) is a ``library_file`` item with the visitor's colour on each offered
+    slot (`file_prices.py` `checked_file_choice`, the same refusals), the pinned sha256
+    and the held copy, which the item holds."""
     orders = _orders(state)
     asked = {"visitor": token_sha256(visitor_id), **body.model_dump(mode="json")}
     reply = await asyncio.to_thread(_stored, state, key, ADD_ROUTE, asked)
     if reply is not None:
         return await _answer(state, visitor_id, reply)
     shop = await asyncio.to_thread(lambda: state.settings_store.snapshot().runtime)
-    listing, resolved, choice = await checked_choice(
-        orders,
-        body,
-        shop.storefront_materials,
-        render_colours=lambda key: _render_colours(state, visitor_id, key),
-    )
-    visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
+    entry: NewModelItem | NewLibraryItem
+    variant: Variant | None
+    if await asyncio.to_thread(_sells_file, orders, body.listing_id):
+        # A file listing's line (#6710 §7.6): a library file item at the visitor's colours.
+        listing, file = await checked_file_choice(
+            orders,
+            body.listing_id,
+            body.listing_updated_at,
+            body.colours,
+            shop.storefront_materials,
+            values=body.values,
+        )
+        visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
+        filaments = file.filaments
+        variant = (
+            None
+            if filaments is None
+            else Variant(listing.id, file.snapshot.sha256, tuple(f.id for f in filaments))
+        )
+        price = None if variant is None else await price_of(state, library_file(file), variant)
+        entry = NewLibraryItem(
+            file=library_file(file),
+            colours=file.colours,
+            quantity=body.quantity,
+            title=listing.title,
+        )
+    else:
+        listing, resolved, choice = await checked_choice(
+            orders,
+            body,
+            shop.storefront_materials,
+            render_colours=lambda key, variant: _render_colours(state, visitor_id, key, variant),
+        )
+        visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
+        # The line's firm price, read by its variant's key (#6153): never the browser's.
+        variant = await variant_at_add(
+            state,
+            visitor_id=visitor.id,
+            listing=listing,
+            render_key=resolved.reference.render_key,
+            colours=body.colours,
+            material=choice.material,
+            variant_key=variant_key(listing, choice, body.colours),
+        )
+        price = None if variant is None else await price_of(state, resolved.reference, variant)
+        entry = NewModelItem(
+            resolved=resolved,
+            quantity=body.quantity,
+            title=listing.title,
+            storefront_offered=tuple(listing.params),
+        )
     by = visitor_actor(visitor)
-    # The line's firm price, read by its variant's key (#6153): never the browser's.
-    variant = await variant_at_add(
-        state,
-        visitor_id=visitor.id,
-        listing=listing,
-        render_key=resolved.reference.render_key,
-        colours=body.colours,
-        material=choice.material,
-    )
-    price = None if variant is None else await price_of(state, resolved.reference, variant)
     currency = await asyncio.to_thread(lambda: orders.price_book.policy()[0])
-    entry = NewModelItem(
-        resolved=resolved,
-        quantity=body.quantity,
-        title=listing.title,
-        storefront_offered=tuple(listing.params),
-    )
 
     def write() -> Replay:
         # Outside the ledger's transaction: two first adds at once make one draft.
@@ -453,6 +524,8 @@ async def add_listing_item(
                 raise draft_full()
             if variant is not None:
                 LinePrices.record(conn, items[0].id, variant, price)
+            if isinstance(entry, NewLibraryItem):
+                _still_pinned(conn, listing.id, entry.file.sha256)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
             changes.append((order, items))

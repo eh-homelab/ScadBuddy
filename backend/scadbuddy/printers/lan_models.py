@@ -72,3 +72,50 @@ class LanStopped(BaseModel):
 
     stage: Literal["failed", "cancelled"]
     message: str
+
+
+#: The ``gcode_state``s in which the printer holds a job and refuses a ``project_file``
+#: ``ERROR STATE`` (#6871). ``RUNNING`` was measured on the H2C on 2026-11-21: the
+#: refusal came with HMS ``0500_4004`` "Device is busy and cannot start new task".
+#: ``PREPARE``, ``SLICING`` and ``PAUSE`` hold a job the same way (OpenBambuAPI
+#: ``mqtt.md``); not measured.
+BUSY_STATES = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
+#: The ended states whose plate may still hold the print (#6871): a run waits for a
+#: cleared plate here only when ``lan_require_plate_clear`` asks it to.
+ENDED_STATES = frozenset({"FINISH", "FAILED"})
+#: A printer with no print at all (#6871): neither busy nor holding an ended one.
+IDLE_STATES = frozenset({"IDLE"})
+
+
+class LanQueued(BaseModel):
+    """Why a native run waits before its first print (#6871): the printer was busy when
+    the run read it, before any upload. It runs another print (``job``, which the run
+    waits out), or holds an ended one whose plate must be cleared (``job`` ``None``). The
+    run starts once the printer is free and someone says the plate is clear."""
+
+    #: The printer's ``gcode_state`` the run read: one of `BUSY_STATES` while it prints,
+    #: one of `ENDED_STATES` while its plate waits.
+    state: str
+    #: The print the run waits for, as the report named it when it was read.
+    job: LanStarted | None = None
+    #: Its place among ScadBuddy's runs queued on the printer, from 1, when it was
+    #: read; ``None`` when that could not be read.
+    place: int | None = None
+
+
+def busy_with(
+    report: dict[str, Any], received_at: datetime, *, plate_clear: bool
+) -> LanQueued | None:
+    """Whether a printer reporting ``report`` cannot take a print now (#6871): it runs
+    one (`BUSY_STATES`), or, with ``plate_clear``, holds an ended one whose plate must be
+    cleared first (`ENDED_STATES`). ``None`` when it can."""
+    state = report.get("gcode_state")
+    if not isinstance(state, str):
+        return None
+    if state in BUSY_STATES:
+        name = report.get("subtask_name")
+        job = LanStarted(subtask_name=name if isinstance(name, str) else "", started_at=received_at)
+        return LanQueued(state=state, job=job)
+    if plate_clear and state in ENDED_STATES:
+        return LanQueued(state=state)
+    return None

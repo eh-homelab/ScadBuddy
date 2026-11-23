@@ -63,6 +63,7 @@ from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.print import (
     RemoteBbPull,
     RemoteEvents,
+    RemoteFilamentPresets,
     RemoteFilamentSync,
     RemoteFilamentTrays,
     RemoteHeldPresets,
@@ -1380,7 +1381,11 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     # with the kept copy of Bambuddy's local presets (#4645).
     native = native_slice_starter(
         settings,
-        Profiles.installed(settings.slicer_profiles_dir, held=RemoteHeldPresets(crud)),
+        Profiles.installed(
+            settings.slicer_profiles_dir,
+            held=RemoteHeldPresets(crud),
+            own=RemoteFilamentPresets(crud),
+        ),
     )
     kinds = bambuddy_kinds_over(
         settings_store=settings_store,
@@ -1431,6 +1436,8 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             # A run's next plate copy waits on the printer's report (#4541).
             reports=reports,
             uses=print_uses,
+            # A run queued on a busy printer says its place (#6871).
+            runs=print_runs,
         )
     )
     return PrintWorkerDeps(
@@ -1514,6 +1521,7 @@ PRINT_CRUD_AREAS = frozenset(
         "filament-sync",
         "filament-pull",
         "sensor-notify",
+        "own-presets",
     }
 )
 

@@ -9,7 +9,7 @@ native API's write (`spools/native.py`) does.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Protocol, get_args
 from uuid import UUID
 
@@ -19,6 +19,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.models import NozzleSize
 from scadbuddy.filament import models as m
+from scadbuddy.filament.sb_presets import bambuddy_refs_on
 
 Conn = Connection[DictRow]
 
@@ -60,72 +61,121 @@ def own_k_values(conn: Conn, spool_id: UUID) -> list[dict[str, Any]]:
     ).fetchall()
 
 
-def _type_id(conn: Conn, spool_id: UUID) -> UUID | None:
-    row = conn.execute("SELECT type_id FROM filament_spools WHERE id = %s", (spool_id,)).fetchone()
-    return None if row is None else row["type_id"]
+def _type_ids(conn: Conn, spool_ids: list[UUID]) -> dict[UUID, UUID | None]:
+    rows = conn.execute(
+        "SELECT id, type_id FROM filament_spools WHERE id = ANY(%s)", (spool_ids,)
+    ).fetchall()
+    return {row["id"]: row["type_id"] for row in rows}
+
+
+def _type_rows(conn: Conn, sql: str, type_ids: Iterable[UUID | None]) -> dict[UUID, list[Any]]:
+    """The rows ``sql`` (which takes the type ids as one array) gives, by ``type_id``."""
+    wanted = list({t for t in type_ids if t is not None})
+    found: dict[UUID, list[Any]] = {}
+    if wanted:
+        for row in conn.execute(sql, (wanted,)).fetchall():
+            found.setdefault(row["type_id"], []).append(row)
+    return found
 
 
 def effective_presets(conn: Conn, spool_id: UUID) -> list[m.EffectivePreset]:
     """The type's presets, each replaced by the spool's row of the same key, then the
     spool's rows of keys the type lacks; by printer model and nozzle diameter."""
-    type_id = _type_id(conn, spool_id)
-    rows: dict[tuple[str, str], tuple[dict[str, Any], bool]] = {}
-    if type_id is not None:
-        for row in conn.execute(
-            f"SELECT {_TYPE_PRESET_COLUMNS} FROM filament_spool_type_presets WHERE type_id = %s",
-            (type_id,),
-        ).fetchall():
+    return effective_presets_of(conn, [spool_id])[spool_id]
+
+
+def effective_presets_of(
+    conn: Conn, spool_ids: Iterable[UUID]
+) -> dict[UUID, list[m.EffectivePreset]]:
+    """`effective_presets` of each of ``spool_ids``, in four queries whatever their
+    number (#6902); a spool that does not exist has none. A ScadBuddy preset's row
+    carries its Bambuddy id (`EffectivePreset.bambuddy_id`, #7176)."""
+    ids = list(dict.fromkeys(spool_ids))
+    types = _type_ids(conn, ids)
+    by_type = _type_rows(
+        conn,
+        f"SELECT {_TYPE_PRESET_COLUMNS} FROM filament_spool_type_presets WHERE type_id = ANY(%s)",
+        types.values(),
+    )
+    own: dict[UUID, list[dict[str, Any]]] = {}
+    for row in conn.execute(
+        f"SELECT {_PRESET_COLUMNS}, migrated FROM filament_spool_presets WHERE spool_id = ANY(%s)",
+        (ids,),
+    ).fetchall():
+        own.setdefault(row["spool_id"], []).append(row)
+    bambuddy = bambuddy_refs_on(
+        conn,
+        {row["slicer_filament"] for group in (*by_type.values(), *own.values()) for row in group},
+    )
+    out: dict[UUID, list[m.EffectivePreset]] = {}
+    for spool_id in ids:
+        type_id = types.get(spool_id)
+        rows: dict[tuple[str, str], tuple[dict[str, Any], bool]] = {}
+        for row in [] if type_id is None else by_type.get(type_id, []):
             rows[row["printer_model"], row["nozzle_diameter"]] = (row, False)
-    for row in own_presets(conn, spool_id):
-        rows[row["printer_model"], row["nozzle_diameter"]] = (row, True)
-    migrated = {
-        (r["printer_model"], r["nozzle_diameter"])
-        for r in conn.execute(
-            "SELECT printer_model, nozzle_diameter FROM filament_spool_presets"
-            " WHERE spool_id = %s AND migrated",
-            (spool_id,),
-        ).fetchall()
-    }
-    return [
-        m.EffectivePreset(
-            printer_model=row["printer_model"],
-            nozzle_diameter=row["nozzle_diameter"],
-            slicer_filament=row["slicer_filament"],
-            slicer_filament_name=row["slicer_filament_name"],
-            overridden=own,
-            migrated=own and key in migrated,
-        )
-        for key, (row, own) in sorted(rows.items())
-    ]
+        for row in own.get(spool_id, []):
+            rows[row["printer_model"], row["nozzle_diameter"]] = (row, True)
+        out[spool_id] = [
+            m.EffectivePreset(
+                printer_model=row["printer_model"],
+                nozzle_diameter=row["nozzle_diameter"],
+                slicer_filament=row["slicer_filament"],
+                slicer_filament_name=row["slicer_filament_name"],
+                overridden=is_own,
+                migrated=is_own and bool(row["migrated"]),
+                bambuddy_id=bambuddy.get(row["slicer_filament"]),
+            )
+            for _, (row, is_own) in sorted(rows.items())
+        ]
+    return out
 
 
 def effective_k_values(conn: Conn, spool_id: UUID) -> list[m.EffectiveKValue]:
     """The type's K values, each replaced by the spool's row of the same key, then the
     spool's rows of keys the type lacks; by printer, extruder and nozzle diameter."""
-    type_id = _type_id(conn, spool_id)
-    rows: dict[tuple[str, int, str], tuple[dict[str, Any], bool]] = {}
-    if type_id is not None:
-        for row in conn.execute(
-            f"SELECT {_TYPE_K_COLUMNS} FROM filament_spool_type_k_values WHERE type_id = %s",
-            (type_id,),
-        ).fetchall():
+    return effective_k_values_of(conn, [spool_id])[spool_id]
+
+
+def effective_k_values_of(
+    conn: Conn, spool_ids: Iterable[UUID]
+) -> dict[UUID, list[m.EffectiveKValue]]:
+    """`effective_k_values` of each of ``spool_ids``, in three queries whatever their
+    number (#6902); a spool that does not exist has none."""
+    ids = list(dict.fromkeys(spool_ids))
+    types = _type_ids(conn, ids)
+    by_type = _type_rows(
+        conn,
+        f"SELECT {_TYPE_K_COLUMNS} FROM filament_spool_type_k_values WHERE type_id = ANY(%s)",
+        types.values(),
+    )
+    own: dict[UUID, list[dict[str, Any]]] = {}
+    for row in conn.execute(
+        f"SELECT {_K_COLUMNS} FROM filament_spool_k_values WHERE spool_id = ANY(%s)", (ids,)
+    ).fetchall():
+        own.setdefault(row["spool_id"], []).append(row)
+    out: dict[UUID, list[m.EffectiveKValue]] = {}
+    for spool_id in ids:
+        type_id = types.get(spool_id)
+        rows: dict[tuple[str, int, str], tuple[dict[str, Any], bool]] = {}
+        for row in [] if type_id is None else by_type.get(type_id, []):
             rows[str(row["printer_id"]), row["extruder"], row["nozzle_diameter"]] = (row, False)
-    for row in own_k_values(conn, spool_id):
-        rows[str(row["printer_id"]), row["extruder"], row["nozzle_diameter"]] = (row, True)
-    return [
-        m.EffectiveKValue(
-            printer_id=row["printer_id"],
-            extruder=row["extruder"],
-            nozzle_diameter=row["nozzle_diameter"],
-            nozzle_type=row["nozzle_type"],
-            k_value=row["k_value"],
-            name=row["name"],
-            cali_idx=row["cali_idx"],
-            setting_id=row["setting_id"],
-            overridden=own,
-        )
-        for _, (row, own) in sorted(rows.items())
-    ]
+        for row in own.get(spool_id, []):
+            rows[str(row["printer_id"]), row["extruder"], row["nozzle_diameter"]] = (row, True)
+        out[spool_id] = [
+            m.EffectiveKValue(
+                printer_id=row["printer_id"],
+                extruder=row["extruder"],
+                nozzle_diameter=row["nozzle_diameter"],
+                nozzle_type=row["nozzle_type"],
+                k_value=row["k_value"],
+                name=row["name"],
+                cali_idx=row["cali_idx"],
+                setting_id=row["setting_id"],
+                overridden=is_own,
+            )
+            for _, (row, is_own) in sorted(rows.items())
+        ]
+    return out
 
 
 def preset_for(

@@ -16,7 +16,7 @@ import logging
 import os
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Sequence
 from functools import partial
-from typing import Annotated, BinaryIO
+from typing import Annotated, BinaryIO, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -91,6 +91,7 @@ from scadbuddy.bambuddy.library_listing import (
     file_entry,
     folder_views,
     list_library,
+    lower_hash,
     search_library,
 )
 from scadbuddy.bambuddy.library_view import (
@@ -380,12 +381,14 @@ async def get_library_search(
     q: Annotated[str, Query(max_length=200)],
     show_all: Annotated[bool, Query(alias="all")] = False,
     fresh: bool = False,
+    types: Annotated[list[Literal["3mf", "stl"]] | None, Query(max_length=2)] = None,
 ) -> LibrarySearch:
     """The files whose name, or the path of their folder, holds every word of ``q`` as a substring,
     whatever the case or a separator ``_ - . ( ) [ ]`` (#3630); each names its
     ``folder_path``. Without ``all`` only unsliced 3MFs, as the listing; ``hidden``
-    counts the matches only ``all`` lists. At most 100 files, ``total`` how many
-    matched.
+    counts the matches only ``all`` lists. With ``types`` (#6710 §9.2: the storefront's
+    file picker sends ``types=3mf&types=stl``) only files of those types are listed, and
+    ``all`` is ignored. At most 100 files, ``total`` how many matched.
 
     Bambuddy has no search, so its whole library is read at once and kept in this
     process: answered from it for 30 s, and for 10 minutes after while one read
@@ -400,14 +403,14 @@ async def get_library_search(
         tree, rows = await asyncio.gather(
             native.folders(), native.library_listing(folder_id=None, every_folder=True)
         )
-        found = search_library(folder_views(tree), rows, q, show_all=show_all)
+        found = search_library(folder_views(tree), rows, q, show_all=show_all, types=types)
         await _name_native_outputs(native, outputs, found.files)
         return found
     config = BambuddyConfig.from_settings(store.load())
     source = f"{config.base_url}#{hashlib.sha256((config.api_key or '').encode()).hexdigest()}"
     # One config for the key and the client, so the two cannot drift apart.
     snapshot = await index.snapshot(source, partial(BambuddyClient, config), fresh=fresh)
-    found = search_library(snapshot.folders, snapshot.files, q, show_all=show_all)
+    found = search_library(snapshot.folders, snapshot.files, q, show_all=show_all, types=types)
     made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in found.files))
     for entry in found.files:
         entry.output_id = made.get(entry.id)
@@ -434,15 +437,15 @@ async def get_library_file_entry(
     ScadBuddy's own library) does not have is a 404."""
     native = await library.serving_native()
     if native is not None:
-        folder_id = (await native.library_file(file_id)).folder_id
-        listing = await list_library(native, folder_id=folder_id, show_all=True)
+        file = await native.library_file(file_id)
+        listing = await list_library(native, folder_id=file.folder_id, show_all=True)
         entry = file_entry(listing, file_id)
         if entry is not None:
             await _name_native_outputs(native, outputs, [entry])
     else:
         async with client_for(store.load()) as client:
-            folder_id = (await client.library_file(file_id)).folder_id
-            listing = await list_library(client, folder_id=folder_id, show_all=True)
+            file = await client.library_file(file_id)
+            listing = await list_library(client, folder_id=file.folder_id, show_all=True)
         entry = file_entry(listing, file_id)
         if entry is not None:
             made = await live_outputs_for_files(uploads, outputs, [entry.id])
@@ -450,6 +453,8 @@ async def get_library_file_entry(
     if entry is None:
         # Moved or deleted between the two reads.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"library file {file_id} is not listed")
+    # Bambuddy's listing states no hash; the file's own read does (#7073).
+    entry.file_hash = lower_hash(file.file_hash)
     return entry
 
 

@@ -53,6 +53,76 @@ export interface ListingPicturesProps {
   onUploaded: (model: ModelSummary, id: string) => void
 }
 
+/** One picture a listing names, as its row shows it. */
+export interface PictureItem {
+  id: string
+  name: string
+  /** The image to show; null shows `placeholder`. */
+  src: string | null
+  placeholder: string
+  /** What is wrong with it, said beside it; null for a picture the store can show. */
+  note: string | null
+}
+
+/**
+ * #6213 — the pictures a listing names (`media_ids`), in order, each with Move up, Move down
+ * and Remove, and marked Live when the public site shows it now. Shared by a template's
+ * pictures and a library file's (#6710).
+ */
+export function PictureList({ items, live, onChange }: { items: readonly PictureItem[]; live: LivePictures; onChange: (ids: string[]) => void }) {
+  const ids = items.map((item) => item.id)
+  function move(from: number, to: number) {
+    const next = [...ids]
+    const [id] = next.splice(from, 1)
+    if (id === undefined) return
+    next.splice(to, 0, id)
+    onChange(next)
+  }
+  return (
+    <>
+      <span className="text-sm font-medium">Pictures</span>
+      {live === 'unknown' && <p className="text-xs text-muted-foreground">Publish again to see which pictures are live.</p>}
+      {Array.isArray(live) && (
+        <p className="text-xs text-muted-foreground">Live is what the store shows now. Save draft takes the listing off the store; Publish puts these pictures live.</p>
+      )}
+      {items.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No pictures: the customer sees none.</p>
+      ) : (
+        <ol aria-label="Pictures shown" className="flex flex-col gap-1.5">
+          {items.map(({ id, name, src, placeholder, note }, index) => {
+            const isLive = Array.isArray(live) && live.includes(id)
+            return (
+              <li key={`${index}-${id}`} data-testid="listing-picture" className="flex flex-wrap items-center gap-2 rounded-md border p-1.5 text-sm">
+                {src !== null ? (
+                  <img src={src} alt={name} className="h-10 w-14 shrink-0 rounded object-cover" />
+                ) : (
+                  <span aria-hidden="true" className="flex h-10 w-14 shrink-0 items-center justify-center rounded bg-muted text-[10px] text-muted-foreground">
+                    {placeholder}
+                  </span>
+                )}
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate">{name}</span>
+                  {note && <span className="text-xs text-warn">{note}</span>}
+                </span>
+                {Array.isArray(live) && (isLive ? <Badge>Live</Badge> : <Badge variant="outline">Not live yet</Badge>)}
+                <Button size="sm" variant="ghost" aria-label={`Move ${name} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
+                  <ArrowUpIcon />
+                </Button>
+                <Button size="sm" variant="ghost" aria-label={`Move ${name} down`} disabled={index === items.length - 1} onClick={() => move(index, index + 1)}>
+                  <ArrowDownIcon />
+                </Button>
+                <Button size="sm" variant="ghost" aria-label={`Remove ${name}`} onClick={() => onChange(ids.filter((_other, at) => at !== index))}>
+                  <XIcon />
+                </Button>
+              </li>
+            )
+          })}
+        </ol>
+      )}
+    </>
+  )
+}
+
 /**
  * #6213 — a listing's pictures in the editor: every id of the draft's `media_ids`, in
  * order (Move up, Move down, Remove), so the list is exactly what Save draft and Publish
@@ -71,14 +141,6 @@ export function ListingPictures({ slug, media, mediaState = 'ready', chosen, liv
   const [error, setError] = useState<string | null>(null)
   const input = useRef<HTMLInputElement>(null)
   const uploadLimit = useUploadLimit()
-
-  function move(from: number, to: number) {
-    const next = [...shown]
-    const [id] = next.splice(from, 1)
-    if (id === undefined) return
-    next.splice(to, 0, id)
-    onChange(next)
-  }
 
   async function upload(file: File) {
     setError(null)
@@ -106,50 +168,20 @@ export function ListingPictures({ slug, media, mediaState = 'ready', chosen, liv
     }
   }
 
+  const items: PictureItem[] = shown.map((id) => {
+    const item = byId.get(id)
+    return {
+      id,
+      name: item?.caption || item?.file || id,
+      src: item && images.includes(id) ? api.mediaUrl(slug, { id }) : null,
+      placeholder: item?.kind === 'video' ? 'Video' : 'No image',
+      note: pictureNote(id, item, images, mediaState),
+    }
+  })
+
   return (
     <div className="flex flex-col gap-2" role="group" aria-label="Pictures">
-      <span className="text-sm font-medium">Pictures</span>
-      {live === 'unknown' && <p className="text-xs text-muted-foreground">Publish again to see which pictures are live.</p>}
-      {Array.isArray(live) && (
-        <p className="text-xs text-muted-foreground">Live is what the store shows now. Save draft takes the listing off the store; Publish puts these pictures live.</p>
-      )}
-      {shown.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No pictures: the customer sees none.</p>
-      ) : (
-        <ol aria-label="Pictures shown" className="flex flex-col gap-1.5">
-          {shown.map((id, index) => {
-            const item = byId.get(id)
-            const name = item?.caption || item?.file || id
-            const isLive = Array.isArray(live) && live.includes(id)
-            const note = pictureNote(id, item, images, mediaState)
-            return (
-              <li key={`${index}-${id}`} data-testid="listing-picture" className="flex flex-wrap items-center gap-2 rounded-md border p-1.5 text-sm">
-                {item && images.includes(id) ? (
-                  <img src={api.mediaUrl(slug, { id })} alt={name} className="h-10 w-14 shrink-0 rounded object-cover" />
-                ) : (
-                  <span aria-hidden="true" className="flex h-10 w-14 shrink-0 items-center justify-center rounded bg-muted text-[10px] text-muted-foreground">
-                    {item?.kind === 'video' ? 'Video' : 'No image'}
-                  </span>
-                )}
-                <span className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate">{name}</span>
-                  {note && <span className="text-xs text-warn">{note}</span>}
-                </span>
-                {Array.isArray(live) && (isLive ? <Badge>Live</Badge> : <Badge variant="outline">Not live yet</Badge>)}
-                <Button size="sm" variant="ghost" aria-label={`Move ${name} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
-                  <ArrowUpIcon />
-                </Button>
-                <Button size="sm" variant="ghost" aria-label={`Move ${name} down`} disabled={index === shown.length - 1} onClick={() => move(index, index + 1)}>
-                  <ArrowDownIcon />
-                </Button>
-                <Button size="sm" variant="ghost" aria-label={`Remove ${name}`} onClick={() => onChange(shown.filter((_other, at) => at !== index))}>
-                  <XIcon />
-                </Button>
-              </li>
-            )
-          })}
-        </ol>
-      )}
+      <PictureList items={items} live={live} onChange={onChange} />
       {others.length > 0 && (
         <div className="flex flex-col gap-1">
           <span className="text-xs text-muted-foreground">The design’s other pictures</span>

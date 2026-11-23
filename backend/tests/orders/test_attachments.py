@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from scadbuddy.entities.attachments import EntityAttachmentStore
+from scadbuddy.entities.links import EntityLinkStore, LinkInput
+from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.registry import EntityStore
+from scadbuddy.entities.sweep import sweep_orphan_entities
 from scadbuddy.orders.attachments import clean_filename, sniff
 from scadbuddy.orders.lifecycle import FulfilmentInput, LifecycleError
 from scadbuddy.orders.models import (
@@ -119,6 +124,23 @@ def holders_of(pool: PgPool, attachment_id: str) -> list[str]:
 
 
 @pytest.mark.requires_postgres
+def test_attachment_row_has_its_entity(shop: Shop, pool: PgPool) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    attached = attach_to(shop, order, item, rev)
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT subject, entity_id FROM entity_attachments WHERE id = %s", (attached.id,)
+        ).fetchone()
+        assert row is not None
+        assert row["subject"] == f"order_item_revision:{rev.id}"
+        found = EntityStore(pool).find(conn, EntityRef.parse(row["subject"]))
+    assert found is not None
+    assert row["entity_id"] == found
+
+
+@pytest.mark.requires_postgres
 def test_a_file_on_a_revision_is_listed_under_its_item(shop: Shop, pool: PgPool) -> None:
     order = shop.order()
     item = shop.item(order)
@@ -195,6 +217,71 @@ def test_deleting_a_draft_item_removes_its_revisions_files_and_holds(
     assert not holders_of(pool, one.id) and not holders_of(pool, two.id)
     removed = [e for e in shop.rows.events(order.id) if e.kind == "attachment.removed"]
     assert {e.detail["attachment_id"] for e in removed} == {one.id, two.id}
+
+
+@pytest.mark.requires_postgres
+def test_a_deleted_draft_items_entities_and_links_are_swept(shop: Shop, pool: PgPool) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    kept = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    attach_to(shop, order, item, rev)
+    entities = EntityStore(pool)
+    links = EntityLinkStore(pool, entities)
+    links.add(EntityRef("order_item", item.id), LinkInput(url="https://example.com/gone"), BY)
+    links.add(EntityRef("order_item", kept.id), LinkInput(url="https://example.com/kept"), BY)
+
+    shop.lifecycle.delete_item(order.id, item.id, BY)
+
+    # The item's entity and its revision's (whose file the delete removed) go.
+    assert sweep_orphan_entities(entities, EntityAttachmentStore(pool, entities)) == 2
+    with pool.connection() as conn:
+        assert entities.find(conn, EntityRef("order_item", item.id)) is None
+        assert entities.find(conn, EntityRef("order_item_revision", rev.id)) is None
+        assert entities.find(conn, EntityRef("order_item", kept.id)) is not None
+        gone = conn.execute(
+            "SELECT count(*) AS n FROM entity_links WHERE url = 'https://example.com/gone'"
+        ).fetchone()
+    assert gone is not None and gone["n"] == 0
+    assert [link.url for link in links.list(EntityRef("order_item", kept.id))] == [
+        "https://example.com/kept"
+    ]
+
+
+@pytest.mark.requires_postgres
+def test_a_released_claims_file_moves_to_its_items_entity(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted()
+    claim = shop.lifecycle.claim_print(
+        order.id, item.id, BY, request_id="run", sliced_sha256=None, sliced_blob_key=None
+    )
+    sha = "e" * 64
+    att = shop.lifecycle.add_attachment(
+        order.id,
+        item.id,
+        BY,
+        attachment_id="att-claim",
+        kind="image",
+        role="other",
+        filename="p.png",
+        media_type="image/png",
+        size_bytes=1,
+        sha256=sha,
+        blob_key=f"attachment-{sha}",
+        caption="",
+        fulfilment_id=claim.id,
+    )
+    assert att.subject == f"order_item_fulfilment:{claim.id}"
+
+    shop.lifecycle.release_print(claim, "refused")
+
+    entities = EntityStore(pool)
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT subject, entity_id FROM entity_attachments WHERE id = %s", (att.id,)
+        ).fetchone()
+        assert row is not None
+        assert row["subject"] == f"order_item:{item.id}"
+        assert row["entity_id"] == entities.find(conn, EntityRef("order_item", item.id))
 
 
 @pytest.mark.requires_postgres

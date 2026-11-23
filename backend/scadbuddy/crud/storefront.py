@@ -53,6 +53,8 @@ from scadbuddy.storefront.wire import (
 #: ``turnstile`` is the bot check (#5283, `storefront/turnstile.py`). ``order`` is the
 #: customer's order page (#5283).
 #: ``models`` is a customer's own models (#6133): upload slots, the request, the CSP origin.
+#: ``variants`` is the instant read of a visitor's choices and its cached preview (#6921).
+#: ``file-prices`` is the price of a visitor's colours on a file listing (#6710).
 EDGE_AREAS: Final[frozenset[str]] = frozenset(
     {
         "listings",
@@ -64,6 +66,8 @@ EDGE_AREAS: Final[frozenset[str]] = frozenset(
         "accounts",
         "order",
         "models",
+        "variants",
+        "file-prices",
     }
 )
 #: The site key's read: the page's CSP waits on it, so it gives up fast and the edge
@@ -244,6 +248,43 @@ class StorefrontCrud:
         slice (#6153), or pending, or none."""
         return await self._call(
             "GET", f"/renders/{job_id}/estimate", visitor_id=visitor_id, client=client
+        )
+
+    async def variant(self, listing_id: str, body: bytes, *, visitor_id: str, client: str) -> Any:
+        """``POST …/storefront/listings/{id}/variant`` (#6921): the visitor's render body as
+        it came, unread; the answer is what the shop holds of those choices. A read: it
+        takes no ``Idempotency-Key``. ``listing_id`` must be a listing id
+        (`storefront/routes.py` checks it)."""
+        return await self._call(
+            "POST",
+            f"/listings/{listing_id}/variant",
+            visitor_id=visitor_id,
+            client=client,
+            content=body,
+        )
+
+    async def listing_price(
+        self, listing_id: str, body: bytes, *, visitor_id: str, client: str
+    ) -> Any:
+        """``POST …/storefront/listings/{id}/price`` (#6710): the visitor's colours on a
+        file listing as they came, unread; the answer is their price. A read: it takes no
+        ``Idempotency-Key``. ``listing_id`` must be a listing id (`storefront/routes.py`
+        checks it)."""
+        return await self._call(
+            "POST",
+            f"/listings/{listing_id}/price",
+            visitor_id=visitor_id,
+            client=client,
+            content=body,
+        )
+
+    async def variant_preview(self, key: str, *, visitor_id: str, client: str) -> CrudStream:
+        """``GET …/storefront/variants/{key}/preview.glb`` (#6921), its body unread: the
+        caller reads it as a stream, then closes it. ``key`` must be a variant key."""
+        return await self._crud.stream(
+            "GET",
+            f"{BASE}/variants/{key}/preview.glb",
+            headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
         )
 
     async def draft(self, *, visitor_id: str, client: str) -> Any:

@@ -1399,6 +1399,22 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     expect(alert).not.toHaveTextContent('may still have been queued')
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
+
+  it('says nothing was sent when the printer refused the start, never that it may be queued (#6871)', async () => {
+    const detail =
+      '3DP-31B-598 refused the print: ERROR STATE. Nothing was sent to print, so it is safe to print again.'
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({ title: 'Bad Gateway', status: 502, detail, may_have_queued: false }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(detail)
+    expect(alert).not.toHaveTextContent('may still have been queued')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+  })
 })
 
 describe('PrintPicker · A run that got no answer (#470)', () => {
@@ -5571,10 +5587,81 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     const asked = choices.urls.length
     await user.click(within(first).getByRole('button', { name: 'Yes, that one' }))
     // The link is made and the re-read is out: neither tray is asked about the record now.
+    // The other tray is still asked, with only a new spool from it to offer (R-7150-9).
     await waitFor(() => expect(choices.urls.length).toBeGreaterThan(asked))
     expect(choices.answered).toBeLessThan(choices.urls.length)
     expect(screen.queryByTestId('tray-question-0-1')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('tray-question-0-2')).not.toBeInTheDocument()
+    const second = screen.getByTestId('tray-question-0-2')
+    expect(within(second).queryByRole('button', { name: /^Yes/ })).toBeNull()
+    expect(within(second).getByRole('button', { name: 'New spool from this tray' })).toBeInTheDocument()
+  })
+
+  it('asks about a native tray with no candidate, offering a new spool from it (R-7150-9)', async () => {
+    setHotPath(true)
+    const answer = hotFilaments()
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          printer_id: HOT_PRINTER.bambuddy_printer_id,
+          filaments: { ...answer, shelf: [] },
+          model_choices: { printer_id: null, filament_plan: [] },
+          lan_printers: [HOT_PRINTER.id],
+        }),
+      ),
+    )
+    renderPicker()
+    await loaded()
+    const question = await screen.findByTestId('tray-question-0-1')
+    expect(within(question).getByRole('button', { name: 'New spool from this tray' })).toBeInTheDocument()
+    expect(within(question).getByRole('button', { name: 'Print from the tray as it is' })).toBeInTheDocument()
+    expect(within(question).queryByRole('button', { name: /^Yes/ })).toBeNull()
+  })
+
+  it("carries no tray question's error or key from one native printer to the next (#7150)", async () => {
+    setHotPath(true)
+    const garage: PrinterRow = {
+      ...HOT_PRINTER,
+      id: '00000000-0000-4000-8000-0000000000c3',
+      serial: '31B8BP000000C3',
+      name: 'Garage',
+      bambuddy_printer_id: null,
+      bambuddy_active: false,
+    }
+    const keys: (string | null)[] = []
+    server.use(
+      http.get('/api/v1/printers', () => HttpResponse.json([HOT_PRINTER, garage])),
+      http.get('/api/v1/print/outputs/:id/choices', ({ request }) => {
+        const lan = new URL(request.url).searchParams.get('printer') === garage.id
+        return HttpResponse.json({
+          ...choicesView,
+          printer_id: lan ? null : HOT_PRINTER.bambuddy_printer_id,
+          filaments: hotFilaments(),
+          model_choices: { printer_id: null, filament_plan: [] },
+          lan_printers: [HOT_PRINTER.id, garage.id],
+        })
+      }),
+      http.post('/api/v1/printers/:printer/trays/:ams/:tray/new-spool', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return HttpResponse.json({ detail: 'The printer reports no filament in this tray.' }, { status: 409 })
+      }),
+    )
+    const choices = watch('GET', '/choices')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(screen.getByText(/sends it to the printer over the LAN/)).toBeInTheDocument())
+    const first = await screen.findByTestId('tray-question-0-1')
+    await user.click(within(first).getByRole('button', { name: 'New spool from this tray' }))
+    expect(await within(first).findByRole('alert')).toHaveTextContent('no filament in this tray')
+    await choose(user, await screen.findByRole('combobox', { name: 'Printer' }), /^Garage/)
+    await waitFor(() => expect(choices.urls.some((url) => url.includes(`printer=${garage.id}`))).toBe(true))
+    await waitFor(() => expect(choices.answered).toBe(choices.urls.length))
+    const next = await screen.findByTestId('tray-question-0-1')
+    expect(within(next).queryByRole('alert')).toBeNull()
+    await user.click(within(next).getByRole('button', { name: 'New spool from this tray' }))
+    await waitFor(() => expect(keys).toHaveLength(2))
+    expect(keys[1]).toBeTruthy()
+    expect(keys[1]).not.toBe(keys[0])
   })
 
   it('sends no Bambuddy id beside a LAN-only row, even while the old view is in (#4516 Task 9)', async () => {

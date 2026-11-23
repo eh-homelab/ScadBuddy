@@ -11,11 +11,9 @@ import {
   type SDKResultMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@opentelemetry/api'
-import type { Sql } from 'postgres'
 import type { BrowserOrigins } from '../browser/store.js'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
-import type { PayloadKeys } from '../temporal/payloadCodec.js'
 import type { ProbeVerdict } from '../harness/credentialErrors.js'
 import type { CredentialSource } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
@@ -54,20 +52,19 @@ import {
   type SessionMode,
   type SessionStatus,
 } from './protocol.js'
-import { SessionBlobs, type SessionImages, type StoredSessionBlob } from './blobs.js'
-import { type HttpBodiesFor, pgHttpBodies } from './httpBodies.js'
-import { SessionFiles, type WorkspaceFiles } from '../workspace/store.js'
+import type { SessionImages, StoredSessionBlob } from './blobs.js'
+import type { HttpBodiesFor } from './httpBodies.js'
+import type { WorkspaceFiles } from '../workspace/store.js'
 import { SessionEdits, type EditRows } from './edits.js'
 import { forkEventCut, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
-import { PostgresSessionStore, type TranscriptRows } from './store.js'
+import { TranscriptStore, type TranscriptRows } from './store.js'
 import type { UserAttachment } from './images.js'
-import { PgResourceRows, type ResourceRows, SessionResources, type TouchedRecord } from './touched.js'
-import { type ListFilter, PgSessionRows, ROW_TITLE_MAX, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
+import { type ResourceRows, SessionResources, type TouchedRecord } from './touched.js'
+import { type ListFilter, ROW_TITLE_MAX, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, SessionRuntime } from './durable.js'
-import { PendingProjection, type PendingReads } from '../gate/projection.js'
-import { gated } from '../api/crudStores.js'
+import type { PendingReads } from '../gate/projection.js'
 import type { ApprovalRoutes } from '../approvals/crudApprovals.js'
 import type { QuestionRoutes } from '../gate/crudQuestions.js'
 import type { EscalationRoutes } from '../flows/crudEscalations.js'
@@ -75,8 +72,8 @@ import type { FlowRunReads } from '../flows/backendReads.js'
 import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
 import { type WarmQuery, WarmSessions } from './warm.js'
-import { PgPublisher, type Publisher } from './publish.js'
-import { PgSessionReads, type SessionReads } from './sessionReads.js'
+import type { Publisher } from './publish.js'
+import type { SessionReads } from './sessionReads.js'
 import type { TurnCoreDeps } from './turnCore.js'
 import { systemAppend } from './turnShared.js'
 import { FlowQueue } from '../flows/queue.js'
@@ -153,8 +150,8 @@ import { FlowQueue } from '../flows/queue.js'
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
 export { SESSION_MODES, type SessionMode } from './protocol.js'
-export { CLAIMED_AT, likeLiteral, type ListFilter, listQuery } from './rows.js'
-export { BROWSER_TOOLS_GUIDE, MEMORY_TEXT_MAX, memoryText, POOL_BUDGET, POOL_COST, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
+export { type ListFilter } from './rows.js'
+export { BROWSER_TOOLS_GUIDE, MEMORY_TEXT_MAX, memoryText, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 
 /** The largest session budget Settings takes, and the most a raise can take one session's budget to. */
 export const MAX_SESSION_BUDGET_USD = 100
@@ -661,29 +658,29 @@ function startedQuery(run: QueryRunner): (spawn: HarnessRun) => WarmQuery {
 }
 
 export type SessionManagerDeps = {
-  /** The API's `pending-input` routes (gate/crudPending.ts), which the projection reads while `use()` holds. */
-  pendingRoutes?: { crud: PendingReads; use: () => boolean } | undefined
-  /** The API's `approvals` routes (approvals/crudApprovals.ts), which the approvals take while `use()` holds. */
-  approvalRoutes?: { crud: ApprovalRoutes; use: () => boolean } | undefined
-  /** The API's `questions` routes (gate/crudQuestions.ts), which the questions take while `use()` holds. */
-  questionRoutes?: { crud: QuestionRoutes; use: () => boolean } | undefined
-  /** The API's `escalations` routes (flows/crudEscalations.ts), which the escalations and the run queue take while `use()` holds. */
-  escalationRoutes?: { crud: EscalationRoutes; use: () => boolean } | undefined
-  sql: Sql
-  /** The sessions' rows (`PgSessionRows` on `sql` when omitted; gated to the API's routes in main.ts, #5299 step 9). */
-  rows?: SessionRows
-  /** Where what a session's calls touched is kept (`PgResourceRows` on `sql` when omitted; gated in main.ts). */
-  resourceRows?: ResourceRows
-  /** Where the transcripts' rows are kept (`PgTranscriptRows` on `sql` with `payloadKeys` when omitted; gated in main.ts, #5299 step 9). */
-  transcripts?: TranscriptRows
-  /** Where the sessions' event logs are kept (`PgEventRows` on `sql` when omitted; gated in main.ts, #5299 step 9). */
-  eventRows?: EventRows
-  /** A child's reasoning before its call (`PgSessionReads` on `sql` when omitted; gated in main.ts, #6501). */
-  sessionReads?: SessionReads
-  /** A warm process's eviction on every replica (`PgPublisher` on `sql` when omitted; gated in main.ts, #6501). */
-  publish?: Pick<Publisher, 'warmEvict'>
-  /** An edit's transaction (edits.ts `PgEditRows` on `sql` when omitted; gated in main.ts, #6449). */
-  editRows?: EditRows
+  // Each store below is the API's CRUD routes (#5299): main.ts passes the `Crud…` clients.
+  /** The `pending-input` routes (gate/crudPending.ts): the parked calls' projection. */
+  pendingRoutes: PendingReads
+  /** The `approvals` routes (approvals/crudApprovals.ts). */
+  approvalRoutes: ApprovalRoutes
+  /** The `questions` routes (gate/crudQuestions.ts). */
+  questionRoutes: QuestionRoutes
+  /** The `escalations` routes (flows/crudEscalations.ts): the escalations and the run queue. */
+  escalationRoutes: EscalationRoutes
+  /** The sessions' rows (rows.ts, area `sessions`). */
+  rows: SessionRows
+  /** Where what a session's calls touched is kept (touched.ts, area `session-resources`). */
+  resourceRows: ResourceRows
+  /** Where the transcripts' rows are kept (crudTranscripts.ts, area `transcripts`). */
+  transcripts: TranscriptRows
+  /** Where the sessions' event logs are kept (crudEvents.ts, area `session-events`). */
+  eventRows: EventRows
+  /** A child's reasoning before its call (sessionReads.ts, area `session-reads`). */
+  sessionReads: SessionReads
+  /** A warm process's eviction on every replica (publish.ts, area `publish`). */
+  publish: Pick<Publisher, 'warmEvict'>
+  /** An edit's transaction (edits.ts, area `session-edits`). */
+  editRows: EditRows
   /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
   flowReads: FlowRunReads
   paths: HarnessPaths
@@ -753,7 +750,7 @@ export type SessionManagerDeps = {
   /**
    * The registered, enabled remote MCP plugins for a turn (#297), registered
    * with the loopback forwarder: in production
-   * `forwardForRun(await loadEnabledPlugins(store, kek), forwarder)`. Read once
+   * `forwardForRun(await loadEnabledPlugins(store), forwarder)`. Read once
    * per turn, so enabling or changing a plugin applies from the next turn on;
    * released when the turn ends.
    */
@@ -789,20 +786,19 @@ export type SessionManagerDeps = {
     limits?: Partial<HttpLimits>
   }
   /**
-   * The assistant's workspace (#2329, workspace/store.ts): where http_request's
-   * `save_to_workspace` writes, and what a fork copies. One over `sql` (caps from
-   * `settings`) when omitted.
+   * The assistant's workspace (#2329, workspace/crudStore.ts): where http_request's
+   * `save_to_workspace` writes, and what a fork copies.
    */
-  workspace?: WorkspaceFiles
-  /** A session's images (`SessionBlobs` on `sql` when omitted; gated to the API's routes in main.ts). */
-  blobs?: SessionImages
-  /** A session's saved http_request bodies (`PgHttpBodies` on `sql` when omitted). */
-  httpBodies?: HttpBodiesFor
+  workspace: WorkspaceFiles
+  /** A session's images (crudBlobs.ts, area `session-blobs`). */
+  blobs: SessionImages
+  /** A session's saved http_request bodies (area `http-bodies`). */
+  httpBodies: HttpBodiesFor
   /**
    * A session's background tasks (src/background/): every turn gets the session's CronCreate
    * and the rest (each not off under `builtin:claude-code`) in place of Claude Code's own,
    * which end with the turn, unless the session keeps none (ClaimedSession.backgroundTools: a
-   * flow-started session, a Workflow agent's chat). Without it (no Temporal or no database)
+   * flow-started session, a Workflow agent's chat). Without it (no Temporal)
    * no turn has them.
    */
   background?: { tasks: BackgroundTasks; tz: string; commandQueue?: string }
@@ -828,13 +824,11 @@ export type SessionManagerDeps = {
    * credential (a bearer token's row; auth/tokens.ts `liveTokenTiers`), or
    * undefined when it cannot.
    */
-  currentTiers?: (owner: Owner) => Promise<readonly Tier[] | undefined>
-  /** The headless browser's lists and approvals (browser/store.ts); a turn makes one over `sql` without it. */
-  browserOrigins?: BrowserOrigins
-  /** The data keys the transcript is sealed under (D7); without them no transcript line is written. */
-  payloadKeys?: PayloadKeys
-  /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */
-  approvalHashKey?: Buffer
+  currentTiers: (owner: Owner) => Promise<readonly Tier[] | undefined>
+  /** The headless browser's lists and approvals (browser/store.ts). */
+  browserOrigins: BrowserOrigins
+  /** HMAC key for approval input hashes, released by the API; it throws until released (approvals/service.ts). */
+  approvalHashKey: () => Buffer
   /**
    * The audit log (#258, audit/log.ts): every tool call a turn makes
    * (audit/turn.ts), and every approval decision.
@@ -907,7 +901,7 @@ export function titleFrom(prompt: string): string {
 export const RESTARTING = 'the agent service is restarting; send again in a moment'
 
 export class SessionManager {
-  readonly store: PostgresSessionStore
+  readonly store: TranscriptStore
   readonly events: EventLog
   /** Approvals of outward calls (#258); `approvals.decide` is the decision API. */
   readonly approvals: ApprovalService
@@ -938,7 +932,7 @@ export class SessionManager {
    * plugin or package change on any replica: warmEvict.ts; main.ts hears it on the change stream).
    */
   readonly warm: WarmSessions
-  /** The sessions' rows (rows.ts): over SQL, or the API's CRUD routes once it lists area `sessions` (main.ts). */
+  /** The sessions' rows (rows.ts): the API's CRUD routes, area `sessions`. */
   readonly rows: SessionRows
   private readonly deps: SessionManagerDeps
   /** Set by `drain`: a restart is coming, so no new turn starts here. */
@@ -958,33 +952,25 @@ export class SessionManager {
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
-    this.store = new PostgresSessionStore(deps.sql, {
-      ...(deps.payloadKeys ? { keys: deps.payloadKeys } : {}),
-      ...(deps.transcripts ? { rows: deps.transcripts } : {}),
-    })
-    this.rows = deps.rows ?? new PgSessionRows(deps.sql)
-    this.touched = new SessionResources(deps.resourceRows ?? new PgResourceRows(deps.sql))
-    this.blobs = deps.blobs ?? new SessionBlobs(deps.sql)
-    this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
-    this.events = new EventLog(deps.sql, {
-      ...(deps.eventRows ? { rows: deps.eventRows } : {}),
+    this.store = new TranscriptStore(deps.transcripts)
+    this.rows = deps.rows
+    this.touched = new SessionResources(deps.resourceRows)
+    this.blobs = deps.blobs
+    this.files = deps.workspace
+    this.events = new EventLog(deps.eventRows, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
     })
     this.approvals = new ApprovalService({
-      sql: deps.sql,
       events: this.events,
       ...(deps.settings ? { settings: deps.settings } : {}),
       ...(deps.approvalGrants ? { grants: deps.approvalGrants } : {}),
-      ...(deps.audit ? { audit: deps.audit } : {}),
-      ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
+      hashKey: deps.approvalHashKey,
       workspace: this.files,
       routes: deps.approvalRoutes,
     })
-    this.questions = new QuestionService({ sql: deps.sql, events: this.events, ...(deps.audit ? { audit: deps.audit } : {}), routes: deps.questionRoutes })
-    // The API's `pending-input` routes once it lists the area (#5299 step 10), SQL until then.
-    const pending = new PendingProjection(deps.sql)
-    this.projection = deps.pendingRoutes ? gated<PendingReads>(pending, deps.pendingRoutes.crud, deps.pendingRoutes.use) : pending
+    this.questions = new QuestionService({ events: this.events, ...(deps.audit ? { audit: deps.audit } : {}), routes: deps.questionRoutes })
+    this.projection = deps.pendingRoutes
     this.warm = new WarmSessions({
       store: this.store,
       maxEntries: deps.warm?.maxEntries ?? DEFAULT_WARM_MAX_ENTRIES,
@@ -992,28 +978,28 @@ export class SessionManager {
       ...(deps.run ? { start: startedQuery(deps.run) } : {}),
       ...(deps.warm?.log ? { log: deps.warm.log } : {}),
     })
-    const sessionReads = deps.sessionReads ?? new PgSessionReads(deps.sql)
-    this.queue = new FlowQueue(deps.sql, deps.flowReads, deps.escalationRoutes, sessionReads)
+    const sessionReads = deps.sessionReads
+    this.queue = new FlowQueue(deps.flowReads, deps.escalationRoutes, sessionReads)
     this.escalations = new Escalations({
-      sql: deps.sql,
       reads: deps.flowReads,
       routes: deps.escalationRoutes,
       sessions: this.rows,
       sessionReads,
       durable: () => this.durable,
-      ...(deps.currentTiers ? { currentTiers: deps.currentTiers } : {}),
+      currentTiers: deps.currentTiers,
       // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
       send: async (id, owner, text, tiers) => {
         await this.send(id, owner, text, { tiers })
       },
     })
     this.edits = new SessionEdits({
-      sql: deps.sql,
-      ...(deps.editRows ? { rows: deps.editRows } : {}),
+      rows: deps.editRows,
       events: this.events,
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
       endDurable: (id) => this.endDurable(id),
+      // No Temporal (this.durable unset): nothing to end, and nothing to warn about.
+      endArchived: (id) => this.durable?.end(id) ?? Promise.resolve(),
       warm: this.warm,
       endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
@@ -1102,7 +1088,7 @@ export class SessionManager {
   /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
   async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
-    const body = await savedBody((this.deps.httpBodies ?? pgHttpBodies(this.deps.sql))(id), saved)
+    const body = await savedBody(this.deps.httpBodies(id), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
     return { id: saved, ...body }
   }
@@ -1553,7 +1539,7 @@ export class SessionManager {
     // fingerprint, and its question gate is the browser user's): gone here and
     // on every other replica (spec 2026-10-13 §5.3, warmEvict.ts).
     void this.warm.evict(id, 'handed off')
-    await (this.deps.publish ?? new PgPublisher(this.deps.sql)).warmEvict(id)
+    await this.deps.publish.warmEvict(id)
     return this.get(id, to)
   }
 
@@ -1810,6 +1796,8 @@ export class SessionManager {
    */
   async stopTurns({ others }: { graceMs: number; abortWaitMs: number; others?: Promise<void> }): Promise<void> {
     this.drain()
+    // No durable re-send starts from here on (#7103); the running sweep ends a turn no workflow took.
+    await this.durableTurns?.close()
     // The turns on these warm processes (an AgentSession's, TurnHost.stop), which keep their
     // own grace and wait: their processes are not closed under them.
     await others

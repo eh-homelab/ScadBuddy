@@ -1,6 +1,8 @@
 import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ExternalLinkIcon, ShoppingCartIcon, SlidersHorizontalIcon } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
+import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
+import { LinksPanel } from '../../components/entities/LinksPanel'
 import { api, ApiError } from '../../api/client'
 import {
   getType,
@@ -18,6 +20,7 @@ import {
   type TypeKValueInput,
 } from '../../api/filament'
 import { addShopping } from '../../api/filamentPurchasing'
+import { CostCalculator } from '../../components/filament/CostCalculator'
 import { KValueTable } from '../../components/filament/KValueTable'
 import { keyOf, kValueRowsError, type KPrinter } from '../../components/filament/kValueRows'
 import { PresetTable } from '../../components/filament/PresetTable'
@@ -35,6 +38,8 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { listBack } from '../../components/filament/spoolsQuery'
+import { EntityLink } from '../../components/filament/EntityLink'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { parseRgba } from '../../lib/rgba'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
 
@@ -294,7 +299,8 @@ interface Lists {
  * #6262 — one type, `/filament/types/<id>` or `/filament/types/new`: what a spool of it is
  * (material, colour, weights, temperatures, price), the slicer presets it prints with per
  * printer model and nozzle, its pressure-advance K values, the supplier prices it has
- * (#6266; "Use as default cost" only fills the cost field, Save writes it), an "Add to shopping
+ * (#6266; "Use as default cost" only fills the cost field, Save writes it), a cost calculator
+ * from a purchase's price, tax, shipping and net weight (#7152, the same "Use as default cost"), an "Add to shopping
  * list" button (one pending spool, written at once), and the spools of it. Saving
  * sends one PATCH of what changed (a POST for a new type) and, when they changed, the
  * presets' and the K values' PUTs. Unsaved edits hold every way out (`useLeaveGuard`).
@@ -396,7 +402,7 @@ export function TypePage() {
       if (JSON.stringify(draft.k_values) !== JSON.stringify(kWere)) await setTypeKValues(typeId, draft.k_values)
       setNotice('Saved')
       if (id === 'new') {
-        guard.leaveTo(`/filament/types/${typeId}`, { replace: true, state: location.state })
+        guard.leaveTo(filamentLinks.type(typeId), { replace: true, state: location.state })
         return
       }
       const fresh = await getType(typeId)
@@ -548,7 +554,7 @@ export function TypePage() {
             <Pick label="Insert type" value={draft.insert_type_id} onChange={(next) => set('insert_type_id', next)} options={lists.insertTypes} />
           </div>
           <Field label="Colour">
-            <RgbaColourField value={draft.rgba} onChange={(next) => set('rgba', next)} />
+            <RgbaColourField value={draft.rgba} onChange={(next) => set('rgba', next)} catalog onExtraColours={(extras) => set('extra_colours', extras.join(', '))} />
           </Field>
           {text('colour_name', 'Colour name')}
           {text('extra_colours', 'Extra colours', { hint: 'For multi-colour filament: #RRGGBB or #RRGGBBAA, separated by commas.' })}
@@ -576,6 +582,13 @@ export function TypePage() {
               {text('low_stock_pct', 'Low stock at (%)', { mode: 'numeric', hint: 'Of the label weight.' })}
             </div>
             <p className="text-[12px] text-muted-foreground">A priced type is a row of the price book, which prices quotes.</p>
+            <CostCalculator
+              labelWeight={draft.label_weight_g}
+              onUseAsCost={(perKg) => {
+                set('cost_per_kg', perKg)
+                setNotice(`Cost per kg is now ${perKg}, from the calculator. Save the type to keep it.`)
+              }}
+            />
           </section>
           <section aria-label="Reordering" className="flex flex-col gap-3">
             <h2 className="text-sm font-semibold tracking-tight">Reordering</h2>
@@ -643,6 +656,16 @@ export function TypePage() {
       </section>
 
       {!creating && (
+        <section aria-label="Files and links" className="mt-6 flex flex-col gap-2">
+          <h2 className="text-sm font-semibold tracking-tight">Files and links</h2>
+          <div className="grid gap-6 lg:grid-cols-2">
+            <AttachmentsPanel entity={`spool_type:${madeId ?? id}`} />
+            <LinksPanel entity={`spool_type:${madeId ?? id}`} />
+          </div>
+        </section>
+      )}
+
+      {!creating && (
         <section aria-label="Spools" className="mt-6 flex flex-col gap-2">
           <h2 className="text-sm font-semibold tracking-tight">Spools of this type</h2>
           <div className="overflow-x-auto rounded-md border">
@@ -662,13 +685,13 @@ export function TypePage() {
                       <RgbaSwatch rgba={spool.effective?.rgba ?? draft.rgba ?? '#FFFFFFFF'} size="md" gramsLeft={spool.grams_left} labelWeight={spool.effective?.label_weight_g} />
                     </td>
                     <td className="px-2 py-1.5">
-                      <Link to={`/filament/spools/${spool.id}`} className="font-medium underline-offset-4 hover:underline">
+                      <EntityLink to={filamentLinks.spool(spool.id)} className="font-medium">
                         #{spool.number}
-                      </Link>
+                      </EntityLink>
                       {spool.archived_at && <span className="ml-2 text-[12px] text-muted-foreground">Archived</span>}
                     </td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{spool.grams_left ?? ''}</td>
-                    <td className="px-2 py-1.5">{spool.names?.location ?? ''}</td>
+                    <td className="px-2 py-1.5">{spool.names?.location && spool.location_id ? <EntityLink to={filamentLinks.location(spool.location_id)}>{spool.names.location}</EntityLink> : ''}</td>
                   </tr>
                 ))}
                 {mine.length === 0 && (
@@ -725,7 +748,7 @@ function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-4 py-6">
-        <Link to={`/filament/types${listBack(location.state)}`} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
+        <Link to={`${filamentLinks.types}${listBack(location.state)}`} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
           <ChevronLeftIcon className="size-3.5" /> Types
         </Link>
         {children}

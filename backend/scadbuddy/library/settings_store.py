@@ -504,6 +504,15 @@ class StoredSettings(BambuddyIds):
     #: only (no row is on), because `filament/shopping.py` `add_for_empty_on` reads it in
     #: the emptying write's own transaction, where no environment value reaches.
     filament_shopping_auto_add_empty: bool = True
+    #: #7156: off, ScadBuddy holds Bambuddy's auto-add of unknown RFID spools off; on, it
+    #: leaves Bambuddy's value as it is. On by default. Stored only (no row is on),
+    #: because `filament/rfid_mode.py` reads it in SQL beside the override mode
+    #: (R-7156-4).
+    filament_auto_add_unknown_rfid: bool = True
+    #: #6905: how many days a Bambuddy sync pass's history row is kept. ``None``: 30
+    #: (`filament/bb_sync_passes.py` `PASS_TTL_DAYS_DEFAULT`). Stored only: the
+    #: housekeeping's activity sweep reads it.
+    filament_sync_pass_ttl_days: int | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -826,6 +835,12 @@ class SettingsPatch(BaseModel):
     #: #6868: whether an empty spool adds its type to the shopping list; ``null`` puts
     #: back the default (on).
     filament_shopping_auto_add_empty: bool | None = None
+    #: #7156: off holds Bambuddy's auto-add of unknown RFID spools off; ``null`` puts back
+    #: the default (on).
+    filament_auto_add_unknown_rfid: bool | None = None
+    #: #6905: days a sync pass's history row is kept, 1 to ten years; ``null`` puts back
+    #: the default, 30.
+    filament_sync_pass_ttl_days: int | None = Field(default=None, ge=1, le=3650)
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.
@@ -878,6 +893,11 @@ class SettingsPatch(BaseModel):
     filament_sync: FilamentSync | None = None
     filament_low_stock_pct: int | None = Field(default=None, ge=0, le=100)
     filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
+    filament_drying_temp_c: int | None = Field(default=None, ge=1, le=150)
+    filament_drying_hours: Decimal | None = Field(
+        default=None, ge=Decimal("0.1"), le=Decimal("999.9")
+    )
+    filament_label_base_url: str | None = Field(default=None, max_length=64)
     filament_burn_window_days: int | None = Field(default=None, ge=1, le=365)
     filament_lead_time_days: int | None = Field(default=None, ge=0, le=365)
     filament_safety_margin_days: int | None = Field(default=None, ge=0, le=365)
@@ -947,6 +967,8 @@ class SettingsPatch(BaseModel):
     orders_allow_unfulfil: bool | None = None
     #: Whether a native run waits for a cleared plate between its prints (#4939).
     lan_require_plate_clear: bool | None = None
+    #: Whether a native run waits for a busy printer rather than send (#6871).
+    lan_queue_when_busy: bool | None = None
     #: The S3 store (spec 2026-10-16 §4.2); the secret is write-only, ``""`` clears it.
     store_s3_endpoint: str | None = None
     store_s3_region: str | None = None
@@ -1213,9 +1235,12 @@ class SettingsStore:
         runtime = self.defaults.model_copy()
         out: dict[str, Any] = {}
         plain: dict[str, Any] = {}
+        plain_names: list[str] = []
         for name in sorted(wanted):
             if name not in ENV_SEEDED:
-                plain[name] = stored_rows.get(name)
+                plain_names.append(name)
+                if name in stored_rows:
+                    plain[name] = stored_rows[name]
                 continue
             if name in stored_rows:
                 try:
@@ -1226,15 +1251,21 @@ class SettingsStore:
                         "ignoring a stored setting this version refuses", extra={"setting": name}
                     )
             out[name] = getattr(runtime, name)
-        if plain:
+        if plain_names:
+            # A name with no row takes its `StoredSettings` default.
             stored = StoredSettings.model_validate(plain)
-            out.update({name: getattr(stored, name) for name in plain})
+            out.update({name: getattr(stored, name) for name in plain_names})
         return out
 
     def plate_clear_required(self) -> bool:
         """``lan_require_plate_clear`` as it is now (#4939): an env-seeded field that
         `StoredSettings` does not hold."""
         return self.snapshot().runtime.lan_require_plate_clear
+
+    def queue_when_busy(self) -> bool:
+        """``lan_queue_when_busy`` as it is now (#6871): an env-seeded field that
+        `StoredSettings` does not hold."""
+        return self.snapshot().runtime.lan_queue_when_busy
 
     def _written(self, section: SettingsSection) -> StoredSettings:
         """Announce a committed write and read the settings back."""
@@ -1477,6 +1508,21 @@ class SettingsStore:
         emit(self.events, SettingsChanged(section="model_choices"))
         return self.library_choices(file_id)
 
+    def copy_library_choices(self, from_id: int, to_id: int) -> bool:
+        """File ``from_id``'s remembered choices copied to file ``to_id``, only when
+        ``to_id`` holds none (a storefront item's held copy put back, #6710 §10.2); whether
+        a row was written. One statement, so a choice made meanwhile is never overwritten."""
+        with self._pool.connection() as conn:
+            written = conn.execute(
+                "INSERT INTO model_print_choices (model_id, choices)"
+                " SELECT %s, choices FROM model_print_choices WHERE model_id = %s"
+                " ON CONFLICT (model_id) DO NOTHING",
+                (library_options_scope(to_id), library_options_scope(from_id)),
+            ).rowcount
+        if written:
+            emit(self.events, SettingsChanged(section="model_choices"))
+        return bool(written)
+
     def set_model_project(
         self, model_id: str, preset_id: str | None, project: ModelProject | None
     ) -> StoredSettings:
@@ -1676,6 +1722,8 @@ class SettingsReader(Protocol):
 
     def plate_clear_required(self) -> bool: ...
 
+    def queue_when_busy(self) -> bool: ...
+
 
 #: The sealed settings the print worker gets opened (#5298, plan D8): the Bambuddy key.
 #: `print_projection` leaves every other sealed field null.
@@ -1695,9 +1743,11 @@ PRINT_UNREAD = (
 
 class PrintSettings(StoredSettings):
     """What the print worker gets of the settings (`print_projection`): the stored
-    settings, and ``lan_require_plate_clear`` as the API resolves it."""
+    settings, and ``lan_require_plate_clear`` and ``lan_queue_when_busy`` as the API
+    resolves them."""
 
     lan_require_plate_clear: bool = False
+    lan_queue_when_busy: bool = True
 
 
 def print_projection(snapshot: SettingsSnapshot) -> PrintSettings:
@@ -1718,6 +1768,7 @@ def print_projection(snapshot: SettingsSnapshot) -> PrintSettings:
             **snapshot.stored.model_dump(),
             **blanked,
             "lan_require_plate_clear": snapshot.runtime.lan_require_plate_clear,
+            "lan_queue_when_busy": snapshot.runtime.lan_queue_when_busy,
         }
     )
 

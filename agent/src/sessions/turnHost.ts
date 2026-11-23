@@ -2,13 +2,13 @@ import { randomUUID } from 'node:crypto'
 import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
 import { context as otelContext } from '@opentelemetry/api'
-import type { Sql } from 'postgres'
 import type { GateTrace } from '../approvals/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import { turnCostEntry } from '../audit/turn.js'
 import { redact, WAIT_FOR_USER } from '../gate/entry.js'
 import { refusal } from '../gate/refusal.js'
 import { INPUT_CHANNEL } from '../gate/store.js'
+import { backendDropped } from '../api/crudRead.js'
 import type { AppendFence } from './store.js'
 import { type AttentionSpec, answeredText, BACK_REPLIES, DEFAULT_REPLIES, RECONNECTED_TEXT, timedOutText } from '../harness/attention.js'
 import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
@@ -18,7 +18,7 @@ import type { QuestionGate, QuestionRequest, QuestionVerdict, UserQuestion } fro
 import type { QuestionService } from '../gate/questions.js'
 import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
 import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
-import { NO_CAPACITY, PLACEMENT_MOVED, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
+import { BACKEND_UNREACHABLE, NO_CAPACITY, PLACEMENT_MOVED, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
 import { attentionGate, type HeldRow, replyOf, TAB_WAIT_CALL } from './attentionGate.js'
 import type { SessionImages } from './blobs.js'
 import type { TurnFence, TurnRoutes } from '../gate/crudPending.js'
@@ -28,7 +28,7 @@ import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
 import { type Placement, type SessionDirectory, watchCaps } from '../workspace/directory.js'
-import { PgTurnRows, type TurnRows } from './turnRows.js'
+import type { TurnRows } from './turnRows.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
 // the `session_turn` activity runs (temporal/session/turnActivity.ts). The turn is a classic
@@ -182,24 +182,25 @@ const CUT_TEXT: Record<Cut, string> = {
 export type TurnHostDeps = {
   /** The replica's turn machinery (SessionManager.turnCore): its warm processes, events, audit. */
   core: TurnCoreDeps
-  sql: Sql
-  /** The row's turn writes (turnRows.ts): `PgTurnRows` on `sql` when omitted; gated in main.ts (#6449). */
-  turns?: TurnRows
+  /** The row's turn writes (turnRows.ts, #6449). */
+  turns: TurnRows
   /** The message's images, by the names DurableTurns.send stored them under; and a tool result's, stored under the fence. */
   images: Pick<SessionImages, 'get' | 'putIf'>
   /** This replica's session host queue (`agent-sessions.<identity>`), what each result names. */
   hostQueue: string
   /** Tests only: the fence's period (FENCE_MS). */
   fenceMs?: number
+  /** Tests only: how long a placement that lost the API waits for its appends to land (LANDED_WAIT_MS). */
+  landedWaitMs?: number
   /** Hears a channel (events/changeStream.ts `listenAlso`): a held call wakes on `scadbuddy_input`. Without it, the poll alone. */
   listen?: (channel: string, onNotify: (payload: string) => void) => void
   /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
   inputPollMs?: number
   /**
-   * The API's `pending-input` routes (gate/crudPending.ts, #5299 step 10), used while `use()` holds:
-   * a held call's response read, and its span mark, fenced there by this placement. SQL otherwise.
+   * The API's `pending-input` routes (gate/crudPending.ts, #5299 step 10): a held call's response
+   * read, and its span mark, fenced there by this placement.
    */
-  pendingRoutes?: { crud: TurnRoutes; use: () => boolean } | undefined
+  pendingRoutes: TurnRoutes
   /** The calls in flight at a restart whose ToolCall finished, and whether each succeeded (activityProjection.ts `finishedToolCalls`); absent, none. */
   finishedCalls?: (sessionId: string, turnId: string) => Promise<FinishedCall[]>
   /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
@@ -248,6 +249,11 @@ type AttentionInput = { reason?: string; timeout_s?: number; on_timeout?: string
 
 type Running = { attempt: string; cut: (why: Cut) => void; release: () => boolean; done: Promise<void> }
 
+/** The retryable BackendUnreachable of placement `attempt`, which the workflow places again (#6994). */
+function unreachable(id: string, attempt: string, err: unknown): ApplicationFailure {
+  return ApplicationFailure.retryable(`session ${id}'s placement ${attempt} could not reach the backend: ${describe(err)}`, BACKEND_UNREACHABLE)
+}
+
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
@@ -268,6 +274,9 @@ function cardOf(q: UserQuestion, secrets: readonly string[]): UserQuestion {
 }
 
 const within = (ms: number, work: Promise<unknown>) => Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms).unref())])
+
+/** How long a placement that lost the API waits for its process's appends to land before the turn is placed again (#6994). */
+const LANDED_WAIT_MS = 15_000
 
 /** Why a released placement stopped: what its process is closed with, and its tally's stop. */
 const RELEASED_TEXT = 'a call waited longer than the turn holds its process; the turn goes on once it is decided'
@@ -296,7 +305,7 @@ export class TurnHost {
 
   constructor(deps: TurnHostDeps) {
     this.#deps = deps
-    this.#turns = deps.turns ?? new PgTurnRows(deps.sql)
+    this.#turns = deps.turns
     // The only listener of this channel on the stream: listenAlso keeps one per channel, so a second would replace this one.
     deps.listen?.(INPUT_CHANNEL, (requestId) => {
       for (const wake of this.#waiters.get(requestId) ?? []) wake()
@@ -391,6 +400,9 @@ export class TurnHost {
       // Its place, unless a spawn took it: the workflow places the turn again, elsewhere or here.
       // Not when a newer placement of the session arrived since (it cut this one): the place is its.
       if (this.#arrived.get(id) === arrival) this.#deps.core.warm.unreserve(id)
+      // A call to the API whose connection dropped (its claim, a read past its retries, its spend):
+      // the workflow places the turn again, never shows it (#6994).
+      if (!(err instanceof ApplicationFailure) && backendDropped(err)) throw unreachable(id, attempt, err)
       throw err
     } finally {
       if (this.#arrived.get(id) === arrival) this.#arrived.delete(id)
@@ -634,6 +646,14 @@ export class TurnHost {
         throw ApplicationFailure.retryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, PLACEMENT_MOVED)
       }
       if (why !== undefined) throw ApplicationFailure.nonRetryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, SESSION_GONE)
+      // The turn failed on a CRUD call whose connection dropped (a transcript load in a rollout,
+      // #6994): placed again, resumed from its transcript, not shown. Its spend is written above.
+      // Its process's last appends land first, for at most LANDED_WAIT_MS (the API may still be
+      // away): the next placement resumes from the transcript, and its claim fences out the rest.
+      if (!result && run.backendDropped) {
+        await within(this.#deps.landedWaitMs ?? LANDED_WAIT_MS, this.#deps.core.warm.landed(id))
+        throw unreachable(id, attempt, new Error(run.failure ?? 'the backend could not be reached'))
+      }
       // A process the turn let go (it failed, or was recycled) lands its last appends before the
       // turn ends, as a classic turn's does: the next turn's claim would fence them out, and its
       // spawn would then start the session anew over Claude Code's own file of it.
@@ -893,11 +913,7 @@ export class TurnHost {
   }
 
   async #row(requestId: string): Promise<Response | undefined> {
-    const routes = this.#deps.pendingRoutes
-    if (routes?.use()) return await routes.crud.response(requestId)
-    const [row] = await this.#deps.sql<Response[]>`
-      SELECT outcome, response, reason, responder, decision_traceparent FROM ai_input_responses WHERE request_id = ${requestId}`
-    return row
+    return await this.#deps.pendingRoutes.response(requestId)
   }
 
   /**
@@ -907,15 +923,8 @@ export class TurnHost {
    */
   async #traceEntry(requestId: string, traceparent: string | undefined, fence: TurnFence): Promise<void> {
     if (!traceparent) return
-    const routes = this.#deps.pendingRoutes
-    // On the API, only while this placement still holds the session (the turn fence, #5299 step 10).
-    if (routes?.use()) {
-      await routes.crud.markPark(requestId, traceparent, fence).catch((err: unknown) => {
-        this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
-      })
-      return
-    }
-    await this.#deps.sql`UPDATE ai_pending_input SET traceparent = ${traceparent} WHERE request_id = ${requestId}`.catch((err: unknown) => {
+    // Only while this placement still holds the session (the turn fence, #5299 step 10).
+    await this.#deps.pendingRoutes.markPark(requestId, traceparent, fence).catch((err: unknown) => {
       this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
     })
   }

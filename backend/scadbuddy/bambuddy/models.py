@@ -925,6 +925,15 @@ class LibraryListRow(BambuddyModel):
     #: ScadBuddy's own library only (#6394): a print run's per-print copy or slice
     #: (``library_files.print_subject``), which its sweep trashes. Never Bambuddy's.
     per_print: bool = False
+    #: ScadBuddy's own library only (#7073): the row's ``sha256``. Bambuddy's listing
+    #: states no hash; its ``GET /library/files/{id}`` does (`LibraryFile.file_hash`).
+    #: Lowercase hex, the case a listing's pinned sha256 has.
+    file_hash: str | None = None
+
+    @field_validator("file_hash")
+    @classmethod
+    def _lowercase_hash(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
 
 
 class LibraryPlate(BambuddyModel):
@@ -1105,6 +1114,10 @@ class KProfile(BambuddyModel):
     name: str
     k_value: str
     setting_id: str | None = None
+    #: Bambuddy's defaults (``backend/app/schemas/kprofile.py``, v1.3.1, #7154).
+    n_coef: str = "0.000000"
+    ams_id: int = 0
+    tray_id: int = -1
 
 
 class KProfileTable(BambuddyModel):
@@ -1112,6 +1125,24 @@ class KProfileTable(BambuddyModel):
 
     profiles: list[KProfile] = Field(default_factory=list)
     nozzle_diameter: str | None = None
+
+
+class KProfileWriteResult(BambuddyModel):
+    """A K-profile write's answer (#7154): ``{success, confirmed, message}`` for a set, a
+    batch and a delete, where ``confirmed`` is false when the printer sent no
+    acknowledgement in time; ``{success, message}`` for a note's set and delete
+    (``backend/app/api/routes/kprofiles.py``, maziggy/bambuddy v1.3.1)."""
+
+    success: bool
+    confirmed: bool | None = None
+    message: str = ""
+
+
+class KProfileNotes(BambuddyModel):
+    """``GET /api/v1/printers/{id}/kprofiles/notes`` (``KProfileNoteResponse``): each
+    note by the key Bambuddy's page stores it under (#7154)."""
+
+    notes: dict[str, str] = Field(default_factory=dict)
 
 
 class SpoolKProfile(BambuddyModel):
@@ -1274,8 +1305,18 @@ class Spool(BambuddyModel):
     #: v1.3.1): the pull leaves a row made after an open create intent to the push
     #: (#6265 Decision 10).
     created_at: datetime | None = None
+    #: #7149: whether it was added full, when its tag was written (set only by a SpoolBuddy
+    #: write), and ``weight_used`` when its consumed counter was last reset: BB's "Total
+    #: consumed" is ``weight_used - weight_used_baseline``
+    #: (``SpoolResponse`` in ``sync-routes.json``; ``models/spool.py`` lines 37-50 and 85
+    #: at https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/models/spool.py).
+    added_full: bool | None = None
+    encode_time: datetime | None = None
+    weight_used_baseline: float = 0.0
 
-    @field_validator("updated_at", "last_weighed_at", "last_dried_at", "archived_at", "created_at")
+    @field_validator(
+        "updated_at", "last_weighed_at", "last_dried_at", "archived_at", "created_at", "encode_time"
+    )
     @classmethod
     def _utc(cls, value: datetime | None) -> datetime | None:
         return as_utc(value)
@@ -1358,6 +1399,24 @@ class SpoolCatalogEntry(BambuddyModel):
     name: str
     #: Grams; the pull rounds a fractional one to whole grams.
     weight: int | float
+
+
+class BbColour(BambuddyModel):
+    """``GET /api/v1/inventory/colors`` — one entry of Bambuddy's colour catalog
+    (``ColorEntryResponse`` in ``backend/app/api/routes/inventory.py``, lines 470-481 at
+    https://github.com/maziggy/bambuddy/tree/b7d894b57c0a373f66dc0de49680865b02b3aae5; its
+    OpenAPI in 1.2.6b1 names the route only). ``hex_color`` is ``#RRGGBB`` or
+    ``#RRGGBBAA``; ``extra_colors`` is BB's comma-separated hex stops. The pull fills the
+    colour catalog from it (#6907)."""
+
+    id: int
+    manufacturer: str
+    color_name: str
+    hex_color: str
+    material: str | None = None
+    is_default: bool = False
+    extra_colors: str | None = None
+    effect_type: str | None = None
 
 
 class SpoolAssignment(BambuddyModel):

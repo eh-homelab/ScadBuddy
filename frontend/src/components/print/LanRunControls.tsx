@@ -20,8 +20,10 @@ type Sent = 'stop' | 'clear'
  * #4942, #4939 — the one control surface of a native run's prints still to start: the
  * printer has no queue, so ScadBuddy starts each once the printer has ended the one
  * before. "Stop the rest" stops the ones not started (the print on the printer carries
- * on); while the run waits for a cleared plate (`lan_require_plate_clear`), "Plate is
- * clear" starts the next. The print dialog's panel and the Prints page card show it.
+ * on); while the run waits for a cleared plate (`lan_require_plate_clear`, or a run
+ * queued on a busy printer, #6871), "Plate is clear" starts the next. A queued run says
+ * whether it waits for a running print (`queued_for_print`) or only for an ended print's
+ * plate. The print dialog's panel and the Prints page card show it.
  */
 export function LanRunControls({
   control,
@@ -62,7 +64,13 @@ export function LanRunControls({
       <p>
         {control.awaiting_clear
           ? `The printer has finished. Clear the plate of ${printer}, then start the next print. ${waiting} still to start.`
-          : `${waiting} still to start, each once the printer has finished the one before.`}
+          : control.queued && control.queued_for_print
+            ? `Queued until ${printer} has finished the print it is running. ${waiting} still to start.`
+            : control.queued && control.printer_idle
+              ? `Queued until the plate of ${printer} is said clear. It reads idle, but its plate may still hold the print before: clear it if so. ${waiting} still to start.`
+              : control.queued
+                ? `Queued until the plate of ${printer} is clear: it holds a print that has ended. ${waiting} still to start.`
+                : `${waiting} still to start, each once the printer has finished the one before.`}
       </p>
       <div className="flex flex-wrap gap-2">
         {control.awaiting_clear && (

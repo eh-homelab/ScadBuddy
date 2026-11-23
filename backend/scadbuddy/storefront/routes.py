@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 import uuid
@@ -197,6 +198,76 @@ ESTIMATE_FIELDS: Final = frozenset(
 async def render_estimate(job_id: str, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     answer = await crud.render_estimate(_job(job_id), visitor_id=visitor_id, client=client)
     return {k: v for k, v in answer.items() if k in ESTIMATE_FIELDS}
+
+
+#: The fields of a variant's preview a visitor reads (#6921): never an output id.
+VARIANT_PREVIEW_FIELDS: Final = frozenset({"url", "colors", "bbox_mm", "plates"})
+#: A variant key (`orders/storefront/renders.py` `variant_key`): a sha256 in hex.
+VARIANT_KEY: Final = re.compile(r"[0-9a-f]{64}")
+
+
+@visitor_router.post("/listings/{listing_id}/variant")
+async def variant(
+    listing_id: str, request: Request, crud: Crud, visitor_id: Visitor, client: Client
+) -> Any:
+    """What the shop holds of the visitor's choices, at once (#6921): a render's body, sent
+    on as it came. A read (no ``Idempotency-Key``), counted as one (`ratelimit.py`). The
+    price keeps `ESTIMATE_FIELDS` only, and the preview `VARIANT_PREVIEW_FIELDS`."""
+    if LISTING_ID.fullmatch(listing_id) is None:
+        raise ApiError(
+            404, "There is no such listing.", type_=f"{STOREFRONT_PROBLEMS}listing_not_found"
+        )
+    body = await _body(request, "render_body_invalid")
+    answer = await crud.variant(listing_id, body, visitor_id=visitor_id, client=client)
+    price = answer.get("price") or {}
+    preview = answer.get("preview")
+    return {
+        "price": {k: v for k, v in price.items() if k in ESTIMATE_FIELDS},
+        "preview": (
+            None
+            if preview is None
+            else {k: v for k, v in preview.items() if k in VARIANT_PREVIEW_FIELDS}
+        ),
+        "render": answer.get("render"),
+        "values": answer.get("values"),
+    }
+
+
+@visitor_router.post("/listings/{listing_id}/price")
+async def listing_price(
+    listing_id: str, request: Request, crud: Crud, visitor_id: Visitor, client: Client
+) -> Any:
+    """The price of the visitor's colours on a file listing (#6710 §7.5), sent on as it
+    came. A read (no ``Idempotency-Key``), counted as one (`ratelimit.py`); the answer keeps
+    `ESTIMATE_FIELDS` only."""
+    if LISTING_ID.fullmatch(listing_id) is None:
+        raise ApiError(
+            404, "There is no such listing.", type_=f"{STOREFRONT_PROBLEMS}listing_not_found"
+        )
+    body = await _body(request, "price_body_invalid")
+    answer = await crud.listing_price(listing_id, body, visitor_id=visitor_id, client=client)
+    return {k: v for k, v in answer.items() if k in ESTIMATE_FIELDS}
+
+
+@visitor_router.get("/variants/{variant_key}/preview.glb")
+async def variant_preview(
+    variant_key: str, crud: Crud, visitor_id: Visitor, client: Client
+) -> StreamingResponse:
+    """The preview mesh of a variant priced before (#6921), relayed as a stream. A key that
+    is not one is 404 before any call."""
+    if VARIANT_KEY.fullmatch(variant_key) is None:
+        raise ApiError(
+            404,
+            "There is no preview of these choices.",
+            type_=f"{STOREFRONT_PROBLEMS}variant_not_found",
+        )
+    stream = await crud.variant_preview(variant_key, visitor_id=visitor_id, client=client)
+    headers = {}
+    if "content-length" in stream.response.headers and (
+        "content-encoding" not in stream.response.headers
+    ):
+        headers["Content-Length"] = stream.response.headers["content-length"]
+    return _Relayed(stream, headers=headers)
 
 
 @visitor_router.get("/draft")

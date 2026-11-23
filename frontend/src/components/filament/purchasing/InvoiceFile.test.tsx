@@ -19,7 +19,9 @@ const show = (media_type: string, name = 'receipt') => render(<InvoiceFile invoi
 
 const photo = () => screen.getByRole('img', { name: /Photo of the invoice/ })
 const scaleOf = () => Number(/scale\(([\d.]+)\)/.exec(photo().style.transform)?.[1])
-const offsetOf = () => /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(photo().style.transform)!.slice(1).map(Number)
+// jsdom 31 serializes `translate(x, 0px)` as `translate(x)`: a missing y is 0.
+const offsetOf = () =>
+  /translate\((-?[\d.]+)px(?:, (-?[\d.]+)px)?\)/.exec(photo().style.transform)!.slice(1).map((n) => Number(n ?? 0))
 
 /** jsdom lays nothing out: give the viewport a 400 x 300 box at the page's origin. */
 function sizeViewport() {

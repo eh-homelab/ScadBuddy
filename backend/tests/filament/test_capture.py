@@ -25,6 +25,7 @@ from scadbuddy.printers.status import STALE_AFTER
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.spools.models import SeenTray
 from tests.conftest import PgPool
+from tests.filament.lock_support import waits_for_the_printer_lock
 from tests.printers.conftest import KEK
 
 pytestmark = pytest.mark.requires_postgres
@@ -526,3 +527,72 @@ def test_capture_leaves_an_ams_unit_place_alone(pg_pool: PgPool) -> None:
     with pg_pool.connection() as conn:
         row = conn.execute("SELECT archived_at FROM filament_locations WHERE id = %s", (unit,))
         assert row.fetchone() == {"archived_at": None}
+
+
+def _flatten(pool: PgPool, pid: str) -> UUID:
+    """Make the printer's places as an install from before printer places has them: no
+    root, the unit place with no parent. Answers the unit place's id."""
+    with pool.connection() as conn:
+        row = conn.execute(
+            "UPDATE filament_locations SET parent_id = NULL WHERE printer_id = %s"
+            " AND ams_id IS NOT NULL AND tray_id IS NULL RETURNING id",
+            (pid,),
+        ).fetchone()
+        conn.execute(
+            "DELETE FROM filament_locations WHERE printer_id = %s AND printer_root", (pid,)
+        )
+    assert row is not None
+    return UUID(str(row["id"]))
+
+
+def _root(pool: PgPool, pid: str) -> UUID | None:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM filament_locations WHERE printer_id = %s AND printer_root"
+            " AND archived_at IS NULL",
+            (pid,),
+        ).fetchone()
+    return None if row is None else UUID(str(row["id"]))
+
+
+def test_a_flat_install_gets_its_printer_place_on_the_next_capture(pg_pool: PgPool) -> None:
+    """#6955: a unit place with no parent and a tray place under it (made before printer
+    places) gets the printer's place on the next capture, even one that loads nothing."""
+    pid, _ = _printer(pg_pool)
+    spool = _spool(pg_pool, U1)
+    _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    unit = _flatten(pg_pool, pid)
+    assert _root(pg_pool, pid) is None
+    result = _reconcile(pg_pool, pid, _report(_tray(1, U1)), T0 + timedelta(minutes=1))
+    assert result.loaded == 0
+    root = _root(pg_pool, pid)
+    assert root is not None
+    placed = LocationStore(pg_pool).get(unit)
+    assert placed is not None and placed.parent_id == root
+    assert _row(pg_pool, spool)["location_id"] == _tray_place(pg_pool, pid)
+
+
+def test_a_flat_install_with_no_printer_kind_still_captures(pg_pool: PgPool) -> None:
+    pid, _ = _printer(pg_pool)
+    spool = _spool(pg_pool, U1)
+    _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    unit = _flatten(pg_pool, pid)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_location_kinds SET printer = false")
+    _reconcile(pg_pool, pid, _report({"id": "1"}), T0 + timedelta(minutes=1))
+    assert _root(pg_pool, pid) is None
+    placed = LocationStore(pg_pool).get(unit)
+    assert placed is not None and placed.parent_id is None
+    assert _row(pg_pool, spool)["location_id"] is None
+
+
+def test_capture_takes_the_printer_lock_before_it_makes_a_place(pg_pool: PgPool) -> None:
+    """#7081: a capture that makes a unit and a slot takes the printer's place lock first,
+    as the labels route does (`tests/filament/test_locations.py`)."""
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    result = waits_for_the_printer_lock(
+        pg_pool, UUID(pid), lambda: _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    )
+    assert result.loaded == 1
+    assert _row(pg_pool, spool)["location_id"] == _tray_place(pg_pool, pid)

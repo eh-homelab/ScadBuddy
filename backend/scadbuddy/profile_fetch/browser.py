@@ -17,15 +17,23 @@ The worker (`worker.py`, `remote.RemoteSite`) drives it over HTTP on
 `remote`'s docstring. ``GET /healthz`` answers 200 while it serves, with no token. Every other
 call must carry the token (``Authorization: Bearer <token>``, compared with
 `hmac.compare_digest`): without it the answer is 401 before any byte of the body is read. One
-step runs at a time (a lock), on one signed-in browser (`steps.SiteHolder`). When the worker
-goes away during a step (its activity was cancelled or timed out), the service cancels the
-step and closes the browser, since the page may be wedged mid-export.
+step runs at a time (a lock), on one signed-in browser (`steps.SiteHolder`); each step opens
+its own page path first, so a 3DFP search takes its turn between an export's steps (#7062,
+R-7062-2). When the worker goes away during a step (its activity was cancelled or timed
+out), the service cancels the step and closes the browser, since the page may be wedged
+mid-export; for a search it cancels the step only, and the browser stays open for the export
+(R-7062-3). One that went away while its step still waited for its turn runs nothing and
+leaves the browser open. A search's worker never sends ``DELETE /session`` (R-7062-3). A
+search that itself fails ``browser`` or ``timeout`` closes the browser here, while it still
+holds the lock, so no export step is running on it; the next step signs in again
+(R-7062-4).
 
-At start it serves, then signs in once. A refused login, or a browser that does not launch
-(Chromium's sandbox cannot start, plan Decision 6), ends the process with 1: every fetch
-would fail the same way. A bot check, a timeout or a browser failure after the launch is
-logged, and the first call signs in again. It sets ``RLIMIT_CORE`` to 0 before any browser
-launches, and makes itself non-dumpable (`hardening.forbid_dumping`).
+At start it serves, then signs in. A login refused on three tries (`LOGIN_RETRY_DELAYS`
+apart), or a browser that does not launch (Chromium's sandbox cannot start, plan
+Decision 6), ends the process with 1: every fetch would fail the same way. A bot check, a
+timeout or a browser failure after the launch is logged, and the first call signs in again.
+It sets ``RLIMIT_CORE`` to 0 before any browser launches, and makes itself non-dumpable
+(`hardening.forbid_dumping`).
 """
 
 from __future__ import annotations
@@ -38,10 +46,10 @@ import os
 import resource
 import signal
 import sys
-from collections.abc import Awaitable, Callable, Sequence
-from contextlib import suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from pydantic import BaseModel, ValidationError
 
@@ -56,8 +64,10 @@ from scadbuddy.intake_worker.sandbox import (
     mounted_secrets,
 )
 from scadbuddy.profile_fetch.remote import (
+    CREATE,
     EXPORT,
     MAX_ASK_BYTES,
+    SEARCH,
     SESSION,
     SPOOLS,
     ExportAsk,
@@ -71,7 +81,7 @@ from scadbuddy.profile_fetch.settings import (
 )
 from scadbuddy.profile_fetch.site import SITE, ThreeDfpSite
 from scadbuddy.profile_fetch.steps import Site, SiteError, SiteHolder
-from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES
+from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES, CreateAsk, SearchAsk
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +91,11 @@ SECRETS_DIR: Path = Path("/var/run/secrets")
 #: How long an ask's body may take to arrive once its head did.
 BODY_TIMEOUT: Final = 10.0
 BROWSER_DID_NOT_START: Final = "the browser did not start"
+#: The pauses between the start's sign-in tries after a refused login (#6941): three tries.
+LOGIN_RETRY_DELAYS: Final = (10.0, 30.0)
+#: A search's failures that close the browser on the service, under the lock (R-7062-4):
+#: the worker's `activities.FRESH_BROWSER_KINDS`, which this module cannot import.
+RESET_KINDS: Final[frozenset[str]] = frozenset({"browser", "timeout"})
 
 Answer = tuple[int, dict[str, str], bytes]
 
@@ -98,25 +113,35 @@ class StartRefusedError(Exception):
     launch. Its text is fixed and holds no secret."""
 
 
-async def sign_in_at_start(sites: SiteHolder) -> None:
-    """Sign in once at start (the module docstring)."""
+async def sign_in_at_start(
+    sites: SiteHolder, *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+) -> None:
+    """Sign in at start (the module docstring). A refused login is tried again after
+    each of `LOGIN_RETRY_DELAYS` before it refuses the start: on prod the site refused three
+    starts in a row and signed in the fourth, with the same login (#6941)."""
     refused: str | None = None
-    try:
-        await sites.get()
-    except SiteError as error:
-        if error.kind == "login_failed":
-            refused = "3DFP login failed"
-        else:
-            # The driver's own text, which never holds the login.
-            logger.warning(
-                "3DFP sign-in at start failed (%s): %s; the first call signs in again",
-                error.kind,
-                error,
-            )
-    except Exception as error:
-        # Logged by its class only: a launch error's text can quote the environment.
-        logger.error("the browser did not start (%s)", type(error).__name__)
-        refused = BROWSER_DID_NOT_START
+    for delay in (*LOGIN_RETRY_DELAYS, None):
+        refused = None
+        try:
+            await sites.get()
+        except SiteError as error:
+            if error.kind == "login_failed":
+                refused = "3DFP login failed"
+            else:
+                # The driver's own text, which never holds the login.
+                logger.warning(
+                    "3DFP sign-in at start failed (%s): %s; the first call signs in again",
+                    error.kind,
+                    error,
+                )
+        except Exception as error:
+            # Logged by its class only: a launch error's text can quote the environment.
+            logger.error("the browser did not start (%s)", type(error).__name__)
+            refused = BROWSER_DID_NOT_START
+        if refused != "3DFP login failed" or delay is None:
+            break
+        logger.warning("3DFP login failed at start; trying again in %.0f s", delay)
+        await sleep(delay)
     if refused is not None:
         # Raised outside the handler: the text is fixed, and no chain rides along.
         raise StartRefusedError(refused)
@@ -174,6 +199,8 @@ class BrowserService:
             SESSION: {"POST": self._open, "DELETE": self._close},
             SPOOLS: {"POST": self._spools},
             EXPORT: {"POST": self._export},
+            SEARCH: {"POST": self._search},
+            CREATE: {"POST": self._create},
         }
         if path not in routes:
             await _send(writer, *_json(404, {"error": "not-found"}))
@@ -202,7 +229,9 @@ class BrowserService:
             ask = await asyncio.wait_for(reader.readexactly(int(length)), BODY_TIMEOUT)
         except TimeoutError:
             return
-        answer = await self._run(reader, step, ask)
+        # A search cut mid-way leaves the browser open; the next step opens its own page
+        # path (R-7062-3).
+        answer = await self._run(reader, step, ask, cut_closes=path != SEARCH)
         if answer is not None:
             await _send(writer, *answer)
 
@@ -216,38 +245,77 @@ class BrowserService:
         reader: asyncio.StreamReader,
         step: Callable[[bytes], Awaitable[Answer]],
         ask: bytes,
+        *,
+        cut_closes: bool = True,
     ) -> Answer | None:
         """The step's answer, one step at a time; None when the worker went away during
-        it: the step is cancelled and the browser closed."""
-        async with self.lock:
+        it: the step is cancelled, and with ``cut_closes`` the browser closed, since the page
+        may be wedged mid-export. A search's step is cut without closing it (R-7062-3): the
+        next step opens its own page path; a search that itself fails ``browser`` or
+        ``timeout`` closes it in `_on_site` (R-7062-4). A worker
+        that went away while its step waited for its turn (a search waits for the export's
+        step in hand, R-7062-2) gets None and runs nothing, and the browser stays open."""
+        async with self._turn(reader) as watcher:
+            if watcher is None:
+                return None
             running = asyncio.ensure_future(step(ask))
-            # The ask is read whole; the next read ends only when the worker goes away.
-            watcher = asyncio.ensure_future(reader.read(1))
-            try:
-                await asyncio.wait({running, watcher}, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                watcher.cancel()
+            await asyncio.wait({running, watcher}, return_when=asyncio.FIRST_COMPLETED)
             if running.done():
                 return running.result()
             running.cancel()
             with suppress(BaseException):
                 await running
-            await self._sites.drop()
-            logger.info("the worker went away during a step; the browser is closed")
+            if cut_closes:
+                await self._sites.drop()
+                logger.info("the worker went away during a step; the browser is closed")
+            else:
+                logger.info("the worker went away during a search; the browser stays open")
             return None
 
-    async def _on_site(self, step: Callable[[Site], Awaitable[Answer]]) -> Answer:
-        """``step`` on the signed-in browser; a failure as its kind only."""
+    @asynccontextmanager
+    async def _turn(
+        self, reader: asyncio.StreamReader
+    ) -> AsyncIterator[asyncio.Future[Any] | None]:
+        """The step's turn on the browser, the one place that takes and gives back
+        `lock`. It yields the watcher, whose read ends when the worker goes away, once the
+        lock is held; or None when the worker went away first, and then no step runs. On
+        exit the lock is given back if it was taken, a handler cancelled after its turn
+        took the lock but before it woke included."""
+        # The ask is read whole; the next read ends only when the worker goes away.
+        watcher = asyncio.ensure_future(reader.read(1))
+        turn = asyncio.ensure_future(self.lock.acquire())
+        try:
+            await asyncio.wait({turn, watcher}, return_when=asyncio.FIRST_COMPLETED)
+            yield watcher if turn.done() and not watcher.done() else None
+        finally:
+            watcher.cancel()
+            if turn.done() and not turn.cancelled():
+                self.lock.release()
+            else:
+                # Not yet taken: a cancelled `Lock.acquire` never holds the lock.
+                turn.cancel()
+
+    async def _on_site(
+        self, step: Callable[[Site], Awaitable[Answer]], *, resets: bool = False
+    ) -> Answer:
+        """``step`` on the signed-in browser; a failure as its kind only. With ``resets``
+        (a search), a failure of a kind in `RESET_KINDS` closes the browser here, while
+        this step still holds the lock, so no export step runs on it; the next step signs
+        in again (R-7062-4)."""
         try:
             return await step(await self._sites.get())
         except SiteError as error:
             # The driver's own text, which never holds the login.
             logger.warning("a step on the site failed (%s): %s", error.kind, error)
-            return _site_failure(error.kind)
+            kind = error.kind
         except Exception as error:
             # The class only: a Playwright error's text can quote a filled value.
             logger.warning("a step on the site failed (browser): %s", type(error).__name__)
-            return _site_failure("browser")
+            kind = "browser"
+        if resets and kind in RESET_KINDS:
+            await self._sites.drop()
+            logger.info("a search failed (%s); the browser is closed", kind)
+        return _site_failure(kind)
 
     async def _open(self, ask: bytes) -> Answer:
         async def signed_in(site: Site) -> Answer:
@@ -284,12 +352,54 @@ class BrowserService:
 
         return await self._on_site(export)
 
+    async def _search(self, ask: bytes) -> Answer:
+        wanted = _parse(SearchAsk, ask)
+        if wanted is None:
+            return _json(400, {"error": "bad-ask"})
+
+        async def search(site: Site) -> Answer:
+            return _model(await site.search(wanted))
+
+        return await self._on_site(search, resets=True)
+
+    async def _create(self, ask: bytes) -> Answer:
+        wanted = _parse(CreateAsk, ask)
+        if wanted is None:
+            return _json(400, {"error": "bad-ask"})
+
+        async def create(site: Site) -> Answer:
+            return _model(await site.create(wanted))
+
+        return await self._on_site(create)
+
+
+def _model(answer: BaseModel) -> Answer:
+    return 200, {"Content-Type": "application/json"}, answer.model_dump_json().encode()
+
 
 def _parse[M: BaseModel](model: type[M], ask: bytes) -> M | None:
     try:
         return model.model_validate_json(ask)
     except ValidationError:
         return None
+
+
+async def _until_stop(work: Coroutine[object, object, None], stop: asyncio.Event) -> None:
+    """Runs ``work`` until it ends or ``stop`` is set, whichever is first. The start's
+    sign-in can take minutes with its retries; a SIGTERM in that window cancels it, so a
+    rollout ends the pod before its grace period (claude-review on #6947)."""
+    task = asyncio.ensure_future(work)
+    stopping = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({task, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stopping.cancel()
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+    if not task.cancelled():
+        task.result()
 
 
 async def serve(
@@ -318,7 +428,7 @@ async def serve(
     logger.info("profile-fetch browser service serving on %s", server.sockets[0].getsockname()[1])
     try:
         async with service.lock:
-            await sign_in_at_start(sites)
+            await _until_stop(sign_in_at_start(sites), stop)
         await stop.wait()
     finally:
         server.close()

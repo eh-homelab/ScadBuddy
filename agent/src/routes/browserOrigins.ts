@@ -31,7 +31,7 @@ import { ready, type RouteModule } from './module.js'
 // them: an agent must not widen where its own browser may go (spec §8.1).
 
 export type BrowserOriginsRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   store: BrowserOrigins | undefined
   /** The sessions an approval is written to; undefined exactly when `store` is. */
   sessions: Pick<SessionManager, 'get'> | undefined
@@ -50,8 +50,8 @@ const PutBody = z.strictObject({ allow: z.array(rule).max(MAX_RULES), deny: z.ar
 const AllowBody = z.strictObject({ rule })
 const ApproveBody = z.strictObject({ origin: z.string().max(MAX_RULE_LENGTH) })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'the headless browser lists'
 
 /** `text` as an http(s) origin (scheme://host[:port]), or undefined when it is not exactly one. */
@@ -78,7 +78,7 @@ async function body<T>(c: Context, schema: z.ZodType<T>): Promise<T | string> {
 
 export function registerBrowserOriginsRoutes(app: Hono, deps: BrowserOriginsRouteDeps): void {
   async function store(): Promise<BrowserOrigins | string> {
-    if (!deps.store) return NO_DATABASE
+    if (!deps.store) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.store : NOT_READY
   }
   const view = async (s: BrowserOrigins, lists?: BrowserLists): Promise<BrowserOriginsView> => ({
@@ -88,7 +88,7 @@ export function registerBrowserOriginsRoutes(app: Hono, deps: BrowserOriginsRout
   })
   /** As routes/sessionFiles.ts `writable`: the user's own session only, and never an archived one; a Response when refused. */
   async function refusedSession(c: Context, id: string): Promise<Response | undefined> {
-    if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
+    if (!deps.sessions) return c.json({ detail: NOT_CONFIGURED }, 503)
     try {
       const session = await deps.sessions.get(id, browserUser(c))
       if (!sameOwner(browserUser(c), session.owner)) {

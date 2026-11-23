@@ -14,6 +14,17 @@ describe('LibraryFilePicker (#5544)', () => {
 
   const picker = () => <LibraryFilePicker open picked={null} disabled={false} onPick={vi.fn()} />
 
+  it('lists only the types it is given, each with its type (#6710 §9.2)', async () => {
+    const asked = vi.spyOn(api, 'searchLibrary')
+    const { user } = renderPage(<LibraryFilePicker open picked={null} disabled={false} onPick={vi.fn()} types={['3mf', 'stl']} />)
+    await user.type(screen.getByLabelText('Library file'), 'keychain')
+    const files = await screen.findByRole('list', { name: 'Library files' })
+    const hits = within(files).getAllByRole('button').map((hit) => hit.textContent ?? '')
+    expect(hits.some((hit) => hit.includes('gcode'))).toBe(false)
+    expect(hits.find((hit) => hit.startsWith('keychain-reagan.3mf'))).toContain(', 3MF')
+    expect(asked).toHaveBeenLastCalledWith({ q: 'keychain', all: false, types: ['3mf', 'stl'] }, expect.anything())
+  })
+
   it('drops a failed search’s error when the query changes or clears', async () => {
     const real = api.searchLibrary.bind(api)
     let release: () => void = () => {}

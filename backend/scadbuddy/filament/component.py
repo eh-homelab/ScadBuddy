@@ -10,6 +10,7 @@ from typing import Annotated
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.filament.assignments_cache import AssignmentsCache
+from scadbuddy.filament.bb_sync_passes import SyncPassStore
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import FilamentInventory, PoolSbSpoolReads
 from scadbuddy.filament.invoices import InvoiceStore
@@ -19,6 +20,7 @@ from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import PoolPrintUses, print_use_hook
 from scadbuddy.filament.profile_fill import TypeFiller
 from scadbuddy.filament.rfid_mode import RfidModeStore
+from scadbuddy.filament.sb_presets import FilamentPresetStore
 from scadbuddy.filament.sensors import SensorStore
 from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
@@ -51,11 +53,13 @@ class Filament:
     assignments: AssignmentsCache = field(default_factory=AssignmentsCache)
     #: The image's slicer profiles a type is filled from (#6714); ``None`` without them.
     profile_table: Callable[[], DensityTable | None] = lambda: None
+    #: ScadBuddy's own filament presets (#7176); ``None`` in a test that builds no store.
+    own_presets: FilamentPresetStore | None = None
 
     @property
     def filler(self) -> TypeFiller:
         """Fills spool types from their slicer profiles (#6714)."""
-        return TypeFiller(self.types, self.profile_table)
+        return TypeFiller(self.types, self.profile_table, self.own_presets)
 
     @property
     def reads(self) -> PoolSbSpoolReads:
@@ -63,6 +67,11 @@ class Filament:
         make them (`SbSpoolReads`): Bambuddy's path's picker rows among them (#6262
         Task 7)."""
         return PoolSbSpoolReads(self.inventory, self.presets)
+
+    @property
+    def sync_passes(self) -> SyncPassStore:
+        """The Bambuddy sync's pass history (#6905)."""
+        return SyncPassStore(self.spools)
 
 
 FILAMENT: Key[Filament] = Key("filament")
@@ -74,10 +83,19 @@ def _build(core: Core, components: Components) -> Filament:
     def defaults() -> FilamentDefaults:
         # Two rows in one query, read on each use: a change applies to the next read. It
         # takes a connection of its own, so the stores call it before they take theirs.
-        read = core.settings_store.read({"filament_low_stock_pct", "filament_default_cost_per_kg"})
+        read = core.settings_store.read(
+            {
+                "filament_low_stock_pct",
+                "filament_default_cost_per_kg",
+                "filament_drying_temp_c",
+                "filament_drying_hours",
+            }
+        )
         return FilamentDefaults(
             low_stock_pct=int(read["filament_low_stock_pct"]),
             cost_per_kg=read["filament_default_cost_per_kg"],
+            drying_temp_c=read["filament_drying_temp_c"],
+            drying_hours=read["filament_drying_hours"],
         )
 
     def shop_currency() -> str:
@@ -122,6 +140,7 @@ def _build(core: Core, components: Components) -> Filament:
         shopping=ShoppingStore(pool),
         metrics=MetricsStore(pool, spools, metrics_settings),
         profile_table=lambda: density_table(core.settings.slicer_profiles_dir),
+        own_presets=FilamentPresetStore(pool, lambda: core.store.blobs),
     )
 
 

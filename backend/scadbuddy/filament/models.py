@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Final, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -28,6 +28,7 @@ from pydantic import (
 
 from scadbuddy.bambuddy.models import SpoolBuddyDevice
 from scadbuddy.filament.colour import Rgba
+from scadbuddy.slicing.own_presets import sb_id
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 
@@ -304,6 +305,9 @@ class ColourCreate(_In):
     manufacturer: Text | None = None
     rgba: Rgba
     material_id: UUID | None = None
+    #: The material as the source names it ("PLA Basic"); with the maker and the name it
+    #: is the row's identity (#6907).
+    material_name: Text | None = None
     extra_colours: Colours | None = None
     effect_id: UUID | None = None
 
@@ -315,17 +319,32 @@ class ColourPatch(_Patch):
     manufacturer: Text | None = None
     rgba: Rgba | None = None
     material_id: UUID | None = None
+    material_name: Text | None = None
     extra_colours: Colours | None = None
     effect_id: UUID | None = None
     archived: bool | None = None
+
+
+#: Where a colour catalog row came from (#6907): a sync's source, else ``None``, a person's.
+ColourSource = Literal["bambuddy", "filamentcolors", "bambu"]
 
 
 class Colour(_Catalog):
     manufacturer: str | None
     rgba: Rgba
     material_id: UUID | None
+    material_name: str | None = None
     extra_colours: list[Rgba] | None
     effect_id: UUID | None
+    #: The sync that made or last wrote the row; ``None`` for a person's own row. A
+    #: person's edit keeps it, as where the values came from (Decision 222);
+    #: ``synced_at`` ``None`` says the row was edited since.
+    source: ColourSource | None = None
+    #: That sync write's time. A person's write of a value a sync writes clears it, and no
+    #: sync writes a row whose ``synced_at`` is ``None`` (#6907, Decision 217).
+    synced_at: datetime | None = None
+    #: Bambuddy's colour catalog entry the row is linked to (`GET /inventory/colors`).
+    bb_colour_id: int | None = None
 
 
 # -- locations ------------------------------------------------------------------------
@@ -336,20 +355,23 @@ class LocationKindCreate(_In):
     sort_order: SortOrder = 0
     dry_storage: bool = False
     ams: bool = False
+    printer: bool = False
 
 
 class LocationKindPatch(_Patch):
-    not_null = frozenset({"name", "sort_order", "dry_storage", "ams"})
+    not_null = frozenset({"name", "sort_order", "dry_storage", "ams", "printer"})
     name: Name | None = None
     sort_order: SortOrder | None = None
     dry_storage: bool | None = None
     ams: bool | None = None
+    printer: bool | None = None
     archived: bool | None = None
 
 
 class LocationKind(_Catalog):
     dry_storage: bool
     ams: bool
+    printer: bool
 
 
 class LocationCreate(_In):
@@ -381,6 +403,8 @@ class LocationPatch(_Patch):
 
 
 class Location(_Catalog):
+    number: int
+    printer_root: bool
     kind_id: UUID
     parent_id: UUID | None
     identifier: str | None
@@ -396,6 +420,59 @@ class LocationNode(Location):
 
     spool_count: int
     children: list[LocationNode] = Field(default_factory=list)
+
+
+class PathStep(BaseModel):
+    """A place on the way to another, or under it: enough to name it and link to it."""
+
+    id: UUID
+    name: str
+    code: str
+
+
+class PlacedSpool(BaseModel):
+    """A spool in a place, as its page lists it: effective material and colour."""
+
+    id: UUID
+    number: int
+    code: str
+    material: str | None
+    colour_rgba: Rgba | None
+    grams_left: float | None
+
+
+class LocationDetail(Location):
+    """A place's own page (#6955): its code and kind, the places above it (root first),
+    the unarchived places under it and the unarchived spools in it."""
+
+    code: str
+    kind_name: str
+    path: list[PathStep]
+    children: list[PathStep]
+    spools: list[PlacedSpool]
+
+
+class PrinterLabelsRequest(_In):
+    #: ``None`` means every printer.
+    printer_ids: list[UUID] | None = None
+
+
+class PrinterLabel(BaseModel):
+    """One label: a printer's place (depth 0), an AMS unit or the external holder (1) or a
+    slot (2)."""
+
+    location_id: UUID
+    code: str
+    name: str
+    depth: int
+
+
+class PrinterLabels(BaseModel):
+    base_url: str | None
+    labels: list[PrinterLabel]
+    #: The names of the printers with no report that lists an AMS unit or an external
+    #: holder: their slots get labels only once a spool has been loaded in them.
+    no_report: list[str] = []
 
 
 Reading = Annotated[float, Field(allow_inf_nan=False)]
@@ -807,6 +884,15 @@ class EffectivePreset(BaseModel):
     slicer_filament_name: str | None
     overridden: bool
     migrated: bool = False
+    #: For a ScadBuddy preset (``slicer_filament`` ``sb-<id>``, #7176): its Bambuddy
+    #: local preset id (its mirror), or ``None`` while Bambuddy has none. Unset for any
+    #: other ref, which Bambuddy knows as it is (`for_bambuddy`).
+    bambuddy_id: str | None = None
+
+    def for_bambuddy(self) -> str | None:
+        """The ref Bambuddy knows this preset by: the mirror's id for a ScadBuddy preset
+        (``None`` without one), else ``slicer_filament`` as it is."""
+        return self.bambuddy_id if sb_id(self.slicer_filament) is not None else self.slicer_filament
 
 
 class EffectiveKValue(BaseModel):
@@ -972,12 +1058,44 @@ class SpoolCreate(_In):
     weight_locked: bool = False
     note: Note | None = None
     grams_left: Grams | None = None
+    #: Whether the spool was added full (#7149 R-7149-2); ``None`` is not known.
+    added_full: bool | None = None
 
     @model_validator(mode="after")
     def _typed(self) -> SpoolCreate:
         if self.type_id is None and self.material_id is None:
             raise ValueError("a spool needs a type_id or a material_id")
         return self
+
+
+class SpoolDraftPreset(SpoolPresetCreate):
+    """A draft's own preset row (#7150, R-7150-11). ``migrated`` keeps a copied row's
+    origin: a row the presets-per-nozzle migration made stays ``migrated`` on the copy, so
+    the copy's first type drops it as it would the source's (`presets.drop_migrated`). A
+    row a person changes is theirs, so the spool form drops the flag on an edit."""
+
+    migrated: bool = False
+
+
+class SpoolDraft(_In):
+    """A new spool as the spool form holds it (#7150, R-7150-2): its fields, the place it
+    goes to (not a printer's tray) and its own presets and K values. What
+    ``GET /filament/spools/{id}/copy`` answers (R-7150-3)."""
+
+    spool: SpoolCreate
+    location_id: UUID | None = None
+    presets: list[SpoolDraftPreset] = Field(default_factory=list)
+    k_values: list[SpoolKValueCreate] = Field(default_factory=list)
+
+
+#: The most spools one bulk create makes (R-7150-1).
+BULK_MAX: Final = 100
+
+
+class SpoolBulkCreate(SpoolDraft):
+    """``quantity`` identical spools, each with its own number (#7150, R-7150-1)."""
+
+    quantity: Annotated[int, Field(ge=1, le=BULK_MAX)] = 1
 
 
 class SpoolPatch(_Patch):
@@ -1007,6 +1125,7 @@ class SpoolPatch(_Patch):
     cost_per_kg: Cost | None = None
     weight_locked: bool | None = None
     note: Note | None = None
+    added_full: bool | None = None
     archived: bool | None = None
 
 
@@ -1059,6 +1178,14 @@ class Spool(_Row):
     #: The invoice line the spool was bought on, if any. An invoice line may fill a spool
     #: with none, costed or not; one with a line is refused (#6700).
     invoice_line_id: UUID | None = None
+    #: How the spool's data came in, in Bambuddy's words (``rfid_auto``, ``nfc_link``,
+    #: ``opentag3d`` ...), whether the pull or ScadBuddy wrote it (#7149 R-7149-1). Read
+    #: only: the pull, a person's tag bind and a confirmed NTAG write set it.
+    data_origin: str | None = None
+    #: Whether the spool was added full; ``None`` is not known (R-7149-2).
+    added_full: bool | None = None
+    #: When its tag was written (Bambuddy's ``encode_time``, R-7149-3). Read only.
+    tag_encoded_at: datetime | None = None
     #: The values the spool has after its overrides over its type's.
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
     #: The names of the fields the spool overrides.
@@ -1216,13 +1343,16 @@ class FilamentSpoolSummary(BaseModel):
 class HeldSpool(BaseModel):
     """What a tray's picker row and its low-filament warnings read of the SB spool in it
     (`bambuddy/trays.py` `loaded_trays`): its id and number, its effective brand and
-    colour names, ``rgba`` and label weight, and the ledger's grams. Nothing else, so
+    colour names, ``rgba`` and label weight, the ledger's grams, and its material and
+    subtype names for the rack's Glow and abrasive tests only (#6876). Nothing else, so
     the background slice's request stays small (#6262, ``MAX_REQUEST_BYTES``)."""
 
     id: UUID
     number: int
     needs_type: bool
     brand: str | None = None
+    material: str | None = None
+    subtype: str | None = None
     colour_name: str | None = None
     rgba: str | None = None
     grams_left: float | None = None
@@ -1236,6 +1366,8 @@ class HeldSpool(BaseModel):
             number=spool.number,
             needs_type=spool.type_id is None,
             brand=spool.names.brand,
+            material=spool.names.material,
+            subtype=spool.names.subtype,
             colour_name=effective.colour_name,
             rgba=effective.rgba,
             grams_left=spool.grams_left,
@@ -1323,6 +1455,7 @@ EventKind = Literal[
     "archived",
     "restored",
     "synced_from_bb",
+    "consumed_reset",
 ]
 EventSource = Literal["ams_remain", "scale", "print_estimate", "print_actual", "person", "bb"]
 
@@ -1432,11 +1565,12 @@ class SpoolEvent(BaseModel):
 
 class SpoolEventAdd(_In):
     """What a person records on a spool: a weighing (``grams`` is the filament left,
-    without the empty spool) or a drying (its temperature and hours). A drying that leaves
-    out ``temp_c`` or ``hours`` takes the spool's `DryingDefaults` for it; ``null`` records
-    none (#6720)."""
+    without the empty spool), a drying (its temperature and hours) or a reset of its
+    consumed counter (``consumed_reset``, #7149 R-7149-4: no grams, the grams left stay). A
+    drying that leaves out ``temp_c`` or ``hours`` takes the spool's `DryingDefaults` for
+    it; ``null`` records none (#6720)."""
 
-    kind: Literal["weighed", "dried"]
+    kind: Literal["weighed", "dried", "consumed_reset"]
     source: Literal["person", "scale"] = "person"
     #: When it happened, with its offset; never later than now (`FUTURE_SKEW` allowed).
     at: AwareDatetime | None = None
@@ -1456,7 +1590,25 @@ class SpoolEventAdd(_In):
             raise ValueError("a weighing has no temp_c or hours")
         if self.kind == "dried" and self.grams is not None:
             raise ValueError("a drying has no grams; record a weighing for that")
+        if self.kind == "consumed_reset" and (
+            self.grams is not None or self.temp_c is not None or self.hours is not None
+        ):
+            raise ValueError("a consumed reset has no grams, temp_c or hours")
         return self
+
+
+class ConsumedReset(_In):
+    """The spools whose consumed counter to start again (#7149 R-7149-4): an explicit list,
+    never "all", as Bambuddy's bulk reset takes (a slip would wipe every counter)."""
+
+    spool_ids: list[UUID] = Field(min_length=1, max_length=500)
+
+
+class ConsumedResetDone(BaseModel):
+    """How many spools took a ``consumed_reset`` event, and the ids that name no spool."""
+
+    reset: int
+    not_found: list[UUID]
 
 
 class SpoolArchive(_In):
@@ -1549,13 +1701,15 @@ class SpoolTypeSupplier(BaseModel):
     price_per_kg: Decimal | None
 
 
-DryingFrom = Literal["spool", "type", "subtype", "material"]
+DryingFrom = Literal["spool", "type", "subtype", "material", "setting"]
 
 
 class DryingDefaults(BaseModel):
     """What a drying of the spool records when it does not say (#6720, R-6714-10,
     R-6714-18): each field from the spool's own override, else its type, else its subtype,
-    else its material; ``*_from`` names which. ``None`` when none of them sets it."""
+    else its material, else the setting ``filament_drying_temp_c`` or
+    ``filament_drying_hours`` (#7156); ``*_from`` names which. ``None`` when none of them
+    sets it."""
 
     temp_c: int | None = None
     hours: Decimal | None = None
@@ -1687,16 +1841,28 @@ class RfidState(BaseModel):
     #: The last reconcile was refused because Bambuddy's auth is on.
     blocked: bool = False
     changed_at: AwareDatetime
+    #: ScadBuddy's own setting ``filament_auto_add_unknown_rfid`` is off (#7156, R-7156-2),
+    #: read in the same statement as the row.
+    auto_add_off: bool = False
+
+    @property
+    def holds(self) -> bool:
+        """Bambuddy's ``auto_add_unknown_rfid`` is held off: by the mode, or by the setting
+        (R-7156-3)."""
+        return self.override_mode or self.auto_add_off
 
 
 class RfidStatus(BaseModel):
-    """The answer on the RFID override mode (#6264). ``state`` is ``applied`` when the
-    mode is on and Bambuddy reads ``false``; ``pending`` when a write has not landed or
-    Bambuddy could not be reached (``detail`` then names the error); ``blocked`` when
-    Bambuddy refused the write because its auth is on; ``off`` when the mode is off and
-    nothing is saved."""
+    """The answer on the RFID override mode (#6264) and the setting
+    ``filament_auto_add_unknown_rfid`` (#7156), the two holds on Bambuddy's
+    ``auto_add_unknown_rfid``. ``state`` is ``applied`` when either holds it and Bambuddy
+    reads ``false``; ``pending`` when a write has not landed or Bambuddy could not be
+    reached (``detail`` then names the error); ``blocked`` when Bambuddy refused the write
+    because its auth is on; ``off`` when neither holds and nothing is saved."""
 
     override_mode: bool
+    #: ScadBuddy's setting: ``False`` holds Bambuddy's value off as the mode does.
+    auto_add_unknown_rfid: bool = True
     state: Literal["off", "applied", "pending", "blocked"]
     bambuddy_auto_add: bool | None = None
     saved_auto_add: bool | None = None
