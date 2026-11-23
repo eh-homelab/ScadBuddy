@@ -284,6 +284,7 @@ function publishFile(found: StorefrontListing): Response {
     ...found,
     library_file: { ...asked, pinned: sha, repin: false, filename },
     published: true,
+    // As publish copies a file's pictures (§5.2 step 4): one image per id, its id as `media_id`.
     media: publishedMedia(found),
     published_at: at,
     updated_at: at,
@@ -449,7 +450,8 @@ export const handlers = [
   // #6710 §9.3 — a plate's picture in the pinned copy: 404 with no pin.
   http.get(`${base}/:id/plates/:plate`, ({ params }) => {
     const found = listings.find((l) => l.id === String(params['id']))
-    if (!found?.library_file?.pinned) return refused(404, 'listing_not_found', 'no picture of that plate')
+    // As `get_listing_plate`: a plain 404, no problem type, for a listing with no pin.
+    if (!found?.library_file?.pinned) return HttpResponse.json({ detail: `no picture of plate ${String(params['plate']).replace(/\.png$/, '')}` }, { status: 404 })
     return pngResponse()
   }),
 
