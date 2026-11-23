@@ -1465,7 +1465,8 @@ describe('filament_spool_upsert quantity and copy_of', () => {
   })
 
   // R-7150-8: a resend reads the copy again, so its key names the draft it read too.
-  function copyResends(drafts: unknown[]) {
+  const TEAL = { spool: { type_id: ROW, colour_name: 'Teal' }, location_id: null, presets: [], k_values: [] }
+  function copyResends(drafts: (typeof TEAL)[]) {
     const keys: (string | null)[] = []
     let read = 0
     server.use(
@@ -1477,7 +1478,6 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     )
     return keys
   }
-  const TEAL = { spool: { type_id: ROW, colour_name: 'Teal' }, location_id: null, presets: [], k_values: [] }
 
   it('sends the same key when a copy is resent with its source unchanged (R-7150-8)', async () => {
     const keys = copyResends([TEAL, TEAL])
