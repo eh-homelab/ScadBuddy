@@ -22,6 +22,9 @@ describe('dot segments in backend paths (#7221)', () => {
     expect(new URL('http://api.example/a/b\\..\\c').pathname).toBe('/a/c')
     expect(() => refuseDotSegments('http://api.example/a/b\\..\\c', 'a read')).toThrow(DotSegmentError)
     expect(refuseDotSegments('http://api.example/a/b%5C..%5Cc', 'a read')).toBe('http://api.example/a/b%5C..%5Cc')
+    // Right after the host as well (#7277): the host ends at the backslash.
+    expect(new URL('http://api.example\\..\\x').pathname).toBe('/x')
+    expect(() => refuseDotSegments('http://api.example\\..\\x', 'a read')).toThrow(DotSegmentError)
   })
 
   it('a refused path is never read as the backend away, so it is never tried again (#7225)', () => {
