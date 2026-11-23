@@ -229,6 +229,80 @@ def test_background_tools_come_from_the_parent_unless_refused(agent: Agent) -> N
     assert agent.refused("POST", "/sessions", _new(background_tools=True)).status_code == 422
 
 
+BROWSER = {
+    "user_agent": "Mozilla/5.0 (iPhone)",
+    "viewport": {"width": 390, "height": 844},
+    "locale": "en-GB",
+}
+
+
+def test_browser_is_stored_and_read(agent: Agent) -> None:
+    row = _start(agent, browser=BROWSER)
+    assert row["browser"] == BROWSER
+    assert agent.get(f"/sessions/{row['id']}")["session"]["browser"] == BROWSER
+    listed = agent.post("/sessions/list", {"principal": None})["sessions"]
+    assert [s["browser"] for s in listed if s["id"] == row["id"]] == [BROWSER]
+
+
+def test_no_browser_reads_null(agent: Agent) -> None:
+    assert _start(agent)["browser"] is None
+
+
+def test_empty_browser_reads_null(agent: Agent) -> None:
+    assert _start(agent, browser={})["browser"] is None
+
+
+def test_fork_inherits_browser(agent: Agent) -> None:
+    parent = _start(agent, browser=BROWSER)
+    assert _start(agent, parent_id=parent["id"])["browser"] == BROWSER
+    own = {"locale": "de"}
+    assert _start(agent, parent_id=parent["id"], browser=own)["browser"] == own
+
+
+@pytest.mark.parametrize(
+    "browser",
+    [
+        {"user_agent": ""},
+        {"user_agent": "x" * 513},
+        {"user_agent": "\u00e9"},
+        {"user_agent": "a\nb"},
+        {"viewport": {"width": 319, "height": 800}},
+        {"viewport": {"width": 3841, "height": 800}},
+        {"viewport": {"width": 800, "height": 319}},
+        {"viewport": {"width": 800, "height": 2161}},
+        {"viewport": {"width": 390.5, "height": 800}},
+        {"viewport": {"width": 800}},
+        {"locale": "en_GB"},
+        {"locale": "e"},
+        {"locale": "a" * 36},
+        {"locale": "en--GB"},
+        {"proxy": "x"},
+    ],
+)
+def test_browser_out_of_bounds_is_422(
+    agent: Agent, tables: PgPool, browser: dict[str, Any]
+) -> None:
+    body = _new(browser=browser)
+    response = agent.refused("POST", "/sessions", body)
+    assert response.status_code == 422
+    errors = response.json()["errors"]
+    assert all(e["loc"][:2] == ["body", "browser"] for e in errors), errors
+    assert _sql(tables, "SELECT 1 FROM ai_sessions WHERE id = %s", (body["id"],)) == []
+
+
+@pytest.mark.parametrize(
+    "browser",
+    [
+        {"user_agent": "a" * 512},
+        {"viewport": {"width": 320, "height": 320}},
+        {"viewport": {"width": 3840, "height": 2160}},
+        {"locale": "zh-Hant-TW"},
+    ],
+)
+def test_browser_bound_edges_pass(agent: Agent, browser: dict[str, Any]) -> None:
+    assert _start(agent, browser=browser)["browser"] == browser
+
+
 def test_the_new_session_limit_holds_under_the_owner_lock(agent: Agent, tables: PgPool) -> None:
     limit = {"max": 2, "window_ms": 60_000}
     _start(agent, TOKEN, limit=limit)
