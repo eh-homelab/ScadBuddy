@@ -361,6 +361,13 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // answer links it there.
   storefront_listing_draft: () => [],
   storefront_listing_publish: () => [],
+  // A hosted plugin (#6938) is a record of its own, in Settings → Tools & plugins → Hosted
+  // plugins; its package's pin is reviewed there too.
+  hosted_plugin_create: () => [],
+  hosted_plugin_update: () => [],
+  hosted_plugin_file_write: () => [],
+  hosted_plugin_file_delete: () => [],
+  hosted_plugin_publish: () => [],
   // The price book (#4250) is a record of its own, edited on the Filament page's Types tab.
   price_book_set: () => [],
   price_book_import_spools: () => [],

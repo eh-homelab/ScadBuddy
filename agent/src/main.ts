@@ -135,7 +135,7 @@ import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
 import { CrudOperations, OperationStore } from './operations/store.js'
 import { activityKindsOf, crudUpsertActivityKinds } from './activity/kinds.js'
-import { packageKinds } from './plugins/packages/operations.js'
+import { offerHosted, packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
@@ -466,6 +466,12 @@ const packageInstaller = new PackageInstaller({
 // (read only), once per content hash; and what a turn would make of the enabled packages.
 const verifiedPackageReview = reviewsByHash((pin) => verifiedReview(packageInstaller, pin))
 const packagesLoadCheck = packageLoadCheck(pluginPackages, packageInstaller)
+// hosted_plugin_publish's offer (#6938, spec 2026-11-21 §6.2): in-process, never through the
+// UI-guarded package routes. Every path shares toolServices (an in-process turn, /mcp, a ToolCall).
+toolServices.hostedPackages = {
+  get: (name) => pluginPackages.get(name),
+  offer: (name, signal) => offerHosted(pluginPackages, packageInstaller, name, signal),
+}
 // The cache is this pod's scratch, empty after every deploy: filled at start, so a
 // turn does not wait on a whole repository's fetch (#4217).
 void untilAreas()
