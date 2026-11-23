@@ -4,7 +4,11 @@
 // agent's service credential. A value with `/` is safe (`%2F`). The client's refusal of
 // redirects (backend.ts, #7104) stays as a backstop for the last segment.
 
-/** A backend path that names a `.` or `..` segment: it is never sent. */
+/**
+ * A backend path that names a `.` or `..` segment: it is never sent. A plain error, never a
+ * CrudReadError: no classifier reads it as the backend away (`isTransient`, `backendDropped`),
+ * so a refused path is never tried again (#7225).
+ */
 export class DotSegmentError extends Error {
   override name = 'DotSegmentError'
 }
@@ -23,7 +27,8 @@ export function isDotSegment(value: string): boolean {
  */
 export function refuseDotSegments(url: string, what: string): string {
   const path = url.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, '').split(/[?#]/, 1)[0] ?? ''
-  if (path.split('/').some(isDotSegment)) throw new DotSegmentError(`${what}: a path segment is "." or "..", so it was not sent`)
+  // The URL parser reads a raw `\` as a separator too, in an http(s) URL (#7225).
+  if (path.split(/[/\\]/).some(isDotSegment)) throw new DotSegmentError(`${what}: a path segment is "." or "..", so it was not sent`)
   return url
 }
 
