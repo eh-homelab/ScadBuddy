@@ -35,6 +35,10 @@ const name = z
 
 /** The top folders a draft may hold (backend hosted_plugins/rules.py `TOP_LEVEL`). */
 const TOP_LEVEL = ['skills', 'agents', 'commands']
+/** The longest path and the longest segment, in UTF-8 bytes (rules.py `MAX_PATH_BYTES`, `MAX_SEGMENT_BYTES`). */
+const MAX_PATH_BYTES = 1024
+const MAX_SEGMENT_BYTES = 255
+const utf8Bytes = (text: string) => Buffer.byteLength(text, 'utf8')
 
 /**
  * Why a draft path is refused, or undefined: the API's own rules (backend hosted_plugins/rules.py
@@ -44,6 +48,7 @@ const TOP_LEVEL = ['skills', 'agents', 'commands']
  */
 export function draftPathProblem(path: string): string | undefined {
   if (path === '') return 'the path is empty'
+  if (utf8Bytes(path) > MAX_PATH_BYTES) return `the path is too long: at most ${MAX_PATH_BYTES} bytes`
   if (path.includes('\\')) return 'the path holds a backslash; separate folders with /'
   // eslint-disable-next-line no-control-regex -- the API refuses control characters too
   if (/[\x00-\x1f\x7f]/.test(path)) return 'the path holds a control character'
@@ -52,6 +57,7 @@ export function draftPathProblem(path: string): string | undefined {
   for (const segment of segments) {
     if (segment === '') return 'the path has an empty segment'
     if (segment.startsWith('.')) return `"${segment}" starts with "."; no ".", "..", hidden files or folders`
+    if (utf8Bytes(segment) > MAX_SEGMENT_BYTES) return `a segment of the path is too long: at most ${MAX_SEGMENT_BYTES} bytes`
   }
   if (segments.length < 2 || !TOP_LEVEL.includes(segments[0] ?? '')) return 'a file must be under skills/, agents/ or commands/'
   return undefined
@@ -60,7 +66,7 @@ export function draftPathProblem(path: string): string | undefined {
 const filePath = z
   .string()
   .min(1)
-  .max(1024)
+  .max(MAX_PATH_BYTES)
   .superRefine((path, check) => {
     const problem = draftPathProblem(path)
     if (problem) check.addIssue({ code: 'custom', message: problem })

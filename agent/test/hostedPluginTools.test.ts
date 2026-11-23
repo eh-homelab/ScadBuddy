@@ -186,7 +186,9 @@ describe('hosted plugin tools (#6938)', () => {
         return HttpResponse.json({})
       }),
     )
-    const bad = ['..', '.', 'a/../b', 'skills/../..', '/skills/x', 'skills//x', 'skills\\x', 'skills/.hidden', '.claude-plugin/plugin.json', 'other/x', 'skills']
+    const bad = ['..', '.', 'a/../b', 'skills/../..', '/skills/x', 'skills//x', 'skills\\x', 'skills/.hidden', '.claude-plugin/plugin.json', 'other/x', 'skills',
+      // Within 1024 characters but over the API's UTF-8 byte limits: a 256-byte segment, a 1214-byte path.
+      `skills/${'é'.repeat(128)}`, `skills/${`${'é'.repeat(100)}/`.repeat(6)}x`]
     const calls: [string, Record<string, unknown>][] = [
       ['hosted_plugin_file_read', {}],
       ['hosted_plugin_file_write', { content: 'x' }],
