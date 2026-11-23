@@ -1,4 +1,4 @@
-import { memo, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { memo, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
 import { PencilIcon, PlusIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { failure } from '../../lib/mediaFiles'
 import { useAsync } from '../../lib/useAsync'
@@ -65,17 +65,23 @@ function retyped(draft: Draft, type: ValueType): Draft {
   return { ...draft, type }
 }
 
-/** The draft's value, or why it is not one. A string is sent as typed: only the key is trimmed. */
+/** A decimal number, an exponent allowed: `Number` alone would also take `0x1A`, `0b11` and `Infinity`. */
+const DECIMAL = /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/
+
+/**
+ * The draft's value, or why it is not one. A string is sent as typed: only the key is trimmed.
+ * A list drops only its items that are exactly empty (R12: a stored string is never trimmed).
+ */
 function valueOf(draft: Draft): { value: PropertyValue } | { error: string } {
   switch (draft.type) {
     case 'number': {
-      const number = Number(draft.text.trim())
-      return draft.text.trim() !== '' && Number.isFinite(number) ? { value: number } : { error: 'Enter a number, such as 1.8.' }
+      const text = draft.text.trim()
+      return DECIMAL.test(text) && Number.isFinite(Number(text)) ? { value: Number(text) } : { error: 'Enter a number, such as 1.8.' }
     }
     case 'yesno':
       return { value: draft.yes }
     case 'list':
-      return { value: [...draft.items] }
+      return { value: draft.items.filter((item) => item !== '') }
     default:
       return { value: draft.text }
   }
@@ -173,8 +179,10 @@ function EntityProperties({ entity, title = 'Properties' }: { entity: string; ti
   // second write in flight could answer first and the older reply would then show.
   const [writing, setWriting] = useState(false)
   const writingNow = useRef(false)
-  // The key whose Edit button takes the focus once its form closes (a rename's new key).
+  // The key whose Edit button takes the focus once its form closes (a rename's new key) or a remove ends.
   const [focusKey, setFocusKey] = useState<string | null>(null)
+  // The add form's key field, which takes the focus when a remove leaves no row.
+  const addKey = useRef<HTMLInputElement>(null)
 
   async function patch(set: PropertySet) {
     if (writingNow.current) throw new Error('Another change is being saved. Try again when it is done.')
@@ -208,7 +216,7 @@ function EntityProperties({ entity, title = 'Properties' }: { entity: string; ti
         <div className="overflow-hidden rounded-md border">
           <table className="w-full text-[13px]">
             <tbody className="divide-y">
-              {properties.map((property) => (
+              {properties.map((property, at) => (
                 <PropertyRow
                   key={property.key}
                   property={property}
@@ -220,6 +228,12 @@ function EntityProperties({ entity, title = 'Properties' }: { entity: string; ti
                   takeFocus={focusKey === property.key}
                   onFocused={() => setFocusKey(null)}
                   onClosed={setFocusKey}
+                  onRemoved={() => {
+                    // The focus goes to the next row, the previous one if this was the last, or the add form.
+                    const after = properties[at + 1]?.key ?? properties[at - 1]?.key
+                    if (after === undefined) addKey.current?.focus()
+                    else setFocusKey(after)
+                  }}
                   onPatch={patch}
                 />
               ))}
@@ -228,7 +242,7 @@ function EntityProperties({ entity, title = 'Properties' }: { entity: string; ti
         </div>
       )}
       {/* Only once the keys are known: an add onto a stored key must ask before it replaces. */}
-      {list.data && !list.error && <AddProperty docs={docs} keys={keys} keysId={keysId} locked={writing} onPatch={patch} />}
+      {list.data && !list.error && <AddProperty docs={docs} keys={keys} keysId={keysId} locked={writing} keyInput={addKey} onPatch={patch} />}
     </section>
   )
 }
@@ -330,6 +344,7 @@ function PropertyRow({
   takeFocus,
   onFocused,
   onClosed,
+  onRemoved,
   onPatch,
 }: {
   property: EntityProperty
@@ -344,6 +359,8 @@ function PropertyRow({
   onFocused: () => void
   /** The form closed; the focus goes to the Edit button of `key`, the row's key after it. */
   onClosed: (key: string) => void
+  /** The row's key was removed; the panel moves the focus. */
+  onRemoved: () => void
   onPatch: Patch
 }) {
   const { key } = property
@@ -466,7 +483,7 @@ function PropertyRow({
           title="Remove"
           disabled={busy}
           className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-          onClick={() => patch.send({ [key]: null })}
+          onClick={() => patch.send({ [key]: null }, { done: onRemoved })}
         >
           {patch.busy ? <Spinner /> : <Trash2Icon aria-hidden="true" />}
         </Button>
@@ -482,12 +499,14 @@ function AddProperty({
   keys,
   keysId,
   locked,
+  keyInput,
   onPatch,
 }: {
   docs: Record<string, KeyDoc>
   keys: ReadonlySet<string>
   keysId: string
   locked: boolean
+  keyInput: RefObject<HTMLInputElement | null>
   onPatch: Patch
 }) {
   const [key, setKey] = useState('')
@@ -519,6 +538,7 @@ function AddProperty({
     <form noValidate onSubmit={add} aria-label="Add a property" className="flex flex-col gap-2 rounded-md border border-dashed p-2.5">
       <div className="flex flex-wrap items-start gap-2">
         <Input
+          ref={keyInput}
           value={key}
           onChange={(event) => {
             setKey(event.target.value)

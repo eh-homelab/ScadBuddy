@@ -185,6 +185,57 @@ describe('PropertiesPanel (#7026)', () => {
     expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { mpn: null } }])
   })
 
+  it('takes a decimal number only: a hex or binary literal is an error, an exponent is not', async () => {
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await screen.findByText('No properties yet.')
+    await user.type(screen.getByLabelText('New property key'), 'td')
+    const value = screen.getByLabelText('New property value')
+    for (const text of ['0x1A', '0b11', '0o7', '1.', '.5', 'Infinity']) {
+      await user.clear(value)
+      await user.type(value, text)
+      await user.click(screen.getByRole('button', { name: 'Add property' }))
+      expect(screen.getByRole('alert')).toHaveTextContent('Enter a number, such as 1.8.')
+    }
+    expect(entityMock.propertyPatches).toEqual([])
+    await user.clear(value)
+    await user.type(value, '-1.5e3')
+    await user.click(screen.getByRole('button', { name: 'Add property' }))
+    await screen.findByRole('row', { name: /td/ })
+    expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { td: -1500 } }])
+  })
+
+  it('drops the empty items of a list on save, so an untouched new list saves as []', async () => {
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await screen.findByText('No properties yet.')
+    await user.type(screen.getByLabelText('New property key'), 'asin')
+    await user.click(screen.getByRole('button', { name: 'Add property' }))
+    await screen.findByRole('row', { name: /asin/ })
+    await user.type(screen.getByLabelText('New property key'), 'tags')
+    await choose(user, screen.getByRole('combobox', { name: 'New property type' }), 'List')
+    await user.type(screen.getByLabelText('New property value, item 1'), ' ')
+    await user.click(screen.getByRole('button', { name: 'Add item' }))
+    await user.click(screen.getByRole('button', { name: 'Add item' }))
+    await user.type(screen.getByLabelText('New property value, item 3'), 'b')
+    await user.click(screen.getByRole('button', { name: 'Add property' }))
+    await screen.findByRole('row', { name: /tags/ })
+    // Only an item that is exactly empty goes: a space is a value (strings are never trimmed).
+    expect(entityMock.propertyPatches).toEqual([
+      { entity: TYPE, set: { asin: [] } },
+      { entity: TYPE, set: { tags: [' ', 'b'] } },
+    ])
+  })
+
+  it("moves focus after a remove to the next row's Edit button, then the previous one's, then the add form", async () => {
+    seedEntityProperties(TYPE, { a: '1', b: '2', c: '3' })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(within(await screen.findByRole('row', { name: /^b/ })).getByRole('button', { name: 'Remove b' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit c' })).toHaveFocus())
+    await user.click(screen.getByRole('button', { name: 'Remove c' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit a' })).toHaveFocus())
+    await user.click(screen.getByRole('button', { name: 'Remove a' }))
+    await waitFor(() => expect(screen.getByLabelText('New property key')).toHaveFocus())
+  })
+
   it('offers no add form while the properties load, so a replace cannot go unasked', async () => {
     seedEntityProperties(TYPE, { gtin: ['1', '2', '3'] })
     const read = gate()
