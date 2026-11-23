@@ -48,6 +48,14 @@ pin with whether that pin is approved, and for a hosted package the version that
 add a package to the feed and remove it (#6936); a feed or package that is not there is 404
 ``feed-not-found`` or ``package-not-found``.
 
+A hosted package (#6934, ``source_kind`` ``hosted``) is pinned to a published version
+(``pin_kind`` ``version``): its install and re-pin are stored only when that version of the
+hosted plugin of the same name has the content hash sent (409 ``hosted-version-mismatch``),
+and every row answered carries ``hosted_latest_version``, the hosted plugin's latest
+version, so the agent shows a version that no pin names ("version N not offered", spec
+§6.3). A package of any other kind cannot take a hosted plugin's name (409
+``hosted-name-taken``, the reverse of ruling R3).
+
 A package that is not there is 404 ``package-not-found``. Each refusal's text is the
 agent's ``PluginError``'s, which the agent raises again with the route's status.
 """
@@ -105,15 +113,17 @@ MIRROR_MISSING = "mirror-missing"
 MIRROR_NOT_FOUND = "mirror-not-found"
 HOSTED_VERSION_NOT_FOUND = "hosted-version-not-found"
 FEED_NOT_FOUND = "feed-not-found"
+HOSTED_VERSION_MISMATCH = "hosted-version-mismatch"
+HOSTED_NAME_TAKEN = "hosted-name-taken"
 
 Name = Annotated[str, Path(pattern=NAME_PATTERN)]
 Sha256 = Annotated[str, Path(pattern=SHA256_PATTERN)]
 
-#: Where a package comes from (the table's CHECK). ``hosted`` is the schema's only (#6934).
+#: Where a package comes from (the table's CHECK).
 SourceKind = Literal["git", "marketplace", "marketplace-url", "archive", "npm", "hosted"]
-#: The kinds an install here may name.
-InstallKind = Literal["git", "marketplace", "marketplace-url", "archive", "npm"]
-PinKind = Literal["commit", "bytes"]
+PinKind = Literal["commit", "bytes", "version"]
+#: The column each pin kind names its pin by.
+PIN_FIELD: dict[str, str] = {"commit": "commit_sha", "bytes": "bytes_sha256", "version": "version"}
 #: The kinds that name a marketplace entry.
 MARKETPLACE_KINDS = frozenset({"marketplace", "marketplace-url"})
 #: The kinds whose ref names what was asked for (a branch, tag or commit), never empty.
@@ -186,6 +196,9 @@ class PackageRow(BaseModel):
     pending_review: dict[str, Any] | None
     created_at: datetime
     updated_at: datetime
+    #: For a ``hosted`` package, its hosted plugin's ``latest_version`` (null otherwise, or
+    #: before a publish): a version neither the pin nor the re-pin names is "not offered".
+    hosted_latest_version: int | None = None
 
 
 class Package(BaseModel):
@@ -237,8 +250,26 @@ def _read(row: Any) -> dict[str, Any]:
     return out
 
 
-def _row(row: Any) -> PackageRow:
-    return PackageRow.model_validate(_read(row))
+def _rows(conn: psycopg.Connection[Any], rows: list[Any]) -> list[PackageRow]:
+    """Rows as every route answers them, a hosted one with its plugin's latest version."""
+    hosted = [r["name"] for r in rows if r["source_kind"] == "hosted"]
+    latest: dict[str, int | None] = {}
+    if hosted:
+        latest = {
+            r["name"]: r["latest_version"]
+            for r in conn.execute(
+                "SELECT name, latest_version FROM ai_hosted_plugins WHERE name = ANY(%s)",
+                (hosted,),
+            ).fetchall()
+        }
+    return [
+        PackageRow.model_validate({**_read(r), "hosted_latest_version": latest.get(r["name"])})
+        for r in rows
+    ]
+
+
+def _row(conn: psycopg.Connection[Any], row: Any) -> PackageRow:
+    return _rows(conn, [row])[0]
 
 
 def _not_found(name: str) -> ApiError:
@@ -256,13 +287,30 @@ def _refused(review: dict[str, Any]) -> list[str]:
 
 
 def _pin_id(row: Any, prefix: str = "") -> str | None:
-    """The row's (or with ``pending_``, its re-pin's) commit or bytes sha256."""
-    kind = row[f"{prefix}pin_kind"]
-    if kind == "commit":
-        return row[f"{prefix}commit_sha"]  # type: ignore[no-any-return]
-    if kind == "bytes":
-        return row[f"{prefix}bytes_sha256"]  # type: ignore[no-any-return]
-    return None
+    """The row's (or with ``pending_``, its re-pin's) commit, bytes sha256 or version, as
+    text."""
+    field = PIN_FIELD.get(row[f"{prefix}pin_kind"])
+    value = None if field is None else row[f"{prefix}{field}"]
+    return None if value is None else str(value)
+
+
+def _hosted_held(conn: psycopg.Connection[Any], name: str, body: Pin) -> None:
+    """A version pin names a published version of the hosted plugin ``name`` whose content
+    hash is the one sent: the agent hashed what that version's zip holds."""
+    if body.version is None:
+        return
+    found = conn.execute(
+        "SELECT 1 FROM ai_hosted_plugins h JOIN ai_hosted_plugin_versions v ON v.plugin_id = h.id"
+        " WHERE h.name = %s AND v.version = %s AND v.content_hash = %s FOR KEY SHARE OF h",
+        (name, body.version, body.content_hash),
+    ).fetchone()
+    if found is None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f'the hosted plugin "{name}" has no version {body.version}'
+            f" with the content hash {body.content_hash}",
+            reason=HOSTED_VERSION_MISMATCH,
+        )
 
 
 def _mirror_held(conn: psycopg.Connection[Any], name: str, body: Pin) -> None:
@@ -298,7 +346,7 @@ async def plugin_packages(state: StateDep, enabled: Annotated[bool, Query()] = F
 
     def run(conn: psycopg.Connection[Any]) -> list[PackageRow]:
         rows = conn.execute(f"SELECT * FROM ai_plugin_packages{where} ORDER BY name").fetchall()
-        return [_row(r) for r in rows]
+        return _rows(conn, rows)
 
     return Packages(packages=await _in_tx(state, run))
 
@@ -307,19 +355,21 @@ async def plugin_packages(state: StateDep, enabled: Annotated[bool, Query()] = F
 async def plugin_package(name: Name, state: StateDep) -> Package:
     def run(conn: psycopg.Connection[Any]) -> PackageRow | None:
         row = conn.execute("SELECT * FROM ai_plugin_packages WHERE name = %s", (name,)).fetchone()
-        return None if row is None else _row(row)
+        return None if row is None else _row(conn, row)
 
     return Package(package=await _in_tx(state, run))
 
 
 class Pin(_Body):
-    """A fetched, vetted and hashed commit or file, as the agent prepared it."""
+    """A fetched, vetted and hashed commit, file or hosted version, as the agent prepared
+    it."""
 
     fetch_url: str = Field(min_length=1, max_length=URL_MAX)
     fetch_path: str = Field(max_length=TEXT_MAX)
     pin_kind: PinKind = "commit"
     commit_sha: str | None = Field(default=None, pattern=COMMIT_PATTERN)
     bytes_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    version: int | None = Field(default=None, ge=1)
     content_hash: str = Field(pattern=HASH_PATTERN)
     files: dict[str, Any]
     review: dict[str, Any]
@@ -336,16 +386,19 @@ class Pin(_Body):
 
     @model_validator(mode="after")
     def _one_pin(self) -> Self:
-        commit = self.pin_kind == "commit"
-        if commit != (self.commit_sha is not None) or commit == (self.bytes_sha256 is not None):
-            field = "commit_sha" if commit else "bytes_sha256"
-            raise ValueError(f"a {self.pin_kind} pin names its {field} only")
+        named = [k for k, f in PIN_FIELD.items() if getattr(self, f) is not None]
+        if named != [self.pin_kind]:
+            raise ValueError(f"a {self.pin_kind} pin names its {PIN_FIELD[self.pin_kind]} only")
         return self
+
+    @property
+    def pin_id(self) -> str:
+        return str(getattr(self, PIN_FIELD[self.pin_kind]))
 
 
 class Install(Pin):
     name: str = Field(pattern=NAME_PATTERN)
-    source_kind: InstallKind
+    source_kind: SourceKind
     source_url: str = Field(min_length=1, max_length=URL_MAX)
     #: The ref asked for: a branch, tag or commit for a repository; an npm version or
     #: dist-tag (empty for a tarball link); an archive's expected ``sha256:`` or empty.
@@ -375,12 +428,21 @@ async def plugin_package_install(body: Install, state: StateDep) -> PackageRow:
         )
 
     def run(conn: psycopg.Connection[Any]) -> PackageRow:
+        hosted_store.lock_name(conn, body.name)
+        if body.source_kind != "hosted" and hosted_store.plugin(conn, body.name) is not None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f'"{body.name}" is the name of a hosted plugin; install that plugin from'
+                " Hosted plugins, or a package of another name",
+                reason=HOSTED_NAME_TAKEN,
+            )
         _mirror_held(conn, body.name, body)
+        _hosted_held(conn, body.name, body)
         row = conn.execute(
             "INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref,"
             " marketplace_entry, fetch_url, fetch_path, pin_kind, commit_sha, bytes_sha256,"
-            " content_hash, files, review)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " version, content_hash, files, review)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             " ON CONFLICT (name) DO NOTHING RETURNING *",
             (
                 body.name,
@@ -393,6 +455,7 @@ async def plugin_package_install(body: Install, state: StateDep) -> PackageRow:
                 body.pin_kind,
                 body.commit_sha,
                 body.bytes_sha256,
+                body.version,
                 body.content_hash,
                 Jsonb(body.files),
                 Jsonb(body.review),
@@ -407,7 +470,7 @@ async def plugin_package_install(body: Install, state: StateDep) -> PackageRow:
         # What an older replica's remove left: a re-install starts at the defaults.
         forget_package(conn, body.name)
         _written(conn)
-        return _row(row)
+        return _row(conn, row)
 
     return await _in_tx(state, run)
 
@@ -426,7 +489,7 @@ async def plugin_package_pending(name: Name, body: Pending, state: StateDep) -> 
             reason=PACKAGE_NAME_DIFFERS,
         )
 
-    pin_id = body.commit_sha or body.bytes_sha256
+    pin_id = body.pin_id
 
     def run(conn: psycopg.Connection[Any]) -> PackageRow:
         current = _locked(conn, name)
@@ -439,6 +502,7 @@ async def plugin_package_pending(name: Name, body: Pending, state: StateDep) -> 
         if kind in REF_KINDS and not body.ref:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"a {kind} source names its ref")
         _mirror_held(conn, name, body)
+        _hosted_held(conn, name, body)
         if (
             current["pin_kind"] == body.pin_kind
             and _pin_id(current) == pin_id
@@ -454,7 +518,7 @@ async def plugin_package_pending(name: Name, body: Pending, state: StateDep) -> 
         row = conn.execute(
             "UPDATE ai_plugin_packages SET pending_ref = %s, pending_fetch_url = %s,"
             " pending_fetch_path = %s, pending_pin_kind = %s, pending_commit_sha = %s,"
-            " pending_bytes_sha256 = %s, pending_version = NULL, pending_content_hash = %s,"
+            " pending_bytes_sha256 = %s, pending_version = %s, pending_content_hash = %s,"
             " pending_files = %s, pending_review = %s, updated_at = now()"
             " WHERE name = %s RETURNING *",
             (
@@ -464,6 +528,7 @@ async def plugin_package_pending(name: Name, body: Pending, state: StateDep) -> 
                 body.pin_kind,
                 body.commit_sha,
                 body.bytes_sha256,
+                body.version,
                 body.content_hash,
                 Jsonb(body.files),
                 Jsonb(body.review),
@@ -473,7 +538,7 @@ async def plugin_package_pending(name: Name, body: Pending, state: StateDep) -> 
         assert row is not None
         prune_stale_rows(conn, name, row["review"])
         _written(conn)
-        return _row(row)
+        return _row(conn, row)
 
     return await _in_tx(state, run)
 
@@ -493,32 +558,34 @@ async def plugin_package_discard(name: Name, state: StateDep) -> PackageRow:
             raise _not_found(name)
         prune_stale_rows(conn, name, row["review"])
         _written(conn)
-        return _row(row)
+        return _row(conn, row)
 
     return await _in_tx(state, run)
 
 
 class Approve(_Body):
-    """The pin the review showed: its commit, or for a bytes pin its bytes' sha256."""
+    """The pin the review showed: its commit, for a bytes pin its bytes' sha256, or for a
+    hosted package its version."""
 
     commit_sha: str | None = Field(default=None, pattern=COMMIT_PATTERN)
     bytes_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    version: int | None = Field(default=None, ge=1)
     content_hash: str = Field(pattern=HASH_PATTERN)
     allow_refused: bool = False
 
     @model_validator(mode="after")
     def _one(self) -> Self:
-        if (self.commit_sha is None) == (self.bytes_sha256 is None):
-            raise ValueError("name the pin by commit_sha or by bytes_sha256, not both")
+        if len([f for f in PIN_FIELD.values() if getattr(self, f) is not None]) != 1:
+            raise ValueError("name the pin by one of commit_sha, bytes_sha256 or version")
         return self
 
     @property
     def kind(self) -> str:
-        return "commit" if self.commit_sha is not None else "bytes"
+        return next(k for k, f in PIN_FIELD.items() if getattr(self, f) is not None)
 
     @property
     def pin_id(self) -> str:
-        return self.commit_sha or self.bytes_sha256 or ""
+        return str(getattr(self, PIN_FIELD[self.kind]))
 
 
 @router.post("/plugin-packages/{name}/approve", name="crud_agent_plugin_package_approve")
@@ -579,11 +646,11 @@ async def plugin_package_approve(name: Name, body: Approve, state: StateDep) -> 
             assert row is not None
             prune_stale_rows(conn, name, row["review"])
             _written(conn)
-            return _row(row)
+            return _row(conn, row)
         if current["approved_at"] is not None and current["allow_refused"] == allow:
             if prune_stale_rows(conn, name, current["review"]):
                 notify_warm_evict(conn)
-            return _row(current)
+            return _row(conn, current)
         row = conn.execute(
             "UPDATE ai_plugin_packages SET approved_at = now(), allow_refused = %s,"
             " updated_at = now() WHERE name = %s RETURNING *",
@@ -592,7 +659,7 @@ async def plugin_package_approve(name: Name, body: Approve, state: StateDep) -> 
         assert row is not None
         prune_stale_rows(conn, name, row["review"])
         _written(conn)
-        return _row(row)
+        return _row(conn, row)
 
     return await _in_tx(state, run)
 
@@ -619,7 +686,7 @@ async def plugin_package_enabled(name: Name, body: Enabled, state: StateDep) -> 
         assert row is not None
         prune_stale_rows(conn, name, row["review"])
         _written(conn)
-        return _row(row)
+        return _row(conn, row)
 
     return await _in_tx(state, run)
 
@@ -789,10 +856,9 @@ async def hosted_plugin_zip(
 
 # Marketplace feeds (#6933, spec 2026-11-21 §6.4, area ``plugin-feeds``): the packages a feed
 # lists, for the agent, which serves ``marketplace.json`` and the version zips from them. The
-# agent decides what an outside client is given: only an approved pin, and a hosted one by the
-# version whose content hash is that pin's. Each version's plugin.json names its number, so
-# no two versions of a plugin share a content hash when publish made them; the schema does not
-# forbid it, so the read still takes one version per package, the newest with the pin's hash.
+# agent decides what an outside client is given: only an approved pin, and a hosted one at the
+# version that pin names (#6934: the pin holds its ``version``), and only while that version's
+# content hash is still the pin's.
 
 #: ``ai_plugin_feeds.slug``'s CHECK.
 FEED_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
@@ -807,7 +873,7 @@ class PluginFeed(BaseModel):
 
 
 class FeedHostedVersion(BaseModel):
-    """The hosted plugin's version whose content hash is the package's current pin."""
+    """The hosted plugin's version the package's current pin names."""
 
     version: int
     zip_sha256: str
@@ -850,11 +916,8 @@ SELECT p.name, p.source_kind, p.fetch_url, p.fetch_path, p.commit_sha, p.content
   FROM ai_plugin_feed_packages fp
   JOIN ai_plugin_packages p ON p.name = fp.package_name
   LEFT JOIN ai_hosted_plugins h ON p.source_kind = 'hosted' AND h.name = p.name
-  LEFT JOIN LATERAL (
-        SELECT version, zip_sha256 FROM ai_hosted_plugin_versions
-         WHERE plugin_id = h.id AND content_hash = p.content_hash
-         ORDER BY version DESC LIMIT 1
-       ) v ON true
+  LEFT JOIN ai_hosted_plugin_versions v
+    ON v.plugin_id = h.id AND v.version = p.version AND v.content_hash = p.content_hash
  WHERE fp.feed_id = %s AND (%s::text IS NULL OR p.name = %s)
  ORDER BY p.name
 """

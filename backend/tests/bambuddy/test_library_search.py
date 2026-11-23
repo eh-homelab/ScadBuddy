@@ -65,6 +65,15 @@ def test_a_hit_states_its_row_s_file_hash_in_lowercase() -> None:
     assert {hit.id: hit.file_hash for hit in found.files} == {20: "cd" * 32, 21: None}
 
 
+def test_a_listing_row_states_its_file_hash_in_lowercase() -> None:
+    """#7073 review: a row's ``file_hash`` is lowercase at the source, so every reader of
+    the row (the CRUD listing route included) compares it with a pinned sha256 as is."""
+    stated = LibraryListRow(id=1, filename="a.3mf", file_type="3mf", file_hash="EF" * 32)
+
+    assert stated.file_hash == "ef" * 32
+    assert row(2, "b.3mf", None).file_hash is None
+
+
 def test_a_file_is_found_by_the_folders_it_is_in() -> None:
     found = search_library(FOLDERS, ROWS, "name keychains", show_all=False)
 

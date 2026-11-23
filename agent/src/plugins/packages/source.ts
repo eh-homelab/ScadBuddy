@@ -1,5 +1,5 @@
 import { isLoopbackHost } from '../../http/egress.js'
-import { PluginError } from '../registry.js'
+import { PLUGIN_NAME_RE, PluginError } from '../registry.js'
 
 // Where a plugin package comes from (issue #297, "Installing a plugin":
 // "A git URL or marketplace entry, pinned to a commit"; #6935: any URL Claude Code takes,
@@ -17,6 +17,9 @@ import { PluginError } from '../registry.js'
 //   npm              a package from an npm registry: `url` is `<registry>/<name>` (a
 //                    scope's `/` as `%2f`, as the registry takes it) and `ref` its
 //                    version or dist-tag; or an https tarball link, with `ref` ''
+//   hosted           a ScadBuddy hosted plugin (#6934, spec 2026-11-21 §6.3 step 5, §6.5):
+//                    always its latest published version, read with the zip over the API's
+//                    CRUD area `hosted-plugins` (hosted.ts), pinned to that version
 //
 // A git and a marketplace source are pinned to a commit; archive and npm ones, and a
 // marketplace entry of either kind, to the sha256 of the file fetched at install (pin
@@ -33,6 +36,7 @@ export type PackageSource =
   | { kind: 'marketplace-url'; url: string; ref: string; entry: string }
   | { kind: 'archive'; url: string; ref: string }
   | { kind: 'npm'; url: string; ref: string }
+  | { kind: 'hosted'; name: string }
 
 export type SourceKind = PackageSource['kind']
 
@@ -198,6 +202,7 @@ function storedNpm(url: string, ref: string): Extract<PackageSource, { kind: 'np
 
 export type SourceInput = {
   kind: SourceKind
+  name?: string | undefined
   url?: string | undefined
   ref?: string | undefined
   path?: string | undefined
@@ -214,7 +219,7 @@ export type SourceInput = {
  */
 export function validateSource(input: SourceInput): PackageSource {
   const only = (allowed: readonly (keyof SourceInput)[]) => {
-    for (const key of ['ref', 'path', 'entry', 'sha256', 'package', 'version', 'registry'] as const) {
+    for (const key of ['ref', 'path', 'entry', 'sha256', 'package', 'version', 'registry', 'name'] as const) {
       if (input[key] !== undefined && !allowed.includes(key)) throw new PluginError(`${key} is not for a ${input.kind} source`, 400)
     }
   }
@@ -253,9 +258,32 @@ export function validateSource(input: SourceInput): PackageSource {
       }
       only(['ref'])
       return storedNpm(url(), input.ref ?? '')
+    case 'hosted':
+      only(['name'])
+      if (input.url !== undefined) throw new PluginError('a hosted source names its plugin, not a url', 400)
+      return { kind: 'hosted', name: validateHostedName(input.name) }
     default:
       throw new PluginError(`source kind ${JSON.stringify((input as { kind: unknown }).kind)} is not one ScadBuddy installs`, 400)
   }
+}
+
+/** A hosted plugin's name: the hosted plugins' alphabet (backend hosted_plugins/rules.py `NAME_RE`). */
+export function validateHostedName(raw: string | undefined): string {
+  const name = (raw ?? '').trim()
+  if (!PLUGIN_NAME_RE.test(name) || name.includes('--')) {
+    throw new PluginError(`"${raw ?? ''}" is not a hosted plugin name`, 400)
+  }
+  return name
+}
+
+/** The columns a source is stored in (`ai_plugin_packages` `source_url`, `source_ref`). A hosted source has no URL: it is `hosted:<name>`. */
+export function sourceColumns(source: PackageSource): { url: string; ref: string } {
+  return source.kind === 'hosted' ? { url: hostedUrl(source.name), ref: '' } : { url: source.url, ref: source.ref }
+}
+
+/** Where a hosted package's files come from, as its `fetch_url`: no URL is fetched, the zip is read over CRUD. */
+export function hostedUrl(name: string): string {
+  return `hosted:${name}`
 }
 
 /** The `reason` of a re-pin refused by `RepinFixedError`. */
@@ -279,13 +307,16 @@ export class RepinFixedError extends PluginError {
 /**
  * `current` with the ref a re-pin asks for: a branch, tag or commit for a repository
  * source, a version or dist-tag for a registry npm package. The other kinds have no ref
- * to move: a re-pin fetches their URL again, except an archive installed with its sha256
- * (`RepinFixedError`).
+ * to move: a re-pin fetches their URL again (a hosted plugin's latest version), except an
+ * archive installed with its sha256 (`RepinFixedError`).
  */
 export function withRepinRef(current: PackageSource, ref: string | undefined): PackageSource {
   if (current.kind === 'archive' && current.ref !== '') throw new RepinFixedError()
   if (isGitSource(current)) return { ...current, ref: validateRef(ref ?? current.ref) }
   if (current.kind === 'npm' && current.ref !== '') return { ...current, ref: validateNpmVersion(ref ?? current.ref) }
-  if (ref !== undefined) throw new PluginError(`a ${current.kind === 'npm' ? 'tarball link' : current.kind} source has no ref to re-pin to`, 400)
+  if (ref !== undefined) {
+    const what = current.kind === 'npm' ? 'tarball link' : current.kind === 'hosted' ? 'hosted plugin (it takes its latest version)' : current.kind
+    throw new PluginError(`a ${what} source has no ref to re-pin to`, 400)
+  }
   return current
 }

@@ -167,15 +167,29 @@ def test_a_hosted_plugin_published_back_to_old_files_is_listed_once(
     assert zipped.status_code == 200
     assert hashlib.sha256(zipped.content).hexdigest() == v3["zip_sha256"]
 
-    # The schema does not make a content hash unique per plugin: a second version row with the
-    # pin's hash still gives one entry, the newest such version.
+    # The schema does not make a content hash unique per plugin: a newer version row with the
+    # pin's hash still gives one entry, at the version the pin names (#6934).
     db.execute(
         "INSERT INTO ai_hosted_plugin_versions (plugin_id, version, zip_sha256, content_hash,"
         " files, published_by) SELECT plugin_id, 4, zip_sha256, content_hash, files, published_by"
         " FROM ai_hosted_plugin_versions WHERE version = 3"
     )
     [entry] = client.get(f"{CRUD}/default", headers=agent).json()["packages"]
-    assert entry["hosted"]["version"] == 4
+    assert entry["hosted"]["version"] == 3
+
+
+def test_a_hosted_pin_whose_hash_is_not_its_versions_is_not_listed(
+    client: TestClient, db: Any
+) -> None:
+    """The pin names version 1, with a hash that is not version 1's: no version is listed."""
+    assert client.post(HOSTED, json={"name": "greeter", "description": "Hi"}).status_code == 201
+    assert client.put(f"{HOSTED}/greeter/files/skills/hello/SKILL.md", content=SKILL).is_success
+    assert client.post(f"{HOSTED}/greeter/publish").status_code in (200, 201)
+    _package(db, "greeter", kind="hosted", content_hash=H1, version=1)
+    _list(db, "greeter")
+
+    [entry] = client.get(f"{CRUD}/default", headers=token(client)).json()["packages"]
+    assert entry["hosted"] is None
 
 
 def test_a_feed_read_can_name_one_package(client: TestClient, db: Any) -> None:

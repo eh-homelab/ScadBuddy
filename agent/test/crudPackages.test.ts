@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { CrudPackageMirror } from '../src/plugins/packages/mirror.js'
 import { CrudPackageStore, type PreparedPackage } from '../src/plugins/packages/store.js'
+import { withRepinRef } from '../src/plugins/packages/source.js'
 import type { PackageReview } from '../src/plugins/packages/vet.js'
 import { PluginError } from '../src/plugins/registry.js'
 
@@ -111,6 +112,7 @@ class FakeApi {
         pending_pin_kind: b.pin_kind ?? 'commit',
         pending_commit_sha: b.commit_sha ?? null,
         pending_bytes_sha256: b.bytes_sha256 ?? null,
+        pending_version: b.version ?? null,
         pending_content_hash: b.content_hash,
         pending_files: b.files,
         pending_review: b.review,
@@ -118,8 +120,9 @@ class FakeApi {
       return this.#json(row)
     }
     if (m[2] === 'approve') {
-      const id = b.commit_sha ?? b.bytes_sha256
-      const matches = (prefix: string) => id === row[`${prefix}${b.bytes_sha256 !== undefined ? 'bytes_sha256' : 'commit_sha'}`]
+      const id = b.commit_sha ?? b.bytes_sha256 ?? b.version
+      const field = b.version !== undefined ? 'version' : b.bytes_sha256 !== undefined ? 'bytes_sha256' : 'commit_sha'
+      const matches = (prefix: string) => id === row[`${prefix}${field}`]
       if (!matches('') && !matches('pending_')) {
         return this.#problem(409, 'the commit and content hash do not match the pin under review; reload the review and approve what it shows', 'pin-mismatch')
       }
@@ -191,7 +194,7 @@ describe('the plugin packages through CRUD routes (#5299 step 5)', () => {
     await store.create(prepared())
     const next = prepared(C2, H2)
     next.files = { 'README.md': { sha256: '9'.repeat(64), size: 2, executable: false }, 'NEW.md': { sha256: '8'.repeat(64), size: 1, executable: false } }
-    const view = await store.setPending('greeter', { ...next, source: { ...next.source, ref: 'main' } })
+    const view = await store.setPending('greeter', { ...next, source: withRepinRef(next.source, 'main') })
     expect(view.pending).toMatchObject({ ref: 'main', commit_sha: C2, diff: { added: ['NEW.md'], changed: ['README.md'] } })
     expect((await store.filesOf('greeter', true))?.pin.commit).toBe(C2)
     expect((await store.filesOf('greeter', false))?.pin.commit).toBe(C1)
@@ -272,5 +275,50 @@ describe('bytes pins and their mirrors through CRUD routes (#6935)', () => {
     // The API names the sha256 it kept; one other than the agent's is refused.
     await expect(mirror.put('greeter', B1, bytes)).rejects.toThrow(/kept the bytes .* not /)
     await expect(mirror.put('../x', sha, bytes)).rejects.toThrow()
+  })
+})
+
+describe('hosted packages through CRUD routes (#6934)', () => {
+  function hostedPrepared(version: number, contentHash: string): PreparedPackage {
+    return { ...prepared('', contentHash), source: { kind: 'hosted', name: 'greeter' }, fetchUrl: 'hosted:greeter', version }
+  }
+
+  it('sends a version pin, approves it by its version, and shows a version no pin names', async () => {
+    const api = new FakeApi()
+    const store = new CrudPackageStore({ baseUrl: BASE, fetch: api.fetch })
+    const made = await store.create(hostedPrepared(1, H1))
+    expect(api.seen.at(-1)?.body).toMatchObject({
+      name: 'greeter',
+      source_kind: 'hosted',
+      source_url: 'hosted:greeter',
+      source_ref: '',
+      fetch_url: 'hosted:greeter',
+      pin_kind: 'version',
+      version: 1,
+    })
+    expect(api.seen.at(-1)?.body).not.toHaveProperty('commit_sha')
+    expect(made).toMatchObject({ source: { kind: 'hosted', name: 'greeter' }, pin_kind: 'version', version: 1, approved: false, not_offered: null })
+    await store.approve('greeter', '1', H1, false, 'version')
+    expect(api.seen.at(-1)?.body).toEqual({ version: 1, content_hash: H1, allow_refused: false })
+    await store.setEnabled('greeter', true)
+    expect((await store.enabledPins())[0]).toMatchObject({ name: 'greeter', commit: '', version: 1, contentHash: H1 })
+    expect(await store.pinOf('greeter')).toMatchObject({ source: { kind: 'hosted', name: 'greeter' }, version: 1 })
+
+    // Version 2 is published: the API answers the latest version, and no pin names it.
+    api.rows.get('greeter')!.hosted_latest_version = 2
+    expect((await store.get('greeter'))?.not_offered).toBe(2)
+    const repinned = await store.setPending('greeter', hostedPrepared(2, H2))
+    expect(api.seen.at(-1)?.body).toMatchObject({ ref: '', pin_kind: 'version', version: 2 })
+    expect(repinned).toMatchObject({ version: 1, not_offered: null, pending: { pin_kind: 'version', version: 2, content_hash: H2 } })
+    // The current pin keeps loading until the re-pin is approved.
+    expect((await store.enabledPins())[0]).toMatchObject({ version: 1, contentHash: H1 })
+    expect(await store.filesOf('greeter', true)).toMatchObject({ pin: { version: 2, contentHash: H2 } })
+  })
+
+  it('reads an API from before #6934 as nothing not offered', async () => {
+    const api = new FakeApi()
+    const store = new CrudPackageStore({ baseUrl: BASE, fetch: api.fetch })
+    await store.create(hostedPrepared(1, H1))
+    expect((await store.get('greeter'))?.not_offered).toBeNull()
   })
 })

@@ -2,7 +2,7 @@ import { CrudReadError } from '../../api/crudRead.js'
 import { type CrudCallInit, type CrudTarget, crudOf, qs, segment } from '../../api/crudStores.js'
 import { PluginError } from '../registry.js'
 import { diffFiles, type FileDiff, type FileList } from './hash.js'
-import type { PackageSource, SourceKind } from './source.js'
+import { type PackageSource, type SourceKind, sourceColumns } from './source.js'
 import type { PackageReview } from './vet.js'
 
 // `ai_plugin_packages` (backend/scadbuddy/migrations_agent/20260928T0750Z_plugin_packages.sql,
@@ -11,7 +11,8 @@ import type { PackageReview } from './vet.js'
 // it hashes to `content_hash`: a commit pin (`pin_kind` `commit`) from `fetch_url`,
 // `fetch_path` and `commit_sha`; a bytes pin (`bytes`, #6935: an archive or npm package)
 // from the mirrored file `bytes_sha256` (mirror.ts) and `fetch_path` inside it, never
-// from upstream.
+// from upstream; a version pin (`version`, #6934: a hosted plugin) from that published
+// version's zip, read over the API's CRUD area `hosted-plugins` (hosted.ts).
 //
 // LIFECYCLE (issue #297 "Review before enable"; spec §8.2, installing is a
 // settings write and outward):
@@ -37,6 +38,8 @@ export type PreparedPackage = {
   commit: string
   /** A bytes pin's file's sha256 (mirrored before the pin is stored); absent for a commit pin. */
   bytesSha256?: string
+  /** A hosted plugin's published version (pin kind `version`); absent for the other kinds. */
+  version?: number
   contentHash: string
   files: FileList
   review: PackageReview
@@ -50,6 +53,8 @@ export type PackagePin = {
   commit: string
   /** A bytes pin's file's sha256: the pin loads from its mirror (mirror.ts). */
   bytesSha256?: string
+  /** A hosted plugin's version: the pin loads from that version's zip (hosted.ts). */
+  version?: number
   contentHash: string
   /** Approved with `allow_refused`: loaded despite what the rules refuse (vet.ts). */
   allowRefused?: boolean
@@ -65,6 +70,7 @@ export type PendingPin = {
   pin_kind: PinKind
   commit_sha: string | null
   bytes_sha256: string | null
+  version: number | null
   content_hash: string
   review: PackageReview
   diff: FileDiff
@@ -77,10 +83,18 @@ export type PackageView = {
     | { kind: 'git'; url: string; ref: string; path: string }
     | { kind: 'marketplace' | 'marketplace-url'; url: string; ref: string; entry: string; plugin_url: string; plugin_path: string }
     | { kind: 'archive' | 'npm'; url: string; ref: string; plugin_path: string }
-  /** `commit` (commit_sha), or `bytes` (bytes_sha256: the sha256 of the archive or tarball). */
+    | { kind: 'hosted'; name: string }
+  /** `commit` (commit_sha), `bytes` (bytes_sha256: the sha256 of the archive or tarball), or `version` (a hosted plugin's). */
   pin_kind: PinKind
   commit_sha: string | null
   bytes_sha256: string | null
+  version: number | null
+  /**
+   * A hosted package's latest published version when neither its pin nor its pending re-pin
+   * is that version ("version N not offered", spec 2026-11-21 §6.3 step 5); null otherwise.
+   * Offering it is an install, or a re-pin when the package is installed.
+   */
+  not_offered: number | null
   content_hash: string
   review: PackageReview
   approved: boolean
@@ -124,6 +138,8 @@ export type PackageRow = {
   pending_review: PackageReview | null
   created_at: Date
   updated_at: Date
+  /** A hosted package's hosted plugin's latest version (the API's, #6934); null otherwise. */
+  hosted_latest_version: number | null
 }
 
 /** A review stored before `refused` existed had none: it would have been refused outright. */
@@ -145,9 +161,18 @@ function viewSource(row: PackageRow): PackageView['source'] {
         plugin_url: row.fetch_url,
         plugin_path: row.fetch_path,
       }
+    case 'hosted':
+      return { kind: 'hosted', name: row.name }
     default:
       return { kind: row.source_kind === 'npm' ? 'npm' : 'archive', url: row.source_url, ref: row.source_ref, plugin_path: row.fetch_path }
   }
+}
+
+/** A hosted package's latest version that neither its pin nor its re-pin names, else null. */
+function notOffered(row: PackageRow): number | null {
+  const latest = row.hosted_latest_version
+  if (row.source_kind !== 'hosted' || latest === null) return null
+  return latest === row.version || latest === row.pending_version ? null : latest
 }
 
 /** A row as routes see it. */
@@ -158,6 +183,8 @@ export function view(row: PackageRow): PackageView {
     pin_kind: row.pin_kind,
     commit_sha: row.commit_sha,
     bytes_sha256: row.bytes_sha256,
+    version: row.version,
+    not_offered: notOffered(row),
     content_hash: row.content_hash,
     review: withRefused(row.review),
     approved: row.approved_at !== null,
@@ -174,6 +201,7 @@ export function view(row: PackageRow): PackageView {
             pin_kind: row.pending_pin_kind,
             commit_sha: row.pending_commit_sha,
             bytes_sha256: row.pending_bytes_sha256,
+            version: row.pending_version,
             content_hash: row.pending_content_hash,
             review: withRefused(row.pending_review),
             diff: diffFiles(row.files, row.pending_files),
@@ -192,6 +220,7 @@ export function pin(row: PackageRow): PackagePin {
     fetchPath: row.fetch_path,
     commit: row.commit_sha ?? '',
     ...(row.bytes_sha256 !== null ? { bytesSha256: row.bytes_sha256 } : {}),
+    ...(row.version !== null ? { version: row.version } : {}),
     contentHash: row.content_hash,
     allowRefused: row.allow_refused,
   }
@@ -207,10 +236,11 @@ export type PackageRepo = {
   setPending(name: string, prepared: PreparedPackage): Promise<PackageView>
   discardPending(name: string): Promise<PackageView>
   /**
-   * Approves the pin the review showed: `pin` is its commit, or with `kind` `bytes` its
-   * file's sha256. `allowRefused` must be true when the reviewed pin's `refused` is not empty.
+   * Approves the pin the review showed: `pin` is its commit, with `kind` `bytes` its
+   * file's sha256, with `kind` `version` its version (as text). `allowRefused` must be true
+   * when the reviewed pin's `refused` is not empty.
    */
-  approve(name: string, pin: string, contentHash: string, allowRefused?: boolean, kind?: 'commit' | 'bytes'): Promise<PackageView>
+  approve(name: string, pin: string, contentHash: string, allowRefused?: boolean, kind?: PinKind): Promise<PackageView>
   setEnabled(name: string, enabled: boolean): Promise<PackageView>
   delete(name: string): Promise<boolean>
   /** Every enabled (so approved) pin, for a harness run. */
@@ -231,6 +261,8 @@ export function sourceOf(row: PackageRow): PackageSource {
     case 'archive':
     case 'npm':
       return { kind: row.source_kind, url: row.source_url, ref: row.source_ref }
+    case 'hosted':
+      return { kind: 'hosted', name: row.name }
     default:
       throw new PluginError(`plugin package ${row.name} has a ${row.source_kind} source, which this installer does not fetch`, 409)
   }
@@ -246,7 +278,8 @@ export const PACKAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 /**
  * A row as the API answers it: every column, its times as ISO text. An API of the build
- * before #6935 (during a roll) answers no pin kind and none of the bytes or version columns.
+ * before #6935 (during a roll) answers no pin kind and none of the bytes or version columns,
+ * and one before #6934 no `hosted_latest_version` (read as none: nothing shows as not offered).
  */
 type WireRow = Omit<
   PackageRow,
@@ -259,6 +292,7 @@ type WireRow = Omit<
   | 'pending_pin_kind'
   | 'pending_bytes_sha256'
   | 'pending_version'
+  | 'hosted_latest_version'
 > & {
   approved_at: string | null
   created_at: string
@@ -269,6 +303,7 @@ type WireRow = Omit<
   pending_pin_kind?: PinKind | null
   pending_bytes_sha256?: string | null
   pending_version?: number | null
+  hosted_latest_version?: number | null
 }
 
 function fromWire(row: WireRow): PackageRow {
@@ -286,6 +321,7 @@ function fromWire(row: WireRow): PackageRow {
           : null,
     pending_bytes_sha256: row.pending_bytes_sha256 ?? null,
     pending_version: row.pending_version ?? null,
+    hosted_latest_version: row.hosted_latest_version ?? null,
     approved_at: row.approved_at === null ? null : new Date(row.approved_at),
     created_at: new Date(row.created_at),
     updated_at: new Date(row.updated_at),
@@ -302,7 +338,12 @@ function fromWire(row: WireRow): PackageRow {
  * nothing written: send it again once the roll is over.
  */
 function pinBody(p: PreparedPackage) {
-  const pinned = p.bytesSha256 === undefined ? { commit_sha: p.commit } : { pin_kind: 'bytes', bytes_sha256: p.bytesSha256 }
+  const pinned =
+    p.version !== undefined
+      ? { pin_kind: 'version', version: p.version }
+      : p.bytesSha256 === undefined
+        ? { commit_sha: p.commit }
+        : { pin_kind: 'bytes', bytes_sha256: p.bytesSha256 }
   return { fetch_url: p.fetchUrl, fetch_path: p.fetchPath, ...pinned, content_hash: p.contentHash, files: p.files, review: p.review }
 }
 
@@ -358,11 +399,12 @@ export class CrudPackageStore implements PackageRepo {
   }
 
   async create(p: PreparedPackage): Promise<PackageView> {
+    const { url, ref } = sourceColumns(p.source)
     const body = {
       name: p.review.name,
       source_kind: p.source.kind,
-      source_url: p.source.url,
-      source_ref: p.source.ref,
+      source_url: url,
+      source_ref: ref,
       marketplace_entry: entryOf(p.source),
       ...pinBody(p),
     }
@@ -373,7 +415,7 @@ export class CrudPackageStore implements PackageRepo {
     if (p.review.name !== name) {
       throw new PluginError(`the new commit names the plugin "${p.review.name}", not "${name}"`, 409)
     }
-    const body = { ref: p.source.ref, ...pinBody(p) }
+    const body = { ref: sourceColumns(p.source).ref, ...pinBody(p) }
     return view(await this.#row('a plugin package re-pinned', this.#path(name, 'pending'), { body }))
   }
 
@@ -381,8 +423,8 @@ export class CrudPackageStore implements PackageRepo {
     return view(await this.#row("a plugin package's re-pin discarded", this.#path(name, 'discard-pending'), { method: 'POST' }))
   }
 
-  async approve(name: string, commit: string, contentHash: string, allowRefused = false, kind: 'commit' | 'bytes' = 'commit'): Promise<PackageView> {
-    const pinned = kind === 'bytes' ? { bytes_sha256: commit } : { commit_sha: commit }
+  async approve(name: string, commit: string, contentHash: string, allowRefused = false, kind: PinKind = 'commit'): Promise<PackageView> {
+    const pinned = kind === 'bytes' ? { bytes_sha256: commit } : kind === 'version' ? { version: Number(commit) } : { commit_sha: commit }
     const body = { ...pinned, content_hash: contentHash, allow_refused: allowRefused }
     return view(await this.#row('a plugin package approved', this.#path(name, 'approve'), { body }))
   }
@@ -418,6 +460,7 @@ export function filesOfRow(row: PackageRow, pending: boolean): { pin: PackagePin
       fetchPath: row.pending_fetch_path,
       commit: row.pending_commit_sha ?? '',
       ...(row.pending_bytes_sha256 !== null ? { bytesSha256: row.pending_bytes_sha256 } : {}),
+      ...(row.pending_version !== null ? { version: row.pending_version } : {}),
       contentHash: row.pending_content_hash,
     },
     files: row.pending_files,

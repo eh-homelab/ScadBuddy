@@ -39,9 +39,20 @@ def plugins(conn: Conn) -> list[Any]:
     return conn.execute("SELECT * FROM ai_hosted_plugins ORDER BY name").fetchall()
 
 
+def lock_name(conn: Conn, name: str) -> None:
+    """Holds the package name ``name`` until the caller's transaction ends. A hosted plugin's
+    create and a package's install both take it before they check the other table, so the
+    two can never both take one name (ruling R3 and its reverse, #6934)."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended('ai_plugin_package_name:' || %s, 0))",
+        (name,),
+    )
+
+
 def create(conn: Conn, name: str, description: str, category: str | None, tags: list[str]) -> Any:
     """A new plugin with an empty draft. Spec ruling R3: never a name an installed package
     has (a built-in is refused by the caller)."""
+    lock_name(conn, name)
     taken = conn.execute(
         "SELECT 1 FROM ai_plugin_packages WHERE name = %s FOR KEY SHARE", (name,)
     ).fetchone()

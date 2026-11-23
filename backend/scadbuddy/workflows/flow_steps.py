@@ -9,7 +9,7 @@ so it is the workflow's state and replays with it.
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -24,6 +24,9 @@ from scadbuddy.workflows.flow_models import (
 )
 from scadbuddy.workflows.flow_routes import RouteAuthor
 
+if TYPE_CHECKING:
+    from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
+
 FLOW_PROJECT = "flow_project"
 
 
@@ -34,7 +37,7 @@ class StepOwner(Protocol):
     def run_id(self) -> str: ...
 
     @property
-    def runner(self) -> Any: ...
+    def runner(self) -> "AgentWorkflowRunner": ...
 
     @property
     def trigger_event(self) -> dict[str, Any] | None: ...
