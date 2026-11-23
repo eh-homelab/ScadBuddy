@@ -1071,9 +1071,7 @@ async def test_the_sweep_starts_one_step_for_an_attempt_missing_a_medium(
 
     await sweep_media(shop.lifecycle, sweeping, starts)
 
-    assert sorted(starts.started) == sorted(
-        [(missing_photo.id, False), (never_checked.id, False)]
-    )
+    assert sorted(starts.started) == sorted([(missing_photo.id, False), (never_checked.id, False)])
     assert sweeping.downloads == []
 
 
@@ -1101,7 +1099,28 @@ async def test_without_bambuddy_the_sweep_starts_nothing(shop: Shop) -> None:
     assert starts.started == []
 
 
-async def test_the_sweep_goes_on_when_temporal_is_down(shop: Shop) -> None:
-    by_hand(shop)
+class FirstFails(Starts):
+    """Temporal refuses the first start only."""
 
-    await sweep_media(shop.lifecycle, Archives(), Starts(fail=True))
+    tries = 0
+
+    async def start(self, fulfilment_id: str, *, retries: bool) -> None:
+        self.tries += 1
+        if self.tries == 1:
+            raise RuntimeError("Temporal is down")
+        await super().start(fulfilment_id, retries=retries)
+
+
+async def test_the_sweep_goes_on_after_a_failed_start(shop: Shop) -> None:
+    """A start Temporal refuses is logged; the sweep starts the next attempt, and the
+    refused one is tried again at the next sweep (nothing stamped it checked)."""
+    _, _, first = by_hand(shop, 81)
+    _, _, second = by_hand(shop, 82)
+    starts = FirstFails()
+
+    await sweep_media(shop.lifecycle, Archives(), starts)
+    assert len(starts.started) == 1
+
+    again = Starts()
+    await sweep_media(shop.lifecycle, Archives(), again)
+    assert sorted(again.started) == sorted([(first.id, False), (second.id, False)])

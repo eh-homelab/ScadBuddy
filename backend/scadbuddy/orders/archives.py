@@ -303,7 +303,7 @@ async def sweep_media(
     lacks a medium and was not read for media in the last `SWEEP_CHECK_EVERY`. It catches
     what the triggers missed (Temporal down, an outcome not heard, a timelapse Bambuddy
     got later). It asks Bambuddy nothing itself, and nothing without a Bambuddy. A failed
-    start is logged, and the next attempt is started. The number of attempts started."""
+    start is logged, and the next attempt is started. The number of starts asked for."""
     if not integrations.linked:
         return 0
     now = datetime.now(UTC)

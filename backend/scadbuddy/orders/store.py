@@ -2470,7 +2470,9 @@ class OrderStore:
                 (at, fulfilment_id),
             )
 
-    def attempts_missing_media(self, created_after: datetime, checked_before: datetime) -> list[str]:
+    def attempts_missing_media(
+        self, created_after: datetime, checked_before: datetime
+    ) -> list[str]:
         """The attempts made after ``created_after`` and not read for media since
         ``checked_before`` that still lack a medium (spec 2026-11-05 §4.6): one of their
         archives has no finish photo or no timelapse copy on the attempt or on its item (a
@@ -2481,8 +2483,8 @@ class OrderStore:
                 "SELECT f.id FROM order_item_fulfilments f"
                 " WHERE f.created_at > %(after)s"
                 " AND (f.media_checked_at IS NULL OR f.media_checked_at <= %(before)s)"
-                " AND (f.archive_ids = '{}'"
-                "  AND f.print_run_id IS NOT NULL AND f.finished_at IS NOT NULL"
+                " AND ((f.archive_ids = '{}'"
+                "  AND f.print_run_id IS NOT NULL AND f.finished_at IS NOT NULL)"
                 "  OR EXISTS (SELECT 1 FROM unnest(f.archive_ids) a(id)"
                 "   CROSS JOIN (VALUES ('finished_photo'), ('timelapse')) m(media)"
                 "   WHERE NOT EXISTS (SELECT 1 FROM entity_attachments e"
