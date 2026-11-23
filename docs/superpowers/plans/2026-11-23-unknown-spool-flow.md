@@ -607,7 +607,7 @@ Write each note in ASD-STE100 style. Cite each measured fact with where it was m
 
 - [ ] **Step 2: Check that no doc now says "Needs you" has three sources**
 
-Run: `cd /home/elan/repos/ScadBuddy/.worktrees/7143-unknown-spools && grep -rn "Needs you" --include=*.md docs frontend/CLAUDE.md agent/CLAUDE.md backend/CLAUDE.md | grep -i "grant\|pairing"`
+Run: `cd "$(git rev-parse --show-toplevel)" && grep -rn "Needs you" --include=*.md docs frontend/CLAUDE.md agent/CLAUDE.md backend/CLAUDE.md | grep -i "grant\|pairing"`
 Expected: each hit that lists the sources also names the unknown spools.
 
 - [ ] **Step 3: Commit** — `docs(filament): the unknown spool flow as built (#7143)`

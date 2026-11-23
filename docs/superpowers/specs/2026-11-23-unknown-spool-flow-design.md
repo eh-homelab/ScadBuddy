@@ -23,7 +23,7 @@ ScadBuddy must not print from that printer, because its grams and costs would go
   and the spool-loaded state bits).
 - The print dialog's `tray_questions` asks about an untagged empty-handed tray only when
   close shelf candidates exist; a tagged tray that matches nothing is skipped.
-- `prepare_run` (`printers/print_run.py`) refuses a run before upload with
+- `prepare_run` (`bambuddy/print_run.py`) refuses a run before upload with
   `RunRefusalError` (422); "Slot N has no spool chosen" is one such refusal.
   `PrintActivities.lan_print` probes the printer right before a LAN start.
 - "Needs you" (`frontend/src/lib/needsYou.ts`) lists agent requests, flow grants and
@@ -64,6 +64,10 @@ ScadBuddy must not print from that printer, because its grams and costs would go
 - The scan/tap swap wizard and Web NFC (slice 4). Scanning here is the phone camera opening
   a label's `/x/S-<n>` URL or the owner typing the code.
 - Push notifications to a closed browser. The item shows in the app; push can come later.
+- A tray loaded between `prepare_run` and the LAN start, when the worker's CRUD read of the
+  block fails at `lan_print`: the start goes on (logged). `prepare_run` checked moments
+  before, and a failed read must not stop every print; such a print books its grams to no
+  spool.
 
 ## Anti-goals
 
@@ -107,7 +111,7 @@ while the tray is loaded and unmatched; resolving or emptying deletes it. The ro
 
 In `reconcile`, for each loaded tray with no holder:
 - RFID present: make a spool of the tag's type (the existing type match by material and
-  colour; a new type when none matches, as the Bambuddy pull does), link it to the tray
+  colour; with no match, a spool with no type, as the Bambuddy pull makes, see D6), link it to the tray
   (`FilamentInventory.link`), place it, and book `created` and `loaded`. No row.
 - No RFID: upsert the row (refresh `seen_at` and the reported fields).
 For each tray with a holder, or not loaded: delete its row if one exists.
@@ -121,7 +125,7 @@ For each tray with a holder, or not loaded: delete its row if one exists.
   seen_at}`: refused 409 `tray_changed` when the row's `seen_at` differs or the row is
   gone; 404 for an unknown code. In one transaction: link the spool to the tray, place it,
   book the weight (see Goals 5), delete the row.
-- CRUD route for the worker: `GET /api/v1/internal/crud/filament/printers/{id}/unknown-trays`
+- CRUD route for the worker (see D7): `GET /api/v1/internal/crud/print/filament/printers/{id}/unknown-trays`
   (service credential), answering the count.
 
 ### Print block
