@@ -1,5 +1,6 @@
 import { crudRead, wellFormed } from '../api/crudRead.js'
 import { CrudLeases, type CrudTarget } from '../api/crudStores.js'
+import { isDotSegment } from '../api/pathSegments.js'
 import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
 import { sessionPath } from './rows.js'
 import type { TouchedCall, TouchedSink } from './touched.js'
@@ -52,8 +53,8 @@ export type AssistantCostReport = {
 }
 
 /**
- * `recorded` (written now or before), `refused` (400, 404, 409 or 422 from the route: never sent
- * again), `deferred` (under one minor unit: nothing written, sent again with more spend),
+ * `recorded` (written now or before), `refused` (400, 404, 409 or 422 from the route, or an order
+ * id of `.` or `..`, refused before it is sent, #7221: never sent again), `deferred` (under one minor unit: nothing written, sent again with more spend),
  * `failed` (anything else: the same share sent again at the next report).
  */
 export type ReportAnswer = 'recorded' | 'refused' | 'deferred' | 'failed'
@@ -75,6 +76,8 @@ const MIN_POST_MS = 1_000
 export function crudCostPoster(backendUrl: string, fetchImpl: typeof fetch): PostCost {
   const base = backendUrl.replace(/\/+$/, '')
   return async (report, timeoutMs = REPORT_TIMEOUT_MS) => {
+    // An order id of `.` or `..` would post to another route (#7221): refused for good, never tried again.
+    if (isDotSegment(report.orderId)) return 'refused'
     try {
       const response = await fetchImpl(`${base}${ASSISTANT_COST_PATH(report.orderId)}`, {
         method: 'POST',

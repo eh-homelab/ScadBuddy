@@ -694,6 +694,65 @@ describe('Filament (#6262)', () => {
     expect(within(filament).getByRole('switch', { name: /Add a spool's type when it runs out/ })).not.toBeChecked()
   })
 
+  it('switches off spools for unknown RFID tags with Save Filament, and says the setting holds Bambuddy off (#7156)', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    const toggle = within(filament).getByRole('switch', { name: /Let Bambuddy add spools for unknown tags/ })
+    expect(toggle).toBeChecked()
+    expect(within(filament).getByText('Add spools for unknown RFID tags')).toBeInTheDocument()
+    // The status line changes only once the save's own read of the RFID status has answered.
+    let statusReads = 0
+    const onAnswer = ({ request }: { request: Request }) => {
+      if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/filament/rfid/status') statusReads += 1
+    }
+    server.events.on('response:mocked', onAnswer)
+    try {
+      await user.click(toggle)
+      const before = statusReads
+      await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
+      await waitFor(() => expect(mockSettings().filament_auto_add_unknown_rfid).toBe(false))
+      expect(within(filament).getByRole('switch', { name: /Let Bambuddy add spools for unknown tags/ })).not.toBeChecked()
+      await waitFor(() => expect(statusReads).toBeGreaterThan(before))
+    } finally {
+      server.events.removeListener('response:mocked', onAnswer)
+    }
+    // The override mode stays off; the status says what holds Bambuddy's auto-add.
+    expect(within(filament).getByRole('switch', { name: 'RFID override mode' })).not.toBeChecked()
+    expect(
+      await within(filament).findByText('Bambuddy no longer adds unknown RFID spools, because "Add spools for unknown RFID tags" is off'),
+    ).toBeInTheDocument()
+  })
+
+  it('saves the drying defaults, refuses a temperature out of range, and empty offers none (#7156)', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const temp = () => within(region('Filament')).getByLabelText('Default drying temperature, °C')
+    const hours = () => within(region('Filament')).getByLabelText('Default drying time, hours')
+    expect(temp()).toHaveValue('')
+    expect(hours()).toHaveValue('')
+    await enter(user, temp(), '200')
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    expect(await within(region('Filament')).findByText('Enter 1 to 150 °C, or leave it empty to offer none.')).toBeInTheDocument()
+    expect(mockSettings().filament_drying_temp_c).toBeNull()
+
+    await user.clear(temp())
+    await enter(user, temp(), '55')
+    await enter(user, hours(), '8.5')
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_drying_temp_c).toBe(55))
+    expect(mockSettings().filament_drying_hours).toBe('8.5')
+    // Cleared before the save's answer reaches the form, the fields equal the old stored values
+    // (empty), so the next Save would send nothing.
+    expect(await within(region('Filament')).findByText(/^Saved at /)).toBeInTheDocument()
+
+    await user.clear(temp())
+    await user.clear(hours())
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_drying_temp_c).toBeNull())
+    expect(mockSettings().filament_drying_hours).toBeNull()
+  })
+
   it('saves the 3DFP fetch nozzles with Save Filament, and shows them again on the next visit (#6625)', async () => {
     const first = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()

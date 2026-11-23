@@ -3,6 +3,8 @@ import { ApiError, api, request } from '../../../api/client'
 import {
   archiveSpool,
   bindTag,
+  bulkCreateSpools,
+  copySpool,
   createSpool,
   deleteSpool,
   getForecast,
@@ -405,6 +407,34 @@ describe('the spools CSV import (Task 15)', () => {
     expect(await importSpools(rows, { dryRun: false, key: 'k-1' })).toEqual(first)
     expect(await listSpools()).toHaveLength(12)
     expect(await refusal(importSpools([{ material: 'PETG' }], { dryRun: false, key: 'k-1' }))).toMatchObject({ status: 422 })
+  })
+
+  it('makes N spools once per key, and refuses a tray place or another body (#7150)', async () => {
+    const body = { spool: { material_id: M.PLA, weight_locked: false }, quantity: 2, location_id: L.SHELF_A, presets: [], k_values: [] }
+    const first = await bulkCreateSpools(body, 'b-1')
+    expect(first.map((one) => one.number)).toEqual([20, 21])
+    expect(first.every((one) => one.location_id === L.SHELF_A)).toBe(true)
+    expect(await bulkCreateSpools(body, 'b-1')).toEqual(first)
+    expect(await listSpools()).toHaveLength(13)
+    expect(await refusal(bulkCreateSpools({ ...body, quantity: 3 }, 'b-1'))).toMatchObject({ status: 422 })
+    expect(await refusal(bulkCreateSpools({ ...body, location_id: L.AMS_A1 }, 'b-2'))).toMatchObject({ status: 422 })
+    expect(await listSpools()).toHaveLength(13)
+  })
+
+  it("copies a spool's own fields and not its tray, weight or lock (#7150)", async () => {
+    const draft = await copySpool(spoolId(4))
+    expect(draft.spool).toMatchObject({ type_id: T.BLACK, weight_locked: false, grams_left: null })
+    expect(draft.location_id).toBeNull()
+    expect((await copySpool(spoolId(6))).spool).toMatchObject({ material_id: M.PLA, colour_name: 'Teal', label_weight_g: 1000 })
+    expect(await refusal(copySpool(NOBODY))).toMatchObject({ status: 404 })
+  })
+
+  it('makes a spool from a tray place once per key (#7150)', async () => {
+    await moveSpool(spoolId(8), null)
+    const made = await api.newTraySpool(H2C.printer_id, 0, 3, 's-1')
+    expect(made.location_id).toBe(L.AMS_A4)
+    expect(await api.newTraySpool(H2C.printer_id, 0, 3, 's-1')).toEqual(made)
+    expect(await refusal(api.newTraySpool(H2C.printer_id, 1, 0, 's-2'))).toMatchObject({ status: 409 })
   })
 
   it('refuses a write with an error line, and writes none of its rows', async () => {

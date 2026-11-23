@@ -230,6 +230,15 @@ def test_a_remembered_print_sequence_round_trips(store: SettingsStore) -> None:
     assert loaded.model_print_choices["library:7"].print_sequence == "by layer"
 
 
+def test_read_gives_a_stored_only_setting_with_no_row_its_default(store: SettingsStore) -> None:
+    # #7156: `put_settings` reads the auto-add setting before a save; with no row yet,
+    # the answer is the `StoredSettings` default, not a refused None.
+    name = "filament_auto_add_unknown_rfid"
+    assert store.read({name}) == {name: True}
+    store.save(SettingsPatch(filament_auto_add_unknown_rfid=False))
+    assert store.read({name}) == {name: False}
+
+
 def test_forgetting_removes_the_row(store: SettingsStore, pg_conninfo: str) -> None:
     printer = bambuddy_printer(pg_conninfo, 1)
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))

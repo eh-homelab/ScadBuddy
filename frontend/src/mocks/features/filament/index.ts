@@ -133,6 +133,7 @@ export function reset() {
   colourSyncs = []
   bambuddyKValues.clear()
   imports.clear()
+  created.clear()
   invoicedLine.clear()
   fetches.clear()
 }
@@ -331,7 +332,7 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
   }
 }
 
-/** `spools.py` `_drying_defaults` (#6720, R-6714-18): each field from the spool, else the type, else the subtype, else the material. */
+/** `spools.py` `_drying_defaults` (#6720, R-6714-18): each field from the spool, else the type, else the subtype, else the material, else the setting (#7156). */
 function dryingDefaults(row: SpoolRow): S['DryingDefaults'] {
   const type = state.types.find((one) => one.id === row.type_id)
   const subtype = state.catalogs.subtypes.find((one) => one.id === (row.subtype_id ?? type?.subtype_id))
@@ -347,6 +348,9 @@ function dryingDefaults(row: SpoolRow): S['DryingDefaults'] {
     if (out.temp_c == null && source?.drying_temp_c != null) Object.assign(out, { temp_c: source.drying_temp_c, temp_from: level })
     if (out.hours == null && source?.drying_hours != null) Object.assign(out, { hours: source.drying_hours, hours_from: level })
   }
+  const settings = mockSettings()
+  if (out.temp_c == null && settings.filament_drying_temp_c != null) Object.assign(out, { temp_c: settings.filament_drying_temp_c, temp_from: 'setting' })
+  if (out.hours == null && settings.filament_drying_hours != null) Object.assign(out, { hours: String(settings.filament_drying_hours), hours_from: 'setting' })
   return out
 }
 
@@ -529,6 +533,7 @@ const REFUSED = {
   locationExists: 'a place with that name, that tray or that AMS unit already exists',
   locationCycle: 'a place cannot be its own parent or sit under one of its own',
   moveTarget: "the place to move to does not exist, is archived or is an AMS unit's place",
+  trayPlace: "a new spool cannot go straight into a printer's tray; make it, then link it to the tray",
   badCursor: 'the cursor is not one this ledger gave',
   sensorAms: 'an AMS sensor is made by ScadBuddy and cannot be added by hand',
 } as const
@@ -1271,6 +1276,20 @@ export function addInvoicedSpools(typeId: string, count: number, costPerKg: stri
 
 /** `crud/idempotency.py`: each write's key and the body and answer it had. */
 const imports = new Map<string, { body: string; answer: S['ImportPreview'] }>()
+/** #7150 — the bulk creates' and creates from slot's replies, by `Idempotency-Key`. */
+const created = new Map<string, { body: string; status: number; answer: unknown }>()
+
+/** A write's reply kept under its key (`crud/idempotency.py`): a retry answers it, another body is a 422. */
+function keyed(request: Request, asked: string, write: () => Response | { status: number; answer: unknown }): Response {
+  const key = request.headers.get('Idempotency-Key')
+  if (!key) return problem(428, 'This write needs an Idempotency-Key header. Nothing was done.')
+  const seen = created.get(key)
+  if (seen) return seen.body === asked ? HttpResponse.json(seen.answer as object, { status: seen.status }) : problem(422, 'This Idempotency-Key was used for another request.')
+  const done = write()
+  if (done instanceof Response) return done
+  created.set(key, { body: asked, ...done })
+  return HttpResponse.json(done.answer as object, { status: done.status })
+}
 
 // -- 3DFP preset fetch (#6625) ----------------------------------------------------------
 
@@ -1851,7 +1870,7 @@ export const handlers = [
     const raw = await request.json()
     const extra = extraKeys(raw, FIELDS.spoolCreate)
     if (extra) return extra
-    const body = normalised(raw as S['SpoolCreate'])
+    const body = normalised(raw as S['SpoolCreate-Input'])
     const made = newSpool(body)
     const refused = spoolRefusal(made)
     if (refused) return refused
@@ -1876,6 +1895,72 @@ export const handlers = [
     if (done instanceof Response) return done
     imports.set(key, { body: asked, answer: done })
     return HttpResponse.json(done)
+  }),
+  // #7150 — `POST /filament/spools/bulk`: N spools of one draft, all or none.
+  http.post(`${BASE}/spools/bulk`, async ({ request }) => {
+    const raw = (await request.json()) as Record<string, unknown>
+    const extra = extraKeys(raw, ['spool', 'quantity', 'location_id', 'presets', 'k_values']) ?? extraKeys(raw.spool, FIELDS.spoolCreate)
+    if (extra) return extra
+    const body = raw as S['SpoolBulkCreate']
+    const quantity = body.quantity ?? 1
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) return problem(422, 'quantity: Input should be between 1 and 100')
+    return keyed(request, JSON.stringify(raw), () => {
+      const place = body.location_id ? state.locations.find((one) => one.id === body.location_id && !one.archived_at) : null
+      if (body.location_id && !place) return problem(422, REFUSED.moveTarget)
+      if (place && place.tray_id != null) return problem(422, REFUSED.trayPlace)
+      const presets = body.presets ?? []
+      if (duplicated(presets, (row) => `${row.printer_model}|${row.nozzle_diameter}`)) return problem(422, REFUSED.rowsDuplicate)
+      const fields = normalised(body.spool)
+      const made: SpoolRow[] = []
+      for (let n = 0; n < quantity; n += 1) {
+        const row = { ...newSpool(fields), number: Math.max(0, ...state.spools.map((one) => one.number), ...made.map((one) => one.number)) + 1, location_id: place?.id ?? null }
+        const refused = spoolRefusal(row)
+        if (refused) return refused
+        made.push(row)
+      }
+      for (const row of made) {
+        state.spools.push(row)
+        addEvent(row.id, 'created', { source: row.grams_left != null ? 'person' : null, grams_after: row.grams_left })
+        if (place) addEvent(row.id, 'moved', { data: { from: null, to: place.id } })
+        state.spoolPresets.push(...presets.map((one) => ({ slicer_filament_name: null, ...one, spool_id: row.id })))
+        state.spoolKValues.push(...(body.k_values ?? []).map((one) => ({ nozzle_type: null, name: null, cali_idx: null, setting_id: null, ...one, k_value: String(one.k_value), spool_id: row.id })))
+      }
+      return { status: 201, answer: made.map(view) }
+    })
+  }),
+  // #7150 — `GET /filament/spools/{id}/copy`: a new spool's draft, without what stays the first spool's.
+  http.get(`${BASE}/spools/:id/copy`, ({ params }) => {
+    const row = findSpool(String(params.id))
+    if (!row) return problem(404, `no spool ${String(params.id)}`)
+    const spool = Object.fromEntries(FIELDS.spoolCreate.filter((field) => field !== 'grams_left' && field !== 'weight_locked' && field !== 'added_full' && row[field as keyof SpoolRow] != null).map((field) => [field, row[field as keyof SpoolRow]]))
+    const place = state.locations.find((one) => one.id === row.location_id && !one.archived_at && one.tray_id == null)
+    const draft: S['SpoolDraft'] = {
+      spool: { ...spool, weight_locked: false, grams_left: null } as S['SpoolCreate-Output'],
+      location_id: place?.id ?? null,
+      presets: state.spoolPresets.filter((one) => one.spool_id === row.id).map(({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name }) => ({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name, migrated: false })),
+      k_values: state.spoolKValues.filter((one) => one.spool_id === row.id).map(({ spool_id: _s, ...one }) => one),
+    }
+    return HttpResponse.json(draft)
+  }),
+  // #7150 — create from slot: the mock's report is the tray's place; a new PLA spool, placed there.
+  http.post('/api/v1/printers/:printer/trays/:ams/:tray/new-spool', ({ params, request }) => {
+    const ams = Number(params.ams)
+    const tray = Number(params.tray)
+    return keyed(request, JSON.stringify(params), () => {
+      const place = state.locations.find((one) => one.printer_id === params.printer && one.ams_id === ams && one.tray_id === tray && !one.archived_at)
+      if (!place) return problem(409, "the printer's last report does not show that tray filled")
+      const material = state.catalogs.materials.find((one) => one.name === 'PLA')
+      const row = { ...newSpool({ material_id: material?.id ?? null, rgba: '#FFFFFFFF' }), location_id: place.id }
+      for (const [at, other] of state.spools.entries()) {
+        if (other.location_id !== place.id) continue
+        state.spools[at] = { ...other, location_id: null, updated_at: now() }
+        addEvent(other.id, 'moved', { data: { from: place.id, to: null } })
+      }
+      state.spools.push(row)
+      addEvent(row.id, 'created')
+      addEvent(row.id, 'moved', { data: { from: null, to: place.id } })
+      return { status: 201, answer: view(row) }
+    })
   }),
   http.get(`${BASE}/spools/:id`, ({ params }) => {
     const row = findSpool(String(params.id))
@@ -2008,7 +2093,7 @@ export const handlers = [
     const sent = await request.json()
     const extra = extraKeys(sent, FIELDS.kValue)
     if (extra) return extra
-    const rows = (sent as S['SpoolKValueCreate'][]).map((one) => ({
+    const rows = (sent as S['SpoolKValueCreate-Input'][]).map((one) => ({
       nozzle_type: null,
       name: null,
       cali_idx: null,

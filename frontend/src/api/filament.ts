@@ -11,13 +11,15 @@ type Query<Op extends keyof operations> = NonNullable<operations[Op]['parameters
 export type Spool = Schemas['Spool']
 /** The spec lists a field the server always sends (it has a default) as optional; here it is required. */
 export type SpoolDetail = Schemas['SpoolDetail'] & Required<Pick<Schemas['SpoolDetail'], 'effective' | 'overridden' | 'names' | 'presets' | 'k_values' | 'low_stock' | 'in_use' | 'type_suppliers'>>
-export type SpoolCreate = Schemas['SpoolCreate']
+export type SpoolCreate = Schemas['SpoolCreate-Input']
 export type SpoolPatch = Schemas['SpoolPatch']
+export type SpoolDraft = Schemas['SpoolDraft']
+export type SpoolBulkCreate = Schemas['SpoolBulkCreate']
 export type TagBind = Schemas['TagBind']
 export type TagBinding = Schemas['TagBinding']
 export type PresetInput = Schemas['SpoolPresetCreate']
 export type EffectivePreset = Schemas['EffectivePreset']
-export type KValueInput = Schemas['SpoolKValueCreate']
+export type KValueInput = Schemas['SpoolKValueCreate-Input']
 export type EffectiveKValue = Schemas['EffectiveKValue']
 export type SpoolType = Schemas['SpoolType']
 export type SpoolTypeDetail = Schemas['SpoolTypeDetail']
@@ -71,6 +73,19 @@ export type PriceSeries = Schemas['PriceSeries']
 export type SpendRow = Schemas['SpendRow']
 export type MetricsQueryParams = Query<'get_metrics_api_v1_filament_metrics_get'>
 export type PurchasingQueryParams = Query<'get_purchasing_metrics_api_v1_filament_metrics_purchasing_get'>
+export type MaterialNumberStats = Schemas['MaterialNumberStats']
+export type MaterialNumberRow = Schemas['MaterialNumberRow']
+export type MaterialNumberQueryParams = Query<'get_material_number_stats_api_v1_filament_metrics_material_numbers_get'>
+export type CostCalculation = Schemas['CostCalculation']
+/**
+ * #7152 — the route's query, with money narrowed to exact decimal strings (the spec also
+ * allows a number, which would go through a float); `tax`, `shipping` and `quantity` may be left out.
+ */
+export type CostQueryParams = Omit<Query<'get_cost_per_kg_api_v1_filament_cost_per_kg_get'>, 'price' | 'tax' | 'shipping'> & {
+  price: string
+  tax?: string
+  shipping?: string
+}
 export type FilamentInventoryView = Schemas['FilamentInventoryView']
 export type CsvRow = Schemas['CsvRow']
 export type ImportPreview = Schemas['ImportPreview']
@@ -143,6 +158,17 @@ export const importSpools = (rows: CsvRow[], options: { dryRun: true } | { dryRu
   })
 
 export const createSpool = (body: SpoolCreate) => request<Spool>(`${BASE}/spools`, json('POST', body))
+
+/**
+ * #7150 — `quantity` identical spools, each with its own number, with their place, presets
+ * and K values, in one transaction. `key` is one `Idempotency-Key` per opened form, so a
+ * retry or a double click answers the first spools and makes no more.
+ */
+export const bulkCreateSpools = (body: SpoolBulkCreate, key: string) =>
+  request<Spool[]>(`${BASE}/spools/bulk`, { ...json('POST', body), headers: { 'Idempotency-Key': key } })
+
+/** #7150 — a new spool's draft from an existing one: not its number, tags, tray, ledger or weight lock. */
+export const copySpool = (id: string) => request<SpoolDraft>(`${BASE}/spools/${seg(id)}/copy`)
 
 /** Only the fields sent change; `null` clears an override. */
 export const patchSpool = (id: string, body: SpoolPatch) => request<Spool>(`${BASE}/spools/${seg(id)}`, json('PATCH', body))
@@ -405,6 +431,13 @@ export const getMetrics = (params: MetricsQueryParams = {}) => request<Inventory
 /** #6269 — price per kg over time and confirmed invoice spend, each in its own currency. */
 export const getPurchasingMetrics = (params: PurchasingQueryParams = {}) =>
   request<PurchasingMetrics>(`${BASE}/metrics/purchasing${query(params)}`)
+
+/** #7152 — stock, use in the range and value by material number (a type code, case folded). */
+export const getMaterialNumberStats = (params: MaterialNumberQueryParams = {}) =>
+  request<MaterialNumberStats>(`${BASE}/metrics/material-numbers${query(params)}`)
+
+/** #7152 — what a price, tax, shipping and net weight come to per kg, in the shop's currency; writes nothing. */
+export const calculateCostPerKg = (params: CostQueryParams) => request<CostCalculation>(`${BASE}/cost-per-kg${query(params)}`)
 
 /** Every spool with the tray it is in, and each registry printer's trays (Task 9). */
 export const getInventory = (options: { includeArchived?: boolean } = {}) =>

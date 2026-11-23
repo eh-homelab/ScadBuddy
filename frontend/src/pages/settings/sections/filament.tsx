@@ -105,7 +105,10 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 function statusLine(status: RfidStatus): string {
   switch (status.state) {
     case 'applied':
-      return 'Bambuddy no longer adds unknown RFID spools'
+      // #7156 — the setting holds Bambuddy's auto-add off too; say which hold it is.
+      return status.override_mode || status.auto_add_unknown_rfid !== false
+        ? 'Bambuddy no longer adds unknown RFID spools'
+        : `Bambuddy no longer adds unknown RFID spools, because "${AUTO_ADD_LABEL}" is off`
     case 'blocked':
       return `Blocked: ${status.detail ?? 'Bambuddy refused the change'}`
     case 'pending':
@@ -801,6 +804,31 @@ function AutoShoppingRow({ form }: { form: BackendSettings }) {
   )
 }
 
+/** #7156 — the setting's title (`setting_docs.py`), which the override mode's status names when it holds Bambuddy off. */
+const AUTO_ADD_LABEL = 'Add spools for unknown RFID tags'
+
+/**
+ * #7156 — a stored choice, on by default, saved with "Save Filament". On leaves Bambuddy's own
+ * auto-add of unknown RFID spools as it is; off holds it off, beside the RFID override mode below.
+ */
+function AutoAddRfidRow({ form }: { form: BackendSettings }) {
+  return (
+    <FieldRow
+      id="setting-filament_auto_add_unknown_rfid"
+      {...docOf(form.settings, 'filament_auto_add_unknown_rfid')}
+      error={form.errors.filament_auto_add_unknown_rfid}
+    >
+      <SwitchField
+        id="setting-filament_auto_add_unknown_rfid"
+        label="Let Bambuddy add spools for unknown tags"
+        userOnly={false}
+        checked={form.value('filament_auto_add_unknown_rfid') === 'true'}
+        onCheckedChange={(checked) => form.setField('filament_auto_add_unknown_rfid', checked ? 'true' : 'false')}
+      />
+    </FieldRow>
+  )
+}
+
 /**
  * #6625 — the nozzles a 3DFP preset fetch exports for each printer model, one checkbox
  * each. `profile_fetch_nozzles` is held in the form comma-joined and saved with "Save
@@ -836,8 +864,7 @@ function FetchNozzlesRow({ form }: { form: BackendSettings }) {
  * know). It is an action with a status, not a draft: the switch writes the mode on the server
  * at once, which answers with where Bambuddy stands.
  */
-function OverrideRow() {
-  const status = useAsync(() => getRfidStatus(), [])
+function OverrideRow({ status }: { status: AsyncState<RfidStatus> }) {
   const [pending, setPending] = useState(false)
   const [report, setReport] = useState<string | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
@@ -905,8 +932,14 @@ function OverrideRow() {
  */
 export function Component() {
   const syncStatus = useAsync(() => getSyncStatus(), [])
-  // A saved direction changes `skipped`: read the status again.
-  const form = useBackendSettings(id, (s) => fieldsOf(id, s), { onSaved: () => syncStatus.refresh() })
+  const rfidStatus = useAsync(() => getRfidStatus(), [])
+  // A saved direction changes `skipped`, and a saved auto-add setting the RFID status: read both again.
+  const form = useBackendSettings(id, (s) => fieldsOf(id, s), {
+    onSaved: () => {
+      syncStatus.refresh()
+      rfidStatus.refresh()
+    },
+  })
   return (
     <SavedSection
       form={form}
@@ -927,7 +960,8 @@ export function Component() {
       <SyncStatusRow status={syncStatus} />
       <SyncPassesRow lastPassAt={syncStatus.data?.last_pass_at} form={form} />
       <SyncPassTtlRow form={form} />
-      <OverrideRow />
+      <AutoAddRfidRow form={form} />
+      <OverrideRow status={rfidStatus} />
       <FetchNozzlesRow form={form} />
       <PresetMirrorRow form={form} />
       <AutoShoppingRow form={form} />

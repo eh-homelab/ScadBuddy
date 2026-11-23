@@ -36,6 +36,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 from fastapi.responses import JSONResponse
+from psycopg import errors as pg_errors
 from pydantic import AwareDatetime, BaseModel, ValidationError
 from temporalio.service import RPCError
 
@@ -107,6 +108,7 @@ from scadbuddy.filament.catalog import (
 )
 from scadbuddy.filament.colour_catalog import ColourSync, ColourSyncRequest, ColourSyncs
 from scadbuddy.filament.component import Filament, FilamentDep
+from scadbuddy.filament.cost_calc import CostCalculation, CostQuery, CostTooHighError, calculate
 from scadbuddy.filament.csv_import import (
     ImportPreview,
     ImportRefusedError,
@@ -153,12 +155,18 @@ from scadbuddy.filament.spools import (
     ResetBeforeLinkError,
     SpoolBambuddyLinkedError,
     SpoolInUseError,
+    SpoolTrayPlaceError,
     SpoolTypelessError,
     TagKeysClashError,
     TagUnnamedError,
 )
 from scadbuddy.filament.tdfp import CREATE_WAIT, SEARCH_WAIT, Tdfp, tdfp
-from scadbuddy.filament.types import PresetUnknownError, TypeRowsDuplicateError, TypeTempError
+from scadbuddy.filament.types import (
+    PresetUnknownError,
+    TypeRowsDuplicateError,
+    TypeTempError,
+    names_preset,
+)
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.kinds import waiting_on_bambuddy
@@ -1074,6 +1082,89 @@ async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCr
         raise _refused(exc) from None
 
 
+BULK_ROUTE = "POST /filament/spools/bulk"
+
+
+@router.post(
+    "/spools/bulk",
+    response_model=list[m.Spool],
+    status_code=status.HTTP_201_CREATED,
+    summary="Add several identical spools",
+    description=(
+        "`quantity` (1 to 100) spools of one `spool` body, in one transaction (#7150): each "
+        "gets its own number and its own `created` event (`grams_left` is each one's first "
+        "reading), its move to `location_id`, and its own `presets` and `k_values`. Answers "
+        "the spools in number order. Needs an `Idempotency-Key` (428 without one): a retry "
+        "with the same key answers the first result and writes nothing, and the key with "
+        "another body is a 422. 422 for a bad field, a row it names that does not exist, an "
+        "effective minimum temperature above its maximum, two preset or K rows of one key, "
+        "or a place that does not exist, is archived, is an AMS unit's or is a printer's "
+        "tray (a tray takes one spool, through its own link). Nothing is written on a "
+        "refusal."
+    ),
+)
+async def bulk_create_spools(
+    filament: FilamentDep,
+    caller: CallerDep,
+    body: m.SpoolBulkCreate,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> JSONResponse:
+    who = actor(caller)
+    # A person's key, under their own name, as the CSV import keys it.
+    key = f"{who}\x1f{required_key(idempotency_key)}"
+    asked = body.model_dump(mode="json")
+
+    def write() -> Replay:
+        defaults = filament.spools.defaults()
+        with filament.spools.transaction() as conn:
+
+            def run() -> Replay:
+                try:
+                    with conn.transaction():
+                        ids = filament.spools.bulk_on(conn, body, actor=who)
+                except pg_errors.ForeignKeyViolation as error:
+                    # As `PUT …/presets` maps it: an unknown `sb-<id>` preset is its own 422.
+                    if names_preset(error):
+                        raise PresetUnknownError() from None
+                    raise CatalogRefError() from None
+                except pg_errors.UniqueViolation:
+                    raise TypeRowsDuplicateError() from None
+                spools = []
+                for spool_id in ids:
+                    made = filament.spools.read(conn, spool_id, defaults=defaults)
+                    assert made is not None
+                    spools.append(made.model_dump(mode="json"))
+                return Replay(status.HTTP_201_CREATED, spools)
+
+            return idempotent_write(conn, "filament", key, BULK_ROUTE, asked, run)
+
+    try:
+        done = await asyncio.to_thread(write)
+    except (*_SPOOL_REFUSED, SpoolTrayPlaceError, MoveTargetError, CatalogRefError) as exc:
+        raise _refused(exc) from None
+    return JSONResponse(done.body, status_code=done.status)
+
+
+@router.get(
+    "/spools/{spool_id}/copy",
+    response_model=m.SpoolDraft,
+    summary="Start a new spool from an existing one",
+    description=(
+        "The body `POST /filament/spools/bulk` takes, less its `quantity`, filled from the "
+        "spool (#7150): its type, its own overrides, its note, its own presets and K values, "
+        "and its place unless that is a printer's tray or archived. It leaves out what stays "
+        "the first spool's own: its number, tags, tray, ledger (so no `grams_left`) and "
+        "weight lock. An archived spool can be copied. Writes nothing; 404 for no such "
+        "spool."
+    ),
+)
+async def copy_spool(filament: FilamentDep, spool_id: UUID) -> m.SpoolDraft:
+    draft = await asyncio.to_thread(filament.spools.copy, spool_id)
+    if draft is None:
+        raise _no_spool(spool_id)
+    return draft
+
+
 @router.get(
     "/type-proposals",
     response_model=m.TypeProposals,
@@ -1475,7 +1566,8 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
         "`weighed` with `grams` (the filament left, without the empty spool) is a new "
         "reading: `grams_left` starts again from it. `dried` takes `temp_c` and `hours`; "
         "one left out is the spool's `drying_defaults` value (its type's, else its "
-        "subtype's, else its material's), and `null` records none. `consumed_reset` takes "
+        "subtype's, else its material's, else the setting `filament_drying_temp_c` or "
+        "`filament_drying_hours`), and `null` records none. `consumed_reset` takes "
         "nothing and starts the spool's consumed counter again (`consumed_g`); the grams "
         "left stay. On a spool linked to Bambuddy a `consumed_reset` whose `at` is not "
         "after the link is a 422 with `code` `reset_before_link` (#7149 R-7149-12): the sync "
@@ -1709,6 +1801,59 @@ async def get_purchasing_metrics(
 ) -> mm.PurchasingMetrics:
     start, end = _range(since, until, 365)
     return await asyncio.to_thread(filament.metrics.purchasing, start, end)
+
+
+@router.get(
+    "/metrics/material-numbers",
+    response_model=mm.MaterialNumberStats,
+    summary="Stock, use and value by material number",
+    description=(
+        "Per material number (a spool type's `code`, which Bambuddy calls `material_number`, "
+        "case folded; `key` `null` for untyped spools, listed last): every type of that code "
+        "with `archived`, the unarchived spools, their grams left and their value at each "
+        "spool's cost per kg (else the default cost; `null` when none has a cost) in "
+        "`currency`, the shop's; and `used_g` and `wasted_g`, the grams of the plates that "
+        "ended from `since` to `until`, both included (default the 180 days before today), "
+        "counted as `GET /filament/metrics` counts consumption: archived spools too, a plate "
+        "SB and Bambuddy both booked once, failed and cancelled plates also as waste. A "
+        "material number with no spool in stock and no plate in the range is left out. 422 "
+        "when `since` is after `until` or the range is longer than three years."
+    ),
+)
+async def get_material_number_stats(
+    filament: FilamentDep, since: date | None = None, until: date | None = None
+) -> mm.MaterialNumberStats:
+    start, end = _range(since, until, 180)
+    return await asyncio.to_thread(filament.metrics.material_numbers, start, end)
+
+
+@router.get(
+    "/cost-per-kg",
+    response_model=CostCalculation,
+    summary="Work out a cost per kg",
+    description=(
+        "What `price` (paid for `quantity` spools, default 1), `tax` and `shipping` (default "
+        "0) come to per kg of filament when each spool holds `net_weight_g` grams: "
+        "`cost_per_kg` with all three in (what an invoice line gives its spools), and "
+        "`price_per_kg` with shipping out (a price point's basis). Money is a decimal string "
+        "of at most four places, the results rounded half up to four, in `currency`, the "
+        "shop's (`orders_currency`). It writes nothing. 422 for an unknown parameter, an "
+        "amount out of bounds or a cost per kg of 10^8 or more."
+    ),
+)
+async def get_cost_per_kg(
+    store: SettingsStoreDep, query: Annotated[CostQuery, Query()]
+) -> CostCalculation:
+    try:
+        settings = await asyncio.to_thread(store.snapshot)
+    except DATABASE_ERRORS as error:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "the settings could not be read; try again"
+        ) from error
+    try:
+        return calculate(query, settings.runtime.orders_currency)
+    except CostTooHighError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
 
 
 async def _assignments(store: SettingsStore, cache: AssignmentsCache) -> list[SpoolAssignment]:
@@ -2167,9 +2312,12 @@ async def import_bambuddy(
     response_model=m.RfidStatus,
     summary="Read the RFID override mode",
     description=(
-        "Whether the RFID override mode is on, and where Bambuddy's `auto_add_unknown_rfid` "
-        "stands: `applied` (mode on, Bambuddy's value is false), `pending` (a write has not "
-        "landed, or Bambuddy could not be reached; `detail` names the error), `blocked` "
+        "Whether the RFID override mode is on, whether the setting "
+        "`filament_auto_add_unknown_rfid` is on (`auto_add_unknown_rfid`; off holds Bambuddy's "
+        "value off as the mode does, #7156), and where Bambuddy's `auto_add_unknown_rfid` "
+        "stands: `applied` (the mode or the setting holds it, and Bambuddy's value is false), "
+        "`pending` (a write has not landed, or Bambuddy could not be reached; `detail` names "
+        "the error), `blocked` "
         "(Bambuddy refused the write because its auth is on) or `off`. Also lists the "
         "SpoolBuddy devices. Reads Bambuddy and writes nothing; when Bambuddy fails, "
         "`bambuddy_auto_add` is null and `devices` is empty."
@@ -2185,7 +2333,8 @@ async def get_rfid_status(filament: FilamentDep, store: SettingsStoreDep) -> m.R
     summary="Turn the RFID override mode on or off",
     description=(
         "While the mode is on, Bambuddy's auto-add of unknown RFID spools is turned off; "
-        "the value Bambuddy had is saved first and put back when the mode turns off. The "
+        "the value Bambuddy had is saved first and put back when the mode turns off, unless "
+        "the setting `filament_auto_add_unknown_rfid` is off and still holds it (#7156). The "
         "mode is written first, then Bambuddy is reconciled once, and the answer is the "
         "status. It is 200 even when Bambuddy refuses the write (`blocked`: its auth is "
         "on) or cannot be reached (`pending`); the mode then stays as asked and the "
@@ -2208,7 +2357,8 @@ async def set_rfid_override_mode(
     summary="Reconcile RFID with Bambuddy now",
     description=(
         "Runs once what the spool refresh Schedule runs: Bambuddy's `auto_add_unknown_rfid` "
-        "is brought to the override mode, then the queued tag changes are pushed (only with "
+        "is brought to the override mode and the setting `filament_auto_add_unknown_rfid`, "
+        "then the queued tag changes are pushed (only with "
         "`filament_sync.tags` `sb_to_bb` or `two_way`), then the AMS slot of each override tag is "
         "configured with its type's preset. Answers the mode's status and the tag push "
         "counts, and the override slots' counts (`slots` is null with no Bambuddy)."

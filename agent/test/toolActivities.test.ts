@@ -1224,9 +1224,9 @@ describe("hosted_plugin_publish's draft binding (#7199)", () => {
     const moved = await failure(env(undefined, 'tool-toolu_20').run(h.activities.hosted_plugin_publish!, { name: 'shop-notes' }))
     expect(moved.nonRetryable).toBe(true)
     expect(moved.type).toBe('NotApproved')
-    expect(moved.message).toContain(
-      'hosted_plugin_publish was not run: the draft, its description or its versions changed since a person approved this publish',
-    )
+    // The gate cannot tell a changed draft from no approval at all, so it claims neither (#7211).
+    expect(moved.message).toContain('hosted_plugin_publish was not run: no approval matches what it names now')
+    expect(moved.message).toContain('if a person approved this publish, the draft, its description or its versions changed since')
     expect(moved.message).toContain('Call hosted_plugin_publish again')
     expect(moved.message).not.toContain('none is recorded')
     expect(state.published).toEqual([])
@@ -1267,7 +1267,8 @@ describe("hosted_plugin_publish's draft binding (#7199)", () => {
       const h = harness({ flows: bound, audit, services: services({ backend: backendOf(state), hostedPackages }) }, [publishTool])
       const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.hosted_plugin_publish!, named))
       expect(refused.type).toBe('NotApproved')
-      expect(refused.message).toContain('changed since a person approved this publish')
+      expect(refused.message).toContain('no approval matches what it names now')
+      expect(refused.message).toContain('if a person approved this publish, the draft, its description or its versions changed since')
       expect(state.published).toEqual([])
     })
 
