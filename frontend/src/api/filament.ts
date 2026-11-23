@@ -71,6 +71,18 @@ export type PriceSeries = Schemas['PriceSeries']
 export type SpendRow = Schemas['SpendRow']
 export type MetricsQueryParams = Query<'get_metrics_api_v1_filament_metrics_get'>
 export type PurchasingQueryParams = Query<'get_purchasing_metrics_api_v1_filament_metrics_purchasing_get'>
+export type MaterialNumberStats = Schemas['MaterialNumberStats']
+export type MaterialNumberRow = Schemas['MaterialNumberRow']
+export type MaterialNumberQueryParams = Query<'get_material_number_stats_api_v1_filament_metrics_material_numbers_get'>
+export type CostCalculation = Schemas['CostCalculation']
+/** #7152 — money as exact decimal strings; `tax`, `shipping` and `quantity` may be left out. */
+export interface CostQueryParams {
+  price: string
+  tax?: string
+  shipping?: string
+  quantity?: number
+  net_weight_g: number
+}
 export type FilamentInventoryView = Schemas['FilamentInventoryView']
 export type CsvRow = Schemas['CsvRow']
 export type ImportPreview = Schemas['ImportPreview']
@@ -405,6 +417,13 @@ export const getMetrics = (params: MetricsQueryParams = {}) => request<Inventory
 /** #6269 — price per kg over time and confirmed invoice spend, each in its own currency. */
 export const getPurchasingMetrics = (params: PurchasingQueryParams = {}) =>
   request<PurchasingMetrics>(`${BASE}/metrics/purchasing${query(params)}`)
+
+/** #7152 — stock, use in the range and value by material number (a type code, case folded). */
+export const getMaterialNumberStats = (params: MaterialNumberQueryParams = {}) =>
+  request<MaterialNumberStats>(`${BASE}/metrics/material-numbers${query(params)}`)
+
+/** #7152 — what a price, tax, shipping and net weight come to per kg, in the shop's currency; writes nothing. */
+export const calculateCostPerKg = (params: CostQueryParams) => request<CostCalculation>(`${BASE}/cost-per-kg${query(params)}`)
 
 /** Every spool with the tray it is in, and each registry printer's trays (Task 9). */
 export const getInventory = (options: { includeArchived?: boolean } = {}) =>

@@ -106,6 +106,9 @@ const DATE = z
   }, 'Not a real calendar date')
   .describe('A date, YYYY-MM-DD')
 
+/** #7152: a money amount as `purchasing_models.Money` takes it: at most 8 whole digits and 4 places. */
+const MONEY = z.string().regex(/^\d{1,8}(\.\d{1,4})?$/, 'a decimal string, e.g. "21.40"')
+
 /** The events `filament_spool_history` returns: the route sends them newest first. */
 const HISTORY_EVENTS = 50
 
@@ -1229,6 +1232,57 @@ const tools: Tool[] = [
         await ok(
           backend.GET('/api/v1/filament/metrics/purchasing', { params: { query: { since, until } } }),
           'read the purchasing metrics',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_material_number_stats',
+    label: 'Read stock and use by material number',
+    description:
+      "Per material number (a spool type's `code`, which Bambuddy calls `material_number`, case folded; " +
+      '`key` null for untyped spools): every type of that code with `archived`, the unarchived spools, their ' +
+      "grams left and value at cost (in `currency`, the shop's), and `used_g` and `wasted_g`, the plates' " +
+      'grams from `since` to `until` counted as `filament_metrics` counts consumption. `since` and `until` ' +
+      'are dates (`YYYY-MM-DD`), both included; default the 180 days before today. 422 when `since` is ' +
+      'after `until` or the range is over 1096 days.',
+    input: z.object({ since: DATE.optional(), until: DATE.optional() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/metrics/material-numbers'],
+    handler: async ({ since, until }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/metrics/material-numbers', { params: { query: { since, until } } }),
+          'read the material number stats',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_cost_per_kg',
+    label: 'Work out a cost per kg',
+    description:
+      'What `price` (paid for `quantity` spools, default 1), `tax` and `shipping` (default 0) come to per kg ' +
+      'when each spool holds `net_weight_g` grams of filament: `cost_per_kg` with all three in (what an ' +
+      'invoice line gives its spools) and `price_per_kg` with shipping out (a supplier price point). Money is ' +
+      "a decimal string of at most four places; the answer is exact, rounded half up to four, in the shop's " +
+      '`currency`. It writes nothing: to keep the result, set the type\'s `cost_per_kg`.',
+    input: z.object({
+      price: MONEY,
+      tax: MONEY.optional(),
+      shipping: MONEY.optional(),
+      quantity: z.number().int().min(1).max(1000).optional().describe('Spools the price paid for; default 1'),
+      net_weight_g: z.number().int().min(1).max(100_000).describe('Grams of filament in one spool, without the spool'),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/cost-per-kg'],
+    handler: async ({ price, tax, shipping, quantity, net_weight_g }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/cost-per-kg', { params: { query: { price, tax, shipping, quantity, net_weight_g } } }),
+          'work out the cost per kg',
         ),
       ),
   }),

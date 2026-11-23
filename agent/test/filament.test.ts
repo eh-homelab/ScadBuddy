@@ -1124,6 +1124,8 @@ describe('filament history and metrics tools', () => {
     ['filament_forecast'],
     ['filament_metrics'],
     ['filament_purchasing_metrics'],
+    ['filament_material_number_stats'],
+    ['filament_cost_per_kg'],
   ])('%s is read tier', (name) => {
     expect(tool(name).risk).toBe('read')
     expect(tool(name).gated).toBe(false)
@@ -1178,6 +1180,38 @@ describe('filament history and metrics tools', () => {
       }),
     )
     await runTool(tool('filament_purchasing_metrics'), { since: '2026-01-01' }, ctx())
+  })
+
+  it('reads the material number stats for the range it was given (#7152)', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${FIL}/metrics/material-numbers`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ currency: 'USD', rows: [{ key: 'PLA-WHT', used_g: 45 }] })
+      }),
+    )
+    const out = firstText(await runTool(tool('filament_material_number_stats'), { since: '2026-11-01', until: '2026-11-30' }, ctx()))
+    expect(out).toEqual({ currency: 'USD', rows: [{ key: 'PLA-WHT', used_g: 45 }] })
+    await runTool(tool('filament_material_number_stats'), {}, ctx())
+    expect(seen).toEqual(['?since=2026-11-01&until=2026-11-30', ''])
+    expect(() => tool('filament_material_number_stats').parse({ since: '2026-02-30' })).toThrow()
+  })
+
+  it('asks the backend for a cost per kg with money as decimal strings (#7152)', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${FIL}/cost-per-kg`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ currency: 'USD', cost_per_kg: '32.1333' })
+      }),
+    )
+    const t = tool('filament_cost_per_kg')
+    const out = firstText(await runTool(t, { price: '40', tax: '3.20', shipping: '5', quantity: 2, net_weight_g: 750 }, ctx()))
+    expect(out).toEqual({ currency: 'USD', cost_per_kg: '32.1333' })
+    expect(seen).toEqual(['?price=40&tax=3.20&shipping=5&quantity=2&net_weight_g=750'])
+    expect(() => t.parse({ price: 40, net_weight_g: 750 })).toThrow()
+    expect(() => t.parse({ price: '1.00001', net_weight_g: 750 })).toThrow()
+    expect(() => t.parse({ price: '1', net_weight_g: 0 })).toThrow()
   })
 
   it('refuses a dimension the route does not know', () => {
