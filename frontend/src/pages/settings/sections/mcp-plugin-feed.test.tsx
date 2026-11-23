@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { seedStoredPackage } from '../../../mocks/aiPlugins'
 import { setPluginFeed } from '../../../mocks/features/pluginFeeds'
 import { renderSettingsSection } from '../testing'
 import { Component as McpAccessTokens } from './mcp-access-tokens'
@@ -26,7 +27,37 @@ describe('Plugin feed section', () => {
     renderSettingsSection(<PluginFeed />, { route })
     const list = await screen.findByRole('list', { name: 'Plugins in the feed' })
     const rows = within(list).getAllByRole('listitem').map((li) => li.textContent)
-    expect(rows).toEqual(['greeterVersion 3', 'print-helpersCommit 4b825dc', 'labelsNot listed until its pin is approved'])
+    expect(rows).toEqual([
+      'greeterVersion 3Remove',
+      'print-helpersCommit 4b825dcRemove',
+      'labelsNot listed until its pin is approvedRemove',
+    ])
+  })
+
+  it('adds an installed package to the feed and removes it (#6936)', async () => {
+    seedStoredPackage('outside')
+    const { user } = renderSettingsSection(<PluginFeed />, { route })
+    await screen.findByRole('list', { name: 'Plugins in the feed' })
+    await user.click(await screen.findByRole('combobox', { name: 'Plugin package to add' }))
+    await user.click(await screen.findByRole('option', { name: 'outside' }))
+    await user.click(screen.getByRole('button', { name: 'Add to feed' }))
+    const list = screen.getByRole('list', { name: 'Plugins in the feed' })
+    await waitFor(() => expect(within(list).getByText('outside')).toBeInTheDocument())
+    expect(await screen.findByText(/Every installed plugin package is in the feed/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Remove outside from the feed' }))
+    await waitFor(() => expect(within(list).queryByText('outside')).toBeNull())
+  })
+
+  it('says that every client runs the hooks of a package approved with them allowed', async () => {
+    seedStoredPackage('hooked', { allow_refused: true })
+    const { user } = renderSettingsSection(<PluginFeed />, { route })
+    await user.click(await screen.findByRole('combobox', { name: 'Plugin package to add' }))
+    await user.click(await screen.findByRole('option', { name: 'hooked' }))
+    expect(screen.getByTestId('plugin-feed-runs-everywhere')).toHaveTextContent(/runs its hooks and MCP servers/)
+    await user.click(screen.getByRole('button', { name: 'Add to feed' }))
+    const row = await within(screen.getByRole('list', { name: 'Plugins in the feed' })).findByText('hooked')
+    expect(row.closest('li')).toHaveTextContent(/runs its hooks and MCP servers/)
   })
 
   it('gives a settings entry with the bearer header, then the install command', async () => {

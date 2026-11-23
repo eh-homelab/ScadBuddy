@@ -22,6 +22,14 @@ it ends. This fails closed on purpose; the operator sees it as visitors' 429
 
 A row names its job once the submit answers (`attach`); a visitor reads only the jobs its
 rows name (`owns`).
+
+A file listing's price read that claims a slice (#6710) writes a counted row of ``kind``
+``slice`` with no job (`admit_slice`): it counts against the rates, never the concurrency.
+During the roll that added ``kind`` (migration ``20261123T0211Z_storefront_renders_kind``),
+a replica of the build before it counts such a row as an open render (its query has no
+``kind`` and takes a row with no job as open) for up to ``render_timeout``. That fails
+closed, as above, and ends with the roll: a brief 429 ``render_limited`` with limit
+``concurrency`` during that deploy is this.
 """
 
 from __future__ import annotations

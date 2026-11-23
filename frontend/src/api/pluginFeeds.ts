@@ -7,17 +7,22 @@
 import type { McpAuthMode } from './mcpTokens'
 
 /** Why a package the feed names is not listed. */
-export type PluginFeedUnlisted = 'not-approved' | 'no-version' | 'unpinnable'
+export type PluginFeedUnlisted = 'not-approved' | 'no-version' | 'unpinnable' | 'no-mirror'
 
 export interface PluginFeedPackage {
   name: string
   listed: boolean
   reason: PluginFeedUnlisted | null
-  kind: 'hosted' | 'git' | null
+  /** How it is listed (#6936: `archive` is a bytes pin served from ScadBuddy's mirror). */
+  kind: 'hosted' | 'git' | 'archive' | null
   /** A hosted package's listed version. */
   version: number | null
   /** A git package's pinned commit. */
   commit: string | null
+  /** An archive's bytes pin: the sha256 of the mirrored file. */
+  archive: string | null
+  /** Approved with its hooks or MCP servers allowed: every client of the feed runs them. */
+  allow_refused: boolean
 }
 
 export interface PluginFeedView {

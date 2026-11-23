@@ -338,6 +338,28 @@ async def test_a_call_cancelled_once_it_has_the_lock_gives_it_back() -> None:
     assert not service.lock.locked()
 
 
+async def test_a_worker_gone_as_the_lock_frees_runs_nothing_and_gives_it_back() -> None:
+    """`_turn`'s worker-gone path: the worker goes away while its call waits for the lock,
+    and the lock frees in the same loop tick, so its turn and its watcher are both done
+    when it wakes. It runs nothing, answers None, and gives the lock back."""
+    service = Service(FakeSite()).service
+    ran: list[bytes] = []
+
+    async def step(ask: bytes) -> Any:
+        ran.append(ask)
+
+    reader = asyncio.StreamReader()
+    await service.lock.acquire()
+    handler = asyncio.create_task(service._run(reader, step, b"x"))
+    await _until(lambda: service.lock._waiters)
+    # One tick: the turn's acquire and the watcher's read both end before the handler wakes.
+    reader.feed_eof()
+    service.lock.release()
+    assert await asyncio.wait_for(handler, 5) is None
+    assert ran == []
+    assert not service.lock.locked()
+
+
 async def _until(ready: Any) -> None:
     """Wait (bounded, no fixed sleep) until ``ready()`` holds."""
     async with asyncio.timeout(5):
