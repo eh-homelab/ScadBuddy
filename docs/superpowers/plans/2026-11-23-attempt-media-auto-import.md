@@ -302,9 +302,9 @@ imported, at most once per attempt per day, never after 14 days, never with the 
   `OrderIntegrations` and `NotLinked`), `backend/scadbuddy/orders/bambuddy.py`
 - Modify: `backend/scadbuddy/orders/archives.py` (`mirror_media` scans when
   `facts.timelapse` is false, the setting is on, the attempt is 14 days old or less and
-  `timelapse_scanned_at` is null or a day old; stamps it; reads the archive again on the
-  next step)
-- Modify: `backend/scadbuddy/core/settings.py` (`orders_import_timelapse: bool = True`,
+  `timelapse_scanned_at` is null or a day old; stamps it; the scan is synchronous (spec §4.3a), so an `attached` reply is followed by an archive read in the same step
+  )
+- Modify: `backend/scadbuddy/core/settings.py` (`orders_import_timelapse: bool = False` until the owner decides, spec §9;
   apply mode `live`), `backend/scadbuddy/core/setting_docs.py` (label and help)
 - Modify: `frontend/src/pages/settings/fields.ts`, `frontend/src/pages/settings/sections/orders.tsx`
   (the switch); `frontend/src/mocks/fixtures.ts`

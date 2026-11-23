@@ -219,8 +219,10 @@ differently:
 1. **The archive is too fresh.** Bambuddy processes the timelapse after `completed`.
    Nothing to do now; the next step imports it.
 2. **It is on the printer, not in Bambuddy.** The print was queued with timelapse on but
-   Bambuddy did not fetch it (the usual case here: #5323 and #5565 turn the flag on;
-   Bambuddy's fetch is manual, F5). The import asks Bambuddy to **scan**
+   Bambuddy did not fetch it (#5323 and #5565 turn the flag on). Bambuddy 1.3.2 scans
+   by itself when a print ends with timelapse on (§4.3a), so this case is now rarer
+   than the draft assumed; it remains for a print whose auto-scan missed. The import
+   asks Bambuddy to **scan**
    (`timelapse/scan`, F5, wrapped as a new seam method `scan_timelapse(archive_id) ->
    bool`), once per archive per step, and imports what the scan attached. Bambuddy's
    "only after the user explicitly selects" is a policy about *its* UI; the user has
@@ -230,11 +232,10 @@ differently:
 3. **The printer never recorded one.** The scan finds nothing; the UI says so
    ("no timelapse on this print") instead of telling the person to pull one.
 
-The scan needs the API key's Manage Archives scope (`Scope.MANAGE_ARCHIVES`, as
-`select_timelapse`), and Bambuddy may also want Control Printer to list the printer
-(as `printer-media` does, F4). Without them the scan is refused and logged once, and
+The scan needs only the API key's Manage Archives scope (`Scope.MANAGE_ARCHIVES`, as
+`select_timelapse`; read from Bambuddy 1.3.2's source by the spike, #7238). Without it the scan is refused and logged once, and
 case 2 degrades to case 3's message plus the existing pull-by-hand route. The scan is
-behind a setting, `orders_import_timelapse` (default **on**), so a Bambuddy whose
+behind a setting, `orders_import_timelapse` (default **off** until the owner decides, §4.3a and §9; the draft had on), so a Bambuddy whose
 printer FTP is slow or metered can keep the manual path. **The scan is the one thing in
 this design that reaches the printer**; that is why it is the one switch.
 
@@ -247,6 +248,38 @@ archive on the next step. If the scan turns out to match loosely (a wrong print'
 file attached as this attempt's, §2's anti-goal), the switch defaults to **off** and
 the design's timelapse half stays manual; that is a decision to bring back, not to
 make in the plan.
+
+### 4.3a What the spike measured (#7230, PR #7238, 2026-11-23)
+
+Measured on prod's Bambuddy 1.3.2 (auth off) with two scan calls; the replies are
+vendored as `backend/tests/bambuddy/recordings/timelapse-scan-none.json` and
+`timelapse-scan-exists.json`, and the PR's README section cites the Bambuddy source
+lines.
+
+- **Replies.** Always 200 with a `status`: `not_found` (with `available_files`, the
+  card's unclaimed videos; archive 282, 0.82 s), `exists` (a timelapse is already
+  attached; archive 283, 0.17 s, no printer contact), `attached` (with `filename`;
+  from the source only, see below). An unknown archive is 404.
+- **Synchronous.** The route downloads and attaches before it replies, so the
+  fire-and-forget re-read above is not needed: an `attached` reply means the next
+  archive read has the timelapse.
+- **A match deletes the printer's copy** of the video (`delete_archived_timelapse`).
+  The spike therefore did not call the scan on the one archive that would have
+  matched; there is no `attached` recording.
+- **It already runs by itself.** Bambuddy scans when a print ends with timelapse on.
+- **It can match loosely.** Videos claimed by other archives are excluded first. With a
+  print-start baseline it attaches the one video new since the print started (two or
+  more: nothing). Without one it tries, in order: the file's stem in the video name,
+  the name's timestamp within ±4 h of `started_at`, the FTP mtime within 2 h of
+  `completed_at`, then the card's only video if the print completed under 1 h ago.
+  So a later print's lone unclaimed video can attach to this archive when this
+  print's own video is gone, and the clock rules depend on the printer's clock (the
+  H2C's is off by about 1 h 20 min). A wrong match also deletes that video from the
+  card.
+
+By the rule above and §8.1, this is a loose match: `orders_import_timelapse` ships
+**off** until the owner decides (§9). Story 6 (#7235) builds the scan and the setting
+with that default.
 
 A scan is tried at most **once per attempt per day**, recorded as
 `timelapse_scanned_at` on the attempt (`order_item_fulfilments`), and never once the
@@ -444,3 +477,10 @@ Docs
    a loose match comes back as a question before the switch ships on.
 2. **Load the archive row on page open: yes.** The **From Bambuddy…** button goes;
    the row shows what is attached and offers only what is missing (§4.4).
+
+## 9. Waiting for the owner
+
+1. **Turn the timelapse scan on?** The spike (§4.3a) found that the scan can attach
+   another print's video and deletes the video it attaches from the printer's card.
+   Bambuddy also scans by itself at print end. Until the owner says yes,
+   `orders_import_timelapse` defaults to **off** and the finish photo half ships alone.
