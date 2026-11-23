@@ -113,6 +113,39 @@ async def test_the_catalogue_lists_a_preset_once(own: MemoryOwn) -> None:
     assert catalogue.native_ref(ref, "filament") == ref
 
 
+async def test_a_local_ref_to_an_adopted_id_resolves_to_its_scadbuddy_preset(
+    own: MemoryOwn,
+) -> None:
+    """The hidden kept row's id still resolves: a remembered override and a binding not
+    yet adopted both slice the ScadBuddy preset that holds it."""
+    own.bb[12] = 7
+    catalogue = await catalogue_for(None, native=Profiles(PROFILES, held=MemoryHeld(PLA), own=own))
+    seven, sb = PresetRef(source="local", id="7"), PresetRef(source="local", id="sb-12")
+    assert catalogue.native_ref(seven, "filament") == sb
+    override = resolve(
+        tray(), tray_plan(), h2c_choices(filament_overrides={1: seven}), catalogue, {}
+    )
+    assert override.errors == [] and override.filament_presets == [sb]
+    binding = EffectivePreset(
+        printer_model="H2C",
+        nozzle_diameter="0.4",
+        slicer_filament="7",
+        slicer_filament_name=None,
+        overridden=False,
+    )
+    bound = resolve(tray(16), tray_plan(), h2c_choices(), catalogue, {16: [binding]})
+    assert bound.errors == [] and bound.filament_presets == [sb]
+
+
+async def test_a_scadbuddy_preset_that_does_not_flatten_leaves_the_kept_row() -> None:
+    own = MemoryOwn({12: {**SILK, "inherits": "No such parent"}}, bb={12: 7})
+    catalogue = await catalogue_for(None, native=Profiles(PROFILES, held=MemoryHeld(PLA), own=own))
+    local = [row.ref.id for row in catalogue.filament if row.ref.source == "local"]
+    assert local == ["7"]
+    seven = PresetRef(source="local", id="7")
+    assert catalogue.native_ref(seven, "filament") == seven
+
+
 async def test_a_spool_naming_a_scadbuddy_preset_resolves_natively(own: MemoryOwn) -> None:
     preset = EffectivePreset(
         printer_model="H2C",

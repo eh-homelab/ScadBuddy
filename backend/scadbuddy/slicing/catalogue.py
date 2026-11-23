@@ -242,8 +242,9 @@ async def with_held(image: Catalogue, profiles: Profiles) -> Catalogue:
     (:attr:`Profiles.own`, #7176) that the native slicer can read: a Postgres read,
     never Bambuddy. Each kept row is Bambuddy's catalogue's for it (``local_choice``), so
     a remembered ``local`` ref resolves as it does there; each of ScadBuddy's is a
-    ``local`` row with the ref ``sb-<id>``, and the kept row of a Bambuddy id one of them
-    has is left out, so one preset is listed once. A preset that does not flatten over
+    ``local`` row with the ref ``sb-<id>``, and the kept row of a Bambuddy id an offered
+    one has is left out, so one preset is listed once; a ``local`` ref to that id resolves
+    to the ScadBuddy preset (`Catalogue.local_aliases`). A preset that does not flatten over
     this tree (a parent this Bambu Studio lacks, no settings) is not offered, as the
     tree's own are not (the module's docstring); nor is a slot's own copy (#3962), as on
     Bambuddy's. ``image`` itself without either."""
@@ -251,7 +252,15 @@ async def with_held(image: Catalogue, profiles: Profiles) -> Catalogue:
     if held is None and own is None:
         return image
     own_rows = [] if own is None else await own.rows()
-    hidden = {row.bb_preset_id for row in own_rows if row.bb_preset_id is not None}
+    root, version = profiles.root, await asyncio.to_thread(lambda: profiles.version)
+    own_offered = await _own_choices(own_rows, profiles, root, version)
+    shown = {choice.ref.id for choice in own_offered}
+    aliases = {
+        str(row.bb_preset_id): sb_ref(row.id)
+        for row in own_rows
+        if row.bb_preset_id is not None and sb_ref(row.id) in shown
+    }
+    hidden = {int(bb_id) for bb_id in aliases}
     rows = (
         []
         if held is None
@@ -261,7 +270,6 @@ async def with_held(image: Catalogue, profiles: Profiles) -> Catalogue:
             if row.preset.preset_type in _SLOTS and row.preset.id not in hidden
         ]
     )
-    root, version = profiles.root, await asyncio.to_thread(lambda: profiles.version)
     unknown = [
         row
         for row in rows
@@ -281,10 +289,10 @@ async def with_held(image: Catalogue, profiles: Profiles) -> Catalogue:
         if is_slot_preset(row.preset.name):
             continue
         offered[row.preset.preset_type].append(local_choice(row.preset))
-    offered["filament"].extend(await _own_choices(own_rows, profiles, root, version))
+    offered["filament"].extend(own_offered)
     if not any(offered.values()):
         return image
-    return image.with_held(offered["printer"], offered["process"], offered["filament"])
+    return image.with_held(offered["printer"], offered["process"], offered["filament"], aliases)
 
 
 async def _own_choices(

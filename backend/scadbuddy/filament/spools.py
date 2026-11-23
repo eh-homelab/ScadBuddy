@@ -33,6 +33,7 @@ from scadbuddy.filament.types import (
     TypeRowsDuplicateError,
     TypeTempError,
     effective,
+    names_preset,
     overridden,
 )
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
@@ -784,7 +785,9 @@ class FilamentSpoolStore:
                 return p.effective_presets(conn, spool_id)
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
-        except errors.ForeignKeyViolation:
+        except errors.ForeignKeyViolation as error:
+            if not names_preset(error):
+                raise
             raise PresetUnknownError() from None
 
     def k_values(self, spool_id: UUID) -> _KValues | None:

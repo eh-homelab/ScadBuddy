@@ -16,7 +16,7 @@ blob (`blob_refs` holder `filament_preset`), with every version in
 slicer reads `sb-<id>` refs from ScadBuddy's store (the API's Postgres and blob store; the
 print worker through a CRUD route), never from Bambuddy. Every place that hands a preset to
 Bambuddy (Bambuddy's slice path, the spool push, the AMS slot configure) sends the preset's
-Bambuddy id instead (`EffectivePreset.bambuddy_filament`).
+Bambuddy id instead (`EffectivePreset.bambuddy_id`, `for_bambuddy()`).
 
 **Spec and earlier plans:** #7176 and its comment; #7174 (superseded: its `PUT` is the
 mirror's update); `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md` (Decision 22:
@@ -85,7 +85,7 @@ Without a Bambuddy URL the mirror does nothing.
    preset has the Bambuddy id Bambuddy sent, else the id (the next refresh adopts it). A row
    still holds "what Bambuddy sent last" when it holds that id or the `sb-` ref of the
    preset that has it.
-8. **Bambuddy-facing reads.** `EffectivePreset.bambuddy_filament` is the ref Bambuddy knows:
+8. **Bambuddy-facing reads.** `EffectivePreset.for_bambuddy()` is the ref Bambuddy knows (from `bambuddy_id`):
    the preset's Bambuddy id for an `sb-` ref (none when it has none), else `slicer_filament`
    as it is. The resolver on Bambuddy's catalogue, the spool push and the slot configure use
    it.
@@ -119,7 +119,7 @@ Without a Bambuddy URL the mirror does nothing.
 - [ ] `held_presets_activity` runs adoption after the refresh.
 - [ ] `Profiles.own`, catalogue, `slicing/presets.py`, resolver native mapping; CRUD route and
       `RemoteFilamentPresets`; wiring in the API and the print worker.
-- [ ] `EffectivePreset.bambuddy_filament`; resolver Bambuddy path, `bb_sync_plan`,
+- [ ] `EffectivePreset.bambuddy_id` and `for_bambuddy()`; resolver Bambuddy path, `bb_sync_plan`,
       `rfid_slots`, `profile_fill` reads an `sb-` preset's document.
 - [ ] `_bb_presets` (Decision 7).
 - [ ] Docs: backend CLAUDE.md, `docs/features/spools-and-filament.md`.
