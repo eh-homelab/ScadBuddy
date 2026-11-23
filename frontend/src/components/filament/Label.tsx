@@ -1,23 +1,30 @@
 import type { SpoolDetail } from '../../api/filament'
-import { LABEL_HEIGHT_MM, LABEL_WIDTH_MM, QR_MM, QUIET_MM } from './labelSheet'
+import { bigTextMm, DEFAULT_SIZE, type LabelSize, QR_MM, QUIET_MM } from './labelSheet'
+
+/** The box both labels share: black on white in any theme, the QR box and the text column centred top to bottom. */
+const box = (size: LabelSize) => ({
+  width: `${size.widthMm}mm`,
+  height: `${size.heightMm}mm`,
+  breakInside: 'avoid' as const,
+  paddingLeft: `${QUIET_MM}mm`,
+  paddingRight: '1.5mm',
+  gap: `${QUIET_MM}mm`,
+})
 
 /**
- * #6264 — one 50 x 25 mm spool label: the QR code (19.8 mm with a 2.6 mm quiet zone, drawn from `svg`), the spool
- * number large, the material and colour, the brand. It is print output, so it is black on
- * white in any theme; a long name is cut with an ellipsis and never leaves the 50 mm.
+ * #6264 — one spool label, 50 x 25 mm unless `size` says otherwise (#7157): the QR code (19.8 mm with a 2.6 mm
+ * quiet zone, drawn from `svg`), the spool number large, the material and colour, the brand. It is print output,
+ * so it is black on white in any theme; a long name is cut with an ellipsis and never leaves the label. The PDF
+ * (`backend/scadbuddy/filament/label_pdf.py`) draws the same lines.
  */
-export function Label({ spool, svg, testId = 'label' }: { spool: SpoolDetail; svg: string; testId?: string }) {
+export function Label({ spool, svg, size = DEFAULT_SIZE, testId = 'label' }: { spool: SpoolDetail; svg: string; size?: LabelSize; testId?: string }) {
   const colour = spool.effective.colour_name ?? spool.colour_name
   const number = `#${spool.number}`
-  // 9 mm for up to #999; a longer number gets smaller so it fits the 23.5 mm text column.
-  const numberMm = Math.min(9, 22 / (0.62 * number.length))
+  // 9 mm for up to #999 on a 50 mm label; a longer number, or a narrower label, gets smaller so it fits the text column.
+  const numberMm = bigTextMm(number, 9, size.widthMm)
   const material = [spool.names?.material, spool.names?.subtype].filter(Boolean).join(' ')
   return (
-    <div
-      data-testid={testId}
-      className="box-border flex shrink-0 items-center overflow-hidden bg-white text-black"
-      style={{ width: `${LABEL_WIDTH_MM}mm`, height: `${LABEL_HEIGHT_MM}mm`, breakInside: 'avoid', paddingLeft: `${QUIET_MM}mm`, paddingRight: '1.5mm', gap: `${QUIET_MM}mm` }}
-    >
+    <div data-testid={testId} className="box-border flex shrink-0 items-center overflow-hidden bg-white text-black" style={box(size)}>
       <div aria-hidden="true" className="shrink-0 [&>svg]:block [&>svg]:size-full" style={{ width: `${QR_MM}mm`, height: `${QR_MM}mm` }} dangerouslySetInnerHTML={{ __html: svg }} />
       <div className="flex min-w-0 flex-1 flex-col leading-tight">
         <span className="whitespace-nowrap font-bold leading-none tabular-nums" style={{ fontSize: `${numberMm}mm` }}>
@@ -32,18 +39,14 @@ export function Label({ spool, svg, testId = 'label' }: { spool: SpoolDetail; sv
 }
 
 /**
- * #6955 — one 50 x 25 mm place label (a printer, an AMS unit or slot, the external holder): the same QR
- * box as the spool label, the code large, the place's name below it in at most two lines.
+ * #6955 — one place label (a printer, an AMS unit or slot, the external holder), 50 x 25 mm unless `size` says
+ * otherwise (#7157): the same QR box as the spool label, the code large, the place's name below it in at most two lines.
  */
-export function LocationLabel({ code, name, svg, testId = 'label' }: { code: string; name: string; svg: string; testId?: string }) {
-  // 8 mm up to "L-999" (5 characters); a longer code gets smaller so it fits the 23.5 mm text column.
-  const codeMm = Math.min(8, 22 / (0.62 * code.length))
+export function LocationLabel({ code, name, svg, size = DEFAULT_SIZE, testId = 'label' }: { code: string; name: string; svg: string; size?: LabelSize; testId?: string }) {
+  // 8 mm up to "L-999" on a 50 mm label; a longer code, or a narrower label, gets smaller so it fits the text column.
+  const codeMm = bigTextMm(code, 8, size.widthMm)
   return (
-    <div
-      data-testid={testId}
-      className="box-border flex shrink-0 items-center overflow-hidden bg-white text-black"
-      style={{ width: `${LABEL_WIDTH_MM}mm`, height: `${LABEL_HEIGHT_MM}mm`, breakInside: 'avoid', paddingLeft: `${QUIET_MM}mm`, paddingRight: '1.5mm', gap: `${QUIET_MM}mm` }}
-    >
+    <div data-testid={testId} className="box-border flex shrink-0 items-center overflow-hidden bg-white text-black" style={box(size)}>
       <div aria-hidden="true" className="shrink-0 [&>svg]:block [&>svg]:size-full" style={{ width: `${QR_MM}mm`, height: `${QR_MM}mm` }} dangerouslySetInnerHTML={{ __html: svg }} />
       <div className="flex min-w-0 flex-1 flex-col leading-tight">
         <span className="whitespace-nowrap font-bold leading-none tabular-nums" style={{ fontSize: `${codeMm}mm` }}>

@@ -2,12 +2,13 @@ package nethttplibrary
 
 import (
 	"errors"
+	"net/http"
+	"strings"
+
 	abstractions "github.com/microsoft/kiota-abstractions-go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"net/http"
-	"strings"
 )
 
 var urlReplaceOptionKey = abstractions.RequestOptionKey{Key: "UrlReplaceOptionKey"}
@@ -48,11 +49,17 @@ func (u *UrlReplaceOptions) GetKey() abstractions.RequestOptionKey {
 
 // GetReplacementPairs reads ReplacementPairs settings from UrlReplaceOptions
 func (u *UrlReplaceOptions) GetReplacementPairs() map[string]string {
+	if u == nil {
+		return nil
+	}
 	return u.ReplacementPairs
 }
 
 // IsEnabled reads Enabled setting from UrlReplaceOptions
 func (u *UrlReplaceOptions) IsEnabled() bool {
+	if u == nil {
+		return false
+	}
 	return u.Enabled
 }
 
@@ -73,14 +80,14 @@ func (c *UrlReplaceHandler) Intercept(pipeline Pipeline, middlewareIndex int, re
 	}
 
 	reqOption, ok := req.Context().Value(urlReplaceOptionKey).(urlReplaceOptionsInt)
-	if !ok {
+	if !ok || isNilInterface(reqOption) {
 		reqOption = &c.options
 	}
 
 	obsOptions := GetObservabilityOptionsFromRequest(req)
 	ctx := req.Context()
 	var span trace.Span
-	if obsOptions != nil {
+	if obsOptions != nil && !isNilInterface(obsOptions) {
 		ctx, span = otel.GetTracerProvider().Tracer(obsOptions.GetTracerInstrumentationName()).Start(ctx, "UrlReplaceHandler_Intercept")
 		span.SetAttributes(attribute.Bool("com.microsoft.kiota.handler.url_replacer.enable", true))
 		defer span.End()
@@ -97,8 +104,12 @@ func (c *UrlReplaceHandler) Intercept(pipeline Pipeline, middlewareIndex int, re
 
 	req.URL.Path = ReplacePathTokens(req.URL.Path, reqOption.GetReplacementPairs())
 
-	if span != nil {
-		span.SetAttributes(attribute.String("http.request_url", req.RequestURI))
+	if span != nil && obsOptions != nil && !isNilInterface(obsOptions) && obsOptions.GetIncludeEUIIAttributes() {
+		reqURI := req.RequestURI
+		if reqURI == "" && req.URL != nil {
+			reqURI = req.URL.String()
+		}
+		span.SetAttributes(attribute.String("http.request_url", reqURI))
 	}
 
 	response, err := pipeline.Next(req, middlewareIndex)

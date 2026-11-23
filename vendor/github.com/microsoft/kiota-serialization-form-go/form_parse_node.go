@@ -72,7 +72,7 @@ func sanitizeKey(key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.Trim(res, " "), nil
+	return strings.TrimSpace(res), nil
 }
 
 // GetChildNode returns a new parse node for the given identifier.
@@ -80,14 +80,21 @@ func (n *FormParseNode) GetChildNode(index string) (absser.ParseNode, error) {
 	if n == nil {
 		return nil, errors.New("node is nil")
 	}
-	if index == "" {
+	trimmedIndex := strings.TrimSpace(index)
+	if trimmedIndex == "" {
 		return nil, errors.New("index is empty")
 	}
-	key, err := sanitizeKey(index)
-	if err != nil {
-		return nil, err
+	fieldValue, ok := n.fields[trimmedIndex]
+	if !ok {
+		key, err := sanitizeKey(trimmedIndex)
+		if err != nil {
+			return nil, err
+		}
+		if key == "" {
+			return nil, errors.New("index is empty")
+		}
+		fieldValue, ok = n.fields[key]
 	}
-	fieldValue, ok := n.fields[key]
 	if !ok {
 		return nil, nil
 	}
@@ -105,7 +112,7 @@ func (n *FormParseNode) GetObjectValue(ctor absser.ParsableFactory) (absser.Pars
 	if ctor == nil {
 		return nil, errors.New("constructor is nil")
 	}
-	if n == nil || n.value == "" {
+	if n == nil || isNullOrEmptyNode(n.value) {
 		return nil, nil
 	}
 	result, err := ctor(n)
@@ -155,7 +162,7 @@ func (n *FormParseNode) GetObjectValue(ctor absser.ParsableFactory) (absser.Pars
 
 // GetCollectionOfObjectValues returns the collection of Parsable values from the node.
 func (n *FormParseNode) GetCollectionOfObjectValues(ctor absser.ParsableFactory) ([]absser.Parsable, error) {
-	if n == nil || n.value == "" {
+	if n == nil || isNullOrEmptyNode(n.value) {
 		return nil, nil
 	}
 	return nil, errors.New("collections are not supported in form serialization")
@@ -163,7 +170,7 @@ func (n *FormParseNode) GetCollectionOfObjectValues(ctor absser.ParsableFactory)
 
 // GetCollectionOfPrimitiveValues returns the collection of primitive values from the node.
 func (n *FormParseNode) GetCollectionOfPrimitiveValues(targetType string) ([]interface{}, error) {
-	if n == nil || n.value == "" {
+	if n == nil || isNullOrEmptyNode(n.value) {
 		return nil, nil
 	}
 	trimmedType := strings.TrimSpace(targetType)
@@ -193,13 +200,13 @@ func getPrimitiveValue(value string, targetType string) (interface{}, error) {
 		return getStringValue(value)
 	case "bool", "boolean":
 		return getBoolValue(value)
-	case "int8", "uint8":
+	case "int8", "uint8", "sbyte":
 		return getInt8Value(value)
 	case "byte":
 		return getByteValue(value)
 	case "float32", "float":
 		return getFloat32Value(value)
-	case "float64", "double":
+	case "float64", "double", "decimal":
 		return getFloat64Value(value)
 	case "int32":
 		return getInt32Value(value)
@@ -207,13 +214,13 @@ func getPrimitiveValue(value string, targetType string) (interface{}, error) {
 		return getInt64Value(value)
 	case "time", "datetime", "date-time":
 		return getTimeValue(value)
-	case "timeonly":
+	case "timeonly", "time-only":
 		return getTimeOnlyValue(value)
-	case "dateonly":
+	case "dateonly", "date", "date-only":
 		return getDateOnlyValue(value)
 	case "isoduration", "duration":
 		return getISODurationValue(value)
-	case "uuid":
+	case "uuid", "guid":
 		return getUUIDValue(value)
 	case "base64", "[]byte", "bytearray", "binary":
 		return getByteArrayValue(value)
@@ -224,7 +231,7 @@ func getPrimitiveValue(value string, targetType string) (interface{}, error) {
 
 // GetCollectionOfEnumValues returns the collection of Enum values from the node.
 func (n *FormParseNode) GetCollectionOfEnumValues(parser absser.EnumFactory) ([]interface{}, error) {
-	if n == nil || n.value == "" {
+	if n == nil || isNullOrEmptyNode(n.value) {
 		return nil, nil
 	}
 	if parser == nil {
@@ -255,6 +262,22 @@ func (n *FormParseNode) GetStringValue() (*string, error) {
 		return nil, nil
 	}
 	return getStringValue(n.value)
+}
+
+func isNullOrEmptyNode(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || isNullValue(trimmed) {
+		return true
+	}
+	if !strings.ContainsAny(value, "%+") {
+		return false
+	}
+	res, err := url.QueryUnescape(value)
+	if err != nil {
+		return false
+	}
+	trimmed = strings.TrimSpace(res)
+	return trimmed == "" || isNullValue(trimmed)
 }
 
 func isNullValue(value string) bool {
@@ -580,9 +603,9 @@ func getByteArrayValue(value string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(trimmed)
 }
 
-// GetRawValue returns a ByteArray value from the nodes.
+// GetRawValue returns a pointer to the raw string value from the node, or nil if the node is empty or null.
 func (n *FormParseNode) GetRawValue() (interface{}, error) {
-	if n == nil || n.value == "" {
+	if n == nil || isNullOrEmptyNode(n.value) {
 		return nil, nil
 	}
 	res := n.value

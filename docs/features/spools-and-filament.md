@@ -163,7 +163,9 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   mode does, so no spool is made for an unknown tag; the value Bambuddy had goes back only when
   neither holds. ScadBuddy's capture makes no spool from a tag itself),
   `filament_label_base_url` (an https origin of at most 64 characters, live; unset, labels use
-  `public_url` reduced to its https origin, then the page's own origin).
+  `public_url` reduced to its https origin, then the page's own origin),
+  `filament_label_template` (#7157, stored only: the label template the labels page and the
+  labels PDF use; the 50 x 25 mm roll label by default).
 - Bambuddy's spool fields (#7149, plan
   `docs/superpowers/plans/2026-11-23-spool-bb-fields.md`,
   migration `20261123T0609Z_filament_spool_bb_fields.sql`):
@@ -204,8 +206,18 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   slot and external holder the printer's latest report lists; a printer with no such report is
   named on the page. Spool labels keep `scadbuddy:spool:<id>`. A place links to its own page,
   `/filament/locations/<id>`.
+- Label templates and the PDF (#7157, plan
+  `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): the labels page offers SB's
+  50 x 25 mm roll label, Bambuddy's six templates (two box labels, two AMS holder labels and
+  the Avery 5160 and L7160 sheets) and a custom size, and saves the choice in
+  `filament_label_template`. A sheet template prints on its own grid. "Download PDF" asks
+  `POST /api/v1/filament/labels` (`backend/scadbuddy/filament/label_pdf.py`, ReportLab) for
+  the same labels at the same template and saves it through `downloadBlob`, so it works
+  inside Bambuddy's frame. A place label's PDF needs the label address or an https public
+  URL (409 `no_label_base` otherwise). The browser print stays.
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
-  `filament_printer_labels`.
+  `filament_printer_labels`, and the label sizes with `filament_label_templates`; the PDF
+  route has no tool (R-7157-10).
 
 ## Tests
 

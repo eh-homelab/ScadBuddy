@@ -1771,6 +1771,22 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_label_templates',
+    label: 'List label templates',
+    description:
+      'The label sizes the Labels page offers (#7157): each template\'s `id`, `name`, `width_mm`, `height_mm` and, ' +
+      'for a sheet of labels, its `sheet` (page, columns, rows, margins and gaps); `custom`, the bounds of a custom ' +
+      'size. With none chosen the labels are `roll_50x25`. The chosen one is the setting ' +
+      '`filament_label_template` (get_settings).',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/label-templates'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/label-templates'), 'list the label templates')),
+  }),
+
+  defineTool({
     name: 'filament_location_upsert',
     label: 'Add or edit a filament location',
     description:
