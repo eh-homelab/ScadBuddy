@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import type { CustomizerSchema, Filament, MediaView, StorefrontListing } from '../../api/types'
+import type { CustomizerSchema, Filament, MediaView, OutputPlate, SlotNeed, StorefrontListing } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
 import {
   colourProblems,
+  declaredSlots,
   defaultFits,
   defaultsFor,
   draftOf,
@@ -16,6 +17,7 @@ import {
   listingInput,
   listingRefusal,
   nearestFilaments,
+  platePictures,
   previewListing,
   savedKey,
   sellMedia,
@@ -26,6 +28,31 @@ import {
   withoutWords,
   type ListingDraft,
 } from './listingDraft'
+
+/** A template case of `test-fixtures/storefront/sell-draft-vectors.json`. */
+interface TemplateVector {
+  name: string
+  schema: CustomizerSchema
+  filaments: Filament[]
+  values: Record<string, string | number | boolean>
+  expected: { params: unknown; fixed: unknown; colours: string[] }
+  /** The params the save sends for those defaults (`listingInput`), where the vector pins them. */
+  input?: unknown
+}
+
+/**
+ * #6710 — a library-file case: the file as the library's routes answer it (`GET
+ * /print/library/{id}`, `…/filaments` `slots`, `…/plates`), and the body a new listing of
+ * it saves, but `materials`, which each side sets its own way.
+ */
+interface FileVector {
+  name: string
+  file: { id: number; library: 'bambuddy' | 'native'; filename: string; slots: SlotNeed[]; plates: OutputPlate[] }
+  filaments: Filament[]
+  expected: Record<string, unknown>
+}
+
+const sharedVectors = JSON.parse(readFileSync(`${import.meta.dirname}/../../../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (TemplateVector | FileVector)[]
 
 function filament(id: string, colour: string, colour_name: string): Filament {
   return {
@@ -101,15 +128,7 @@ describe('defaultsFor (#6131): the smart defaults', () => {
   })
 
   it('agrees with the shared vectors', () => {
-    const vectors = JSON.parse(readFileSync(`${import.meta.dirname}/../../../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as {
-      name: string
-      schema: CustomizerSchema
-      filaments: Filament[]
-      values: Record<string, string | number | boolean>
-      expected: { params: unknown; fixed: unknown; colours: string[] }
-      /** The params the save sends for those defaults (`listingInput`), where the vector pins them. */
-      input?: unknown
-    }[]
+    const vectors = sharedVectors.filter((vector): vector is TemplateVector => !('file' in vector))
     expect(vectors.length).toBeGreaterThan(0)
     for (const vector of vectors) {
       const defaults = defaultsFor(vector.schema, vector.filaments, vector.values)
@@ -458,6 +477,26 @@ describe('a file listing’s draft (#6710 §9)', () => {
     ]
     expect(fileColours(slots, [BLUE, CORAL, petg, NATURAL])).toEqual(['blue', 'coral', 'natural'])
     expect(fileColours(slots.slice(0, 1), [BLUE, CORAL, petg, NATURAL])).toEqual(['blue', 'coral'])
+  })
+
+  it('drafts a new file listing as the shared vectors say (the assistant drafts the same, #6710 §11.3)', () => {
+    const vectors = sharedVectors.filter((vector): vector is FileVector => 'file' in vector)
+    expect(vectors.length).toBeGreaterThan(0)
+    for (const { name, file, filaments, expected } of vectors) {
+      // As the editor fills a new file listing in: "Sell on storefront…" (or a pick), then the
+      // file's parts and plates once read (`StorefrontListingPage`, `useListedFile`).
+      const draft: ListingDraft = {
+        ...switchSource(emptyDraft(), 'library_file'),
+        library_file: { id: file.id, library: file.library, filename: file.filename, repin: false, pinned: null },
+        title: fileTitle(file.filename, filaments),
+        colours: fileColours(declaredSlots(file.slots), filaments),
+        media_ids: platePictures(file.plates),
+      }
+      const { materials, ...body } = listingInput(draft, undefined, filaments)
+      expect(body, name).toEqual(expected)
+      // The page leaves a new listing on the shop's default materials.
+      expect(materials, name).toEqual([])
+    }
   })
 
   it('names the support filament publish locks a support part to', () => {

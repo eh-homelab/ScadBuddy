@@ -1110,6 +1110,15 @@ colour each slot needs, and "Wait for the right colour" (#6218) is on by default
 - `storefront_listing_draft` with `library_file_id` drafts a file listing; the shared
   vectors in `test-fixtures/storefront/sell-draft-vectors.json` gain a file case, which
   `listingDraft.test.ts` and the agent's tool test both read.
+  As built (PR 7): the file case has a `file` key (the library's answers for the file: its
+  name, `…/filaments` `slots`, `…/plates`) and `expected`, the body a new listing of it saves
+  but `materials`. The editor's `declaredSlots` and `platePictures` (`listingDraft.ts`) and
+  the agent's copies make the parts and the pictures. `materials` differs on purpose: the page
+  leaves a new listing on the shop's default, and the agent names the offered filaments'
+  materials (`draftMaterials`, as for a design, #6302 review), so publish's materials check
+  (§5.1 row 6) passes for a file of a material the default leaves out. The agent refuses a file
+  whose type is not 3MF or STL before it posts (§5.1 row 2), and `lock` and `values` with
+  `library_file_id`.
 
 ### 11.4 Before go-live (on prod, by hand)
 

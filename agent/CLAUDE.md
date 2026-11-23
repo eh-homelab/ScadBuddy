@@ -566,7 +566,11 @@ opens every one and seals it again byte for byte).
     `storefront_listing_draft` (`write`: a listing from an output or a model, unpublished,
     with the Storefront page's smart defaults in `tools/storefrontDraft.ts`, a copy of the
     frontend's `listingDraft.ts` tested against `test-fixtures/storefront/sell-draft-vectors.json`;
-    a colour the customer can choose is taken out of the title) and
+    a colour the customer can choose is taken out of the title; or, with `library_file_id`, a
+    file listing, #6710 spec 2026-11-21 §11.3: the body the editor saves for a new listing of that
+    file, `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`, which the vectors' file
+    case pins, but `materials`, which is the offered filaments' (`draftMaterials`) where the page
+    leaves the shop's default) and
     `storefront_listing_publish` (`outward`). The listings' other routes stay the page's.
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry, or,
     #6935, a bare `marketplace.json` URL's entry, an archive or an npm package) live
