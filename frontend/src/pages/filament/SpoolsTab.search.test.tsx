@@ -1,6 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { useLocation } from 'react-router'
 import { describe, expect, it } from 'vitest'
+import { seedEntityProperties } from '../../mocks/features/entities'
+import { spoolId } from '../../mocks/features/filament/seed'
 import { renderPage } from '../../test/utils'
 import { SpoolsTab } from './SpoolsTab'
 
@@ -97,5 +99,13 @@ describe('the Spools tab search', () => {
     await table()
     await user.keyboard('/')
     expect(screen.getByRole('searchbox', { name: 'Search spools' })).toHaveFocus()
+  })
+
+  it('reads the properties again when the tab loads its spools again (#7026)', async () => {
+    const { user } = render('/filament/spools?q=LOT-77')
+    expect(await screen.findByText('No spool matches “LOT-77” with these filters.')).toBeInTheDocument()
+    seedEntityProperties(`spool:${spoolId(3)}`, { lot: 'LOT-77' })
+    await user.click(screen.getByRole('button', { name: 'Sync weights from AMS' }))
+    await waitFor(async () => expect(numbers(await table())).toEqual(['3']))
   })
 })

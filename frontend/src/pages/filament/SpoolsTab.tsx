@@ -167,6 +167,11 @@ export function SpoolsTab() {
   const latest = useRef(0)
   const load = useCallback(async () => {
     const mine = ++latest.current
+    // #7026: each spool's property values, searched as text, read on every load so an edit
+    // shows; beside the list, never holding it back. A failed read leaves the map empty.
+    void loadKindPropertyTexts('spool').then((found) => {
+      if (mine === latest.current) setPropertyTexts(found)
+    })
     try {
       const [spools, summary, types, tree] = await Promise.all([listSpools({ includeArchived: true }), getSummary(), listTypes(), listLocations()])
       if (mine !== latest.current) return
@@ -208,10 +213,6 @@ export function SpoolsTab() {
       },
       () => {},
     )
-    // #7026: each spool's property values, searched as text; a failed read leaves the map empty.
-    void loadKindPropertyTexts('spool').then((found) => {
-      if (live) setPropertyTexts(found)
-    })
     return () => {
       live = false
     }

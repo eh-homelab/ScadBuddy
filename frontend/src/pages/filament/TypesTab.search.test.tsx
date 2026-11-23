@@ -69,6 +69,14 @@ describe('the Types tab search', () => {
     await waitFor(async () => expect(ids(await table())).toEqual([T.MISTLETOE]))
   })
 
+  it('reads the properties again when the tab loads its types again (#7026)', async () => {
+    const { user } = render('/filament/types?q=0456')
+    expect(await screen.findByText('No type matches “0456”.')).toBeInTheDocument()
+    seedEntityProperties(`spool_type:${T.MISTLETOE}`, { gtin: ['0456'] })
+    await user.click(screen.getByRole('button', { name: 'Fill from slicer profiles' }))
+    await waitFor(async () => expect(ids(await table())).toEqual([T.MISTLETOE]))
+  })
+
   it('still searches when the properties cannot be read (#7026)', async () => {
     server.use(http.get('/api/v1/entity-kinds/:kind/properties', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
     render('/filament/types?q=elegoo')

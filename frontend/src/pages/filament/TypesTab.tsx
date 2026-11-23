@@ -86,6 +86,11 @@ export function TypesTab() {
   const latest = useRef(0)
   const load = useCallback(async () => {
     const mine = ++latest.current
+    // #7026: each type's property values, searched as text, read on every load so an edit
+    // shows; beside the list, never holding it back. A failed read leaves the map empty.
+    void loadKindPropertyTexts('spool_type').then((found) => {
+      if (mine === latest.current) setPropertyTexts(found)
+    })
     try {
       const [types, spools, materials, subtypes, brands] = await Promise.all([
         listTypes({ includeArchived: true }),
@@ -117,10 +122,6 @@ export function TypesTab() {
       setNewest(prices)
       setSkus(found)
       setPricesFailed(failed)
-    })
-    // #7026: each type's property values, searched as text; a failed read leaves the map empty.
-    void loadKindPropertyTexts('spool_type').then((found) => {
-      if (live) setPropertyTexts(found)
     })
     return () => {
       live = false
