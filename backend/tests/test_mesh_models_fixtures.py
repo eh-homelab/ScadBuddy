@@ -43,6 +43,7 @@ def opened(name: str, directory: Path) -> tuple[list[ReadObject], Scene]:
     return read, scene
 
 
+@pytest.mark.usefixtures("one_whole_read_at_a_time")
 @pytest.mark.parametrize("entry", READ, ids=lambda e: e["file"].removesuffix(".3mf"))
 def test_every_readable_fixture_opens_with_its_objects_parts_and_paint(
     entry: dict[str, Any], tmp_path: Path
