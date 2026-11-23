@@ -990,7 +990,8 @@ def test_the_entities_migration_keeps_order_attachments_for_the_previous_build(
             " repeat('a', 64), 'attachment-a', '', '{}')"
         )
         conn.execute(old, ("before",))
-        # Only up to `entities`: a later migration drops the view (#6960, `test_the_compatibility_view_and_its_trigger_are_dropped`).
+        # Only up to `entities`: a later migration drops the view (#6960,
+        # `test_the_compatibility_view_and_its_trigger_are_dropped`).
         assert (
             migrate(conn, MIGRATIONS[: _index("entities") + 1])[0]
             == MIGRATIONS[_index("entities")].id
