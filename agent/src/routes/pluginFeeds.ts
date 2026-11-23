@@ -75,7 +75,7 @@ export type PluginFeedView = {
   slug: string
   name: string
   owner: string
-  /** What `/plugin marketplace add` takes; null without SCADBUDDY_PUBLIC_URL. */
+  /** What `/plugin marketplace add` takes, on the origin the Settings request came on (as the zip URLs are); null when that origin is unknown. */
   marketplace_url: string | null
   /** What /mcp, and so the feed, applies; null when the settings cannot be read. */
   auth_mode: McpAuthMode | null
@@ -174,9 +174,10 @@ export const route: RouteModule = {
       const read = await feeds.read(slug)
       if (!read.feed) return c.json({ detail: NOT_FOUND }, 404)
       const authMode = mcp ? await authModeOf(mcp.authSettings) : null
+      const origin = originOf(c)
       const view: PluginFeedView = {
         ...read.feed,
-        marketplace_url: publicUrl ? marketplaceUrl(publicUrl, slug) : null,
+        marketplace_url: origin ? marketplaceUrl(origin, slug) : null,
         auth_mode: authMode,
         packages: read.packages.map((p) => {
           const e = feedEntry(p, '', slug)

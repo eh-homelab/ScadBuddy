@@ -181,7 +181,7 @@ and its backend module:
   `mcpTransportProblem`, `authenticate`), only approved pins, each zip URL on the origin the
   `marketplace.json` request came on (`effectiveRequest`; Claude Code sends the marketplace's
   `headers` only to that origin), a zip request reading only its own package;
-  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read.
+  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read (its `marketplace_url` is on the request's origin too). The feed is LAN-only like /mcp: no public prefix on the SSO host (clusters#4017).
 - `mcp-relay` (#5299 step 11, `api/crud_agent_mcp.py`): `src/mcp/relayRows.ts` `CrudRelayRows`
   (the /mcp session directory and messages; a message's row and its `scadbuddy_mcp` NOTIFY
   commit in one transaction). `test/mcpSessions.pg.test.ts` runs the relay against the

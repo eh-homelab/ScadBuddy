@@ -55,7 +55,8 @@ export function PluginFeedSection() {
       <p className="text-xs text-muted-foreground">
         Claude Code outside ScadBuddy installs these plugins from ScadBuddy, each at the pin an admin approved.
         A newer pin reaches it after the admin approves it and the user runs{' '}
-        <code className="sb-num">/plugin marketplace update {view.name}</code>.
+        <code className="sb-num">/plugin marketplace update {view.name}</code>. Like /mcp, the feed works with a
+        bearer token only on the LAN host.
       </p>
 
       {view.packages.length === 0 ? (
@@ -73,7 +74,7 @@ export function PluginFeedSection() {
 
       {!snippets ? (
         <p className="text-sm text-warn">
-          The feed has no address: set ScadBuddy&rsquo;s public URL (SCADBUDDY_PUBLIC_URL) for the agent.
+          The feed has no address: the agent could not tell which host this page was opened on.
         </p>
       ) : (
         <div className="space-y-3">
