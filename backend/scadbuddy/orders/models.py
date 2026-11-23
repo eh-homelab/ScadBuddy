@@ -764,6 +764,10 @@ class Fulfilment(BaseModel):
     #: The archives' printing time and filament, summed (§8.2).
     actual_seconds: int | None = None
     actual_grams: float | None = None
+    #: When the media import last asked Bambuddy to scan the printer for the timelapse,
+    #: and when it last read the attempt's archives for media (#7231).
+    timelapse_scanned_at: datetime | None = None
+    media_checked_at: datetime | None = None
 
 
 class OrderProject(BaseModel):
@@ -1010,6 +1014,8 @@ AttachmentKind = Literal["image", "video", "document", "other"]
 AttachmentRole = Literal[
     "reference", "issue", "finished", "packed", "timelapse", "render", "test_print", "other"
 ]
+#: The Bambuddy archive medium an attachment was copied from (#7231).
+ArchiveCopyMedia = Literal["finished_photo", "timelapse"]
 #: The roles only a design revision's file takes (storefront spec §4): its ``render``
 #: and the photo of its ``test_print``.
 REVISION_ROLES: frozenset[AttachmentRole] = frozenset({"render", "test_print"})
@@ -1071,6 +1077,10 @@ class Attachment(BaseModel):
     caption: str
     created_at: datetime
     created_by: Actor
+    #: The Bambuddy archive it was copied from, and which of its media (#7231); both
+    #: None for any other file.
+    archive_id: int | None = None
+    archive_media: ArchiveCopyMedia | None = None
 
 
 class AttachmentPatch(BaseModel):
