@@ -241,12 +241,11 @@ describe('bytes pins and their mirrors through CRUD routes (#6935)', () => {
     }
   }
 
-  it('sends a bytes pin by its sha256, and a commit pin as before', async () => {
+  it('sends a bytes pin by its sha256, and a commit pin by its commit', async () => {
     const api = new FakeApi()
     const store = new CrudPackageStore({ baseUrl: BASE, fetch: api.fetch })
     await store.create(prepared(C1, H1, 'other'))
-    // An API pod from before #6935 takes a commit pin's body unchanged.
-    expect(api.seen.at(-1)?.body).not.toHaveProperty('pin_kind')
+    expect(api.seen.at(-1)?.body).toMatchObject({ pin_kind: 'commit', commit_sha: C1 })
     const made = await store.create(bytesPrepared())
     expect(api.seen.at(-1)?.body).toMatchObject({ source_kind: 'archive', source_ref: '', pin_kind: 'bytes', bytes_sha256: B1, fetch_path: 'greeter-1.0' })
     expect(api.seen.at(-1)?.body).not.toHaveProperty('commit_sha')
