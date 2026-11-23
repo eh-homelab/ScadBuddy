@@ -157,6 +157,7 @@ from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
     OverrideKindError,
+    ResetBeforeLinkError,
     SpoolBambuddyLinkedError,
     SpoolInUseError,
     SpoolTypelessError,
@@ -1482,14 +1483,26 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
         "one left out is the spool's `drying_defaults` value (its type's, else its "
         "subtype's, else its material's), and `null` records none. `consumed_reset` takes "
         "nothing and starts the spool's consumed counter again (`consumed_g`); the grams "
-        "left stay. "
+        "left stay. On a spool linked to Bambuddy a `consumed_reset` whose `at` is not "
+        "after the link is a 422 with `code` `reset_before_link` (#7149 R-7149-12): the sync "
+        "never sends such a reset to Bambuddy, so the counters would disagree. "
         "404 for no such spool, 422 for a field the kind does not take."
     ),
 )
 async def add_spool_event(
     filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.SpoolEventAdd
 ) -> m.SpoolEvent:
-    made = await asyncio.to_thread(filament.spools.add_event, spool_id, body, actor=actor(caller))
+    try:
+        made = await asyncio.to_thread(
+            filament.spools.add_event, spool_id, body, actor=actor(caller)
+        )
+    except ResetBeforeLinkError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(exc),
+            code="reset_before_link",
+            linked_at=exc.linked_at.isoformat(),
+        ) from None
     if made is None:
         raise _no_spool(spool_id)
     return made
