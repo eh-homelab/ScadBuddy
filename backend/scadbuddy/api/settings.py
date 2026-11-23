@@ -57,6 +57,7 @@ from scadbuddy.core.settings import (
 )
 from scadbuddy.filament.bb_sync_models import pushes_anything
 from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
@@ -259,6 +260,8 @@ class SettingsView(BaseModel):
     filament_shopping_auto_add_empty: bool = True
     #: #6905: days a Bambuddy sync pass's history row is kept; ``None``: 30.
     filament_sync_pass_ttl_days: int | None = None
+    #: #7157: the label template the Labels page and `POST /filament/labels` use.
+    filament_label_template: LabelTemplateChoice = Field(default_factory=LabelTemplateChoice)
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
@@ -535,6 +538,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         print_auto_import_skip_lan_printers=stored.print_auto_import_skip_lan_printers or [],
         filament_shopping_auto_add_empty=stored.filament_shopping_auto_add_empty,
         filament_sync_pass_ttl_days=stored.filament_sync_pass_ttl_days,
+        filament_label_template=stored.filament_label_template or LabelTemplateChoice(),
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,

@@ -1,4 +1,4 @@
-"""Location labels (#6955)."""
+"""Location labels (#6955), and the labels a PDF draws (#7157)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,9 @@ from scadbuddy.codes.parse import format_code
 from scadbuddy.filament import models as m
 from scadbuddy.filament import prints
 from scadbuddy.filament.catalog import CatalogRefError
+from scadbuddy.filament.label_pdf import Label, PlaceLabel, SpoolLabel
 from scadbuddy.filament.locations import LocationStore, NoAmsKindError
+from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.status import status_from_report
 from scadbuddy.printers.store import PrinterStore
@@ -155,3 +157,68 @@ def _label(location_id: UUID, row: Mapping[str, Any], depth: int) -> m.PrinterLa
         name=row["name"],
         depth=depth,
     )
+
+
+#: A place label's QR payload at most (`labelSheet.ts` `MAX_PAYLOAD_BYTES`): QR version 5 at
+#: level M, a module of at least 0.5 mm in the 19.8 mm box.
+MAX_PAYLOAD_BYTES = 84
+
+
+class LabelNotFoundError(LookupError):
+    """A spool or place a labels PDF names does not exist."""
+
+    def __init__(self, what: str, row_id: UUID) -> None:
+        super().__init__(f"no {what} {row_id}")
+
+
+class NoLabelBaseError(Exception):
+    """A place label needs an address, and neither the label address nor the public URL
+    gives one (#7157, R-7157-5)."""
+
+
+class LabelPayloadTooLongError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(
+            f"The address for {code} is too long for a QR code on a label."
+            " Shorten the label address in Settings."
+        )
+
+
+def pdf_labels(
+    spools: FilamentSpoolStore,
+    locations: LocationStore,
+    spool_ids: Sequence[UUID],
+    location_ids: Sequence[UUID],
+    base: str | None,
+) -> list[Label]:
+    """The labels of ``spool_ids``, then ``location_ids``, from SB's own rows, with what the
+    browser label carries (`frontend/src/components/filament/Label.tsx`): a spool's number,
+    material and subtype, colour name and brand, its QR `scadbuddy:spool:<id>`; a place's
+    code and name, its QR `<base>/x/L-<n>`. An archived row still gets its label."""
+    labels: list[Label] = []
+    for spool_id in spool_ids:
+        spool = spools.get(spool_id)
+        if spool is None:
+            raise LabelNotFoundError("spool", spool_id)
+        material = " ".join(n for n in (spool.names.material, spool.names.subtype) if n)
+        labels.append(
+            SpoolLabel(
+                number=spool.number,
+                material=material or None,
+                colour=spool.effective.colour_name or spool.colour_name,
+                brand=spool.names.brand,
+                qr=f"scadbuddy:spool:{spool_id}",
+            )
+        )
+    for location_id in location_ids:
+        place = locations.get(location_id)
+        if place is None:
+            raise LabelNotFoundError("location", location_id)
+        if base is None:
+            raise NoLabelBaseError()
+        code = format_code("L", place.number)
+        payload = f"{base.rstrip('/')}/x/{code}"
+        if len(payload.encode()) > MAX_PAYLOAD_BYTES:
+            raise LabelPayloadTooLongError(code)
+        labels.append(PlaceLabel(code=code, name=place.name, qr=payload))
+    return labels

@@ -100,6 +100,7 @@ from scadbuddy.core.settings import (
     check_value,
     env_var,
 )
+from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.orders.message_models import MessagingBinding
@@ -508,6 +509,9 @@ class StoredSettings(BambuddyIds):
     #: (`filament/bb_sync_passes.py` `PASS_TTL_DAYS_DEFAULT`). Stored only: the
     #: housekeeping's activity sweep reads it.
     filament_sync_pass_ttl_days: int | None = None
+    #: #7157: the label template the Labels page and the labels PDF use (R-7157-2).
+    #: ``None``: `label_templates.DEFAULT_TEMPLATE`. Stored only.
+    filament_label_template: LabelTemplateChoice | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -833,6 +837,8 @@ class SettingsPatch(BaseModel):
     #: #6905: days a sync pass's history row is kept, 1 to ten years; ``null`` puts back
     #: the default, 30.
     filament_sync_pass_ttl_days: int | None = Field(default=None, ge=1, le=3650)
+    #: #7157: the label template; ``null`` puts back the 50 x 25 mm roll label.
+    filament_label_template: LabelTemplateChoice | None = None
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.

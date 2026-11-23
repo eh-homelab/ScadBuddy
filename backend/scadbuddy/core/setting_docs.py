@@ -440,6 +440,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " Keep it stable: a printed label keeps the address it was printed with. Empty uses"
             " ScadBuddy's public URL. At most 64 characters.",
         ),
+        "filament_label_template": SettingDoc(
+            "Label template",
+            "The size of a printed label, for spools and for printer, AMS and slot places:"
+            " a roll or box label, an AMS holder, an Avery sheet, or a custom size of 40 to"
+            " 190 mm wide and 25 to 190 mm tall. The Labels page saves the last one chosen.",
+        ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",
             "On, a spool whose filament reaches 0 g, or that is archived, adds its type to the"
