@@ -1105,7 +1105,10 @@ async def slice_estimate(
         # Another read's slice of this variant, or no room yet: the page reads again.
         return pending(planned.key) if claim.row is None else answer_of(claim.row)
     assert claim.row is not None and claim.row.claim_key is not None
-    await _start(state, prices, planned, claim.row.claim_key, claim.previous)
+    started = await _start(state, prices, planned, claim.row.claim_key, claim.previous)
+    if not started and refund is not None:
+        # The claim went back: no slice ran, so the read costs nothing (#7075 review).
+        await refund()
     return pending(planned.key)
 
 
@@ -1177,12 +1180,12 @@ async def _start(
     planned: Planned,
     claim_key: str,
     previous: PriceRow | None,
-) -> None:
+) -> bool:
     """The variant's slice started as its operation, which this claim's own key keys.
     A start that fails gives the claim back (:meth:`SlicePrices.release`), so the next
     read claims it again; one whose answer says the operation may still run keeps the
     row ``running``, so it still counts against the capacity, and `_settle_ended`
-    settles it once the operation ends."""
+    settles it once the operation ends. False when the claim went back."""
     # Here, not at the top: the API's operations import the components.
     from fastapi import Response
 
@@ -1209,12 +1212,15 @@ async def _start(
     except ApiError as error:
         if may_still_run(error):
             logger.warning("a storefront slice may have started: %s", error.detail)
-            return
+            return True
         logger.warning("a storefront slice was not started: %s", error.detail)
         await asyncio.to_thread(prices.release, planned.key, claim_key, previous)
+        return False
     except Exception:
         logger.warning("a storefront slice was not started", exc_info=True)
         await asyncio.to_thread(prices.release, planned.key, claim_key, previous)
+        return False
+    return True
 
 
 async def _settle_ended(state: AppState, prices: SlicePrices) -> None:
