@@ -657,6 +657,8 @@ answers `503` until the API lists the agent's CRUD areas (§5, "Readiness").
 
 Tokens can be managed in every auth mode. In `disabled` mode `/mcp` ignores them, and
 Settings warns about that; they take effect again when the mode returns to `bearer`.
+The same tokens also read the plugin feed (§9, [The marketplace feed](#the-marketplace-feed-6933)):
+revoking one stops its feed reads too.
 The mode is stored in `ai_settings` and changed in Settings (§10, `GET`/`PUT /api/v1/ai/mcp/auth`, `agent/src/routes/mcpAuthMode.ts`); `bearer` is the default until it is set.
 
 To give a client a token, create one with a name that says where it will live, copy it
@@ -784,6 +786,9 @@ Issue #262. With OIDC on, MCP clients such as Claude Code or Claude Desktop sign
 through the homelab IdP instead of being given a pasted `sbmcp_` token. Bearer tokens
 keep working. The design and the specifications followed are in spec §8.3 (`oidc`) and
 [security.md](security.md#mcp-oidc-access-tokens).
+
+OIDC access tokens also read the plugin feed (§9,
+[The marketplace feed](#the-marketplace-feed-6933)), with the same audience as `/mcp`.
 
 **Prerequisites.**
 
@@ -1136,7 +1141,17 @@ agent's backend client also follows no redirect (`api/backend.ts`), so such a re
 instead (#7104).
 
 `hosted_plugin_publish` parks for a person's approval, which names the next version and
-the draft's changes (or, for a draft equal to the latest version, the version it offers). Once approved, the call publishes, then offers the version in the
+the draft's changes (or, for a draft equal to the latest version, the version it offers).
+The approved input also holds `draft`, the draft-diff's `draft_digest` (the draft's files,
+its description and its latest version, `GET /api/v1/hosted-plugins/{name}/draft-diff`), and
+the publish sends it as `?expect_draft=`. A draft written after the approval is refused 409
+`draft-changed`, and nothing is published (#6931 review M3); the model then asks again.
+In a session on Temporal the call's run reads the draft's digest again, so a draft written
+after the approval hashes otherwise. The gate refuses that call `NotApproved` with the
+same advice (`movedSinceApproval`), and runs nothing (#7199). A flow's call that sends no
+`draft` binds the draft as the run page read it (`flowBinding`, backend
+`flows/print_binding.py`); the run sends that digest as `expect_draft` (#7199).
+Once approved, the call publishes, then offers the version in the
 agent's own process (`offerHosted` over `PackageInstaller`, `ToolServices.hostedPackages`),
 never through the UI-guarded package routes. A person still approves the version in
 Settings before it loads. When the draft equals the latest version, the call publishes
@@ -1145,6 +1160,41 @@ after a failed offer offers it. The error says to call again only for a failure 
 pass; for a refusal (the package vetting, or a package of another kind under the name) it
 says to fix the draft first. Deleting a plugin and moving a draft file have no tool:
 they stay the Hosted plugins editor's.
+
+### The marketplace feed (#6933)
+
+The agent serves a marketplace feed of plugin packages to Claude Code sessions outside
+ScadBuddy (spec `2026-11-21-hosted-plugin-feeds-design.md` §6.4, §6.7;
+[`agent/src/routes/pluginFeeds.ts`](../../agent/src/routes/pluginFeeds.ts)). It reads its
+data over the API's CRUD areas `plugin-feeds`, `hosted-plugins` and `package-mirrors`.
+
+| Route | Who | What it does |
+|---|---|---|
+| `GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json` | `/mcp`'s auth | The feed's `marketplace.json`: each package at its current approved pin. `Cache-Control: private, max-age=60`. |
+| `GET …/{feed}/plugins/{name}/versions/{N}/{zip_sha256}.zip` | `/mcp`'s auth | A hosted package's listed version, only when the URL's number and sha256 are the listed ones and the bytes hash to it (else 404, or 502 for bytes that differ). `immutable`. |
+| `GET …/{feed}/plugins/{name}/archives/{sha256}.zip` | `/mcp`'s auth | An archive or npm pin's zip, made from ScadBuddy's mirror and named by the served zip's sha256. `immutable`. |
+| `GET /api/v1/ai/plugin-feeds/{feed}` | Read guard | Settings → MCP access → **Plugin feed**: the feed's `marketplace_url`, the auth mode, and each package with whether it is listed and why not. |
+| `PUT`, `DELETE /api/v1/ai/plugin-feeds/{feed}/packages/{name}` | UI only | Adds a package to the feed (201, or 200 when it was in it) or takes it out (204). |
+
+**The feed follows `/mcp`'s auth.** Each request passes the same transport gates and
+`authenticate()` as `/mcp`: the `sbmcp_` tokens of §4.1 (any tier), OIDC access tokens
+while OIDC is on (§6a), and in `disabled` mode anyone, whatever the anonymous cap (§10;
+every cap includes `read`). So an operator who revokes a token, changes the auth mode or
+the anonymous cap, or turns OIDC on or off, changes who reads the feed too. Settings that
+cannot be read fail closed.
+
+**LAN-only.** The feed has no public prefix on the SSO host (owner decision on
+eh-homelab/clusters#4017): it is reached on the LAN host, as `/mcp` is, and off-LAN clients
+get no feed. The zip URLs and `marketplace_url` are made from the origin the request came
+on, not `SCADBUDDY_PUBLIC_URL`, because Claude Code sends a marketplace's `headers` only to
+that origin.
+
+**What is listed.** Only a package's current approved pin; a pending re-pin, a draft, an
+unapproved package or a package not in the feed is 404 on these paths. A package approved
+with `allow_refused` can be listed, and every client of the feed then runs its hooks and
+MCP servers ([security.md](security.md#the-marketplace-feed-6933)).
+A hosted zip read waits at most 120 s for the API (`HOSTED_ZIP_TIMEOUT_MS`, the
+installer's deadline for the same route).
 
 ### Status
 
@@ -1582,6 +1632,10 @@ DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
 
 Outward tools still need a human approval in the UI in every mode (spec §8.2; see
 [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
+
+The mode and the cap also govern the plugin feed, `/api/v1/ai/plugin-feeds/*` (§9,
+[The marketplace feed](#the-marketplace-feed-6933)): in `disabled` mode anyone on the LAN
+reads it.
 
 ## 11. Automatic Hindsight memory
 

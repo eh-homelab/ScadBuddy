@@ -1180,6 +1180,112 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
   })
 })
 
+// #7199: hosted_plugin_publish binds its approval to the draft's digest. In a durable session
+// the run resolves the draft again; in a flow the backend binds a person's approval to it.
+describe("hosted_plugin_publish's draft binding (#7199)", () => {
+  const FLOW_RUN = '5a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
+  const DIGEST = `sha256:${'d'.repeat(64)}`
+  const MOVED = `sha256:${'e'.repeat(64)}`
+  const publishTool = ALL_TOOLS.find((t) => t.name === 'hosted_plugin_publish')!
+  type Drafts = { digest: string; published: (string | null)[] }
+  /** The API as the fake backend answers it: the draft's digest now, and each publish's `expect_draft`. */
+  function backendOf(state: Drafts) {
+    return createBackendClient(BACKEND, async (request) => {
+      const req = request as Request
+      const url = new URL(req.url)
+      const base = '/api/v1/hosted-plugins/shop-notes'
+      if (url.pathname === `${base}/draft-diff`) {
+        return Response.json({ base_version: 1, added: [], removed: [], changed: ['skills/a/SKILL.md'], manifest_changed: false, draft_digest: state.digest })
+      }
+      if (url.pathname === base) return Response.json({ name: 'shop-notes', latest_version: 1 })
+      if (url.pathname === `${base}/publish` && req.method === 'POST') {
+        state.published.push(url.searchParams.get('expect_draft'))
+        return Response.json({ version: 2, zip_sha256: 'z', content_hash: 'h', files: {}, published_at: '', published_by: 'service:agent' })
+      }
+      return Response.json({})
+    })
+  }
+  const hostedPackages = { get: async () => undefined, offer: async () => ({ name: 'shop-notes', version: 2 }) as never }
+  const hash = (tool: string, input: Record<string, unknown>) => `${tool}:${JSON.stringify(input)}`
+  const audit = { record: async () => {}, hash, summarise: (tool: string) => `summary:${tool}` }
+  const sessions = { ownerOf: async (id: string) => (id === SESSION ? BROWSER : undefined) }
+
+  it('refuses a durable call whose draft changed since its approval, says so, and publishes nothing', async () => {
+    const state: Drafts = { digest: DIGEST, published: [] }
+    const backend = backendOf(state)
+    const describeCall = gateActivities({ audit, sessions, tools: [publishTool], services: services({ backend }) })[DESCRIBE_CALL_ACTIVITY]!
+    const described: unknown = await env().run(describeCall, { tool: 'hosted_plugin_publish', input: { name: 'shop-notes' } })
+    const parked = (described as { input_hash: string }).input_hash
+    expect(parked).toBe(hash('hosted_plugin_publish', { name: 'shop-notes', draft: DIGEST }))
+    // The person approved the parked hash; then the draft changed.
+    const approvals = { approved: async (_id: string, call?: { inputHash: string }) => call?.inputHash === parked }
+    const h = harness({ approvals, audit, services: services({ backend, hostedPackages }) }, [publishTool])
+    state.digest = MOVED
+    const moved = await failure(env(undefined, 'tool-toolu_20').run(h.activities.hosted_plugin_publish!, { name: 'shop-notes' }))
+    expect(moved.nonRetryable).toBe(true)
+    expect(moved.type).toBe('NotApproved')
+    expect(moved.message).toContain(
+      'hosted_plugin_publish was not run: the draft, its description or its versions changed since a person approved this publish',
+    )
+    expect(moved.message).toContain('Call hosted_plugin_publish again')
+    expect(moved.message).not.toContain('none is recorded')
+    expect(state.published).toEqual([])
+    // The draft as it was approved: it runs, and sends the approved digest.
+    state.digest = DIGEST
+    await env(undefined, 'tool-toolu_20').run(h.activities.hosted_plugin_publish!, { name: 'shop-notes' })
+    expect(state.published).toEqual([DIGEST])
+  })
+
+  it('still says none is recorded for a call whose input the resolution left as it was', async () => {
+    const state: Drafts = { digest: DIGEST, published: [] }
+    const h = harness({ approvals: { approved: async () => false }, audit, services: services({ backend: backendOf(state), hostedPackages }) }, [publishTool])
+    const refused = await failure(env(undefined, 'tool-toolu_21').run(h.activities.hosted_plugin_publish!, { name: 'shop-notes', draft: DIGEST }))
+    expect(refused.type).toBe('NotApproved')
+    expect(refused.message).toContain('none is recorded for this call')
+    expect(state.published).toEqual([])
+  })
+
+  describe('in a flow run', () => {
+    const FLOW = `flow-${FLOW_RUN}`
+    const named = { name: 'shop-notes' }
+    /** A person's decision on the run page, bound to the draft the backend read (flows/print_binding.py). */
+    const bound: FlowRuns = {
+      startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),
+      approved: async (requestId, inputHash) => requestId.endsWith(':call_ok') && inputHash === hash('hosted_plugin_publish', { ...named, draft: DIGEST }),
+      approvedUnresolved: async () => false,
+    }
+
+    it('runs the draft the approval was bound to, and sends it as expect_draft', async () => {
+      const state: Drafts = { digest: DIGEST, published: [] }
+      const h = harness({ flows: bound, audit, services: services({ backend: backendOf(state), hostedPackages }) }, [publishTool])
+      await env(FLOW, 'tool-call_ok').run(h.activities.hosted_plugin_publish!, named)
+      expect(state.published).toEqual([DIGEST])
+    })
+
+    it('refuses it, says the draft changed, and publishes nothing once the draft changed since', async () => {
+      const state: Drafts = { digest: MOVED, published: [] }
+      const h = harness({ flows: bound, audit, services: services({ backend: backendOf(state), hostedPackages }) }, [publishTool])
+      const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.hosted_plugin_publish!, named))
+      expect(refused.type).toBe('NotApproved')
+      expect(refused.message).toContain('changed since a person approved this publish')
+      expect(state.published).toEqual([])
+    })
+
+    it("refuses a person's decision on the raw arguments: it never falls back past the draft", async () => {
+      const raw: FlowRuns = {
+        startedBy: async (id) => (id === FLOW_RUN ? BROWSER : undefined),
+        approved: async (requestId, inputHash) => requestId.endsWith(':call_ok') && inputHash === hash('hosted_plugin_publish', named),
+        approvedUnresolved: async () => false,
+      }
+      const state: Drafts = { digest: DIGEST, published: [] }
+      const h = harness({ flows: raw, audit, services: services({ backend: backendOf(state), hostedPackages }) }, [publishTool])
+      const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.hosted_plugin_publish!, named))
+      expect(refused.type).toBe('NotApproved')
+      expect(state.published).toEqual([])
+    })
+  })
+})
+
 describe("decidedCalls: a released turn's approved call (unified runtime spec §5.4 step 5)", () => {
   const OTHER = '9d1f2a3b-4c5d-4e6f-8a7b-0c1d2e3f4a5b'
   let ran = 0

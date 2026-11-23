@@ -5,6 +5,7 @@ prints the file, and a file gone since it was added is refused, never a 500."""
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import psycopg
 import pytest
 
 from scadbuddy.bambuddy.follow import Follower
+from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.print_run import PrintRunResult
@@ -60,6 +62,13 @@ class Library:
 
     async def colours(self, file_id: int) -> dict[int, str]:
         return dict(self.slot_colours)
+
+    async def file(self, file_id: int) -> LibraryFile | None:
+        return LibraryFile(id=file_id, filename="bracket.3mf") if file_id in self.files else None
+
+    async def download(self, file_id: int) -> AsyncGenerator[bytes]:
+        raise AssertionError("a back-office item's check reads no bytes")
+        yield b""
 
 
 @pytest.fixture

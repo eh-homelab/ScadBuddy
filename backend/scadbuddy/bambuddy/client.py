@@ -287,6 +287,7 @@ Operation = Literal[
     "spools.update",
     "spools.archive",
     "spools.restore",
+    "spools.reset_consumed",
     "spools.k_profiles",
     "spools.presets_put",
     "spools.suppliers_put",
@@ -2391,6 +2392,20 @@ class BambuddyClient:
             scope=Scope.MANAGE_INVENTORY,
             operation="spools.archive",
             what=f"archive spool {spool_id}",
+        )
+        return Spool.model_validate(response.json())
+
+    async def reset_consumed_counter(self, spool_id: int) -> Spool:
+        """``POST /api/v1/inventory/spools/{id}/reset-consumed-counter``, no body
+        (``routes/inventory.py`` line 1811, v1.3.1): sets ``weight_used_baseline`` to
+        ``weight_used``, so Bambuddy's "Total consumed" reads 0; the remainder and the
+        weight lock stay (#7149 R-7149-5)."""
+        response = await self._send(
+            "POST",
+            f"/inventory/spools/{spool_id}/reset-consumed-counter",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.reset_consumed",
+            what=f"reset the consumed counter of spool {spool_id}",
         )
         return Spool.model_validate(response.json())
 

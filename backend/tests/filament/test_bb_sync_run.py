@@ -905,6 +905,22 @@ async def test_a_spool_create_archive_and_restore() -> None:
 
 
 @respx.mock
+async def test_a_consumed_reset_posts_with_no_body() -> None:
+    """#7149 R-7149-5: the answer is the spool row, which `results` echoes."""
+    _listings()
+    reset = respx.post(f"{API}/inventory/spools/3/reset-consumed-counter").mock(
+        return_value=httpx.Response(200, json=_spool_row(3, weight_used_baseline=100.0))
+    )
+    sync = FakeSync([_plan([_write("reset_consumed", 3, {})])])
+
+    await _run(sync)
+
+    assert reset.calls.last.request.content == b""
+    [(_, _, [done], _)] = sync.sent
+    assert done.ok and done.answer is not None and done.answer["weight_used_baseline"] == 100.0
+
+
+@respx.mock
 async def test_a_plan_for_another_instance_stops_the_pass() -> None:
     _listings()
     sync = FakeSync([_plan([], instance_changed=True)])

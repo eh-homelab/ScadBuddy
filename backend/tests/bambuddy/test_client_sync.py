@@ -81,6 +81,20 @@ async def test_update_spool_sends_only_the_given_fields(bambuddy: BambuddyClient
 
 
 @respx.mock
+async def test_the_consumed_reset_posts_to_its_route(bambuddy: BambuddyClient) -> None:
+    """#7149 R-7149-5: no body; the answer is the spool, its baseline now its use."""
+    reset = respx.post(f"{API}/inventory/spools/3/reset-consumed-counter").mock(
+        return_value=httpx.Response(200, json=_spool(weight_used=120.0, weight_used_baseline=120.0))
+    )
+
+    spool = await bambuddy.reset_consumed_counter(3)
+
+    assert reset.calls.last.request.content == b""
+    assert reset.calls.last.request.headers["X-API-Key"] == "s3cret"
+    assert spool.weight_used_baseline == 120.0
+
+
+@respx.mock
 async def test_archive_and_restore_post_to_their_routes(bambuddy: BambuddyClient) -> None:
     archive = respx.post(f"{API}/inventory/spools/3/archive").mock(
         return_value=httpx.Response(200, json=_spool(archived_at="2026-11-18T12:00:00"))
@@ -355,6 +369,7 @@ def test_every_sync_operation_is_a_declared_name() -> None:
         "spools.update",
         "spools.archive",
         "spools.restore",
+        "spools.reset_consumed",
         "spools.k_profiles",
         "spools.presets_put",
         "spools.suppliers_put",

@@ -221,14 +221,20 @@ def spool_metrics(
     now: datetime,
 ) -> SpoolMetrics:
     """One spool's metrics. "Opened" is its first ``loaded`` event, else its first plate
-    (Decision 15). Money is quantized to the cent."""
+    (Decision 15). Money is quantized to the cent. The consumed counter counts the plates
+    after the newest ``consumed_reset`` (#7149 R-7149-4); the other figures are lifetime."""
     found = plates(events)
     used = sum(p.grams for p in found)
+    resets = [e for e in _ordered(events) if e.kind == ledger.CONSUMED_RESET]
+    since = resets[-1].at if resets else None
+    consumed = sum(p.grams for p in found if since is None or p.at > since)
     rate = burn(found, window_days=window_days, born=created_at, now=now)
     loaded = next((e.at for e in _ordered(events) if e.kind == "loaded"), None)
     opened = loaded if loaded is not None else (found[0].at if found else None)
     return SpoolMetrics(
         used_g=used,
+        consumed_g=consumed,
+        consumed_since=since,
         prints=len(found),
         grams_per_print=used / len(found) if found else None,
         wasted_g=sum(p.grams for p in found if p.outcome in ("failed", "cancelled")),

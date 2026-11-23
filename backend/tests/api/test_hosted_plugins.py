@@ -200,6 +200,7 @@ def test_a_draft_the_checks_refuse_is_not_published(client: TestClient) -> None:
 def test_a_publish_makes_immutable_numbered_versions(client: TestClient, db: Any) -> None:
     _ready(client)
     diff = client.get(f"{BASE}/greeter/draft-diff").json()
+    assert diff.pop("draft_digest").startswith("sha256:")
     assert diff == {
         "base_version": None,
         "added": ["skills/hello/SKILL.md"],
@@ -224,6 +225,7 @@ def test_a_publish_makes_immutable_numbered_versions(client: TestClient, db: Any
     _put(client, "commands/wave.md", b"Wave.\n")
     _put(client, "skills/hello/SKILL.md", SKILL + b"Again.\n")
     diff = client.get(f"{BASE}/greeter/draft-diff").json()
+    assert diff.pop("draft_digest").startswith("sha256:")
     assert diff == {
         "base_version": 1,
         "added": ["commands/wave.md"],
@@ -320,6 +322,61 @@ def test_a_draft_over_the_packages_cap_with_its_manifest_is_not_published(
     assert (refused.status_code, refused.json()["reason"]) == (422, "draft-invalid")
 
 
+def test_a_full_draft_with_its_manifest_fits_the_agents_unpack_cap(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6931 review I1: the agent unpacks at most 500 entries (``unpack.ts``
+    ``UNPACK_MAX_FILES``), and the published zip is the draft plus ``plugin.json``."""
+    assert (rules.PACKAGE_MAX_FILES, rules.MAX_FILES) == (500, 499)
+    assert routes.HostedPluginFiles(files=[], total_bytes=0).max_files == 499
+    monkeypatch.setattr(rules, "PACKAGE_MAX_FILES", 3)
+    monkeypatch.setattr(rules, "MAX_FILES", 2)
+    _ready(client)
+    assert _put(client, "skills/hello/more.md", b"more").status_code == 200
+    over = _put(client, "skills/hello/third.md", b"third")
+    assert (over.status_code, over.json()["reason"]) == (413, "too-many-files")
+    full = client.post(f"{BASE}/greeter/publish")
+    assert full.status_code == 200, full.text
+    assert len(full.json()["files"]) == 3
+
+
+def test_a_draft_over_the_agents_unpack_cap_is_not_published(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A draft written under an older, larger cap is refused at publish with the reason."""
+    _ready(client)
+    assert _put(client, "skills/hello/more.md", b"more").status_code == 200
+    monkeypatch.setattr(rules, "PACKAGE_MAX_FILES", 2)
+    refused = client.post(f"{BASE}/greeter/publish")
+    assert (refused.status_code, refused.json()["reason"]) == (422, "draft-invalid")
+    assert any("more than 2 files" in p for p in refused.json()["problems"]), refused.text
+    assert client.get(f"{BASE}/greeter").json()["latest_version"] is None
+
+
+def test_a_publish_with_the_approved_digest_refuses_a_changed_draft(client: TestClient) -> None:
+    """#6931 review M3: ``expect_draft`` binds a publish to the draft a person approved."""
+    _ready(client)
+    approved = client.get(f"{BASE}/greeter/draft-diff").json()["draft_digest"]
+    assert client.get(f"{BASE}/greeter/draft-diff").json()["draft_digest"] == approved
+
+    _put(client, "skills/hello/extra.md", b"not seen")
+    moved = client.post(f"{BASE}/greeter/publish", params={"expect_draft": approved})
+    assert (moved.status_code, moved.json()["reason"]) == (409, "draft-changed"), moved.text
+    assert client.get(f"{BASE}/greeter").json()["latest_version"] is None
+
+    client.delete(f"{BASE}/greeter/files/skills/hello/extra.md")
+    assert client.get(f"{BASE}/greeter/draft-diff").json()["draft_digest"] == approved
+    client.patch(f"{BASE}/greeter", json={"description": "Waves"})
+    renamed = client.post(f"{BASE}/greeter/publish", params={"expect_draft": approved})
+    assert (renamed.status_code, renamed.json()["reason"]) == (409, "draft-changed")
+
+    current = client.get(f"{BASE}/greeter/draft-diff").json()["draft_digest"]
+    done = client.post(f"{BASE}/greeter/publish", params={"expect_draft": current})
+    assert done.status_code == 200, done.text
+    # The same files after a publish are another digest: its base version moved.
+    assert client.get(f"{BASE}/greeter/draft-diff").json()["draft_digest"] != current
+
+
 def test_a_plugin_is_edited_with_a_patch(client: TestClient) -> None:
     assert _create(client, category="tools", tags=["fun"]).status_code == 201
     only = client.patch(f"{BASE}/greeter", json={"description": "Waves"})
@@ -371,6 +428,7 @@ def test_a_new_description_reaches_the_next_version_only(client: TestClient) -> 
 
     # Only the generated plugin.json differs, and that is still a change to publish.
     diff = client.get(f"{BASE}/greeter/draft-diff").json()
+    assert diff.pop("draft_digest").startswith("sha256:")
     assert diff == {
         "base_version": 1,
         "added": [],

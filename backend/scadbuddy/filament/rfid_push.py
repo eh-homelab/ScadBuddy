@@ -32,6 +32,20 @@ logger = logging.getLogger(__name__)
 #: The session advisory lock (hashed with ``hashtextextended``) that one drain of the
 #: pending-tag queue holds, keyed by name as the backend's other advisory locks are.
 PUSH_LOCK = "scadbuddy:filament:rfid_push"
+#: Bambuddy's ``data_origin`` for a tag linked by hand (``LinkTagRequest``'s default,
+#: ``data_origin_values`` in ``tests/bambuddy/recordings/openapi/rfid-routes.json``): what a
+#: person's bind in ScadBuddy sets on the spool, and what the push sends for a spool with
+#: no origin (#7149 R-7149-1).
+HAND_LINK_ORIGIN = "nfc_link"
+#: Bambuddy's ``data_origin`` when it matches a Bambu tag to a spool
+#: (``spool_tag_matcher.py`` L417, ``data_origin_values``): what a person's bind of a
+#: ``bambu_mifare`` tag sets (#7149 R-7149-10).
+BAMBU_LINK_ORIGIN = "rfid_linked"
+
+
+def link_origin(kind: str | None) -> str:
+    """The ``data_origin`` a person's bind of a tag of ``kind`` gives the spool."""
+    return BAMBU_LINK_ORIGIN if kind == "bambu_mifare" else HAND_LINK_ORIGIN
 
 
 def enqueue_tag(conn: Conn, tag_id: UUID) -> None:
@@ -58,9 +72,10 @@ def failure_label(exc: Exception) -> str:
 
 
 def _read(store: Filament, tag_id: UUID) -> tuple[dict[str, Any], int | None] | None:
-    """The queued tag's keys and ``queued_at``, and the Bambuddy id of the spool it is
-    bound to (``None`` when unbound or the spool has no Bambuddy link); ``None`` when it
-    is no longer queued."""
+    """The queued tag's keys and ``queued_at``, with ``origin`` the bound spool's
+    ``data_origin`` (#7149 R-7149-1), and the Bambuddy id of the spool it is bound to
+    (``None`` when unbound or the spool has no Bambuddy link); ``None`` when it is no
+    longer queued."""
     with store.spools.transaction() as conn:
         tag = conn.execute(
             "SELECT t.kind, t.tag_uid, t.tray_uuid, p.queued_at"
@@ -71,12 +86,14 @@ def _read(store: Filament, tag_id: UUID) -> tuple[dict[str, Any], int | None] | 
         if tag is None:
             return None
         held = conn.execute(
-            "SELECT l.bb_spool_id FROM filament_tag_bindings b"
+            "SELECT l.bb_spool_id, s.data_origin FROM filament_tag_bindings b"
             " JOIN filament_bb_links l ON l.spool_id = b.spool_id"
+            " JOIN filament_spools s ON s.id = b.spool_id"
             " WHERE b.tag_id = %s AND b.unbound_at IS NULL",
             (tag_id,),
         ).fetchone()
-    return tag, None if held is None else held["bb_spool_id"]
+    origin = None if held is None else held["data_origin"]
+    return dict(tag) | {"origin": origin}, None if held is None else held["bb_spool_id"]
 
 
 def _sb_holder(store: Filament, bb_spool_id: int) -> bool | None:
@@ -125,15 +142,17 @@ async def _push_one(
         report.unchanged += 1
     elif desired is not None:
         kind = "bambu" if tag["kind"] == "bambu_mifare" else "ntag"
+        # The spool's own origin; a hand link's word when it has none (R-7149-10).
+        origin = tag["origin"] or link_origin(tag["kind"])
         try:
             await client.link_tag(
-                desired, tag_uid=uid, tray_uuid=tray, tag_type=kind, data_origin="nfc_link"
+                desired, tag_uid=uid, tray_uuid=tray, tag_type=kind, data_origin=origin
             )
             report.pushed += 1
         except TagAlreadyLinkedError as clash:
             await client.clear_spool_tag(clash.holder_id)
             await client.link_tag(
-                desired, tag_uid=uid, tray_uuid=tray, tag_type=kind, data_origin="nfc_link"
+                desired, tag_uid=uid, tray_uuid=tray, tag_type=kind, data_origin=origin
             )
             report.moved += 1
     else:

@@ -12,7 +12,8 @@ import type { SessionRows } from '../sessions/rows.js'
 // inputHash (approvals/service.ts) of the tool and arguments the person approved, made
 // by the backend (flows/approval_hash.py), and it must equal the hash of the call being
 // run. A person's approval of a print_output call that names a registry printer binds to
-// the arguments plus the printer_id the row links (flows/print_binding.py, #4445). Both
+// the arguments plus the printer_id the row links (flows/print_binding.py, #4445), and one
+// of a hosted_plugin_publish call to the arguments plus the draft's digest (#7199). Both
 // tables are the backend's; the agent asks it over its CRUD routes (flows/backendReads.ts,
 // #5299 D7) and never writes them.
 

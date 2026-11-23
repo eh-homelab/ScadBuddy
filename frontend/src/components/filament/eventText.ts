@@ -65,6 +65,7 @@ export const KIND_TEXT: Record<SpoolEvent['kind'], string> = {
   archived: 'Archived',
   restored: 'Restored',
   synced_from_bb: 'Synced from Bambuddy',
+  consumed_reset: 'Used counter reset',
 }
 
 /** The names of the fields an `edited` event can change, as the spool page labels them. */
