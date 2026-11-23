@@ -10,6 +10,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { ChoiceSelect, LabeledInput, LoadingLines } from './form'
 import { Spinner } from '../ui/spinner'
 import { VirtualPrintersPanel } from './VirtualPrinters'
+import { PrinterKProfiles } from './PrinterKProfiles'
 
 /**
  * Settings → Printers (#3823, plan 2026-10-16, Task 10): the printer registry, one row per
@@ -227,6 +228,9 @@ function PrinterItem({
           )}
 
           {!row.lan_host && !virtual && <LanForm row={row} onLinked={onChanged} />}
+
+          {/* #7154: the printer's K-profiles, through the Bambuddy printer it links. */}
+          {!virtual && bambuddy != null && <PrinterKProfiles row={row} />}
 
           <div className="flex items-center gap-2">
             <Button

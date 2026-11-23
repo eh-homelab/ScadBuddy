@@ -176,15 +176,71 @@ export function seedHostedPackage(name: string, version: number, latest = versio
   })
 }
 
-/** The agent's install of a hosted source: a re-pin of the installed hosted package to the latest version. */
+/** What the hosted plugins mock (`features/hostedPlugins.ts`, #6937) holds of a plugin: its latest version and that version's review. */
+export interface HostedMockVersion {
+  latest: number
+  review: PackageReview
+}
+let hostedLookup: (name: string) => HostedMockVersion | undefined = () => undefined
+
+/** The hosted plugins mock tells this one how to read a published plugin, so an Offer installs what the editor published. */
+export function setHostedLookup(lookup: (name: string) => HostedMockVersion | undefined): void {
+  hostedLookup = lookup
+}
+
+/** The hosted plugin's latest version and review: the editor's when it holds the name, else a seeded one. */
+function hostedVersion(name: string): HostedMockVersion | undefined {
+  const published = hostedLookup(name)
+  if (published) return published
+  const latest = hostedLatest.get(name)
+  return latest === undefined ? undefined : { latest, review: state.packages.get(name)?.review ?? REVIEW_V1 }
+}
+
+/** Deleting a hosted plugin deletes its package (spec §6.3). */
+export function dropHostedPackage(name: string): void {
+  const pkg = state.packages.get(name)
+  if (pkg?.source.kind === 'hosted') dropPackage(name)
+}
+
+/** Whether a package (or a built-in) has `name`: a hosted plugin cannot take it (plan ruling R3). */
+export function packageNameTaken(name: string): boolean {
+  return state.packages.has(name) || state.builtIns.has(name)
+}
+
+/**
+ * The agent's install of a hosted source (#6934): the latest version installed unapproved
+ * and disabled when no package has the name, else a re-pin of the hosted package into `pending`.
+ */
 function offerHosted(name: string, status = 201) {
   const pkg = state.packages.get(name)
-  const latest = hostedLatest.get(name)
-  if (latest === undefined) return detail(404, `no hosted plugin named "${name}"`)
-  // The mock seeds only known names; the real agent installs any published hosted plugin.
-  if (!pkg) return detail(502, 'the demo installs a hosted plugin only once it is seeded')
+  const found = hostedVersion(name)
+  if (found === undefined) return detail(404, `no hosted plugin named "${name}"`)
+  const { latest, review } = found
+  if (!pkg) {
+    const installed: PluginPackage = {
+      name,
+      source: { kind: 'hosted', name },
+      pin_kind: 'version',
+      commit_sha: null,
+      bytes_sha256: null,
+      version: latest,
+      not_offered: null,
+      content_hash: hostedHash(latest),
+      review,
+      approved: false,
+      approved_at: null,
+      allow_refused: false,
+      enabled: false,
+      pending: null,
+      created_at: now(),
+      updated_at: now(),
+    }
+    putPackage(name, installed)
+    return HttpResponse.json(installed, { status })
+  }
   if (pkg.source.kind !== 'hosted') return detail(409, `a plugin package named "${name}" is installed from a ${pkg.source.kind} source, not this hosted plugin`)
   if (pkg.version === latest) return detail(409, `"${name}" is already pinned to ${latest}`)
+  const published = hostedLookup(name) !== undefined
   const next: PluginPackage = {
     ...pkg,
     not_offered: null,
@@ -197,8 +253,14 @@ function offerHosted(name: string, status = 201) {
       bytes_sha256: null,
       version: latest,
       content_hash: hostedHash(latest),
-      review: pkg.review,
-      diff: { added: ['commands/bow.md'], removed: [], changed: ['.claude-plugin/plugin.json'] },
+      review,
+      diff: published
+        ? {
+            added: review.files.filter((f) => !pkg.review.files.includes(f)),
+            removed: pkg.review.files.filter((f) => !review.files.includes(f)),
+            changed: ['.claude-plugin/plugin.json'],
+          }
+        : { added: ['commands/bow.md'], removed: [], changed: ['.claude-plugin/plugin.json'] },
     },
   }
   putPackage(name, next)
@@ -421,7 +483,15 @@ export function setRemotePluginAccess(
  * own plugin's switch, from here on every request, so both routes read one state.
  */
 export function packageList(): ListedPackage[] {
-  return [...state.builtIns.values(), ...state.packages.values()]
+  return [...state.builtIns.values(), ...[...state.packages.values()].map(withNotOffered)]
+}
+
+/** A hosted package's `not_offered`, as the agent works it out from the hosted plugin the editor publishes (#6934). */
+function withNotOffered(pkg: PluginPackage): PluginPackage {
+  if (pkg.source.kind !== 'hosted') return pkg
+  const latest = hostedLookup(pkg.name)?.latest
+  if (latest === undefined) return pkg
+  return { ...pkg, not_offered: latest === pkg.version || latest === pkg.pending?.version ? null : latest }
 }
 
 /**

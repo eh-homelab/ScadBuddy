@@ -14,6 +14,7 @@ import {
   fittedDefault,
   fixColour,
   isSupport,
+  isSupportMaterial,
   listingInput,
   listingRefusal,
   nearestFilaments,
@@ -50,6 +51,8 @@ interface FileVector {
   file: { id: number; library: 'bambuddy' | 'native'; filename: string; slots: SlotNeed[]; plates: OutputPlate[] }
   filaments: Filament[]
   expected: Record<string, unknown>
+  /** Titles and the colour names in each that a customer can pick (`titleColours` of the new draft). */
+  titles: { title: string; colours: string[] }[]
 }
 
 const sharedVectors = JSON.parse(readFileSync(`${import.meta.dirname}/../../../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (TemplateVector | FileVector)[]
@@ -385,6 +388,16 @@ describe('savedKey (#6290): a null field is an absent one, and nothing else is',
   })
 })
 
+describe('isSupportMaterial (#7195 review): the shared vectors', () => {
+  it('reads a support material as the backend and the assistant do', () => {
+    // `test-fixtures/storefront/support-materials.json`, which the backend's
+    // `tests/orders/storefront/test_support_material.py` and the agent's tool test read too.
+    const cases = JSON.parse(readFileSync(`${import.meta.dirname}/../../../../test-fixtures/storefront/support-materials.json`, 'utf8')) as { support: string[]; customer: string[] }
+    for (const material of cases.support) expect(isSupportMaterial(material), material).toBe(true)
+    for (const material of cases.customer) expect(isSupportMaterial(material), material).toBe(false)
+  })
+})
+
 describe('a file listing’s draft (#6710 §9)', () => {
   const PIN = 'a'.repeat(64)
   const NATURAL = { ...filament('natural', '#F0EAD6', 'Natural'), material: 'PVA' }
@@ -482,7 +495,7 @@ describe('a file listing’s draft (#6710 §9)', () => {
   it('drafts a new file listing as the shared vectors say (the assistant drafts the same, #6710 §11.3)', () => {
     const vectors = sharedVectors.filter((vector): vector is FileVector => 'file' in vector)
     expect(vectors.length).toBeGreaterThan(0)
-    for (const { name, file, filaments, expected } of vectors) {
+    for (const { name, file, filaments, expected, titles } of vectors) {
       // As the editor fills a new file listing in: "Sell on storefront…" (or a pick), then the
       // file's parts and plates once read (`StorefrontListingPage`, `useListedFile`).
       const draft: ListingDraft = {
@@ -496,6 +509,8 @@ describe('a file listing’s draft (#6710 §9)', () => {
       expect(body, name).toEqual(expected)
       // The page leaves a new listing on the shop's default materials.
       expect(materials, name).toEqual([])
+      // The "Leave … out of the title" warning, which the assistant's copy acts on.
+      for (const { title, colours } of titles) expect(titleColours({ ...draft, title }, undefined, filaments), `${name}: ${title}`).toEqual(colours)
     }
   })
 

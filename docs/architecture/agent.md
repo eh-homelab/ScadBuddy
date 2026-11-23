@@ -86,6 +86,7 @@ Routes are auto-registered from every `routes/*.ts` that exports `route`
 | `/api/v1/ai/credentials…` | Claude credentials | `routes/credentials.ts:207-412` |
 | `/api/v1/ai/settings/*`, `/capabilities/*` | model, limits, workspace, tool access | `routes/model.ts:37`, `routes/capabilities.ts:141-180` |
 | `/api/v1/ai/plugins…`, `/plugin-packages…`, `/mcp-tokens…` | plugins, packages, tokens for external MCP clients | `routes/plugins.ts:161`, `routes/pluginPackages.ts:120`, `routes/mcpTokens.ts:116` |
+| `/api/v1/ai/plugin-feeds…` | the marketplace feed for outside Claude Code (its `marketplace.json` and zips on `/mcp`'s auth, LAN-only), and Settings' read and writes of it | `routes/pluginFeeds.ts:159-272` |
 | `/api/v1/ai/notify/*`, `/push/*`, `/audit` | notifications and the audit log | `routes/notifyChannels.ts:24`, `routes/push.ts:29`, `routes/audit.ts:68` |
 | `/api/v1/ai/orders/*` | customer messages through a bound plugin | `routes/orderMessages.ts:85`, `routes/messagingBinding.ts:63` |
 
@@ -190,8 +191,13 @@ security: [browser-bridge.md](../ai/browser-bridge.md).
   `CrudSessionFiles`); the agent sends and gets plaintext only. The working directory is
   under `SCADBUDDY_SESSION_DIR` (`config.ts`).
 - **Plugins.** Remote MCP plugins (`ai_plugins`) through the loopback forwarder; packages
-  pinned to a git commit (`ai_plugin_packages`), fetched with a stripped git environment
-  (`plugins/packages/git.ts:1-29`). [User guide "Plugins"](../user-guide.md#plugins).
+  (`ai_plugin_packages`) pinned to a git commit (fetched with a stripped git environment,
+  `plugins/packages/git.ts:1-29`), to an archive or npm file's sha256 (`pin_kind` `bytes`,
+  loaded from the API's mirror, `plugins/packages/mirror.ts`), or to a hosted plugin's
+  version (`pin_kind` `version`, `plugins/packages/hosted.ts`). A hosted plugin is a draft
+  of files kept by the API (`ai_hosted_plugins`, published as immutable versions). A
+  marketplace feed (`ai_plugin_feeds`, `ai_plugin_feed_packages`) lists approved pins to
+  outside Claude Code (`plugins/feed.ts`). [User guide "Plugins"](../user-guide.md#plugins).
 - **Claude credentials.** Kinds `anthropic_api_key`, `claude_oauth_token` and `gateway`
   (`credentials.ts`), each sealed with a per-row key under the API's KEK. The API seals and
   opens them, and the agent reads them through area `credentials` (`CrudCredentials`).

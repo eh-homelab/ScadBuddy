@@ -56,6 +56,7 @@ PullId = Annotated[str, Field(pattern=r"^filament-bb-pull-[0-9a-f]{32}$")]
 TYPE_FIELDS: dict[str, str] = {
     "remaining_g": "weights",
     "weight_locked": "weights",
+    "consumed_baseline": "weights",
     "tag_uid": "tags",
     "tray_uuid": "tags",
 }

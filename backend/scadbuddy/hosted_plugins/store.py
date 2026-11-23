@@ -145,6 +145,15 @@ def version(conn: Conn, plugin_id: int, number: int) -> Any | None:
     ).fetchone()
 
 
+def versions(conn: Conn, plugin_id: int) -> list[Any]:
+    """Every published version, newest first."""
+    return conn.execute(
+        "SELECT version, zip_sha256, content_hash, files, published_at, published_by"
+        " FROM ai_hosted_plugin_versions WHERE plugin_id = %s ORDER BY version DESC",
+        (plugin_id,),
+    ).fetchall()
+
+
 def publish(
     conn: Conn,
     plugin_id: int,

@@ -1318,6 +1318,8 @@ async def bind_spool_tag(
                 kind=body.kind,
                 override=body.override,
                 actor=actor(caller),
+                # R-7149-10: the origin follows the tag's stored kind.
+                marks_origin=True,
             )
         )
     except _SPOOL_REFUSED as exc:
@@ -1466,12 +1468,14 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
     "/spools/{spool_id}/events",
     response_model=m.SpoolEvent,
     status_code=status.HTTP_201_CREATED,
-    summary="Record a weighing or a drying",
+    summary="Record a weighing, a drying or a consumed reset",
     description=(
         "`weighed` with `grams` (the filament left, without the empty spool) is a new "
         "reading: `grams_left` starts again from it. `dried` takes `temp_c` and `hours`; "
         "one left out is the spool's `drying_defaults` value (its type's, else its "
-        "subtype's, else its material's), and `null` records none. "
+        "subtype's, else its material's), and `null` records none. `consumed_reset` takes "
+        "nothing and starts the spool's consumed counter again (`consumed_g`); the grams "
+        "left stay. "
         "404 for no such spool, 422 for a field the kind does not take."
     ),
 )
@@ -1482,6 +1486,26 @@ async def add_spool_event(
     if made is None:
         raise _no_spool(spool_id)
     return made
+
+
+@router.post(
+    "/spools/reset-consumed",
+    response_model=m.ConsumedResetDone,
+    summary="Reset the consumed counter of several spools",
+    description=(
+        "A `consumed_reset` ledger event on each spool named (1 to 500 ids; there is no "
+        '"reset all"). The grams left stay; the spool\'s `consumed_g` metric counts the '
+        "plates after it, and the Bambuddy sync resets Bambuddy's counter of a linked spool "
+        "under the `weights` data type. An id that names no spool is in `not_found`. One "
+        "spool: `POST /spools/{spool_id}/events` with `kind: consumed_reset`."
+    ),
+)
+async def reset_consumed(
+    filament: FilamentDep, caller: CallerDep, body: m.ConsumedReset
+) -> m.ConsumedResetDone:
+    return await asyncio.to_thread(
+        filament.spools.reset_consumed, body.spool_ids, actor=actor(caller)
+    )
 
 
 @router.get(

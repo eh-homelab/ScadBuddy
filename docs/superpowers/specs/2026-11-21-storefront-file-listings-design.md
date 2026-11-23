@@ -976,6 +976,21 @@ pinned bytes, and only then starts the run as today.
 5. **The run** starts on the new id, as today. The next print of the item finds that
    file with the pinned sha256, and stands without a restore.
 
+As built (PR 4): the restore is `orders/held_print.py` `restore_held`, which the run calls
+through `restored_file` (`orders/operations.py`) before it computes `subject`. The item's
+move is `Lifecycle.move_library_file`, which also sets the item's library to the one the new
+id is in and its filename to the name the library gave the file, and writes the order event `item.library_file_restored` (`item_id`,
+`from_library_file_id`, `library_file_id`, `sha256`). The copy of the remembered choices is
+`SettingsStore.copy_library_choices`, one `INSERT … ON CONFLICT DO NOTHING`. A held copy lost
+between the check and the run is `library_file_gone` from the run. The folder's lookup, the
+find and the upload run under one advisory lock (`OrderStore.restore_lock`), so two prints
+racing to restore make one "Storefront" folder and one copy. The Bambuddy side of the restore
+(`BambuddyShelf`, `served_shelf`) is in `orders/bambuddy.py`, the one file of `orders/` that
+reaches the Bambuddy client. The check reads a Bambuddy file that states no hash only when its
+stated size is the held copy's; another size is other bytes. The restore runs before the
+print claims the item, so a claim refused after it (on hold, claimed by another print) leaves
+the item on the restored file; that is intended, and the next print restores nothing.
+
 The item's accepted quote stays: its bytes are the held copy's, which it priced
 (§7.3). The listing is not changed: it keeps its pin and its held copy.
 
@@ -1111,8 +1126,9 @@ colour each slot needs, and "Wait for the right colour" (#6218) is on by default
   vectors in `test-fixtures/storefront/sell-draft-vectors.json` gain a file case, which
   `listingDraft.test.ts` and the agent's tool test both read.
   As built (PR 7): the file case has a `file` key (the library's answers for the file: its
-  name, `…/filaments` `slots`, `…/plates`) and `expected`, the body a new listing of it saves
-  but `materials`. The editor's `declaredSlots` and `platePictures` (`listingDraft.ts`) and
+  name, `…/filaments` `slots`, `…/plates`), `expected`, the body a new listing of it saves
+  but `materials`, and `titles`, the colour names in each title that a customer can pick (the
+  editor's `titleColours` of the new draft, the agent's `fileTitleColours`). The editor's `declaredSlots` and `platePictures` (`listingDraft.ts`) and
   the agent's copies make the parts and the pictures. `materials` differs on purpose: the page
   leaves a new listing on the shop's default, and the agent names the offered filaments'
   materials (`draftMaterials`, as for a design, #6302 review), so publish's materials check
