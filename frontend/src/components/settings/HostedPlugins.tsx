@@ -30,6 +30,9 @@ import { usePackagesChanged } from './packagesChanged'
  * change. The backend keeps the drafts and versions (`/api/v1/hosted-plugins`); the agent's
  * package install takes a version on an Offer, and Packages approves it as any package.
  */
+/** The most unsaved files the Settings leave dialog names; more are counted (#7260). */
+const NAMED_FILES_MAX = 3
+
 export function HostedPluginsPanel() {
   const list = useAsync(() => hostedPlugins.list(), [])
   const packages = useAsync(() => aiPlugins.listPackages(), [])
@@ -42,7 +45,9 @@ export function HostedPluginsPanel() {
   const onDirty = useCallback((paths: string[]) => setUnsaved(paths), [])
   // #7192 — leaving Settings asks first while a draft file is unsaved, as Close does. A hold
   // of its own, not a dirty section: the Settings reload and the agent's flag stay the forms'.
-  useHoldLeave('hosted-plugin-editor', unsaved.length > 0 && selected !== null ? `${selected}'s ${unsaved.join(', ')}` : null)
+  // Past a few files the dialog counts them, so its sentence stays short (#7260).
+  const unsavedNamed = unsaved.length <= NAMED_FILES_MAX ? unsaved.join(', ') : `${unsaved.length} files`
+  useHoldLeave('hosted-plugin-editor', unsaved.length > 0 && selected !== null ? `${selected}'s ${unsavedNamed}` : null)
   // A reload or a closed tab asks too, where the browser lets a page ask (as the flow editor).
   useEffect(() => {
     if (unsaved.length === 0) return

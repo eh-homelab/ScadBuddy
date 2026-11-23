@@ -199,7 +199,9 @@ export function PluginFeedSection() {
                 {!token && <>Create a token under Tokens, then paste it where the entry says {PLACEHOLDER}. </>}
                 Add the entry to <code className="sb-num">~/.claude/settings.json</code>, not to a project&rsquo;s
                 settings file, so the token stays out of the repository. Claude Code sends no token with{' '}
-                <code className="sb-num">/plugin marketplace add</code>.
+                <code className="sb-num">/plugin marketplace add</code>. Paste the token itself: Claude Code does not
+                read environment variables in this entry. Then start Claude Code once, because it reads the entry when a
+                session starts. After that, the install command finds the feed.
               </p>
               <CopySnippet
                 id="plugin-feed-settings"
