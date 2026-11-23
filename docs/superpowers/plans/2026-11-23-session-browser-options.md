@@ -333,6 +333,22 @@ in `backend/`): FAIL (unknown field / no column).
 - [ ] **Step 4: Run** the tests, `pnpm lint`, `pnpm typecheck`: PASS.
 - [ ] **Step 5: Commit** `feat(frontend): browser options for a new chat (#7027)`.
 
+### Task 6: A flow's `agent()` session takes browser options
+
+**Files:**
+- Modify: `backend/scadbuddy/workflows/flow_tools.py` (`_agent_session`, `_start_session`)
+- Test: the existing tests of the `agent` host function (find them with `git grep -n "_agent_session\|agent_session" backend/tests`)
+
+**Interfaces:**
+- Consumes: the `sessions_start` tool's `browser` input (Task 2: `{user_agent?, viewport?: {width, height}, locale?}`, bounds checked by the API, a refusal is a tool error naming the field).
+- Produces: the flow host function `agent(prompt, skills, result_schema, images=None, grant=None, on_outside="escalate", browser=None)`; `browser` (a dict or None) goes into the `sessions_start` body only when it is not None, so a run that does not pass it sends the same body as before and its history replays unchanged (`tests/fixtures/project_workflow_histories/`).
+
+- [ ] **Step 1: Failing tests:** `agent(..., browser={"user_agent": "UA"})` sends `sessions_start` a body with `browser` equal to it; without `browser` the body has no `browser` key (exactly the old body); the project workflow replay test still passes.
+- [ ] **Step 2: Run** them: FAIL.
+- [ ] **Step 3: Implement.** Extend the docstring (the script author reads it): what `browser` sets, that the session keeps it for its life, that the API refuses out-of-bounds values. No validation in the workflow. `agent_with_images` stays as it is (deprecated).
+- [ ] **Step 4: Run** the tests, the replay test, ruff, ruff format --check, mypy: PASS.
+- [ ] **Step 5: Commit** `feat(flows): browser options for a flow's agent() session (#7027)`.
+
 ### After the tasks
 
 - Whole-branch review; push `feat/7027-session-browser-options`; PR titled
