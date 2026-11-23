@@ -2,8 +2,8 @@
  * #6869 — every filament entity's page, from one place, so a route change moves every link
  * (plan `docs/superpowers/plans/2026-11-15-filament-ui.md`, R-6869-2). The paths are
  * relative router paths: a link stays on the host the user is on (R-6869-3). An entity with
- * no page of its own links to the list that shows it: a location to the spools filtered to
- * it, a catalog entry to its catalog, an invoice line and a supplier product
+ * no page of its own links to the list that shows it: a catalog entry to its catalog, an
+ * invoice line and a supplier product
  * to their row on the page that holds them (an anchor `useHashTarget` scrolls to). A shopping
  * item is a row of the one shopping list, and a printer's page is Settings → Printing's list.
  * `test-fixtures/filament/ui-paths.json` pins these; the agent's copy
@@ -47,8 +47,14 @@ export const filamentLinks = {
   invoice: (id: string) => at(invoices, id),
   invoiceLine: (invoiceId: string, lineId: string) => anchored(at(invoices, invoiceId), anchors.invoiceLine(lineId)),
   locations: `${BASE}/locations`,
-  /** A place has no page: the spools in it (the Spools tab's `place` filter, by id, so two places of one name stay apart). */
-  location: (id: string) => query(spools, { place: id }),
+  /** #6955 — a place's own page, the target of `/x/L-<n>`. */
+  location: (id: string) => at(`${BASE}/locations`, id),
+  /** The spools in a place (the Spools tab's `place` filter, by id, so two places of one name stay apart). */
+  locationSpools: (id: string) => query(spools, { place: id }),
+  /** #6955 — the labels page for one printer's places. */
+  printerLabels: (printerId: string) => `${BASE}/labels?printers=${encodeURIComponent(printerId)}`,
+  /** #6955 — the labels page for one place. */
+  locationLabel: (id: string) => `${BASE}/labels?locations=${encodeURIComponent(id)}`,
   /** A catalog entry's list (the Catalog tab opens on materials). */
   catalog: (kind: CatalogKind) => (kind === 'materials' ? catalog : query(catalog, { kind })),
   shoppingList,

@@ -30,3 +30,29 @@ export function Label({ spool, svg, testId = 'label' }: { spool: SpoolDetail; sv
     </div>
   )
 }
+
+/**
+ * #6955 — one 50 x 25 mm place label (a printer, an AMS unit or slot, the external holder): the same QR
+ * box as the spool label, the code large, the place's name below it in at most two lines.
+ */
+export function LocationLabel({ code, name, svg, testId = 'label' }: { code: string; name: string; svg: string; testId?: string }) {
+  // 8 mm up to "L-999" (5 characters); a longer code gets smaller so it fits the 23.5 mm text column.
+  const codeMm = Math.min(8, 22 / (0.62 * code.length))
+  return (
+    <div
+      data-testid={testId}
+      className="box-border flex shrink-0 items-center overflow-hidden bg-white text-black"
+      style={{ width: `${LABEL_WIDTH_MM}mm`, height: `${LABEL_HEIGHT_MM}mm`, breakInside: 'avoid', paddingLeft: `${QUIET_MM}mm`, paddingRight: '1.5mm', gap: `${QUIET_MM}mm` }}
+    >
+      <div aria-hidden="true" className="shrink-0 [&>svg]:block [&>svg]:size-full" style={{ width: `${QR_MM}mm`, height: `${QR_MM}mm` }} dangerouslySetInnerHTML={{ __html: svg }} />
+      <div className="flex min-w-0 flex-1 flex-col leading-tight">
+        <span className="whitespace-nowrap font-bold leading-none tabular-nums" style={{ fontSize: `${codeMm}mm` }}>
+          {code}
+        </span>
+        <span className="mt-[1mm] line-clamp-2 break-words text-[3.2mm] font-semibold" title={name}>
+          {name}
+        </span>
+      </div>
+    </div>
+  )
+}

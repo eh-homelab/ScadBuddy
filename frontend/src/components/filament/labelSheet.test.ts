@@ -1,5 +1,6 @@
+import QRCode from 'qrcode'
 import { describe, expect, it } from 'vitest'
-import { labelPayload, parseLabelPayload, qrSvg } from './labelSheet'
+import { labelBase, labelPayload, locationPayload, parseLabelPayload, QR_MM, qrSvg } from './labelSheet'
 
 describe('the label payload', () => {
   it('is the spool id behind a fixed prefix, with no host', () => {
@@ -17,5 +18,25 @@ describe('the label payload', () => {
     const b = await qrSvg(labelPayload('b'))
     expect(a.startsWith('<svg')).toBe(true)
     expect(a).not.toBe(b)
+  })
+})
+
+describe('the location payload', () => {
+  it('builds the address of a code', () => {
+    expect(locationPayload('https://sb.example.com/', 'L-12')).toBe('https://sb.example.com/x/L-12')
+    expect(locationPayload('https://sb.example.com', 'L-12')).toBe('https://sb.example.com/x/L-12')
+  })
+
+  it('keeps the module at least 0.5 mm for the longest base', () => {
+    const payload = locationPayload(`https://${'a'.repeat(56)}`, 'L-9999999')
+    expect(payload.length - 'L-9999999'.length - 3).toBe(64)
+    const { modules } = QRCode.create(payload, { errorCorrectionLevel: 'M' })
+    expect(modules.size).toBeLessThanOrEqual(37)
+    expect(QR_MM / modules.size).toBeGreaterThanOrEqual(0.5)
+  })
+
+  it('takes the base from the setting, else the page origin, with no trailing slash', () => {
+    expect(labelBase('https://sb.example.com/')).toBe('https://sb.example.com')
+    expect(labelBase(null)).toBe(window.location.origin)
   })
 })

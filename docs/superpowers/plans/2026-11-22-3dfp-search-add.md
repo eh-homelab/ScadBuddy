@@ -135,6 +135,12 @@ Rulings from the review of PR #7041 at 5c03d8850 (its non-blocking findings):
   (`api/operations.py` `temporal_unavailable`); a refusal is 500 `temporal-refused`. The
   check's 503 says `may_have_started: false`, the create's `true` (its start may have reached
   Temporal, and the same key joins it), and the search's leaves it out.
+- **R-7025-16 (every Temporal failure, from the review of #7053).** The handlers also pass
+  the lazy client's failed first connect (`RuntimeError("Failed client connect…")`,
+  `TemporalUnreachableError`) to `temporal_failure`, and the type check its `TimeoutError`;
+  a failure `temporal_failure` does not read as Temporal's is raised again. The search's and
+  the create's own `TimeoutError` stays 504 `no_outcome`: it is the route's wait, not a call
+  to Temporal. The descriptions name the 500 `temporal-refused` beside the 503.
 - **R-7062-1 (a search has a slot of its own).** On prod a search answered 503
   `not_started` while a preset fetch ran: the worker's one activity slot
   (`max_concurrent_activities=1`, Decision 16) is held by a fetch's export for the whole

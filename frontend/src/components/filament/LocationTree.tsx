@@ -29,7 +29,7 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
   return (
     <li data-place={node.id}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
-        {/* A place's page is the spools in it (R-6869-6). */}
+        {/* The name opens the place's own page (#6955); the spools in it are `filamentLinks.locationSpools`. */}
         <EntityLink to={filamentLinks.location(node.id)} className={archived ? 'font-medium text-muted-foreground line-through' : 'font-medium'}>
           {node.name}
         </EntityLink>
@@ -39,13 +39,14 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
           </EntityLink>
         )}
         {node.identifier && <span className="text-muted-foreground">{node.identifier}</span>}
-        <span
-          aria-label={`${node.spool_count} ${node.spool_count === 1 ? 'spool' : 'spools'}`}
+        <EntityLink
+          to={filamentLinks.locationSpools(node.id)}
+          aria-label={`${node.spool_count} ${node.spool_count === 1 ? 'spool' : 'spools'} in ${node.name}`}
           className="rounded-full bg-muted px-2 text-[12px] tabular-nums text-muted-foreground"
         >
           {node.spool_count}
           {node.capacity != null ? ` / ${node.capacity}` : ''}
-        </span>
+        </EntityLink>
         {tray && <span className="text-[12px] text-muted-foreground">AMS tray, read only</span>}
         {archived && <span className="text-[12px] text-muted-foreground">Archived</span>}
         {!tray && (

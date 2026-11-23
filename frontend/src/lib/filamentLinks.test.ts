@@ -32,6 +32,8 @@ describe('filamentLinks (#6869)', () => {
   it('filters the lists that stand in for a page', () => {
     expect(filamentLinks.supplierInvoices('s1')).toBe('/filament/invoices?supplier=s1')
     expect(filamentLinks.labels(['a', 'b'])).toBe('/filament/labels?ids=a,b')
+    expect(filamentLinks.locationSpools('a b')).toBe('/filament/spools?place=a+b')
+    expect(filamentLinks.printerLabels('p/1')).toBe('/filament/labels?printers=p%2F1')
     expect(filamentLinks.spools).toBe('/filament/spools')
     expect(filamentLinks.newSpool).toBe('/filament/spools/new')
     expect(filamentLinks.newType).toBe('/filament/types/new')

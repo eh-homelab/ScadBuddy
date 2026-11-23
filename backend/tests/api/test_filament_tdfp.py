@@ -214,6 +214,55 @@ def test_a_search_or_create_temporal_does_not_answer_is_503(
     assert create.json()["may_have_started"] is True
 
 
+async def _never_connected(*args: object, **kwargs: object) -> Any:
+    # How a lazy client's first connect fails (temporalio 1.33, `temporal_failure`).
+    raise RuntimeError("Failed client connect: connection refused")
+
+
+async def _check_timed_out(*args: object, **kwargs: object) -> Any:
+    raise TimeoutError
+
+
+async def _not_temporal(*args: object, **kwargs: object) -> Any:
+    raise RuntimeError("a bug, not Temporal")
+
+
+def test_a_client_that_never_connected_is_503_on_every_route(
+    client: TestClient, runner: FakeTdfp
+) -> None:
+    """R-7025-16: the lazy client's first failed connect is Temporal unreached, read as the
+    other routes read it, on the search, the type check and the create."""
+    runner.search = _never_connected  # type: ignore[method-assign]
+    runner.create = _never_connected  # type: ignore[method-assign]
+    search = client.post(f"{URL}/tdfp/search", json={"brand": "SUNLU"})
+    assert (search.status_code, search.json()["type"]) == (503, TEMPORAL_UNAVAILABLE_PROBLEM)
+    create = client.post(f"{URL}/tdfp/filaments", json=BODY, headers=KEY)
+    assert (create.status_code, create.json()["type"]) == (503, TEMPORAL_UNAVAILABLE_PROBLEM)
+    # No request was written, so the create cannot have started.
+    assert create.json()["may_have_started"] is False
+    type_id = _type(client, code="PLA-WHT", tdfp_id=30173)
+    runner.started = _never_connected  # type: ignore[method-assign]
+    checked = client.post(f"{URL}/tdfp/filaments", json={**BODY, "type_id": type_id}, headers=KEY)
+    assert (checked.status_code, checked.json()["type"]) == (503, TEMPORAL_UNAVAILABLE_PROBLEM)
+    assert checked.json()["may_have_started"] is False
+
+
+def test_a_type_check_that_timed_out_is_503(client: TestClient, runner: FakeTdfp) -> None:
+    type_id = _type(client, code="PLA-WHT", tdfp_id=30173)
+    runner.started = _check_timed_out  # type: ignore[method-assign]
+    r = client.post(f"{URL}/tdfp/filaments", json={**BODY, "type_id": type_id}, headers=KEY)
+    assert (r.status_code, r.json()["type"]) == (503, TEMPORAL_UNAVAILABLE_PROBLEM)
+    assert runner.creates == []
+
+
+def test_a_failure_that_is_not_temporals_is_raised_again(
+    client: TestClient, runner: FakeTdfp
+) -> None:
+    runner.search = _not_temporal  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="a bug"):
+        client.post(f"{URL}/tdfp/search", json={"brand": "SUNLU"})
+
+
 def test_a_type_that_took_another_id_meanwhile_keeps_it(
     client: TestClient, runner: FakeTdfp
 ) -> None:

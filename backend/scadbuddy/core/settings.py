@@ -538,6 +538,11 @@ class Settings(BaseSettings):
     def _storefront_is_an_https_origin(cls, value: str | None) -> str | None:
         return None if value is None else https_origin(value, "SCADBUDDY_STOREFRONT_PUBLIC_URL")
 
+    @field_validator("filament_label_base_url")
+    @classmethod
+    def _label_base_is_an_https_origin(cls, value: str | None) -> str | None:
+        return None if value is None else https_origin(value, "SCADBUDDY_FILAMENT_LABEL_BASE_URL")
+
     @field_validator("trusted_proxies")
     @classmethod
     def _trusted_proxies_are_cidrs(cls, value: str) -> str:
@@ -792,6 +797,9 @@ class Settings(BaseSettings):
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
     filament_low_stock_pct: int = Field(default=20, ge=0, le=100)
     filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
+    # SCADBUDDY_FILAMENT_LABEL_BASE_URL (#6955): the stable https origin a printed location
+    # label's QR opens. Unset, `public_url` is used (`filament/labels.py` `label_base_url`).
+    filament_label_base_url: str | None = Field(default=None, max_length=64)
     # #6269: `filament_burn_window_days` is the span of print history the burn rate and the
     # forecast read; a type that sets no `lead_time_days` or `safety_margin_days` takes the two
     # defaults.
@@ -1157,6 +1165,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "filament_sync": "live",
         "filament_low_stock_pct": "live",
         "filament_default_cost_per_kg": "live",
+        "filament_label_base_url": "live",
         "filament_burn_window_days": "live",
         "filament_lead_time_days": "live",
         "filament_safety_margin_days": "live",

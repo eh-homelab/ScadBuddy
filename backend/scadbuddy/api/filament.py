@@ -114,11 +114,14 @@ from scadbuddy.filament.csv_import import (
     import_on,
     import_rows,
 )
+from scadbuddy.filament.labels import label_base_url
+from scadbuddy.filament.labels import printer_labels as label_logic
 from scadbuddy.filament.ledger import BadCursorError
 from scadbuddy.filament.locations import (
     LocationCycleError,
     LocationExistsError,
     MoveTargetError,
+    NoPrinterKindError,
 )
 from scadbuddy.filament.operations import KIND as COLOUR_SYNC_KIND
 from scadbuddy.filament.operations import subject as colour_sync_subject
@@ -169,13 +172,19 @@ from scadbuddy.profile_fetch.wire import (
 )
 from scadbuddy.profile_fetch.workflow import NOT_STARTED as TDFP_NOT_STARTED
 from scadbuddy.rows.component import ROWS, Rows
-from scadbuddy.workflows.commands import TemporalUnavailableError, temporal_failure
+from scadbuddy.workflows.commands import (
+    TemporalUnavailableError,
+    TemporalUnreachableError,
+    temporal_failure,
+)
 
 #: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
 #: (Decision 17, R-T8-3); "Sync now" and the links' reset (#6773) nudge a full pass
 #: themselves; the Bambuddy import pulls
-#: and the RFID scan writes nothing, so neither has anything to push (Decision 163).
+#: and the RFID scan writes nothing, so neither has anything to push (Decision 163);
+#: the printer labels (#6955) make only the printer and AMS places that capture makes
+#: too, un-nudged, and every labels-page load and agent read calls them.
 NOT_NUDGED = frozenset(
     {
         "sync_ams_weights",
@@ -183,6 +192,7 @@ NOT_NUDGED = frozenset(
         "reset_filament_sync_links",
         "import_bambuddy",
         "scan_rfid_tag",
+        "printer_labels",
     }
 )
 
@@ -814,11 +824,20 @@ async def _tdfp_worker(runner: Tdfp) -> None:
         )
 
 
-def _tdfp_temporal(error: RPCError, what: str, *, may_have_started: bool | None) -> ApiError:
+def _tdfp_temporal(
+    error: BaseException, what: str, *, may_have_started: bool | None
+) -> ApiError | None:
     """A call to Temporal that failed, read as every route reads one (`temporal_failure`,
-    R-7025-15): unavailable or busy is 503 `temporal-unavailable` with `Retry-After`, worth
-    sending again; a refusal is 500 `temporal-refused`."""
+    R-7025-15, R-7025-16): unavailable, busy or unreached (the lazy client's first connect
+    failed, or the call timed out) is 503 `temporal-unavailable` with `Retry-After`, worth
+    sending again; a refusal is 500 `temporal-refused`. ``None`` for a failure that is not
+    Temporal's, which the caller raises again. A client that never connected wrote no
+    request, so nothing can have started (`may_have_started` false where the route says it)."""
     failure = temporal_failure(error, what)
+    if failure is None:
+        return None
+    if isinstance(failure, TemporalUnreachableError) and may_have_started is not None:
+        may_have_started = False
     if isinstance(failure, TemporalUnavailableError):
         return temporal_unavailable(
             what,
@@ -848,7 +867,8 @@ def _tdfp_temporal(error: RPCError, what: str, *, may_have_started: bool | None)
         "search up), 502 when the site or the browser "
         "failed (`code` is the failure's kind; the search is tried once, so send it again), "
         "504 when no outcome came within the wait, 503 `temporal-unavailable` (with "
-        "`Retry-After`) when ScadBuddy's background service did not answer."
+        "`Retry-After`) when ScadBuddy's background service did not answer, 500 "
+        "`temporal-refused` when it refused the call (sending it again will not help)."
     ),
 )
 async def search_tdfp(state: StateDep, caller: CallerDep, body: SearchAsk) -> SearchAnswer:
@@ -860,8 +880,11 @@ async def search_tdfp(state: StateDep, caller: CallerDep, body: SearchAsk) -> Se
         raise _tdfp_problem(
             status.HTTP_504_GATEWAY_TIMEOUT, "no_outcome", "the 3DFP search gave no answer in time"
         ) from None
-    except RPCError as error:
-        raise _tdfp_temporal(error, "the 3DFP search", may_have_started=None) from None
+    except (RPCError, RuntimeError) as error:
+        # A TimeoutError here is the wait's (504 above), not Temporal's.
+        if (problem := _tdfp_temporal(error, "the 3DFP search", may_have_started=None)) is None:
+            raise
+        raise problem from None
     if outcome.search is None:
         raise _tdfp_failed(outcome)
     return outcome.search
@@ -909,8 +932,9 @@ class TdfpCreated(BaseModel):
         "503 `no_worker`, 503 `not_started` (the worker busy with a preset fetch), 502 "
         "and 504 as for the search; on 504 the "
         "create may still run, and the same request with the same key waits for it; 503 "
-        "`temporal-unavailable` as for the search (`may_have_started` says whether a create "
-        "may run). The type's `tdfp_id` is set only while it has none (R-7025-14)."
+        "`temporal-unavailable` and 500 `temporal-refused` as for the search "
+        "(`may_have_started` says whether a create may run). The type's `tdfp_id` is set "
+        "only while it has none (R-7025-14)."
     ),
 )
 async def create_tdfp_filament(
@@ -932,8 +956,11 @@ async def create_tdfp_filament(
             raise _no_type(body.type_id)
         try:
             started = kind.tdfp_id is not None and await runner.started(ask, key=key)
-        except RPCError as error:
-            raise _tdfp_temporal(error, "the 3DFP create's check", may_have_started=False) from None
+        except (RPCError, RuntimeError, TimeoutError) as error:
+            problem = _tdfp_temporal(error, "the 3DFP create's check", may_have_started=False)
+            if problem is None:
+                raise
+            raise problem from None
         if kind.tdfp_id is not None and not started:
             raise _tdfp_problem(
                 status.HTTP_409_CONFLICT,
@@ -950,21 +977,22 @@ async def create_tdfp_filament(
             "the 3DFP create gave no answer in time; it may still run: send the same request"
             " with the same Idempotency-Key to wait for it",
         ) from None
-    except RPCError as error:
-        # The start may have reached Temporal before it failed: the same key joins it.
-        raise _tdfp_temporal(error, "the 3DFP create", may_have_started=True) from None
+    except (RPCError, RuntimeError) as error:
+        # The start may have reached Temporal before it failed: the same key joins it. A
+        # TimeoutError here is the wait's (504 above), not Temporal's.
+        if (problem := _tdfp_temporal(error, "the 3DFP create", may_have_started=True)) is None:
+            raise
+        raise problem from None
     if outcome.create is None:
         raise _tdfp_failed(outcome)
     made = outcome.create
     taken = False
     if made.status == "created" and made.tdfp_id is not None and body.type_id is not None:
-        taken = await asyncio.to_thread(
-            set_type_tdfp_id, filament, body.type_id, made.tdfp_id, actor=who
-        )
+        taken = await asyncio.to_thread(set_type_tdfp_id, filament, body.type_id, made.tdfp_id)
     return TdfpCreated(create=made, type_id=body.type_id, type_tdfp_id_set=taken)
 
 
-def set_type_tdfp_id(filament: Filament, type_id: UUID, tdfp_id: int, *, actor: str) -> bool:
+def set_type_tdfp_id(filament: Filament, type_id: UUID, tdfp_id: int) -> bool:
     """Set the type's ``tdfp_id`` to the created one, unless it has another by now; whether
     the type holds it. One conditional write (`SpoolTypeStore.set_tdfp_id`, R-7025-14), so
     two creates for one type under different keys never replace each other's id."""
@@ -1755,6 +1783,55 @@ async def create_location(filament: FilamentDep, body: m.LocationCreate) -> m.Lo
         return await asyncio.to_thread(filament.locations.create, body)
     except _LOCATION_REFUSED as exc:
         raise _refused(exc) from None
+
+
+@router.get(
+    "/locations/{location_id}",
+    response_model=m.LocationDetail,
+    summary="A location's page",
+    description=(
+        "The place with its `code` (`L-12`), its kind's name, its `path` (the places above "
+        "it, root first), its unarchived `children` and the unarchived `spools` in it. An "
+        "archived place still answers. 404 for no such place."
+    ),
+)
+async def get_location(filament: FilamentDep, location_id: UUID) -> m.LocationDetail:
+    found = await asyncio.to_thread(filament.locations.detail, location_id)
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no location {location_id}")
+    return found
+
+
+@router.post(
+    "/printer-labels",
+    response_model=m.PrinterLabels,
+    summary="The labels of the printers' places",
+    description=(
+        "For each printer (the `printer_ids`, or every printer when null; by name): its own "
+        "place, each AMS unit with its slots, and the external holder, in that order, each "
+        "with its `code`, `name` and `depth` (0 printer, 1 unit or external holder, 2 "
+        "slot); with `base_url`, the address a label's QR opens (`filament_label_base_url`, "
+        "else `public_url`, else null). It makes a printer's place when it has none, and "
+        "the place of each AMS unit, slot and external holder the printer's latest report "
+        "lists, so it is a POST; `no_report` names the printers with no report that lists "
+        "a unit or a holder (their slots appear once a spool has been loaded). "
+        "409 `no_printer_kind` when no location kind is marked as a printer, "
+        "422 for an unknown printer id."
+    ),
+)
+async def printer_labels(
+    filament: FilamentDep, store: SettingsStoreDep, body: m.PrinterLabelsRequest
+) -> m.PrinterLabels:
+    try:
+        labels, no_report = await asyncio.to_thread(
+            label_logic, filament.locations, body.printer_ids
+        )
+    except NoPrinterKindError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code="no_printer_kind") from None
+    except CatalogRefError as exc:
+        raise _refused(exc) from None
+    read = await asyncio.to_thread(store.read, {"filament_label_base_url", "public_url"})
+    return m.PrinterLabels(base_url=label_base_url(read), labels=labels, no_report=no_report)
 
 
 @router.patch(

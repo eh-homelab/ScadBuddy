@@ -193,16 +193,22 @@ def test_a_merge_keeps_the_kept_printers_unit_sensor(pg_pool: PgPool) -> None:
 
 
 def test_an_external_holder_has_no_unit_place(pg_pool: PgPool) -> None:
+    """It hangs under the printer's own place (#6955), and no AMS unit place is made."""
     printer = _printer(pg_pool)
     tray = LocationStore(pg_pool).ensure_ams(printer, 255, 0, label="Ext")
-    assert tray.parent_id is None
     with pg_pool.connection() as conn:
         row = conn.execute(
             "SELECT count(*) AS n FROM filament_locations WHERE printer_id = %s"
-            " AND tray_id IS NULL",
+            " AND tray_id IS NULL AND ams_id IS NOT NULL",
+            (printer,),
+        ).fetchone()
+        root = conn.execute(
+            "SELECT id FROM filament_locations WHERE printer_id = %s"
+            " AND tray_id IS NULL AND ams_id IS NULL",
             (printer,),
         ).fetchone()
     assert row == {"n": 0}
+    assert root is not None and tray.parent_id == root["id"]
 
 
 def test_a_non_finite_or_older_reading_stores_nothing(pg_pool: PgPool) -> None:
