@@ -209,6 +209,43 @@ describe('filament type tools', () => {
     expect((await runTool(tool('filament_type_upsert'), { archived: true }, ctx())).isError).toBe(true)
   })
 
+  it('sets properties after the type is saved, and answers them (#7026)', async () => {
+    const calls: string[] = []
+    const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`
+    server.use(
+      http.post(TYPES, async ({ request }) => {
+        calls.push(`POST ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ id: ROW }, { status: 201 })
+      }),
+      http.patch(PROPS, async ({ request }) => {
+        calls.push(`PATCH ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ properties: [{ key: 'gtin', value: ['0123'], source: 'manual' }] })
+      }),
+    )
+    const added = await runTool(tool('filament_type_upsert'), { fields: { code: 'PLA-RED' }, properties: { gtin: ['0123'], td: null } }, ctx())
+    expect(added.isError).toBeFalsy()
+    expect(firstText(added)).toMatchObject({ id: ROW, properties: [{ key: 'gtin', value: ['0123'] }] })
+    expect(calls).toEqual(['POST {"code":"PLA-RED"}', 'PATCH {"set":{"gtin":["0123"],"td":null}}'])
+  })
+
+  it('says the type was saved and the properties were not when the properties are refused (#7026)', async () => {
+    server.use(
+      http.patch(TYPE, () => HttpResponse.json({ id: ROW })),
+      http.patch(`${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`, () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/entities/bad_property_value', title: 'Bad property value', status: 422, detail: 'td: not a number' },
+          { status: 422 },
+        ),
+      ),
+    )
+    const result = await runTool(tool('filament_type_upsert'), { type_id: ROW, fields: { note: 'x' }, properties: { td: 'thick' } }, ctx())
+    expect(result.isError).toBe(true)
+    const text = String(firstText(result))
+    expect(text).toContain(`spool type ${ROW} was saved`)
+    expect(text).toContain('properties were not')
+    expect(text).toContain('td: not a number')
+  })
+
   it('replaces the presets and the K values', async () => {
     const bodies: unknown[] = []
     server.use(
@@ -577,6 +614,31 @@ describe('filament spool tools', () => {
     const deleted = await runTool(tool('filament_spool_delete'), { spool_id: ROW }, ctx())
     expect(firstText(deleted)).toEqual({ deleted: ROW })
     expect(calls).toEqual([['add', fields], ['edit', { rgba: null }], ['archive', { archived: true }], ['delete']])
+  })
+
+  it("sets a spool's properties after the spool write, and reports a refused set (#7026)", async () => {
+    const calls: string[] = []
+    const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`spool:${ROW}`)}/properties`
+    let refuse = false
+    server.use(
+      http.patch(SPOOL, async ({ request }) => {
+        calls.push(`PATCH spool ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ id: ROW })
+      }),
+      http.patch(PROPS, async ({ request }) => {
+        calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
+        if (refuse) return HttpResponse.json({ detail: 'lot_number: too long' }, { status: 422 })
+        return HttpResponse.json({ properties: [{ key: 'lot_number', value: 'L-2207', source: 'manual' }] })
+      }),
+    )
+    const edited = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, fields: { note: 'n' }, properties: { lot_number: 'L-2207' } }, ctx())
+    expect(firstText(edited)).toMatchObject({ id: ROW, properties: [{ key: 'lot_number', value: 'L-2207' }] })
+    expect(calls).toEqual(['PATCH spool {"note":"n"}', 'PATCH props {"set":{"lot_number":"L-2207"}}'])
+    refuse = true
+    const refused = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, fields: { note: 'n' }, properties: { lot_number: 'x' } }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(String(firstText(refused))).toContain(`spool ${ROW} was saved`)
+    expect(String(firstText(refused))).toContain('lot_number: too long')
   })
 
   it("replaces a spool's own presets and K values", async () => {

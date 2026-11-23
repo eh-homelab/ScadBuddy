@@ -125,3 +125,64 @@ describe('entity attachment and link tools', () => {
     expect(firstText(result)).toMatchObject({ status: 'pending_approval' })
   })
 })
+
+// Entity properties (#7026, Task 4): an entity's key-value properties and a kind's schema.
+describe('entity property tools', () => {
+  const TYPE = 'spool_type:a1b2c3d4-0000-4000-8000-000000000001'
+  const KIND = `${BACKEND}/api/v1/entity-kinds/spool_type/property-schema`
+
+  it('tiers the reads as read and the two writes as write, and maps each to its route', () => {
+    const expected: Record<string, [string, string]> = {
+      entity_property_list: ['read', 'GET /api/v1/entities/{ref}/properties'],
+      entity_property_set: ['write', 'PATCH /api/v1/entities/{ref}/properties'],
+      entity_property_schema_get: ['read', 'GET /api/v1/entity-kinds/{kind}/property-schema'],
+      entity_property_schema_set: ['write', 'PUT /api/v1/entity-kinds/{kind}/property-schema'],
+    }
+    for (const [name, [risk, route]] of Object.entries(expected)) {
+      expect(tool(name).risk, name).toBe(risk)
+      expect(tool(name).routes, name).toEqual([route])
+    }
+  })
+
+  it('lists the properties with the entity page, and renames a key in one call', async () => {
+    const bodies: unknown[] = []
+    const row = { key: 'gtin', value: ['0123'], source: 'manual' }
+    server.use(
+      http.get(`${base(TYPE)}/properties`, () => HttpResponse.json({ properties: [row] })),
+      http.patch(`${base(TYPE)}/properties`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ properties: [{ ...row, key: 'ean' }] })
+      }),
+    )
+    expect(firstText(await tool('entity_property_list').execute({ entity: TYPE }, ctx()))).toEqual({
+      properties: [row],
+      entity_ui_path: '/filament/types/a1b2c3d4-0000-4000-8000-000000000001',
+    })
+    const renamed = firstText(await runTool(tool('entity_property_set'), { entity: TYPE, set: { gtin: null, ean: ['0123'] } }, ctx()))
+    expect(renamed).toMatchObject({ properties: [{ key: 'ean' }] })
+    expect(bodies).toEqual([{ set: { gtin: null, ean: ['0123'] } }])
+  })
+
+  it('refuses a bad key or an empty set before it sends anything', () => {
+    expect(() => tool('entity_property_set').parse({ entity: TYPE, set: { 'Bad-Key': 'x' } })).toThrow()
+    expect(() => tool('entity_property_set').parse({ entity: TYPE, set: {} })).toThrow()
+    expect(() => tool('entity_property_set').parse({ entity: TYPE, set: { td: 1.8, ok: true, lot: 'L1', gtins: ['a'], gone: null } })).not.toThrow()
+  })
+
+  it("reads and replaces a kind's schema", async () => {
+    const bodies: unknown[] = []
+    const schema = { type: 'object', properties: { td: { type: 'number' } } }
+    server.use(
+      http.get(KIND, () => HttpResponse.json({ kind: 'spool_type', schema, keys_in_use: [{ key: 'td', count: 2 }] })),
+      http.put(KIND, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ kind: 'spool_type', schema, keys_in_use: [] })
+      }),
+    )
+    expect(firstText(await tool('entity_property_schema_get').execute({ kind: 'spool_type' }, ctx()))).toMatchObject({
+      keys_in_use: [{ key: 'td', count: 2 }],
+    })
+    await runTool(tool('entity_property_schema_set'), { kind: 'spool_type', schema }, ctx())
+    expect(bodies).toEqual([{ schema }])
+  })
+})

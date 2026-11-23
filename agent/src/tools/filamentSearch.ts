@@ -14,6 +14,8 @@ import { ok } from './call.js'
  *   (brand, material, colour name, SKU, place…), or, from 3 characters, a colour whose hex
  *   contains it, with or without its `#`.
  * - #7151: from 4 hex digits (`:` and `-` left out), a tag UID or tray UUID that holds it.
+ * - A spool's or type's property values (#7026) are text fields too (a GTIN, an MPN, a lot);
+ *   a key's name is not.
  */
 type Spool = components['schemas']['Spool']
 type SpoolType = components['schemas']['SpoolType']
@@ -60,6 +62,18 @@ export interface SpoolExtras {
   tray?: string | null
   /** #7151 — its open tag's UID and tray UUID. */
   tags?: readonly string[]
+  /** The spool's property values as text (`propertyTexts`). */
+  properties?: readonly string[]
+}
+
+/** What else a type is searched by: its property values as text (`propertyTexts`). */
+export interface TypeExtras {
+  properties?: readonly string[]
+}
+
+/** An entity's property values as search text: a string as it is, each list item, a number or boolean as text. */
+export function propertyTexts(values: Readonly<Record<string, string | number | boolean | readonly string[]>> | undefined): string[] {
+  return Object.values(values ?? {}).flatMap((value) => (Array.isArray(value) ? value : [String(value)]))
 }
 
 export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDoc {
@@ -75,25 +89,36 @@ export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDo
       extras.typeCode,
       extras.tray,
       ...(extras.skus ?? []),
+      ...(extras.properties ?? []),
     ],
     hexes: [spool.effective?.rgba ?? spool.rgba],
     tags: extras.tags ?? [],
   }
 }
 
-export function typeSearchDoc(type: SpoolType, names: ReadonlyMap<string, string>, skus: readonly string[] = []): SearchDoc {
+export function typeSearchDoc(type: SpoolType, names: ReadonlyMap<string, string>, skus: readonly string[] = [], extras: TypeExtras = {}): SearchDoc {
   const name = (id: string | null | undefined) => (id ? names.get(id) : null)
   return {
-    texts: [type.code, name(type.brand_id), name(type.material_id), name(type.subtype_id), type.colour_name, ...skus],
+    texts: [type.code, name(type.brand_id), name(type.material_id), name(type.subtype_id), type.colour_name, ...skus, ...(extras.properties ?? [])],
     hexes: [type.rgba],
   }
 }
 
-/** The SKUs and catalog routes the search reads, for a tool's `routes`. */
+/** The SKUs, catalog and property routes the search reads, for a tool's `routes`. */
 export const SEARCH_ROUTES = [
   'GET /api/v1/filament/suppliers',
   'GET /api/v1/filament/suppliers/{supplier_id}/products',
+  'GET /api/v1/entity-kinds/{kind}/properties',
 ] as const
+
+/**
+ * #7026: each `kind` entity's property values as search text, by its id (the read keys each
+ * entity by its ref within the kind, the spool's or type's id), for those that have properties.
+ */
+export async function kindPropertyTexts(backend: BackendClient, kind: 'spool' | 'spool_type'): Promise<Map<string, string[]>> {
+  const { properties } = await ok(backend.GET('/api/v1/entity-kinds/{kind}/properties', { params: { path: { kind } } }), `read the ${kind} properties`)
+  return new Map(Object.entries(properties).map(([id, values]) => [id, propertyTexts(values)]))
+}
 
 /**
  * Each type's SKUs, from the products of every supplier not archived. A supplier whose

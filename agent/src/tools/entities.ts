@@ -1,11 +1,12 @@
 import { z } from 'zod'
+import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { filamentPaths } from './filamentLinks.js'
 import { defineTool, json, ToolError } from './registry.js'
 
 // Files and links on any entity (#6950, phase 1): the generic `/entities/{ref}` routes
 // (backend/scadbuddy/api/entity_attachments.py, entity_links.py). Lists are `read`; every
-// change is `outward`, so a session parks it for a person. An agent upload is out of scope:
+// file or link change is `outward`, so a session parks it for a person. An agent upload is out of scope:
 // a file reaches an entity through the UI (an order's through order_attach).
 
 const entity = z
@@ -26,6 +27,46 @@ const caption = z.string().max(1000)
 const linkKind = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text, `other` when left out: `support`, `datasheet`, `store`, ...')
 
 const deleted = (what: string) => json({ deleted: what })
+
+// Properties (#7026, spec §6.3a): an entity's key-value properties and a kind's property schema
+// (backend/scadbuddy/api/entity_properties.py). Reads are `read`; a property or schema write is
+// `write`, the same as filament_type_upsert and filament_spool_upsert, which take `properties` too.
+
+const PROPERTY_KEY = /^[a-z][a-z0-9_]{0,63}$/
+const propertyValue = z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.array(z.string().max(500)).max(50)])
+
+/** A properties patch: each key to its new value, `null` removes it. */
+export const propertySet = z
+  .record(z.string().regex(PROPERTY_KEY, 'a key is `^[a-z][a-z0-9_]{0,63}$`'), propertyValue.nullable())
+  .refine((set) => Object.keys(set).length > 0 && Object.keys(set).length <= 200, 'give 1 to 200 keys')
+
+export type PropertySet = z.infer<typeof propertySet>
+
+/** The rules every property write follows, for a tool's description. */
+export const PROPERTY_RULES =
+  'A key is lower case, `^[a-z][a-z0-9_]{0,63}$`; a value is a string (up to 2000 characters), a number, a ' +
+  'boolean or a list of up to 50 strings (each up to 500), and `null` removes the key; an entity has up to 200 ' +
+  'keys. The whole set applies or none of it (422 `bad_property_value` names the key). A rename is one set: the ' +
+  'old key `null` and the new key its value. Suggested keys, which the kind\'s schema documents and checks: on a ' +
+  'spool type `mpn`, `gtin` (a list), `asin`, `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool ' +
+  '`lot_number` (entity_property_schema_get lists them). Any other key is kept as given.'
+
+const propertyKind = z.string().regex(/^[a-z_]{1,32}$/).describe('An entity kind: `spool_type`, `spool`, `printer`, `supplier`, ...')
+
+/**
+ * Sets `set` on `ref` after its own write succeeded, and answers its properties. A refusal says
+ * that `saved` (the type or spool) was saved and the properties were not, with the backend's reason.
+ */
+export async function setPropertiesAfter(backend: BackendClient, ref: string, set: PropertySet, saved: string) {
+  try {
+    const { properties } = await ok(backend.PATCH('/api/v1/entities/{ref}/properties', { params: { path: { ref } }, body: { set } }), `set the properties of ${ref}`)
+    return properties
+  } catch (e) {
+    const lead = `${saved} was saved; its properties were not`
+    if (e instanceof ToolError) throw new ToolError(`${lead}: ${e.summary}`, e.status, e.untrusted, e.problem)
+    throw new ToolError(`${lead}: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
 
 /** The page of an entity that has one (the filament kinds); others have none. */
 function uiPath(ref: string): string | undefined {
@@ -187,5 +228,60 @@ export const entityTools = [
       await onEntity(ref, backend.DELETE('/api/v1/entities/{ref}/links/{link_id}', { params: { path: { ref, link_id } } }), `remove link ${link_id} from ${ref}`)
       return deleted(link_id)
     },
+  }),
+  defineTool({
+    name: 'entity_property_list',
+    label: "List an entity's properties",
+    description:
+      "The key-value properties kept on an entity (a spool type's GTIN or MPN, a spool's lot), by key, each with its " +
+      '`value` and `source`. A print archive has none (422 `unknown_entity_kind`). Answers `entity_ui_path` when the entity has a page.',
+    input: z.object({ entity }),
+    risk: 'read',
+    routes: ['GET /api/v1/entities/{ref}/properties'],
+    handler: async ({ entity: ref }, { backend }) =>
+      withPage(ref, await onEntity(ref, backend.GET('/api/v1/entities/{ref}/properties', { params: { path: { ref } } }), `list the properties of ${ref}`)),
+  }),
+  defineTool({
+    name: 'entity_property_set',
+    label: "Set an entity's properties",
+    description: `Set or remove properties on an entity; keys left out stay. ${PROPERTY_RULES} Answers the entity's properties. Writes ScadBuddy only.`,
+    input: z.object({ entity, set: propertySet.describe('Each key to its new value; `null` removes the key') }),
+    risk: 'write',
+    routes: ['PATCH /api/v1/entities/{ref}/properties'],
+    summarize: ({ entity: ref, set }) => `Set ${Object.keys(set).join(', ')} on ${ref}`,
+    handler: async ({ entity: ref, set }, { backend }) =>
+      withPage(
+        ref,
+        await onEntity(ref, backend.PATCH('/api/v1/entities/{ref}/properties', { params: { path: { ref } }, body: { set } }), `set the properties of ${ref}`),
+      ),
+  }),
+  defineTool({
+    name: 'entity_property_schema_get',
+    label: "Read a kind's property schema",
+    description:
+      "A kind's property schema: a JSON Schema (Draft 2020-12) object whose `properties` document and type the keys the " +
+      'kind knows (their titles and help), and `keys_in_use`, each key its entities have with a count. The schema never ' +
+      'refuses a key it does not know.',
+    input: z.object({ kind: propertyKind }),
+    risk: 'read',
+    routes: ['GET /api/v1/entity-kinds/{kind}/property-schema'],
+    handler: async ({ kind }, { backend }) =>
+      json(await ok(backend.GET('/api/v1/entity-kinds/{kind}/property-schema', { params: { path: { kind } } }), `read the ${kind} property schema`)),
+  }),
+  defineTool({
+    name: 'entity_property_schema_set',
+    label: "Replace a kind's property schema",
+    description:
+      "Replace a kind's property schema whole (read it with entity_property_schema_get first and send it back changed). " +
+      'A JSON Schema (Draft 2020-12) object with `properties`, each a key and its subschema (`type`, `title`, `description`, ' +
+      '`enum`, bounds). It may not restrict which keys exist (`additionalProperties`, `required`, `propertyNames`) nor hold ' +
+      '`pattern`, `patternProperties`, `format: regex`, `$ref` or `$dynamicRef` anywhere: 422 `bad_property_schema`. ' +
+      'Writes ScadBuddy only.',
+    input: z.object({ kind: propertyKind, schema: z.record(z.string(), z.unknown()).describe('The whole schema') }),
+    risk: 'write',
+    routes: ['PUT /api/v1/entity-kinds/{kind}/property-schema'],
+    summarize: ({ kind }) => `Replace the ${kind} property schema`,
+    handler: async ({ kind, schema }, { backend }) =>
+      json(await ok(backend.PUT('/api/v1/entity-kinds/{kind}/property-schema', { params: { path: { kind } }, body: { schema } }), `set the ${kind} property schema`)),
   }),
 ]
