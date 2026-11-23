@@ -262,6 +262,18 @@ def by_bb_id_on(
     return {row["bb_preset_id"]: row["id"] for row in rows}
 
 
+def record_instance_on(conn: Conn, instance: str | None) -> None:
+    """A preset's Bambuddy id is a Bambuddy link (#7176, `bambuddy_pull.ANY_LINK`): when the
+    filament sync's state row records no Bambuddy yet, ``instance``, the one the id was
+    written for, becomes the links' (Decision 12). So after a URL change the mirror waits
+    and a person can reset the links (`bb_sync_results.reset_links`). Run in the
+    transaction that wrote the id; ``None`` records nothing."""
+    if instance is not None:
+        conn.execute(
+            "UPDATE filament_bb_sync_state SET instance = %s WHERE instance IS NULL", (instance,)
+        )
+
+
 class FilamentPresetStore:
     """``filament_presets`` and their documents. ``blobs`` is asked at each read, as the
     app's blob store is set after its components are built. Reads in a thread."""
@@ -409,6 +421,7 @@ def _adopt_one(
             # The document came from Bambuddy: its mirror holds it already.
             mirrored_sha256=sha256,
         )
+        record_instance_on(conn, instance)
         rebind_on(conn, detail.id, preset_id)
         return True
 

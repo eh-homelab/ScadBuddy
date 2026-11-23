@@ -345,6 +345,19 @@ async def test_another_bambuddys_preset_is_never_refreshed_or_reused(
     assert (made.name, made.bb_instance) == ("New seven", "n3wn3wn3wn3w")
 
 
+async def test_an_adopted_id_records_the_links_instance(pg_pool: PgPool, tmp_path: Path) -> None:
+    """A preset's Bambuddy id is a link (#7176): when presets are the only links, the
+    adoption records their Bambuddy, so a URL change later waits for a reset."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    held = HeldPresetStore(pg_pool)
+    await held.keep(_held(7, "Mine", "2026-11-20T01:00:00"))
+    _bind(pg_pool, _type(pg_pool, "PLA-R"), "7")
+    assert await adopt_held(pg_pool, blobs, held, "a1b2c3d4e5f6") == 1
+    with pg_pool.connection() as conn:
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+    assert state is not None and state["instance"] == "a1b2c3d4e5f6"
+
+
 async def test_a_scadbuddy_owned_preset_is_never_read_back(pg_pool: PgPool, tmp_path: Path) -> None:
     blobs = LocalBlobStore(tmp_path / "blobs")
     held = HeldPresetStore(pg_pool)

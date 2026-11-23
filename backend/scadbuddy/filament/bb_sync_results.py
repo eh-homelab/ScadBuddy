@@ -654,8 +654,9 @@ def sync_status(
 def adopt_instance(store: Filament, instance: str) -> None:
     """Record ``instance`` as the links' Bambuddy when none is recorded and links exist:
     #6261's pull made them before the state row did (Decision 12). A link of a supplier,
-    location, insert type or filament counts too (`bambuddy_pull.ANY_LINK`). The API
-    calls it at boot with the configured Bambuddy's, before its first nudge."""
+    location, insert type, filament, colour or preset counts too
+    (`bambuddy_pull.ANY_LINK`). The API calls it at boot with the configured Bambuddy's,
+    before its first nudge."""
     with store.spools.transaction() as conn:
         record_instance(conn, instance)
 

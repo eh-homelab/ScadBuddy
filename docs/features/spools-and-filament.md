@@ -91,12 +91,17 @@ made in Bambuddy takes a new version when Bambuddy edits it
 Bambuddy's local presets after a fetch and after each refresh, rewritten in place under the
 same Bambuddy id when it changes; a failed copy is the preset's `mirror_error`
 (`backend/scadbuddy/filament/preset_mirror.py`). One mirror runs at a time, a preset's
-Bambuddy id is kept with the Bambuddy it belongs to. After the Bambuddy URL changes the
-mirror waits, as the filament sync does, until the links are reset
-(`POST /filament/sync/reset-links`): a reset that finds the same Bambuddy moves the ids to
-the new URL, and one that deletes the links drops them, so each preset is created on the
-new Bambuddy; meanwhile no path hands Bambuddy an id of the old one. A create whose answer
-was lost is found by name above the highest id listed before it, not made twice.
+Bambuddy id is kept with the Bambuddy it belongs to. That id is a Bambuddy link as the
+filament sync's are: the write that stores it records its Bambuddy as the links' one when
+none is recorded, so a site whose only links are presets has one too. After the Bambuddy
+URL changes the mirror waits, as the filament sync does, until the links are reset
+(`POST /filament/sync/reset-links`): a reset that finds the same Bambuddy (proved by the
+spool links, so never when presets are the only links) moves the ids to the new URL, and
+one that deletes the links drops them, so each preset is created on the new Bambuddy;
+meanwhile no path hands Bambuddy an id of the old one. A create whose answer was lost is
+found above the highest id listed before it, by its name and its document, not made
+twice; one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
+own `mirror_error` and never stops the rest.
 
 A fetch writes ScadBuddy only: each file is the type's `3dfp` preset of its key, a changed
 one a new version with its changed keys in the run's notes, and the type's own nozzle range

@@ -16,18 +16,24 @@ made in Bambuddy to a mirrored preset is not read back.
 
 One mirror runs at a time (the session try-lock `LOCK`): another caller meanwhile sends
 nothing, and the next refresh sends what it left. A preset's Bambuddy id is kept with
-the Bambuddy it belongs to (``bb_instance``). After the Bambuddy URL changes the mirror
-waits, as the filament sync does, until a person resets the links (#6773): a reset that
-finds the same Bambuddy moves the ids to the new URL's instance
-(`bb_sync_results.reset_links`), and one that deletes the links drops them, so each
-preset is created on the new Bambuddy. A preset whose id is still another Bambuddy's is
-created on the configured one, never rewritten there by id. Bambuddy's ``PUT`` merges
-the document over the OrcaSlicer base its ``inherits`` names, while its ``POST`` keeps it
-as sent (`BambuddyClient.update_local_preset`), so a rewritten copy can carry inherited
-keys the first one lacked. Before
-a ``POST`` the mirror keeps the highest id Bambuddy lists (``mirror_create_floor``), so
-when the answer is lost the next send takes the one preset of that name above it instead
-of making a second one.
+the Bambuddy it belongs to (``bb_instance``), and it is a Bambuddy link as the filament
+sync's are (`bambuddy_pull.ANY_LINK`): the write that stores it records its Bambuddy as
+the links' one when none is recorded (`sb_presets.record_instance_on`), so the links'
+instance is recorded even when presets are the only links. After the Bambuddy URL changes
+the mirror waits, as the filament sync does, until a person resets the links (#6773): a
+reset that finds the same Bambuddy (proved by the spool links, so never when presets are
+the only links) moves the ids to the new URL's instance (`bb_sync_results.reset_links`),
+and one that deletes the links drops them, so each preset is created on the new
+Bambuddy. A preset whose id is still another Bambuddy's (a mirror that raced a reset
+stored it) is created on the configured one, never rewritten there by id. Bambuddy's
+``PUT`` merges the document over the OrcaSlicer base its ``inherits`` names, while its
+``POST`` keeps it as sent (`BambuddyClient.update_local_preset`), so a rewritten copy can
+carry inherited keys the first one lacked. Before a ``POST`` the mirror keeps the highest
+id Bambuddy lists (``mirror_create_floor``), so when the answer is lost the next send
+takes the one preset above it that has the same name and holds the document sent
+(`_Listing.made_after`) instead of making a second one. One preset's failure, a Bambuddy
+id another ScadBuddy preset holds included, is its own ``mirror_error`` and never stops
+the presets after it.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from collections.abc import Callable, Collection
 from typing import Any
 
 from fastapi import status
+from psycopg.errors import UniqueViolation
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
@@ -45,7 +52,12 @@ from scadbuddy.bambuddy.models import LocalPreset
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.rfid_push import acquire_lock
-from scadbuddy.filament.sb_presets import Conn, FilamentPresetStore, sync_from_held
+from scadbuddy.filament.sb_presets import (
+    Conn,
+    FilamentPresetStore,
+    record_instance_on,
+    sync_from_held,
+)
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.store import BlobStore
@@ -70,9 +82,10 @@ def instance_of(settings: StoredSettings) -> str | None:
 
 
 def _links_elsewhere(pool: ConnectionPool[Conn], instance: str) -> bool:
-    """Whether the filament sync's links name another Bambuddy than ``instance``: the URL
-    changed, and until a person resets the links (#6773) it is not known whether the new
-    URL reaches the same Bambuddy, so the mirror waits, as the sync does."""
+    """Whether the links' recorded Bambuddy (the filament sync's and the presets' ids,
+    `record_instance_on`) is another than ``instance``: the URL changed, and until a
+    person resets the links (#6773) it is not known whether the new URL reaches the same
+    Bambuddy, so the mirror waits, as the sync does."""
     with pool.connection() as conn:
         row = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
     return row is not None and row["instance"] not in (None, instance)
@@ -102,8 +115,9 @@ def _mirrored(
 ) -> None:
     """Bambuddy ``instance`` holds document ``sha256`` as its preset ``bb_id``. The id is
     kept whatever the document; the document counts as sent only while the preset still
-    holds it: a version written meanwhile stays pending."""
-    with pool.connection() as conn:
+    holds it: a version written meanwhile stays pending. With the id, ``instance`` is
+    recorded as the links' Bambuddy when none is (`record_instance_on`)."""
+    with pool.connection() as conn, conn.transaction():
         conn.execute(
             "UPDATE filament_presets SET bb_preset_id = %s, bb_instance = %s,"
             " mirror_create_floor = NULL,"
@@ -112,6 +126,7 @@ def _mirrored(
             " WHERE id = %s",
             (bb_id, instance, sha256, sha256, preset_id),
         )
+        record_instance_on(conn, instance)
 
 
 def _create_floor(pool: ConnectionPool[Conn], preset_id: int, floor: int) -> None:
@@ -142,9 +157,19 @@ class _Listing:
             self._presets = (await self._client.local_presets()).filament
         return self._presets
 
-    async def made_after(self, name: str, floor: int) -> int | None:
-        """The one preset named ``name`` with an id above ``floor``, else ``None``."""
-        found = [p.id for p in await self._all() if p.name == name and p.id > floor]
+    async def made_after(self, name: str, doc: dict[str, Any], floor: int) -> int | None:
+        """The one preset named ``name`` with an id above ``floor`` whose document is
+        ``doc``, else ``None``. Bambuddy's ``POST`` stores the document as sent
+        (`BambuddyClient.create_local_preset`), so a lost create of ``doc`` reads back as
+        ``doc``; another type's preset of the same name holds another document. A
+        version written since the lost create matches nothing, and the preset is created
+        again."""
+        found = []
+        for preset in await self._all():
+            if preset.name == name and preset.id > floor:
+                detail = await self._client.local_preset(preset.id)
+                if detail.setting == doc:
+                    found.append(preset.id)
         return found[0] if len(found) == 1 else None
 
     async def floor(self) -> int:
@@ -169,7 +194,7 @@ async def _send(
     bb_id = row["bb_preset_id"] if row["bb_instance"] in (None, instance) else None
     if bb_id is None and row["mirror_create_floor"] is not None:
         # A create whose answer was lost: the preset it made, when Bambuddy lists one.
-        bb_id = await listing.made_after(row["name"], row["mirror_create_floor"])
+        bb_id = await listing.made_after(row["name"], doc, row["mirror_create_floor"])
     if bb_id is not None:
         try:
             await client.update_local_preset(bb_id, row["name"], doc)
@@ -226,6 +251,18 @@ async def _mirror_locked(
             continue
         try:
             bb_id = await _send(client, pool, listing, row, doc, instance)
+            await asyncio.to_thread(_mirrored, pool, row["id"], row["sha256"], bb_id, instance)
+        except UniqueViolation:
+            # Another ScadBuddy preset holds that Bambuddy id: this one's error, and the
+            # presets after it are still sent.
+            await asyncio.to_thread(
+                _failed, pool, row["id"], f"another preset holds Bambuddy preset {bb_id}"
+            )
+            logger.warning(
+                "a mirrored filament preset's Bambuddy id is another preset's",
+                extra={"preset_id": row["id"], "bb_preset_id": bb_id},
+            )
+            continue
         except ApiError as error:
             await asyncio.to_thread(_failed, pool, row["id"], f"Bambuddy: {error.detail}")
             logger.warning(
@@ -242,7 +279,6 @@ async def _mirror_locked(
                 extra={"preset_id": row["id"], "error": type(error).__name__},
             )
             continue
-        await asyncio.to_thread(_mirrored, pool, row["id"], row["sha256"], bb_id, instance)
         sent += 1
     return sent
 
