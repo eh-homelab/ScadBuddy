@@ -196,6 +196,27 @@ function shift(entity: string, position: number, except?: string) {
 
 const refOf = (params: Record<string, unknown>) => decodeURIComponent(String(params.ref))
 
+
+// The backend's keyword allowlist (entities/properties.py TOP_KEYWORDS, KEY_KEYWORDS):
+// a schema documents keys and never refuses one.
+const TOP_KEYWORDS = new Set(['type', 'properties', 'additionalProperties', '$schema', '$comment', 'title', 'description', 'examples'])
+const KEY_KEYWORDS = new Set([
+  'type', 'title', 'description', '$comment', 'default', 'examples', 'deprecated', 'readOnly', 'writeOnly', 'enum', 'const',
+  'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'format', 'items',
+  'minItems', 'maxItems', 'uniqueItems',
+])
+
+function schemaProblem(schema: Record<string, unknown> | undefined): string | null {
+  if (!schema || schema.type !== 'object') return 'a property schema is an object schema'
+  for (const k of Object.keys(schema)) if (!TOP_KEYWORDS.has(k)) return `keyword '${k}' is not allowed at the top level`
+  if ('additionalProperties' in schema && schema.additionalProperties !== true) return "'additionalProperties' may only be true"
+  for (const [key, sub] of Object.entries((schema.properties ?? {}) as Record<string, unknown>)) {
+    if (!sub || typeof sub !== 'object' || Array.isArray(sub)) return `the subschema in property '${key}' is a JSON object`
+    for (const k of Object.keys(sub)) if (!KEY_KEYWORDS.has(k)) return `keyword '${k}' is not allowed in property '${key}'`
+  }
+  return null
+}
+
 export const handlers = [
   http.get('/api/v1/entities/:ref/attachments', ({ params }) => HttpResponse.json({ attachments: listed(refOf(params)) })),
   http.post('/api/v1/entities/:ref/attachments', async ({ request, params }) => {
@@ -336,9 +357,8 @@ export const handlers = [
     if (kind === PRINT_ARCHIVE) return noProperties(request, kind)
     const body = (await request.json()) as { schema?: Record<string, unknown> }
     const schema = body.schema
-    if (!schema || schema.type !== 'object' || 'required' in schema || 'patternProperties' in schema || 'propertyNames' in schema) {
-      return coded(request, 422, 'bad_property_schema', 'a property schema is an object schema that refuses no key')
-    }
+    const problem = schemaProblem(schema)
+    if (problem || !schema) return coded(request, 422, 'bad_property_schema', problem ?? 'a property schema is an object schema')
     entityMock.schemas[kind] = schema
     return HttpResponse.json({ kind, schema, keys_in_use: keysInUse(kind) })
   }),
