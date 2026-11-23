@@ -9,7 +9,7 @@ import hashlib
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -29,6 +29,7 @@ from scadbuddy.orders.archives import (
     mirror_archives,
     mirror_attempt,
     mirror_run,
+    sweep_media,
 )
 from scadbuddy.orders.component import OrdersComponent
 from scadbuddy.orders.integrations import (
@@ -1030,3 +1031,77 @@ async def test_a_read_starts_one_step_only_for_an_offered_medium_not_attached(
         shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(fail=True)
     )
     assert [a.archive_id for a in read.archives] == [81]
+
+
+def aged(pool: PgPool, fulfilment_id: str, created: timedelta, checked: timedelta | None) -> None:
+    """The attempt made ``created`` ago, its media last read ``checked`` ago (None: never)."""
+    now = datetime.now(UTC)
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET created_at = %s, media_checked_at = %s"
+            " WHERE id = %s",
+            (now - created, None if checked is None else now - checked, fulfilment_id),
+        )
+
+
+async def test_the_sweep_starts_one_step_for_an_attempt_missing_a_medium(
+    shop: Shop, pool: PgPool, step: Step
+) -> None:
+    """Spec 2026-11-05 §4.6: an attempt of the last 14 days that names an archive, lacks a
+    medium and was last read more than an hour ago gets one step; the sweep asks Bambuddy
+    nothing itself."""
+    _, _, missing_photo = by_hand(shop, 81)
+    await step(PerArchive(facts(81, finish_photos=[])), missing_photo.id)
+    _, _, checked_lately = by_hand(shop, 82)
+    _, _, too_old = by_hand(shop, 83)
+    _, _, has_both = by_hand(shop, 84)
+    await step(PerArchive(facts(84)), has_both.id)
+    _, _, never_checked = by_hand(shop, 85)
+    shop.accepted()  # an item with no attempt
+    order, item = shop.accepted()
+    shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="failed"), BY
+    )  # an attempt naming no archive
+    aged(pool, missing_photo.id, timedelta(days=3), timedelta(hours=2))
+    aged(pool, checked_lately.id, timedelta(days=3), timedelta(minutes=10))
+    aged(pool, too_old.id, timedelta(days=15), None)
+    aged(pool, has_both.id, timedelta(days=3), timedelta(hours=2))
+    starts = Starts()
+    sweeping = Archives()
+
+    await sweep_media(shop.lifecycle, sweeping, starts)
+
+    assert sorted(starts.started) == sorted(
+        [(missing_photo.id, False), (never_checked.id, False)]
+    )
+    assert sweeping.downloads == []
+
+
+async def test_the_sweep_starts_a_finished_run_whose_outcome_was_missed(
+    shop: Shop, pool: PgPool
+) -> None:
+    """A run attempt that settled with no outcome heard has no archive copied yet; the
+    sweep still starts its step. A run still printing gets none."""
+    _, _, attempt, _ = printed(shop, pool)
+    order, item = shop.accepted()
+    started(shop, order, item, run_row(pool))
+    starts = Starts()
+
+    await sweep_media(shop.lifecycle, Archives(), starts)
+
+    assert starts.started == [(attempt.id, False)]
+
+
+async def test_without_bambuddy_the_sweep_starts_nothing(shop: Shop) -> None:
+    by_hand(shop)
+    starts = Starts()
+
+    await sweep_media(shop.lifecycle, NOT_LINKED, starts)
+
+    assert starts.started == []
+
+
+async def test_the_sweep_goes_on_when_temporal_is_down(shop: Shop) -> None:
+    by_hand(shop)
+
+    await sweep_media(shop.lifecycle, Archives(), Starts(fail=True))
