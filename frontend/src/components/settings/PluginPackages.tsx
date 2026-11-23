@@ -51,6 +51,7 @@ import { cn } from '@/lib/utils'
 import { LoadingLines, SettingBody, SettingCard } from './form'
 import { Spinner } from '../ui/spinner'
 import { PackageFiles } from './PackageFiles'
+import { announcePackagesChanged, usePackagesChanged } from './packagesChanged'
 
 /**
  * Settings → Plugin packages (#297): Claude plugins (skills, subagents, hooks,
@@ -970,10 +971,16 @@ export function PluginPackagesPanel() {
   const shadowed = (name: string) => listed.some((p) => isBuiltIn(p) && p.name === name)
   const sourceOf = (name: string) => caps.sources.find((s) => s.id === packageSource(name))
 
+  // Hosted plugins' Offer installs or re-pins a package (#6937): read them again.
+  usePackagesChanged('packages', () => {
+    state.refresh()
+    void caps.reload()
+  })
   const replace = (pkg: PluginPackage) => {
     // A built-in and a package stored under its name share a name.
     const at = (p: ListedPackage) => !isBuiltIn(p) && p.name === pkg.name
     state.setData(listed.some(at) ? listed.map((p) => (at(p) ? pkg : p)) : [...listed, pkg])
+    announcePackagesChanged('packages')
   }
   /** A change to which pin is stored or approved changes its items: read the sources again. */
   const repinned = (pkg: PluginPackage) => {
@@ -1013,6 +1020,7 @@ export function PluginPackagesPanel() {
                 onSource={caps.replace}
                 onRemoved={(name) => {
                   state.setData(listed.filter((p) => isBuiltIn(p) || p.name !== name))
+                  announcePackagesChanged('packages')
                   void caps.reload()
                 }}
                 onApprove={setApprove}

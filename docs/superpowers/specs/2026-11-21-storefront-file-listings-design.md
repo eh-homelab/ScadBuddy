@@ -1111,8 +1111,9 @@ colour each slot needs, and "Wait for the right colour" (#6218) is on by default
   vectors in `test-fixtures/storefront/sell-draft-vectors.json` gain a file case, which
   `listingDraft.test.ts` and the agent's tool test both read.
   As built (PR 7): the file case has a `file` key (the library's answers for the file: its
-  name, `…/filaments` `slots`, `…/plates`) and `expected`, the body a new listing of it saves
-  but `materials`. The editor's `declaredSlots` and `platePictures` (`listingDraft.ts`) and
+  name, `…/filaments` `slots`, `…/plates`), `expected`, the body a new listing of it saves
+  but `materials`, and `titles`, the colour names in each title that a customer can pick (the
+  editor's `titleColours` of the new draft, the agent's `fileTitleColours`). The editor's `declaredSlots` and `platePictures` (`listingDraft.ts`) and
   the agent's copies make the parts and the pictures. `materials` differs on purpose: the page
   leaves a new listing on the shop's default, and the agent names the offered filaments'
   materials (`draftMaterials`, as for a design, #6302 review), so publish's materials check

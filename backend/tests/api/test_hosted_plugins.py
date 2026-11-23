@@ -234,6 +234,10 @@ def test_a_publish_makes_immutable_numbered_versions(client: TestClient, db: Any
     v2 = client.post(f"{BASE}/greeter/publish").json()
     assert v2["version"] == 2
     assert v2["zip_sha256"] != v1["zip_sha256"]
+    # The editor's version list (#6937): every version, newest first, as publish answered it.
+    assert client.get(f"{BASE}/greeter/versions").json() == [v2, v1]
+    missing = client.get(f"{BASE}/nobody/versions")
+    assert (missing.status_code, missing.json()["reason"]) == (404, "hosted-plugin-not-found")
 
     with pytest.raises(psycopg.errors.RestrictViolation):
         db.execute("UPDATE ai_hosted_plugin_versions SET published_by = 'x' WHERE version = 1")

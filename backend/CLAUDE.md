@@ -458,7 +458,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   agent-schema tables `ai_hosted_plugins`, `ai_hosted_plugin_files` (the draft) and
   `ai_hosted_plugin_versions` (never updated; a trigger refuses it), and `ai_plugin_feeds`.
   The bytes are blobs `attachment-<sha256>` held in `blob_refs` by holder `hosted_plugin`.
-  Routes `api/hosted_plugins.py` (`/hosted-plugins`, `api` class) and the agent's area
+  Routes `api/hosted_plugins.py` (`/hosted-plugins`, `api` class; `GET /{name}/versions` lists
+  the versions newest first for Settings' editor, #6937) and the agent's area
   `hosted-plugins` in `api/crud_agent_packages.py` (a plugin's latest version, a version's
   zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`. A marketplace
   feed's packages are `ai_plugin_feed_packages` (#6933; a package's delete removes its rows),
@@ -1507,7 +1508,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   under `/entities/{kind}:{ref}`; the file and thumbnail GETs are scriptless
   (`auth/routes.py` `SCRIPTLESS_GETS`). The migration `20261122T0426Z_entities.sql` keeps
   `order_attachments` as a view, with a trigger that fills `entity_id`, for the previous
-  build's replicas during the roll; a later migration drops them.
+  build's replicas during the roll; `20261123T0651Z_drop_order_attachments_view.sql` drops them (#6960).
 - `backend/scadbuddy/orders/` — orders phase 1 (#4249, epic #4248, spec
   `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
   customers, orders and line items as ScadBuddy's own records. A library-file item has no

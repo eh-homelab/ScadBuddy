@@ -27,8 +27,10 @@ describe('the service credential on a call', () => {
 
   it('follows no redirect on a backend call, and still follows one elsewhere (#7180)', async () => {
     const seen: string[] = []
+    const authorizations: (string | undefined)[] = []
     const server = createServer((req, res) => {
       seen.push(`${req.method} ${req.url}`)
+      authorizations.push(req.headers.authorization)
       // As FastAPI answers a path with a trailing slash, and as S3 can answer for its region.
       if (req.url?.endsWith('/')) res.writeHead(307, { location: req.url.slice(0, -1) }).end()
       else if (req.url === '/bucket/old') res.writeHead(307, { location: '/bucket/new' }).end()
@@ -41,6 +43,15 @@ describe('the service credential on a call', () => {
       await expect(wrapped(`http://127.0.0.1:${port}/api/v1/internal/crud/agent/x/`, { method: 'DELETE' })).rejects.toThrow()
       expect((await wrapped(`http://127.0.0.1:${port}/bucket/old`)).status).toBe(200)
       expect(seen).toEqual(['DELETE /api/v1/internal/crud/agent/x/', 'GET /bucket/old', 'GET /bucket/new'])
+      // With no token held, the call goes out without one, and still follows no redirect (#7183).
+      const none: CredentialSource = { current: async () => undefined, invalidate: () => undefined }
+      const bare = withServiceCredential(globalThis.fetch, none, `http://127.0.0.1:${port}/api`)
+      await expect(bare(`http://127.0.0.1:${port}/api/v1/internal/crud/agent/y/`, { method: 'DELETE' })).rejects.toThrow()
+      expect(seen.slice(3)).toEqual(['DELETE /api/v1/internal/crud/agent/y/'])
+      expect(authorizations[0]).toBe(`Bearer ${TOKEN}`)
+      // The hop outside the backend, and the redirect it followed, carry no token (#7194).
+      expect(authorizations.slice(1, 3)).toEqual([undefined, undefined])
+      expect(authorizations[3]).toBeUndefined()
     } finally {
       await new Promise((resolve) => server.close(resolve))
     }
