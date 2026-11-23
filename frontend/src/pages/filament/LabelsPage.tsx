@@ -175,8 +175,11 @@ export function LabelsPage() {
   const [pdfProblem, setPdfProblem] = useState<string | null>(null)
   const [pdfBusy, setPdfBusy] = useState(false)
   const size = sizeOf(choice, templates)
-  // A pick made on this page outranks the stored choice that arrives after it.
+  // A choice saved on this page outranks the stored one that arrives after it. Opening the
+  // custom fields saves nothing, so the stored choice still shows under them, and the
+  // person's typing is kept.
   const picked = useRef(false)
+  const customOpened = useRef(false)
   // R-7157-9: one PUT at a time; a newer save replaces one still waiting, so the newest choice is stored last.
   const saving = useRef<{ busy: boolean; next: LabelTemplateChoice | null; seq: number }>({ busy: false, next: null, seq: 0 })
   const picker = useRef<HTMLButtonElement>(null)
@@ -195,7 +198,7 @@ export function LabelsPage() {
         const stored = settings.filament_label_template
         if (!live || !stored || picked.current) return
         setChoice(cleanChoice(stored))
-        if (stored.template === 'custom') setDraft({ width: String(stored.width_mm ?? ''), height: String(stored.height_mm ?? '') })
+        if (stored.template === 'custom' && !customOpened.current) setDraft({ width: String(stored.width_mm ?? ''), height: String(stored.height_mm ?? '') })
       })
       .catch(() => {})
     return () => {
@@ -231,7 +234,7 @@ export function LabelsPage() {
   const pick = (value: string) => {
     setCustomProblem(null)
     if (value === 'custom') {
-      picked.current = true
+      customOpened.current = true
       setEditingCustom(true)
       setDraft({ width: String(size.widthMm), height: String(size.heightMm) })
       return

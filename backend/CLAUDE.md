@@ -1070,7 +1070,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   never the request's host) and `label_pdf.py` (ReportLab: the browser label's lines and a vector
   QR code, Helvetica, Latin-1 only). Routes `GET /filament/label-templates` and `POST
   /filament/labels` (the PDF as the body, at most 100 labels; in `NOT_NUDGED`). Agent tools: `filament_code_resolve`, `filament_location_get`,
-  `filament_printer_labels` (all `read`).
+  `filament_printer_labels` and `filament_label_templates` (all `read`); the PDF route has none
+  (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
   (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
   (`L` is `filament_locations`, `S` is `filament_spools`) and `resolve` (`{kind, id, code, name,

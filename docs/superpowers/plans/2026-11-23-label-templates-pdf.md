@@ -73,8 +73,17 @@ with no body schema.
 - **R-7157-9 Only the newest template choice is stored.** The page sends one `PUT /settings`
   at a time. A pick made while one is in flight waits, and a newer pick replaces it, so the
   last PUT holds the newest choice and the page shows it; only that save's failure is shown.
-  A choice made before the stored setting is read outranks the stored one. A custom size
-  field left for the template picker saves nothing: the pick that follows decides.
+  A choice saved before the stored setting is read outranks the stored one. Opening the
+  custom fields saves nothing, so the stored setting still shows under them when it arrives,
+  and what the person typed stays: the page never shows a template the person neither chose
+  nor has stored. A custom size field left for the template picker saves nothing: the pick
+  that follows decides.
+- **R-7157-10 The agent reads the templates; the PDF has no tool.** `filament_label_templates`
+  (`read`, `agent/src/tools/filament.ts`) lists the templates and the custom bounds, so the
+  assistant can say which sizes exist; the choice itself is the setting, which it reads with
+  `get_settings`. `POST /filament/labels` is a `NOT_A_TOOL` entry
+  (`agent/src/tools/coverage.ts`): its answer is a PDF the assistant cannot read as text, the
+  download tools' pattern embeds base64 (never, #2479) or links a GET, and this is a POST.
 
 ## Steps
 

@@ -158,7 +158,8 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   inside Bambuddy's frame. A place label's PDF needs the label address or an https public
   URL (409 `no_label_base` otherwise). The browser print stays.
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
-  `filament_printer_labels`.
+  `filament_printer_labels`, and the label sizes with `filament_label_templates`; the PDF
+  route has no tool (R-7157-10).
 
 ## Tests
 

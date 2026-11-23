@@ -88,6 +88,29 @@ describe('the label template (#7157)', () => {
     expect(puts).toEqual([{ filament_label_template: { template: 'box_40x30' } }])
   })
 
+  it('shows the stored template under an unfinished custom size, and keeps the fields open', async () => {
+    serve()
+    const puts = serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    let answer: () => void = () => {}
+    const held = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.get('*/api/v1/settings', async () => {
+        await held
+        return HttpResponse.json({ filament_label_template: { template: 'custom', width_mm: 90, height_mm: 45 }, filament_label_base_url: null, public_url: null })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await choose(user, await screen.findByRole('combobox', { name: 'Label' }), 'Custom size')
+    const width = screen.getByRole('spinbutton', { name: 'Width (mm)' })
+    await user.clear(width)
+    await user.type(width, '7')
+    answer()
+    await waitFor(() => expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 90mm; height: 45mm/))
+    // The fields stay open with what the person typed; nothing was saved.
+    expect(screen.getByRole('spinbutton', { name: 'Width (mm)' })).toHaveValue(7)
+    expect(puts).toEqual([])
+  })
+
   it('sends only the newest of quick picks, after the one in flight (R-7157-9)', async () => {
     serve()
     serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
