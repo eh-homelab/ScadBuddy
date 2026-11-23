@@ -145,21 +145,32 @@ def check_schema(schema: dict[str, Any]) -> None:
         raise BadPropertySchema(reason)
 
 
+#: Keywords whose value is data, never a schema.
+_DATA_KEYWORDS = frozenset({"const", "default", "enum", "examples"})
+#: Keywords whose value maps NAMES to subschemas: a name is never a keyword.
+_NAMED_SUBSCHEMAS = frozenset({"properties", "$defs", "definitions", "dependentSchemas"})
+
+
 def _refused_in(node: Any) -> str | None:
-    """The reason a keyword anywhere under `node` is refused, or None."""
-    if isinstance(node, dict):
-        if node.get("format") == "regex":
-            return '"format": "regex"' + _NO_REGEX
-        children = list(node.items())
-        for k, v in children:
-            if k in REFUSED_DEEP:
-                return REFUSED_DEEP[k]
-            reason = _refused_in(v)
-            if reason is not None:
-                return reason
-    elif isinstance(node, list):
-        for v in node:
-            reason = _refused_in(v)
+    """The reason a keyword anywhere in the schema `node` is refused, or None. Data values
+    are skipped and the names in a map of subschemas are not keywords."""
+    if isinstance(node, list):
+        return next((r for v in node if (r := _refused_in(v)) is not None), None)
+    if not isinstance(node, dict):
+        return None
+    if node.get("format") == "regex":
+        return '"format": "regex"' + _NO_REGEX
+    for k, v in node.items():
+        if k in _DATA_KEYWORDS:
+            continue
+        if k in REFUSED_DEEP:
+            return REFUSED_DEEP[k]
+        if k in _NAMED_SUBSCHEMAS and isinstance(v, dict):
+            subs: list[Any] = list(v.values())
+        else:
+            subs = [v]
+        for sub in subs:
+            reason = _refused_in(sub)
             if reason is not None:
                 return reason
     return None

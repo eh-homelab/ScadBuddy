@@ -206,6 +206,31 @@ def test_set_schema_refuses_a_restricting_schema(
     assert props.schema("spool_type") == before
 
 
+def test_a_schema_documents_keys_named_like_keywords(
+    pg_pool: PgPool, props: EntityPropertyStore
+) -> None:
+    """Names under `properties` are not keywords, and `const`, `default`, `enum` and
+    `examples` hold data."""
+    kind = _spool_type(pg_pool)
+    schema = {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "default": {"pattern": "x", "$ref": "y"}},
+            "$ref": {"type": "string", "enum": ["a", "b"]},
+            "format": {"type": "string", "examples": [{"patternProperties": 1}]},
+            "patternProperties": {"type": "integer", "const": 3},
+        },
+    }
+
+    assert props.set_schema("spool_type", schema, BY) == schema
+
+    props.apply(kind, _patch({"pattern": "ok", "format": "regex"}), BY)
+    with pytest.raises(BadPropertyValue) as caught:
+        props.apply(kind, _patch({"pattern": 5}), BY)
+    assert caught.value.key == "pattern"
+    assert _values(props, kind)["pattern"] == "ok"
+
+
 def test_set_schema_stores_a_schema_that_types_a_new_key(
     pg_pool: PgPool, props: EntityPropertyStore
 ) -> None:
