@@ -25,8 +25,8 @@ edge, the intake worker and the slicer hold none and reach data through the CRUD
 ### Ownership by domain
 
 "Owner" below means the code that writes the table. In every case it is a table in the
-same schema, created by a file in `backend/scadbuddy/migrations/` (267 files today) or
-`backend/scadbuddy/migrations_agent/` (105 files today).
+same schema, created by a file in `backend/scadbuddy/migrations/` or
+`backend/scadbuddy/migrations_agent/`.
 
 | Domain | Tables (creating migration) | Written by |
 |---|---|---|
