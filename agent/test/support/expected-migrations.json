@@ -418,5 +418,9 @@
   {
     "id": "20261122T1907Z_plugin_feed_packages",
     "sha256": "5ce2b28b5d8b97ded610dd72bacee833cbe9632ecd5a505f042a88b5dd7c7754"
+  },
+  {
+    "id": "20261123T1756Z_plugin_package_pending_kind_strict",
+    "sha256": "d02cf935d30aa1490dec3939b81843b5db7bbb5beccc83f84ad4778fe5053510"
   }
 ]

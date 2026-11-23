@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
 from scadbuddy.agent_data import packages
+from scadbuddy.render.agent_migrations import AGENT_MIGRATIONS, migrate_agent
 from tests.api.test_crud_agent_cost import token
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.agent_migrations]
@@ -581,118 +582,143 @@ def test_a_mirror_is_held_for_the_package_it_was_sent_for(
     assert client.post(BASE, json=_archive(), headers=agent).status_code == 201
 
 
-# The previous build's statements (origin/main before #6935,
-# `api/crud_agent_packages.py`), word for word: during a roll its API pods run them against
-# the table this file's migration changed.
-OLD_PENDING = (
-    "UPDATE ai_plugin_packages SET pending_ref = %s, pending_fetch_url = %s,"
-    " pending_fetch_path = %s, pending_commit_sha = %s, pending_content_hash = %s,"
-    " pending_files = %s, pending_review = %s, updated_at = now()"
-    " WHERE name = %s RETURNING *"
-)
-OLD_DISCARD = (
-    "UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL,"
-    " pending_fetch_path = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,"
-    " pending_files = NULL, pending_review = NULL, updated_at = now()"
-    " WHERE name = %s RETURNING *"
-)
-OLD_APPROVE = (
-    "UPDATE ai_plugin_packages SET enabled = enabled AND NOT %s,"
-    " source_ref = pending_ref, fetch_url = pending_fetch_url,"
-    " fetch_path = pending_fetch_path, commit_sha = pending_commit_sha,"
-    " content_hash = pending_content_hash, files = pending_files,"
-    " review = pending_review, approved_at = now(), allow_refused = %s,"
-    " pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,"
-    " pending_commit_sha = NULL, pending_content_hash = NULL,"
-    " pending_files = NULL, pending_review = NULL, updated_at = now()"
-    " WHERE name = %s RETURNING *"
+# #7191: the strict pending CHECKs of 20261123T1756Z_plugin_package_pending_kind_strict.sql,
+# and its backfill of the rows that the looser CHECKs of 20261122T0323Z let in.
+STRICT = "20261123T1756Z_plugin_package_pending_kind_strict"
+Z1 = "c" * 64
+Z2 = "d" * 64
+PENDING_COLUMNS = (
+    "pending_ref",
+    "pending_fetch_url",
+    "pending_fetch_path",
+    "pending_pin_kind",
+    "pending_commit_sha",
+    "pending_bytes_sha256",
+    "pending_version",
+    "pending_content_hash",
+    "pending_files",
+    "pending_review",
 )
 
 
-def _old_pending(db: Any, name: str = "greeter") -> None:
-    body = _pending(name)
-    db.execute(
-        OLD_PENDING,
+def _insert(conn: Any, name: str, source_kind: str = "git", **pending: Any) -> None:
+    """A commit-pinned row of ``source_kind``. ``pending`` sets re-pin columns (without the
+    ``pending_`` prefix); with a ``content_hash`` the re-pin's place, files and review too."""
+    columns: dict[str, Any] = {
+        "name": name,
+        "source_kind": source_kind,
+        "source_url": f"https://git.test/{name}.git",
+        "source_ref": "HEAD",
+        "marketplace_entry": name if source_kind.startswith("marketplace") else None,
+        "fetch_url": f"https://git.test/{name}.git",
+        "fetch_path": "",
+        "pin_kind": "commit",
+        "commit_sha": C1,
+        "content_hash": H1,
+        "files": Jsonb({}),
+        "review": Jsonb(_review(name)),
+    }
+    if "content_hash" in pending:
+        columns.update(
+            pending_ref="main",
+            pending_fetch_url=f"https://git.test/{name}.git",
+            pending_fetch_path="",
+            pending_files=Jsonb({}),
+            pending_review=Jsonb(_review(name)),
+        )
+    columns.update({f"pending_{k}": v for k, v in pending.items()})
+    names = ", ".join(columns)
+    marks = ", ".join(["%s"] * len(columns))
+    conn.execute(
+        f"INSERT INTO ai_plugin_packages ({names}) VALUES ({marks})".encode(),
+        tuple(columns.values()),
+    )
+
+
+def _pending_of(conn: Any, name: str) -> dict[str, Any]:
+    cols = ", ".join(PENDING_COLUMNS)
+    row = conn.execute(
+        f"SELECT {cols} FROM ai_plugin_packages WHERE name = %s".encode(), (name,)
+    ).fetchone()
+    return dict(zip(PENDING_COLUMNS, row, strict=True))
+
+
+def test_the_backfill_makes_every_loose_row_strict(pg_conninfo: str) -> None:
+    before = tuple(m for m in AGENT_MIGRATIONS if m.id != STRICT)
+    assert len(before) == len(AGENT_MIGRATIONS) - 1
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        migrate_agent(conn, before)
+        # What the looser CHECKs let in: an old pod's commit re-pin with no kind, and a
+        # kind that it left behind with no re-pin.
+        _insert(conn, "old-repin", commit_sha=C2, content_hash=H2)
+        _insert(conn, "stale-kind", pin_kind="bytes")
+        # Rows that are strict already.
+        _insert(
+            conn, "strict", "marketplace-url", pin_kind="bytes", bytes_sha256=Z1, content_hash=H2
+        )
+        _insert(conn, "plain")
+        # Re-pins that neither CHECK lets in: written only with both CHECKs off.
+        conn.execute(
+            "ALTER TABLE ai_plugin_packages"
+            " DROP CONSTRAINT ai_plugin_packages_pending_check,"
+            " DROP CONSTRAINT ai_plugin_packages_pending_source_pin_check"
+        )
+        _insert(conn, "no-kind", content_hash=H2)
+        _insert(
+            conn, "two-pins", pin_kind="commit", commit_sha=C2, bytes_sha256=Z2, content_hash=H2
+        )
+        _insert(conn, "wrong-source", pin_kind="bytes", bytes_sha256=Z2, content_hash=H2)
+        conn.execute(
+            "ALTER TABLE ai_plugin_packages"
+            " ADD CONSTRAINT ai_plugin_packages_pending_check CHECK (true),"
+            " ADD CONSTRAINT ai_plugin_packages_pending_source_pin_check CHECK (true)"
+        )
+        assert migrate_agent(conn) == [STRICT]
+
+        old = _pending_of(conn, "old-repin")
+        assert (old["pending_pin_kind"], old["pending_commit_sha"]) == ("commit", C2)
+        assert old["pending_content_hash"] == H2
+        assert set(_pending_of(conn, "stale-kind").values()) == {None}
+        strict = _pending_of(conn, "strict")
+        assert (strict["pending_pin_kind"], strict["pending_bytes_sha256"]) == ("bytes", Z1)
+        assert set(_pending_of(conn, "plain").values()) == {None}
+        # A proposal that the strict CHECKs refuse is discarded whole; the pin stays.
+        for name in ("no-kind", "two-pins", "wrong-source"):
+            assert set(_pending_of(conn, name).values()) == {None}, name
+            pin = conn.execute(
+                "SELECT pin_kind, commit_sha FROM ai_plugin_packages WHERE name = %s", (name,)
+            ).fetchone()
+            assert pin == ("commit", C1), name
+
+
+@pytest.mark.parametrize(
+    ("change", "constraint"),
+    [
+        # A re-pin with no kind: the previous build's commit re-pin.
+        ("pending_pin_kind = NULL", "ai_plugin_packages_pending_check"),
+        # A kind with no re-pin: the previous build's discard and approve.
         (
-            body["ref"],
-            body["fetch_url"],
-            body["fetch_path"],
-            body["commit_sha"],
-            body["content_hash"],
-            Jsonb(body["files"]),
-            Jsonb(body["review"]),
-            name,
+            "pending_commit_sha = NULL, pending_content_hash = NULL, pending_files = NULL,"
+            " pending_review = NULL, pending_ref = NULL, pending_fetch_url = NULL,"
+            " pending_fetch_path = NULL",
+            "ai_plugin_packages_pending_check",
         ),
-    )
-
-
-def test_the_previous_builds_repin_discard_and_approve_pass_the_checks(
-    client: TestClient, agent: dict[str, str], db: Any
+        # A pin column that is not the kind's, or a second one.
+        ("pending_pin_kind = 'bytes'", "ai_plugin_packages_pending_check"),
+        (f"pending_bytes_sha256 = '{Z1}'", "ai_plugin_packages_pending_check"),
+        # A kind that the source cannot have.
+        (
+            f"pending_pin_kind = 'bytes', pending_commit_sha = NULL, pending_bytes_sha256 = '{Z1}'",
+            "ai_plugin_packages_pending_source_pin_check",
+        ),
+    ],
+)
+def test_the_strict_checks_refuse_the_loose_forms(
+    pg_conninfo: str, change: str, constraint: str
 ) -> None:
-    client.post(BASE, json=_install(), headers=agent)
-    # An old pod's re-pin: no pending_pin_kind. This build reads it as a commit re-pin.
-    _old_pending(db)
-    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
-    assert (row["pending_pin_kind"], row["pending_commit_sha"]) == ("commit", C2)
-    # An old pod's discard of it, and of one this build stored (pending_pin_kind set).
-    db.execute(OLD_DISCARD, ("greeter",))
-    assert client.post(f"{BASE}/greeter/pending", json=_pending(), headers=agent).status_code == 200
-    db.execute(OLD_DISCARD, ("greeter",))
-    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
-    # A kind left over with no re-pin means nothing.
-    assert (row["pending_pin_kind"], row["pending_content_hash"]) == (None, None)
-    # An old pod's re-pin over the leftover kind, then its approve.
-    _old_pending(db)
-    db.execute(OLD_APPROVE, (False, False, "greeter"))
-    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
-    assert (row["pin_kind"], row["commit_sha"], row["content_hash"]) == ("commit", C2, H2)
-    assert row["pending_pin_kind"] is None
-    # This build approves an old pod's re-pin by its commit, and writes the kind itself.
-    _old_pending(db, "greeter")
-    db.execute(
-        "UPDATE ai_plugin_packages SET pending_commit_sha = %s, pending_content_hash = %s"
-        " WHERE name = 'greeter'",
-        (C1, H1),
-    )
-    approved = client.post(
-        f"{BASE}/greeter/approve", json={"commit_sha": C1, "content_hash": H1}, headers=agent
-    )
-    assert approved.status_code == 200, approved.text
-    assert (approved.json()["pin_kind"], approved.json()["commit_sha"]) == ("commit", C1)
-
-
-def test_the_previous_builds_approve_never_leaves_a_bytes_pin_with_a_commit(
-    client: TestClient, agent: dict[str, str], db: Any
-) -> None:
-    # A marketplace-url entry pinned to bytes, with a commit re-pin an old pod stored.
-    _mirror(client, agent, ZIP)
-    url_entry = {
-        **_archive(),
-        "source_kind": "marketplace-url",
-        "source_url": "https://plugins.test/marketplace.json",
-        "marketplace_entry": "greeter",
-    }
-    assert client.post(BASE, json=url_entry, headers=agent).status_code == 201
-    _old_pending(db)
-    with pytest.raises(psycopg.errors.CheckViolation):
-        db.execute(OLD_APPROVE, (False, False, "greeter"))
-    row = client.get(f"{BASE}/greeter", headers=agent).json()["package"]
-    assert (row["pin_kind"], row["bytes_sha256"], row["commit_sha"]) == ("bytes", ZIP_SHA, None)
-    # This build approves it as the commit pin it is.
-    approved = client.post(
-        f"{BASE}/greeter/approve", json={"commit_sha": C2, "content_hash": H2}, headers=agent
-    )
-    assert approved.status_code == 200, approved.text
-    assert (approved.json()["pin_kind"], approved.json()["bytes_sha256"]) == ("commit", None)
-    # An old pod's discard of a bytes re-pin would leave its sha256 behind: refused.
-    _mirror(client, agent, OTHER)
-    pending = {
-        **_pending(),
-        "ref": "",
-        "pin_kind": "bytes",
-        "bytes_sha256": OTHER_SHA,
-    }
-    del pending["commit_sha"]
-    assert client.post(f"{BASE}/greeter/pending", json=pending, headers=agent).status_code == 200
-    with pytest.raises(psycopg.errors.CheckViolation):
-        db.execute(OLD_DISCARD, ("greeter",))
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        migrate_agent(conn)
+        _insert(conn, "greeter", pin_kind="commit", commit_sha=C2, content_hash=H2)
+        with pytest.raises(psycopg.errors.CheckViolation) as refused:
+            conn.execute(f"UPDATE ai_plugin_packages SET {change} WHERE name = 'greeter'".encode())
+        assert refused.value.diag.constraint_name == constraint
