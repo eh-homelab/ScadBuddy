@@ -317,6 +317,27 @@ describe('HostedPluginsPanel', () => {
     expect(unload()).toBe(false)
   })
 
+  it('names up to three unsaved files in the leave hold, and counts more (#7260)', async () => {
+    const extra = ['skills/print-notes/a.md', 'skills/print-notes/b.md', 'skills/print-notes/c.md']
+    for (const path of extra) await hostedPlugins.writeFile('print-notes', path, new TextEncoder().encode('x'), false)
+    function Probe() {
+      return <output aria-label="leave holds">{useLeaveHolds().join('|')}</output>
+    }
+    const { user } = renderPage(
+      <SettingsDirtyProvider>
+        <HostedPluginsPanel />
+        <Probe />
+      </SettingsDirtyProvider>,
+    )
+    const editor = await openPlugin(user, 'print-notes')
+    const paths = ['skills/print-notes/SKILL.md', ...extra]
+    for (const path of paths) {
+      await user.click(within(editor).getByRole('button', { name: path }))
+      await user.type(await within(editor).findByLabelText(`Edit ${path}`), 'more')
+    }
+    expect(screen.getByRole('status', { name: 'leave holds' })).toHaveTextContent(/^print-notes's 4 files$/)
+  })
+
   it('replaces a file that is not text with an upload, after a confirm, and keeps its executable bit', async () => {
     await hostedPlugins.writeFile('print-notes', 'skills/print-notes/blob.bin', new Uint8Array([0xff, 0xfe, 0x00]), true)
     const { user } = renderPage(<HostedPluginsPanel />)
