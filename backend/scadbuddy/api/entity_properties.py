@@ -192,7 +192,7 @@ async def get_property_schema(kind: KindPath, entities: EntitiesDep) -> KindProp
         "`description`, `examples`. Per key: `type` (string, number, integer, boolean, array, "
         'or a list of them with `"null"`), annotations, `enum`, `const`, number and length '
         "bounds, `format` (an annotation, not `regex`), `items` (strings), `minItems`, "
-        "`maxItems`, `uniqueItems`; each key must still take some value. Anything else is 422 "
+        "`maxItems`, `uniqueItems`; an `enum` or `const` must fit its key, and no bound may cross its pair or a cap. Anything else is 422 "
         "`bad_property_schema`, naming the keyword, and the old schema stays. Values already "
         "stored are not checked again."
     ),
