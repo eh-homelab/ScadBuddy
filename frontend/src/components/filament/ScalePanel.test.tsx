@@ -78,6 +78,25 @@ describe('ScalePanel', () => {
     expect(reads).toBe(2)
   })
 
+  it('keeps the list and says so when the read after a tare fails', async () => {
+    let reads = 0
+    server.use(
+      http.get('*/api/v1/filament/rfid/status', () => {
+        reads++
+        if (reads > 1) return HttpResponse.json({ title: 'Bad Gateway', status: 502, detail: 'Bambuddy did not answer' }, { status: 502, headers: { 'Content-Type': 'application/problem+json' } })
+        return HttpResponse.json({ override_mode: false, state: 'off', bambuddy_auto_add: null, saved_auto_add: null, detail: null, devices: [device({})] })
+      }),
+      http.post('*/api/v1/filament/spoolbuddy/devices/:device/tare', () => HttpResponse.json({ device_id: 'sb-1', status: 'queued' })),
+    )
+    const { user } = renderPage(<ScalePanel />)
+    await user.click(await screen.findByRole('button', { name: 'Tare scale spoolbuddy-bench' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Tare scale' }))
+    expect(await screen.findByText(/Could not refresh the device list/)).toBeInTheDocument()
+    expect(screen.getByText('spoolbuddy-bench')).toBeInTheDocument()
+    expect(screen.getByText(/Tare queued on spoolbuddy-bench/)).toBeInTheDocument()
+    expect(reads).toBe(2)
+  })
+
   it('sends nothing when the person keeps the scale as it is', async () => {
     const posted: string[] = []
     serveDevices([device({})])

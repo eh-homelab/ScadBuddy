@@ -40,17 +40,26 @@ export function ScalePanel() {
   const [busy, setBusy] = useState(false)
   const [queued, setQueued] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [refreshFailed, setRefreshFailed] = useState(false)
 
   async function tare(device: SpoolBuddyDevice) {
     setBusy(true)
     setError(null)
     setQueued(null)
+    setRefreshFailed(false)
     try {
       await tareScale(device.device_id)
       setQueued(device.hostname)
       // Read the devices again: the tare is now the device's pending command, and another
-      // device may have taken a command meanwhile. The list stays on screen while it reads.
-      status.refresh()
+      // device may have taken a command meanwhile. The list stays on screen while it reads;
+      // a failed read keeps it and says so.
+      status.refresh(
+        () => {
+          setRefreshFailed(false)
+          return true
+        },
+        () => setRefreshFailed(true),
+      )
     } catch (cause) {
       setError(message(cause))
     } finally {
@@ -95,6 +104,7 @@ export function ScalePanel() {
           )
         })}
       </ul>
+      {refreshFailed && <p className="text-[12px] text-warn">Could not refresh the device list. It shows what was read before the tare.</p>}
 
       {queued && (
         <p role="status" className="text-[13px]">
