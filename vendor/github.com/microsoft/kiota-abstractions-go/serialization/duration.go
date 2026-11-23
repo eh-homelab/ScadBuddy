@@ -9,6 +9,7 @@ import (
 	"math"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,8 +23,8 @@ var (
 
 	errMonthsInDurationUseOverload = errors.New("months are not allowed with the ToDuration method, use the overload instead")
 
-	full = regexp.MustCompile(`P((?P<year>\d+)Y)?((?P<month>\d+)M)?((?P<day>\d+)D)?(T((?P<hour>\d+)H)?((?P<minute>\d+)M)?((?P<second>\d+(?:\.\d+))S)?)?`)
-	week = regexp.MustCompile(`P((?P<week>\d+)W)`)
+	full = regexp.MustCompile(`^P((?P<year>\d+)Y)?((?P<month>\d+)M)?((?P<day>\d+)D)?(T((?P<hour>\d+)H)?((?P<minute>\d+)M)?((?P<second>\d+(?:\.\d+)?)S)?)?$`)
+	week = regexp.MustCompile(`^P((?P<week>\d+)W)$`)
 )
 
 type duration struct {
@@ -54,12 +55,14 @@ func durationFromString(dur string) (*duration, error) {
 	}
 
 	d := &duration{}
+	hasField := false
 
 	for i, name := range re.SubexpNames() {
 		part := match[i]
 		if i == 0 || name == "" || part == "" {
 			continue
 		}
+		hasField = true
 
 		val, err := strconv.ParseFloat(part, 64)
 		if err != nil {
@@ -87,6 +90,10 @@ func durationFromString(dur string) (*duration, error) {
 		default:
 			return nil, fmt.Errorf("unknown field %s", name)
 		}
+	}
+
+	if !hasField {
+		return nil, errBadFormat
 	}
 
 	return d, nil
@@ -123,9 +130,16 @@ func (d *duration) string() string {
 		if d.Minutes > 0 {
 			s.WriteString(fmt.Sprintf("%dM", d.Minutes))
 		}
-		if d.Seconds > 0 {
+		if d.MilliSeconds > 0 {
+			msStr := strings.TrimRight(fmt.Sprintf("%03d", d.MilliSeconds), "0")
+			s.WriteString(fmt.Sprintf("%d.%sS", d.Seconds, msStr))
+		} else if d.Seconds > 0 {
 			s.WriteString(fmt.Sprintf("%dS", d.Seconds))
 		}
+	}
+
+	if s.Len() == 1 {
+		return "PT0S"
 	}
 
 	return s.String()
@@ -160,7 +174,7 @@ func (d *duration) normalize() error {
 		d.Days += d.Hours / HtoD
 		d.Hours %= HtoD
 	}
-	if d.Days >= DtoW && d.Days%DtoW == 0 && d.Months == 0 && d.Years == 0 {
+	if d.Days >= DtoW && d.Days%DtoW == 0 && d.Months == 0 && d.Years == 0 && !d.hasTimePart() {
 		d.Weeks += d.Days / DtoW
 		d.Days = 0
 	}
@@ -184,7 +198,7 @@ func (d *duration) normalize() error {
 }
 
 func (d *duration) hasTimePart() bool {
-	return d.Hours != 0 || d.Minutes != 0 || d.Seconds != 0
+	return d.Hours != 0 || d.Minutes != 0 || d.Seconds != 0 || d.MilliSeconds != 0
 }
 
 func (d *duration) toDuration() (time.Duration, error) {
@@ -213,6 +227,7 @@ func (d *duration) toDurationWithMonths(daysInAMonth int) (time.Duration, error)
 	tot += time.Hour * time.Duration(d.Hours)
 	tot += time.Minute * time.Duration(d.Minutes)
 	tot += time.Second * time.Duration(d.Seconds)
+	tot += time.Millisecond * time.Duration(d.MilliSeconds)
 
 	return tot, nil
 }
