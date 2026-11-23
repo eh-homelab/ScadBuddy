@@ -310,7 +310,7 @@ Expected: FAIL.
 
 **Interfaces:**
 - Consumes: `printerLabels` (Task 6).
-- Produces: `locationPayload(base: string, code: string): string` → `${base}/x/${code}`, with `base` stripped of a trailing slash. The page's query: `?printers=<id>,<id>` or `?printers=all`, and `?locations=<id>` for one place (Task 7's link; read with `getLocation`).
+- Produces: `locationPayload(base: string, code: string): string` → `${base}/x/${code}`, with `base` stripped of a trailing slash. The page's query: `?printers=<id>,<id>` or `?printers=all`, and `?locations=<id>` for one place (Task 7's link; read with `getLocation`). Since #7081 `?locations=` takes any number of ids, comma-separated, and both modes stop at `MAX_LABELS`.
 
 - [ ] **Step 1: Write the failing tests**
 

@@ -12,6 +12,7 @@ import pytest
 
 from scadbuddy.bambuddy.trays import EXTERNAL
 from scadbuddy.filament.catalog import CatalogRefError, CatalogStore
+from scadbuddy.filament.labels import printer_labels
 from scadbuddy.filament.locations import (
     LocationCycleError,
     LocationExistsError,
@@ -30,6 +31,7 @@ from scadbuddy.filament.models import (
 )
 from scadbuddy.filament.spools import FilamentSpoolStore
 from tests.conftest import PgPool
+from tests.filament.lock_support import waits_for_the_printer_lock
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -417,6 +419,61 @@ def test_merge_keeps_the_kept_printers_place(pg_pool: PgPool) -> None:
     assert live_unit.parent_id == root_into and live_unit.printer_id == into
     moved = store.get(beside.id)
     assert moved is not None and moved.archived_at is None and moved.printer_id == into
+
+
+def test_a_merged_root_moved_to_the_kept_printer_takes_its_name(pg_pool: PgPool) -> None:
+    """#7081: only the merged printer has a printer place, so it moves to ``into`` and is
+    named as ``into``, in the merge's transaction."""
+    store = LocationStore(pg_pool)
+    merged, into = _printer_named(pg_pool, "Old H2C"), _printer_named(pg_pool, "H2C")
+    root = store.ensure_printer(merged)
+    with pg_pool.connection() as conn, conn.transaction():
+        repoint_printer_locations(conn, merged, into)
+    moved = store.get(root)
+    assert moved is not None and moved.archived_at is None
+    assert (moved.printer_id, moved.name) == (into, "H2C")
+    assert store.ensure_printer(into) == root
+
+
+def test_printer_labels_take_the_printer_lock_before_any_place(pg_pool: PgPool) -> None:
+    """#7081: the labels route takes the printer's place lock first, as capture does
+    (`tests/filament/test_capture.py`), so the two never take place locks in another
+    order and never deadlock. While it is held the route makes nothing."""
+    store = LocationStore(pg_pool)
+    printer = _printer_named(pg_pool, "H2C")
+    found, _ = waits_for_the_printer_lock(
+        pg_pool, printer, lambda: printer_labels(store, [printer])
+    )
+    assert [label.name for label in found] == ["H2C"]
+
+
+def test_every_place_maker_takes_the_printer_lock(pg_pool: PgPool) -> None:
+    """Each `ensure_*` takes the lock, so every caller's first place write comes after it,
+    also with no printer kind (a capture never fails for a missing kind)."""
+    printer = _printer(pg_pool)
+
+    def in_transaction(make: Any) -> Any:
+        def run() -> Any:
+            with pg_pool.connection() as conn, conn.transaction():
+                return make(conn)
+
+        return run
+
+    waits_for_the_printer_lock(
+        pg_pool, printer, in_transaction(lambda c: LocationStore.ensure_printer_on(c, printer))
+    )
+    waits_for_the_printer_lock(
+        pg_pool, printer, in_transaction(lambda c: LocationStore.ensure_ams_unit_on(c, printer, 0))
+    )
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_location_kinds SET archived_at = now() WHERE name = 'Printer'"
+        )
+    waits_for_the_printer_lock(
+        pg_pool,
+        printer,
+        in_transaction(lambda c: LocationStore.ensure_ams_on(c, printer, 1, 0, label="T")),
+    )
 
 
 def test_rehanging_never_makes_a_cycle_through_the_root(pg_pool: PgPool) -> None:

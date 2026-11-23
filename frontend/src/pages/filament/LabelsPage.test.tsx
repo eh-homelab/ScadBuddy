@@ -180,6 +180,44 @@ describe('the labels page', () => {
     expect(screen.getAllByTestId('label')).toHaveLength(1)
   })
 
+  it('draws a label for each place of ?locations=, in the order given', async () => {
+    renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A4},${L.AMS_A1},${L.AMS_A4}` })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(2))
+    expect(screen.getAllByTestId('label').map((label) => label.textContent)).toEqual([expect.stringContaining('slot 4'), expect.stringContaining('slot 1')])
+    expect(screen.getAllByTestId('print-label')).toHaveLength(2)
+  })
+
+  it('draws the places it could read and names the rest', async () => {
+    renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1},nope` })
+    expect(await screen.findByRole('alert')).toHaveTextContent('The label of nope could not be read')
+    expect(screen.getAllByTestId('label')).toHaveLength(1)
+  })
+
+  it('refuses more than 100 places and reads none', async () => {
+    let reads = 0
+    server.use(
+      http.get('*/api/v1/filament/locations/:id', () => {
+        reads++
+        return new HttpResponse(null, { status: 404 })
+      }),
+    )
+    const ids = Array.from({ length: 101 }, (_, i) => `p${i}`).join(',')
+    renderPage(<LabelsPage />, { route: `/filament/labels?locations=${ids}` })
+    expect(await screen.findByText('Print at most 100 labels at a time')).toBeInTheDocument()
+    expect(screen.queryAllByTestId('label')).toHaveLength(0)
+    expect(reads).toBe(0)
+  })
+
+  it('refuses more than 100 printer labels and draws none', async () => {
+    const labels = Array.from({ length: 101 }, (_, i) => ({ location_id: `x${i}`, code: `L-${i + 1}`, name: `P${i}`, depth: 0 }))
+    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: null, labels, no_report: [] })))
+    renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
+    expect(await screen.findByText('Print at most 100 labels at a time')).toBeInTheDocument()
+    expect(screen.queryAllByTestId('label')).toHaveLength(0)
+    expect(screen.queryByText('No printers.')).toBeNull()
+    expect(screen.getByRole('button', { name: /Print/ })).toBeDisabled()
+  })
+
   it('goes back to the Locations tab from a place label', () => {
     renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
     expect(screen.getByRole('link', { name: /Locations/ })).toHaveAttribute('href', '/filament/locations')

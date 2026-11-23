@@ -31,6 +31,8 @@ _COLUMNS = ", ".join(m.Location.model_fields)
 #: Held while a place gets a new parent, so two moves in opposite directions cannot both
 #: pass the cycle check and then make a cycle.
 _TREE_LOCK = "filament_locations_tree"
+#: The prefix of a printer's place lock (`LocationStore.lock_printer_on`).
+_PRINTER_LOCK = "filament_printer_places:"
 
 
 class LocationExistsError(ValueError):
@@ -258,6 +260,7 @@ class LocationStore:
             " AND tray_id = %s AND archived_at IS NULL"
         )
         key = (printer_id, ams_id, tray_id)
+        LocationStore.lock_printer_on(conn, printer_id)
         try:
             # The external holder's parent is the printer's place.
             found = conn.execute(select, key).fetchone()
@@ -337,6 +340,7 @@ class LocationStore:
             " AND tray_id IS NULL AND archived_at IS NULL"
         )
         key = (printer_id, ams_id)
+        LocationStore.lock_printer_on(conn, printer_id)
         try:
             found = conn.execute(select, key).fetchone()
             if found is None:
@@ -385,6 +389,20 @@ class LocationStore:
         unit: UUID = found["id"]
         return unit
 
+    @staticmethod
+    def lock_printer_on(conn: Conn, printer_id: UUID) -> None:
+        """Take the printer's place lock, held to the end of ``conn``'s transaction
+        (#7081). Every `ensure_*` takes it before it reads or writes a place of the
+        printer, so a labels request (`filament/labels.py`, units first, then slots) and a
+        capture (`filament/capture.py`, each slot's unit just before the slot) make a
+        printer's places one at a time and never wait on each other's new rows in opposite
+        orders. An advisory lock, not a row lock on the printer's place: it needs no
+        ``printer`` kind, so a capture with none still runs. Taking it again in the same
+        transaction is free."""
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{_PRINTER_LOCK}{printer_id}",)
+        )
+
     def ensure_printer(self, printer_id: UUID) -> UUID:
         """The id of the printer's own place; `ensure_printer_on` on a pool connection."""
         with self._pool.connection() as conn:
@@ -402,6 +420,7 @@ class LocationStore:
             "SELECT id FROM filament_locations WHERE printer_id = %s AND printer_root"
             " AND archived_at IS NULL"
         )
+        LocationStore.lock_printer_on(conn, printer_id)
         try:
             found = conn.execute(select, (printer_id,)).fetchone()
             if found is None:
@@ -614,10 +633,11 @@ def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
     """Make printer ``merged``'s AMS tray places printer ``into``'s, on ``conn`` and in
     the printer merge's transaction (`printers/store.py` `_merge`). A tray only
     ``merged`` has moves as it is, and so does its printer's own place when ``into`` has none
-    (two of them clash, as two trays do). Where both printers have an unarchived place for one
-    tray, ``into``'s stands: each spool in ``merged``'s moves there with a ``moved``
-    event, its places move under it, and ``merged``'s is archived (not deleted: the
-    ledger's ``moved`` events name it). Archived places move as they are.
+    (two of them clash, as two trays do), which then takes ``into``'s printer name. Where
+    both printers have an unarchived place for one tray, ``into``'s stands: each spool in
+    ``merged``'s moves there with a ``moved`` event, its places move under it, and
+    ``merged``'s is archived (not deleted: the ledger's ``moved`` events name it). Archived
+    places move as they are.
 
     Locks the spools before the places, as `LocationStore.move` does."""
     gone = conn.execute(
@@ -665,6 +685,13 @@ def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
             "UPDATE filament_locations SET archived_at = now(), updated_at = now() WHERE id = %s",
             (old,),
         )
+    # A root only ``merged`` had moves to ``into`` and is named as ``into`` (#7081); a
+    # place with a printer is outside the name index, so the name cannot clash.
+    conn.execute(
+        "UPDATE filament_locations l SET name = p.name, updated_at = now() FROM printers p"
+        " WHERE p.id = %s AND l.printer_id = %s AND l.printer_root AND l.archived_at IS NULL",
+        (into, merged),
+    )
     conn.execute(
         "UPDATE filament_locations SET printer_id = %s, updated_at = now() WHERE printer_id = %s",
         (into, merged),
