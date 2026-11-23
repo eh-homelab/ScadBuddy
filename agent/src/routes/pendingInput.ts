@@ -582,7 +582,6 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
       return page ? c.json(page) : c.json({ detail: `no session ${c.req.param('id')}` }, 404)
     } catch (err) {
       if (err instanceof DurableUnavailable) return c.json({ detail: err.message, retry: true }, 503)
-      if (err instanceof WorkflowNotFoundError) return c.json({ detail: `session ${c.req.param('id')} has no running workflow` }, 404)
       throw err
     }
   })

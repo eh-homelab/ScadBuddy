@@ -117,10 +117,23 @@ export class DurableGate {
     }
   }
 
-  /** The session's parked calls, from its workflow (the source of truth). */
+  /**
+   * The session's parked calls, from its workflow (the source of truth). Input exists only
+   * while a run is open: a workflow that is closed (archive and forget end it, #7036) or no
+   * longer found (Temporal's retention) has none, and its closed run is not queried, which
+   * would need a worker to replay it. Unreachable, DurableUnavailable.
+   */
   async pendingInput(sessionId: string): Promise<PendingInputEntry[]> {
-    const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
-    return this.#call(this.#timeoutMs, () => handle.query<PendingInputEntry[]>(PENDING_INPUT_QUERY))
+    const workflowId = sessionWorkflowId(sessionId)
+    try {
+      const described = await this.#call(this.#timeoutMs, () => this.#client.workflow.getHandle(workflowId).describe())
+      if (described.status.name !== 'RUNNING') return []
+      const handle = this.#client.workflow.getHandle(workflowId, described.runId)
+      return await this.#call(this.#timeoutMs, () => handle.query<PendingInputEntry[]>(PENDING_INPUT_QUERY))
+    } catch (err) {
+      if (err instanceof WorkflowNotFoundError) return []
+      throw err
+    }
   }
 
   /**

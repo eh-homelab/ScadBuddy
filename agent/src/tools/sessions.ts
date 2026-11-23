@@ -3,7 +3,6 @@ import { ownerOf } from '../approvals/mcp.js'
 import { ApprovalError, type ApprovalRecord } from '../approvals/service.js'
 import type { Principal } from '../auth/principal.js'
 import { approvalView, type ApprovalView, BROWSER_USER } from '../routes/approvals.js'
-import { WorkflowNotFoundError } from '@temporalio/common'
 import { DurableUnavailable } from '../gate/durable.js'
 import { parseRequestId } from '../gate/ids.js'
 import { pendingInput, type PendingInputEntry, RespondError, respond, sessionPendingInput } from '../routes/pendingInput.js'
@@ -840,7 +839,6 @@ export const sessionTools: Tool[] = [
           return await sessionPendingInput(manager(ctx), ownerOf(ctx.principal), session_id)
         } catch (err) {
           if (err instanceof DurableUnavailable) throw new ToolError(err.message, 503)
-          if (err instanceof WorkflowNotFoundError) throw new ToolError(`session ${session_id} has no running workflow`, 404)
           throw err
         }
       })()

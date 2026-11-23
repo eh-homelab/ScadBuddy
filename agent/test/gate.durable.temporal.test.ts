@@ -1,5 +1,4 @@
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
-import { WorkflowNotFoundError } from '@temporalio/common'
 import { Worker } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -134,8 +133,19 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
     expect((err as Error).message).toMatch(/not answering/)
   }, 60_000)
 
-  it('says a session with no workflow is not found', async () => {
-    await expect(new DurableGate(env.client).pendingInput(randomUUID())).rejects.toBeInstanceOf(WorkflowNotFoundError)
+  it('lists no input for a session whose workflow is not found (past retention, #7311)', async () => {
+    expect(await new DurableGate(env.client).pendingInput(randomUUID())).toEqual([])
+  }, 60_000)
+
+  it.each(['terminated', 'completed'] as const)('lists no input for a session whose run is %s, though it parked an entry (#7311)', async (how) => {
+    const gate = new DurableGate(env.client)
+    const { sessionId } = await park()
+    expect(await gate.pendingInput(sessionId)).toHaveLength(1)
+    const handle = env.client.workflow.getHandle(sessionWorkflowId(sessionId))
+    if (how === 'terminated') await handle.terminate('archived')
+    else await handle.signal('finish')
+    await vi.waitFor(async () => expect((await handle.describe()).status.name).toBe(how.toUpperCase()), { timeout: 20_000 })
+    expect(await gate.pendingInput(sessionId)).toEqual([])
   }, 60_000)
 
   it('is unavailable, within its bound, while no worker answers; the interrupt Signal is recorded all the same', async () => {

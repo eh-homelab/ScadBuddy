@@ -396,8 +396,11 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     expect(page.entries.every((e) => e.session_id === session.id)).toBe(true)
     expect((await app.request(`/api/v1/ai/sessions/${session.id}/pending-input`)).status).toBe(403)
     expect((await app.request(`/api/v1/ai/sessions/${randomUUID()}/pending-input`, { headers: READ })).status).toBe(404)
-    // A session whose workflow is not there (never started) has none to ask.
-    expect((await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })).status).toBe(404)
+    // A session whose workflow is not there (never started, or past Temporal's retention)
+    // has no open run, so no pending input (#7311).
+    const gone = await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })
+    expect(gone.status).toBe(200)
+    expect(await gone.json()).toEqual({ entries: [], summaries_truncated: false })
     // With no Temporal configured, no session's workflow can be asked.
     const bare = manager({ sql: db.sql, paths: await tempPaths(), run: parks })
     withoutTemporal(bare)
