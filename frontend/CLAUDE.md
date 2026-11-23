@@ -186,6 +186,16 @@ same way, `vite.config.ts`).
   dialog has "Storefront…" per image (`components/storefront/StorefrontPicture.tsx`),
   which sets the image on each listing of that template through `PUT
   /storefront/listings/{id}/media`; a published listing is published again at once.
+  File listings (#6710, spec 2026-11-21 §9): the editor's Source block chooses a design or a
+  library file (`ListingDraft.source`, `switchSource`); a file comes from `LibraryFilePicker`
+  with `types` (3MF and STL). `components/storefront/listedFile.ts` `useListedFile` reads the
+  file, its plates and its parts (the publish snapshot's once published, else the file's
+  declared slots); `FileSource.tsx` has the picked file, the §9.4 notes ("Use the library's
+  version", "Keep the published version"), Parts (a support part read-only) and
+  `FilePictures` (`plate:<n>`, `upload:<sha256>`; an upload saves a new listing first). The
+  page asks before a save drops a pin (another file picked). The Library page's file menu
+  has "Sell on storefront…" (`?sell=library:<id>`). The changed-file note compares the
+  library entry's `file_hash` (#7073) with the pin, and shows nothing when no hash is stated.
   Prepared colours (#6237): `components/storefront/PrepareColours.tsx`, under a published
   listing's actions, shows the count (`GET …/prepare`), confirms, starts (`POST …/prepare`)
   and shows "n of N ready", read again while the run is open (`running`) or renders are in

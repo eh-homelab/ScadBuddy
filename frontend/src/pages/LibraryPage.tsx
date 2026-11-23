@@ -15,6 +15,7 @@ import {
   PencilIcon,
   PrinterIcon,
   SearchIcon,
+  StoreIcon,
   Trash2Icon,
   XIcon,
   UploadIcon,
@@ -1788,9 +1789,15 @@ function FileCard({
   onTransfer,
   onDelete,
 }: FileCardProps) {
+  const navigate = useNavigate()
+  // #6710 §9.5 — a 3MF or an STL (never a sliced file) can be sold as a storefront listing.
+  const sellable = !file.sliced && ['3mf', 'stl'].includes(file.file_type.toLowerCase())
   // #2670, #3650 — Rename, Copy to… and Move to… on the ⋯ button and on right-click.
   const entries: MenuEntry[] = [
     ...(file.printable ? [{ label: 'Print…', icon: PrinterIcon, onSelect: onPrint }] : []),
+    ...(sellable
+      ? [{ label: 'Sell on storefront…', icon: StoreIcon, onSelect: () => void navigate(`/storefront/listings/new?${new URLSearchParams({ sell: `library:${file.id}` })}`) }]
+      : []),
     { label: 'Rename…', icon: PencilIcon, onSelect: onRename, disabled: actionsDisabled, separator: file.printable },
     { label: 'Copy to…', icon: CopyIcon, onSelect: () => onTransfer('copy'), disabled: actionsDisabled },
     { label: 'Move to…', icon: FolderInputIcon, onSelect: () => onTransfer('move'), disabled: actionsDisabled },

@@ -63,4 +63,24 @@ test.describe('sell on storefront', () => {
     await page.getByRole('link', { name: 'Back to listings' }).click()
     await expect(page.getByTestId('storefront-listing')).toContainText('Published')
   })
+
+  // #6710 §9.5 — a library file, from its menu on the Library page to a published listing.
+  test('lists a library file from the Library page and publishes it', async ({ page }) => {
+    await page.goto('/library')
+    await page.getByTestId('library-file-89').getByRole('button', { name: /^More actions for / }).click()
+    await page.getByRole('menuitem', { name: 'Sell on storefront…' }).click()
+    await expect(page).toHaveURL(/\/storefront\/listings\/new$/)
+
+    await expect(page.getByRole('radio', { name: 'A library file' })).toBeChecked()
+    await expect(page.getByLabel('Title', { exact: true })).toHaveValue('bag-clip-3155628dc2bb43d4940fad6dba164efc')
+    await expect(page.getByRole('region', { name: 'Parts' }).getByTestId('listing-part')).toHaveCount(2)
+    await expect(page.getByTestId('listing-picture').getByRole('img', { name: 'Plate 1' })).toBeVisible()
+
+    await page.getByLabel('Title', { exact: true }).fill('Bag clip')
+    await page.getByRole('button', { name: 'Publish' }).click()
+    await expect(page.getByText('Published', { exact: true })).toBeVisible()
+    await expect(page).toHaveURL(/\/storefront\/listings\/[0-9a-f-]{36}$/)
+    await expect(page.getByTestId('listing-source')).toContainText('Library file')
+    await expect(page.getByTestId('listing-picture').getByText('Live', { exact: true })).toBeVisible()
+  })
 })
