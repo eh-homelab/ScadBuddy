@@ -269,7 +269,8 @@ function countsLine(counts: SyncStatus['counts']): string {
 
 /**
  * #6773 — each thing a reset of the Bambuddy links deletes, in the order the dialog lists it; the
- * first `LINK_ROWS` are links (a colour's link to Bambuddy's colour catalog too, #6907).
+ * first `LINK_ROWS` are links (a colour's link to Bambuddy's colour catalog too, #6907, and a
+ * ScadBuddy filament preset's Bambuddy id, #7176, which the mirror then creates on the new Bambuddy).
  */
 const RESET_ROWS: { key: keyof LinksResetCounts; one: string; many: string }[] = [
   { key: 'spools', one: 'spool link', many: 'spool links' },
@@ -278,12 +279,13 @@ const RESET_ROWS: { key: keyof LinksResetCounts; one: string; many: string }[] =
   { key: 'suppliers', one: 'supplier link', many: 'supplier links' },
   { key: 'locations', one: 'location link', many: 'location links' },
   { key: 'colours', one: 'colour link', many: 'colour links' },
+  { key: 'presets', one: 'filament preset link', many: 'filament preset links' },
   { key: 'intents', one: 'unfinished create', many: 'unfinished creates' },
   { key: 'errors', one: 'listed sync error', many: 'listed sync errors' },
   { key: 'ignored', one: 'ignored Bambuddy spool', many: 'ignored Bambuddy spools' },
 ]
 
-const LINK_ROWS = 6
+const LINK_ROWS = 7
 
 /** What a refused reset says, in plain words. */
 function resetProblem(cause: unknown): string {

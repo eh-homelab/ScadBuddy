@@ -15,7 +15,7 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
-from scadbuddy.filament.bb_sync_results import reset_links
+from scadbuddy.filament.bb_sync_results import reset_links, reset_preview
 from scadbuddy.filament.preset_mirror import (
     LOCK,
     mirror_pending,
@@ -490,8 +490,10 @@ async def test_with_only_preset_links_a_url_change_waits_for_the_reset(
         assert await mirror_with(new, pg_pool, store, HERE) == 0
         assert (create.call_count, put.call_count) == (0, 0)
 
+        preview = reset_preview(_filament(pg_pool), HERE, None)
+        assert (preview.instance, preview.counts.presets, preview.counts.links()) == (OLD, 1, 1)
         done = reset_links(_filament(pg_pool), OLD, HERE, None, expect_kept=False)
-        assert (done.instance, done.kept) == (OLD, False)
+        assert (done.instance, done.kept, done.deleted.presets) == (OLD, False, 1)
         row = _row(pg_pool, made)
         assert (row["bb_preset_id"], row["bb_instance"]) == (None, None)
 

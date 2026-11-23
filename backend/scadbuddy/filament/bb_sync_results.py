@@ -683,9 +683,10 @@ _ROW_LINKS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _reset_counts(conn: Conn) -> LinksResetCounts:
+def _reset_counts(conn: Conn, instance: str | None) -> LinksResetCounts:
     """What a reset deletes now: one count per link kind, the intents, the error rows
-    and the ignored Bambuddy spools."""
+    and the ignored Bambuddy spools. ``presets``: the ScadBuddy presets whose Bambuddy id
+    a delete of ``instance``'s links drops (`reset_links`' own condition)."""
     counts: dict[str, int] = {}
     for name, table in (
         ("spools", "filament_bb_links"),
@@ -704,6 +705,12 @@ def _reset_counts(conn: Conn) -> LinksResetCounts:
         "SELECT count(*) AS n FROM filament_colours WHERE bb_colour_id IS NOT NULL"
     ).fetchone()
     counts["colours"] = row["n"] if row is not None else 0
+    row = conn.execute(
+        "SELECT count(*) AS n FROM filament_presets WHERE bb_preset_id IS NOT NULL"
+        " AND (bb_instance IS NULL OR bb_instance = %s)",
+        (instance,),
+    ).fetchone()
+    counts["presets"] = row["n"] if row is not None else 0
     return LinksResetCounts(**counts)
 
 
@@ -782,7 +789,7 @@ def reset_preview(
     then ``None``), which the answer says (Decision 198). Reads only."""
     with store.spools.transaction() as conn:
         state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
-        counts = _reset_counts(conn)
+        counts = _reset_counts(conn, state["instance"] if state is not None else None)
         same, changed = (False, False) if listing is None else _proof_of(conn, listing)
     return LinksResetPreview(
         instance=state["instance"] if state is not None else None,
@@ -855,7 +862,7 @@ def reset_links(
                 configured_instance=configured,
                 deleted=LinksResetCounts(),
             )
-        counts = _reset_counts(conn)
+        counts = _reset_counts(conn, instance)
         for table in (
             "filament_bb_links",
             "filament_bb_creates",

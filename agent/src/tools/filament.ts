@@ -1486,7 +1486,9 @@ const tools: Tool[] = [
       'has `changed_since_pull`). Only then, ' +
       'and only after the user agreed to the delete below, call it again with `expect_kept: false` (the default), ' +
       'which reads no Bambuddy and deletes, in one transaction, every spool link, the ' +
-      'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +
+      'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the colour ' +
+      "links, the old Bambuddy's ids of ScadBuddy's filament presets (the mirror then creates each one on the new " +
+      'Bambuddy), the open ' +
       'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then the full ' +
       'pass links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
       'is deleted. After a delete (`kept: false`) a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
@@ -1494,7 +1496,7 @@ const tools: Tool[] = [
       'Either way it asks for a full pass. ' +
       '`confirm_instance` must be the instance the links belong to: filament_sync_status `instance`. Answers the ' +
       'instance, `kept` and the counts deleted (`deleted`: `spools`, `suppliers`, `locations`, `insert_types`, ' +
-      '`filaments`, `intents`, `errors`, `ignored`). 409 `confirm_mismatch` when `confirm_instance` is not the ' +
+      '`filaments`, `colours`, `presets`, `intents`, `errors`, `ignored`). 409 `confirm_mismatch` when `confirm_instance` is not the ' +
       "links' instance, `same_instance` when they belong to the configured Bambuddy, `nothing_to_reset` when no " +
       'instance is recorded, `proof_changed` as above; each deletes nothing. Approved first.',
     input: z.object({
