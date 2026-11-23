@@ -63,6 +63,7 @@ from scadbuddy.library.libraries import (
 from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.library.output_index import OutputIndex
 from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
@@ -358,6 +359,7 @@ def _build_core(settings: Settings) -> AppState:
     preview_store = PreviewStore(pool.connection)
     outputs = OutputStore(paths, prints=OutputPrintStore(pool))
     outputs.index = OutputIndex(pool, paths)
+    outputs.rows = OutputRows(pool)
     uploads = BambuddyUploadStore(pool)
     # Render leases in Postgres, so a removal here sees the render worker's (#872).
     checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))

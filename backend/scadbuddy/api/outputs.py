@@ -453,7 +453,7 @@ async def live_outputs_for_files(
     whose output is gone is any other library file (#2138). The library listing and
     Arrange both ask this, so they cannot disagree about a file."""
     made = await uploads.outputs_for_files(library_file_ids)
-    live = await asyncio.to_thread(_existing, outputs, set(made.values()))
+    live = await asyncio.to_thread(outputs.existing, set(made.values()))
     return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
 
 
@@ -464,20 +464,8 @@ async def native_outputs_for_files(
     2026-10-17-native-print-library, Task 4): the output each file's row names, while
     that output still exists."""
     made = {f.id: f.output_id for f in files if f.output_id is not None}
-    live = await asyncio.to_thread(_existing, outputs, set(made.values()))
+    live = await asyncio.to_thread(outputs.existing, set(made.values()))
     return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
-
-
-def _existing(outputs: OutputStore, output_ids: set[str]) -> set[str]:
-    """Those of ``output_ids`` the output store still has."""
-    found: set[str] = set()
-    for output_id in output_ids:
-        try:
-            outputs.directory(output_id)
-        except OutputNotFoundError:
-            continue
-        found.add(output_id)
-    return found
 
 
 async def resolve_library_files(

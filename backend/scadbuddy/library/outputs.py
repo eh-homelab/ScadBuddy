@@ -46,6 +46,7 @@ from scadbuddy.render.schema import ParamValue
 if TYPE_CHECKING:
     from scadbuddy.library.output_index import OutputIndex
     from scadbuddy.library.output_prints import LastPrint, OutputPrintStore
+    from scadbuddy.library.output_rows import OutputRow, OutputRows
     from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,16 @@ def _replace_bytes(path: Path, data: bytes) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
     temporary.write_bytes(data)
     temporary.replace(path)
+
+
+def _holds_plate_cover(model: Path) -> bool:
+    """Whether the 3MF at ``model`` holds plate 1's cover image. False when it cannot be
+    read."""
+    try:
+        with zipfile.ZipFile(model) as archive:
+            return PLATE_THUMBNAIL in archive.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return False
 
 
 def _cover_from_3mf(model: Path, thumbnail: Path) -> None:
@@ -297,6 +308,9 @@ class OutputStore:
         #: Every model's outputs as rows (#4777), written as an output is saved, renamed
         #: or deleted; ``None`` where nothing lists them across models.
         self.index: OutputIndex | None = None
+        #: Every output as a row of ``outputs`` (#7255), the record a lookup by id reads.
+        #: ``None`` keeps the files as the only record (tests and tools with no database).
+        self.rows: OutputRows | None = None
         # The fallback-cover resolution per slug (#179). Finding it means reading
         # every output record and opening 3MFs, and the catalogue asks on every
         # listing, so it is done once per state of the model's outputs.
@@ -342,7 +356,29 @@ class OutputStore:
         except Exception:
             logger.exception("an output change listener failed", extra={"slug": slug})
 
+    def _row_of(self, output_id: str) -> OutputRow | None:
+        """The output's row (#7255). ``None`` when the store has no rows, or when a copy
+        run has not finished and the output has no row: the caller then reads the files.
+        Once a copy run finished, an output with no row is gone."""
+        if self.rows is None:
+            return None
+        row = self.rows.get(output_id)
+        if row is None and self.rows.copied():
+            raise OutputNotFoundError(output_id)
+        return row
+
+    def _copied(self) -> bool:
+        """Whether the rows hold every output: a copy run finished (#7255)."""
+        return self.rows is not None and self.rows.copied()
+
     def _find_dir(self, output_id: str) -> Path:
+        if self.rows is not None:
+            # One indexed read, no glob (#7255).
+            slug = self.rows.slug_of(output_id)
+            if slug is not None:
+                return self.paths.output_dir(slug, output_id)
+            if self.rows.copied():
+                raise OutputNotFoundError(output_id)
         known = self._dirs.get(output_id)
         if known is not None and (known / META_NAME).is_file():
             return known
@@ -355,16 +391,39 @@ class OutputStore:
     def directory(self, output_id: str) -> Path:
         return self._find_dir(output_id)
 
+    def existing(self, output_ids: Iterable[str]) -> set[str]:
+        """Those of ``output_ids`` the store still has: one query once a copy run
+        finished (#7255), else one lookup each."""
+        if self.rows is not None and self.rows.copied():
+            return self.rows.existing(output_ids)
+        found: set[str] = set()
+        for output_id in output_ids:
+            try:
+                self.directory(output_id)
+            except OutputNotFoundError:
+                continue
+            found.add(output_id)
+        return found
+
     def get(self, output_id: str) -> OutputMeta:
-        directory = self._find_dir(output_id)
-        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        row = self._row_of(output_id)
+        if row is not None:
+            meta = row.meta
+        else:
+            directory = self._find_dir(output_id)
+            meta = OutputMeta.model_validate_json(
+                (directory / META_NAME).read_text(encoding="utf-8")
+            )
         [meta] = self._with_last_prints([meta])
         return meta
 
     def name_and_slug(self, output_id: str) -> tuple[str | None, str]:
         """The output's own name and its model, from ``meta.json`` alone: `get` without
         the last-print read, for a caller that only labels it (#3856). One found gone
-        is not looked for again for `GONE_OUTPUT_SECONDS`."""
+        is not looked for again for `GONE_OUTPUT_SECONDS`, unless the store has rows."""
+        row = self._row_of(output_id)
+        if row is not None:
+            return row.meta.name, row.slug
         with self._gone_lock:
             gone = self._gone.get(output_id, 0.0) > time.monotonic()
         if gone:
@@ -398,12 +457,23 @@ class OutputStore:
             return None
 
     def provenance(self, output_id: str) -> Provenance | None:
-        """What the 3MF itself says produced it — the fallback when the record is gone."""
+        """What the 3MF itself says produced it — the fallback when the record is gone.
+        With rows, an output that has a row is read at its own folder, and the tree is
+        searched only before a copy run finished (#7255)."""
+        if self.rows is not None:
+            slug = self.rows.slug_of(output_id)
+            if slug is not None:
+                return read_provenance(self.paths.output_dir(slug, output_id) / MODEL_NAME)
+            if self.rows.copied():
+                return None
         for path in self.paths.outputs.glob(f"*/{output_id}/{MODEL_NAME}"):
             return read_provenance(path)
         return None
 
     def params(self, output_id: str) -> dict[str, ParamValue]:
+        row = self._row_of(output_id)
+        if row is not None:
+            return dict(row.params)
         text = _read_if_there(self._find_dir(output_id) / PARAMS_NAME)
         if text is None:
             return {}
@@ -415,6 +485,11 @@ class OutputStore:
     ) -> dict[str, Any]:
         """The output's inputs; one from before them reads as its params at ``v`` 0.
         A caller that already read :meth:`params` passes them, so they are read once."""
+        row = self._row_of(output_id)
+        if row is not None:
+            if row.inputs is None:
+                return legacy_inputs(row.params if params is None else params)
+            return dict(row.inputs)
         path = self._find_dir(output_id) / INPUTS_NAME
         try:
             text = _read_if_there(path)
@@ -435,6 +510,10 @@ class OutputStore:
         return checked
 
     def list_for(self, slug: str) -> list[OutputMeta]:
+        if self._copied():
+            assert self.rows is not None
+            # Newest first already; one query, no glob (#7255).
+            return self._with_last_prints([row.meta for row in self.rows.for_slug(slug)])
         directory = self.paths.outputs / slug
         if not directory.is_dir():
             return []
@@ -583,6 +662,8 @@ class OutputStore:
             source=source,
         )
         self._write_meta(directory, meta)
+        if self.rows is not None:
+            self._insert_row(directory, meta, job.params, recorded, chosen, index, arranged_from)
         if self.index is not None:
             # The save stands without its row: a failure is logged, and the next start's
             # `OutputIndex.sync` adds the row.
@@ -595,6 +676,51 @@ class OutputStore:
         self.forget_plate_cover(job.slug)
         self._changed(job.slug)
         return meta
+
+    def _insert_row(
+        self,
+        directory: Path,
+        meta: OutputMeta,
+        params: Mapping[str, ParamValue],
+        inputs: Mapping[str, Any],
+        chosen: PipelineOutput | None,
+        index: int,
+        arranged_from: Sequence[str],
+    ) -> None:
+        """The saved output's row, in one transaction (spec §6.6). The row is the record:
+        when the insert fails, the files written for the save go and the save fails."""
+        from scadbuddy.library.output_rows import OutputRow
+
+        assert self.rows is not None
+        record: dict[str, Any] | None = None
+        bom: list[Any] | None = None
+        manifest: list[Any] | None = None
+        if chosen is not None:
+            record = chosen.record.model_copy(update={"output_index": index}).model_dump(
+                mode="json"
+            )
+            bom = [b.model_dump(mode="json") for b in chosen.bom] or None
+            manifest = [m.model_dump(mode="json") for m in chosen.manifest] or None
+        row = OutputRow(
+            output_id=meta.id,
+            slug=meta.slug,
+            meta=meta,
+            params=dict(params),
+            inputs=dict(inputs),
+            record=record,
+            manifest=manifest,
+            bom=bom,
+            arranged_from=list(arranged_from) or None,
+            backfill=None,
+            has_plate_cover=_holds_plate_cover(directory / MODEL_NAME),
+            copied_at=meta.created_at,
+        )
+        try:
+            self.rows.insert(row)
+        except Exception:
+            shutil.rmtree(directory, ignore_errors=True)
+            self._dirs.pop(meta.id, None)
+            raise
 
     def _next_created_at(self, slug: str) -> datetime:
         """Now, or just after the model's newest output when the clock reads earlier.
@@ -610,6 +736,9 @@ class OutputStore:
         return now
 
     def bom(self, output_id: str) -> list[BomEntry]:
+        row = self._row_of(output_id)
+        if row is not None:
+            return [BomEntry.model_validate(e) for e in row.bom or []]
         text = _read_if_there(self.directory(output_id) / BOM_NAME)
         if text is None:
             return []
@@ -618,6 +747,9 @@ class OutputStore:
     def manifest(self, output_id: str) -> list[ManifestObject]:
         """Empty for an output saved before manifests (phase 5): it cannot be arranged."""
         try:
+            row = self._row_of(output_id)
+            if row is not None:
+                return [ManifestObject.model_validate(m) for m in row.manifest or []]
             text = _read_if_there(self.directory(output_id) / MANIFEST_NAME)
         except OutputNotFoundError:
             return []
@@ -629,6 +761,9 @@ class OutputStore:
         """For an arranged output, the outputs its objects came from, and each library
         file ScadBuddy did not make as `library:<id>` (#2284)."""
         try:
+            row = self._row_of(output_id)
+            if row is not None:
+                return _ID_LIST.validate_python(row.arranged_from or [])
             text = _read_if_there(self.directory(output_id) / ARRANGED_NAME)
         except OutputNotFoundError:
             return []
@@ -639,6 +774,11 @@ class OutputStore:
     def backfill(self, output_id: str) -> BackfillState | None:
         """The re-render queued to give this output a manifest (#902), if any."""
         try:
+            row = self._row_of(output_id)
+            if row is not None:
+                if row.backfill is None:
+                    return None
+                return BackfillState.model_validate(row.backfill)
             text = _read_if_there(self.directory(output_id) / BACKFILL_NAME)
         except OutputNotFoundError:
             return None
@@ -647,23 +787,38 @@ class OutputStore:
         return BackfillState.model_validate_json(text)
 
     def start_backfill(self, output_id: str, job_id: str) -> None:
-        _replace(
-            self.directory(output_id) / BACKFILL_NAME,
-            BackfillState(job_id=job_id).model_dump_json(),
-        )
+        self._write_backfill(output_id, BackfillState(job_id=job_id))
 
     def fail_backfill(self, output_id: str, job_id: str, error: str) -> None:
-        state = BackfillState(job_id=job_id, error=error)
+        self._write_backfill(output_id, BackfillState(job_id=job_id, error=error))
+
+    def _write_backfill(self, output_id: str, state: BackfillState) -> None:
+        """The file first, then the row (#7255)."""
         _replace(self.directory(output_id) / BACKFILL_NAME, state.model_dump_json())
+        if self.rows is not None:
+            self.rows.set_backfill(output_id, state.model_dump(mode="json"))
 
     def clear_backfill(self, output_id: str) -> None:
         directory = self.directory(output_id)
         (directory / BACKFILL_NAME).unlink(missing_ok=True)
+        if self.rows is not None:
+            self.rows.set_backfill(output_id, None)
         self._changed(directory.parent.name)
 
     def pending_backfills(self) -> list[tuple[str, BackfillState]]:
         """Every output waiting on a re-render that has not failed."""
         pending: list[tuple[str, BackfillState]] = []
+        if self._copied():
+            assert self.rows is not None
+            # One query, no glob (#7255).
+            for output_id, data in self.rows.pending_backfills():
+                try:
+                    state = BackfillState.model_validate(data)
+                except ValidationError:
+                    continue
+                if state.error is None:
+                    pending.append((output_id, state))
+            return pending
         for path in self.paths.outputs.glob(f"*/*/{BACKFILL_NAME}"):
             try:
                 state = BackfillState.model_validate_json(path.read_text(encoding="utf-8"))
@@ -679,14 +834,24 @@ class OutputStore:
         directory = self.directory(output_id)
         if not (directory / RECORD_NAME).is_file():
             _replace(directory / RECORD_NAME, chosen.record.model_dump_json())
-        _replace(
-            directory / MANIFEST_NAME,
-            json.dumps([m.model_dump(mode="json") for m in chosen.manifest]),
-        )
+        manifest = [m.model_dump(mode="json") for m in chosen.manifest]
+        _replace(directory / MANIFEST_NAME, json.dumps(manifest))
         (directory / BACKFILL_NAME).unlink(missing_ok=True)
+        if self.rows is not None:
+            row = self.rows.get(output_id)
+            if row is not None:
+                # The record it has stays, as the file's does.
+                record = row.record
+                if record is None:
+                    record = chosen.record.model_dump(mode="json")
+                self.rows.set_record(output_id, record, manifest)
+                self.rows.set_backfill(output_id, None)
         self._changed(directory.parent.name)
 
     def record(self, output_id: str) -> OutputRecord | None:
+        row = self._row_of(output_id)
+        if row is not None:
+            return None if row.record is None else OutputRecord.model_validate(row.record)
         text = _read_if_there(self.directory(output_id) / RECORD_NAME)
         if text is None:
             return None
@@ -715,11 +880,13 @@ class OutputStore:
         output is saved, except `mark_storefront` once at the API's start, for an output
         saved before #6371. A second writer of it needs a lock here, or one rename loses."""
         directory = self._find_dir(output_id)
-        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        meta = self._stored_meta(output_id, directory)
         renamed = meta.model_copy(update={"name": name or None})
         _replace(
             directory / META_NAME, json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
         )
+        if self.rows is not None:
+            self.rows.update_meta(output_id, renamed)
         if self.index is not None:
             # After the file: a failure fails the rename, which a retry writes again.
             self.index.rename(output_id, renamed.name)
@@ -729,16 +896,28 @@ class OutputStore:
         """Mark an output saved before #6371 as the storefront slice run's: only its
         ``meta.json`` changes. `OutputIndex.sync` calls it before it writes the row."""
         directory = self._find_dir(output_id)
-        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        meta = self._stored_meta(output_id, directory)
         marked = meta.model_copy(update={"source": STOREFRONT})
         _replace(directory / META_NAME, json.dumps(marked.model_dump(mode="json"), indent=2) + "\n")
+        if self.rows is not None:
+            self.rows.update_meta(output_id, marked)
         return marked
+
+    def _stored_meta(self, output_id: str, directory: Path) -> OutputMeta:
+        """The output's meta as it is stored, with no last-print overlay: its row's, else
+        its ``meta.json``."""
+        row = self._row_of(output_id)
+        if row is not None:
+            return row.meta
+        return OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
 
     def delete(self, output_id: str) -> None:
         directory = self._find_dir(output_id)
         if self.index is not None:
             # Before the files: a failure leaves the output whole, for a retry.
             self.index.forget(output_id)
+        if self.rows is not None:
+            self.rows.delete(output_id)
         shutil.rmtree(directory, ignore_errors=True)
         # A long-lived process would otherwise keep every deleted id's entry (#2909).
         self._dirs.pop(output_id, None)
@@ -773,12 +952,8 @@ class OutputStore:
         """
         for meta in self._oldest_first(slug):
             archive_path = self.paths.output_dir(slug, meta.id) / MODEL_NAME
-            try:
-                with zipfile.ZipFile(archive_path) as archive:
-                    if PLATE_THUMBNAIL in archive.namelist():
-                        return archive_path
-            except (OSError, zipfile.BadZipFile):
-                continue
+            if _holds_plate_cover(archive_path):
+                return archive_path
         return None
 
     def plate_cover_archive(self, slug: str) -> Path | None:
@@ -792,7 +967,15 @@ class OutputStore:
         that raced any forget is not stored: the epoch it started under is stale
         by the time it finishes. That can discard a good result for another slug,
         which costs only one rescan.
+
+        Once a copy run finished, the rows answer (#7255): one query, nothing kept.
         """
+        if self._copied():
+            assert self.rows is not None
+            output_id = self.rows.oldest_with_plate_cover(slug)
+            if output_id is None:
+                return None
+            return self.paths.output_dir(slug, output_id) / MODEL_NAME
         try:
             stamp = (self.paths.outputs / slug).stat().st_mtime_ns
         except OSError:
@@ -820,6 +1003,12 @@ class OutputStore:
     def forget_indexed(self, slug: str) -> None:
         """Drop the index rows of ``slug``'s outputs (#4777), once their directory is gone
         with the model: best effort, as a page drops a row whose files it cannot read."""
+        if self.rows is not None:
+            # The model's delete takes its output rows with it (spec §6.2).
+            try:
+                self.rows.delete_slug(slug)
+            except Exception:
+                logger.exception("could not drop a model's output rows", extra={"slug": slug})
         if self.index is None:
             return
         try:
@@ -840,6 +1029,9 @@ class OutputStore:
         """The id of the output whose plate image :meth:`plate_cover` gives, from the
         same cached resolution -- so the catalogue can tell when the fallback moves to
         another output, which is no commit and so no change of the model's version."""
+        if self._copied():
+            assert self.rows is not None
+            return self.rows.oldest_with_plate_cover(slug)
         archive = self.plate_cover_archive(slug)
         # outputs/<slug>/<output-id>/model.3mf
         return archive.parent.name if archive is not None else None
