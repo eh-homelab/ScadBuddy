@@ -82,13 +82,15 @@ Stories:
 
 ```
 1 spike (done)
-2 migration ─► 3 copy_in ─► 4 workflow ─┬─► 5 sweep
+2 migration (done) ─► 3 copy_in ─► 4 workflow ─┬─► 5 sweep
                                         └─► 7 read fields + frontend ─► 8 agent + docs
 6 scan + setting (dropped)
 ```
 
-Story 1 is done; its findings led to the drop of story 6 (spec §4.3a, §9). Stories 2–5,
-7 and 8 build the import of what Bambuddy's archive already has.
+Story 1 is done; its findings led to the drop of story 6 (spec §4.3a, §9). Story 2 is done
+(#7241, `backend/scadbuddy/migrations/20261123T1649Z_attempt_media_provenance.sql`).
+Stories 3–5, 7 and 8 build the import of what Bambuddy's archive already has; their PRs
+are #7271 (3), #7281 (4), #7295 (5), #7301 (7) and #7303 (8).
 
 CI lanes (`.github/scripts/select-lanes.sh`): a change under `backend/` selects
 `backend` and `image`; under `frontend/`, `image`; under `agent/`, `agent_durable`. The
@@ -118,18 +120,23 @@ is recorded: a match deletes the video from the printer's card (spec §4.3a).
 double insert is impossible, and the attempt can record its last check (spec §4.2,
 §4.6).
 
+**Done** (merged in #7241). The migration is
+`backend/scadbuddy/migrations/20261123T1649Z_attempt_media_provenance.sql`. The steps
+below record what that PR built; do not build them again.
+
 PR #7241 (merged) added `timelapse_scanned_at` and `stamp_timelapse_scanned` before the
 drop. A follow-up PR adds a new migration that drops the column and removes the store
 method and the model field. Merged migrations are never edited. Tracked as #7272.
 
 **Files:**
-- Create: `backend/scadbuddy/migrations/<ts>_attempt_media_provenance.sql`
+- Created: `backend/scadbuddy/migrations/20261123T1649Z_attempt_media_provenance.sql`
 - Modify: `backend/scadbuddy/orders/models.py` (`Attachment.archive_id`,
   `.archive_media: Literal["finished_photo", "timelapse"] | None`;
   `Fulfilment.media_checked_at`)
 - Modify: `backend/scadbuddy/orders/store.py` (`_ATTACHMENT`, `_FULFILMENT`,
-  `insert_attachment` takes and writes both columns and raises `ArchiveCopyExists` on the
-  unique index; `archive_media_present(fulfilment_id, item_id) -> set[tuple[int, str]]`;
+  `insert_attachment` takes and writes both columns and raises `ArchiveCopyExistsError` on the
+  unique index; `archive_media_present(fulfilment_id, item_id, *, conn=None) ->
+  set[tuple[int, ArchiveCopyMedia]]`;
   `stamp_media_checked`)
 - Test: `backend/tests/test_pg_migrations.py`, `backend/tests/orders/test_attempt_files.py`
 
@@ -146,14 +153,14 @@ Migration (one file):
 - `ALTER TABLE order_item_fulfilments ADD COLUMN media_checked_at timestamptz`.
 
 **Steps:**
-- [ ] Failing test in `test_pg_migrations.py`: seed rows as `copy_in` wrote them (an
+- [x] Failing test in `test_pg_migrations.py`: seed rows as `copy_in` wrote them (an
   attempt's photo and timelapse, an item's pre-#5268 photo, a caption a person edited, two
   rows on one key), migrate, assert the columns, the one-of-two rule, and that the index
   exists.
-- [ ] Failing test in `test_attempt_files.py`: a second insert with the same key raises
-  `ArchiveCopyExists` and leaves one row and one `blob_refs` hold; a different `filename`
+- [x] Failing test in `test_attempt_files.py`: a second insert with the same key raises
+  `ArchiveCopyExistsError` and leaves one row and one `blob_refs` hold; a different `filename`
   on the same archive is allowed.
-- [ ] Write the migration and the store/model changes; run
+- [x] Write the migration and the store/model changes; run
   `cd backend && uv run pytest tests/test_pg_migrations.py tests/orders -n auto`.
 
 **Acceptance:** the backfill is exact for the seeded rows; the index refuses a duplicate;
@@ -169,7 +176,7 @@ answers with the winner's row; the actor is explicit; the audit line says `sourc
 
 **Files:**
 - Modify: `backend/scadbuddy/orders/archives.py` (`copy_in`: passes `archive_id`,
-  `archive_media`, `source`; catches `ArchiveCopyExists` and answers the existing row;
+  `archive_media`, `source`; catches `ArchiveCopyExistsError` and answers the existing row;
   `by` stays required and is the actor written)
 - Modify: `backend/scadbuddy/orders/lifecycle.py` (`add_attachment` takes `archive_id`,
   `archive_media`, `source: str | None`; the `attachment.added` event carries `source`)

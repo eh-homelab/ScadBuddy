@@ -131,7 +131,8 @@ limit, a Bambuddy that was down), and as the way to pick a *different* finish ph
 ## 3. Facts this rests on
 
 Verified 2026-11-05; checked again on main `98d17dd52` on 2026-11-23 (file:line on that
-commit). F11 to F14 are new in the review.
+commit). F6 and the §4.2 "today" text describe main before #7241, which added the
+provenance columns and the partial unique index. F11 to F14 are new in the review.
 
 | | fact | where |
 |---|---|---|
@@ -359,14 +360,16 @@ files; the grouping only shows them. #4721 can be narrowed to the grouping, or c
 ## 5. Changes, by file
 
 Backend
-- `scadbuddy/migrations/<ts>_attempt_media_provenance.sql` (one new file, named by UTC
-  timestamp): the two `entity_attachments` columns and their checks, the backfill, the
-  partial unique index (§4.2), and `order_item_fulfilments.media_checked_at`.
+- Shipped in #7241: `scadbuddy/migrations/20261123T1649Z_attempt_media_provenance.sql`
+  (the two `entity_attachments` columns and their checks, the backfill, the partial
+  unique index (§4.2), and `order_item_fulfilments.media_checked_at`), the model fields
+  below, `insert_attachment`'s `ArchiveCopyExistsError`, `archive_media_present` and
+  `stamp_media_checked`.
 - `orders/models.py`: `Attachment.archive_id`, `.archive_media`;
   `Fulfilment.media_checked_at`.
 - `orders/store.py`: write/read the columns (`_ATTACHMENT`, `_FULFILMENT`,
-  `insert_attachment` raises a typed conflict on the unique index); `archive_media_of(attempt)` (what
-  is present, attempt and item); `attempts_missing_media(since, checked_before)` for the
+  `insert_attachment` raises `ArchiveCopyExistsError` on the unique index);
+  `archive_media_present(fulfilment_id, item_id)` (what is present, attempt and item); `attempts_missing_media(since, checked_before)` for the
   sweep; `stamp_media_checked`.
 - `orders/archives.py`: `mirror_media`, `mirror_attempt`; `copy_in` writes the columns,
   takes `created_by` explicitly, and maps the insert conflict to the winner's row;
