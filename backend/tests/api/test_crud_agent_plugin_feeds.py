@@ -92,7 +92,10 @@ def test_the_default_feed_and_its_packages_are_read(client: TestClient, db: Any)
         "fetch_path": "plugins/kept",
         "commit_sha": C1,
         "content_hash": H1,
+        "pin_kind": "commit",
+        "bytes_sha256": None,
         "approved": True,
+        "allow_refused": False,
         "description": "A plugin",
         "hosted": None,
     }
@@ -204,3 +207,55 @@ def test_a_feed_read_can_name_one_package(client: TestClient, db: Any) -> None:
 def test_the_table_refuses_a_package_that_is_not_installed(client: TestClient, db: Any) -> None:
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         _list(db, "nothing")
+
+
+def test_a_bytes_pin_names_its_file(client: TestClient, db: Any) -> None:
+    """#6936: an archive's pin is the sha256 of its file, which the agent serves from the mirror."""
+    sha = "b" * 64
+    db.execute(
+        "INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref,"
+        " fetch_url, fetch_path, pin_kind, bytes_sha256, content_hash, files, review,"
+        " approved_at, allow_refused)"
+        " VALUES ('zipped', 'archive', 'https://files.test/z.zip', '', 'https://files.test/z.zip',"
+        " '', 'bytes', %s, %s, '{}', '{}', now(), true)",
+        (sha, H1),
+    )
+    _list(db, "zipped")
+    [entry] = client.get(f"{CRUD}/default", headers=token(client)).json()["packages"]
+    assert entry["pin_kind"] == "bytes"
+    assert entry["bytes_sha256"] == sha
+    assert entry["commit_sha"] is None
+    assert entry["allow_refused"] is True
+
+
+def test_a_package_is_added_to_the_feed_and_removed(client: TestClient, db: Any) -> None:
+    agent = token(client)
+    _package(db, "added")
+    url = f"{CRUD}/default/packages/added"
+    assert client.put(url, headers=agent).json() == {"done": True}
+    assert client.put(url, headers=agent).json() == {"done": False}
+    names = [p["name"] for p in client.get(f"{CRUD}/default", headers=agent).json()["packages"]]
+    assert names == ["added"]
+    assert client.delete(url, headers=agent).json() == {"done": True}
+    assert client.delete(url, headers=agent).json() == {"done": False}
+    assert client.get(f"{CRUD}/default", headers=agent).json()["packages"] == []
+
+
+def test_adding_needs_the_feed_and_the_package(client: TestClient, db: Any) -> None:
+    agent = token(client)
+    _package(db, "here")
+    no_feed = client.put(f"{CRUD}/nowhere/packages/here", headers=agent)
+    assert no_feed.status_code == 404
+    assert no_feed.json()["reason"] == "feed-not-found"
+    no_package = client.put(f"{CRUD}/default/packages/missing", headers=agent)
+    assert no_package.status_code == 404
+    assert no_package.json()["reason"] == "package-not-found"
+    assert client.delete(f"{CRUD}/nowhere/packages/here", headers=agent).status_code == 404
+
+
+def test_only_the_agent_changes_a_feed(client: TestClient, db: Any) -> None:
+    _package(db, "guarded")
+    url = f"{CRUD}/default/packages/guarded"
+    assert client.put(url).status_code in (401, 403)
+    assert client.put(url, headers=token(client, "render")).status_code == 403
+    assert client.delete(url, headers=token(client, "render")).status_code == 403

@@ -126,6 +126,8 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   lines 305-307): while Bambuddy's auth is on, every write is the scope problem naming
   `K-profiles (admin only)`. The assistant has no K-profile tool yet
   ([#7162](https://github.com/eh-homelab/ScadBuddy/issues/7162)).
+- Parity with Bambuddy 1.2.6b1 (#6270) is not complete yet: [filament-parity.md](filament-parity.md)
+  lists every §11 item, its evidence, and the gap issue for each miss.
 - Filament profiles in Postgres, and their follow-ups, are still open:
   [#2800](https://github.com/eh-homelab/ScadBuddy/issues/2800),
   [#2801](https://github.com/eh-homelab/ScadBuddy/issues/2801),

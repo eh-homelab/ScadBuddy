@@ -1,3 +1,5 @@
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { describe, expect, it, vi } from 'vitest'
 import { CREDENTIAL_WAIT_MS, type CredentialSource, ExchangeCredential, serviceCredentialMiddleware, withServiceCredential } from '../src/api/serviceCredential.js'
 
@@ -21,6 +23,27 @@ describe('the service credential on a call', () => {
     await wrapped('http://backend:8080/api/v1/internal/workspace-blobs/uploads', { method: 'POST' })
     await wrapped('https://bucket.s3.example/blob?X-Amz-Signature=x', { method: 'PUT' })
     expect(seen).toEqual([`Bearer ${TOKEN}`, null])
+  })
+
+  it('follows no redirect on a backend call, and still follows one elsewhere (#7180)', async () => {
+    const seen: string[] = []
+    const server = createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`)
+      // As FastAPI answers a path with a trailing slash, and as S3 can answer for its region.
+      if (req.url?.endsWith('/')) res.writeHead(307, { location: req.url.slice(0, -1) }).end()
+      else if (req.url === '/bucket/old') res.writeHead(307, { location: '/bucket/new' }).end()
+      else res.writeHead(200).end('{}')
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = server.address() as AddressInfo
+      const wrapped = withServiceCredential(globalThis.fetch, fixed, `http://127.0.0.1:${port}/api`)
+      await expect(wrapped(`http://127.0.0.1:${port}/api/v1/internal/crud/agent/x/`, { method: 'DELETE' })).rejects.toThrow()
+      expect((await wrapped(`http://127.0.0.1:${port}/bucket/old`)).status).toBe(200)
+      expect(seen).toEqual(['DELETE /api/v1/internal/crud/agent/x/', 'GET /bucket/old', 'GET /bucket/new'])
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+    }
   })
 
   it('puts it on the request', async () => {
@@ -397,16 +420,54 @@ describe('ExchangeCredential', () => {
     expect(slept).toEqual([5_000])
   })
 
-  it('the default wait keeps a one-shot process alive (#7099 review)', async () => {
+  it('the default wait keeps a one-shot process alive, and an abort clears its timer (#7099 review, #7144)', async () => {
     const credential = new ExchangeCredential({ backendUrl: 'http://backend:8080/', proofFile: '/x', proof: 'k8s' })
-    const spy = vi.spyOn(globalThis, 'setTimeout')
+    const sleep = (credential as unknown as { sleep: (ms: number, signal?: AbortSignal) => Promise<void> }).sleep
+    const set = vi.spyOn(globalThis, 'setTimeout')
+    const clear = vi.spyOn(globalThis, 'clearTimeout')
     try {
-      void (credential as unknown as { sleep: (ms: number) => Promise<void> }).sleep(1)
-      const timer = spy.mock.results.at(-1)?.value as NodeJS.Timeout
+      const controller = new AbortController()
+      const slept = sleep(60_000, controller.signal)
+      const timer = set.mock.results.at(-1)?.value as NodeJS.Timeout
       expect(timer.hasRef()).toBe(true)
+      controller.abort()
+      await slept
+      expect(clear).toHaveBeenCalledWith(timer)
+      // A signal already aborted: it resolves at once and clears its timer too (#7164).
+      await sleep(60_000, AbortSignal.abort())
+      expect(clear).toHaveBeenCalledWith(set.mock.results.at(-1)?.value)
     } finally {
-      spy.mockRestore()
+      set.mockRestore()
+      clear.mockRestore()
     }
+  })
+
+  it('a call soon after a 401 waits out the re-exchange hold-off and carries the new token (#7144)', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const slept: number[] = []
+    const credential = new ExchangeCredential({
+      backendUrl: 'http://backend:8080/',
+      proofFile: '/var/run/scadbuddy/token',
+      proof: 'k8s',
+      fetchImpl: backend.fetchImpl,
+      readProof: async () => 'jwt-1',
+      now: () => clock.now,
+      log: () => undefined,
+      sleep: async (ms) => {
+        slept.push(ms)
+        clock.now += ms
+      },
+    })
+    const first = (await credential.current())!
+    // A 401 7 s after the exchange: the next exchange is held off until 10 s after it.
+    clock.now = 7_000
+    credential.invalidate(first)
+    const second = await credential.untilCurrent()
+    expect(slept).toEqual([3_000])
+    expect(second).toMatch(/^sbsvc_/)
+    expect(second).not.toBe(first)
+    expect(backend.state.calls.length).toBe(2)
   })
 
   it('counts the exchange after the wait in the bound (#7099 review)', async () => {

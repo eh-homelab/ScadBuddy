@@ -1797,7 +1797,7 @@ export class SessionManager {
   async stopTurns({ others }: { graceMs: number; abortWaitMs: number; others?: Promise<void> }): Promise<void> {
     this.drain()
     // No durable re-send starts from here on (#7103); the running sweep ends a turn no workflow took.
-    this.durableTurns?.close()
+    await this.durableTurns?.close()
     // The turns on these warm processes (an AgentSession's, TurnHost.stop), which keep their
     // own grace and wait: their processes are not closed under them.
     await others
