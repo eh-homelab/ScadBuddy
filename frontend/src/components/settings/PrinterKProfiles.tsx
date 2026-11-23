@@ -43,6 +43,19 @@ export function shownK(value: string): string {
   return Number.isFinite(k) ? (Math.trunc(k * 1000) / 1000).toFixed(3) : value
 }
 
+/** K as the printer holds it, for editing: every place, the trailing zeros dropped (`0.034500` is `0.0345`). */
+export function editedK(value: string): string {
+  return /^\d+\.\d*$/.test(value) ? value.replace(/\.?0+$/, '') || '0' : value
+}
+
+/**
+ * The key a note on `profile` goes under when it has none yet: its `setting_id`, else its slot
+ * key, the first keys Bambuddy's page reads (`noteKeys`), so no later note there hides it.
+ */
+function noteKeyFor(profile: KProfile): string {
+  return profile.setting_id || `slot_${profile.slot_id}_${profile.filament_id}_${profile.extruder_id}`
+}
+
 /** The keys Bambuddy's page stores a profile's note under, in the order it reads them. */
 export function noteKeys(profile: KProfile): string[] {
   return [
@@ -284,7 +297,7 @@ function KProfileForm({
   const was = editing.kind === 'edit' ? editing.profile : undefined
   const [name, setName] = useState(was?.name ?? '')
   const [filament, setFilament] = useState(was?.filament_id ?? '')
-  const [k, setK] = useState(was ? shownK(was.k_value) : '0.020')
+  const [k, setK] = useState(was ? editedK(was.k_value) : '0.020')
   const [flow, setFlow] = useState(was ? flowOf(was.nozzle_id) : STANDARD)
   const [extruders, setExtruders] = useState<Extruders>(was ? (String(was.extruder_id) as Extruders) : dual ? 'both' : '0')
   const [text, setText] = useState(note?.note ?? '')
@@ -299,29 +312,51 @@ function KProfileForm({
     const body = (extruder: number): KProfileSet => ({
       slot_id: was?.slot_id ?? 0,
       extruder_id: extruder,
-      // An edit keeps what the printer reported; a new profile is the flow type and the nozzle.
+      // An edit keeps the id the printer reported, as Bambuddy's page does; one it reported
+      // empty, and a new profile, get the flow type and the nozzle (`HS00-0.4`).
       nozzle_id: was?.nozzle_id || `${flow}-${diameter}`,
       nozzle_diameter: diameter,
       filament_id: filament.trim(),
       name: name.trim(),
       k_value: k.trim(),
-      setting_id: was?.setting_id ?? null,
+      setting_id: was?.setting_id || null,
+      ...(was ? { n_coef: was.n_coef, ams_id: was.ams_id, tray_id: was.tray_id } : {}),
     })
+    const noteChanged = text !== (note?.note ?? '')
+    // A profile write runs once and on a single-nozzle printer is a delete and an add, so an
+    // edit that changes only the note sends only the note.
+    const profileChanged = !was || name.trim() !== was.name || Number(k.trim()) !== Number(was.k_value)
+    let result: KProfileWriteResult | undefined
     try {
-      const result =
-        extruders === 'both' && !was
-          ? await api.setKProfilesBatch(row.id, [body(0), body(1)])
-          : await api.setKProfile(row.id, body(was ? was.extruder_id : Number(extruders)))
-      // A note's key is the one it was read under, else the one Bambuddy's page gives a new profile.
-      if (text !== (note?.note ?? '')) {
-        const key = note?.key ?? (was ? (was.setting_id ?? `slot_${was.slot_id}_${was.filament_id}_${was.extruder_id}`) : `name_${name.trim()}_${filament.trim()}`)
-        await api.setKProfileNote(row.id, key, text)
+      if (profileChanged) {
+        result =
+          extruders === 'both' && !was
+            ? await api.setKProfilesBatch(row.id, [body(0), body(1)])
+            : await api.setKProfile(row.id, body(was ? was.extruder_id : Number(extruders)))
       }
-      onDone(said(result, was ? `Saved ${name.trim()}.` : `Added ${name.trim()}.`))
     } catch (cause) {
       setError(problem(cause, 'Could not save the K-profile.'))
       setBusy(false)
+      return
     }
+    const saved = was ? `Saved ${name.trim()}` : `Added ${name.trim()}`
+    if (noteChanged) {
+      // The key the note was read under; else, for a new profile, the one Bambuddy's page
+      // gives it (its slot and setting are not known until the printer answers).
+      const key = note?.key ?? (was ? noteKeyFor(was) : `name_${name.trim()}_${filament.trim()}`)
+      try {
+        await api.setKProfileNote(row.id, key, text)
+      } catch (cause) {
+        // The profile write is done and must not be sent again: close, and say what failed.
+        onDone({ text: `${saved}, but not its note: ${problem(cause, 'the note could not be saved')}.`, warn: true })
+        return
+      }
+    }
+    if (!result) {
+      onDone({ text: noteChanged ? `Saved the note on ${was?.name}.` : 'Nothing changed.', warn: false })
+      return
+    }
+    onDone(said(result, `${saved}.`))
   }
 
   return (

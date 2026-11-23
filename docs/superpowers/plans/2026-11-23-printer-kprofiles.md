@@ -78,8 +78,10 @@ Each is posted on #7154.
 - **R-7154-6 (what SB accepts).** Bodies forbid unknown fields. `k_value` is a decimal from
   0 to under 10 with at most 6 places, sent with 6 places as BB's page does.
   `nozzle_diameter` is one of `0.2`, `0.4`, `0.6`, `0.8`. `nozzle_id` is two capitals, two
-  digits, a dash and a diameter (`HS00-0.4`). `filament_id` is 1-64 of
-  `[A-Za-z0-9_.+-]`. `name` is 1-64 printable characters. `extruder_id` is 0 or 1,
+  digits, a dash and a diameter (`HS00-0.4`), or as the printer reported it: a flow code
+  alone or empty (review of #7173). `filament_id` is 1-64 of `[A-Za-z0-9_.+-]`;
+  `setting_id` is 0-64 of the same, so an empty one from the list goes back. A set takes
+  the row's `n_coef`, `ams_id` and `tray_id`, so an edit sends what the printer reported. `name` is 1-64 printable characters. `extruder_id` is 0 or 1,
   `slot_id` at least 0. A batch is 1-16 rows of one `nozzle_diameter` (BB sends the
   first row's for all). A note is at most 2,000 characters; a note key 1-256 printable
   characters with no `/`.

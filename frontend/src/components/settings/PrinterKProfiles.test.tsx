@@ -128,6 +128,80 @@ describe('PrinterKProfiles (#7154)', () => {
     expect(mockKProfileNotes().PFUS1).toBeUndefined()
   })
 
+  it('edits only the note without writing the profile, so K keeps all six places', async () => {
+    const writes: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method !== 'GET' && new URL(request.url).pathname.includes('/kprofiles')) writes.push(new URL(request.url).pathname)
+    })
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit High Flow_Bambu PETG HF' }))
+    const form = screen.getByRole('form', { name: 'Edit High Flow_Bambu PETG HF' })
+    expect(within(form).getByLabelText('K value')).toHaveValue('0.0345')
+    await user.type(within(form).getByLabelText('Note'), 'wet spool')
+    await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved the note on High Flow_Bambu PETG HF.')
+    expect(writes.every((path) => path.endsWith('/kprofiles/notes'))).toBe(true)
+    expect(mockKProfiles().find((row) => row.slot_id === 2)?.k_value).toBe('0.034500')
+    expect(mockKProfileNotes()['slot_2_GFG02_1']).toBe('wet spool')
+  })
+
+  it('sends a changed K with every place the person typed', async () => {
+    const sent: unknown[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/kprofiles')) sent.push(await request.clone().json())
+    })
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit High Flow_Bambu PETG HF' }))
+    const form = screen.getByRole('form', { name: 'Edit High Flow_Bambu PETG HF' })
+    await user.clear(within(form).getByLabelText('K value'))
+    await user.type(within(form).getByLabelText('K value'), '0.034512')
+    await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
+    await screen.findByRole('status')
+    expect(sent).toEqual([expect.objectContaining({ slot_id: 2, k_value: '0.034512', nozzle_id: 'HH00-0.4' })])
+  })
+
+  it('deletes and edits a profile the printer reported with no nozzle id', async () => {
+    const bare = { ...mockKProfiles()[0]!, nozzle_id: '', setting_id: '' }
+    server.use(
+      http.get('/api/v1/printers/:id/kprofiles', () => HttpResponse.json({ profiles: [bare], nozzle_diameter: '0.4' })),
+    )
+    const bodies: { path: string; body: unknown }[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method !== 'GET') bodies.push({ path: new URL(request.url).pathname, body: await request.clone().json() })
+    })
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
+    const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
+    await user.clear(within(form).getByLabelText('K value'))
+    await user.type(within(form).getByLabelText('K value'), '0.03')
+    await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
+    await screen.findByRole('status')
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Deleted Bambu PLA Basic.'))
+
+    // The edit rebuilds the id as Bambuddy's page does; the delete names the row as reported.
+    const set = bodies.find((one) => one.path.endsWith('/kprofiles'))?.body
+    expect(set).toEqual(expect.objectContaining({ nozzle_id: 'HS00-0.4', setting_id: null }))
+    const removed = bodies.find((one) => one.path.endsWith('/kprofiles/delete'))?.body
+    expect(removed).toEqual(expect.objectContaining({ nozzle_id: '', setting_id: '' }))
+  })
+
+  it('closes the form and says so when the profile saved but its note did not', async () => {
+    server.use(http.put('/api/v1/printers/:id/kprofiles/notes', () => HttpResponse.json({ detail: 'boom' }, { status: 500 })))
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
+    const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
+    await user.clear(within(form).getByLabelText('K value'))
+    await user.type(within(form).getByLabelText('K value'), '0.03')
+    await user.type(within(form).getByLabelText('Note'), ' again')
+    await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved Bambu PLA Basic, but not its note')
+    expect(screen.queryByRole('form', { name: 'Edit Bambu PLA Basic' })).not.toBeInTheDocument()
+  })
+
   it('deletes a profile only once confirmed', async () => {
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }))
@@ -153,6 +227,8 @@ describe('PrinterKProfiles (#7154)', () => {
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
     const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
+    await user.clear(within(form).getByLabelText('K value'))
+    await user.type(within(form).getByLabelText('K value'), '0.03')
     await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
     expect(await within(form).findByRole('alert')).toHaveTextContent("No Bambuddy API key can change a printer's K-profiles")
   })

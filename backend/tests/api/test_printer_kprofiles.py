@@ -133,7 +133,31 @@ def test_set_sends_the_profile_with_six_places(client: TestClient) -> None:
     assert response.status_code == 200, response.text
     assert response.json() == SENT
     sent = json.loads(route.calls.last.request.content)
-    assert sent == {**ROW, "k_value": "0.020000", "setting_id": None}
+    assert sent == {
+        **ROW,
+        "k_value": "0.020000",
+        "setting_id": None,
+        "n_coef": "0.000000",
+        "ams_id": 0,
+        "tray_id": -1,
+    }
+
+
+@respx.mock
+def test_an_edit_keeps_what_the_printer_reported(client: TestClient) -> None:
+    """Review of #7173: a row as the printer reported it (a flow code with no diameter, its
+    own ``n_coef``) goes back as it is."""
+    pid = linked(client, 3)
+    route = respx.post(f"{API}/printers/3/kprofiles/").mock(
+        return_value=httpx.Response(200, json=SENT)
+    )
+    row = {**ROW, "slot_id": 5, "nozzle_id": "HH01", "n_coef": "1.400000", "tray_id": 2}
+
+    response = client.post(base(pid), json=row, headers=press())
+
+    assert response.status_code == 200, response.text
+    sent = json.loads(route.calls.last.request.content)
+    assert (sent["nozzle_id"], sent["n_coef"], sent["tray_id"]) == ("HH01", "1.400000", 2)
 
 
 def test_a_write_needs_an_idempotency_key(client: TestClient) -> None:
@@ -149,13 +173,17 @@ def test_a_write_needs_an_idempotency_key(client: TestClient) -> None:
         {"k_value": "0.0200001"},
         {"k_value": "abc"},
         {"nozzle_diameter": "0.5"},
-        {"nozzle_id": "HH00"},
+        {"nozzle_id": "hh00-0.4"},
+        {"nozzle_id": "HH00-0.4x"},
         {"filament_id": "GF A00"},
         {"name": ""},
         {"name": "a\nb"},
         {"extruder_id": 2},
         {"slot_id": -1},
-        {"n_coef": "0.1"},
+        {"n_coef": "x"},
+        {"tray_id": 16},
+        {"ams_id": 256},
+        {"surprise": 1},
     ],
 )
 def test_a_bad_profile_is_refused_before_bambuddy(
@@ -212,6 +240,30 @@ def test_delete_sends_bambuddys_delete_body(client: TestClient) -> None:
         "nozzle_diameter": "0.4",
         "filament_id": "GFA00",
         "setting_id": "PF1",
+    }
+
+    response = client.post(f"{base(pid)}/delete", json=body, headers=press())
+
+    assert response.status_code == 200, response.text
+    assert json.loads(route.calls.last.request.content) == body
+
+
+@respx.mock
+def test_a_profile_the_printer_reported_with_no_ids_can_be_deleted(client: TestClient) -> None:
+    """Review of #7173: many printers report no ``nozzle_id`` (Bambuddy's
+    ``KProfilesView.tsx``), and a ``setting_id`` may be empty; the delete sends them as the
+    list answered them."""
+    pid = linked(client, 3)
+    route = respx.delete(f"{API}/printers/3/kprofiles/").mock(
+        return_value=httpx.Response(200, json={"success": True, "message": "K-profile deleted"})
+    )
+    body = {
+        "slot_id": 4,
+        "extruder_id": 0,
+        "nozzle_id": "",
+        "nozzle_diameter": "0.4",
+        "filament_id": "GFA00",
+        "setting_id": "",
     }
 
     response = client.post(f"{base(pid)}/delete", json=body, headers=press())

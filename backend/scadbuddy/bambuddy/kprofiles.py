@@ -28,9 +28,14 @@ from scadbuddy.printers.store import PrinterStore, printer_uuid
 #: The nozzles Bambu's printers take (R-7154-6).
 NozzleDiameter = Literal["0.2", "0.4", "0.6", "0.8"]
 #: The flow type and the diameter, as Bambu Studio's generator writes it: ``HS00-0.4``
-#: is standard flow, ``HH00-0.4`` high flow (``KProfilesView.tsx``, v1.3.1).
-NOZZLE_ID = r"^[A-Z]{2}[0-9]{2}-[0-9]\.[0-9]$"
+#: is standard flow, ``HH00-0.4`` high flow (``KProfilesView.tsx``, v1.3.1). A printer may
+#: report a flow code alone (``HH01``) or nothing at all (#1748 there), and a write names a
+#: profile as the list answered it, so both are taken (review of #7173).
+NOZZLE_ID = r"^([A-Z]{2}[0-9]{2}(-[0-9]\.[0-9])?)?$"
 FILAMENT_ID = r"^[A-Za-z0-9_.+-]{1,64}$"
+#: A ``setting_id`` as the list answers it, empty included.
+SETTING_ID = r"^[A-Za-z0-9_.+-]{0,64}$"
+N_COEF = r"^[0-9]{1,2}(\.[0-9]{1,6})?$"
 #: A K value below this, with at most this many places (R-7154-6).
 K_MAX = Decimal(10)
 K_PLACES = 6
@@ -87,7 +92,11 @@ class KProfileSet(_Strict):
     filament_id: str = Field(pattern=FILAMENT_ID)
     name: ProfileName
     k_value: KValue
-    setting_id: str | None = Field(default=None, pattern=FILAMENT_ID)
+    setting_id: str | None = Field(default=None, pattern=SETTING_ID)
+    #: What the printer reported on the row an edit sends back; Bambuddy's defaults else.
+    n_coef: str = Field(default="0.000000", pattern=N_COEF)
+    ams_id: int = Field(default=0, ge=0, le=255)
+    tray_id: int = Field(default=-1, ge=-1, le=15)
 
 
 class KProfileBatch(_Strict):
@@ -111,7 +120,7 @@ class KProfileRemove(_Strict):
     nozzle_id: str = Field(pattern=NOZZLE_ID)
     nozzle_diameter: NozzleDiameter
     filament_id: str = Field(pattern=FILAMENT_ID)
-    setting_id: str | None = Field(default=None, pattern=FILAMENT_ID)
+    setting_id: str | None = Field(default=None, pattern=SETTING_ID)
 
 
 class KProfileNoteSet(_Strict):
