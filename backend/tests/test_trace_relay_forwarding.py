@@ -55,10 +55,24 @@ def make(
     return forwarder, metrics
 
 
-async def until(condition: Callable[[], bool]) -> None:
-    async with asyncio.timeout(5):
-        while not condition():
-            await asyncio.sleep(0.01)
+#: Turns of the loop ``until`` gives the work that was ready once its deadline passed.
+LATE_TURNS = 100
+
+
+async def until(condition: Callable[[], bool], budget: float = 5.0) -> None:
+    try:
+        async with asyncio.timeout(budget):
+            while not condition():
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        # A loop blocked past the deadline (a long GC pause on a loaded xdist worker)
+        # wakes this wait and its timeout in one turn, before a post already under way
+        # can finish (#7014). Let the ready work run, then look again; no more time.
+        for _ in range(LATE_TURNS):
+            if condition():
+                return
+            await asyncio.sleep(0)
+        raise
 
 
 async def test_an_accepted_batch_is_posted_to_the_traces_path() -> None:
@@ -105,6 +119,23 @@ async def test_an_unreachable_collector_counts_failed() -> None:
     async with forwarder.running():
         forwarder.offer(BATCH)
         await until(lambda: outcome(metrics, "failed") == 1)
+
+
+async def test_a_loop_blocked_past_the_deadline_still_sees_the_post_finish() -> None:
+    """#7014: the loop blocks past ``until``'s budget while a post is under way (as in a
+    long GC pause), and the post needs a few more turns after it. The count comes in those
+    turns, not after more time."""
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        time.sleep(0.3)  # blocks the loop past the budget below
+        for _ in range(3):
+            await asyncio.sleep(0)
+        raise httpx.ConnectError("refused", request=request)
+
+    forwarder, metrics = make(collector)
+    async with forwarder.running():
+        forwarder.offer(BATCH)
+        await until(lambda: outcome(metrics, "failed") == 1, budget=0.1)
 
 
 async def test_a_collector_that_never_answers_times_out() -> None:
