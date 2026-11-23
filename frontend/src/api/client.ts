@@ -452,6 +452,13 @@ async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{
   return { status: response.status, body: (await response.json()) as T }
 }
 
+/** A call whose answer is not JSON (a hosted plugin's draft file, #6937), as the `Response`; a non-2xx answer throws `ApiError`. */
+export async function requestRaw(path: string, init?: RequestInit): Promise<Response> {
+  const response = await send(`${API_BASE}${path}`, init)
+  if (!response.ok) throw new ApiError(await readProblem(response))
+  return response
+}
+
 /**
  * For the routes that answer with a text body rather than JSON: the model's
  * source (`GET /models/{slug}/source`, text/plain) and its README

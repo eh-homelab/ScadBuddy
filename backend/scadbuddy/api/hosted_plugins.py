@@ -10,6 +10,7 @@ ScadBuddy as a draft of files, published as immutable numbered versions.
   ``?executable=true`` for a script under ``skills/``) and ``DELETE /{name}/files/{path}``
   one file; ``POST /{name}/files/moves`` a rename; ``GET /{name}/draft-diff`` the draft
   against the latest version, with ``manifest_changed`` when the description differs;
+- ``GET /{name}/versions`` the published versions, newest first (#6937, the editor's list);
 - ``POST /{name}/publish`` the next version: the draft checked (422 ``draft-invalid`` with
   ``problems``), ``plugin.json`` generated, the zip built (`hosted_plugins/bundle.py`) and
   stored, and the version row and ``latest_version`` written in one transaction. A draft
@@ -499,6 +500,15 @@ async def hosted_plugin_draft_diff(name: Name, state: StateDep) -> HostedPluginD
             manifest_changed=_manifest_changed(row, base),
             **diff,
         )
+
+    return await _in_tx(state, run)
+
+
+@router.get("/{name}/versions", summary="List a hosted plugin's published versions, newest first")
+async def list_hosted_plugin_versions(name: Name, state: StateDep) -> list[HostedPluginVersion]:
+    def run(conn: psycopg.Connection[Any]) -> list[HostedPluginVersion]:
+        rows = store.versions(conn, _plugin(conn, name)["id"])
+        return [HostedPluginVersion.model_validate(dict(r)) for r in rows]
 
     return await _in_tx(state, run)
 
