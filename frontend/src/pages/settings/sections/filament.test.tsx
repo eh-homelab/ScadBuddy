@@ -701,10 +701,22 @@ describe('Filament (#6262)', () => {
     const toggle = within(filament).getByRole('switch', { name: /Make a spool from a tag no spool holds/ })
     expect(toggle).toBeChecked()
     expect(within(filament).getByText('Add spools for unknown RFID tags')).toBeInTheDocument()
-    await user.click(toggle)
-    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_auto_add_unknown_rfid).toBe(false))
-    expect(within(filament).getByRole('switch', { name: /Make a spool from a tag no spool holds/ })).not.toBeChecked()
+    // The status line changes only once the save's own read of the RFID status has answered.
+    let statusReads = 0
+    const onAnswer = ({ request }: { request: Request }) => {
+      if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/filament/rfid/status') statusReads += 1
+    }
+    server.events.on('response:mocked', onAnswer)
+    try {
+      await user.click(toggle)
+      const before = statusReads
+      await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
+      await waitFor(() => expect(mockSettings().filament_auto_add_unknown_rfid).toBe(false))
+      expect(within(filament).getByRole('switch', { name: /Make a spool from a tag no spool holds/ })).not.toBeChecked()
+      await waitFor(() => expect(statusReads).toBeGreaterThan(before))
+    } finally {
+      server.events.removeListener('response:mocked', onAnswer)
+    }
     // The override mode stays off; the status says what holds Bambuddy's auto-add.
     expect(within(filament).getByRole('switch', { name: 'RFID override mode' })).not.toBeChecked()
     expect(
