@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { RgbaSwatch } from './RgbaSwatch'
-import type { CandidateDiff, TypeCandidate } from './makeType'
+import { linksBookRow, type CandidateDiff, type TypeCandidate } from './makeType'
 
 const DIFF_WORDS: Record<CandidateDiff, string> = { material: 'material', subtype: 'subtype', effect: 'effect', alpha: 'opacity' }
 
@@ -30,8 +30,9 @@ function detail(candidate: TypeCandidate, names: ReadonlyMap<string, string>, sp
 /**
  * #7159 R-7159-3 — "Make a type" for a price book row whose brand and colour a type already
  * has: link one of those types (the exact match chosen first, else the first) or make a new
- * type anyway. Linking sets only the type's cost per kg (R-7159-4); a type whose identity
- * differs from the row keeps the book row of its own name, which the dialog says first.
+ * type anyway. Linking sets only the type's cost per kg (R-7159-4). A type whose names or
+ * colour the price book does not match to the row (`linksBookRow`) cannot link it: the
+ * dialog says so first, and its button sets that type's cost instead.
  */
 export function LinkTypeDialog({
   row,
@@ -56,6 +57,7 @@ export function LinkTypeDialog({
 }) {
   const [chosen, setChosen] = useState(candidates[0]?.type.id ?? '')
   const picked = candidates.find((one) => one.type.id === chosen) ?? candidates[0]
+  const links = picked ? linksBookRow(row, picked.type, names) : false
   return (
     <Dialog open onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="sm:max-w-lg">
@@ -90,10 +92,10 @@ export function LinkTypeDialog({
             )
           })}
         </RadioGroup>
-        {picked && !picked.exact && (
+        {picked && !links && (
           <p className="text-[13px] text-muted-foreground">
-            Linking sets the cost of {picked.type.code} only. The price book links a type by its own material, subtype, brand and colour, so {picked.type.code} keeps
-            the price book row of its own name, and this row still has no type.
+            The price book links a type by its material, subtype and brand names and its colour. {picked.type.code} does not match this row's, so this row still has
+            no type. Setting its cost gives {row.cost_per_kg} per kg to its own price book row, which the price book adds if it has none.
           </p>
         )}
         <DialogFooter>
@@ -105,7 +107,7 @@ export function LinkTypeDialog({
           </Button>
           {picked && (
             <Button type="button" disabled={busy} onClick={() => onLink(picked)}>
-              Link {picked.type.code}
+              {links ? `Link ${picked.type.code}` : `Set ${picked.type.code}'s cost`}
             </Button>
           )}
         </DialogFooter>

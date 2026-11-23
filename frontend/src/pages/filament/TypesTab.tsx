@@ -88,9 +88,10 @@ export function TypesTab() {
       const [types, spools, materials, subtypes, brands] = await Promise.all([
         listTypes({ includeArchived: true }),
         listSpools({ includeArchived: false }),
-        listCatalog('materials'),
-        listCatalog('subtypes'),
-        listCatalog('brands'),
+        // Archived names too: a type may still name an archived catalog row (#7159 shows them).
+        listCatalog('materials', { includeArchived: true }),
+        listCatalog('subtypes', { includeArchived: true }),
+        listCatalog('brands', { includeArchived: true }),
       ])
       if (mine !== latest.current) return
       const count = new Map<string, number>()

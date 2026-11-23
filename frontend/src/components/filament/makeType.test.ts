@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { listCatalog, type SpoolType } from '../../api/filament'
+import { listCatalog, setCatalogAliases, type SpoolType } from '../../api/filament'
 import type { Filament } from '../../api/types'
 import { E, M, ST, B, T } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
-import { linkTypeToBook, makeTypeFromBook, rankCandidates, typeCandidates } from './makeType'
+import { linksBookRow, linkTypeToBook, makeTypeFromBook, rankCandidates, typeCandidates } from './makeType'
 
 const book = (over: Partial<Filament>): Filament =>
   ({
@@ -97,7 +97,7 @@ describe('rankCandidates (#7159)', () => {
 })
 
 describe('typeCandidates (#7159)', () => {
-  it('resolves the names by key and alias, and adds no catalog row', async () => {
+  it('resolves the names by key and spelling, and adds no catalog row', async () => {
     const before = await Promise.all((['materials', 'subtypes', 'brands', 'effects'] as const).map((kind) => listCatalog(kind, { includeArchived: true })))
     const gold = typeOf({ code: 'EL-PLA-SILK-GOLD', brand_id: B.ELEGOO, subtype_id: ST.SILK, effect_id: E.SILK, rgba: '#D4AF37FF' })
     const plain = typeOf({ code: 'EL-PLA-GOLD', brand_id: B.ELEGOO, rgba: '#d4af37ff' })
@@ -113,16 +113,53 @@ describe('typeCandidates (#7159)', () => {
   })
 })
 
+describe('typeCandidates by a brand alias (#7159 R-7159-1)', () => {
+  it('finds the type of a brand the row names by its alias', async () => {
+    await setCatalogAliases('brands', B.ELEGOO, ['Elegoo 3D'])
+    const gold = typeOf({ code: 'EL-PLA-SILK-GOLD', brand_id: B.ELEGOO, rgba: '#D4AF37FF' })
+    const found = await typeCandidates(book({ brand: 'elegoo3d', colour: '#D4AF37' }), [gold])
+    expect(found.map((one) => one.type.code)).toEqual(['EL-PLA-SILK-GOLD'])
+  })
+})
+
+describe('linksBookRow (#7159): the server links a book row by names, RGB and alpha', () => {
+  const names = new Map([
+    [M.PLA, 'PLA'],
+    [ST.SILK, 'Silk'],
+    [B.ELEGOO, 'Elegoo'],
+  ])
+  const gold = typeOf({ brand_id: B.ELEGOO, subtype_id: ST.SILK, effect_id: E.SILK, rgba: '#D4AF37FF' })
+  const row = { material: 'pla', subtype: 'SILK', brand: 'elegoo', colour: '#d4af37', alpha: 255 }
+
+  it('links a row of the same names in any case, whatever the effect', () => {
+    expect(linksBookRow(row, gold, names)).toBe(true)
+    expect(linksBookRow(row, { ...gold, effect_id: null }, names)).toBe(true)
+  })
+
+  it('does not link a row whose names differ, even by an alias spelling, or whose alpha differs', () => {
+    expect(linksBookRow({ ...row, subtype: null }, gold, names)).toBe(false)
+    expect(linksBookRow({ ...row, material: 'p.l.a' }, gold, names)).toBe(false)
+    expect(linksBookRow({ ...row, alpha: 128 }, gold, names)).toBe(false)
+  })
+
+  it('does not link when a name of the type is unknown', () => {
+    expect(linksBookRow(row, gold, new Map([[M.PLA, 'PLA']]))).toBe(false)
+  })
+})
+
 describe('linkTypeToBook (#7159 R-7159-4)', () => {
   it('sends only the row cost per kg', async () => {
-    let body: unknown = null
+    const bodies: Promise<unknown>[] = []
     server.events.on('request:start', ({ request }) => {
-      if (request.method === 'PATCH') void request.clone().json().then((sent) => (body = sent))
+      if (request.method === 'PATCH') bodies.push(request.clone().json())
     })
-    const linked = await linkTypeToBook(typeOf({ id: T.GOLD, code: 'EL-PLA-SILK-GOLD' }), { cost_per_kg: '22.5000' })
-    server.events.removeAllListeners()
-    expect(body).toEqual({ cost_per_kg: '22.5000' })
-    expect(linked.id).toBe(T.GOLD)
-    expect(linked.filament_id).not.toBeNull()
+    try {
+      const linked = await linkTypeToBook(typeOf({ id: T.GOLD, code: 'EL-PLA-SILK-GOLD' }), { cost_per_kg: '22.5000' })
+      expect(await Promise.all(bodies)).toEqual([{ cost_per_kg: '22.5000' }])
+      expect(linked.id).toBe(T.GOLD)
+      expect(linked.filament_id).not.toBeNull()
+    } finally {
+      server.events.removeAllListeners()
+    }
   })
 })

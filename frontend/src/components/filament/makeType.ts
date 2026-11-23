@@ -140,6 +140,28 @@ export function rankCandidates(row: Pick<Filament, 'colour' | 'alpha'>, ids: Boo
     .sort((a, b) => Number(b.exact) - Number(a.exact) || a.type.code.localeCompare(b.type.code))
 }
 
+/**
+ * #7159 — whether setting `type`'s cost links `row`: the server finds the type's book row
+ * by its material, subtype and brand names (upper-cased, no aliases), its RGB and its
+ * alpha, and not its effect (`types.py` `_link_price_book`, `orders/store.py`
+ * `existing_filament`). `names` holds the catalog names by id; an id it lacks never links.
+ */
+export function linksBookRow(row: Pick<Filament, 'material' | 'subtype' | 'brand' | 'colour' | 'alpha'>, type: SpoolType, names: ReadonlyMap<string, string>): boolean {
+  const name = (id: string | null) => (id === null ? '' : (names.get(id) ?? null))
+  const same = (text: string | null, id: string | null) => {
+    const held = name(id)
+    return held !== null && (text ?? '').toUpperCase() === held.toUpperCase()
+  }
+  const alpha = row.alpha.toString(16).padStart(2, '0').toUpperCase()
+  return (
+    same(row.material, type.material_id) &&
+    same(row.subtype, type.subtype_id) &&
+    same(row.brand, type.brand_id) &&
+    rgbOf(type.rgba) === rgbOf(row.colour) &&
+    type.rgba.slice(7, 9).toUpperCase() === alpha
+  )
+}
+
 /** #7159 — the row's brand, material, subtype and effect, resolved by key and alias; it adds no catalog row. */
 export async function bookRowIds(row: Pick<Filament, 'brand' | 'material' | 'subtype' | 'effect'>): Promise<BookRowIds> {
   const [brand, material, effect] = await Promise.all([
@@ -163,10 +185,9 @@ export async function typeCandidates(row: Filament, types: readonly SpoolType[])
 
 /**
  * #7159 R-7159-4 — link an existing type instead of making one: only its `cost_per_kg` is
- * set, from the row. The server then links the book row of the type's own identity
- * (`types.py` `_link_price_book`: material, subtype and brand names, RGB and alpha). That is
- * this row when the identities agree; when they do not it is another row, which the server
- * adds when the book has none. The answer's `filament_id` says which.
+ * set, from the row. The server then links the book row of the type's own identity, and
+ * gives that row this cost (`linksBookRow` says whether it is this row). When it is another
+ * row, the server adds it if the book has none. The answer's `filament_id` says which.
  */
 export function linkTypeToBook(type: SpoolType, row: Pick<Filament, 'cost_per_kg'>): Promise<SpoolType> {
   return upsertType({ cost_per_kg: row.cost_per_kg }, type.id)

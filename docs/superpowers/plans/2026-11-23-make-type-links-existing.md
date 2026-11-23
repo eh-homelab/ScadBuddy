@@ -36,26 +36,32 @@ the DEEPLEE rows said subtype `Silk` while the types said `Silk Dual`
   nothing adds nothing (the candidate search never writes the catalog).
 - The price book has no bulk "Make a type": each row has its own button. R-7159-6 is met by the
   check running in the one path every click takes.
-- `PATCH /filament/types/{id}` with `cost_per_kg` runs `types.py` `_link_price_book`: it links
-  the book row of the **type's own identity** (material, subtype and brand names, RGB, alpha), and
-  adds one when the book has none. For an exact candidate that is the clicked row. For a
-  candidate whose material or subtype differs (the prod case), it is another row. The dialog says
-  so before the link, and the answer names the row the type linked when it is not the clicked
-  one.
+- `PATCH /filament/types/{id}` with `cost_per_kg` runs `types.py` `_link_price_book`: it finds
+  the book row of the **type's own identity** by `orders/store.py` `existing_filament` (material,
+  subtype and brand names compared upper-cased, with no aliases; RGB; alpha; not the effect),
+  gives it the cost, and adds one when the book has none. When those names and colour are the
+  clicked row's (`makeType.ts` `linksBookRow`), that is the clicked row. Otherwise (the prod
+  case: `PLA+` against `PLA`) it is another row, and the clicked row keeps no type. The dialog
+  says so before the click, its button then reads "Set <code>'s cost" instead of "Link <code>",
+  and the notice after it says the type is linked to its own price book row.
 
 ## Tasks
 
 1. `makeType.ts`: `rankCandidates(row, ids, types)` (pure: brand id and RGB filter, unarchived,
-   exact match first) and `typeCandidates(row, types)` (resolves the row's brand, material,
-   subtype and effect through `resolveCatalog`, adds nothing), and `linkTypeToBook(type, row)`
-   (`PATCH` with `cost_per_kg` only). Unit tests first (`makeType.test.ts`): the SUNLU and
-   DEEPLEE cases, alias brands, alpha ignored, archived and other-brand types left out, ranking,
-   no catalog writes, and the patch body.
+   exact match first, `differs` names the rest), `typeCandidates(row, types)` (resolves the row's
+   brand, material, subtype and effect through `resolveCatalog`, adds nothing), `linksBookRow`
+   (the server's book-row match) and `linkTypeToBook(type, row)` (`PATCH` with `cost_per_kg`
+   only). Unit tests first (`makeType.test.ts`): the SUNLU and DEEPLEE cases, a brand alias,
+   alpha ignored in the filter, archived and other-brand types left out, ranking, no catalog
+   writes, the book-row match, and the patch body.
 2. `components/filament/LinkTypeDialog.tsx`: the choice (radio list of candidates with swatch,
-   code, material and subtype, label weight, spool count; "Link this type", "Make a new type",
-   Cancel). `FilamentsEditor` looks for candidates on "Make a type" and opens it when there is
-   one. Component tests first (`FilamentsEditor.test.tsx`): the dialog shows with the exact match
-   chosen, linking patches only the cost, "Make a new type" makes one, no candidate makes one at
-   once.
-3. `TypesTab.tsx` passes `names` and `spoolsOf` to `FilamentsEditor`.
+   code, material and subtype, label weight, spool count, and what differs; "Link <code>" or
+   "Set <code>'s cost", "Make a new type", Cancel). `FilamentsEditor` looks for candidates on
+   "Make a type" and opens it when there is one. Component tests first, through the Types tab
+   (`pages/filament/TypesTab.test.tsx`): the exact match chosen and linked with only its cost
+   sent, an effect-only difference that still links, the prod case warned before and only its
+   cost set, "Make a new type" makes one, Cancel makes none. A row with no candidate makes one at
+   once (the tab's existing tests).
+3. `TypesTab.tsx` passes `names` (archived catalog rows included) and `spoolsOf` to
+   `FilamentsEditor`.
 4. `pnpm gen:api`, the touched vitest files, `pnpm typecheck`, `pnpm lint`.

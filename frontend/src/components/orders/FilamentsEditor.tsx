@@ -138,9 +138,15 @@ export function FilamentsEditor({
   const filaments = book.data?.filaments ?? []
   const emptyDensities = filaments.some((f) => !f.archived_at && !f.density_g_cm3)
 
+  /** Each action starts with no error and no earlier link notice on screen. */
+  function clearNotices() {
+    setError(null)
+    setLinked(null)
+  }
+
   async function act(action: () => Promise<unknown>) {
     setBusy(true)
-    setError(null)
+    clearNotices()
     try {
       await action()
       setDraft(EMPTY)
@@ -156,7 +162,7 @@ export function FilamentsEditor({
   // Not `act`: a draft being typed stays.
   async function importSpools() {
     setBusy(true)
-    setError(null)
+    clearNotices()
     try {
       setImported((await api.importSpools()).rows)
       book.refresh()
@@ -174,8 +180,7 @@ export function FilamentsEditor({
    */
   async function makeType(filament: Filament) {
     setBusy(true)
-    setError(null)
-    setLinked(null)
+    clearNotices()
     try {
       const candidates = types ? await typeCandidates(filament, types) : []
       if (candidates.length > 0) setChoice({ row: filament, candidates })
@@ -201,7 +206,7 @@ export function FilamentsEditor({
 
   async function chooseNew(filament: Filament) {
     setBusy(true)
-    setError(null)
+    clearNotices()
     setChoice(null)
     try {
       await makeNewType(filament)
@@ -213,7 +218,7 @@ export function FilamentsEditor({
   /** R-7159-4: only the type's cost; the server links the book row of the type's own identity. */
   async function linkType(filament: Filament, candidate: TypeCandidate) {
     setBusy(true)
-    setError(null)
+    clearNotices()
     setChoice(null)
     try {
       const type = await linkTypeToBook(candidate.type, filament)
@@ -233,7 +238,7 @@ export function FilamentsEditor({
 
   async function fillDensities() {
     setBusy(true)
-    setError(null)
+    clearNotices()
     try {
       setFilled((await api.fillDensities()).rows)
       book.refresh()
@@ -345,7 +350,7 @@ export function FilamentsEditor({
               onClick={() => {
                 setEditing(f.id)
                 setDraft(draftOf(f))
-                setError(null)
+                clearNotices()
               }}
             >
               Edit
