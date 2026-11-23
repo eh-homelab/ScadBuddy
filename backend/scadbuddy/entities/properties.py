@@ -32,7 +32,6 @@ MAX_LIST = 50
 MAX_LIST_ITEM = 500
 #: Top-level keywords that would refuse a key; a schema with any of them is refused.
 RESTRICTING = ("required", "propertyNames", "patternProperties")
-EMPTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
 
 PropertyValue = str | float | int | bool | list[str]
 
@@ -77,7 +76,11 @@ def _shape_problem(value: JsonValue) -> str | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int | float):
-        return None if math.isfinite(value) else "a number must be finite"
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:  # an int past a double's range
+            finite = False
+        return None if finite else "a number must be finite and fit a double"
     if isinstance(value, str):
         return None if len(value) <= MAX_STRING else f"at most {MAX_STRING} characters"
     if isinstance(value, list):
@@ -124,6 +127,21 @@ def check_schema(schema: dict[str, Any]) -> None:
     for keyword in RESTRICTING:
         if keyword in schema:
             raise BadPropertySchema(f'"{keyword}" would refuse keys')
+    for key, sub in (schema.get("properties") or {}).items():
+        if sub is False:
+            raise BadPropertySchema(f'"{key}": a false subschema would refuse the key')
+    if _has_ref(schema):
+        raise BadPropertySchema(
+            '"$ref" and "$dynamicRef" are not taken: each known key is checked on its own'
+        )
+
+
+def _has_ref(node: Any) -> bool:
+    if isinstance(node, dict):
+        return any(k in ("$ref", "$dynamicRef") or _has_ref(v) for k, v in node.items())
+    if isinstance(node, list):
+        return any(_has_ref(v) for v in node)
+    return False
 
 
 def _of(row: dict[str, Any]) -> EntityProperty:
@@ -140,7 +158,7 @@ def _schema_in(conn: Conn, kind: str) -> dict[str, Any]:
     row = conn.execute(
         "SELECT schema FROM entity_property_schemas WHERE kind = %s", (kind,)
     ).fetchone()
-    return dict(EMPTY_SCHEMA) if row is None else dict(row["schema"])
+    return {"type": "object", "properties": {}} if row is None else dict(row["schema"])
 
 
 _LIST = (
@@ -168,12 +186,19 @@ class EntityPropertyStore:
     ) -> builtins.list[EntityProperty]:
         """The whole patch or nothing, in one transaction: `EntityNotFound` when the owner's
         row is not there, `BadPropertyValue` for a bad key or value, or (key ``*``) for more
-        than `MAX_KEYS` keys after it. The entity's properties after it, by key."""
+        than `MAX_KEYS` keys after it and more than before it (a printer merge may leave an
+        entity past the limit; it can still remove and change keys). The entity's
+        properties after it, by key."""
         with self.pool.connection() as conn, conn.transaction():
             entity_id = self.entities.ensure(conn, ref)
             # One writer at a time per entity, so the key count holds.
             conn.execute("SELECT 1 FROM entities WHERE id = %s FOR UPDATE", (entity_id,))
             _checked(patch, _schema_in(conn, ref.kind))
+            before = conn.execute(
+                "SELECT count(*) AS n FROM entity_properties WHERE entity_id = %s",
+                (entity_id,),
+            ).fetchone()
+            assert before is not None
             actor = Jsonb(by.model_dump(mode="json"))
             for key, value in patch.set.items():
                 if value is None:
@@ -190,7 +215,7 @@ class EntityPropertyStore:
                     (entity_id, key, Jsonb(value), actor),
                 )
             rows = conn.execute(_LIST, (entity_id,)).fetchall()
-            if len(rows) > MAX_KEYS:
+            if len(rows) > max(MAX_KEYS, before["n"]):
                 raise BadPropertyValue("*", f"an entity has at most {MAX_KEYS} keys")
         return [_of(r) for r in rows]
 

@@ -81,8 +81,26 @@ def test_a_rename_is_one_patch_and_all_or_nothing(
 
 @pytest.mark.parametrize(
     "value",
-    [{"a": 1}, ["1", 2], [["x"]], float("nan"), "x" * 2001, ["y"] * 51, ["z" * 501]],
-    ids=["object", "mixed_list", "nested_list", "nan", "long_string", "long_list", "long_item"],
+    [
+        {"a": 1},
+        ["1", 2],
+        [["x"]],
+        float("nan"),
+        10**400,
+        "x" * 2001,
+        ["y"] * 51,
+        ["z" * 501],
+    ],
+    ids=[
+        "object",
+        "mixed_list",
+        "nested_list",
+        "nan",
+        "past_a_double",
+        "long_string",
+        "long_list",
+        "long_item",
+    ],
 )
 def test_values_outside_the_four_shapes_are_refused(
     pg_pool: PgPool, props: EntityPropertyStore, value: JsonValue
@@ -142,8 +160,28 @@ def test_unknown_keys_pass_a_schema_and_known_keys_are_typed(
         {"type": "object", "patternProperties": {"^x": {}}},
         {"type": "array"},
         {"type": "object", "properties": {"a": {"type": "nope"}}},
+        {"type": "object", "properties": {"mpn": False}},
+        {
+            "type": "object",
+            "$defs": {"s": {"type": "string"}},
+            "properties": {"mpn": {"$ref": "#/$defs/s"}},
+        },
+        {
+            "type": "object",
+            "properties": {"gtin": {"type": "array", "items": {"$dynamicRef": "#x"}}},
+        },
     ],
-    ids=["additional", "required", "names", "patterns", "array", "invalid"],
+    ids=[
+        "additional",
+        "required",
+        "names",
+        "patterns",
+        "array",
+        "invalid",
+        "false_subschema",
+        "ref",
+        "dynamic_ref",
+    ],
 )
 def test_set_schema_refuses_a_restricting_schema(
     props: EntityPropertyStore, schema: dict[str, Any]
@@ -175,7 +213,36 @@ def test_set_schema_stores_a_schema_that_types_a_new_key(
 
 
 def test_a_kind_with_no_schema_row_has_an_empty_one(props: EntityPropertyStore) -> None:
+    first = props.schema("printer")
+    assert first == {"type": "object", "properties": {}}
+    first["properties"]["x"] = {}
     assert props.schema("printer") == {"type": "object", "properties": {}}
+
+
+def test_an_entity_past_the_limit_may_shrink_but_not_grow(
+    pg_pool: PgPool, props: EntityPropertyStore
+) -> None:
+    """A printer merge keeps every key, so an entity can hold more than 200."""
+    kind = _spool_type(pg_pool)
+    props.apply(kind, _patch({"k0": 0}), BY)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO entity_properties (entity_id, key, value, updated_by)"
+            " SELECT e.id, 'k' || n, to_jsonb(n), '{\"kind\": \"browser\"}'"
+            " FROM entities e, generate_series(1, 200) n"
+            " WHERE e.kind = 'spool_type' AND e.ref = %s",
+            (kind.ref,),
+        )
+    assert len(props.list(kind)) == 201
+
+    with pytest.raises(BadPropertyValue) as caught:
+        props.apply(kind, _patch({"extra": 1}), BY)
+    assert caught.value.key == "*"
+    assert len(props.list(kind)) == 201
+
+    after = props.apply(kind, _patch({"k0": None, "k1": "changed"}), BY)
+    assert len(after) == 200
+    assert _values(props, kind)["k1"] == "changed"
 
 
 def test_of_kind_and_keys_in_use(pg_pool: PgPool, props: EntityPropertyStore) -> None:
