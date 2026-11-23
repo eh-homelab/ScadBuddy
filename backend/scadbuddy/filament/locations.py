@@ -614,10 +614,11 @@ def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
     """Make printer ``merged``'s AMS tray places printer ``into``'s, on ``conn`` and in
     the printer merge's transaction (`printers/store.py` `_merge`). A tray only
     ``merged`` has moves as it is, and so does its printer's own place when ``into`` has none
-    (two of them clash, as two trays do), which then takes ``into``'s printer name. Where both printers have an unarchived place for one
-    tray, ``into``'s stands: each spool in ``merged``'s moves there with a ``moved``
-    event, its places move under it, and ``merged``'s is archived (not deleted: the
-    ledger's ``moved`` events name it). Archived places move as they are.
+    (two of them clash, as two trays do), which then takes ``into``'s printer name. Where
+    both printers have an unarchived place for one tray, ``into``'s stands: each spool in
+    ``merged``'s moves there with a ``moved`` event, its places move under it, and
+    ``merged``'s is archived (not deleted: the ledger's ``moved`` events name it). Archived
+    places move as they are.
 
     Locks the spools before the places, as `LocationStore.move` does."""
     gone = conn.execute(
