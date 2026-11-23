@@ -7,11 +7,13 @@ import { assertEndpointAllowed, PluginError } from '../registry.js'
 import { ARCHIVE_LIMITS, type Downloader, egressDownload, MARKETPLACE_LIMITS } from './download.js'
 import { type Checkout, extractSubdir, FetchError, type RepoFetcher } from './git.js'
 import { hashTree, PackageContentError, type TreeHash } from './hash.js'
+import type { HostedPlugins } from './hosted.js'
 import { declaredHeaderSecrets } from './mcp.js'
 import type { PackageMirror } from './mirror.js'
 import { fetchNpmTarball } from './npm.js'
 import {
   DEFAULT_REF,
+  hostedUrl,
   normaliseGitUrl,
   normaliseRepoPath,
   type PackageSource,
@@ -47,6 +49,14 @@ import { capProblems, type Endpoint, itemsOfPlugin, LISTING_PACKAGES_BUDGET, lis
 // unpacks the MIRRORED copy, never the upstream URL: an approved pin still loads after
 // upstream deleted or changed the file, and a re-pin fetches upstream again and shows
 // the diff.
+//
+// VERSION PINS (#6934, spec 2026-11-21 §6.3 step 5 and §6.5): a `hosted` source is a
+// ScadBuddy hosted plugin, always its latest published version, read with its zip over the
+// API's CRUD area `hosted-plugins` (hosted.ts), never over the network. The zip must hash to
+// the version's `zip_sha256` and its files to the version's `content_hash`, and it is vetted
+// as every package is; the pin is (version, content hash). Its cached directory is
+// `<cacheRoot>/<name>/v<version>-<hash prefix>`, and a cache miss reads that version's zip
+// again: a version is never changed.
 //
 // EVERY FETCH goes through the egress check first (src/http/egress.ts, via
 // `assertEndpointAllowed`: https, or http to loopback; no link-local or cloud
@@ -87,6 +97,8 @@ export type InstallerOptions = {
   mirror?: () => PackageMirror | undefined
   /** The HTTP download (download.ts `egressDownload`, which runs the egress check at every hop). */
   download?: Downloader
+  /** The hosted plugins' versions (the API's area `hosted-plugins`); without them a hosted install or load is a 503. */
+  hosted?: () => HostedPlugins | undefined
 }
 
 type GitTarget = { kind: 'git'; url: string; ref: string; path: string; sameRepo: boolean }
@@ -214,6 +226,7 @@ export class PackageInstaller {
   private readonly fetcher: RepoFetcher
   private readonly resolve: Resolver
   private readonly mirrorOf: () => PackageMirror | undefined
+  private readonly hostedOf: () => HostedPlugins | undefined
   private readonly download: Downloader
   /** Per package, the tail of its queue: materialising and pruning run one at a time. */
   private readonly queues = new Map<string, Promise<unknown>>()
@@ -231,6 +244,7 @@ export class PackageInstaller {
     this.cacheRoot = path.resolve(options.cacheRoot)
     this.resolve = options.resolve ?? systemResolver
     this.mirrorOf = options.mirror ?? (() => undefined)
+    this.hostedOf = options.hosted ?? (() => undefined)
     this.download = options.download ?? egressDownload
   }
 
@@ -243,6 +257,14 @@ export class PackageInstaller {
       )
     }
     return mirror
+  }
+
+  private hosted(): HostedPlugins {
+    const hosted = this.hostedOf()
+    if (!hosted) {
+      throw new PluginError('a hosted plugin needs the API to serve its versions (CRUD area hosted-plugins), and this API does not serve it yet', 503)
+    }
+    return hosted
   }
 
   private async tempDir(): Promise<string> {
@@ -402,6 +424,47 @@ export class PackageInstaller {
     }
   }
 
+  /**
+   * A hosted plugin's latest version: its zip read over CRUD and checked against the
+   * version's `zip_sha256`, unpacked, vetted, and its files checked against the version's
+   * `content_hash` (the API checks the pin against that version again when it stores it).
+   */
+  private async prepareHosted(source: Extract<PackageSource, { kind: 'hosted' }>, signal?: AbortSignal): Promise<PreparedPackage> {
+    const hosted = this.hosted()
+    const latest = await hosted.latest(source.name)
+    if (latest === undefined) throw new PluginError(`no hosted plugin named "${source.name}"`, 404)
+    if (latest === null) throw new PluginError(`the hosted plugin "${source.name}" has no published version yet; publish it first`, 409)
+    signal?.throwIfAborted()
+    const bytes = await hosted.zip(source.name, latest.version, latest.zip_sha256)
+    const tmp = await this.tempDir()
+    try {
+      const { root, dir } = await this.unpacked(bytes, path.join(tmp, 'unpacked'))
+      const pkg = path.join(tmp, 'pkg')
+      await rename(dir, pkg)
+      const { tree, review } = await this.vetTree(await this.hashed(pkg), pkg, source.name)
+      if (tree.hash !== latest.content_hash) {
+        throw new PluginError(`the files of ${source.name} version ${latest.version} hash to ${tree.hash}, not its ${latest.content_hash}`, 502)
+      }
+      if (review.name !== source.name) {
+        throw new PackageRefusedError([`the hosted plugin's manifest names "${review.name}", not "${source.name}"`])
+      }
+      const prepared: PreparedPackage = {
+        source,
+        fetchUrl: hostedUrl(source.name),
+        fetchPath: root,
+        commit: '',
+        version: latest.version,
+        contentHash: tree.hash,
+        files: tree.files,
+        review,
+      }
+      await this.place(pinOfPrepared(prepared), pkg).catch(() => undefined)
+      return prepared
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  }
+
   /** An entry of a bare `marketplace.json` URL: the file fetched (5 MiB, 10 s), its entry's plugin prepared. */
   private async prepareBareMarketplace(source: Extract<PackageSource, { kind: 'marketplace-url' }>, signal?: AbortSignal) {
     const { bytes } = await this.download(source.url, {
@@ -463,6 +526,7 @@ export class PackageInstaller {
    * AgentOperation run that is cancelled).
    */
   async prepare(source: PackageSource, signal?: AbortSignal): Promise<PreparedPackage> {
+    if (source.kind === 'hosted') return this.prepareHosted(source, signal)
     if (source.kind === 'marketplace-url') return this.prepareBareMarketplace(source, signal)
     if (source.kind === 'archive' || source.kind === 'npm') return this.prepareBytes(source, source, bytesFallbackName(source), signal)
     await this.egress(source.url, 'source url')
@@ -516,9 +580,9 @@ export class PackageInstaller {
     }
   }
 
-  /** `<cacheRoot>/<name>/<commit>-<first 16 of the hash>`; for a bytes pin `b<first 40 of its sha256>-…`. */
+  /** `<cacheRoot>/<name>/<commit>-<first 16 of the hash>`; for a bytes pin `b<first 40 of its sha256>-…`, a version pin `v<version>-…`. */
   cacheDir(pin: PackagePin): string {
-    const id = pin.bytesSha256 !== undefined ? `b${pin.bytesSha256.slice(0, 40)}` : pin.commit
+    const id = pin.version !== undefined ? `v${pin.version}` : pin.bytesSha256 !== undefined ? `b${pin.bytesSha256.slice(0, 40)}` : pin.commit
     return path.join(this.cacheRoot, pin.name, `${id}-${pin.contentHash.slice('sha256:'.length, 'sha256:'.length + 16)}`)
   }
 
@@ -662,9 +726,16 @@ export class PackageInstaller {
    */
   private async verifiedCopy(pin: PackagePin, options: { vet?: boolean } = {}): Promise<string> {
     const dir = this.cacheDir(pin)
+    if (pin.version !== undefined && !(await this.cacheMatches(dir, pin))) {
+      await rm(dir, { recursive: true, force: true })
+      await this.fromBytes(pin, await this.hosted().zip(pin.name, pin.version), `version ${pin.version}`, options)
+      if (!(await this.cacheMatches(dir, pin))) {
+        throw new PluginError(`the cached copy of ${pin.name} does not match its pin after unpacking`, 502)
+      }
+    }
     if (pin.bytesSha256 !== undefined && !(await this.cacheMatches(dir, pin))) {
       await rm(dir, { recursive: true, force: true })
-      await this.fromMirror(pin, pin.bytesSha256, options)
+      await this.fromBytes(pin, await this.mirror().get(pin.name, pin.bytesSha256), `the mirrored ${pin.bytesSha256}`, options)
       if (!(await this.cacheMatches(dir, pin))) {
         throw new PluginError(`the cached copy of ${pin.name} does not match its pin after unpacking`, 502)
       }
@@ -700,9 +771,11 @@ export class PackageInstaller {
     return dir
   }
 
-  /** A bytes pin's mirrored file unpacked, its `fetchPath` hashed (and vetted) against the pin, and placed in the cache. */
-  private async fromMirror(pin: PackagePin, sha: string, options: { vet?: boolean }): Promise<void> {
-    const bytes = await this.mirror().get(pin.name, sha)
+  /**
+   * A pin's file (a bytes pin's mirrored copy, a version pin's zip) unpacked, its `fetchPath`
+   * hashed (and vetted) against the pin, and placed in the cache. `what` names the file.
+   */
+  private async fromBytes(pin: PackagePin, bytes: Buffer, what: string, options: { vet?: boolean }): Promise<void> {
     const tmp = await this.tempDir()
     try {
       const unpacked = path.join(tmp, 'unpacked')
@@ -715,12 +788,12 @@ export class PackageInstaller {
       }
       const pkg = path.join(tmp, 'pkg')
       await rename(path.join(unpacked, sub), pkg).catch(() => {
-        throw new PluginError(`the mirrored file of ${pin.name} has no ${pin.fetchPath || 'root'} directory`, 502)
+        throw new PluginError(`${what} of ${pin.name} has no ${pin.fetchPath || 'root'} directory`, 502)
       })
       const tree = await this.hashed(pkg)
       if (options.vet !== false) await this.vetTree(tree, pkg, pin.name)
       if (tree.hash !== pin.contentHash) {
-        throw new PluginError(`the files of the mirrored ${sha} hash to ${tree.hash}, not the pinned ${pin.contentHash}`, 502)
+        throw new PluginError(`the files of ${what} hash to ${tree.hash}, not the pinned ${pin.contentHash}`, 502)
       }
       await this.place(pin, pkg)
     } finally {
@@ -778,6 +851,7 @@ function pinOfPrepared(p: PreparedPackage): PackagePin {
     fetchPath: p.fetchPath,
     commit: p.commit,
     ...(p.bytesSha256 !== undefined ? { bytesSha256: p.bytesSha256 } : {}),
+    ...(p.version !== undefined ? { version: p.version } : {}),
     contentHash: p.contentHash,
   }
 }

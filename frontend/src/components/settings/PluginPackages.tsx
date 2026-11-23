@@ -268,7 +268,14 @@ function ApproveDialog({
   const pin =
     pending && pkg.pending
       ? pkg.pending
-      : { pin_kind: pkg.pin_kind, commit_sha: pkg.commit_sha, bytes_sha256: pkg.bytes_sha256, content_hash: pkg.content_hash, review: pkg.review }
+      : {
+          pin_kind: pkg.pin_kind,
+          commit_sha: pkg.commit_sha,
+          bytes_sha256: pkg.bytes_sha256,
+          version: pkg.version,
+          content_hash: pkg.content_hash,
+          review: pkg.review,
+        }
   const refused = pin.review.refused ?? []
   const named = pinLabel(pin)
 
@@ -371,8 +378,9 @@ function ApproveDialog({
   )
 }
 
-/** How a pin is named: a commit, or the sha256 of an archive or npm package's file (#6935). */
-function pinLabel(pin: Pick<PluginPackage, 'pin_kind' | 'commit_sha' | 'bytes_sha256'>): { label: string; thing: string; value: string } {
+/** How a pin is named: a commit, the sha256 of an archive or npm package's file (#6935), or a hosted plugin's version (#6934). */
+function pinLabel(pin: Pick<PluginPackage, 'pin_kind' | 'commit_sha' | 'bytes_sha256' | 'version'>): { label: string; thing: string; value: string } {
+  if (pin.pin_kind === 'version') return { label: 'Version', thing: 'version', value: String(pin.version ?? '') }
   return pin.pin_kind === 'bytes'
     ? { label: 'File SHA-256', thing: 'file', value: pin.bytes_sha256 ?? '' }
     : { label: 'Commit', thing: 'commit', value: pin.commit_sha ?? '' }
@@ -392,7 +400,7 @@ function repinFixed(pkg: PluginPackage): boolean {
   return pkg.source.kind === 'archive' && pkg.source.ref.startsWith('sha256:')
 }
 
-type InstallKind = PackageInstall['kind']
+type InstallKind = Exclude<PackageInstall['kind'], 'hosted'>
 
 const INSTALL_KINDS: { kind: InstallKind; label: string }[] = [
   { kind: 'git', label: 'Git repository' },
@@ -753,6 +761,7 @@ function PackageCard({
             )}
             {pkg.approved && pkg.allow_refused && <Badge tone="warn">Unvetted code allowed</Badge>}
             {pkg.pending && <Badge tone="warn">Re-pin awaiting approval</Badge>}
+            {pkg.not_offered !== null && <Badge tone="warn">Version {pkg.not_offered} not offered</Badge>}
             {shadowed && <Badge tone="warn">Not loaded</Badge>}
           </div>
           {shadowed && (
@@ -763,14 +772,18 @@ function PackageCard({
           {pkg.review.description && <p className="mt-1 text-xs text-muted-foreground">{pkg.review.description}</p>}
           <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
             <dt className="text-muted-foreground">Source</dt>
-            <dd className="break-all">
-              <ExternalLink href={fetched.url}>{fetched.url}</ExternalLink>
-              {fetched.kind === 'git' && fetched.path && <span className="sb-num"> · {fetched.path}</span>}
-              {(fetched.kind === 'marketplace' || fetched.kind === 'marketplace-url') && (
-                <span className="sb-num"> · entry {fetched.entry}</span>
-              )}
-              {fetched.ref && !fetched.ref.startsWith('sha256:') && <span className="sb-num text-muted-foreground"> @ {fetched.ref}</span>}
-            </dd>
+            {fetched.kind === 'hosted' ? (
+              <dd>Hosted plugin {fetched.name}</dd>
+            ) : (
+              <dd className="break-all">
+                <ExternalLink href={fetched.url}>{fetched.url}</ExternalLink>
+                {fetched.kind === 'git' && fetched.path && <span className="sb-num"> · {fetched.path}</span>}
+                {(fetched.kind === 'marketplace' || fetched.kind === 'marketplace-url') && (
+                  <span className="sb-num"> · entry {fetched.entry}</span>
+                )}
+                {fetched.ref && !fetched.ref.startsWith('sha256:') && <span className="sb-num text-muted-foreground"> @ {fetched.ref}</span>}
+              </dd>
+            )}
             <dt className="text-muted-foreground">{pinLabel(pkg).label}</dt>
             <dd className="sb-num break-all">{pinLabel(pkg).value}</dd>
             <dt className="text-muted-foreground">Content hash</dt>
@@ -800,7 +813,8 @@ function PackageCard({
                     {' '}to <span className="sb-num">{pkg.pending.ref}</span>
                   </>
                 )}{' '}
-                at <span className="sb-num break-all">{pinLabel(pkg.pending).value}</span>. The current pin keeps loading
+                at {pkg.pending.pin_kind === 'version' && 'version '}
+                <span className="sb-num break-all">{pinLabel(pkg.pending).value}</span>. The current pin keeps loading
                 until you approve this one.
               </p>
               <div className="mt-2">
@@ -824,6 +838,30 @@ function PackageCard({
                 </Button>
               </div>
             </div>
+          ) : fetched.kind === 'hosted' ? (
+            pkg.not_offered !== null ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2" aria-label="Version not offered">
+                <p className="grow text-xs">
+                  Version <span className="sb-num">{pkg.not_offered}</span> is published. Offer it to see what changed; version{' '}
+                  <span className="sb-num">{pkg.version}</span> keeps loading until you approve the new one.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    void act('offer', async () => onChange(await aiPlugins.installPackage({ kind: 'hosted', name: fetched.name })))
+                  }
+                  disabled={busy !== null}
+                  aria-busy={busy === 'offer'}
+                  {...USER_ONLY}
+                >
+                  {busy === 'offer' && <Spinner />}
+                  Offer version {pkg.not_offered}
+                </Button>
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-muted-foreground">Publish a new version in Hosted plugins to re-pin it.</p>
+            )
           ) : repinFixed(pkg) ? (
             <p className="mt-3 text-xs text-muted-foreground">
               Installed with its file&rsquo;s SHA-256, so it always loads that file. To use a new file, remove this

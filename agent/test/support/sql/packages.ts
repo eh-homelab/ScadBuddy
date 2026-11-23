@@ -15,7 +15,7 @@ import {
   withRefused,
 } from '../../../src/plugins/packages/store.js'
 import type { FileList } from '../../../src/plugins/packages/hash.js'
-import type { PackageSource } from '../../../src/plugins/packages/source.js'
+import { type PackageSource, sourceColumns } from '../../../src/plugins/packages/source.js'
 import type { PackageReview } from '../../../src/plugins/packages/vet.js'
 import { PluginError } from '../../../src/plugins/registry.js'
 import { notifyWarmEvict } from './publisher.js'
@@ -139,7 +139,7 @@ export class PackageStore implements PackageRepo {
       const rows = await tx<PackageRow[]>`
       INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref, marketplace_entry, fetch_url,
                                       fetch_path, pin_kind, commit_sha, bytes_sha256, content_hash, files, review)
-      VALUES (${p.review.name}, ${p.source.kind}, ${p.source.url}, ${p.source.ref},
+      VALUES (${p.review.name}, ${p.source.kind}, ${sourceColumns(p.source).url}, ${sourceColumns(p.source).ref},
               ${entryOf(p.source)}, ${p.fetchUrl}, ${p.fetchPath}, ${preparedKind(p)},
               ${p.bytesSha256 === undefined ? p.commit : null}, ${p.bytesSha256 ?? null},
               ${p.contentHash}, ${tx.json(p.files)}, ${tx.json(p.review)})
@@ -175,7 +175,7 @@ export class PackageStore implements PackageRepo {
       }
       const [row] = await tx<PackageRow[]>`
         UPDATE ai_plugin_packages SET
-          pending_ref = ${p.source.ref}, pending_fetch_url = ${p.fetchUrl}, pending_fetch_path = ${p.fetchPath},
+          pending_ref = ${sourceColumns(p.source).ref}, pending_fetch_url = ${p.fetchUrl}, pending_fetch_path = ${p.fetchPath},
           pending_pin_kind = ${preparedKind(p)}, pending_commit_sha = ${p.bytesSha256 === undefined ? p.commit : null},
           pending_bytes_sha256 = ${p.bytesSha256 ?? null}, pending_version = NULL, pending_content_hash = ${p.contentHash},
           pending_files = ${tx.json(p.files)}, pending_review = ${tx.json(p.review)}, updated_at = now()
