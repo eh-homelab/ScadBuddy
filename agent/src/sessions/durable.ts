@@ -237,6 +237,8 @@ export class DurableTurns {
   readonly #resendAfterMs: number
   /** The re-sends not yet due (#resendLater), which `close` clears. */
   readonly #resends = new Set<NodeJS.Timeout>()
+  /** Set by `close`: a send still in flight then arms no re-send. */
+  #closed = false
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
@@ -509,6 +511,7 @@ export class DurableTurns {
    * as before when the workflow still holds none past RUNNING_GRACE_MS. Payload-free warnings.
    */
   #resendLater(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[]): void {
+    if (this.#closed) return
     const timer = setTimeout(() => {
       this.#resends.delete(timer)
       this.#resend(session, turn, sent).catch(() => {
@@ -520,11 +523,12 @@ export class DurableTurns {
   }
 
   /**
-   * Clears the re-sends not yet due (#7103): the process stops, so its Temporal client closes. A
+   * Clears the re-sends not yet due, and arms none after (a send still in flight) (#7103): the process stops, so its Temporal client closes. A
    * re-send that ran after that could not reach Temporal anyway, and its call's retry would throw
    * outside any promise. The running sweep ends a turn that no workflow took, as for any lost send.
    */
   close(): void {
+    this.#closed = true
     for (const timer of this.#resends) clearTimeout(timer)
     this.#resends.clear()
   }
