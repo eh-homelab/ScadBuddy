@@ -27,8 +27,10 @@ describe('the service credential on a call', () => {
 
   it('follows no redirect on a backend call, and still follows one elsewhere (#7180)', async () => {
     const seen: string[] = []
+    const authorizations: (string | undefined)[] = []
     const server = createServer((req, res) => {
       seen.push(`${req.method} ${req.url}`)
+      authorizations.push(req.headers.authorization)
       // As FastAPI answers a path with a trailing slash, and as S3 can answer for its region.
       if (req.url?.endsWith('/')) res.writeHead(307, { location: req.url.slice(0, -1) }).end()
       else if (req.url === '/bucket/old') res.writeHead(307, { location: '/bucket/new' }).end()
@@ -46,6 +48,8 @@ describe('the service credential on a call', () => {
       const bare = withServiceCredential(globalThis.fetch, none, `http://127.0.0.1:${port}/api`)
       await expect(bare(`http://127.0.0.1:${port}/api/v1/internal/crud/agent/y/`, { method: 'DELETE' })).rejects.toThrow()
       expect(seen.slice(3)).toEqual(['DELETE /api/v1/internal/crud/agent/y/'])
+      expect(authorizations[0]).toBe(`Bearer ${TOKEN}`)
+      expect(authorizations[3]).toBeUndefined()
     } finally {
       await new Promise((resolve) => server.close(resolve))
     }
