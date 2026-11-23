@@ -1769,6 +1769,19 @@ wheels = [
 ]
 
 [[package]]
+name = "reportlab"
+version = "5.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "charset-normalizer" },
+    { name = "pillow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/89/22/c18474be40b9bbb52fdb7051177d4d25f1ea59fada17eb181026411e93b1/reportlab-5.1.0.tar.gz", hash = "sha256:6878200464527e87672d19e9f7cfc6bb890e3a6931e74ac6a1a8d1754aa55671", size = 4109612, upload-time = "2026-10-22T07:26:43.307Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/3c/bf68d44f160b44685fc714f746a954c71d0091b3dc4fd3c8670154b44841/reportlab-5.1.0-py3-none-any.whl", hash = "sha256:59fdbaec5efe437095ad1d7292ec9a271c8ca2d3ec75e889c6e61400929b90df", size = 2018647, upload-time = "2026-10-22T07:26:40.754Z" },
+]
+
+[[package]]
 name = "requests"
 version = "2.34.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1923,6 +1936,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "referencing" },
     { name = "regex" },
+    { name = "reportlab" },
     { name = "temporal-agent-harness", extra = ["code-mode"] },
     { name = "temporalio", extra = ["opentelemetry"] },
     { name = "trimesh" },
@@ -1947,6 +1961,7 @@ dev = [
     { name = "types-jsonschema" },
     { name = "types-lxml" },
     { name = "types-regex" },
+    { name = "types-reportlab" },
 ]
 profile-fetch = [
     { name = "playwright" },
@@ -1979,6 +1994,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "referencing", specifier = ">=0.28" },
     { name = "regex", specifier = ">=2024.11.6" },
+    { name = "reportlab", specifier = ">=5.1,<6" },
     { name = "temporal-agent-harness", extras = ["code-mode"], git = "https://github.com/temporal-community/temporal-agent-harness?rev=a1cd66f4ffa0aead976ccf86d0ff84a50deb5383" },
     { name = "temporalio", extras = ["opentelemetry"], specifier = ">=1.33.0,<1.37" },
     { name = "trimesh", specifier = ">=4.5" },
@@ -2003,6 +2019,7 @@ dev = [
     { name = "types-jsonschema", specifier = ">=4.26.0.20261006" },
     { name = "types-lxml", specifier = ">=2026.2.16" },
     { name = "types-regex", specifier = ">=2026.9.29.20261005" },
+    { name = "types-reportlab", specifier = ">=5.1,<6" },
 ]
 profile-fetch = [{ name = "playwright", specifier = "==1.64.1" }]
 
@@ -2184,6 +2201,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/37/d4/e3586873a6b36be46d231593021edb769ec3341c6a0e234b8ddb02120e56/types_regex-2026.11.19.20261119.tar.gz", hash = "sha256:e26dacbf9f9ca46281ecccc85ab42947cd6c7900d9092435972e80b37c8511d3", size = 14466, upload-time = "2026-11-19T09:36:09.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c9/3d/4319315751ce54a6ef58e95b3135e6d94b89799e9d5bc0851f70e315d670/types_regex-2026.11.19.20261119-py3-none-any.whl", hash = "sha256:bf0ed475d94ed594bfc228378c9ca6b17437f90a03438dc6ddb96652dbb19fe1", size = 11221, upload-time = "2026-11-19T09:36:08.913Z" },
+]
+
+[[package]]
+name = "types-reportlab"
+version = "5.1.0.20261122"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/06/0f/84f4d613743dcf5c896b0426d9e712e5542f5d5776b84c63add3cfcd9aab/types_reportlab-5.1.0.20261122.tar.gz", hash = "sha256:78237a2ac7d3458315f61cce242f74eae3d8fb8afc6204aef2dac0b2561a29aa", size = 73916, upload-time = "2026-11-22T08:58:42.556Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7d/a3/cd2692e34e3b85134bd3f313d7b018609dd24ba6b166d9faba584db8debc/types_reportlab-5.1.0.20261122-py3-none-any.whl", hash = "sha256:648577b042c7008df45763bcc2c74d2e74ed83c41c8e1dcfb5da5ed11015b484", size = 113997, upload-time = "2026-11-22T08:58:41.558Z" },
 ]
 
 [[package]]

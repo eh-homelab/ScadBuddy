@@ -1062,8 +1062,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   holder; not "beside" places; it first makes each unit, slot and external holder the printer's
   latest `printer_reports` row lists, and answers `no_report` for a printer with none). Routes in `api/filament.py`: `GET /filament/locations/{id}`
   (`LocationDetail`) and `POST /filament/printer-labels` (a POST because it may make places; 422
-  for an unknown printer; in `NOT_NUDGED`). Agent tools: `filament_code_resolve`, `filament_location_get`,
-  `filament_printer_labels` (all `read`).
+  for an unknown printer; in `NOT_NUDGED`). The labels PDF (#7157, plan
+  `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): `filament/label_templates.py`
+  (`TEMPLATES`, SB's 50 x 25 mm roll and Bambuddy's six; `LabelTemplateChoice`, the stored-only
+  setting `filament_label_template` and the PDF body's `template`), `labels.py` `pdf_labels`
+  (the labels from SB's rows; a place label needs `label_base_url`, else 409 `no_label_base`,
+  never the request's host) and `label_pdf.py` (ReportLab: the browser label's lines and a vector
+  QR code, Helvetica, Latin-1 only). Routes `GET /filament/label-templates` and `POST
+  /filament/labels` (the PDF as the body, at most 100 labels; in `NOT_NUDGED`). Agent tools: `filament_code_resolve`, `filament_location_get`,
+  `filament_printer_labels` and `filament_label_templates` (all `read`); the PDF route has none
+  (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
   (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
   (`L` is `filament_locations`, `S` is `filament_spools`) and `resolve` (`{kind, id, code, name,
