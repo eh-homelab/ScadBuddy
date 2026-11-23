@@ -1508,7 +1508,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   under `/entities/{kind}:{ref}`; the file and thumbnail GETs are scriptless
   (`auth/routes.py` `SCRIPTLESS_GETS`). The migration `20261122T0426Z_entities.sql` keeps
   `order_attachments` as a view, with a trigger that fills `entity_id`, for the previous
-  build's replicas during the roll; a later migration drops them.
+  build's replicas during the roll; `20261123T0651Z_drop_order_attachments_view.sql` drops them (#6960).
 - `backend/scadbuddy/orders/` — orders phase 1 (#4249, epic #4248, spec
   `2026-10-18-orders-design.md`, plan `2026-10-19-orders-phase-1-customers-and-orders.md`):
   customers, orders and line items as ScadBuddy's own records. A library-file item has no
