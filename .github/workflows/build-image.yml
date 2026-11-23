@@ -476,7 +476,7 @@ jobs:
             org.opencontainers.image.title=ScadBuddy sandbox
             org.opencontainers.image.description=A ScadBuddy session's Bash and PowerShell sandbox, and its egress proxy
 
-      # The same label as the other two jobs: `X.Y.Z` for a `vX.Y.Z` tag,
+      # The same label as the other jobs: `X.Y.Z` for a `vX.Y.Z` tag,
       # `sha-<short>` otherwise.
       - name: Pick the version label
         id: label
@@ -583,7 +583,7 @@ jobs:
             org.opencontainers.image.title=ScadBuddy Playwright MCP
             org.opencontainers.image.description=The ScadBuddy agent's browser: Playwright MCP with per-session user agent, viewport and locale
 
-      # The same label as the other two jobs: `X.Y.Z` for a `vX.Y.Z` tag,
+      # The same label as the other jobs: `X.Y.Z` for a `vX.Y.Z` tag,
       # `sha-<short>` otherwise.
       - name: Pick the version label
         id: label
