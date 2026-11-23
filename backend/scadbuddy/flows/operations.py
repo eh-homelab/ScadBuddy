@@ -71,7 +71,13 @@ from scadbuddy.flows.grants import Inside, Outside, Verdict, match_grant
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Decision, Proposal, Run
 from scadbuddy.flows.narrowing import narrowing_problem
-from scadbuddy.flows.print_binding import api_lookup, bind_call, named_printer
+from scadbuddy.flows.print_binding import (
+    api_drafts,
+    api_lookup,
+    bind_call,
+    binds,
+    named_draft,
+)
 from scadbuddy.flows.store import (
     FlowStore,
     HopMovedError,
@@ -108,7 +114,13 @@ PRINTER_CHANGED = "https://scadbuddy.dev/problems/flow-printer-changed"
 PRINTER_UNBOUND = "https://scadbuddy.dev/problems/flow-printer-unbound"
 #: The API refused the projects worker's read of a print's registry printer (#5466).
 PRINTER_REFUSED = "https://scadbuddy.dev/problems/flow-printer-refused"
-#: The statuses of that read that no retry mends: the worker's service credential (#5472).
+#: A publish's hosted plugin draft is not the one the run page showed (#7199).
+DRAFT_CHANGED = "https://scadbuddy.dev/problems/flow-draft-changed"
+#: An approval of a publish whose draft the run page could not name (#7199).
+DRAFT_UNBOUND = "https://scadbuddy.dev/problems/flow-draft-unbound"
+#: The API refused the projects worker's read of a publish's draft (#7199).
+DRAFT_REFUSED = "https://scadbuddy.dev/problems/flow-draft-refused"
+#: The statuses of a binding's read that no retry mends: the worker's service credential (#5472).
 REFUSED_READS = frozenset({401, 403})
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
@@ -222,21 +234,38 @@ def _printer_unbound() -> ApiError:
     )
 
 
-def _printer_refused(code: int) -> ApiError:
-    """The API refused the projects worker's read of the row: its service credential, a
-    fault an operator fixes. Trying again would be refused the same way."""
+def _draft_changed() -> ApiError:
     return ApiError(
-        status.HTTP_500_INTERNAL_SERVER_ERROR,
-        f"ScadBuddy's API refused to read the printer this call prints on (HTTP {code}),"
-        " so nothing was approved. Check the projects worker's service credential.",
-        type_=PRINTER_REFUSED,
+        status.HTTP_409_CONFLICT,
+        "The draft this call publishes is not the one you were shown. Reload it.",
+        type_=DRAFT_CHANGED,
     )
 
 
-def _printer_unreadable() -> ApiError:
+def _draft_unbound() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The run page could not say which draft this call publishes, so it cannot be"
+        " approved yet. Reload it, and approve once it names the draft.",
+        type_=DRAFT_UNBOUND,
+    )
+
+
+def _read_refused(code: int, what: str, type_: str) -> ApiError:
+    """The API refused the projects worker's read of what a call names: its service
+    credential, a fault an operator fixes. Trying again would be refused the same way."""
+    return ApiError(
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        f"ScadBuddy's API refused to read {what} (HTTP {code}),"
+        " so nothing was approved. Check the projects worker's service credential.",
+        type_=type_,
+    )
+
+
+def _read_failed(what: str) -> ApiError:
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
-        "Could not read the printer this call prints on, so nothing was approved. Try again.",
+        f"Could not read {what}, so nothing was approved. Try again.",
     )
 
 
@@ -297,7 +326,8 @@ def flow_kinds(
     ScadBuddy's own API, which a parent's narrowing is matched through (the grant's
     facts, as `flow_grant_check` reads them); None, and every narrowing asks the person.
     A person's approval of a `print_output` call that names a registry printer reads
-    that printer through it too (#4445); None, and that approval is refused."""
+    that printer through it too (#4445), and one of a `hosted_plugin_publish` call that
+    sends no `draft` reads the draft's digest (#7199); None, and that approval is refused."""
 
     async def answer_of(request: dict[str, Any]) -> str:
         if "answer" in request:
@@ -428,8 +458,9 @@ def flow_kinds(
         name and arguments, or a turn tool's (#6118), which the agent hashes again from
         the call it is asked to run. None for a ScadBuddy host function (the workflow
         runs it itself). A print on a registry printer is bound to the pair its row links
-        now (#4445), which must be the `bound_hash` the run page showed (`shown`): else
-        a 409, which says whether the page showed another pair or none."""
+        now (#4445), and a publish of a hosted plugin's draft to the draft's digest now
+        (#7199). Either must be the `bound_hash` the run page showed (`shown`): else a 409,
+        which says whether the page showed another binding or none."""
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         for parked in await client.get_pending_approvals():
             if parked.tool_id != call_id:
@@ -439,41 +470,48 @@ def flow_kinds(
             name = str(parked.tool_input.get("name"))
             args = parked.tool_input.get("args")
             args = args if isinstance(args, dict) else {}
-            if parked.tool_name == APPROVED_TOOL and named_printer(name, args) is not None:
-                # Bound to the registry printer's link as it is now (#4445), which the
+            if parked.tool_name == APPROVED_TOOL and binds(name, args):
+                # Bound to what the call names as it is now (#4445, #7199), which the
                 # agent's gate checks again when the call runs.
+                draft = named_draft(name, args) is not None
+                what = (
+                    "the hosted plugin draft this call publishes"
+                    if draft
+                    else "the printer this call prints on"
+                )
                 registry = None if api is None else api()
                 if registry is None:
                     raise ApiError(
                         status.HTTP_503_SERVICE_UNAVAILABLE,
-                        "Approving a print on a registry printer needs SCADBUDDY_API_INTERNAL_URL.",
+                        f"Approving a call that names {what} needs SCADBUDDY_API_INTERNAL_URL.",
                     )
                 try:
-                    args = (await bind_call(name, args, api_lookup(registry))).args
-                except httpx.HTTPStatusError as err:
-                    activity.logger.warning(
-                        "could not read the printer a flow's print names", exc_info=True
-                    )
-                    if err.response.status_code in REFUSED_READS:
+                    args = (
+                        await bind_call(
+                            name, args, api_lookup(registry), drafts=api_drafts(registry)
+                        )
+                    ).args
+                except httpx.HTTPError as err:
+                    activity.logger.warning(f"could not read {what}", exc_info=True)
+                    if (
+                        isinstance(err, httpx.HTTPStatusError)
+                        and err.response.status_code in REFUSED_READS
+                    ):
                         # The worker's credential refused: another try is refused the same way.
-                        raise _printer_refused(err.response.status_code) from None
-                    # Any other status (408, 429, a 5xx, ...) may pass on another try.
-                    raise _printer_unreadable() from None
-                except httpx.HTTPError:
-                    # Nothing is recorded: the person approves again once the row reads.
-                    activity.logger.warning(
-                        "could not read the printer a flow's print names", exc_info=True
-                    )
-                    raise _printer_unreadable() from None
+                        refused = DRAFT_REFUSED if draft else PRINTER_REFUSED
+                        raise _read_refused(err.response.status_code, what, refused) from None
+                    # Any other failure (408, 429, a 5xx, no answer, ...) may pass on another
+                    # try. Nothing is recorded: the person approves again once it reads.
+                    raise _read_failed(what) from None
                 finally:
                     await registry.aclose()
                 bound = input_hash(hash_key, name, args)
                 if not isinstance(shown, str):
-                    # The page showed no binding (its read of the run or of the printer
-                    # failed): never approved without one.
-                    raise _printer_unbound()
+                    # The page showed no binding (its read of the run or of what the call
+                    # names failed): never approved without one.
+                    raise _draft_unbound() if draft else _printer_unbound()
                 if not hmac.compare_digest(shown, bound):
-                    raise _printer_changed()
+                    raise _draft_changed() if draft else _printer_changed()
                 return bound
             return input_hash(hash_key, name, args)
         raise _stale()
