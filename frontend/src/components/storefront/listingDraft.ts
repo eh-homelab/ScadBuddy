@@ -1,4 +1,4 @@
-import type { CustomizerSchema, Filament, ListingBound, MediaView, Param, ParamValue, StorefrontListing, StorefrontListingInput } from '../../api/types'
+import type { CustomizerSchema, Filament, ListingBound, MediaView, OutputPlate, Param, ParamValue, SlotNeed, StorefrontListing, StorefrontListingInput } from '../../api/types'
 import type { Listing as PublicListing, PublicParam } from '../../storefront/api/client'
 import { customerFilaments, shownLabel, valueProblem } from '../../storefront/params'
 
@@ -607,6 +607,26 @@ export function fileTitle(filename: string, filaments: readonly Filament[]): str
   const name = filename.replace(/(\.gcode)?\.[a-z0-9]+$/i, '').replace(/_+/g, ' ')
   const colours = customerFilaments(filaments).flatMap((filament) => (filament.colour_name ? [filament.colour_name] : []))
   return withoutWords(name, colours).slice(0, 200) || name.slice(0, 200)
+}
+
+/**
+ * #6710 — the file's declared slots (`GET /print/library/{id}/filaments` `slots`) as its parts
+ * before a publish: every one counted as used, a support material's as support, one with no
+ * colour grey. The agent's `storefrontDraft.ts` keeps a copy (the shared vectors).
+ */
+export function declaredSlots(slots: readonly SlotNeed[]): DraftSlot[] {
+  return slots.map((slot) => ({
+    slot: slot.slot_id - 1,
+    colour: slot.colour || '#808080',
+    material: slot.material ?? null,
+    used: true,
+    support: isSupportMaterial(slot.material),
+  }))
+}
+
+/** #6710 §9.3 — the picture ids (`plate:<n>`) of the file's plates that have a picture, in plate order. */
+export function platePictures(plates: readonly OutputPlate[]): string[] {
+  return plates.filter((plate) => plate.has_thumbnail).map((plate) => `plate:${plate.index}`)
 }
 
 /**
