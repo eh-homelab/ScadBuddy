@@ -153,7 +153,14 @@ function PatchFeedback({ patch, locked }: { patch: ReturnType<typeof usePatch>; 
  * says of the key. A key is edited in place; renaming one is one PATCH that removes the old
  * key and sets the new. The server decides what a key and a value may be (`bad_property_value`).
  */
-export const PropertiesPanel = memo(function PropertiesPanel({ entity, title = 'Properties' }: { entity: string; title?: string }) {
+export const PropertiesPanel = memo(function PropertiesPanel({ entity, title }: { entity: string; title?: string }) {
+  // Keyed by its entity: a page that keeps the panel while its id changes (the quick find
+  // opens another type from a type's page) gets a fresh one, so an earlier entity's PATCH
+  // reply, edit or write lock never lands on the next one.
+  return <EntityProperties key={entity} entity={entity} title={title} />
+})
+
+function EntityProperties({ entity, title = 'Properties' }: { entity: string; title?: string }) {
   const { kind } = entityParts(entity)
   const list = useAsync(() => entityApi.properties(entity), [entity])
   const schema = useAsync(() => entityApi.propertySchema(kind), [kind])
@@ -224,7 +231,7 @@ export const PropertiesPanel = memo(function PropertiesPanel({ entity, title = '
       {list.data && !list.error && <AddProperty docs={docs} keys={keys} keysId={keysId} locked={writing} onPatch={patch} />}
     </section>
   )
-})
+}
 
 function TypePicker({ value, onChange, label }: { value: ValueType; onChange: (type: ValueType) => void; label: string }) {
   return (

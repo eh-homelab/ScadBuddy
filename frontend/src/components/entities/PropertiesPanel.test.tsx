@@ -232,6 +232,28 @@ describe('PropertiesPanel (#7026)', () => {
     expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { mpn: null } }])
   })
 
+  it('drops a reply that lands after the panel moved to another entity', async () => {
+    const other = 'spool_type:7a000000-0000-4000-8000-000000000002'
+    seedEntityProperties(TYPE, { mpn: 'A' })
+    seedEntityProperties(other, { part: 'B' })
+    const reply = gate()
+    server.use(
+      http.patch(PROPERTIES, async () => {
+        await reply.opened
+        return HttpResponse.json({ properties: [{ key: 'mpn', value: 'A2', source: 'manual', updated_at: '2026-11-23T00:00:00Z', updated_by: null }] })
+      }),
+    )
+    const { user, rerender } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(within(await screen.findByRole('row', { name: /mpn/ })).getByRole('button', { name: 'Remove mpn' }))
+    rerender(<PropertiesPanel entity={other} />)
+    expect(await screen.findByRole('row', { name: /^part/ })).toBeInTheDocument()
+    reply.open()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByRole('row', { name: /mpn/ })).toBeNull()
+    expect(screen.getByRole('row', { name: /^part/ })).toBeInTheDocument()
+    expect(within(screen.getByRole('row', { name: /^part/ })).getByRole('button', { name: 'Remove part' })).toBeEnabled()
+  })
+
   it("moves focus into a row's form, and back to its Edit button on Cancel, Escape and Save", async () => {
     seedEntityProperties(TYPE, { mpn: 'A' })
     const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
