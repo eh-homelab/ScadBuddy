@@ -23,7 +23,7 @@ import { BambuddyResourcesProvider } from './bambuddyResources'
 import { SettingsCacheProvider, useSettingsCache } from './cache'
 import { SettingsCollapseProvider } from './collapse'
 import { CollapseContext, useReveal } from './collapseState'
-import { SettingsDirtyProvider, useDirtySections } from './dirty'
+import { SettingsDirtyProvider, useDirtySections, useLeaveHolds } from './dirty'
 import { AREAS, foldIdsOf, resolveLocation, SECTION_REGISTRY, type SettingsSection } from './registry'
 import { sectionId, useSectionNav } from './sectionNav'
 
@@ -108,6 +108,10 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
   const collapse = useContext(CollapseContext)
   const dirtyIds = useDirtySections()
   const anyDirty = dirtyIds.length > 0
+  // #7192 — unsaved work that is no settings form (a hosted plugin's draft files) holds a
+  // leave too, but is never a dirty section.
+  const holds = useLeaveHolds()
+  const leaveHeld = anyDirty || holds.length > 0
   const titleOf = (id: string) => sections.find((section) => section.id === id)?.title ?? id
 
   const shown = useMemo(
@@ -141,7 +145,7 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
     else element.scrollTop = 0
   }, [target.area, hash])
 
-  const guard = useLeaveGuard(anyDirty, { within: '/settings' })
+  const guard = useLeaveGuard(leaveHeld, { within: '/settings' })
 
   // #1041 — a failed load is not "loading": say so, and offer the read again. Settings
   // is the page someone opens because something is wrong.
@@ -222,7 +226,7 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
                   onClick={(event) => {
                     event.preventDefault()
                     reveal(section.id)
-                    goToSection(section.id, { inPlace: anyDirty })
+                    goToSection(section.id, { inPlace: leaveHeld })
                   }}
                   // shadcn's tabs look (#3671): the section in view is the active tab. Links,
                   // not tabs: each moves to its section in this one page.
@@ -311,8 +315,8 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
           <AlertDialogHeader>
             <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
             <AlertDialogDescription>
-              {`Unsaved changes in ${dirtyIds.map(titleOf).join(', ')} will be lost.`} Save each section first to
-              keep its changes.
+              {`Unsaved changes in ${[...dirtyIds.map(titleOf), ...holds].join(', ')} will be lost.`}{' '}
+              {holds.length === 0 ? 'Save each section first to keep its changes.' : 'Save each section and file first to keep its changes.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

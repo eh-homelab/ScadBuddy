@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AiAvailability } from '../../agent/chat/availability'
 import { emitRealtime } from '../../mocks/realtime'
 import { Section } from './controls'
-import { useReportDirty } from './dirty'
+import { useDirtySections, useHoldLeave, useReportDirty } from './dirty'
 import type { SettingsSection } from './registry'
 import { SettingsProviders, SettingsShell } from './SettingsShell'
 import { enter, renderSettingsShell } from './testing'
@@ -72,6 +72,22 @@ function GhostMcp() {
   return (
     <Section id="ghost-mcp" title="Ghost MCP">
       {null}
+    </Section>
+  )
+}
+
+/** #7192 — unsaved work that is no settings form: it holds a leave, never a dirty section. */
+function Holder() {
+  const [held, setHeld] = useState(false)
+  useHoldLeave('holder', held ? "shop-notes's skills/a.md" : null)
+  const dirty = useDirtySections()
+  return (
+    <Section id="holder" title="Holder">
+      <button type="button" onClick={() => setHeld(!held)}>
+        {held ? 'Let go' : 'Hold'}
+      </button>
+      <span data-testid="dirty">{dirty.join(',')}</span>
+      <Link to="/">Leave from holder</Link>
     </Section>
   )
 }
@@ -174,6 +190,24 @@ describe('SettingsShell (#2171)', () => {
     expect(screen.getByLabelText('Alpha')).toHaveValue('draft')
     await user.click(screen.getByRole('link', { name: 'Leave' }))
     expect(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).toHaveTextContent('Alpha')
+  })
+
+  it('asks before leaving while a hold is set, naming it, though no section is dirty (#7192)', async () => {
+    const { user } = renderSettingsShell([...fakes, { id: 'holder', area: 'general', title: 'Holder', order: 30, Component: Holder }])
+    await user.click(await screen.findByRole('button', { name: 'Hold' }))
+    // Not a dirty section: the reload, the area dots and the agent's flag read those only.
+    expect(screen.getByTestId('dirty')).toHaveTextContent('')
+    expect(within(areas()).getByRole('link', { name: 'General' })).not.toContainElement(screen.queryByLabelText('unsaved'))
+    await user.click(screen.getByRole('link', { name: 'Leave from holder' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
+    expect(dialog).toHaveTextContent("Unsaved changes in shop-notes's skills/a.md will be lost. Save each section and file first")
+    await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
+    expect(where()).toBe('/settings/general')
+    // Let go: leaving no longer asks.
+    await user.click(screen.getByRole('button', { name: 'Let go' }))
+    await user.click(screen.getByRole('link', { name: 'Leave from holder' }))
+    await waitFor(() => expect(screen.queryByTestId('where')).toBeNull())
+    expect(screen.queryByRole('alertdialog')).toBeNull()
   })
 
   it('names every section with a draft, in any area, in the changed-elsewhere notice', async () => {

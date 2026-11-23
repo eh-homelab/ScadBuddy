@@ -35,14 +35,14 @@ ARG BAMBU_STUDIO_SHA256_AMD64=d501b103fac5424513ec0e8d6bc145fb30719de2c7d94d7320
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.13.8 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.9 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
 # cannot move under a build. OpenSCAD's only stable release (2021.01) has no
 # Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
 # OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
-FROM openscad/openscad:dev.2026-11-16@sha256:c7e532e701d3add64de98c317abbbcacbf1ab9efb656014dcb001b90e7538c38 AS base
+FROM openscad/openscad:dev.2026-11-23@sha256:a1e72647c652a76804a7baea44d5dfc444c1047fd77832336119cb1d70b6edc4 AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
 # a nightly on Debian trixie, so a pinned version here would break the
@@ -496,7 +496,7 @@ RUN cargo build --release --locked -p scadbuddy-slicer
 # Upstream publishes no arm64 AppImage, so this stage always takes the amd64 one,
 # whatever TARGETARCH is: the profiles are JSON and serve every app image, and only
 # `slicer`, which runs the CLI, refuses another architecture.
-FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS slicer-dist
+FROM ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289 AS slicer-dist
 
 ARG BAMBU_STUDIO_VERSION
 ARG BAMBU_STUDIO_ASSET
@@ -552,7 +552,7 @@ RUN { curl --fail --silent --show-error --location --retry 3 --retry-all-errors 
 # by tag and index digest, as `base` is, so the glibc the CLI was checked
 # against cannot move under a build. The worker built on bookworm (glibc 2.36)
 # runs on 24.04's 2.39.
-FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS slicer
+FROM ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289 AS slicer
 
 ARG TARGETARCH
 ARG BAMBU_STUDIO_VERSION
@@ -865,7 +865,7 @@ FROM base AS app
 # never fire; it stays as the check that the tag, digest and version agree. When
 # bumping the base, re-verify §3 of the design spec against the new build and
 # change the FROM line and the default below in the same commit.
-ARG OPENSCAD_VERSION=2026.11.16
+ARG OPENSCAD_VERSION=2026.11.23
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.
