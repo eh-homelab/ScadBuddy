@@ -543,7 +543,7 @@ export function SpoolPage() {
   const dryFrom = !dryTouched && dryDefaults ? dryingDefaultsText(dryDefaults) : null
   // #7280: a scale reading of a spool with an insert is checked for an offer of its empty weight.
   const scaleReading = DECIMAL.test(reading.trim()) && Number(reading) > 0 ? Number(reading) : null
-  const insertCheck = useInsertWeightCheck(saved && !saved.archived_at && saved.effective.insert_type_id ? saved.id : undefined, scaleReading)
+  const { check: insertCheck, pending: checkPending } = useInsertWeightCheck(saved && !saved.archived_at && saved.effective.insert_type_id ? saved.id : undefined, scaleReading)
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setNotice(null)
     setDraft((was) => ({ ...was, [key]: value }))
@@ -955,7 +955,7 @@ export function SpoolPage() {
                   className="flex flex-col gap-2"
                   onSubmit={(event) => {
                     event.preventDefault()
-                    if (readingOk) void act(weigh, 'Weighed')
+                    if (readingOk && !checkPending) void act(weigh, 'Weighed')
                   }}
                 >
                   <Label htmlFor="spool-reading" className="text-[13px]">
@@ -966,7 +966,7 @@ export function SpoolPage() {
                   {empty && reading.trim() !== '' && DECIMAL.test(reading.trim()) && filament < 0 && <p className="text-[12px] text-warn">That is less than the empty spool.</p>}
                   {offer && readingOk && <InsertWeightOffer offer={offer} checked={offerChecked} disabled={busy} onCheckedChange={(checked) => setOfferChoice({ reading: offer.reading_g, checked })} />}
                   <div>
-                    <Button type="submit" size="sm" variant="outline" disabled={busy || !readingOk}>
+                    <Button type="submit" size="sm" variant="outline" disabled={busy || !readingOk || checkPending}>
                       Record weighing
                     </Button>
                   </div>
