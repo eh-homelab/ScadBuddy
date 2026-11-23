@@ -181,6 +181,12 @@ def _trays(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
     return found
 
 
+def every_tray(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
+    """Every slot the status reports, filled or not, by unit: the external holders as unit
+    `EXTERNAL`, trays 0 and 1 (#7153)."""
+    return _trays(status)
+
+
 def tray_at(status: PrinterStatus, ams_id: int, tray_id: int) -> AmsTray | None:
     """The tray an assignment's ``ams_id`` and ``tray_id`` name, the external holders
     included (their trays 0 and 1)."""
