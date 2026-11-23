@@ -10,8 +10,13 @@ library page uses (``NativeLibrary.upload``, or Bambuddy's ``send.upload_raw`` t
 ``orders/bambuddy.py`` ``BambuddyShelf``), and the item is pointed at the new file in one
 transaction with an order event naming both ids. The folder's lookup, the find and the
 upload hold ``OrderStore.restore_lock``, so two prints racing to restore make one folder
-and one copy.
-The old file's remembered choices are copied to the new file when it has none.
+and one copy. The item takes the name the library gave the file. The old file's
+remembered choices are copied to the new file when it has none.
+
+The restore runs before the print claims the item, so a claim refused after it (the
+order on hold, the item claimed by another print) leaves the item on the restored file
+and the copy in "Storefront". That is intended: the item's bytes are back in the library,
+and the next print finds them there and restores nothing.
 
 A retry of the same claim reuses the check's answer, so it calls :func:`restore_held`
 again with the old id: it finds the item moved, or, when the try before stopped after its
@@ -24,8 +29,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
+from collections.abc import AsyncIterator
 from contextlib import aclosing
-from typing import TYPE_CHECKING, BinaryIO, Protocol
+from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 from fastapi import status
 
@@ -45,6 +51,13 @@ logger = logging.getLogger(__name__)
 STOREFRONT_FOLDER = "Storefront"
 
 
+class Shelved(NamedTuple):
+    """A file of the shelf: its id, and the name the library gave it."""
+
+    id: int
+    filename: str
+
+
 class Shelf(Protocol):
     """The library that serves, as the restore writes it."""
 
@@ -52,12 +65,12 @@ class Shelf(Protocol):
         """The top-level folder :data:`STOREFRONT_FOLDER`, found or made."""
         ...
 
-    async def find(self, folder_id: int, sha256: str, size: int) -> int | None:
+    async def find(self, folder_id: int, sha256: str, size: int) -> Shelved | None:
         """A live file in ``folder_id`` whose bytes hash to ``sha256``, or None."""
         ...
 
-    async def upload(self, filename: str, data: BinaryIO, folder_id: int) -> int:
-        """``data`` uploaded into ``folder_id`` as ``filename``; the new file's id."""
+    async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
+        """``chunks`` uploaded into ``folder_id`` as ``filename``; the new file."""
         ...
 
 
@@ -74,12 +87,25 @@ class NativeShelf:
     async def storefront_folder(self) -> int:
         return (await self.native.template_folder(STOREFRONT_FOLDER)).id
 
-    async def find(self, folder_id: int, sha256: str, size: int) -> int | None:
+    async def find(self, folder_id: int, sha256: str, size: int) -> Shelved | None:
         rows = await self.native.library_listing(folder_id=folder_id)
-        return next((row.id for row in rows if (row.file_hash or "").lower() == sha256), None)
+        return next(
+            (
+                Shelved(row.id, row.filename)
+                for row in rows
+                if (row.file_hash or "").lower() == sha256
+            ),
+            None,
+        )
 
-    async def upload(self, filename: str, data: BinaryIO, folder_id: int) -> int:
-        return (await self.native.upload(filename, data, folder_id)).id
+    async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
+        # The native upload reads a file: the chunks are spooled to one first.
+        with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
+            async for chunk in chunks:
+                await asyncio.to_thread(spool.write, chunk)
+            await asyncio.to_thread(spool.seek, 0)
+            made = await self.native.upload(filename, spool, folder_id)
+        return Shelved(made.id, made.name)
 
 
 async def restore_held(
@@ -114,22 +140,26 @@ async def restore_held(
         # is missing, and each upload the bytes the other has not put there yet.
         async with held_across_awaits(lifecycle.store.restore_lock()):
             folder = await shelf.storefront_folder()
-            found = await shelf.find(folder, file.sha256, stat.ref.size)
-            if found is not None:
-                new_id = found
-            else:
-                with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
-                    async with aclosing(content.get(stat.ref)) as chunks:
-                        async for chunk in chunks:
-                            await asyncio.to_thread(spool.write, chunk)
-                    await asyncio.to_thread(spool.seek, 0)
-                    new_id = await shelf.upload(file.filename, spool, folder)
+            shelved = await shelf.find(folder, file.sha256, stat.ref.size)
+            if shelved is None:
+                async with aclosing(content.get(stat.ref)) as chunks:
+                    shelved = await shelf.upload(file.filename, chunks, folder)
                 logger.info(
                     "a storefront item's held copy was put back into the library",
-                    extra={"item_id": item.id, "from": checked_id, "library_file_id": new_id},
+                    extra={
+                        "item_id": item.id,
+                        "from": checked_id,
+                        "library_file_id": shelved.id,
+                    },
                 )
         moved = await asyncio.to_thread(
-            lifecycle.move_library_file, order_id, item.id, by, checked_id, new_id
+            lifecycle.move_library_file,
+            order_id,
+            item.id,
+            by,
+            checked_id,
+            shelved.id,
+            shelved.filename,
         )
         assert moved.library_file is not None
         new_id = moved.library_file.id

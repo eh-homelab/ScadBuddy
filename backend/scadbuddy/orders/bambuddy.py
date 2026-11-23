@@ -15,11 +15,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import shutil
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import aclosing, asynccontextmanager
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, BinaryIO
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -45,7 +44,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.bambuddy_pull import read_assignments
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.orders.density import density_text
-from scadbuddy.orders.held_print import STOREFRONT_FOLDER, NativeShelf, Shelf
+from scadbuddy.orders.held_print import STOREFRONT_FOLDER, NativeShelf, Shelf, Shelved
 from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
@@ -428,7 +427,7 @@ class BambuddyShelf:
         made = await self.client.create_folder(FolderCreate(name=STOREFRONT_FOLDER))
         return made.id
 
-    async def find(self, folder_id: int, sha256: str, size: int) -> int | None:
+    async def find(self, folder_id: int, sha256: str, size: int) -> Shelved | None:
         for row in sorted(await self.client.library_files(folder_id), key=lambda r: r.id):
             if row.file_size is not None and row.file_size != size:
                 continue
@@ -439,12 +438,14 @@ class BambuddyShelf:
                     continue
                 raise
             if (found.file_hash or "").lower() == sha256:
-                return found.id
+                return Shelved(found.id, found.filename)
         return None
 
-    async def upload(self, filename: str, data: BinaryIO, folder_id: int) -> int:
+    async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
+        # Streamed from the content store into the one spool `upload_raw` keeps.
         async def write(sink: Sink) -> None:
-            await asyncio.to_thread(shutil.copyfileobj, data, sink)
+            async for chunk in chunks:
+                await asyncio.to_thread(sink.write, chunk)
 
         made = await upload_raw(
             self.client,
@@ -454,7 +455,7 @@ class BambuddyShelf:
             media_type=UPLOAD_MEDIA_TYPE,
             write=write,
         )
-        return made.id
+        return Shelved(made.id, made.filename)
 
 
 @asynccontextmanager

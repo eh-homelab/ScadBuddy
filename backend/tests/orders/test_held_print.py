@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, BinaryIO, cast
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -23,7 +22,13 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.orders.bambuddy import BambuddyShelf, served_shelf
-from scadbuddy.orders.held_print import STOREFRONT_FOLDER, NativeShelf, Shelf, restore_held
+from scadbuddy.orders.held_print import (
+    STOREFRONT_FOLDER,
+    NativeShelf,
+    Shelf,
+    Shelved,
+    restore_held,
+)
 from scadbuddy.orders.models import LibraryFileRef, Order, OrderItem
 from scadbuddy.orders.printing import print_check
 from scadbuddy.orders.problems import PROBLEMS
@@ -241,9 +246,9 @@ class CountingShelf(NativeShelf):
         super().__init__(native)
         self.uploads = 0
 
-    async def upload(self, filename: str, data: BinaryIO, folder_id: int) -> int:
+    async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
         self.uploads += 1
-        return await super().upload(filename, data, folder_id)
+        return await super().upload(filename, chunks, folder_id)
 
 
 class Choices:
@@ -336,8 +341,8 @@ async def test_a_retry_after_the_upload_finds_the_file_by_its_sha256(
     other_folder = await native.create_folder("Elsewhere", None)
     shelf = CountingShelf(native)
     # Bytes of the same sha256 outside "Storefront" are not taken.
-    elsewhere = await shelf.upload("bracket.3mf", _spooled(PINNED), other_folder.id)
-    uploaded = await shelf.upload("bracket.3mf", _spooled(PINNED), folder.id)
+    elsewhere = (await shelf.upload("bracket.3mf", _chunks(PINNED), other_folder.id)).id
+    uploaded = (await shelf.upload("bracket.3mf", _chunks(PINNED), folder.id)).id
     assert await restore(shop, order, item, content, shelf, Choices()) == uploaded
     assert shelf.uploads == 2
     assert uploaded != elsewhere
@@ -362,9 +367,9 @@ class RacingShelf(CountingShelf):
         self.folder = (await self.native.create_folder(STOREFRONT_FOLDER, None)).id
         return self.folder
 
-    async def upload(self, filename: str, data: BinaryIO, folder_id: int) -> int:
+    async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
         await asyncio.sleep(0.05)
-        return await super().upload(filename, data, folder_id)
+        return await super().upload(filename, chunks, folder_id)
 
 
 async def test_racing_restores_make_one_folder_and_one_file(
@@ -386,14 +391,29 @@ async def test_racing_restores_make_one_folder_and_one_file(
 
 async def test_the_native_find_takes_a_hash_in_either_case() -> None:
     """As the print's check and Bambuddy's shelf compare a stated hash."""
-    rows = [SimpleNamespace(id=7, file_hash=SHA256.upper())]
+    rows = [SimpleNamespace(id=7, filename="bracket.3mf", file_hash=SHA256.upper())]
 
     class Listing:
         async def library_listing(self, *, folder_id: int) -> list[SimpleNamespace]:
             return rows
 
     shelf = NativeShelf(cast(NativeLibrary, Listing()))
-    assert await shelf.find(1, SHA256, len(PINNED)) == 7
+    assert await shelf.find(1, SHA256, len(PINNED)) == (7, "bracket.3mf")
+
+
+async def test_the_item_takes_the_name_of_the_file_it_moves_to(
+    shop: Shop, content: ContentStore, held: str, native: NativeLibrary
+) -> None:
+    """The file in "Storefront" with the pinned bytes is named otherwise (renamed there,
+    or named so by the library on a clash): the item names it as the library does."""
+    order, item = storefront_item(shop, GONE_ID, "native")
+    folder = await native.template_folder(STOREFRONT_FOLDER)
+    shelf = CountingShelf(native)
+    there = (await shelf.upload("bracket (1).3mf", _chunks(PINNED), folder.id)).id
+    assert await restore(shop, order, item, content, shelf, Choices()) == there
+    moved = shop.get_item(item).library_file
+    assert moved is not None
+    assert (moved.id, moved.filename) == (there, "bracket (1).3mf")
 
 
 async def test_the_choices_are_copied_to_an_empty_scope_only(
@@ -402,7 +422,7 @@ async def test_the_choices_are_copied_to_an_empty_scope_only(
     order, item = storefront_item(shop, GONE_ID, "native")
     folder = await native.template_folder(STOREFRONT_FOLDER)
     shelf = CountingShelf(native)
-    there = await shelf.upload("bracket.3mf", _spooled(PINNED), folder.id)
+    there = (await shelf.upload("bracket.3mf", _chunks(PINNED), folder.id)).id
     choices = Choices(held={there})
     assert await restore(shop, order, item, content, shelf, choices) == there
     assert choices.copied == []
@@ -418,8 +438,8 @@ async def test_a_held_copy_lost_before_the_restore_is_library_file_gone(
     assert shop.get_item(item).library_file == item.library_file
 
 
-def _spooled(payload: bytes) -> BinaryIO:
-    return io.BytesIO(payload)
+async def _chunks(payload: bytes) -> AsyncIterator[bytes]:
+    yield payload
 
 
 # -- the restore into Bambuddy's library ------------------------------------------------------
@@ -483,12 +503,12 @@ async def test_bambuddys_find_matches_the_hash_and_skips_another_size(
 ) -> None:
     shelf = bambuddy_shelf(bambuddy)
     folder = await shelf.storefront_folder()
-    longer = await shelf.upload("other.3mf", _spooled(PINNED + b"!"), folder)
-    same_size = await shelf.upload("same.3mf", _spooled(bytes(len(PINNED))), folder)
+    longer = (await shelf.upload("other.3mf", _chunks(PINNED + b"!"), folder)).id
+    same_size = (await shelf.upload("same.3mf", _chunks(bytes(len(PINNED))), folder)).id
     assert await shelf.find(folder, SHA256, len(PINNED)) is None
-    pinned = await shelf.upload("bracket.3mf", _spooled(PINNED), folder)
+    pinned = (await shelf.upload("bracket.3mf", _chunks(PINNED), folder)).id
     recorded.asked.clear()
-    assert await shelf.find(folder, SHA256, len(PINNED)) == pinned
+    assert await shelf.find(folder, SHA256, len(PINNED)) == (pinned, "bracket.3mf")
     # Only the files of the copy's size have their hash read.
     assert recorded.count("GET", f"/library/files/{longer}") == 0
     assert recorded.count("GET", f"/library/files/{same_size}") == 1

@@ -5661,10 +5661,11 @@ class Lifecycle:
         return written
 
     def move_library_file(
-        self, order_id: str, item_id: str, by: Actor, from_id: int, to_id: int
+        self, order_id: str, item_id: str, by: Actor, from_id: int, to_id: int, filename: str
     ) -> OrderItem:
-        """A storefront item's held copy put back into the library as file ``to_id``
-        (#6710 §10.2): the item names it from now on, and the audit line names both ids
+        """A storefront item's held copy put back into the library as file ``to_id``,
+        named ``filename`` there (#6710 §10.2): the item names it from now on, and the
+        audit line names both ids
         (`item.library_file_restored`). An item that no longer names ``from_id`` (a retry
         of the same claim moved it already) is answered as it is, nothing written. Allowed
         on hold and on an ended order: it changes where the bytes are read, not what is
@@ -5677,7 +5678,7 @@ class Lifecycle:
                 raise LifecycleError(
                     "item_not_found", f"no library file item {item_id}", not_found=True
                 )
-            moved = self.store.move_library_file(conn, item_id, from_id, to_id, library)
+            moved = self.store.move_library_file(conn, item_id, from_id, to_id, filename, library)
             if moved is None:
                 return item
             self._event(

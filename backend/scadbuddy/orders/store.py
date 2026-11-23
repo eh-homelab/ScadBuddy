@@ -1736,15 +1736,16 @@ class OrderStore:
         return _item_of(row)
 
     def move_library_file(
-        self, conn: Conn, item_id: str, from_id: int, to_id: int, library: str
+        self, conn: Conn, item_id: str, from_id: int, to_id: int, filename: str, library: str
     ) -> OrderItem | None:
-        """A storefront item pointed at ``to_id`` of ``library`` (#6710 §10.2), its held
-        copy put back there; only while it still names ``from_id``, else None."""
+        """A storefront item pointed at ``to_id`` of ``library``, named ``filename`` there
+        (#6710 §10.2), its held copy put back there; only while it still names
+        ``from_id``, else None."""
         row = conn.execute(
-            "UPDATE order_items SET library_file_id = %s, library_source = %s,"
-            " updated_at = now() WHERE id = %s AND kind = 'library_file'"
-            f" AND library_file_id = %s RETURNING {_ITEM}",
-            (to_id, library, item_id, from_id),
+            "UPDATE order_items SET library_file_id = %s, library_filename = %s,"
+            " library_source = %s, updated_at = now() WHERE id = %s"
+            f" AND kind = 'library_file' AND library_file_id = %s RETURNING {_ITEM}",
+            (to_id, filename, library, item_id, from_id),
         ).fetchone()
         return None if row is None else _item_of(row)
 
