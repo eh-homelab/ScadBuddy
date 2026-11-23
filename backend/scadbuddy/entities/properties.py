@@ -1,12 +1,15 @@
 """Key-value properties on any entity (#7026, spec 6.3a): rows of `entity_properties`, one
 per entity and key. A value is a string, a finite number, a boolean or a list of strings.
 A kind's schema (`entity_property_schemas`) documents and types the keys it knows and never
-refuses a key: a known key's value is checked against its subschema, any other is stored as
-given. A person's or the agent's write makes a key `manual`."""
+refuses a key: it uses only an allowlisted subset of JSON Schema, a known key's value is
+checked against its subschema, and any other key is stored as given. A person's or the
+agent's write makes a key `manual`."""
 
 from __future__ import annotations
 
 import builtins
+import functools
+import json
 import math
 import re
 from datetime import datetime
@@ -30,18 +33,54 @@ MAX_KEYS = 200
 MAX_STRING = 2000
 MAX_LIST = 50
 MAX_LIST_ITEM = 500
-#: Top-level keywords that would refuse a key; a schema with any of them is refused.
-RESTRICTING = ("required", "propertyNames")
-_NO_REF = '"$ref" and "$dynamicRef" are not taken: each known key is checked on its own'
-_NO_REGEX = " is not taken: a regex could hang a write"
-#: Keywords refused at any depth. A regex in a stored schema can backtrack without end on
-#: a crafted value while a write runs.
-REFUSED_DEEP = {
-    "$ref": _NO_REF,
-    "$dynamicRef": _NO_REF,
-    "pattern": '"pattern"' + _NO_REGEX,
-    "patternProperties": '"patternProperties"' + _NO_REGEX,
-}
+#: The only keywords a schema may use at its top level. `examples` holds data.
+TOP_KEYWORDS = frozenset(
+    {
+        "type",
+        "properties",
+        "additionalProperties",
+        "$schema",
+        "$comment",
+        "title",
+        "description",
+        "examples",
+    }
+)
+#: The only keywords a known key's subschema may use. `enum`, `const`, `default` and
+#: `examples` hold data. No keyword here can refuse another key or run a regex.
+KEY_KEYWORDS = frozenset(
+    {
+        "type",
+        "title",
+        "description",
+        "$comment",
+        "default",
+        "examples",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+        "enum",
+        "const",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minLength",
+        "maxLength",
+        "format",
+        "items",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+    }
+)
+#: The keywords an `items` subschema may use: a list holds no list.
+ITEM_KEYWORDS = KEY_KEYWORDS - {"items"}
+#: The types a known key's subschema may name; "null" only beside another, in a list.
+KEY_TYPES = frozenset({"string", "number", "integer", "boolean", "array"})
+#: The types an `items` subschema may name.
+ITEM_TYPES = KEY_TYPES - {"array"}
 
 PropertyValue = str | float | int | bool | list[str]
 
@@ -74,7 +113,8 @@ class BadPropertyValue(ValueError):  # noqa: N818
 
 
 class BadPropertySchema(ValueError):  # noqa: N818
-    """A schema that is not a valid object schema, or one that would refuse a key."""
+    """A schema that is not a valid object schema, or one that uses a keyword outside the
+    allowed subset."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -116,67 +156,65 @@ def _checked(patch: PropertyPatch, schema: dict[str, Any]) -> None:
         if problem is not None:
             raise BadPropertyValue(key, problem)
         if key in known:
-            error = best_match(Draft202012Validator(known[key]).iter_errors(value))
+            validator = _validator(json.dumps(known[key], sort_keys=True))
+            error = best_match(validator.iter_errors(value))
             if error is not None:
                 raise BadPropertyValue(key, error.message)
 
 
+@functools.lru_cache(maxsize=256)
+def _validator(canonical: str) -> Draft202012Validator:
+    """The validator of a known key's subschema, by its sorted-keys JSON, so a patch does
+    not build it again."""
+    return Draft202012Validator(json.loads(canonical))
+
+
 def check_schema(schema: dict[str, Any]) -> None:
-    """`BadPropertySchema` unless `schema` is a valid Draft 2020-12 object schema that
-    refuses no key."""
+    """`BadPropertySchema` unless `schema` is a valid Draft 2020-12 object schema in the
+    allowed subset, so it refuses no key and runs no regex. The top level uses only
+    `TOP_KEYWORDS`, with `additionalProperties` only true. Each key's subschema is an
+    object that uses only `KEY_KEYWORDS`, names only `KEY_TYPES` (or a list of them, with
+    "null"), and has no `format` "regex". Its `items` is such a subschema of `ITEM_TYPES`,
+    with no `items`. Any other keyword is refused."""
     if not isinstance(schema, dict):
         raise BadPropertySchema("a schema is a JSON object")
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError as e:
         raise BadPropertySchema(f"not a valid Draft 2020-12 schema: {e.message}") from None
+    _only(schema, TOP_KEYWORDS, "at the top level")
     if schema.get("type") != "object":
         raise BadPropertySchema('a schema\'s "type" is "object"')
     if "additionalProperties" in schema and schema["additionalProperties"] is not True:
         raise BadPropertySchema('"additionalProperties" may only be true')
-    for keyword in RESTRICTING:
-        if keyword in schema:
-            raise BadPropertySchema(f'"{keyword}" would refuse keys')
-    for key, sub in (schema.get("properties") or {}).items():
-        if sub is False:
-            raise BadPropertySchema(f'"{key}": a false subschema would refuse the key')
-    reason = _refused_in(schema)
-    if reason is not None:
-        raise BadPropertySchema(reason)
+    for key, sub in schema.get("properties", {}).items():
+        _check_key(sub, f"in property '{key}'", KEY_KEYWORDS, KEY_TYPES)
 
 
-#: Keywords whose value is data, never a schema.
-_DATA_KEYWORDS = frozenset({"const", "default", "enum", "examples"})
-#: Keywords whose value maps NAMES to subschemas: a name is never a keyword. Draft-07's
-#: `dependencies` maps a name to a subschema or to a list of names (plain strings).
-_NAMED_SUBSCHEMAS = frozenset(
-    {"properties", "$defs", "definitions", "dependentSchemas", "dependencies"}
-)
+def _only(node: dict[str, Any], allowed: frozenset[str], where: str) -> None:
+    for keyword in node:
+        if keyword not in allowed:
+            raise BadPropertySchema(f"keyword '{keyword}' is not allowed {where}")
 
 
-def _refused_in(node: Any) -> str | None:
-    """The reason a keyword anywhere in the schema `node` is refused, or None. Data values
-    are skipped and the names in a map of subschemas are not keywords."""
-    if isinstance(node, list):
-        return next((r for v in node if (r := _refused_in(v)) is not None), None)
-    if not isinstance(node, dict):
-        return None
-    if node.get("format") == "regex":
-        return '"format": "regex"' + _NO_REGEX
-    for k, v in node.items():
-        if k in _DATA_KEYWORDS:
-            continue
-        if k in REFUSED_DEEP:
-            return REFUSED_DEEP[k]
-        if k in _NAMED_SUBSCHEMAS and isinstance(v, dict):
-            subs: list[Any] = list(v.values())
-        else:
-            subs = [v]
-        for sub in subs:
-            reason = _refused_in(sub)
-            if reason is not None:
-                return reason
-    return None
+def _check_key(sub: Any, where: str, keywords: frozenset[str], types: frozenset[str]) -> None:
+    """`BadPropertySchema` unless the key's (or its items') subschema `sub` is an object
+    that uses only `keywords` and names only `types`."""
+    if not isinstance(sub, dict):
+        raise BadPropertySchema(f"the subschema {where} is a JSON object")
+    _only(sub, keywords, where)
+    if "type" in sub:
+        named = sub["type"] if isinstance(sub["type"], list) else [sub["type"]]
+        if not set(named) - {"null"} or not set(named) <= types | {"null"}:
+            allowed = ", ".join(sorted(types))
+            raise BadPropertySchema(
+                f'the type {where} is one of {allowed}, or a list of them and "null"'
+            )
+    if sub.get("format") == "regex":
+        raise BadPropertySchema(f"format 'regex' is not allowed {where}")
+    if "items" in sub:
+        items_where = "in the items of " + where.removeprefix("in ")
+        _check_key(sub["items"], items_where, ITEM_KEYWORDS, ITEM_TYPES)
 
 
 def _of(row: dict[str, Any]) -> EntityProperty:

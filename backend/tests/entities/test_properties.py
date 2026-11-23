@@ -13,6 +13,7 @@ from scadbuddy.entities.properties import (
     BadPropertyValue,
     EntityPropertyStore,
     PropertyPatch,
+    check_schema,
 )
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityNotFound, EntityStore
@@ -151,6 +152,9 @@ def test_unknown_keys_pass_a_schema_and_known_keys_are_typed(
     assert _values(props, kind) == {"colour_family": "blue"}
 
 
+_REDOS = {"type": "string", "pattern": "^(a+)+$"}
+
+
 @pytest.mark.parametrize(
     "schema",
     [
@@ -160,25 +164,34 @@ def test_unknown_keys_pass_a_schema_and_known_keys_are_typed(
         {"type": "object", "patternProperties": {"^x": {}}},
         {"type": "array"},
         {"type": "object", "properties": {"a": {"type": "nope"}}},
-        {"type": "object", "properties": {"mpn": False}},
+        {"type": "object", "unevaluatedProperties": False},
+        {"type": "object", "maxProperties": 0},
+        {"type": "object", "dependentRequired": {"mpn": ["gtin"]}},
+        {"type": "object", "allOf": [{"required": ["mpn"]}]},
+        {"type": "object", "not": {"properties": {"mpn": True}, "required": ["mpn"]}},
+        {"type": "object", "properties": {"mpn": {"not": {}}}},
+        {"type": "object", "properties": {"mpn": _REDOS}},
         {
             "type": "object",
             "$defs": {"s": {"type": "string"}},
             "properties": {"mpn": {"$ref": "#/$defs/s"}},
         },
-        {
-            "type": "object",
-            "properties": {"gtin": {"type": "array", "items": {"$dynamicRef": "#x"}}},
-        },
-        {
-            "type": "object",
-            "properties": {"mpn": {"type": "string", "pattern": "^(a+)+$"}},
-        },
-        {
-            "type": "object",
-            "properties": {"meta": {"type": "object", "patternProperties": {"^(a+)+$": {}}}},
-        },
+        {"type": "object", "properties": {"mpn": {"$ref": "#/$defs/s"}}},
         {"type": "object", "properties": {"mpn": {"type": "string", "format": "regex"}}},
+        {"type": "object", "if": {"properties": {"mpn": {"type": "string"}}}},
+        {"type": "object", "dependentSchemas": {"mpn": {"required": ["gtin"]}}},
+        {"type": "object", "properties": {"mpn": True}},
+        {"type": "object", "properties": {"mpn": False}},
+        {
+            "type": "object",
+            "properties": {"tags": {"type": "array", "items": {"type": "array"}}},
+        },
+        {
+            "type": "object",
+            "properties": {"tags": {"type": "array", "items": {"type": "string", "items": {}}}},
+        },
+        {"type": "object", "properties": {"tags": {"type": "array", "items": _REDOS}}},
+        {"type": "object", "properties": {"meta": {"type": "object"}}},
     ],
     ids=[
         "additional",
@@ -187,15 +200,27 @@ def test_unknown_keys_pass_a_schema_and_known_keys_are_typed(
         "patterns",
         "array",
         "invalid",
-        "false_subschema",
+        "unevaluated",
+        "max_properties",
+        "dependent_required",
+        "all_of",
+        "not_top",
+        "not_key",
+        "pattern",
+        "ref_with_defs",
         "ref",
-        "dynamic_ref",
-        "nested_pattern",
-        "nested_pattern_properties",
         "format_regex",
+        "if",
+        "dependent_schemas",
+        "true_subschema",
+        "false_subschema",
+        "nested_array_items",
+        "nested_items_keyword",
+        "items_pattern",
+        "object_type",
     ],
 )
-def test_set_schema_refuses_a_restricting_schema(
+def test_set_schema_refuses_a_keyword_outside_the_subset(
     props: EntityPropertyStore, schema: dict[str, Any]
 ) -> None:
     before = props.schema("spool_type")
@@ -206,45 +231,55 @@ def test_set_schema_refuses_a_restricting_schema(
     assert props.schema("spool_type") == before
 
 
-_REDOS = {"type": "string", "pattern": "^(a+)+$"}
+def test_a_refusal_names_the_keyword_and_where_it_is(props: EntityPropertyStore) -> None:
+    with pytest.raises(BadPropertySchema) as top:
+        props.set_schema("spool_type", {"type": "object", "allOf": [{}]}, BY)
+    assert top.value.reason == "keyword 'allOf' is not allowed at the top level"
+
+    with pytest.raises(BadPropertySchema) as key:
+        props.set_schema("spool_type", {"type": "object", "properties": {"mpn": _REDOS}}, BY)
+    assert key.value.reason == "keyword 'pattern' is not allowed in property 'mpn'"
 
 
-@pytest.mark.parametrize(
-    "schema",
-    [
-        {
-            "type": "object",
-            "properties": {"tags": {"type": "array", "items": _REDOS}},
+def test_every_allowed_keyword_is_accepted(props: EntityPropertyStore) -> None:
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$comment": "c",
+        "title": "Spool type",
+        "description": "d",
+        "examples": [{"mpn": "x"}],
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "grade": {
+                "type": ["integer", "null"],
+                "title": "Grade",
+                "description": "d",
+                "$comment": "c",
+                "default": 1,
+                "examples": [1, 2],
+                "deprecated": False,
+                "readOnly": False,
+                "writeOnly": False,
+                "enum": [1, 2, 3, None],
+                "minimum": 0,
+                "maximum": 9,
+                "exclusiveMinimum": -1,
+                "exclusiveMaximum": 10,
+                "multipleOf": 1,
+            },
+            "url": {"type": "string", "const": "x", "minLength": 1, "maxLength": 9},
+            "site": {"type": "string", "format": "uri"},
+            "tags": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "description": "a tag"},
+                "minItems": 0,
+                "maxItems": 5,
+                "uniqueItems": True,
+            },
+            "ok": {"type": "boolean"},
         },
-        {"type": "object", "allOf": [{"properties": {"mpn": _REDOS}}]},
-        {"type": "object", "if": {"properties": {"mpn": _REDOS}}},
-        {
-            "type": "object",
-            "if": {"properties": {"mpn": {"type": "string"}}},
-            "then": {"properties": {"mpn": _REDOS}},
-        },
-        {
-            "type": "object",
-            "properties": {"meta": {"type": "object", "propertyNames": _REDOS}},
-        },
-        {"type": "object", "dependencies": {"const": {"pattern": "^(a+)+$"}}},
-        {"type": "object", "definitions": {"pattern": _REDOS}},
-    ],
-    ids=["items", "all_of", "if", "then", "property_names", "dependencies", "definitions"],
-)
-def test_set_schema_refuses_a_nested_regex(
-    props: EntityPropertyStore, schema: dict[str, Any]
-) -> None:
-    before = props.schema("spool_type")
-
-    with pytest.raises(BadPropertySchema):
-        props.set_schema("spool_type", schema, BY)
-
-    assert props.schema("spool_type") == before
-
-
-def test_dependencies_names_are_not_keywords(props: EntityPropertyStore) -> None:
-    schema = {"type": "object", "dependencies": {"pattern": {"type": "object"}}}
+    }
 
     assert props.set_schema("spool_type", schema, BY) == schema
 
@@ -259,9 +294,9 @@ def test_a_schema_documents_keys_named_like_keywords(
         "type": "object",
         "properties": {
             "pattern": {"type": "string", "default": {"pattern": "x", "$ref": "y"}},
-            "$ref": {"type": "string", "enum": ["a", "b"]},
+            "$ref": {"type": "string", "enum": ["a", "b", {"allOf": [], "not": {}}]},
             "format": {"type": "string", "examples": [{"patternProperties": 1}]},
-            "patternProperties": {"type": "integer", "const": 3},
+            "patternProperties": {"type": "integer", "const": {"if": {"pattern": "x"}}},
         },
     }
 
@@ -349,6 +384,8 @@ def test_the_seeded_schemas(props: EntityPropertyStore) -> None:
         "empty_spool_weight_g",
         "td",
     }
+    for kind in ("spool", "spool_type"):
+        check_schema(props.schema(kind))
 
 
 def test_apply_on_a_missing_owner_raises_entity_not_found(

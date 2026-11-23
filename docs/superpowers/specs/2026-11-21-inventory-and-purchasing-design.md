@@ -164,8 +164,17 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
   string, a number, a boolean or a list of strings.
 - **Schemas document, never restrict.** A kind's property schema (a JSON Schema object) types
   and describes the keys it knows; any other key is stored as given. A known key's value is
-  checked against its subschema. A schema that would refuse a key (`additionalProperties`
-  other than true, `required`, `propertyNames`, `patternProperties`) is refused.
+  checked against its subschema. A schema uses only an allowed subset of Draft 2020-12, so it
+  can refuse no key and run no regex. At the top level: `type` (`"object"`), `properties`,
+  `additionalProperties` (only `true`), `$schema`, `$comment`, `title`, `description`,
+  `examples`. In each key's subschema (an object): `type` (`string`, `number`, `integer`,
+  `boolean`, `array`, or a list of them with `null`), the annotations (`title`,
+  `description`, `$comment`, `default`, `examples`, `deprecated`, `readOnly`, `writeOnly`),
+  `enum`, `const`, the number bounds (`minimum`, `maximum`, `exclusiveMinimum`,
+  `exclusiveMaximum`, `multipleOf`), `minLength`, `maxLength`, `format` (never `regex`),
+  `items` (a subschema of a scalar type, with no `items`), `minItems`, `maxItems`,
+  `uniqueItems`. The values of `enum`, `const`, `default` and `examples` are data. A schema
+  with any other keyword is refused.
 - Where the schema lives: for an entity kind registered in code (`spool`, `spool_type`, …),
   a row of `entity_property_schemas (kind, schema)`, seeded by migration and editable by a
   person. For an item (phase 2), its item kind's `attribute_schema`, which follows the same

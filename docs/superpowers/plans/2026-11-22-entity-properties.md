@@ -27,9 +27,13 @@ D17, §9 phase 1b. Issue #7026; epic #6949.
 - Key: `^[a-z][a-z0-9_]{0,63}$`. At most 200 keys per entity. No list of allowed keys in code.
 - Value: a string (at most 2000 characters), a finite number, a boolean, or a list of at
   most 50 strings of at most 500 characters each. Anything else is 422 `bad_property_value`.
-- A schema never restricts: a schema with `additionalProperties` (other than `true`),
-  `required`, `propertyNames` or `patternProperties` at its top level, or one that is not a
-  valid Draft 2020-12 schema of `"type": "object"`, is 422 `bad_property_schema`.
+- A schema never restricts: it uses only an allowed subset (`check_schema`, spec §6.3a).
+  Top level: `type` (`"object"`), `properties`, `additionalProperties` (only `true`),
+  `$schema`, `$comment`, `title`, `description`, `examples`. Each key's subschema (an
+  object): a scalar or `array` `type` (a list may add `null`), annotations, `enum`, `const`,
+  number bounds, `minLength`/`maxLength`, `format` (not `regex`), `items` (scalar, no nested
+  `items`), `minItems`/`maxItems`/`uniqueItems`. A schema with any other keyword, or one
+  that is not a valid Draft 2020-12 schema, is 422 `bad_property_schema`.
 - A known key (in the kind schema's `properties`) is validated against its subschema
   (Draft 2020-12); a mismatch is 422 `bad_property_value` naming the key.
 - `source`: `manual` for a person's or the agent's write. No import writes in this plan.
@@ -106,7 +110,7 @@ D17, §9 phase 1b. Issue #7026; epic #6949.
   - `test_a_bad_key_is_refused`, parametrized over `"GTIN"`, `"1abc"`, `"a" * 65`, `"a-b"`.
   - `test_unknown_keys_pass_a_schema_and_known_keys_are_typed`: on `spool_type`,
     `{"colour_family": "blue"}` is stored; `{"gtin": "0123"}` (not a list) is refused.
-  - `test_set_schema_refuses_a_restricting_schema`, parametrized over
+  - `test_set_schema_refuses_a_keyword_outside_the_subset`, parametrized over (among others)
     `{"type": "object", "additionalProperties": False}`, `{"type": "object", "required": ["mpn"]}`,
     `{"type": "object", "propertyNames": {"maxLength": 3}}`,
     `{"type": "object", "patternProperties": {"^x": {}}}`, `{"type": "array"}`,
