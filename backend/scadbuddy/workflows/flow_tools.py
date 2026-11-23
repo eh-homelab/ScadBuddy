@@ -6,6 +6,7 @@ scripts and to coerce their arguments.
 """
 
 import asyncio
+import functools
 import json
 import re
 from collections.abc import Callable
@@ -77,19 +78,16 @@ async def human_answer(question: str) -> HumanAnswer:  # type: ignore[empty-body
 
 
 @agent.tool_defn(inherently_safe=True)
-async def wait_for_human(
-    question: str,
-    runner: agent.Injected[AgentWorkflowRunner],
-    timeout_s: int = DEFAULT_WAIT_S,
-) -> HumanAnswer:
+async def wait_for_human(question: str, timeout_s: int = DEFAULT_WAIT_S) -> HumanAnswer:
     """Ask a person `question` and wait up to `timeout_s` seconds (10 to 86400, an hour
     if left out) for the answer. Raises TimeoutError if nobody answers in time."""
     if not MIN_WAIT_S <= timeout_s <= MAX_WAIT_S:
         raise ValueError(f"timeout_s must be {MIN_WAIT_S} to {MAX_WAIT_S} seconds")
+    owner: StepOwner = workflow.instance()
     call_id = str(workflow.uuid4())
     async with step("wait_for_human", call_id, outward=False, waiting="answer", prompt=question):
         answer: HumanAnswer = await run_callback(
-            runner.run_tool, human_answer, timeout_s, call_id=call_id, question=question
+            owner.runner.run_tool, human_answer, timeout_s, call_id=call_id, question=question
         )
         return answer
 
@@ -745,9 +743,7 @@ async def _gated(
 
 
 @agent.tool_defn(inherently_safe=True)
-async def queue_print(
-    source: dict[str, Any], request: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]
-) -> PrintOutcome:
+async def queue_print(source: dict[str, Any], request: dict[str, Any]) -> PrintOutcome:
     """Once a person approves it, slice and queue `source` ({"output_id": ...} or
     {"file_id": ...}) with `request`, the print dialog's body (`filament_plan`,
     `choices`, ...; send `filament_plan.ids: "sb"` with the ScadBuddy spool numbers
@@ -758,10 +754,11 @@ async def queue_print(
     filaments and must be of them. Refused before it starts, the outcome is `refused`
     with the refusal's `problem` (`requote_needed`: quote it again)."""
     path = _print_path(source)
+    owner: StepOwner = workflow.instance()
     call_id = str(workflow.uuid4())
     outcome: PrintOutcome = await _gated(
         "queue_print",
-        runner,
+        owner.runner,
         approved_print,
         call_id,
         grant=GrantCall(
@@ -778,15 +775,14 @@ async def queue_print(
 
 
 @agent.tool_defn(inherently_safe=True)
-async def arrange(
-    request: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]
-) -> ArrangeResult:
+async def arrange(request: dict[str, Any]) -> ArrangeResult:
     """Once a person approves it, lay out `request`'s objects onto plates (the body of
     POST /outputs/arrange: `objects`, `goal`, ...) and save the result as an output."""
+    owner: StepOwner = workflow.instance()
     call_id = str(workflow.uuid4())
     result: ArrangeResult = await _gated(
         "arrange",
-        runner,
+        owner.runner,
         approved_arrange,
         call_id,
         grant=GrantCall(
@@ -1175,23 +1171,23 @@ async def _run_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner
 
 
 @agent.tool_defn(inherently_safe=True)
-async def tool(name: str, args: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]) -> str:
+async def tool(name: str, args: dict[str, Any]) -> str:
     """Call ScadBuddy's agent tool `name` with `args`, as the person or session that
     started this run; returns its text, each image it returned named as `[image <name>]`
     (`tool_result` gives the images themselves). `name` may also be a plugin's tool or
     `scadbuddy_http__http_request`, named `<server>__<tool>` as the assistant sees them.
     An outward tool (one that changes something outside ScadBuddy) waits for a person
     to approve it first."""
-    return (await _run_tool(name, args, runner)).text
+    owner: StepOwner = workflow.instance()
+    return (await _run_tool(name, args, owner.runner)).text
 
 
 @agent.tool_defn(inherently_safe=True)
-async def tool_result(
-    name: str, args: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]
-) -> ToolResult:
+async def tool_result(name: str, args: dict[str, Any]) -> ToolResult:
     """`tool`, answering `{"text": ..., "images": [...]}`: the images the tool returned,
     each an `Image` pointer kept with this run. An outward tool waits for approval."""
-    return await _run_tool(name, args, runner)
+    owner: StepOwner = workflow.instance()
+    return await _run_tool(name, args, owner.runner)
 
 
 #: The agent's refusals of a session (`agent/src/temporal/flowSessions.ts`) and a turn
@@ -1446,7 +1442,7 @@ _INNER = (human_answer, approved_print, approved_arrange, approved_tool, approve
 SCRIPT_TOOLS: list[Any] = [t for t in FLOW_TOOLS if t not in _INNER]
 
 
-def inputs_tool(schema: dict[str, Any], values: dict[str, Any] | None = None) -> Any:
+def inputs_tool(schema: dict[str, Any]) -> Any:
     """`inputs()` for a flow with an inputs schema (#2483): the run's values, typed as
     the schema's `FlowInputs`. It reads the run's own message, so it records no step."""
     model = inputs_model(schema)
@@ -1455,7 +1451,8 @@ def inputs_tool(schema: dict[str, Any], values: dict[str, Any] | None = None) ->
         """This run's inputs, as the flow's inputs.json declares them, defaults filled
         in. An input that is neither required nor has a default is None when the run
         was not given it."""
-        return model.model_validate(values or {})
+        owner: StepOwner = workflow.instance()
+        return model.model_validate(owner.inputs or {})
 
     _inputs.__name__ = _inputs.__qualname__ = "inputs"
     _inputs.__annotations__ = {"return": model}
@@ -1524,67 +1521,73 @@ class OrderItemChanged(BaseModel):
     attempt: int | None = None
 
 
-def trigger_tool(event: dict[str, Any] | None = None) -> Any:
-    """`trigger()` (#2666): the event a trigger fired this run on, as the fire recorded
-    it, or None. It reads the run's own message, so it records no step. Data only: who
-    the run acts as, and its grant, are the trigger's record (spec 2026-10-11 §12.4)."""
-
-    async def trigger() -> (
-        ModelChanged
-        | RenderFinished
-        | PrintFinished
-        | PrintFailed
-        | OrderChanged
-        | OrderItemChanged
-        | None
-    ):
-        """The event that started this run, told apart by `kind`: a template changed
-        (`commit`), a render finished (`job_id`), or a print finished or failed
-        (`run_id`, `output_id`, `printer`), each with its template's `slug`; or an
-        order's status changed (`order_id`, `status`, `customer_id`), or a line item's
-        (`order_id`, `item_id`, `status`, `attempt`). None for a run started by hand or
-        on a schedule."""
-        if event is None:
+# `trigger()` (#2666): the event a trigger fired this run on, as the fire recorded it, or
+# None. It reads the run's own message, so it records no step. Data only: who the run
+# acts as, and its grant, are the trigger's record (spec 2026-10-11 §12.4).
+@agent.tool_defn(inherently_safe=True)
+async def trigger() -> (
+    ModelChanged
+    | RenderFinished
+    | PrintFinished
+    | PrintFailed
+    | OrderChanged
+    | OrderItemChanged
+    | None
+):
+    """The event that started this run, told apart by `kind`: a template changed
+    (`commit`), a render finished (`job_id`), or a print finished or failed
+    (`run_id`, `output_id`, `printer`), each with its template's `slug`; or an
+    order's status changed (`order_id`, `status`, `customer_id`), or a line item's
+    (`order_id`, `item_id`, `status`, `attempt`). None for a run started by hand or
+    on a schedule."""
+    owner: StepOwner = workflow.instance()
+    event = owner.trigger_event
+    if event is None:
+        return None
+    match event.get("kind"):
+        case "model.changed":
+            return ModelChanged.model_validate(event)
+        case "print.finished":
+            return PrintFinished.model_validate(event)
+        case "print.failed":
+            return PrintFailed.model_validate(event)
+        case "order.changed":
+            return OrderChanged.model_validate(event)
+        case "order_item.changed":
+            return OrderItemChanged.model_validate(event)
+        case "render.finished":
+            return RenderFinished.model_validate(event)
+        case _:
             return None
-        match event.get("kind"):
-            case "model.changed":
-                return ModelChanged.model_validate(event)
-            case "print.finished":
-                return PrintFinished.model_validate(event)
-            case "print.failed":
-                return PrintFailed.model_validate(event)
-            case "order.changed":
-                return OrderChanged.model_validate(event)
-            case "order_item.changed":
-                return OrderItemChanged.model_validate(event)
-            case "render.finished":
-                return RenderFinished.model_validate(event)
-            case _:
-                return None
-
-    return agent.tool_defn(inherently_safe=True)(trigger)
 
 
 #: Every host function a script of a flow without inputs may call, as the type check and
 #: the editor see them.
-HOST_FUNCTIONS: list[Any] = [*SCRIPT_TOOLS, trigger_tool()]
+HOST_FUNCTIONS: list[Any] = [*SCRIPT_TOOLS, trigger]
 #: The name of every host function a script may call on this build, `inputs()` included
 #: (#4146): what the API stamps on a run it starts (`FlowStart.host_functions`), and what
 #: the ``projects`` worker says it serves (`registered.RegisteredActivities`).
 HOST_FUNCTION_NAMES: frozenset[str] = frozenset([*(fn.__name__ for fn in HOST_FUNCTIONS), "inputs"])
 
 
-def run_flow_tool(
-    runner: AgentWorkflowRunner | None = None,
-    inputs_schema: dict[str, Any] | None = None,
-    inputs: dict[str, Any] | None = None,
-    event: dict[str, Any] | None = None,
-) -> Any:
+def run_flow_tool(inputs_schema: dict[str, Any] | None = None) -> Any:
     """The Code Mode tool over the host functions a script may call, with `trigger()`,
-    and `inputs()` when the flow declares inputs. Outside a workflow (the type check) no
-    runner is injected."""
-    injections = {"runner": runner} if runner is not None else None
-    tools = [*SCRIPT_TOOLS, trigger_tool(event)]
+    and `inputs()` when the flow declares inputs.
+
+    One tool per inputs schema, made once per process and shared by every run (#7066).
+    The harness renders the stubs and builds a pydantic adapter per parameter when it
+    makes the tool; in the workflow sandbox that took 20 ms per run, and 0.3 s on a
+    loaded host, of the 2 s the deadlock detector gives an activation. The tool holds
+    nothing of a run: each host function reads the run's runner, inputs and event from
+    the running workflow (`StepOwner`). `warm_sandbox` makes the one without inputs
+    before the worker polls."""
+    key = None if inputs_schema is None else json.dumps(inputs_schema, sort_keys=True)
+    return _flow_tool(key)
+
+
+@functools.lru_cache(maxsize=64)
+def _flow_tool(inputs_schema: str | None) -> Any:
+    tools = [*SCRIPT_TOOLS, trigger]
     if inputs_schema is not None:
-        tools.append(inputs_tool(inputs_schema, inputs))
-    return agent.code_mode_tool(tools, name="run_flow", injections=injections)
+        tools.append(inputs_tool(json.loads(inputs_schema)))
+    return agent.code_mode_tool(tools, name="run_flow")

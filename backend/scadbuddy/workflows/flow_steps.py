@@ -9,7 +9,7 @@ so it is the workflow's state and replays with it.
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -28,10 +28,19 @@ FLOW_PROJECT = "flow_project"
 
 
 class StepOwner(Protocol):
-    """What `step` needs of the running workflow."""
+    """What `step` and the host functions need of the running workflow."""
 
     @property
     def run_id(self) -> str: ...
+
+    @property
+    def runner(self) -> Any: ...
+
+    @property
+    def trigger_event(self) -> dict[str, Any] | None: ...
+
+    @property
+    def inputs(self) -> dict[str, Any] | None: ...
 
     def next_seq(self) -> int: ...
 

@@ -130,17 +130,34 @@ class ProjectWorkflow:
         self._executed = False
         self._seq = 0
         self._started: set[str] = set()
+        self._event: dict[str, Any] | None = None
+        self._inputs: dict[str, Any] | None = None
         self._runner = AgentWorkflowRunner(
             config,
             stream=WorkflowStream(),
             approval_policy_default=ToolApprovalPolicy.allow_inherently_safe(),
         )
-        self._flow = run_flow_tool(self._runner)
+        self._flow = run_flow_tool()
 
     @property
     def run_id(self) -> str:
         """The flow run's id (not Temporal's run id)."""
         return self._start.run_id
+
+    @property
+    def runner(self) -> AgentWorkflowRunner:
+        """The run's harness runner, through which its host functions call their tools."""
+        return self._runner
+
+    @property
+    def trigger_event(self) -> dict[str, Any] | None:
+        """What `trigger()` returns: the event the run's message carries."""
+        return self._event
+
+    @property
+    def inputs(self) -> dict[str, Any] | None:
+        """What `inputs()` validates: the run's inputs, from its message."""
+        return self._inputs
 
     def next_seq(self) -> int:
         """The next host call's step number, from 1."""
@@ -193,10 +210,10 @@ class ProjectWorkflow:
                 "this run has a script already", type="AlreadyExecuted", non_retryable=True
             )
         self._executed = True
-        if message.inputs_schema is not None or message.event is not None:
-            self._flow = run_flow_tool(
-                self._runner, message.inputs_schema, message.inputs, message.event
-            )
+        self._event = message.event
+        self._inputs = message.inputs
+        if message.inputs_schema is not None:
+            self._flow = run_flow_tool(message.inputs_schema)
         info = workflow.info()
         start = self._start
         await workflow.execute_activity(
