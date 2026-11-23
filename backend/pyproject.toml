@@ -45,6 +45,9 @@ dependencies = [
     "packaging>=24",
     # SpoolBuddy's tag scan listens on Bambuddy's WebSocket (#6264, `BambuddyClient.next_tag_scan`).
     "websockets>=15",
+    # The labels PDF (#7157, R-7157-3): pages, text and a vector QR code in one library,
+    # as Bambuddy's own `/inventory/labels` uses.
+    "reportlab>=5.1,<6",
 ]
 
 [build-system]
@@ -77,6 +80,7 @@ dev = [
     "moto[server]>=5.1",
     "types-aiobotocore[s3]>=2.21,<4",
     "pyftpdlib[ssl]>=2.2",
+    "types-reportlab>=5.1,<6",
     # The 3DFP driver's tests and mypy need Playwright for Python (not its browser).
     {include-group = "profile-fetch"},
 ]
