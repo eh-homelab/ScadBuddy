@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { crudRead } from '../src/api/crudRead.js'
+import { backendDropped, crudRead } from '../src/api/crudRead.js'
 import { crudCall, crudJson } from '../src/api/crudStores.js'
 import { defaultPathSerializer } from 'openapi-fetch'
 import { DotSegmentError, isDotSegment, refuseDotSegments, refusingDotParams } from '../src/api/pathSegments.js'
 import { crudCostPoster } from '../src/sessions/orderCosts.js'
+import { isTransient } from '../src/tools/registry.js'
 
 describe('dot segments in backend paths (#7221)', () => {
   it('reads ., .. and their %2e spellings as dot segments, and nothing else', () => {
@@ -17,6 +18,16 @@ describe('dot segments in backend paths (#7221)', () => {
     expect(() => refuseDotSegments('http://api.example/a/..', 'a read')).toThrow(DotSegmentError)
     expect(refuseDotSegments('http://api.example/a/b?x=../y#..', 'a read')).toBe('http://api.example/a/b?x=../y#..')
     expect(refuseDotSegments('http://api.example/a/..%2Fx/b', 'a read')).toBe('http://api.example/a/..%2Fx/b')
+    // A raw backslash is a separator to the URL parser (#7225); an encoded one is not.
+    expect(new URL('http://api.example/a/b\\..\\c').pathname).toBe('/a/c')
+    expect(() => refuseDotSegments('http://api.example/a/b\\..\\c', 'a read')).toThrow(DotSegmentError)
+    expect(refuseDotSegments('http://api.example/a/b%5C..%5Cc', 'a read')).toBe('http://api.example/a/b%5C..%5Cc')
+  })
+
+  it('a refused path is never read as the backend away, so it is never tried again (#7225)', () => {
+    const refused = new DotSegmentError('a read: a path segment is "." or "..", so it was not sent')
+    expect(isTransient(refused)).toBe(false)
+    expect(backendDropped(refused)).toBe(false)
   })
 
   it('refuses a dot segment from a parameter of any style, as serialized', () => {
