@@ -730,6 +730,9 @@ describe('Filament (#6262)', () => {
     await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
     await waitFor(() => expect(mockSettings().filament_drying_temp_c).toBe(55))
     expect(mockSettings().filament_drying_hours).toBe('8.5')
+    // Cleared before the save's answer reaches the form, the fields equal the old stored values
+    // (empty), so the next Save would send nothing.
+    expect(await within(region('Filament')).findByText(/^Saved at /)).toBeInTheDocument()
 
     await user.clear(temp())
     await user.clear(hours())
