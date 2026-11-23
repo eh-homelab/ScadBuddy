@@ -294,8 +294,13 @@ async def test_the_api_drafts_read_the_digest_and_say_none_for_a_404() -> None:
 
 @pytest.mark.parametrize(
     "answer",
-    [httpx.Response(200, json={"name": "shop-notes"}), httpx.Response(200, text="<html>")],
-    ids=["no-digest", "no-json"],
+    [
+        httpx.Response(200, json={"name": "shop-notes"}),
+        httpx.Response(200, text="<html>"),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, json="x"),
+    ],
+    ids=["no-digest", "no-json", "a-list", "a-string"],
 )
 async def test_the_api_drafts_fail_as_an_http_error_on_a_bad_answer(answer: httpx.Response) -> None:
     """#7211: `flow_decide` shapes only an `httpx.HTTPError` as "could not read"; a draft-diff
