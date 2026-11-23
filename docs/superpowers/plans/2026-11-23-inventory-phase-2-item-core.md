@@ -91,7 +91,9 @@ scope addition of 2026-11-23 on #7067 adds `saleable`.
 - Kinds and attribute schemas are rows; no allowlist of kinds or keys in code (spec §4).
   A schema documents and never restricts: every `attribute_schema` write goes through
   #7079's `check_schema` (422 `bad_property_schema`).
-- Kind id: `^[a-z][a-z0-9_]{0,39}$`. `tracking` in `lot`, `unit`, `filament`.
+- Kind id: `^[a-z][a-z0-9_]{0,39}$`. `tracking` in `lot`, `unit`, `filament`, `none`.
+  A `none` kind is not counted: its items take offers and prices, never lots, units or
+  moves; every stock call on such an item is 409 `item_not_counted` (Ruling 1).
   `life_basis` in `none`, `hours`, `months`.
 - Money: stock costs are in the shop currency (`orders_currency`), in minor units.
   `unit_cost_minor numeric(20,6)`, `amount_minor numeric(20,6)`, unrounded; job cost
@@ -106,7 +108,7 @@ scope addition of 2026-11-23 on #7067 adds `saleable`.
 - Nothing in phase 2 sends an item, offer or price to Bambuddy (D16).
 - Entity wire form `kind:ref`; new kinds `item`, `lot`, `unit` (uuid ids).
 - Agent tool risks: reads `read`; every inventory write `write` (as `part_stock_add`,
-  `orders.ts:1609`), unless the owner answers Q8 otherwise.
+  `orders.ts:1609`); `inventory_lot_recost` is `write` too (Ruling 8).
 - Each layer: `cd backend && uv run --frozen ruff check . && uv run --frozen ruff format
   --check . && uv run --frozen mypy`; `cd frontend && pnpm lint && pnpm typecheck`;
   `cd agent && pnpm lint && pnpm typecheck` for the trees it touches.
@@ -147,7 +149,8 @@ scope addition of 2026-11-23 on #7067 adds `saleable`.
 7. **Coverage.** Each new route is a tool or a `coverage.ts` entry, or
    `agent/test/coverage.test.ts` fails (`agent/CLAUDE.md` l.393-396). Layer 2 adds
    temporary entries naming the layer-5 tools (the pattern of #7085); layer 5 drops them.
-8. **#7278 contract.** Seeded kind `spool_part` (`tracking = unit`, `saleable = false`,
+8. **#7278 contract.** #7278 waits for phase 3 (#7068) as well (Ruling 7); phase 2 adds
+   no `filament_spools` column. Seeded kind `spool_part` (`tracking = unit`, `saleable = false`,
    schema with `empty_weight_g` and `role`); `stock_units.installed_in_unit_id` exists;
    moves accept `use` and `return` with `entity_id`. Phase 2 builds no install route.
 
@@ -183,7 +186,7 @@ scope addition of 2026-11-23 on #7067 adds `saleable`.
 Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 - `item_kinds (id text PK CHECK (id ~ '^[a-z][a-z0-9_]{0,39}$'), name text NOT NULL
   (1..100), parent_id text REFERENCES item_kinds (id), tracking text NOT NULL CHECK IN
-  ('lot','unit','filament'), uom text NOT NULL DEFAULT 'each' CHECK (uom ~ '^[a-z]{1,8}$'),
+  ('lot','unit','filament','none'), uom text NOT NULL DEFAULT 'each' CHECK (uom ~ '^[a-z]{1,8}$'),
   attribute_schema jsonb NOT NULL DEFAULT '{"type":"object","properties":{}}', life_basis
   text NOT NULL DEFAULT 'none' CHECK IN ('none','hours','months'), saleable boolean NOT
   NULL DEFAULT false, builtin boolean NOT NULL DEFAULT false, archived_at timestamptz,
@@ -207,8 +210,8 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   '^[A-Z]{3}$'), on_date date NOT NULL, source text NOT NULL CHECK IN
   ('invoice','manual'), invoice_line_id uuid REFERENCES filament_invoice_lines (id),
   created_at, CONSTRAINT offer_price_points_source_line CHECK ((source = 'invoice') =
-  (invoice_line_id IS NOT NULL)))`; index `(offer_id, on_date DESC)`. (Q4: the owner
-  may drop this table from phase 2; its shape is spec §6.5's.)
+  (invoice_line_id IS NOT NULL)))`; index `(offer_id, on_date DESC)`. (Ruling 4: created
+  now, in spec §6.5's final shape; phase 3 moves `filament_price_points` into it.)
 - `stock_lots (id uuid PK, item_id uuid NOT NULL REFERENCES items (id), location_id uuid
   REFERENCES filament_locations (id), received_qty numeric(20,6) NOT NULL, on_hand
   numeric(20,6) NOT NULL, unit_cost_minor numeric(20,6) NOT NULL CHECK (>= 0),
@@ -242,7 +245,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   (amount_minor = qty * unit_cost_minor))`; indexes `(item_id, at)`, `(order_item_id)
   WHERE order_item_id IS NOT NULL`, `(lot_id)`. No FK on `order_id`/`order_item_id`
   (a move outlives a deleted draft, as `part_stock_moves` l.39-42).
-- Seed rows of `item_kinds` (`builtin = true`), defaults per Q1: see Task 1 test.
+- Seed rows of `item_kinds` (`builtin = true`), per Ruling 1: see Task 1 test.
   `spool_part` gets `attribute_schema` `{"type":"object","properties":{"empty_weight_g":
   {"type":"integer","exclusiveMinimum":0,"description":"Weight of the empty part in
   grams"},"role":{"type":"string","enum":["shell","addon"],"description":"A reusable
@@ -251,7 +254,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 - [ ] **Step 1: Write the failing tests** (`requires_postgres`, the `pg_conninfo` /
   `pg_pool` fixtures `tests/entities/conftest.py` uses):
   - `test_the_builtin_kinds_are_seeded`: ids, parents, tracking, uom, life_basis and
-    saleable equal this table (Q1 defaults):
+    saleable equal this table (Ruling 1):
 
     | id | parent | tracking | uom | life_basis | saleable |
     |---|---|---|---|---|---|
@@ -268,7 +271,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
     | equipment | — | unit | each | months | false |
     | dry_bin, tool | equipment | unit | each | months | false |
     | printed_part, assembly | — | lot | each | none | true |
-    | service | — | lot | each | none | false |
+    | service | — | none | each | none | false |
     | spool_part | — | unit | each | none | false |
 
   - `test_spool_part_schema_passes_check_schema`: `check_schema(row.attribute_schema)` raises nothing for every seeded kind.
@@ -294,19 +297,19 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 **Interfaces:**
 - Consumes: #7079 `check_schema`, `BadPropertySchema`, `_schema_in`; `EntityStore`.
 - Produces (`inventory/models.py`):
-  - `Tracking = Literal["lot", "unit", "filament"]`, `LifeBasis = Literal["none", "hours", "months"]`.
+  - `Tracking = Literal["lot", "unit", "filament", "none"]`, `LifeBasis = Literal["none", "hours", "months"]`.
   - `ItemKind(BaseModel)`: `id, name, parent_id: str | None, tracking, uom, attribute_schema: dict, life_basis, saleable: bool, builtin: bool, archived_at, item_count: int`.
   - `KindInput` (`id`, `name`, `parent_id`, `tracking`, `uom`, `attribute_schema`, `life_basis`, `saleable`), `KindPatch` (all optional but `id`), `extra="forbid"`.
   - `Item(BaseModel)`: `id: UUID, kind_id, kind_path: list[str]` (root first), `tracking, uom, name, manufacturer, compatible_with: list[str], low_stock: Decimal, life_hours, life_months, saleable: bool | None, effective_saleable: bool, source, source_ref, edited_fields, note, archived_at, on_hand: Decimal` (lots' sum, or units `in_stock` count), `stock_value_minor: Decimal` (on-hand lots × cost, plus in-stock units' cost), `cost_unknown: bool`, `low: bool` (`low_stock > 0 and on_hand <= low_stock`).
   - `ItemInput`, `ItemPatch` (`extra="forbid"`).
 - Produces (`inventory/kinds.py`): `class KindStore(pool)`: `list(include_archived=False) -> list[ItemKind]`, `get(id)`, `create(body, by)`, `update(id, patch, by)`, `archive(id)`, `restore(id)`; `merged_schema(conn, kind_id) -> dict` (ancestors' `properties` then the kind's, a child's key wins); `item_schema(conn, item_id: str) -> dict` (the item's kind's merged schema; the empty object schema for a bad id). Errors: `KindNotFound`, `KindExists`, `KindCycle`, `KindInUse` (tracking change on a kind with items, or on a builtin), `BadPropertySchema` (re-raised from `check_schema`).
-- Produces (`inventory/items.py`): `class ItemStore(pool, entities)`: `list(*, kind: str | None, descendants: bool = True, q: str | None, low: bool = False, include_archived: bool = False, compatible: str | None) -> list[Item]`; `get(id) -> Item | None`; `create(body, by) -> Item`; `update(id, patch, by) -> Item` (adds each changed field to `edited_fields` when `source != 'manual'`); `archive(id)`, `restore(id)`. Errors: `ItemNotFound`, `ItemExists`, `FilamentItemRefused` (a kind with `tracking = filament`, Q9), `KindArchived`. `q` matches name, manufacturer and any property value of the item (`EXISTS` over `entity_properties` joined to `entities` with `kind = 'item'`, `value::text ILIKE`).
+- Produces (`inventory/items.py`): `class ItemStore(pool, entities)`: `list(*, kind: str | None, descendants: bool = True, q: str | None, low: bool = False, include_archived: bool = False, compatible: str | None) -> list[Item]`; `get(id) -> Item | None`; `create(body, by) -> Item`; `update(id, patch, by) -> Item` (adds each changed field to `edited_fields` when `source != 'manual'`); `archive(id)`, `restore(id)`. Errors: `ItemNotFound`, `ItemExists`, `FilamentItemRefused` (a kind with `tracking = filament`, Ruling 9), `KindArchived`. `q` matches name, manufacturer and any property value of the item (`EXISTS` over `entity_properties` joined to `entities` with `kind = 'item'`, `value::text ILIKE`).
 - Produces (`entities/properties.py`): `schema_for(conn, ref: EntityRef) -> dict[str, Any]`; `apply` uses it; `class SchemaOwnedByKind(ValueError)` raised by `set_schema("item", …)`.
 - Produces (`inventory/component.py`): `INVENTORY` component key; `InventoryComponent.kinds`, `.items`, `.offers`, `.stock`; `InventoryDep`.
 
 - [ ] **Step 1: Write the failing tests**
   - `test_kinds.py`: create `fastener` under `part`; `merged_schema("fastener")` has `part`'s keys plus its own; a child key overrides the parent's subschema; `update(parent_id=<own descendant>)` raises `KindCycle`; a restricting schema (`additionalProperties: false`) raises `BadPropertySchema` and the stored schema is unchanged; changing `tracking` of `nozzle` raises `KindInUse`; `archive` of a kind with unarchived items raises `KindInUse`.
-  - `test_items.py`: create in `hardware`, `get` gives `kind_path == ["part", "hardware"]`, `effective_saleable is False`; with `saleable=True` it is True; `list(kind="part")` includes it, `list(kind="part", descendants=False)` does not; a second item named the same in any case in the kind raises `ItemExists`; create in `filament` raises `FilamentItemRefused`; with `source="bambu_store"`, `update(name=…)` gives `edited_fields == ["name"]`; `list(q="0451")` finds an item whose property `mpn` is `"X-0451"`.
+  - `test_items.py`: an item of `service` (`tracking = none`) has `on_hand == 0`, `stock_value_minor == 0` and `low is False` whatever its `low_stock`; create in `hardware`, `get` gives `kind_path == ["part", "hardware"]`, `effective_saleable is False`; with `saleable=True` it is True; `list(kind="part")` includes it, `list(kind="part", descendants=False)` does not; a second item named the same in any case in the kind raises `ItemExists`; create in `filament` raises `FilamentItemRefused`; with `source="bambu_store"`, `update(name=…)` gives `edited_fields == ["name"]`; `list(q="0451")` finds an item whose property `mpn` is `"X-0451"`.
   - `test_properties.py`: `test_an_items_schema_is_its_kinds`: set `part`'s schema to type `mpn` as string; `apply(item:<id>, {"mpn": 5})` raises `BadPropertyValue("mpn", …)`; `{"colour": "red"}` is stored; `set_schema("item", …)` raises `SchemaOwnedByKind`.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory tests/entities/test_properties.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement** the models, stores, component and the registry rows. `apply` reads `schema_for` before its transaction, as it reads `_schema_in` today.
@@ -346,7 +349,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   - `set_lot_cost(lot_id, unit_cost_minor, by) -> Lot` (clears `cost_unknown`; no move changes, D14).
   - `recost_lot(conn, lot_id) -> RecostResult` — every `use`/`return`/`adjust` move of the lot re-snapshotted at the lot's cost now; per order item, the parts sum before and after.
   - `lots(item_id)`, `units(item_id, status?)`, `moves(*, item_id=None, lot_id=None, unit_id=None, order_item_id=None, limit=200)`, `estimate_unit_cost(conn, item_id, qty) -> tuple[Decimal, bool]` (what `take` would charge per unit now, and whether any part is cost-unknown; reads, writes nothing).
-  - Errors: `LotNotFound`, `UnitNotFound`, `WrongTracking` (a lot call on a unit item and the reverse), `BadQuantity`, `UnitInstalled`.
+  - Errors: `LotNotFound`, `UnitNotFound`, `WrongTracking` (a lot call on a unit item and the reverse), `ItemNotCounted` (any lot, unit or move call on an item of a `none` kind, Ruling 1; `take` raises it too, so an order part of such an item is refused at `set_item_parts`), `BadQuantity`, `UnitInstalled`.
 
 - [ ] **Step 1: Write the failing tests** (`test_stock.py`):
   - `test_fifo_takes_the_oldest_lot_first`: lots 10 @ 5.00 (day 1) and 10 @ 7.00 (day 2); take 15 → moves `-10 @ 500`, `-5 @ 700`; on hand 0 and 5.
@@ -358,6 +361,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   - `test_a_whole_number_uom_refuses_a_fraction`: `each`, qty `1.5` → `BadQuantity`; `ml` takes it.
   - `test_unit_status_writes_its_move`: receive 2 units at 3000; `in_service` → `use` move −1 @ 3000 and `in_service_at` set; `retired` then → `retire`.
   - `test_lot_calls_on_a_unit_item_are_refused` (`WrongTracking`).
+  - `test_a_not_counted_item_takes_no_stock`: an item of `service`: `receive_lot`, `receive_units`, `take`, `use`, `count_item` each raise `ItemNotCounted` and no row is written.
   - `test_estimate_matches_take`: `estimate_unit_cost(item, 15)` is `(Decimal("566.666667"), False)` for the two lots above, and nothing is written.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_stock.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement** `stock.py`. Keep `lots.on_hand` equal to the sum of its moves in each write's transaction.
@@ -388,7 +392,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   - Stock: `GET|POST /inventory/items/{item_id}/lots`; `GET|POST /inventory/items/{item_id}/units`; `GET|PATCH /inventory/lots/{lot_id}` (PATCH: `unit_cost_minor`, `location_id`, `note`); `POST /inventory/lots/{lot_id}/adjust`; `POST /inventory/items/{item_id}/use`; `POST /inventory/items/{item_id}/count`; `GET|PATCH /inventory/units/{unit_id}` (name, serial, location); `POST /inventory/units/{unit_id}/status`; `GET /inventory/moves?item_id=&lot_id=&unit_id=&order_item_id=&limit=`.
   - `POST /inventory/lots/{lot_id}/recost` is added in Task 7 (it writes order events).
   - `GET /entities/{ref}/property-schema` → `KindPropertySchema` of the entity's effective schema (`schema_for`), for every kind.
-  - Problems (`inventory/problems.py`): 404 `kind_not_found`, `item_not_found`, `offer_not_found`, `lot_not_found`, `unit_not_found`, `supplier_not_found`; 409 `kind_exists`, `kind_in_use`, `item_exists`, `offer_exists`, `wrong_tracking`, `unit_installed`, `filament_item_refused`, `schema_owned_by_item_kind`; 422 `kind_cycle`, `bad_quantity`, `bad_property_schema`, `bad_currency`.
+  - Problems (`inventory/problems.py`): 404 `kind_not_found`, `item_not_found`, `offer_not_found`, `lot_not_found`, `unit_not_found`, `supplier_not_found`; 409 `kind_exists`, `kind_in_use`, `item_exists`, `offer_exists`, `wrong_tracking`, `item_not_counted`, `unit_installed`, `filament_item_refused`, `schema_owned_by_item_kind`; 422 `kind_cycle`, `bad_quantity`, `bad_property_schema`, `bad_currency`.
 
 - [ ] **Step 1: Write the failing tests** with the app `client` fixture of `tests/api/test_entity_links.py`: one round trip per family (kinds, items, offers, lots, units, moves); each problem code above at least once; `GET /entities/item:<id>/property-schema` returns the merged kind schema; `PUT /entity-kinds/item/property-schema` → 409 `schema_owned_by_item_kind`; `PATCH /entities/item:<id>/properties` with a value the kind types wrong → 422 `bad_property_value`; `POST /inventory/kinds` with `"attribute_schema": {"type":"object","required":["mpn"]}` → 422 `bad_property_schema` and `GET` shows no kind.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/api/test_inventory.py tests/api/test_inventory_stock.py tests/api/test_entity_properties.py -q` — Expected: FAIL (404).
@@ -408,15 +412,15 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 The migration, in one file, in this order:
 1. `part_item_map`: `item_id = parts.id::uuid` when it is a uuid's text, else
    `gen_random_uuid()`.
-2. `items` from `parts`: kind `hardware` (Q2), name, `low_stock`, `source = 'manual'`,
+2. `items` from `parts`: kind `hardware` (Ruling 2), name, `low_stock`, `source = 'manual'`,
    `created_at`/`updated_at` kept.
-3. Suppliers (Q5): for each distinct non-empty `parts.supplier`, the unarchived
+3. Suppliers (Ruling 5): for each distinct non-empty `parts.supplier`, the unarchived
    `filament_suppliers` row with that `upper(name)`, else a new row (name only). One
    `supplier_offers` row per part with a supplier: `sku` = `'PART-' || left(item_id::text, 8)`
    (parts have no SKU; a person edits it), `url` = `parts.link` or NULL, `pack_size` =
    `parts.pack_size`. One `offer_price_points` row per offer: `price` =
    `pack_price_minor / 10^exponent` in `parts.currency`, `on_date` = `parts.updated_at::date`,
-   `source = 'manual'` (Q4). The exponent comes from the part's currency as
+   `source = 'manual'` (Ruling 4). The exponent comes from the part's currency as
    `orders/currency.py` `minor_exponent` gives it; write the three-letter exceptions as a
    SQL `CASE` and cite that file.
 4. A part with a link and no supplier: one `entity_links` row, `kind = 'purchase'`,
@@ -442,7 +446,7 @@ The migration, in one file, in this order:
    `jsonb_set` over the array; the key becomes `item_id`.
 10. `entities` of kind `part`: `kind = 'item'`, `ref` = the item id; their
     `entity_attachments.subject` likewise.
-11. Rename `parts` → `parts_retired`, `part_stock_moves` → `part_stock_moves_retired` (Q6).
+11. Rename `parts` → `parts_retired`, `part_stock_moves` → `part_stock_moves_retired` (Ruling 6; a follow-up issue drops them after a prod check).
 
 - [ ] **Step 1: Write the failing tests** (apply files before this one, seed, apply it):
   - `test_the_parts_migration_keeps_stock_cost_and_history`: a part (USD, shop USD) with
@@ -536,7 +540,8 @@ The migration, in one file, in this order:
   offer + its latest price point; `unit_cost_minor` = on-hand lots' weighted average for
   display; `POST /parts` creates an item of kind `hardware` + offer + price + a `manual`
   lot when `on_hand > 0`; `POST /parts/{id}/stock` receives `packs × pack_size` at
-  `packs × pack price`; `POST /parts/{id}/adjust` → `count_item`; `GET /parts/{id}/moves`
+  `packs × pack price` (the offer's latest price point, or the body's `pack_price_minor`,
+  which also writes a new `manual` price point: Add stock keeps prefilling the cost, Ruling 4); `POST /parts/{id}/adjust` → `count_item`; `GET /parts/{id}/moves`
   maps `Move` to `StockMove`; each route's description says "Alias of /inventory/…; goes
   after one release", spec §6.11)
 - Modify: `frontend/src/pages/PartsPage.tsx` (the panels' entity `part:<id>` → `item:<id>`)
@@ -560,7 +565,8 @@ Load `frontend-design` first.
   table: name, kind, on hand, low, value, offers count; search; low filter; "New item"),
   `ItemPage.tsx` (header with kind path and saleable; `PropertiesPanel`, offers with
   purchase links and latest price and "Add price", `LinksPanel`, `AttachmentsPanel`, lots or
-  units by tracking with "Receive", "Use", "Count", lot cost edit and "Re-cost past uses",
+  units by tracking (none for a `none` kind: offers only) with "Receive" (cost prefilled
+  from the newest offer's latest price × qty / pack size, Ruling 4), "Use", "Count", lot cost edit and "Re-cost past uses",
   moves), `UnitPage.tsx` (status with its actions, location, cost, the three panels),
   `KindsPage.tsx` (tree, add, edit name, parent, uom, life basis, saleable, archive; the
   schema as a key table: key, type, description; refusals show the 422 detail),
@@ -642,7 +648,7 @@ Load `frontend-design` first.
   upserts do; write), `inventory_item_archive` (write), `inventory_offer_list` (read),
   `inventory_offer_upsert` (write), `inventory_offer_price_add` (write),
   `inventory_lot_receive` (write), `inventory_lot_update` (cost, location, note; write),
-  `inventory_lot_recost` (write, Q8), `inventory_unit_receive` (write),
+  `inventory_lot_recost` (write, Ruling 8), `inventory_unit_receive` (write),
   `inventory_unit_status` (write), `inventory_move_list` (read), `inventory_move_use`
   (write), `inventory_move_count` (write). Every result names `entity_ui_path` (the #6878
   pattern) and is wrapped as untrusted data as the other tools are.
@@ -685,38 +691,31 @@ Load `frontend-design` first.
   rules in place.
 - Install, value over life and printers as units (§6.4): phase 4 (#7069); the columns exist.
 - `saleable` is stored and shown; refusing to sell is phase 6 (#7071) and #7278.
+- #7278 (spool parts) waits for phase 3 (#7068), where spools get `filament_spools.unit_id`
+  (Ruling 7).
 
-## Open questions for the owner
+## Rulings (owner, 2026-11-23)
 
-Each has a proposed default, marked **(default)**. The plan is written to the default.
+Answers to the plan's open questions, given through the coordinator. "Owner" marks the
+owner's own ruling; "Controller" marks a proposed default the coordinator accepted. Every
+task above follows them.
 
-1. **Built-in kinds.** The spec names the kinds but not each one's tracking, unit, life
-   basis or saleable flag. The table in Task 1 is the proposal **(default)**. The owner
-   named only `spool_part`, `equipment`, `consumable` and AMS parts as not saleable and
-   `printed_part`, `assembly` as saleable; the proposal makes every other built-in kind not
-   saleable. Is `service` a `lot` kind (it must take one of the three trackings), or should
-   tracking gain `none`?
-2. **Kind for migrated parts.** All parts become items of kind `hardware` (under `part`)
-   **(default)**, or each part's kind is chosen by hand after the migration.
-3. **Part cost in job cost.** `orders/costs.py` reads a new `parts` figure from
-   `stock_moves`; the migration converts every `part_stock_moves` row and deletes the
-   `part:` cost entries it replaces, so totals stay the same and the figure moves from
-   "other" to "parts" **(default)**. Or: keep writing a `material` cost entry whose amount
-   is the moves' sum, and leave `costs.py` alone.
-4. **Pack prices.** Spec §6.5 gives phase-2 offers no price, but today's part has a pack
-   price that "Add stock" uses. Create `offer_price_points` now for non-filament offers,
-   in spec §6.5's final shape, and move each pack price there **(default)**; or keep no
-   price in phase 2 and drop the pack price (only the opening lot keeps the unit cost).
-5. **Parts with no supplier name.** No supplier and no offer; the link becomes a
-   `purchase` entity link **(default)**. Or a placeholder supplier "Unknown".
-6. **The old tables.** Rename `parts` and `part_stock_moves` to `*_retired` and drop them in
-   a follow-up after a prod check **(default)**, or drop them in the migration.
-7. **#7278 and `filament_spools.unit_id`.** The spool-parts spec installs a part unit on a
-   spool's unit, but spool units arrive in phase 3 (spec §6.4, §9). Either #7278 also waits
-   for phase 3 (#7068) **(default)**, or #7278 adds `filament_spools.unit_id` itself.
-8. **Re-cost from the assistant.** `inventory_lot_recost` changes past orders' costs. Tier
-   `write` **(default)**, or `outward` (a pending action a person approves).
-9. **Filament items before phase 3.** Refuse items and offers of a `filament` kind until
-   spool types get their items **(default)**, or allow them now.
-10. **Quote estimate of parts.** The unit-cost estimate prices parts at what a FIFO take
-    would cost now **(default)**, or at the on-hand weighted average (today's rule).
+1. **Owner.** Kinds gain a fourth tracking, `none` ("not counted"): the kind has items and
+   offers and prices, but never lots, units or moves; any stock call or move on such an
+   item is refused (409 `item_not_counted`). `service` is a `none` kind. The rest of the
+   built-in kinds table (Task 1) stands as proposed. Spec §6.4 carries the amendment
+   (this branch).
+2. **Controller.** Migrated parts become items of kind `hardware`.
+3. **Owner.** Job cost gets a `parts` figure read from `stock_moves`. The migration
+   converts `part_stock_moves` and deletes the `part:` cost entries it replaces.
+4. **Owner.** Pack prices are kept: `offer_price_points` is created now, in spec §6.5's
+   final shape, and each part's pack price moves there. Add stock keeps prefilling the cost.
+5. **Controller.** A part with no supplier name gets no supplier and no offer; its link
+   becomes a `purchase` entity link.
+6. **Controller.** `parts` and `part_stock_moves` are renamed `*_retired`; a follow-up drops
+   them after a prod check.
+7. **Owner.** #7278 waits for phase 3 (#7068); phase 2 adds no `filament_spools` column.
+   `spool_part` stays seeded.
+8. **Controller.** `inventory_lot_recost` is tier `write`.
+9. **Controller.** Items and offers of a `filament` kind are refused until phase 3.
+10. **Controller.** The quote estimate prices parts at what a FIFO take would cost now.
