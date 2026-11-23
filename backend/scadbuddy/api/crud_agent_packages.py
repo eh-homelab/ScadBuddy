@@ -227,29 +227,6 @@ async def _in_tx[T](state: Any, fn: Callable[[psycopg.Connection[Any]], T]) -> T
     return await asyncio.to_thread(run)
 
 
-def _pending_kind(row: Any) -> str | None:
-    """The re-pin's kind, as the migration's ``ai_plugin_packages_pending_check`` reads it.
-
-    The previous build's API (still serving during a roll) writes a commit re-pin without
-    ``pending_pin_kind`` and leaves the column set when it clears a re-pin, so the column
-    alone is not the kind: with no re-pin (``pending_content_hash`` NULL) there is none, and
-    a NULL column with a ``pending_commit_sha`` is a commit.
-    """
-    if row["pending_content_hash"] is None:
-        return None
-    kind = row["pending_pin_kind"]
-    if kind is None and row["pending_commit_sha"] is not None:
-        return "commit"
-    return kind  # type: ignore[no-any-return]
-
-
-def _read(row: Any) -> dict[str, Any]:
-    """A row as every route reads it: the re-pin's kind as `_pending_kind` gives it."""
-    out = dict(row)
-    out["pending_pin_kind"] = _pending_kind(row)
-    return out
-
-
 def _rows(conn: psycopg.Connection[Any], rows: list[Any]) -> list[PackageRow]:
     """Rows as every route answers them, a hosted one with its plugin's latest version."""
     hosted = [r["name"] for r in rows if r["source_kind"] == "hosted"]
@@ -263,7 +240,7 @@ def _rows(conn: psycopg.Connection[Any], rows: list[Any]) -> list[PackageRow]:
             ).fetchall()
         }
     return [
-        PackageRow.model_validate({**_read(r), "hosted_latest_version": latest.get(r["name"])})
+        PackageRow.model_validate({**r, "hosted_latest_version": latest.get(r["name"])})
         for r in rows
     ]
 
@@ -337,7 +314,7 @@ def _locked(conn: psycopg.Connection[Any], name: str) -> Any:
     ).fetchone()
     if row is None:
         raise _not_found(name)
-    return _read(row)
+    return row
 
 
 @router.get("/plugin-packages", name="crud_agent_plugin_packages")
