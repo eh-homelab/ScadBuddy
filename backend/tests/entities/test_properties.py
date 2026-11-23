@@ -479,3 +479,40 @@ def test_apply_on_a_missing_owner_raises_entity_not_found(
             _patch({"mpn": "x"}),
             BY,
         )
+
+
+@pytest.mark.parametrize("value", ["a\u0000b", ["ok", "a\u0000b"]], ids=["string", "list_item"])
+def test_a_nul_in_a_value_is_refused(
+    pg_pool: PgPool, props: EntityPropertyStore, value: JsonValue
+) -> None:
+    kind = _spool_type(pg_pool)
+
+    with pytest.raises(BadPropertyValue) as caught:
+        props.apply(kind, _patch({"lot_number": value}), BY)
+
+    assert caught.value.key == "lot_number"
+    assert "U+0000" in caught.value.reason
+    assert props.list(kind) == []
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "description": "a\u0000b"},
+        {"type": "object", "properties": {"a\u0000b": {"type": "string"}}},
+        {"type": "object", "properties": {"a": {"type": "string", "enum": ["x\u0000"]}}},
+        {"type": "object", "properties": {"a": {"type": "string", "title": "\u0000"}}},
+        {"type": "object", "properties": {"a": {"type": "string", "examples": [["\u0000"]]}}},
+        {"type": "object", "properties": {"a": {"type": "string", "default": {"k\u0000": 1}}}},
+    ],
+    ids=["description", "property_name", "enum", "title", "examples", "default_key"],
+)
+def test_set_schema_refuses_a_nul_anywhere(
+    props: EntityPropertyStore, schema: dict[str, Any]
+) -> None:
+    before = props.schema("spool_type")
+
+    with pytest.raises(BadPropertySchema):
+        props.set_schema("spool_type", schema, BY)
+
+    assert props.schema("spool_type") == before

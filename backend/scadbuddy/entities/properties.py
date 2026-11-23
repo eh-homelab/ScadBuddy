@@ -123,6 +123,19 @@ class BadPropertySchema(ValueError):  # noqa: N818
         self.reason = reason
 
 
+NUL_PROBLEM = "a string may not hold U+0000"  # Postgres jsonb refuses it
+
+
+def _has_nul(node: Any) -> bool:
+    if isinstance(node, str):
+        return "\u0000" in node
+    if isinstance(node, dict):
+        return any(_has_nul(k) or _has_nul(v) for k, v in node.items())
+    if isinstance(node, list):
+        return any(_has_nul(v) for v in node)
+    return False
+
+
 def _shape_problem(value: JsonValue) -> str | None:
     """Why `value` is none of the four shapes, or None."""
     if isinstance(value, bool):
@@ -134,6 +147,8 @@ def _shape_problem(value: JsonValue) -> str | None:
             finite = False
         return None if finite else "a number must be finite and fit a double"
     if isinstance(value, str):
+        if "\u0000" in value:
+            return NUL_PROBLEM
         return None if len(value) <= MAX_STRING else f"at most {MAX_STRING} characters"
     if isinstance(value, list):
         if len(value) > MAX_LIST:
@@ -141,6 +156,8 @@ def _shape_problem(value: JsonValue) -> str | None:
         for item in value:
             if not isinstance(item, str):
                 return "a list holds strings only"
+            if "\u0000" in item:
+                return NUL_PROBLEM
             if len(item) > MAX_LIST_ITEM:
                 return f"a list's string is at most {MAX_LIST_ITEM} characters"
         return None
@@ -173,17 +190,21 @@ def _validator(canonical: str) -> Draft202012Validator:
 
 def check_schema(schema: dict[str, Any]) -> None:
     """`BadPropertySchema` unless `schema` is a valid Draft 2020-12 object schema in the
-    allowed subset, so it refuses no key, runs no regex and leaves every known key some
-    value it takes. The top level uses only `TOP_KEYWORDS`, with `additionalProperties`
-    only true and `$schema`, when given, `DRAFT_2020_12`. Each key's subschema is an object
-    that uses only `KEY_KEYWORDS` and names only `KEY_TYPES` (or a list of them, with
-    "null"). Its `items` uses only `ITEM_KEYWORDS` and names only `ITEM_TYPES`. In either,
-    `enum` holds a value the key takes, `const` is one, no lower bound passes its upper
-    bound, and no minimum length or count passes the value caps. `format` is an annotation
-    only (it checks nothing), but "regex" is refused all the same. Any other keyword is
-    refused."""
+    allowed subset, so it refuses no key and runs no regex. It also refuses a U+0000 in
+    any string or object key, which Postgres jsonb cannot store. It does not prove that
+    every known key takes some value; it checks only the cases below. The top level uses
+    only `TOP_KEYWORDS`, with `additionalProperties` only true and `$schema`, when given,
+    `DRAFT_2020_12`. Each key's subschema is an object that uses only `KEY_KEYWORDS` and
+    names only `KEY_TYPES` (or a list of them, with "null"). Its `items` uses only
+    `ITEM_KEYWORDS` and names only `ITEM_TYPES`. In either, `enum` holds a value the key
+    takes, `const` is one, no lower bound passes its upper bound, and no minimum length or
+    count passes the value caps. Other empty schemas, such as an integer between two
+    exclusive bounds, are not found. `format` is an annotation only (it checks nothing),
+    but "regex" is refused all the same. Any other keyword is refused."""
     if not isinstance(schema, dict):
         raise BadPropertySchema("a schema is a JSON object")
+    if _has_nul(schema):
+        raise BadPropertySchema("a schema may not hold U+0000 in a string or a key")
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError as e:
