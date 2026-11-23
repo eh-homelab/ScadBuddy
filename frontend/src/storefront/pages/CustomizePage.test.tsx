@@ -2,7 +2,7 @@ import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PreviewJob } from '../../components/Preview'
-import { CHARM_ID, ESTIMATE, KEYCHAIN, NO_PRICE, PENDING_PRICE, TAG_ID } from '../../mocks/features/storefrontPublic'
+import { CHARM_ID, ESTIMATE, FILE_ID, KEYCHAIN, NO_PRICE, PENDING_PRICE, TAG_ID } from '../../mocks/features/storefrontPublic'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import type { PollTiming } from '../poll'
@@ -10,7 +10,16 @@ import { CustomizePage } from './CustomizePage'
 
 // WebGL does not exist in jsdom: the viewer is a stand-in. The e2e run draws the real one.
 vi.mock('../../components/Preview', () => ({
-  Preview: ({ job }: { job?: PreviewJob }) => <div data-testid="preview" data-status={job?.status ?? 'none'} />,
+  Preview: ({ job, slotColours, leading }: { job?: PreviewJob; slotColours?: Record<number, string>; leading?: React.ReactNode }) => (
+    <div
+      data-testid="preview"
+      data-status={job?.status ?? 'none'}
+      data-url={job?.preview_url ?? ''}
+      data-slots={slotColours ? JSON.stringify(slotColours) : ''}
+    >
+      {leading}
+    </div>
+  ),
 }))
 
 const LIMITED = {
@@ -846,5 +855,97 @@ describe('CustomizePage', () => {
     )
     show()
     expect(await screen.findByLabelText('Tilt')).toHaveAttribute('inputmode', 'text')
+  })
+})
+
+describe('CustomizePage of a file listing (#6710)', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    return () => server.events.removeAllListeners()
+  })
+
+  /** Every request the page sent, as `METHOD path` and its JSON body. */
+  function requests(): { what: string; body: unknown }[] {
+    const sent: { what: string; body: unknown }[] = []
+    server.events.on('request:start', async ({ request }) => {
+      const body: unknown = request.method === 'POST' ? await request.clone().json() : null
+      sent.push({ what: `${request.method} ${new URL(request.url).pathname}`, body })
+    })
+    return sent
+  }
+
+  it('shows one picker per part and recolours the held preview with no render', async () => {
+    const sent = requests()
+    const { user } = show(FILE_ID)
+    expect(await screen.findByRole('button', { name: /Part 1/ })).toHaveTextContent('Ocean blue')
+    expect(screen.getByRole('button', { name: /Part 2/ })).toHaveTextContent('Signal orange')
+    const preview = await screen.findByTestId('preview')
+    expect(preview).toHaveAttribute('data-url', '/api/store/v1/listings/l4/preview/1.glb')
+    expect(JSON.parse(preview.dataset.slots!)).toEqual({ 0: '#1B6CA8FF', 1: '#E8532FFF' })
+
+    await user.click(screen.getByRole('button', { name: /Part 2/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Ocean blue' }))
+    await waitFor(() => expect(JSON.parse(screen.getByTestId('preview').dataset.slots!)).toEqual({ 0: '#1B6CA8FF', 1: '#1B6CA8FF' }))
+    // The page never shows a material, the file's own colours or its name.
+    expect(screen.queryByText(/PLA|PETG|3mf/)).toBeNull()
+    await screen.findByText('$7.00 for one')
+    expect(sent.filter(({ what }) => /\/renders|\/variant/.test(what))).toEqual([])
+  })
+
+  it('chooses a plate when the file has more than one', async () => {
+    const { user } = show(FILE_ID)
+    await user.click(await screen.findByRole('radio', { name: 'Plate 2' }))
+    expect(screen.getByTestId('preview')).toHaveAttribute('data-url', '/api/store/v1/listings/l4/preview/2.glb')
+  })
+
+  it('reads the price route with the colours, shows it pending, then firm', async () => {
+    const sent = requests()
+    show(FILE_ID)
+    expect(await screen.findByText('Working out the price…')).toBeInTheDocument()
+    expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+    const prices = sent.filter(({ what }) => what === 'POST /api/store/v1/listings/l4/price')
+    expect(prices.length).toBeGreaterThanOrEqual(2)
+    expect(prices[0]!.body).toEqual({ listing_updated_at: '2026-11-07T12:00:00Z', colours: { 0: 'f-blue', 1: 'f-orange' } })
+  })
+
+  it('keeps the last price on screen, marked as updating, until the new colours are priced', async () => {
+    const { user } = show(FILE_ID)
+    await screen.findByText('$7.00 for one')
+    await user.click(screen.getByRole('button', { name: /Part 1/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
+    expect(screen.getByText('$7.00 for one')).toBeInTheDocument()
+    expect(screen.queryByText('Working out the price…')).toBeNull()
+  })
+
+  it('adds the colours to the order, with no values', async () => {
+    const sent = requests()
+    const { user } = show(FILE_ID)
+    await screen.findByRole('button', { name: /Part 1/ })
+    await user.click(screen.getByRole('button', { name: 'Add to order' }))
+    await screen.findByText('Added to your order.')
+    const added = sent.find(({ what }) => what === 'POST /api/store/v1/draft/items')
+    expect(added?.body).toEqual({
+      listing_id: 'l4',
+      listing_updated_at: '2026-11-07T12:00:00Z',
+      values: {},
+      colours: { 0: 'f-blue', 1: 'f-orange' },
+      quantity: 1,
+    })
+  })
+
+  it('names the parts whose colours cannot go together', async () => {
+    const { user } = show(FILE_ID)
+    await user.click(await screen.findByRole('button', { name: /Part 1/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await user.click(screen.getByRole('button', { name: /Part 2/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent("The part 2 can't go with the other colours.")
+  })
+
+  it('says when the shop changed the design, and loads it again', async () => {
+    server.use(http.post('/api/store/v1/listings/l4/price', () => HttpResponse.json({ type: `${PROBLEMS}listing_changed`, title: 'Conflict', status: 409, detail: 'This listing has changed. Load it again.' }, { status: 409 })))
+    const { user } = show(FILE_ID)
+    await user.click(await screen.findByRole('button', { name: 'Load the latest version' }))
+    expect(await screen.findByRole('button', { name: /Part 1/ })).toBeInTheDocument()
   })
 })

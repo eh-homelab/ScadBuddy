@@ -557,6 +557,30 @@ fixes the material, as a colour parameter does today (`resolve_choice` with `slo
 The title has no colour, and the customer gets every slot (repo rule). The page never
 shows the filename, the file's own colours or a material.
 
+As built (PR 6): the edge's prefix is `/api/store/v1`, so a preview path is
+`/api/store/v1/listings/{id}/preview/{plate}.glb` (`storefront/wire.py`
+`listing_preview_path`) and the price is `POST /api/store/v1/listings/{id}/price`.
+`PublicSlot.default` is null when the listing offers no colour (it is then unavailable). A
+material is printable for a file listing when the listing offers a customer filament of it
+(each offered slot takes any colour of the print's one material, `file_choice`), so the
+first such material of the effective list gives the defaults (`listings.py`
+`_offered_file`). `previews` names only the plates publish held a GLB of (none for a file
+with no readable mesh). The CRUD route is `GET …/storefront/listings/{id}/preview/{plate}.glb`
+(`file_listings.py` `held_preview`, 404 `listing_not_found` or `preview_not_found`),
+streamed from the content store; the edge relays it as a stream. A render, a variant and
+the prepare run still take a template listing only (`published_listing`'s `source`); the
+public list and listing take either. On the page (`frontend/src/storefront/pages/FileCustomize.tsx`),
+`CustomizePage` hands a file listing to `FileCustomize` before its render effect ever sees
+it. The parts are colour parameters named `colours.<slot>` (`fileParts.ts` `partsView`), so
+`ListingView`, `colourPlan` and the clash text serve them unchanged; a pick of a colour that
+only another material offers moves each untouched part to the closest colour of that
+material, as for a template. The price read is debounced as a render is, keeps the last
+price on screen marked as updating until the new colours are priced, and stops at a
+`render_limited` or `rate_limited` refusal with its text. A plate chooser ("Plate 1", …)
+sits over the viewer when the file has more than one plate. The §11.1 "Public" tests are
+`tests/orders/storefront/test_public_files.py` and `tests/api/test_storefront_public_files.py`
+(the native-library client's fixtures would clash with `test_storefront_public.py`'s).
+
 ## 7. Pricing
 
 The pricing owner's constraints are the rule here. §15 maps each one to its section.

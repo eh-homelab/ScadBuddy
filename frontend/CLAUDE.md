@@ -95,6 +95,17 @@ same way, `vite.config.ts`).
   nothing is. "Working out the price…" shows only with no price known; "We price this
   design by hand" only when the render's estimate answers `none`. The mock holds a variant
   once its render's estimate answered (`holdVariant` seeds one).
+  A file listing (#6710 PR 6, `source` `library_file`): `CustomizePage` hands it to
+  `pages/FileCustomize.tsx` before its render effect sees it, so it renders nothing. Its
+  parts are colour parameters named `colours.<slot>` (`fileParts.ts` `partsView`), shown by
+  `ListingView` under the same `colourPlan` rule; the preview is the plate's held GLB
+  (`listing.previews`, a plate chooser over the viewer for more than one), recoloured by
+  `Preview` `slotColours` (`lib/partOpacity.ts` `ownSlotMaterials`, `recolourSlots`: a mesh
+  with a `scadbuddy_slot` extra takes its slot's colour, one with none keeps its own). The
+  price is `store.price` (`POST /listings/{id}/price`), the add sends `values` empty and
+  `colours` by slot. The mock lists `FILE` (`l4`) and every file listing the back office's
+  mock published in the tab (`storefront.ts` `publishedFiles`, from `sessionStorage`); e2e
+  `e2e/storefront-sell.spec.ts` sells a library file, publishes it and opens its public page.
   The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)
   and loads Cloudflare's script only when `components/Turnstile.tsx` mounts. A form that
   takes the check sends the widget's token as `X-Turnstile-Token` and draws a new widget

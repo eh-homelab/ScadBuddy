@@ -27,7 +27,7 @@ import {
 import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, type DisplayUnit } from '../lib/units'
-import { withPartOpacity } from '../lib/partOpacity'
+import { ownSlotMaterials, recolourSlots, withPartOpacity } from '../lib/partOpacity'
 import { ErrorBoundary } from './ErrorBoundary'
 import { Spinner } from './ui/spinner'
 import { Badge } from '@/components/ui/badge'
@@ -187,6 +187,12 @@ interface Props {
   cancelError?: string | undefined
   /** The job this page withdrew: cancelled, it is said to be the reader's own doing. */
   withdrawn?: string | undefined
+  /**
+   * #6710 §8.2 — a file listing's colours: each mesh that names a slot (`scadbuddy_slot`)
+   * takes the colour given for it (`#RRGGBBAA`, by slot from 0), with no render; a mesh
+   * with no slot keeps its own. A render's preview passes none.
+   */
+  slotColours?: Readonly<Record<number, string>>
 }
 
 export function Preview({
@@ -206,6 +212,7 @@ export function Preview({
   cancelling = false,
   cancelError,
   withdrawn,
+  slotColours,
 }: Props) {
   // #1638 — the job this render waits on, once read: whether a worker has it yet,
   // where it waits, and how long since it was submitted.
@@ -413,6 +420,7 @@ export function Preview({
                 outline={!failed}
                 onLoaded={setLoadedUrl}
                 onMeasured={onMeasured}
+                slotColours={slotColours}
               />
             </Suspense>
           )}
@@ -1037,25 +1045,36 @@ function Model({
   outline,
   onLoaded,
   onMeasured,
+  slotColours,
 }: {
   url: string
   bbox?: BoundingBox
   outline: boolean
   onLoaded: (url: string) => void
   onMeasured: (url: string, bbox: BoundingBox) => void
+  slotColours?: Readonly<Record<number, string>>
 }) {
   const gltf = useLoader(GLTFLoader, url)
-  // A translucent part gets materials of its own; the rest share the loader's.
-  const { scene, owned } = useMemo(() => {
+  const recolours = slotColours !== undefined
+  // A translucent part gets materials of its own; the rest share the loader's. #6710: with
+  // slot colours, each mesh that names a slot gets its own too, to recolour.
+  const { scene, owned, slotted } = useMemo(() => {
     const copy = gltf.scene.clone(true)
-    return { scene: copy, owned: withPartOpacity(copy) }
-  }, [gltf])
+    const slotted = recolours ? ownSlotMaterials(copy) : []
+    return { scene: copy, owned: withPartOpacity(copy), slotted }
+  }, [gltf, recolours])
   useEffect(
     () => () => {
-      for (const material of owned) material.dispose()
+      for (const material of [...owned, ...slotted]) material.dispose()
     },
-    [owned],
+    [owned, slotted],
   )
+  const invalidate = useThree((state) => state.invalidate)
+  useEffect(() => {
+    if (!slotColours) return
+    recolourSlots(scene, slotColours)
+    invalidate()
+  }, [scene, slotColours, invalidate])
   // #6349 — what the canvas draws see-through, read by the e2e: each such material's opacity.
   const canvas = useThree((state) => state.gl.domElement)
   useEffect(() => {

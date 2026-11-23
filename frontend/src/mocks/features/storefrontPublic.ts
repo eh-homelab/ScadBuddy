@@ -1,8 +1,13 @@
 import { http, HttpResponse } from 'msw'
 import type { CustomerOrder, Draft, Listing, ListingCard, ParamValue, StoreEstimate, StoreRender, StoreVariant } from '../../storefront/api/client'
+import type { StorefrontListing } from '../../api/types'
+import { closestColour } from '../../storefront/closestColour'
 import { colourPlan } from '../../storefront/colours'
-import { keychainGlb } from '../glb'
+import { customerFilaments } from '../../storefront/params'
+import { buildGlb, keychainGlb } from '../glb'
 import { problem } from '../handlers'
+import * as orderState from './orders/state'
+import { publishedFiles } from './storefront'
 import { advanceChecks, modelsOrderOf } from './storefrontModels'
 
 /**
@@ -36,6 +41,7 @@ const ORANGE = { id: 'f-orange', colour: '#E8532F', colour_name: 'Signal orange'
 
 export const KEYCHAIN: Listing = {
   id: KEYCHAIN_ID,
+  source: 'template',
   title: 'Name keychain',
   description: 'A keychain with your name raised on it, in two colours.',
   params: {
@@ -52,6 +58,7 @@ export const KEYCHAIN: Listing = {
 
 export const TAG: Listing = {
   id: TAG_ID,
+  source: 'template',
   title: 'Luggage tag',
   description: 'A tag for a bag, in one colour.',
   params: {
@@ -74,6 +81,7 @@ const PETG_RUST = { id: 'f-petg-rust', colour: '#C0502A', colour_name: 'Rust', m
  */
 export const CHARM: Listing = {
   id: CHARM_ID,
+  source: 'template',
   title: 'Bag charm',
   description: 'A charm in two colours of one material.',
   params: {
@@ -101,7 +109,80 @@ export const CHARM: Listing = {
   available: true,
 }
 
-const LISTINGS = [KEYCHAIN, TAG, CHARM]
+export const FILE_ID = 'l4'
+
+/**
+ * #6710: a listing of a library file, in two parts and two plates. Its colours are PLA
+ * first: each part starts at the PLA colour closest to the file's own (`slots`' defaults).
+ * Its price is the file price below, once worked out; a preview is the held GLB of a plate,
+ * each mesh with its slot.
+ */
+export const FILE: Listing = {
+  id: FILE_ID,
+  source: 'library_file',
+  title: 'Bag clip',
+  description: 'A clip for a bag strap, printed in two parts.',
+  params: {},
+  colours: [BLUE, ORANGE, PETG_TEAL, PETG_RUST],
+  media: [],
+  materials: ['PLA', 'PETG'],
+  updated_at: '2026-11-07T12:00:00Z',
+  available: true,
+  slots: [
+    { slot: 0, label: 'Part 1', default: BLUE.id },
+    { slot: 1, label: 'Part 2', default: ORANGE.id },
+  ],
+  previews: [`${base}/listings/${FILE_ID}/preview/1.glb`, `${base}/listings/${FILE_ID}/preview/2.glb`],
+}
+
+const LISTINGS = [KEYCHAIN, TAG, CHARM, FILE]
+
+/**
+ * The listings the public page shows: the fixed ones, then each file listing the back
+ * office's mock published in this tab (`storefront.ts`, kept in `sessionStorage`), as the
+ * CRUD side's `public_listing` shows it (#6710 PR 6).
+ */
+function allListings(): Listing[] {
+  return [...LISTINGS, ...publishedFiles().flatMap((listing) => publicFile(listing))]
+}
+
+/** A back-office file listing as the public page reads it, or nothing when it offers no colour. */
+function publicFile(listing: StorefrontListing): Listing[] {
+  const snapshot = listing.snapshot
+  if (!snapshot || snapshot.kind !== 'library_file') return []
+  const book = orderState.state.filaments.filter((f) => listing.colours.includes(f.id) && !f.archived_at)
+  const colours = customerFilaments(book).map((f) => ({
+    id: f.id,
+    colour: f.colour.slice(0, 7),
+    colour_name: f.colour_name ?? null,
+    material: f.material,
+    alpha: f.alpha ?? 255,
+    extra_colours: [],
+    effect: null,
+  }))
+  const materials = listing.materials.length > 0 ? listing.materials : SHOP_MATERIALS
+  const first = materials.map((m) => colours.filter((f) => f.material.toLowerCase() === m.toLowerCase())).find((each) => each.length > 0) ?? []
+  const offered = snapshot.slots.filter((slot) => slot.used && !slot.support)
+  return [
+    {
+      id: listing.id,
+      source: 'library_file',
+      title: listing.title,
+      description: listing.description,
+      params: {},
+      colours,
+      media: [],
+      materials,
+      updated_at: listing.updated_at,
+      available: first.length > 0,
+      slots: offered.map((slot, index) => {
+        const at = closestColour({ hex: slot.colour, name: null }, first.map((f) => ({ hex: f.colour, name: f.colour_name, alpha: f.alpha })))
+        return { slot: slot.slot, label: `Part ${index + 1}`, default: at === null ? null : first[at]!.id }
+      }),
+      previews: snapshot.plates.map((plate) => `${base}/listings/${listing.id}/preview/${plate}.glb`),
+    },
+  ]
+}
 
 /** A listing as the public list shows it (#6154): its first picture, and whether it can be ordered. */
 export function card(listing: Listing): ListingCard {
@@ -132,6 +213,8 @@ export const ESTIMATE: StoreEstimate = {
   minor_exponent: 2,
   retry_after: null,
 }
+/** A file listing's slice price (#6710 §7.5): firm once its slice is done. */
+export const FILE_ESTIMATE: StoreEstimate = { ...ESTIMATE, price_minor: 700 }
 /** The price while the shop's slice runs: read again after `retry_after` seconds. */
 export const PENDING_PRICE: StoreEstimate = { source: 'pending', price_minor: null, currency: null, minor_exponent: null, retry_after: 2 }
 /** No firm price: the shop prices the design by hand. */
@@ -152,6 +235,16 @@ let serial = 0
  * preview its render's estimate priced. The instant read answers it, with no render.
  */
 let variants = new Map<string, StoreVariant>()
+/** #6710: how often each file listing's choice of colours was priced. */
+let fileReads = new Map<string, number>()
+
+/** A file listing's plate (#6710 §8.2): a base and a clip, each mesh with its slot. */
+function fileGlb(): Uint8Array {
+  return buildGlb([
+    { color: '#FF6AC1', slot: 0, min: [-25, 0, -8], max: [25, 3, 8] },
+    { color: '#1F6FEB', slot: 1, min: [-10, 3, -4], max: [10, 9, 4] },
+  ])
+}
 
 /** The mock's variant key: the listing and the values, as the CRUD side's `variant_key` keys them. */
 export function variantOf(body: { listing_id?: string; listing_updated_at?: string; values?: Record<string, unknown> }): string {
@@ -220,10 +313,39 @@ interface Body {
   quantity?: number
 }
 
-/** The CRUD side's checks (`orders/storefront/inputs.py`), as far as the mocks need them. */
-function outside(body: Body): Response | Listing {
-  const listing = LISTINGS.find((l) => l.id === body.listing_id)
-  if (!listing) return refused(404, 'listing_not_found', 'There is no such listing.')
+/**
+ * #6710: a file listing's colours as the CRUD side checks them (`file_prices.py`
+ * `file_choice`): no values, a listing filament for each offered slot and no other, and
+ * one material, the first slot's (422 `listing_colours_clash` naming the others).
+ */
+function fileOutside(listing: Listing, body: Pick<Body, 'values' | 'colours'>): Response | null {
+  const colours = body.colours ?? {}
+  const slots = (listing.slots ?? []).map((part) => String(part.slot))
+  const outsideIt = () => refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
+  if (Object.keys(body.values ?? {}).length > 0) return outsideIt()
+  if (Object.keys(colours).some((slot) => !slots.includes(slot)) || slots.some((slot) => !(slot in colours))) return outsideIt()
+  const picked = slots.map((slot) => [slot, listing.colours.find((f) => f.id === colours[slot])] as const)
+  if (picked.some(([, filament]) => !filament)) return outsideIt()
+  const material = picked[0]?.[1]?.material.toLowerCase()
+  const clashing = picked.filter(([, filament]) => filament!.material.toLowerCase() !== material).map(([slot]) => `colours.${slot}`)
+  if (clashing.length > 0) {
+    return problem(422, 'Unprocessable Content', "Some of these colours can't go together: each print is made from one kind of plastic. Change one of them.", {
+      type: PROBLEMS + 'listing_colours_clash',
+      parts: clashing,
+    })
+  }
+  return null
+}
+
+/**
+ * The CRUD side's checks (`orders/storefront/inputs.py`), as far as the mocks need them. A
+ * render and its instant read take a template listing only (`files` false): a file listing
+ * is 404 there, as the CRUD side's `published_listing` answers (#6710).
+ */
+function outside(body: Body, files = true): Response | Listing {
+  const listing = allListings().find((l) => l.id === body.listing_id)
+  if (!listing || (!files && listing.source === 'library_file')) return refused(404, 'listing_not_found', 'There is no such listing.')
+  if (listing.source === 'library_file') return fileOutside(listing, body) ?? listing
   for (const [name, value] of Object.entries(body.values ?? {})) {
     const bound = listing.params[name]
     if (!bound) return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
@@ -320,16 +442,39 @@ export const handlers = [
         })
       : new HttpResponse(null, { status: 404 })
   }),
-  http.get(`${base}/listings`, ({ request }) => HttpResponse.json(listingsPage(LISTINGS, new URL(request.url)))),
+  http.get(`${base}/listings`, ({ request }) => HttpResponse.json(listingsPage(allListings(), new URL(request.url)))),
   http.get(`${base}/listings/:id`, ({ params }) => {
-    const listing = LISTINGS.find((l) => l.id === params.id)
+    const listing = allListings().find((l) => l.id === params.id)
     return listing ? HttpResponse.json(listing) : refused(404, 'listing_not_found', 'There is no such listing.')
+  }),
+  // #6710: a file listing's held preview of a plate, each mesh with its slot.
+  http.get(`${base}/listings/:id/preview/:file`, ({ params }) => {
+    const listing = allListings().find((l) => l.id === params.id)
+    const path = `${base}/listings/${String(params.id)}/preview/${String(params.file)}`
+    if (!listing?.previews?.includes(path)) return refused(404, 'preview_not_found', 'This design has no such preview.')
+    return HttpResponse.arrayBuffer(fileGlb().slice().buffer as ArrayBuffer, { headers: { 'Content-Type': 'model/gltf-binary' } })
+  }),
+  // #6710 §7.5: a file listing's price. The first read of a choice of colours starts its
+  // slice (`pending`), the next answers the price, as the shop's slice price does.
+  http.post(`${base}/listings/:id/price`, async ({ request, params }) => {
+    const listing = allListings().find((l) => l.id === params.id && l.source === 'library_file')
+    if (!listing) return refused(404, 'listing_not_found', 'There is no such listing.')
+    const body = (await request.json()) as Pick<Body, 'listing_updated_at' | 'colours'>
+    if (body.listing_updated_at !== listing.updated_at) {
+      return problem(409, 'Conflict', 'This listing has changed. Load it again.', { type: PROBLEMS + 'listing_changed' })
+    }
+    const checked = fileOutside(listing, body)
+    if (checked) return checked
+    const key = JSON.stringify([listing.id, body.colours])
+    const reads = (fileReads.get(key) ?? 0) + 1
+    fileReads.set(key, reads)
+    return HttpResponse.json(reads === 1 ? { ...PENDING_PRICE, retry_after: 0 } : FILE_ESTIMATE)
   }),
   http.post(`${base}/renders`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing
     const body = (await request.json()) as Body
-    const checked = outside(body)
+    const checked = outside(body, false)
     if (checked instanceof Response) return checked
     const id = next()
     const render: StoreRender = {
@@ -386,7 +531,7 @@ export const handlers = [
   http.post(`${base}/listings/:id/variant`, async ({ request, params }) => {
     const body = (await request.json()) as Body
     if (body.listing_id !== params.id) return refused(422, 'render_body_invalid', 'This request is not a render of a listing.')
-    const checked = outside(body)
+    const checked = outside(body, false)
     if (checked instanceof Response) return checked
     const held = variants.get(variantOf(body))
     const answer: StoreVariant = held ?? { price: NO_PRICE, preview: null, render: null, values: null }
@@ -534,6 +679,7 @@ export function reset(): void {
   orders = 0
   renders = new Map()
   variants = new Map()
+  fileReads = new Map()
   serial = 0
   try {
     sessionStorage.removeItem(STORAGE_KEY)
