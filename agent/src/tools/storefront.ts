@@ -151,6 +151,9 @@ export const storefrontTools: Tool[] = [
         .describe('Parameters the customer may not change, locked at their value: only those the person asked to lock'),
     }),
     risk: 'write',
+    // A library file's reads (#6710) reach Bambuddy on library_backend bambuddy, as
+    // get_library_file and get_print_filaments do.
+    bambuddyScope: ['Read Status', 'Manage Library'],
     routes: [
       'GET /api/v1/outputs/{output_id}',
       'GET /api/v1/jobs/{job_id}',
