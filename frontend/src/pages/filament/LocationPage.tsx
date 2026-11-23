@@ -16,8 +16,8 @@ export function LocationPage() {
   const [place, setPlace] = useState<LocationDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
-  /** #7150 — one `Idempotency-Key` per opened page: a second click makes no second spool. */
-  const [slotKey] = useState(() => crypto.randomUUID())
+  /** #7150 — one `Idempotency-Key` per opened place: a second click makes no second spool. */
+  const [slotKey, setSlotKey] = useState(() => crypto.randomUUID())
   const [making, setMaking] = useState(false)
   const [slotError, setSlotError] = useState<string | null>(null)
 
@@ -39,6 +39,10 @@ export function LocationPage() {
     let live = true
     setPlace(null)
     setError(null)
+    // React Router keeps this page when only `:id` changes: one tray's error and key are not the next one's.
+    setSlotError(null)
+    setMaking(false)
+    setSlotKey(crypto.randomUUID())
     getLocation(id).then(
       (found) => live && setPlace(found),
       (cause: unknown) => {

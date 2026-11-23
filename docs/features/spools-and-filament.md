@@ -51,10 +51,13 @@ A spool is made in three ways besides one at a time (#7150, plan
   place. ScadBuddy builds it from its own report; nothing reaches Bambuddy. The spool has no
   type yet. The route is `POST /printers/{id}/trays/{ams}/{tray}/new-spool` and needs an
   `Idempotency-Key`. The button is on the native print dialog's tray question and on an
-  empty AMS tray's place page.
+  empty AMS tray's place page. The dialog asks about every unanswered native tray, one with
+  no shelf candidate too; that question offers only this button and the skip (R-7150-9).
 
 The agent's `filament_spool_upsert` takes `quantity` and `copy_of`, and `create_tray_spool`
-makes a spool from a tray.
+makes a spool from a tray. A resend of a copy reads its source again: its key names the
+draft it read, so an unchanged source makes nothing twice and a changed one makes a new set
+(R-7150-8).
 
 Tray changes and print ends are recorded when a printer report is written
 (`backend/scadbuddy/filament/capture.py`). They are not a workflow of their own.
@@ -82,7 +85,7 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
 - UI:
   - the **Filament** nav item (`frontend/src/components/AppShell.tsx:111`);
   - its routes (`frontend/src/App.tsx:119-135`);
-  - `frontend/src/pages/filament/FilamentPage.tsx:45`, `SpoolPage.tsx:380`;
+  - `frontend/src/pages/filament/FilamentPage.tsx:45`, `SpoolPage.tsx:397`;
   - `frontend/src/components/filament/`;
   - Settings → Printing → Filament (`frontend/src/pages/settings/sections/filament.tsx:684`);
   - the print dialog's picker (`frontend/src/components/FilamentPicker.tsx:358`);

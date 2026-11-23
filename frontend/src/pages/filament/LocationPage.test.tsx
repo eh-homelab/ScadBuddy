@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
+import { Link } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { getLocation, listSpools, moveSpool } from '../../api/filament'
 import { H2C, L, spoolId } from '../../mocks/features/filament/seed'
@@ -36,6 +37,35 @@ describe('the location page', () => {
     await waitFor(async () => expect((await getLocation(L.AMS_A4)).spools).toHaveLength(1))
     const made = (await listSpools()).find((one) => one.location_id === L.AMS_A4)!
     expect(made.number).toBe(20)
+  })
+
+  it('carries no error and no key from one tray to the next (#7150)', async () => {
+    await moveSpool(spoolId(4), null)
+    await moveSpool(spoolId(8), null)
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('*/api/v1/printers/:printer/trays/:ams/:tray/new-spool', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return HttpResponse.json({ detail: 'The printer reports no filament in this tray.' }, { status: 409 })
+      }),
+    )
+    const { user } = renderPage(
+      <>
+        <LocationPage />
+        <Link to={`/filament/locations/${L.AMS_A4}`}>Go to slot 4</Link>
+      </>,
+      { route: `/filament/locations/${L.AMS_A1}`, path: '/filament/locations/:id' },
+    )
+    expect(await screen.findByRole('heading', { level: 1, name: 'H2C AMS-A slot 1' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'New spool from this tray' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('no filament in this tray')
+    await user.click(screen.getByRole('link', { name: 'Go to slot 4' }))
+    expect(await screen.findByRole('heading', { level: 1, name: 'H2C AMS-A slot 4' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'New spool from this tray' }))
+    await waitFor(() => expect(keys).toHaveLength(2))
+    expect(keys[1]).toBeTruthy()
+    expect(keys[1]).not.toBe(keys[0])
   })
 
   it('offers no new spool on a place that is not a tray, or a tray that holds one (#7150)', async () => {

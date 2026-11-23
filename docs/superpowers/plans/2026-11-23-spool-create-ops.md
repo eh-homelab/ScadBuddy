@@ -50,6 +50,16 @@ Bambuddy (BB) 1.2.6b1. Spec: `docs/superpowers/specs/2026-11-14-filament-managem
   `copy_of` (it then sends the bulk route, with the call's idempotency key; `fields` overlay
   the copy's draft). A new tool `create_tray_spool` calls the create-from-slot route. All
   three are write tier, as the other spool and tray tools are.
+- **R-7150-8 A copy's key names the draft it read.** A resend of `filament_spool_upsert`
+  with `copy_of` reads `GET …/copy` again. Its bulk `Idempotency-Key` is the sha256 of the
+  call's key and the draft's JSON. A resend with the source unchanged sends the same key, so
+  it makes nothing twice. A resend after the source changed sends a new key, so it makes a new
+  set from the changed source, never a 422 for a key sent with another body. The tool's
+  description says so. A plain bulk add (no `copy_of`) keeps the call's key.
+- **R-7150-9 The native print dialog asks about every unanswered tray.** A native tray with no
+  shelf candidate is still asked about. Its question offers only "New spool from this tray"
+  and the skip ("Print from the tray as it is"). A tray question is keyed by its printer too,
+  so one printer's error and `Idempotency-Key` never carry over to the next printer.
 
 ## Tasks
 

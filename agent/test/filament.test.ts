@@ -1464,6 +1464,41 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     ])
   })
 
+  // R-7150-8: a resend reads the copy again, so its key names the draft it read too.
+  function copyResends(drafts: unknown[]) {
+    const keys: (string | null)[] = []
+    let read = 0
+    server.use(
+      http.get(`${SPOOLS}/${SOURCE_ID}/copy`, () => HttpResponse.json(drafts[Math.min(read++, drafts.length - 1)])),
+      http.post(BULK, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return HttpResponse.json([{ id: ROW, number: 22 }], { status: 201 })
+      }),
+    )
+    return keys
+  }
+  const TEAL = { spool: { type_id: ROW, colour_name: 'Teal' }, location_id: null, presets: [], k_values: [] }
+
+  it('sends the same key when a copy is resent with its source unchanged (R-7150-8)', async () => {
+    const keys = copyResends([TEAL, TEAL])
+    const call = { ...ctx(), callKey: 'durable:s1:run-1:toolu_copy' }
+    await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID }, call)
+    await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID }, call)
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toMatch(/^[0-9a-f]{64}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('sends a new key when a copy is resent after its source changed (R-7150-8)', async () => {
+    const keys = copyResends([TEAL, { ...TEAL, spool: { ...TEAL.spool, colour_name: 'Jade' } }])
+    const call = { ...ctx(), callKey: 'durable:s1:run-1:toolu_copy' }
+    await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID }, call)
+    await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID }, call)
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toMatch(/^[0-9a-f]{64}$/)
+    expect(keys[1]).not.toBe(keys[0])
+  })
+
   it('refuses quantity or copy_of on an edit before calling the backend', async () => {
     const result = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, quantity: 2 }, ctx())
     expect(result.isError).toBe(true)

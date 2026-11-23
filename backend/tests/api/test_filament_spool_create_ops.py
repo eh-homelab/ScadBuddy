@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -162,6 +163,34 @@ def test_a_copy_is_the_draft_of_a_new_spool(client: TestClient) -> None:
 
 
 _SET = {"type_id", "colour_name", "cost_per_kg", "note", "weight_locked", "grams_left"}
+
+
+def test_a_copy_carries_the_spools_own_k_values(client: TestClient, pg_conninfo: str) -> None:
+    printer = bambuddy_printer(pg_conninfo, 1)
+    k = {
+        "printer_id": printer,
+        "extruder": 1,
+        "nozzle_diameter": "0.4",
+        "nozzle_type": "hardened_steel",
+        "k_value": "0.025",
+        "name": "Leaf HS",
+        "cali_idx": 7,
+        "setting_id": "GFSA00",
+    }
+    source = _spool(client, material_id=_material_id(client))
+    one = f"{SPOOLS}/{source['id']}"
+    assert client.put(f"{one}/k-values", json=[k]).status_code == 200
+    same = {f: v for f, v in k.items() if f != "k_value"}
+    draft = client.get(f"{one}/copy").json()
+    (drafted,) = draft["k_values"]
+    assert {f: drafted[f] for f in same} == same
+    assert Decimal(drafted["k_value"]) == Decimal("0.025")
+    made = _bulk(client, draft | {"quantity": 1}, key="copy-k")
+    assert made.status_code == 201, made.text
+    (twin,) = made.json()
+    (row,) = client.get(f"{SPOOLS}/{twin['id']}/k-values").json()
+    assert {f: row[f] for f in same} == same
+    assert Decimal(row["k_value"]) == Decimal("0.025")
 
 
 def test_a_copy_of_no_spool_is_404(client: TestClient) -> None:

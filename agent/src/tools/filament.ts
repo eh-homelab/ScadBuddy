@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
@@ -849,7 +850,8 @@ const tools: Tool[] = [
       'When adding, `quantity` (1 to 100) makes that many identical spools in one request, each with its own number, ' +
       "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
       'values and its place unless that is a tray, never its number, tag, tray, weight or weight lock; `fields` ' +
-      'then change the copy. Either answers the list of spools made, and a resend of the same call makes none twice. ' +
+      'then change the copy. Either answers the list of spools made, and a resend of the same call makes none twice; ' +
+      'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
       'material. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
@@ -885,13 +887,18 @@ const tools: Tool[] = [
               `copy spool ${copy_of}`,
             )
           : { spool: {} as SpoolDraft['spool'] }
-        // One key per call: a resend after a lost answer makes no second set of spools.
+        // One key per call: a resend after a lost answer makes no second set of spools. A
+        // resend reads the copy again, so its key names that draft too (R-7150-8): a changed
+        // source is a new request, never a 422 for a key sent with another body.
         const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1 } as SpoolBulkCreate
+        const key = copy_of
+          ? createHash('sha256').update(`${idempotencyKey(ctx)}\x1f${JSON.stringify(draft)}`).digest('hex')
+          : idempotencyKey(ctx)
         return json(
           await ok(
             backend.POST('/api/v1/filament/spools/bulk', {
               body,
-              headers: { 'Idempotency-Key': idempotencyKey(ctx) },
+              headers: { 'Idempotency-Key': key },
             }),
             'add the spools',
           ),
