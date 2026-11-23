@@ -87,6 +87,10 @@ const draftDigest = z
 const DRAFT_MOVED =
   'the draft, its description or its versions changed since a person approved this publish; nothing was published. ' +
   'Call hosted_plugin_publish again to ask for an approval of the draft as it is now'
+/** The gate's advice when no approval matches the draft as it is now (#7199, #7211): it may have changed, or none was given. */
+const DRAFT_MOVED_SINCE_APPROVAL =
+  'if a person approved this publish, the draft, its description or its versions changed since, and nothing was published. ' +
+  'Call hosted_plugin_publish again to ask for an approval of the draft as it is now'
 const NOT_HERE = 'publishing needs the package installer, which this agent process does not have; nothing was published'
 
 const plain = (p: HostedPlugin) => ({
@@ -346,7 +350,7 @@ export const hostedPluginTools: readonly Tool[] = [
     // backend flows/print_binding.py binds a person's approval.
     flowBinding: (args, resolved) => (args.draft !== undefined ? {} : { draft: resolved.draft ?? null }),
     // #7199: a durable call whose draft changed since its approval resolves to another digest.
-    movedSinceApproval: DRAFT_MOVED,
+    movedSinceApproval: DRAFT_MOVED_SINCE_APPROVAL,
     handler: async ({ name: plugin, draft }, ctx) => {
       const offers = ctx.hostedPackages
       if (!offers) throw new ToolError(NOT_HERE)
