@@ -215,7 +215,8 @@ turn left, 20 sessions at most, oldest `tried_at` first; a share under one minor
 closed out with nothing carried once its session is over (`done`, `failed`, or `idle` with no
 activity for `IDLE_OVER_AFTER`, an hour). `record` waits at most `RECORD_WAIT_MS` (#1076).
 Only the route's own 400 or 422, 404 (the order gone) or 409 (no rate reaches the currency, a
-visitor's unsubmitted cart) drops that order's report. Anything else (401 or 403 with no live
+visitor's unsubmitted cart), or an order id of `.` or `..` (refused before it is sent, #7221)
+drops that order's report. Anything else (401 or 403 with no live
 credential, 429, a 5xx, a transport failure, a non-CRUD answer) keeps it with the share it
 sent (`attempted_usd`), sent again at the next turn's end, so a lost answer loses no spend.
 

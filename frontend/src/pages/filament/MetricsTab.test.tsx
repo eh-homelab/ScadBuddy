@@ -52,6 +52,29 @@ describe('the Metrics tab (#6269)', () => {
     expect(within(region('Days of stock')).getByRole('table', { name: 'Days of stock by type' })).toBeInTheDocument()
   })
 
+  it('shows the stats by material number, each type linked, the untyped spools last (#7152)', async () => {
+    render()
+    const table = await within(region('By material number')).findByRole('table', { name: 'Stats by material number' })
+    const rows = within(table).getAllByRole('row').slice(1)
+    const jade = rows.find((row) => row.dataset.key === 'BL-PLA-BASIC-JADE-WHITE')!
+    expect(within(jade).getByRole('link', { name: 'BL-PLA-BASIC-JADE-WHITE' })).toHaveAttribute('href', `/filament/types/${T.JADE}`)
+    expect(rows.at(-1)).toHaveAttribute('data-key', '')
+    expect(within(rows.at(-1)!).getByText('No material number')).toBeInTheDocument()
+  })
+
+  it('asks the material number stats for the range on screen', async () => {
+    const seen: URLSearchParams[] = []
+    server.events.on('request:start', ({ request }) => {
+      const url = new URL(request.url)
+      if (url.pathname === '/api/v1/filament/metrics/material-numbers') seen.push(url.searchParams)
+    })
+    const { user } = render()
+    await within(region('By material number')).findByRole('table', { name: 'Stats by material number' })
+    await user.click(within(screen.getByRole('group', { name: 'Range' })).getByRole('button', { name: '90 days' }))
+    await waitFor(() => expect(seen.map((one) => one.get('since'))).toEqual(['2026-05-22', '2026-08-20']))
+    expect(seen.every((one) => one.get('until') === '2026-11-18')).toBe(true)
+  })
+
   it('opens the consumption table behind "Show the numbers"', async () => {
     const { user } = render()
     await within(region('Consumption')).findByRole('img', { name: /140 g in all/ })

@@ -16,6 +16,8 @@ PATHS = (
     "/api/v1/filament/forecast",
     "/api/v1/filament/metrics",
     "/api/v1/filament/metrics/purchasing",
+    "/api/v1/filament/metrics/material-numbers",
+    "/api/v1/filament/cost-per-kg",
 )
 
 
@@ -87,3 +89,77 @@ def test_metrics_routes_in_openapi_have_summary(client: TestClient) -> None:
         operation = paths[path]["get"]
         assert operation.get("summary"), path
         assert operation.get("description"), path
+
+
+def test_material_numbers_route(client: TestClient) -> None:
+    material = next(
+        m["id"] for m in client.get(f"{URL}/catalog/materials").json() if m["name"] == "PLA"
+    )
+    made = client.post(
+        f"{URL}/types",
+        json={
+            "code": "pla-wht",
+            "material_id": material,
+            "rgba": "#FFFFFF",
+            "label_weight_g": 1000,
+        },
+    )
+    assert made.status_code == 201, made.text
+    spool = client.post(f"{URL}/spools", json={"type_id": made.json()["id"], "grams_left": 400})
+    assert spool.status_code == 201, spool.text
+    _spool(client)
+    found = client.get(f"{URL}/metrics/material-numbers")
+    assert found.status_code == 200, found.text
+    body = found.json()
+    today = datetime.now(UTC).date()
+    assert body["until"] == today.isoformat()
+    assert body["since"] == (today - timedelta(days=180)).isoformat()
+    assert body["currency"] == "USD"
+    assert [(r["key"], r["label"], r["spools"], r["grams_left"]) for r in body["rows"]] == [
+        ("PLA-WHT", "pla-wht", 1, 400.0),
+        (None, "No material number", 1, 500.0),
+    ]
+    reversed_ = client.get(
+        f"{URL}/metrics/material-numbers", params={"since": "2026-11-02", "until": "2026-11-01"}
+    )
+    assert reversed_.status_code == 422, reversed_.text
+
+
+def test_cost_per_kg_route(client: TestClient) -> None:
+    found = client.get(
+        f"{URL}/cost-per-kg",
+        params={"price": "40", "tax": "3.20", "shipping": "5", "quantity": 2, "net_weight_g": 750},
+    )
+    assert found.status_code == 200, found.text
+    assert found.json() == {
+        "currency": "USD",
+        "price": "40",
+        "tax": "3.20",
+        "shipping": "5",
+        "quantity": 2,
+        "net_weight_g": 750,
+        "total": "48.20",
+        "cost_per_kg": "32.1333",
+        "price_per_kg": "28.8000",
+    }
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"price": "1"},
+        {"price": "-1", "net_weight_g": 1000},
+        {"price": "1", "net_weight_g": 1000, "currency": "EUR"},
+        {"price": "99999999.9999", "net_weight_g": 1},
+    ],
+)
+def test_cost_per_kg_route_refuses(client: TestClient, params: dict[str, object]) -> None:
+    found = client.get(f"{URL}/cost-per-kg", params=params)
+    assert found.status_code == 422, found.text
+
+
+def test_cost_per_kg_route_takes_the_shops_currency(client: TestClient) -> None:
+    assert client.put("/api/v1/settings", json={"orders_currency": "EUR"}).status_code == 200
+    found = client.get(f"{URL}/cost-per-kg", params={"price": "20", "net_weight_g": 1000})
+    assert found.status_code == 200, found.text
+    assert found.json()["currency"] == "EUR"

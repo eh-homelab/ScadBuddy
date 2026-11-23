@@ -1136,9 +1136,12 @@ the API; those routes are `api` routes, which take it.
 The file tools check each path with the API's own rules (`hosted_plugins/rules.py`
 `check_path`) before they build the URL, and send no request for a path they refuse. A path
 of `.` or `..` is not percent-encoded, so without this check `files/..` would resolve to
-`DELETE /{name}/`, which the API redirects (307) to `DELETE /{name}`, the whole plugin. The
-agent's backend client also follows no redirect (`api/backend.ts`), so such a request fails
-instead (#7104).
+`DELETE /{name}/`, which the API redirects (307) to `DELETE /{name}`, the whole plugin. Every
+backend call of the agent refuses a path parameter of `.` or `..` before it builds the URL
+(`api/pathSegments.ts`: the typed client's `pathSerializer`, `crudFetch`, the order-cost post),
+since mid-path such a segment reaches another route with no redirect at all
+(`/orders/o1/items/../quote` is `/orders/o1/quote`, #7221). The backend client also follows
+no redirect (`api/backend.ts`), a backstop (#7104).
 
 `hosted_plugin_publish` parks for a person's approval, which names the next version and
 the draft's changes (or, for a draft equal to the latest version, the version it offers).
@@ -1148,7 +1151,7 @@ the publish sends it as `?expect_draft=`. A draft written after the approval is 
 `draft-changed`, and nothing is published (#6931 review M3); the model then asks again.
 In a session on Temporal, a call that sent no `draft` reads the draft's digest again at its
 run, so a draft written after the approval hashes otherwise. The gate refuses that call
-`NotApproved` as matching no approval, with the same advice (`movedSinceApproval`), and runs
+`NotApproved` as matching no approval, with the tool's `movedSinceApproval` advice, and runs
 nothing (#7199, #7211). A call that sent its own `draft` is not read again: the publish's
 `expect_draft` refuses it 409 `draft-changed`. A flow's call that sends no
 `draft` binds the draft as the run page read it (`flowBinding`, backend

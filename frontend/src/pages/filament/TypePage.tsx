@@ -20,6 +20,7 @@ import {
   type TypeKValueInput,
 } from '../../api/filament'
 import { addShopping } from '../../api/filamentPurchasing'
+import { CostCalculator } from '../../components/filament/CostCalculator'
 import { KValueTable } from '../../components/filament/KValueTable'
 import { keyOf, kValueRowsError, type KPrinter } from '../../components/filament/kValueRows'
 import { PresetTable } from '../../components/filament/PresetTable'
@@ -298,7 +299,8 @@ interface Lists {
  * #6262 — one type, `/filament/types/<id>` or `/filament/types/new`: what a spool of it is
  * (material, colour, weights, temperatures, price), the slicer presets it prints with per
  * printer model and nozzle, its pressure-advance K values, the supplier prices it has
- * (#6266; "Use as default cost" only fills the cost field, Save writes it), an "Add to shopping
+ * (#6266; "Use as default cost" only fills the cost field, Save writes it), a cost calculator
+ * from a purchase's price, tax, shipping and net weight (#7152, the same "Use as default cost"), an "Add to shopping
  * list" button (one pending spool, written at once), and the spools of it. Saving
  * sends one PATCH of what changed (a POST for a new type) and, when they changed, the
  * presets' and the K values' PUTs. Unsaved edits hold every way out (`useLeaveGuard`).
@@ -580,6 +582,13 @@ export function TypePage() {
               {text('low_stock_pct', 'Low stock at (%)', { mode: 'numeric', hint: 'Of the label weight.' })}
             </div>
             <p className="text-[12px] text-muted-foreground">A priced type is a row of the price book, which prices quotes.</p>
+            <CostCalculator
+              labelWeight={draft.label_weight_g}
+              onUseAsCost={(perKg) => {
+                set('cost_per_kg', perKg)
+                setNotice(`Cost per kg is now ${perKg}, from the calculator. Save the type to keep it.`)
+              }}
+            />
           </section>
           <section aria-label="Reordering" className="flex flex-col gap-3">
             <h2 className="text-sm font-semibold tracking-tight">Reordering</h2>

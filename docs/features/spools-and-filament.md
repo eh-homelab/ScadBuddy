@@ -44,6 +44,19 @@ another command pending (such as a queued NTAG write) is refused, because a tare
 it. The agent's `filament_spoolbuddy_tare` is `outward`. The rulings are in
 `docs/superpowers/plans/2026-11-23-spoolbuddy-tare.md`.
 
+A type's cost per kg can be worked out on its page (#7152, plan
+[`2026-11-23-catalog-cost-stats.md`](../superpowers/plans/2026-11-23-catalog-cost-stats.md)).
+The cost calculator sends a purchase's price, tax, shipping, spool count and net weight to
+`GET /filament/cost-per-kg` (`backend/scadbuddy/filament/cost_calc.py`). The server does the
+sum on exact decimals, in the shop's currency, and writes nothing. "Use as default cost" puts
+the result in the type's cost field, and Save writes it. The Metrics tab's "By material
+number" section reads `GET /filament/metrics/material-numbers`
+(`MetricsStore.material_numbers`). A material number is a type's code, case folded, which
+Bambuddy calls `material_number`; archived types of the same code count under it. Each row
+gives the types, the spools in stock, their grams and value at cost, and the grams the
+range's prints used, counted as the Consumption chart counts them. The agent reads both
+with `filament_cost_per_kg` and `filament_material_number_stats`.
+
 Filament presets are ScadBuddy's own (#7176, plan
 [2026-11-23](../superpowers/plans/2026-11-23-scadbuddy-filament-presets.md)): the table
 `filament_presets`, each document a blob with every version kept. A type or spool names one
