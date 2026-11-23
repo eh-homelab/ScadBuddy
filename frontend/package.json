@@ -29,7 +29,7 @@
     "@opentelemetry/instrumentation": "0.301.2",
     "@opentelemetry/instrumentation-document-load": "0.69.0",
     "@opentelemetry/instrumentation-fetch": "0.301.0",
-    "@opentelemetry/otlp-transformer": "0.300.0",
+    "@opentelemetry/otlp-transformer": "0.301.2",
     "@opentelemetry/resources": "3.1.0",
     "@opentelemetry/sdk-trace": "3.1.1",
     "@react-three/drei": "^10.7.9",
