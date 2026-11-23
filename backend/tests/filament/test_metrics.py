@@ -338,3 +338,24 @@ def test_opened_is_the_first_load_else_the_first_plate() -> None:
     assert found.days_since_last_use == 2.0
     loaded = _metrics([event(days(6), "loaded"), bb_end(days(4), 20, "a")])
     assert loaded.opened_at == days(6)
+
+
+def test_consumed_counts_every_plate_with_no_reset() -> None:
+    found = _metrics([bb_end(days(3), 40, "a"), bb_end(days(1), 10, "b")])
+    assert (found.consumed_g, found.consumed_since) == (50.0, None)
+
+
+def test_a_consumed_reset_counts_only_the_plates_after_the_newest() -> None:
+    """#7149 R-7149-4: a reset starts the consumed counter again; the lifetime figures
+    stay."""
+    newest = event(days(2), "consumed_reset", "person")
+    events = [
+        bb_end(days(5), 40, "a"),
+        event(days(4), "consumed_reset", "bb"),
+        bb_end(days(3), 25, "b"),
+        newest,
+        bb_end(days(1), 10, "c"),
+    ]
+    found = _metrics(events)
+    assert (found.consumed_g, found.consumed_since) == (10.0, newest.at)
+    assert found.used_g == 75.0

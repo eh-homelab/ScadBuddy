@@ -11,6 +11,7 @@ const history = (values: Partial<SpoolHistory['metrics']> = {}, typeError: Spool
   series: [],
   metrics: {
     used_g: 120,
+    consumed_g: 120,
     prints: 3,
     grams_per_print: 40,
     wasted_g: 30,

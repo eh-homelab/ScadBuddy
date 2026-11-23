@@ -16,7 +16,10 @@ import { defineTool, json, type Tool, type ToolContext, ToolError } from './regi
 // which is an outward settings write. After a person approves the call, confirm_action runs
 // it once: the publish, then the offer in-process (`ToolServices.hostedPackages`, over
 // `PackageInstaller`), never through the UI-guarded package routes. Nothing loads until a
-// person also approves that version in Settings, as for every package.
+// person also approves that version in Settings, as for every package. The approval binds the
+// draft it described (#6931 review M3): its `draft` argument is the draft-diff's
+// `draft_digest`, which the publish sends as `expect_draft`, so a draft written after the
+// approval is refused 409 `draft-changed` and nothing is published.
 //
 // File content crosses the tool boundary as UTF-8 text: a plugin's files are Markdown and
 // scripts. A file that is not UTF-8 is read as its size and sha256 only (#2479: no bytes in JSON).
@@ -76,6 +79,14 @@ const tag = z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)
 const category = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/)
 
 const SOURCE = 'a hosted plugin draft, written by a person or the assistant in ScadBuddy'
+/** The draft-diff's `draft_digest` (backend api/hosted_plugins.py `_draft_digest`). */
+const draftDigest = z
+  .string()
+  .regex(/^sha256:[0-9a-f]{64}$/)
+  .describe('The digest of the draft a person approved. The approval fills it in; leave it out when you ask')
+const DRAFT_MOVED =
+  'the draft, its description or its versions changed since a person approved this publish; nothing was published. ' +
+  'Call hosted_plugin_publish again to ask for an approval of the draft as it is now'
 const NOT_HERE = 'publishing needs the package installer, which this agent process does not have; nothing was published'
 
 const plain = (p: HostedPlugin) => ({
@@ -258,7 +269,7 @@ export const hostedPluginTools: readonly Tool[] = [
       "Write one file of a hosted plugin's draft, as UTF-8 text, replacing any file at that path. Paths are relative, " +
       'under skills/, agents/ or commands/, with no .. and no segment that starts with a dot; .claude-plugin/plugin.json ' +
       'is generated at publish and refused. Each skills/<skill>/SKILL.md needs `name` and `description` frontmatter. ' +
-      "`executable` marks a script under skills/. Caps: 2 MiB a file, 500 files and 20 MiB a draft. Nothing loads from " +
+      "`executable` marks a script under skills/. Caps: 2 MiB a file, 499 files and 20 MiB a draft. Nothing loads from " +
       'a draft: publish it with hosted_plugin_publish.',
     input: z.object({
       name,
@@ -305,35 +316,49 @@ export const hostedPluginTools: readonly Tool[] = [
       'nothing loads until a person also approves the version in Settings → Tools & plugins. The draft is checked: 422 ' +
       '`draft-invalid` lists every problem. A draft equal to the latest version publishes nothing, and that version is ' +
       'offered when no pin names it yet (so a call again after a failed offer offers it).',
-    input: z.object({ name }),
+    input: z.object({ name, draft: draftDigest.optional() }),
     risk: 'outward',
     routes: ['POST /api/v1/hosted-plugins/{name}/publish'],
     summarize: ({ name: plugin }) => `Publish hosted plugin ${plugin} and offer it to the assistant`,
+    // The approved input names the draft it describes (`draft`), so confirm_action publishes
+    // only that draft. Only the input is wanted at the run: a `draft` sent is kept as it is.
     prepareApproval: async (args, ctx, needs) => {
-      if (!needs.summary) return { input: args, summary: `Publish hosted plugin ${args.name} and offer it to the assistant` }
-      const found = await readPlugin(args.name, ctx)
+      const generic = `Publish hosted plugin ${args.name} and offer it to the assistant`
+      if (!needs.summary && args.draft !== undefined) return { input: args, summary: generic }
       const diff = await draftDiff(args.name, ctx)
+      if (args.draft !== undefined && args.draft !== diff.draft_digest) throw new ToolError(DRAFT_MOVED, 409, undefined, 'draft-changed')
+      const input = { ...args, draft: diff.draft_digest }
+      if (!needs.summary) return { input, summary: generic }
+      const found = await readPlugin(args.name, ctx)
       const changes = diffLine(diff)
       // A draft equal to the latest version publishes nothing: the run offers that version.
       if (changes === 'no change' && found.latest_version !== null && found.latest_version !== undefined) {
-        return { input: args, summary: `Offer version ${found.latest_version} of hosted plugin ${args.name} to the assistant (the draft has no change)` }
+        return { input, summary: `Offer version ${found.latest_version} of hosted plugin ${args.name} to the assistant (the draft has no change)` }
       }
       const next = (found.latest_version ?? 0) + 1
       return {
-        input: args,
+        input,
         summary: `Publish hosted plugin ${args.name} as version ${next} (${changes}) and offer it to the assistant`,
       }
     },
-    handler: async ({ name: plugin }, ctx) => {
+    // #7199: a flow's call that sends no `draft` binds the draft as it is now, so a person's
+    // approval on the run page binds that draft, and the run sends it as `expect_draft`. As
+    // backend flows/print_binding.py binds a person's approval.
+    flowBinding: (args, resolved) => (args.draft !== undefined ? {} : { draft: resolved.draft ?? null }),
+    // #7199: a durable call whose draft changed since its approval resolves to another digest.
+    movedSinceApproval: DRAFT_MOVED,
+    handler: async ({ name: plugin, draft }, ctx) => {
       const offers = ctx.hostedPackages
       if (!offers) throw new ToolError(NOT_HERE)
       const { data, error, response } = await ctx.backend.POST('/api/v1/hosted-plugins/{name}/publish', {
-        params: { path: { name: plugin } },
+        params: { path: { name: plugin }, ...(draft === undefined ? {} : { query: { expect_draft: draft } }) },
       })
       const refused = refusalOf(error)
       let published: number | null = null
       if (response.ok && data) {
         published = data.version
+      } else if (response.status === 409 && refused.reason === 'draft-changed') {
+        throw new ToolError(DRAFT_MOVED, 409, refused.detail, refused.reason)
       } else if (!(response.status === 409 && refused.reason === 'nothing-to-publish')) {
         const why = [refused.detail, ...(refused.problems ?? []).map((p) => `- ${p}`)].filter(Boolean).join('\n')
         throw new ToolError(`publish hosted plugin ${plugin} failed (HTTP ${response.status})`, response.status, why || undefined, refused.reason)

@@ -688,8 +688,10 @@ devices and FIFOs, absolute paths, backslashes, NULs, `..` segments, a path give
 encrypted and zip64 entries, and an entry whose size or CRC-32 does not match are
 refused, and nothing of the archive is written. A tar name prefix is read only from a
 POSIX ustar header (magic `ustar\0`, version `00`); a GNU header keeps other fields there.
-The caps are those of a hosted plugin's draft (spec §6.2): 500 entries (directories
-count), 2 MiB per file and 20 MiB in all, checked before a byte is inflated.
+The caps are those of a hosted plugin's published zip (spec §6.2): 500 entries
+(directories count), 2 MiB per file and 20 MiB in all, checked before a byte is inflated.
+A hosted plugin's draft holds at most 499 files, so its zip, with the generated
+`plugin.json`, fits.
 
 **Downloading** (`download.ts`, `npm.ts`). Every hop of a download, redirects included,
 is https, or plain http to a loopback host whose addresses are all loopback (spec §6.6
@@ -861,6 +863,30 @@ Not done yet:
 
 - per-part enabling. The review shows each part, but a package is enabled as a whole.
 - tier maps for a package's own MCP tools. They stay `outward`.
+
+### The marketplace feed (#6933)
+
+Spec 2026-11-21 §6.4 and §6.8.
+
+The feed (`agent/src/routes/pluginFeeds.ts`) lists packages to Claude Code sessions
+outside ScadBuddy. These rules hold:
+
+- **Same auth as `/mcp`.** Each feed, zip and archive request passes `/mcp`'s transport
+  gates and `authenticate()`: an `sbmcp_` token of any tier, an OIDC access token in
+  `oidc` mode, or anyone in `disabled` mode. A revoked or expired token stops reading at
+  once. A change to `/mcp`'s tokens, auth mode or anonymous cap changes the feed with it
+  ([operating.md §9](operating.md#the-marketplace-feed-6933)).
+- **LAN-only.** The feed has no public prefix on the SSO host (eh-homelab/clusters#4017).
+  The zip URLs follow the request's origin, because Claude Code sends a marketplace's
+  `headers` only to its own origin.
+- **Only approved pins.** A package is listed only at its current approved pin; a pending
+  re-pin, a draft or an unapproved package is 404. A hosted zip and an archive are served
+  only when their bytes hash to the sha256 the entry and the URL name, so an immutable URL
+  never serves other bytes.
+- **Every client runs what is listed.** A package approved with `allow_refused` (hooks,
+  MCP servers) can be in the feed, and every client of the feed then runs them on its own
+  machine. Settings says so beside **Add to feed**. Adding or removing a package is a
+  Settings write from the UI only (`uiRequestProblem`), never an assistant's.
 
 ## Tool access (`ai_access`, #2171)
 

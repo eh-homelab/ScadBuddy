@@ -56,6 +56,32 @@ describe('the spool page', () => {
     expect(await within(identity).findByRole('button', { name: 'Tare scale spoolbuddy-bench' })).toBeEnabled()
   })
 
+  it('says how the tag came in and when it was written (#7149)', async () => {
+    open(4)
+    await heading(4)
+    const identity = screen.getByRole('region', { name: 'Identity' })
+    expect(within(identity).getByText('Bambuddy added this spool when an AMS read its unknown tag.')).toBeInTheDocument()
+    expect(within(identity).queryByText(/Tag written/)).toBeNull()
+  })
+
+  it('names a written tag and its date (#7149)', async () => {
+    open(8)
+    await heading(8)
+    const identity = screen.getByRole('region', { name: 'Identity' })
+    expect(within(identity).getByText('Its tag was written through SpoolBuddy.')).toBeInTheDocument()
+    expect(within(identity).getByText(`Tag written ${new Date('2026-11-10T15:30:00Z').toLocaleDateString(undefined, { dateStyle: 'medium' })}.`)).toBeInTheDocument()
+  })
+
+  it('saves whether the spool was added full (#7149)', async () => {
+    const patches = recorded('PATCH', /\/spools\//)
+    const { user } = open(4)
+    await heading(4)
+    await choose(user, screen.getByRole('combobox', { name: 'Added full' }), 'No')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(patches).toEqual([{ added_full: false }]))
+    expect((await getSpool(spoolId(4))).added_full).toBe(false)
+  })
+
   it('resets an overridden colour with one PATCH of null, and the mark stays until the answer', async () => {
     await patchSpool(spoolId(3), { rgba: '#112233FF' })
     const edited = (await listSpoolEvents(spoolId(3))).filter((event) => event.kind === 'edited').length
@@ -493,6 +519,22 @@ describe('the spool page\'s history (#6269)', () => {
     expect(within(timeline).getByText('Assistant')).toBeInTheDocument()
     // A BB plate is booked as the API books it: its grams off, measured, and no grams left.
     expect(within(timeline).getByText(', −55 g, measured, AMS A1')).toBeInTheDocument()
+  })
+
+  it('resets the used counter after a confirm, and the tile counts from then (#7149)', async () => {
+    const posts = recorded('POST', /\/spools\/[^/]+\/events$/)
+    const { user } = open(2)
+    await heading(2)
+    const history = screen.getByRole('region', { name: 'History' })
+    const used = () => within(within(history).getByLabelText('Spool metrics')).getByText('Used').parentElement!
+    await waitFor(() => expect(used()).toHaveTextContent('120 g'))
+    await user.click(within(history).getByRole('button', { name: 'Reset the used counter' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Reset the used counter of spool #2?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Reset counter' }))
+    await waitFor(() => expect(posts).toEqual([{ kind: 'consumed_reset' }]))
+    await waitFor(() => expect(used()).toHaveTextContent(/^Used0 g/))
+    expect(used()).toHaveTextContent('120 g in all')
+    expect((await getSpool(spoolId(2))).grams_left).toBe(820)
   })
 
   it('says why the burn rate is empty, with the window the settings hold', async () => {

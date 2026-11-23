@@ -40,11 +40,18 @@ export function SpoolMetricsPanel({ history, gramsLeft, createdAt }: { history: 
   const aged = Math.max(1, Math.round(age))
   const burnOver = age < window ? `Since it was added ${aged} ${aged === 1 ? 'day' : 'days'} ago` : `Over the last ${window} days`
   const tiles: Tile[] = [
-    {
-      label: 'Used',
-      value: grams(metrics.used_g),
-      note: metrics.prints === 0 ? 'No prints yet' : `${metrics.prints} ${metrics.prints === 1 ? 'print' : 'prints'}${metrics.grams_per_print != null ? `, ${grams(metrics.grams_per_print)} each` : ''}`,
-    },
+    // #7149: after a reset, Used counts from it (`consumed_g`), as Bambuddy's "Total consumed" does.
+    metrics.consumed_since
+      ? {
+          label: 'Used',
+          value: grams(metrics.consumed_g),
+          note: `Since the reset on ${when(metrics.consumed_since)}, ${grams(metrics.used_g)} in all`,
+        }
+      : {
+          label: 'Used',
+          value: grams(metrics.used_g),
+          note: metrics.prints === 0 ? 'No prints yet' : `${metrics.prints} ${metrics.prints === 1 ? 'print' : 'prints'}${metrics.grams_per_print != null ? `, ${grams(metrics.grams_per_print)} each` : ''}`,
+        },
     { label: 'Burn rate', value: burn == null ? null : `${grams(burn)} a day`, why: noPrints, note: burnOver },
     {
       label: 'Empty around',

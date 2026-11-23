@@ -14,6 +14,7 @@ import {
   fittedDefault,
   fixColour,
   isSupport,
+  isSupportMaterial,
   listingInput,
   listingRefusal,
   nearestFilaments,
@@ -384,6 +385,16 @@ describe('savedKey (#6290): a null field is an absent one, and nothing else is',
     expect(body({ size: { kind: 'number', min: 6, max: 28, default: 14 } })).not.toBe(body({ size: { kind: 'number', min: 6, max: 28, default: null } }))
     expect(body({}, { thickness: 5.2 })).not.toBe(body({}, {}))
     expect(body({}, { thickness: 0 })).not.toBe(body({}, {}))
+  })
+})
+
+describe('isSupportMaterial (#7195 review): the shared vectors', () => {
+  it('reads a support material as the backend and the assistant do', () => {
+    // `test-fixtures/storefront/support-materials.json`, which the backend's
+    // `tests/orders/storefront/test_support_material.py` and the agent's tool test read too.
+    const cases = JSON.parse(readFileSync(`${import.meta.dirname}/../../../../test-fixtures/storefront/support-materials.json`, 'utf8')) as { support: string[]; customer: string[] }
+    for (const material of cases.support) expect(isSupportMaterial(material), material).toBe(true)
+    for (const material of cases.customer) expect(isSupportMaterial(material), material).toBe(false)
   })
 })
 

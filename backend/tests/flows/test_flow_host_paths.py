@@ -4,7 +4,7 @@ is refused in `enforce`.
 
 The flow host functions (`workflows/flow_tools.py`) run here with their activities
 (`workflows/flow_routes.py`) on a transport that logs each request; so do the grant
-checks' reads (`workflows/flow_grants.py` `facts_of`) and the printer read that
+checks' reads (`workflows/flow_grants.py` `facts_of`) and the printer and draft reads that
 `flow_decide` (`flows/operations.py`) makes through `flows/print_binding.py` `bind_call`.
 """
 
@@ -29,7 +29,13 @@ import scadbuddy.workflows.flow_grants
 import scadbuddy.workflows.flow_tools
 from scadbuddy.auth.routes import API_PREFIX, FLOW_HOST_ENDPOINTS, Route, endpoint_name
 from scadbuddy.core.settings import Settings
-from scadbuddy.flows.print_binding import PRINT_OUTPUT, api_lookup, bind_call
+from scadbuddy.flows.print_binding import (
+    HOSTED_PLUGIN_PUBLISH,
+    PRINT_OUTPUT,
+    api_drafts,
+    api_lookup,
+    bind_call,
+)
 from scadbuddy.main import create_app
 from scadbuddy.workflows import flow_tools
 from scadbuddy.workflows.flow_grants import FlowGrants
@@ -82,6 +88,13 @@ ANSWERS: list[tuple[str, re.Pattern[str], int, dict[str, Any]]] = [
     ),
     # Not in the registry: the read is made, and the call is bound with no printer.
     ("GET", re.compile(r"/api/v1/printers/[^/]+"), 404, {"detail": "no such printer"}),
+    # A publish's hosted plugin draft (#7199).
+    (
+        "GET",
+        re.compile(r"/api/v1/hosted-plugins/[^/]+/draft-diff"),
+        200,
+        {"draft_digest": "sha256:" + "d" * 64},
+    ),
 ]
 
 
@@ -168,6 +181,10 @@ async def _every_call(logged: Logged) -> None:
         await grants.facts_of("queue_print", None, {"source": source, "request": {}})
     # `flow_decide`'s binding of a print on a registry printer (#4445).
     await bind_call(PRINT_OUTPUT, {"printer": PRINTER}, api_lookup(client))
+    # Its binding of a publish's hosted plugin draft (#7199).
+    await bind_call(
+        HOSTED_PLUGIN_PUBLISH, {"name": "shop-notes"}, api_lookup(client), drafts=api_drafts(client)
+    )
 
 
 def _app_routes() -> list[Route]:
@@ -223,6 +240,7 @@ METHODS = {
     "/api/v1/settings/print-options": "GET",
     "/api/v1/outputs/{_segment(source['output_id'])}": "GET",
     "/api/v1/printers/{printer}": "GET",
+    "/api/v1/hosted-plugins/{plugin}/draft-diff": "GET",
     "/api/v1/orders/{order}/items/{_segment(item_id, 'item id')}/print": "POST",
     "/api/v1/operations/{_segment(attempt['id'], 'operation id')}": "GET",
     "/api/v1/print/runs/{_segment(run_id, 'run id')}": "GET",
