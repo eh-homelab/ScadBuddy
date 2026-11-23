@@ -29,6 +29,7 @@ from pydantic import (
 from scadbuddy.bambuddy.models import SpoolBuddyDevice
 from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.label_templates import LabelTemplate, LabelTemplateChoice
+from scadbuddy.slicing.own_presets import sb_id
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 
@@ -921,6 +922,15 @@ class EffectivePreset(BaseModel):
     slicer_filament_name: str | None
     overridden: bool
     migrated: bool = False
+    #: For a ScadBuddy preset (``slicer_filament`` ``sb-<id>``, #7176): its Bambuddy
+    #: local preset id (its mirror), or ``None`` while Bambuddy has none. Unset for any
+    #: other ref, which Bambuddy knows as it is (`for_bambuddy`).
+    bambuddy_id: str | None = None
+
+    def for_bambuddy(self) -> str | None:
+        """The ref Bambuddy knows this preset by: the mirror's id for a ScadBuddy preset
+        (``None`` without one), else ``slicer_filament`` as it is."""
+        return self.bambuddy_id if sb_id(self.slicer_filament) is not None else self.slicer_filament
 
 
 class EffectiveKValue(BaseModel):

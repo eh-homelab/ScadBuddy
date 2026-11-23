@@ -51,6 +51,7 @@ from scadbuddy.filament.types import (
 )
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.density import DensityTable, density_text
+from scadbuddy.slicing.own_presets import OwnPresets, sb_id
 from scadbuddy.slicing.profiles import ProfileError
 
 #: The preset a type is filled from first: the owner's printer and its usual nozzle.
@@ -97,9 +98,9 @@ class ProfileSource(BaseModel):
 
     #: The type preset's ``slicer_filament``.
     preset_id: str
-    #: The profile's name: the local preset's, or the tree's preset's.
+    #: The profile's name: the local preset's, ScadBuddy's preset's, or the tree's preset's.
     name: str
-    origin: Literal["bambuddy_local", "system"]
+    origin: Literal["bambuddy_local", "scadbuddy", "system"]
     printer_model: str
     nozzle_diameter: str
 
@@ -239,15 +240,34 @@ def _over_parent(setting: Mapping[str, Any], table: DensityTable | None) -> dict
 
 
 async def read_profile(
-    preset: m.TypePreset, table: DensityTable | None, local: LocalPresets | None
+    preset: m.TypePreset,
+    table: DensityTable | None,
+    local: LocalPresets | None,
+    own: OwnPresets | None = None,
 ) -> Profile | Unread:
-    """The profile ``preset`` names, in `orders/density.py`'s order (R-6714-2)."""
+    """The profile ``preset`` names, in `orders/density.py`'s order (R-6714-2); a
+    ScadBuddy preset (``sb-<id>``, #7176) from ScadBuddy's own store."""
     preset_id = preset.slicer_filament.strip()
     source = {
         "preset_id": preset_id,
         "printer_model": preset.printer_model,
         "nozzle_diameter": preset.nozzle_diameter,
     }
+    own_id = sb_id(preset_id)
+    if own_id is not None:
+        doc = None if own is None else (await own.documents([own_id])).get(own_id)
+        if doc is None:
+            return Unread(f"ScadBuddy has no filament preset {preset_id}")
+        name = doc.get("name")
+        values = await asyncio.to_thread(_over_parent, doc, table)
+        return Profile(
+            values,
+            ProfileSource(
+                name=name if isinstance(name, str) and name else preset_id,
+                origin="scadbuddy",
+                **source,
+            ),
+        )
     if preset_id.isdigit():
         if local is None:
             return Unread(
@@ -515,6 +535,8 @@ class TypeFiller:
 
     types: SpoolTypeStore
     table: Callable[[], DensityTable | None]
+    #: ScadBuddy's own filament presets (#7176), which an ``sb-`` preset is read from.
+    own: OwnPresets | None = None
 
     async def fill(
         self,
@@ -623,7 +645,7 @@ class TypeFiller:
         if chosen is None:
             result.reason = "the type has no slicer preset"
             return result, None
-        read = await read_profile(chosen, table, reads.local)
+        read = await read_profile(chosen, table, reads.local, self.own)
         if isinstance(read, Unread):
             result.reason = read.reason
             return result, None

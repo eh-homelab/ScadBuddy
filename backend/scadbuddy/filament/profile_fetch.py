@@ -919,18 +919,19 @@ def _fetched_ids(conn: Conn, type_id: UUID, run_id: UUID) -> _Fetched:
     """The Bambuddy preset ids an earlier fetch of the type made: the type's preset rows
     that a fetch bound (its ``files`` entry's ``preset_id``), not ones a person chose; the
     ids each earlier run recorded as its import's (``bambuddy_made``); and the runs whose
-    import was never listed (R-PR1)."""
+    import was never listed (R-PR1). A row adopted as a ScadBuddy preset (#7176) counts by
+    that preset's Bambuddy id."""
     rows = conn.execute(
-        "SELECT p.slicer_filament FROM filament_spool_type_presets p"
+        "SELECT COALESCE(sp.bb_preset_id::text, p.slicer_filament) AS bb"
+        " FROM filament_spool_type_presets p"
+        " LEFT JOIN filament_presets sp ON sp.id = p.preset_id"
         " WHERE p.type_id = %s AND EXISTS (SELECT 1 FROM filament_profile_fetches f,"
         " jsonb_each(f.files) AS m(model, nozzles), jsonb_each(m.nozzles) AS n(nozzle, entry)"
         " WHERE f.type_id = p.type_id AND f.id <> %s"
-        " AND n.entry ->> 'preset_id' = p.slicer_filament)",
+        " AND n.entry ->> 'preset_id' = COALESCE(sp.bb_preset_id::text, p.slicer_filament))",
         (type_id, run_id),
     ).fetchall()
-    out = _Fetched(
-        {int(row["slicer_filament"]) for row in rows if row["slicer_filament"].isdigit()}
-    )
+    out = _Fetched({int(row["bb"]) for row in rows if row["bb"].isdigit()})
     for run in conn.execute(
         "SELECT bambuddy_before, bambuddy_made, files FROM filament_profile_fetches"
         " WHERE type_id = %s AND id <> %s AND bambuddy_before IS NOT NULL",
