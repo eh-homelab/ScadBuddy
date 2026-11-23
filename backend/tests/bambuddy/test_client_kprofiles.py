@@ -32,7 +32,11 @@ ROW: dict[str, Any] = {
     "k_value": "0.020000",
     "setting_id": None,
 }
-SENT: dict[str, Any] = {"success": True, "confirmed": True, "message": "K-profile added successfully"}
+SENT: dict[str, Any] = {
+    "success": True,
+    "confirmed": True,
+    "message": "K-profile added successfully",
+}
 
 
 def test_a_k_row_keeps_bambuddys_whole_shape() -> None:
