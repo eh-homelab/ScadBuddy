@@ -110,6 +110,19 @@ class _NoSpoolError(Exception):
     """The spool a tag is bound to does not exist; raised to roll back the bind."""
 
 
+class ResetBeforeLinkError(ValueError):
+    """A ``consumed_reset`` dated at or before the spool's Bambuddy link (#7149
+    R-7149-12): the sync never sends such a reset (R-7149-11), so SB's counter and
+    Bambuddy's would disagree."""
+
+    def __init__(self, linked_at: datetime) -> None:
+        super().__init__(
+            "the reset predates the spool's Bambuddy link"
+            f" (linked at {linked_at.isoformat()}); date it after the link"
+        )
+        self.linked_at = linked_at
+
+
 class OverrideKindError(ValueError):
     """An override binding on a tag that is not a Bambu MIFARE tag: only Bambuddy's reader
     of those can be told to ignore them."""
@@ -1157,7 +1170,9 @@ class FilamentSpoolStore:
     ) -> m.SpoolEvent | None:
         """A person's weighing, drying or consumed reset (#7149 R-7149-4); ``None`` for
         no such spool. A drying's ``temp_c`` or ``hours`` left out (not sent) is the
-        spool's drying default (`_drying_defaults`, #6720; the settings last, #7156)."""
+        spool's drying default (`_drying_defaults`, #6720; the settings last, #7156). A
+        reset whose ``at`` is not after the spool's Bambuddy link is
+        `ResetBeforeLinkError` (R-7149-12)."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
         # Read before the store takes its connection (`FilamentDefaults`' rule).
         settings = self._defaults() if body.kind == "dried" else _SETTING_DEFAULTS
@@ -1169,6 +1184,12 @@ class FilamentSpoolStore:
                 is None
             ):
                 return None
+            if body.kind == "consumed_reset" and body.at is not None:
+                link = conn.execute(
+                    "SELECT linked_at FROM filament_bb_links WHERE spool_id = %s", (spool_id,)
+                ).fetchone()
+                if link is not None and body.at <= link["linked_at"]:
+                    raise ResetBeforeLinkError(link["linked_at"])
             if body.kind == "dried":
                 sent = body.model_fields_set
                 defaults = (
