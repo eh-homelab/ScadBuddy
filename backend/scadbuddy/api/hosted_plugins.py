@@ -9,12 +9,16 @@ ScadBuddy as a draft of files, published as immutable numbered versions.
 - ``GET /{name}/files`` the draft; ``GET``, ``PUT`` (the raw bytes as the body,
   ``?executable=true`` for a script under ``skills/``) and ``DELETE /{name}/files/{path}``
   one file; ``POST /{name}/files/moves`` a rename; ``GET /{name}/draft-diff`` the draft
-  against the latest version, with ``manifest_changed`` when the description differs;
+  against the latest version, with ``manifest_changed`` when the description differs and
+  ``draft_digest``, which names the draft, its description and its latest version;
+- ``GET /{name}/versions`` the published versions, newest first (#6937, the editor's list);
 - ``POST /{name}/publish`` the next version: the draft checked (422 ``draft-invalid`` with
   ``problems``), ``plugin.json`` generated, the zip built (`hosted_plugins/bundle.py`) and
   stored, and the version row and ``latest_version`` written in one transaction. A draft
   equal to the latest version, with the same description, is 409 ``nothing-to-publish``;
-  one whose files or description changed while it was built, 409 ``draft-changed``.
+  one whose files or description changed while it was built, 409 ``draft-changed``. With
+  ``?expect_draft=<draft_digest>`` (what a person approved, #6931 review M3), a draft whose
+  digest is now another is 409 ``draft-changed`` too, and nothing is published.
 
 Path rules and caps are `hosted_plugins/rules.py`'s. The routes are ``api`` routes
 (`auth/routes.py`): a person, an access token with ``write`` for a write, or the agent's
@@ -27,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated, Any
@@ -62,7 +67,8 @@ DRAFT_CHANGED = "draft-changed"
 NOTHING_TO_PUBLISH = "nothing-to-publish"
 
 #: The agent's own cap on a package's tree (``agent/src/plugins/packages/hash.ts``
-#: ``MAX_TOTAL_BYTES``), which the published tree, manifest included, must fit.
+#: ``MAX_TOTAL_BYTES``, and ``unpack.ts`` ``UNPACK_MAX_TOTAL_BYTES``), which the published
+#: tree, manifest included, must fit. Its file cap is ``rules.PACKAGE_MAX_FILES``.
 PACKAGE_MAX_TOTAL_BYTES = 20 * 1024 * 1024
 
 Name = Annotated[str, Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")]
@@ -143,6 +149,9 @@ class HostedPluginDraftDiff(BaseModel):
     #: than its version number (a ``PATCH`` changed the description). A draft with only this
     #: change still publishes. False before the first publish.
     manifest_changed: bool
+    #: The draft's files, its description and its latest version, as one digest:
+    #: ``POST /{name}/publish?expect_draft=`` publishes only while it is the same.
+    draft_digest: str
 
 
 class HostedPluginVersion(BaseModel):
@@ -252,6 +261,37 @@ def _file_list(rows: list[Any]) -> dict[str, dict[str, Any]]:
         }
         for p in sorted(by_path, key=rules.sort_key)
     }
+
+
+def _draft_digest(row: Any, rows: list[Any]) -> str:
+    """The digest of what a publish of the draft makes: its files, the description in its
+    generated ``plugin.json`` and the version it is published after."""
+    text = json.dumps(
+        {
+            "files": _file_list(rows),
+            "description": row["description"],
+            "latest_version": row["latest_version"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def draft_digest(state: Any, name: str) -> str | None:
+    """The draft-diff's ``draft_digest`` of hosted plugin ``name`` now, or None when no
+    hosted plugin has the name. A flow's run page binds a publish's approval to it (#7199,
+    `flows/print_binding.py`)."""
+
+    def run(conn: psycopg.Connection[Any]) -> str | None:
+        row = store.plugin(conn, name)
+        return None if row is None else _draft_digest(row, store.draft(conn, row["id"]))
+
+    return await _in_tx(state, run)
+
+
+def _draft_changed(what: str) -> ApiError:
+    return ApiError(status.HTTP_409_CONFLICT, what, reason=DRAFT_CHANGED)
 
 
 def _without_manifest(files: dict[str, Any]) -> dict[str, Any]:
@@ -493,25 +533,51 @@ async def hosted_plugin_draft_diff(name: Name, state: StateDep) -> HostedPluginD
         row = _plugin(conn, name)
         base = store.latest(conn, row)
         before = {} if base is None else _without_manifest(base["files"])
-        diff = bundle.diff_files(before, _file_list(store.draft(conn, row["id"])))
+        rows = store.draft(conn, row["id"])
+        diff = bundle.diff_files(before, _file_list(rows))
         return HostedPluginDraftDiff(
             base_version=None if base is None else base["version"],
             manifest_changed=_manifest_changed(row, base),
+            draft_digest=_draft_digest(row, rows),
             **diff,
         )
 
     return await _in_tx(state, run)
 
 
+@router.get("/{name}/versions", summary="List a hosted plugin's published versions, newest first")
+async def list_hosted_plugin_versions(name: Name, state: StateDep) -> list[HostedPluginVersion]:
+    def run(conn: psycopg.Connection[Any]) -> list[HostedPluginVersion]:
+        rows = store.versions(conn, _plugin(conn, name)["id"])
+        return [HostedPluginVersion.model_validate(dict(r)) for r in rows]
+
+    return await _in_tx(state, run)
+
+
 @router.post("/{name}/publish", summary="Publish the draft as the next version")
 async def publish_hosted_plugin(
-    name: Name, state: StateDep, caller: CallerDep
+    name: Name,
+    state: StateDep,
+    caller: CallerDep,
+    expect_draft: Annotated[
+        str | None,
+        Query(
+            max_length=80,
+            description="The draft-diff's `draft_digest` that was approved: the draft is "
+            "published only while it is the same, else 409 `draft-changed`.",
+        ),
+    ] = None,
 ) -> HostedPluginVersion:
     def read(conn: psycopg.Connection[Any]) -> tuple[Any, list[Any], Any | None]:
         row = _plugin(conn, name)
         return row, store.draft(conn, row["id"]), store.latest(conn, row)
 
     row, rows, base = await _in_tx(state, read)
+    if expect_draft is not None and _draft_digest(row, rows) != expect_draft:
+        raise _draft_changed(
+            "the draft, its description or its versions changed since it was approved; "
+            "nothing was published"
+        )
     draft = {r["path"]: (await blob_bytes(state, r["sha256"]), r["executable"]) for r in rows}
     found = bundle.problems(draft)
     number = (row["latest_version"] or 0) + 1
@@ -521,6 +587,11 @@ async def publish_hosted_plugin(
     if sum(len(data) for data, _ in tree.values()) > PACKAGE_MAX_TOTAL_BYTES:
         found.append(
             f"the plugin with its plugin.json is larger than {PACKAGE_MAX_TOTAL_BYTES} bytes"
+        )
+    if len(tree) > rules.PACKAGE_MAX_FILES:
+        found.append(
+            f"the plugin with its plugin.json has more than {rules.PACKAGE_MAX_FILES} files; "
+            f"a draft holds at most {rules.MAX_FILES}"
         )
     if found:
         raise ApiError(
@@ -554,11 +625,9 @@ async def publish_hosted_plugin(
             or current["description"] != row["description"]
             or _file_list(store.draft(conn, row["id"])) != read_draft
         ):
-            raise ApiError(
-                status.HTTP_409_CONFLICT,
+            raise _draft_changed(
                 "the draft, its description or its versions changed while it was published; "
-                "publish again",
-                reason=DRAFT_CHANGED,
+                "publish again"
             )
         version = store.publish(
             conn,

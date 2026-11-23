@@ -1500,6 +1500,21 @@ class SettingsStore:
         emit(self.events, SettingsChanged(section="model_choices"))
         return self.library_choices(file_id)
 
+    def copy_library_choices(self, from_id: int, to_id: int) -> bool:
+        """File ``from_id``'s remembered choices copied to file ``to_id``, only when
+        ``to_id`` holds none (a storefront item's held copy put back, #6710 §10.2); whether
+        a row was written. One statement, so a choice made meanwhile is never overwritten."""
+        with self._pool.connection() as conn:
+            written = conn.execute(
+                "INSERT INTO model_print_choices (model_id, choices)"
+                " SELECT %s, choices FROM model_print_choices WHERE model_id = %s"
+                " ON CONFLICT (model_id) DO NOTHING",
+                (library_options_scope(to_id), library_options_scope(from_id)),
+            ).rowcount
+        if written:
+            emit(self.events, SettingsChanged(section="model_choices"))
+        return bool(written)
+
     def set_model_project(
         self, model_id: str, preset_id: str | None, project: ModelProject | None
     ) -> StoredSettings:

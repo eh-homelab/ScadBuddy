@@ -14,6 +14,7 @@ from psycopg import errors
 from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.models import LocalPresetDetail
+from scadbuddy.filament import sb_presets
 from scadbuddy.filament.models import TypePreset
 from scadbuddy.filament.sb_presets import (
     FilamentPresetStore,
@@ -47,7 +48,7 @@ def _doc(name: str, low: str = "210", **over: Any) -> dict[str, Any]:
     }
 
 
-def _held(bb_id: int, name: str, stamp: str, **over: Any) -> LocalPresetDetail:
+def _held(bb_id: int, name: str, stamp: str | None, **over: Any) -> LocalPresetDetail:
     return LocalPresetDetail(
         id=bb_id,
         name=name,
@@ -221,6 +222,32 @@ async def test_adoption_turns_bambuddy_ids_into_scadbuddy_presets(
         }
 
 
+async def test_one_preset_that_cannot_be_adopted_never_stops_the_rest(
+    pg_pool: PgPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Bambuddy local preset whose row ScadBuddy refuses keeps its bindings' Bambuddy
+    id; the ids after it are still adopted."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    held = HeldPresetStore(pg_pool)
+    refused, kept = _type(pg_pool, "PLA-R"), _type(pg_pool, "PLA-K")
+    await held.keep(_held(5, "Refused", "2026-11-20T01:00:00"))
+    await held.keep(_held(9, "Kept", "2026-11-20T01:00:00"))
+    _bind(pg_pool, refused, "5")
+    _bind(pg_pool, kept, "9")
+    real = sb_presets._adopt_one
+
+    def refusing(pool: Any, detail: LocalPresetDetail, *args: Any) -> bool:
+        if detail.id == 5:
+            raise errors.CheckViolation("name too long")
+        return real(pool, detail, *args)
+
+    monkeypatch.setattr(sb_presets, "_adopt_one", refusing)
+    assert await adopt_held(pg_pool, blobs, held) == 1
+    assert _bindings(pg_pool, refused) == [("5", None)]
+    [(ref, _)] = _bindings(pg_pool, kept)
+    assert sb_id(ref) is not None
+
+
 async def test_a_bambuddy_edit_is_a_new_version_of_its_preset(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
@@ -247,6 +274,37 @@ async def test_a_bambuddy_edit_is_a_new_version_of_its_preset(
     assert await refresh_bambuddy(pg_pool, blobs, held) == 0
     again = store.get(preset.id)
     assert again is not None and (again.version, again.bb_updated_at) == (2, "2026-11-23T03:00:00")
+
+
+async def test_a_preset_with_no_stamp_writes_no_blob_while_unchanged(
+    pg_pool: PgPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kept preset Bambuddy sent with no ``updated_at`` is read at every refresh; its
+    unchanged document keeps no new blob, and a changed one is a new version."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    held = HeldPresetStore(pg_pool)
+    await held.keep(_held(8, "Stampless", None))
+    _bind(pg_pool, _type(pg_pool, "PLA-N"), "8")
+    await adopt_held(pg_pool, blobs, held)
+    store = FilamentPresetStore(pg_pool, lambda: blobs)
+    (preset,) = store.all()
+
+    kept: list[bytes] = []
+    real = sb_presets.keep_document
+
+    async def counting(store_: Any, body: bytes) -> tuple[str, str]:
+        kept.append(body)
+        return await real(store_, body)
+
+    monkeypatch.setattr(sb_presets, "keep_document", counting)
+    assert await refresh_bambuddy(pg_pool, blobs, held) == 0
+    assert kept == []
+
+    await held.keep(_held(8, "Stampless", None, low="200"))
+    assert await refresh_bambuddy(pg_pool, blobs, held) == 1
+    now = store.get(preset.id)
+    assert now is not None and now.version == 2
+    assert len(kept) == 1
 
 
 async def test_a_scadbuddy_owned_preset_is_never_read_back(pg_pool: PgPool, tmp_path: Path) -> None:

@@ -371,6 +371,19 @@ same way, `vite.config.ts`).
   requests with the `sessionStorage` key `scadbuddy.mock.pending-input`
   (`mocks/features/pendingInput.ts`). The mocks hold two requested grants by default
   (`run-ask`, `trig-render`), so the tab title of the mocked app starts with `(2)`.
+- Hosted plugins (#6937, spec 2026-11-21 §6.2, §6.3): Settings → Tools & plugins → Hosted
+  plugins (`pages/settings/sections/hosted-plugins.tsx`, `components/settings/HostedPlugins.tsx`,
+  `HostedPluginEditor.tsx`; client `api/hostedPlugins.ts`, file bytes as the raw body through
+  `client.ts` `requestRaw`). A draft file opens in Monaco (`HostedFileEditor.tsx`, a lazy chunk;
+  unit tests mock it with a textarea). `hostedDraft.ts` checks paths first (the API's refusal is
+  shown as it is) and works out `offerState` from the package row. A Publish offers the new
+  version at once (spec §6.3 step 5): the agent's package install with `{ kind: 'hosted', name }`,
+  an unapproved install or a re-pin, never an approval. Offer runs the same install for a version
+  a failed offer left unoffered. Publish, Offer and Delete are `USER_ONLY`. Close, or Edit on
+  another plugin, asks before it drops unsaved files. The two
+  package panels tell each other of a change (`packagesChanged.ts`). Mocks
+  `src/mocks/features/hostedPlugins.ts` (seeds `print-notes`, version 1 never offered), which
+  tell `mocks/aiPlugins.ts` what an Offer installs (`setHostedLookup`). e2e `e2e/hosted-plugins.spec.ts`.
 - `frontend/src/lib/appLinks.ts` (`appUrl`, `useAppUrl`, `components/AppLink.tsx`) — links
   to ScadBuddy's own pages use the host the user is on: a path, or a URL on a known origin
   (`public_url` plus `SCADBUDDY_ALLOWED_ORIGINS`), is put on `window.location.origin`

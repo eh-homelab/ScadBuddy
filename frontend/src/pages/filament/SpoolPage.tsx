@@ -100,6 +100,8 @@ interface Draft {
   drying_temp_c: string
   drying_hours: string
   weight_locked: boolean
+  /** Whether it was added full (#7149): `''` is not known. */
+  added_full: '' | 'yes' | 'no'
   note: string
   location_id: string
   /** A new spool's first reading; an existing one is weighed instead. */
@@ -132,6 +134,7 @@ const BLANK: Draft = {
   drying_temp_c: '',
   drying_hours: '',
   weight_locked: false,
+  added_full: '',
   note: '',
   location_id: '',
   grams_left: '',
@@ -165,6 +168,7 @@ function draftOf(spool: SpoolDetail): Draft {
     drying_temp_c: str(spool.drying_temp_c),
     drying_hours: str(spool.drying_hours),
     weight_locked: spool.weight_locked,
+    added_full: spool.added_full == null ? '' : spool.added_full ? 'yes' : 'no',
     note: str(spool.note),
     location_id: str(spool.location_id),
     grams_left: '',
@@ -230,6 +234,7 @@ function bodyOf(draft: Draft): SpoolPatch | string {
     colour_name: draft.colour_name.trim() || null,
     extra_colours: extras.length > 0 ? extras : null,
     weight_locked: draft.weight_locked,
+    added_full: draft.added_full === '' ? null : draft.added_full === 'yes',
     note: draft.note.trim() || null,
     ...(ints as Record<keyof typeof ints, number | null>),
     ...(decimals as Record<keyof typeof decimals, string | null>),
@@ -257,6 +262,18 @@ const created = (body: SpoolPatch, grams: string): SpoolCreate => {
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : cause instanceof Error ? cause.message : 'The server could not be reached. Try again.')
 
 const NONE = '__none__'
+
+/**
+ * #7149: how the spool's tag came in, in a person's words, from Bambuddy's `data_origin`
+ * (`rfid-routes.json` `data_origin_values`); an origin not listed is shown as it is.
+ */
+const ORIGINS: Record<string, string> = {
+  rfid_auto: 'Bambuddy added this spool when an AMS read its unknown tag.',
+  rfid_linked: 'Bambuddy matched its tag to this spool.',
+  nfc_link: 'Its tag was linked to it by hand.',
+  opentag3d: 'Its tag was written through SpoolBuddy.',
+}
+const originText = (origin: string) => ORIGINS[origin] ?? `Its data came in as “${origin}”.`
 
 interface PickProps {
   name: string
@@ -356,6 +373,7 @@ export function SpoolPage() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
   const [reading, setReading] = useState('')
   const [dryTemp, setDryTemp] = useState('')
   const [dryHours, setDryHours] = useState('')
@@ -740,6 +758,12 @@ export function SpoolPage() {
               {saved && !creating ? (
                 <>
                   <TagPanel spool={saved} onChanged={() => void reload(true).catch((cause) => setError(message(cause)))} />
+                  {(saved.data_origin || saved.tag_encoded_at) && (
+                    <p className="flex flex-wrap gap-x-1 text-[12px] text-muted-foreground">
+                      {saved.data_origin && <span>{originText(saved.data_origin)}</span>}
+                      {saved.tag_encoded_at && <span>{`Tag written ${new Date(saved.tag_encoded_at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`}</span>}
+                    </p>
+                  )}
                   <h3 className="mt-2 text-[13px] font-medium">Write a tag</h3>
                   <NtagPanel spool={saved} onBound={() => void reload(true).catch((cause) => setError(message(cause)))} />
                 </>
@@ -772,6 +796,22 @@ export function SpoolPage() {
               {field('diameter_mm', 'Diameter (mm)', { mode: 'decimal' })}
               {field('density_g_cm3', 'Density (g/cm³)', { mode: 'decimal' })}
               {field('low_stock_pct', 'Low stock at (%)', { mode: 'numeric', hint: 'Of the label weight.' })}
+              <div className="flex min-w-0 flex-col gap-1">
+                <Label htmlFor="spool-added-full" className="text-[13px]">
+                  Added full
+                </Label>
+                <Select value={draft.added_full === '' ? NONE : draft.added_full} onValueChange={(next) => set('added_full', next === NONE ? '' : (next as 'yes' | 'no'))}>
+                  <SelectTrigger id="spool-added-full" aria-label="Added full" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE}>Not known</SelectItem>
+                    <SelectItem value="yes">Yes</SelectItem>
+                    <SelectItem value="no">No</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-[12px] text-muted-foreground">Whether the spool was full when it was added.</p>
+              </div>
             </div>
             <p className="text-[13px] text-muted-foreground">
               {empty ? `Empty spool ${empty.empty_weight_g} g (${empty.name}).` : 'Empty spool weight not known. Choose its spool.'}
@@ -977,6 +1017,13 @@ export function SpoolPage() {
                       <GramsChart points={history.series} plates={plateTimes(history.events.map((row) => row.event))} label="Grams left" />
                     </div>
                     {saved && <SpoolMetricsPanel history={history} gramsLeft={leftNow} createdAt={saved.created_at} />}
+                    {saved && (
+                      <div>
+                        <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => setConfirmReset(true)}>
+                          Reset the used counter
+                        </Button>
+                      </div>
+                    )}
                     <SpoolTimeline rows={history.events} catalogs={catalogs} types={lists.types} hrefs={timelineHrefs} />
                   </>
                 ) : (
@@ -1015,6 +1062,33 @@ export function SpoolPage() {
               }
             >
               Delete spool
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={confirmReset} onOpenChange={setConfirmReset}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reset the used counter of spool #{saved?.number}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Used starts again from 0 g. The grams left, the lifetime total and the cost stay. A spool linked to Bambuddy has its consumed counter reset there too when weights sync to it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep counting</AlertDialogCancel>
+            <Button
+              type="button"
+              disabled={busy}
+              onClick={() =>
+                void act(async () => {
+                  setConfirmReset(false)
+                  await addSpoolEvent(spoolKey, { kind: 'consumed_reset' })
+                  await reload(true)
+                }, 'Counter reset')
+              }
+            >
+              Reset counter
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

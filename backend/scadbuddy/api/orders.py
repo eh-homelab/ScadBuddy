@@ -913,7 +913,7 @@ async def _hand_density(body: FilamentInput, orders: OrdersComponent) -> Profile
     """The density ScadBuddy's spools of ``body``'s identity give (its colour at its
     alpha); ``None`` when they cannot be read."""
     try:
-        groups = await inventory_groups(orders.inventory, orders.integrations)
+        groups = await inventory_groups(orders.inventory, orders.integrations, orders.own_presets)
     except DATABASE_ERRORS as error:
         logger.warning("a filament was added with no density: %s", type(error).__name__)
         return None
@@ -1040,7 +1040,7 @@ async def import_spools(orders: OrdersDep) -> SpoolImport:
 async def _spool_groups(orders: OrdersComponent) -> list[SpoolGroup]:
     """`inventory_groups`; 503 when ScadBuddy's spools cannot be read."""
     try:
-        return await inventory_groups(orders.inventory, orders.integrations)
+        return await inventory_groups(orders.inventory, orders.integrations, orders.own_presets)
     except DATABASE_ERRORS as error:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1056,11 +1056,11 @@ async def _spool_groups(orders: OrdersComponent) -> list[SpoolGroup]:
         "Every record not archived with no density gets the one ScadBuddy's spools of its"
         " material, subtype, brand and `#RRGGBBAA` give (#6136, #6262, `orders/density.py`):"
         " the newest spool's own effective density, else its slicer preset id's density"
-        " (Bambuddy's local preset while one is linked, else the image's Bambu Studio"
-        " preset), else that of the preset id its tray reports. One row per such record; a"
-        " row with no `density_g_cm3` is one no source covers, which still has none. A"
-        " density a record has is never changed. Needs no Bambuddy. 503 when ScadBuddy's"
-        " spools cannot be read."
+        " (ScadBuddy's own preset for an `sb-` id, Bambuddy's local preset while one is"
+        " linked, else the image's Bambu Studio preset), else that of the preset id its"
+        " tray reports. One row per such record; a row with no `density_g_cm3` is one no"
+        " source covers, which still has none. A density a record has is never changed."
+        " Needs no Bambuddy. 503 when ScadBuddy's spools cannot be read."
     ),
 )
 async def fill_densities(orders: OrdersDep) -> DensityFill:

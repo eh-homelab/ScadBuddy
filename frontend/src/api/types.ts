@@ -423,6 +423,13 @@ export type VirtualPrinters = Schemas['VirtualPrintersView']
 export type VirtualPrinterCreate = Schemas['VirtualPrinterCreate']
 export type VirtualPrinterUpdate = Schemas['VirtualPrinterUpdate']
 export type VirtualPrinterDiagnostic = Schemas['VirtualPrinterDiagnostic']
+/** #7154 — a printer's K-profiles (pressure advance), through Bambuddy. */
+export type KProfile = Schemas['KProfile']
+export type KProfileTable = Schemas['KProfileTable']
+export type KProfileNotes = Schemas['KProfileNotes']
+export type KProfileWriteResult = Schemas['KProfileWriteResult']
+export type KProfileSet = Schemas['KProfileSet']
+export type KProfileRemove = Schemas['KProfileRemove']
 /** The LAN link as typed: the access code goes once and never comes back. */
 export type LanLink = Schemas['LanLink']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */

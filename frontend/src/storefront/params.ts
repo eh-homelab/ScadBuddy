@@ -110,7 +110,9 @@ export function shownLabel(name: string, label: string | null | undefined, capti
 /**
  * A support material: the shop's choice, never the customer's (owner rule, 2026-11-13).
  * The shop's copy is `backend/scadbuddy/orders/storefront/wire.py` `SUPPORT_MATERIAL`, and
- * the agent's `agent/src/tools/storefrontDraft.ts` `SUPPORT_MATERIAL`: change all together.
+ * the agent's `agent/src/tools/storefrontDraft.ts` `SUPPORT_MATERIAL`: change all together. All three
+ * are tested against `test-fixtures/storefront/support-materials.json` (this one through the
+ * editor's `isSupportMaterial`, `components/storefront/listingDraft.test.ts`).
  */
 const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 

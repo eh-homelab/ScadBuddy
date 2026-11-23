@@ -1696,6 +1696,11 @@ class RemoteHeldPresets(HeldPresetStore):
 _refuse(RemoteHeldPresets, "HeldPresetStore", HELD_PRESETS_API_ONLY)
 
 
+#: The most ids one ``…/print/own-presets/documents`` request names, so its URL stays
+#: short; `RemoteFilamentPresets.documents` sends more in batches.
+OWN_PRESET_DOCUMENTS_MAX = 200
+
+
 class RemoteFilamentPresets:
     """ScadBuddy's own filament presets (#7176, `slicing/own_presets.py` `OwnPresets`)
     over ``…/print/own-presets`` (area ``own-presets``): what a native run's
@@ -1721,12 +1726,15 @@ class RemoteFilamentPresets:
 
     async def documents(self, ids: Collection[int]) -> dict[int, dict[str, Any]]:
         unique = sorted(set(ids))
-        if not unique:
-            return {}
-        url = f"{BASE}/own-presets/documents?{urlencode({'id': unique}, doseq=True)}"
-        body = (await self._client.request("GET", url)).json()
-        # The route already strips them; stripped here too, as the kept presets are.
-        return {int(found): strip_credentials(doc) for found, doc in body.items()}
+        out: dict[int, dict[str, Any]] = {}
+        # The route takes at most `OWN_PRESET_DOCUMENTS_MAX` ids a request.
+        for start in range(0, len(unique), OWN_PRESET_DOCUMENTS_MAX):
+            batch = unique[start : start + OWN_PRESET_DOCUMENTS_MAX]
+            url = f"{BASE}/own-presets/documents?{urlencode({'id': batch}, doseq=True)}"
+            body = (await self._client.request("GET", url)).json()
+            # The route already strips them; stripped here too, as the kept presets are.
+            out |= {int(found): strip_credentials(doc) for found, doc in body.items()}
+        return out
 
 
 #: The `NativeSliceStore` methods only the API calls: the `SliceWorkflow`'s activities

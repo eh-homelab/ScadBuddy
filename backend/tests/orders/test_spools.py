@@ -29,7 +29,7 @@ from scadbuddy.orders.bambuddy import BambuddyIntegrations
 from scadbuddy.orders.integrations import NOT_LINKED, LocalDensity, NotLinked, SpoolDensity
 from scadbuddy.orders.models import Actor, Filament, FilamentInput, QuoteLine
 from scadbuddy.orders.printing import quoted_setup
-from scadbuddy.orders.spool_import import import_spools, spool_groups
+from scadbuddy.orders.spool_import import import_spools, own_densities, spool_groups
 from scadbuddy.orders.spools import (
     ShelfSpool,
     SpoolChoiceError,
@@ -776,3 +776,30 @@ def test_an_invoiced_spools_cost_reaches_the_price_book(pool: PgPool, rows: Orde
     record = rows.filament(imported["filament_id"])
     assert record is not None
     assert Decimal(record.cost_per_kg) == Decimal("21.4000")
+
+
+async def test_a_blob_store_that_cannot_be_read_leaves_out_the_sb_densities() -> None:
+    """#7176: the ScadBuddy presets' densities are left out when their blobs cannot be
+    read, so the import goes on with the spools' other sources."""
+
+    class Broken:
+        async def rows(self) -> list[Any]:
+            return []
+
+        async def documents(self, ids: Any) -> dict[int, dict[str, Any]]:
+            raise OSError("the blob store is not answering")
+
+    assert await own_densities(Broken(), ["sb-5", "GFA00"]) == {}
+
+
+async def test_an_sb_preset_gives_its_documents_density() -> None:
+    class Own:
+        async def rows(self) -> list[Any]:
+            return []
+
+        async def documents(self, ids: Any) -> dict[int, dict[str, Any]]:
+            return {5: {"name": "Mine", "filament_density": ["1.24"]}, 6: {"name": "None"}}
+
+    assert await own_densities(Own(), ["sb-5", "sb-6", "7"]) == {
+        "sb-5": LocalDensity(name="Mine", density_g_cm3="1.24")
+    }

@@ -1058,6 +1058,8 @@ class SpoolCreate(_In):
     weight_locked: bool = False
     note: Note | None = None
     grams_left: Grams | None = None
+    #: Whether the spool was added full (#7149 R-7149-2); ``None`` is not known.
+    added_full: bool | None = None
 
     @model_validator(mode="after")
     def _typed(self) -> SpoolCreate:
@@ -1093,6 +1095,7 @@ class SpoolPatch(_Patch):
     cost_per_kg: Cost | None = None
     weight_locked: bool | None = None
     note: Note | None = None
+    added_full: bool | None = None
     archived: bool | None = None
 
 
@@ -1145,6 +1148,14 @@ class Spool(_Row):
     #: The invoice line the spool was bought on, if any. An invoice line may fill a spool
     #: with none, costed or not; one with a line is refused (#6700).
     invoice_line_id: UUID | None = None
+    #: How the spool's data came in, in Bambuddy's words (``rfid_auto``, ``nfc_link``,
+    #: ``opentag3d`` ...), whether the pull or ScadBuddy wrote it (#7149 R-7149-1). Read
+    #: only: the pull, a person's tag bind and a confirmed NTAG write set it.
+    data_origin: str | None = None
+    #: Whether the spool was added full; ``None`` is not known (R-7149-2).
+    added_full: bool | None = None
+    #: When its tag was written (Bambuddy's ``encode_time``, R-7149-3). Read only.
+    tag_encoded_at: datetime | None = None
     #: The values the spool has after its overrides over its type's.
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
     #: The names of the fields the spool overrides.
@@ -1414,6 +1425,7 @@ EventKind = Literal[
     "archived",
     "restored",
     "synced_from_bb",
+    "consumed_reset",
 ]
 EventSource = Literal["ams_remain", "scale", "print_estimate", "print_actual", "person", "bb"]
 
@@ -1523,11 +1535,12 @@ class SpoolEvent(BaseModel):
 
 class SpoolEventAdd(_In):
     """What a person records on a spool: a weighing (``grams`` is the filament left,
-    without the empty spool) or a drying (its temperature and hours). A drying that leaves
-    out ``temp_c`` or ``hours`` takes the spool's `DryingDefaults` for it; ``null`` records
-    none (#6720)."""
+    without the empty spool), a drying (its temperature and hours) or a reset of its
+    consumed counter (``consumed_reset``, #7149 R-7149-4: no grams, the grams left stay). A
+    drying that leaves out ``temp_c`` or ``hours`` takes the spool's `DryingDefaults` for
+    it; ``null`` records none (#6720)."""
 
-    kind: Literal["weighed", "dried"]
+    kind: Literal["weighed", "dried", "consumed_reset"]
     source: Literal["person", "scale"] = "person"
     #: When it happened, with its offset; never later than now (`FUTURE_SKEW` allowed).
     at: AwareDatetime | None = None
@@ -1547,7 +1560,25 @@ class SpoolEventAdd(_In):
             raise ValueError("a weighing has no temp_c or hours")
         if self.kind == "dried" and self.grams is not None:
             raise ValueError("a drying has no grams; record a weighing for that")
+        if self.kind == "consumed_reset" and (
+            self.grams is not None or self.temp_c is not None or self.hours is not None
+        ):
+            raise ValueError("a consumed reset has no grams, temp_c or hours")
         return self
+
+
+class ConsumedReset(_In):
+    """The spools whose consumed counter to start again (#7149 R-7149-4): an explicit list,
+    never "all", as Bambuddy's bulk reset takes (a slip would wipe every counter)."""
+
+    spool_ids: list[UUID] = Field(min_length=1, max_length=500)
+
+
+class ConsumedResetDone(BaseModel):
+    """How many spools took a ``consumed_reset`` event, and the ids that name no spool."""
+
+    reset: int
+    not_found: list[UUID]
 
 
 class SpoolArchive(_In):

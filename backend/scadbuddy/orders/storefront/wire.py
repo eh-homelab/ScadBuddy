@@ -85,7 +85,8 @@ EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*[0-9]+\s*\)", re.IGNORECA
 #: A support material: the shop's choice, never the customer's (#6152, owner rule
 #: 2026-11-13). The shop slice profile needs no filament type for it (#6153). The page's copy
 #: is `frontend/src/storefront/params.ts` `SUPPORT_MATERIAL`, the agent's
-#: `agent/src/tools/storefrontDraft.ts` `SUPPORT_MATERIAL`: change all together.
+#: `agent/src/tools/storefrontDraft.ts` `SUPPORT_MATERIAL`: change all together. All three are
+#: tested against `test-fixtures/storefront/support-materials.json` (#7195 review).
 SUPPORT_MATERIAL: Final = re.compile(r"support|pva|bvoh|hips", re.IGNORECASE)
 #: A parameter that sets support: the shop may lock it, never offer it (#6152).
 SUPPORT_PARAM: Final = re.compile(r"support|interface", re.IGNORECASE)

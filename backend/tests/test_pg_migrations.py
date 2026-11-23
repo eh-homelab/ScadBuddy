@@ -944,6 +944,32 @@ def test_one_sync_state_row(pg_conninfo: str) -> None:
 
 
 @pytest.mark.requires_postgres
+def test_the_compatibility_view_and_its_trigger_are_dropped(pg_conninfo: str) -> None:
+    """#6960: once every replica runs #6950's build, the `order_attachments` view, the
+    trigger that filled `entity_id` and its function are gone."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _index("entities") + 1])
+        assert conn.execute("SELECT to_regclass('order_attachments')").fetchone() == (
+            "order_attachments",
+        )
+        migrate(conn)
+        assert conn.execute("SELECT to_regclass('order_attachments')").fetchone() == (None,)
+        assert conn.execute(
+            "SELECT count(*) FROM pg_trigger WHERE tgname = 'entity_attachments_fill_entity'"
+        ).fetchone() == (0,)
+        assert conn.execute(
+            "SELECT to_regprocedure('entity_attachments_fill_entity()')"
+        ).fetchone() == (None,)
+        # Nothing fills `entity_id` any more: a write that names none is refused.
+        with pytest.raises(psycopg.errors.NotNullViolation), conn.transaction():
+            conn.execute(
+                "INSERT INTO entity_attachments (id, subject, kind, filename, media_type,"
+                " size_bytes, sha256, blob_key, created_by) VALUES ('x', 'supplier:s', 'image',"
+                " 'a.png', 'image/png', 1, repeat('a', 64), 'attachment-x', '{}')"
+            )
+
+
+@pytest.mark.requires_postgres
 def test_the_entities_migration_keeps_order_attachments_for_the_previous_build(
     pg_conninfo: str,
 ) -> None:
@@ -964,7 +990,12 @@ def test_the_entities_migration_keeps_order_attachments_for_the_previous_build(
             " repeat('a', 64), 'attachment-a', '', '{}')"
         )
         conn.execute(old, ("before",))
-        assert migrate(conn)[0] == MIGRATIONS[_index("entities")].id
+        # Only up to `entities`: a later migration drops the view (#6960,
+        # `test_the_compatibility_view_and_its_trigger_are_dropped`).
+        assert (
+            migrate(conn, MIGRATIONS[: _index("entities") + 1])[0]
+            == MIGRATIONS[_index("entities")].id
+        )
 
         conn.execute(old, ("during",))
         conn.execute(

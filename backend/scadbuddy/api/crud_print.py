@@ -243,6 +243,7 @@ from scadbuddy.crud.print import (
     BASE,
     NO_ACCESS_CODE,
     NO_SUCH_PRINTER,
+    OWN_PRESET_DOCUMENTS_MAX,
     SERIAL_TAKEN,
     SLICE_SUBJECT,
 )
@@ -2245,7 +2246,8 @@ async def own_filament_presets(slicing: SlicingDep) -> list[FilamentPresetRow]:
 
 @router.get("/own-presets/documents", name="crud_print_own_preset_documents")
 async def filament_preset_documents(
-    slicing: SlicingDep, id: Annotated[list[int], Query(default_factory=list, max_length=200)]
+    slicing: SlicingDep,
+    id: Annotated[list[int], Query(default_factory=list, max_length=OWN_PRESET_DOCUMENTS_MAX)],
 ) -> dict[int, dict[str, Any]]:
     """The current documents of ScadBuddy's filament presets ``id``, each without
     print-host credential keys (`core/credentials.py` `strip_credentials`, applied as the

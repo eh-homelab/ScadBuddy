@@ -43,6 +43,7 @@ _EXPECTED_ROUTES = {
     ("PATCH", _SPOOL): Scope.MANAGE_INVENTORY,
     ("POST", f"{_SPOOL}/archive"): Scope.MANAGE_INVENTORY,
     ("POST", f"{_SPOOL}/restore"): Scope.MANAGE_INVENTORY,
+    ("POST", f"{_SPOOL}/reset-consumed-counter"): Scope.MANAGE_INVENTORY,
     ("PUT", f"{_SPOOL}/k-profiles"): Scope.MANAGE_INVENTORY,
     ("PUT", f"{_SPOOL}/filament-presets"): Scope.MANAGE_INVENTORY,
     ("PUT", f"{_SPOOL}/suppliers"): Scope.MANAGE_INVENTORY,
