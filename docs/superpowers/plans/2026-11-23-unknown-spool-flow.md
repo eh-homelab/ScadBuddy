@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-23-unknown-spool-flow-design.md`
 
+**Issue:** #7143, in the spool onboarding epic [#7171](https://github.com/eh-homelab/ScadBuddy/issues/7171).
+
 ## Global Constraints
 
 - Table `filament_unknown_trays`: `id`, `printer_id` (FK `printers`, `ON DELETE CASCADE`), `ams_id`, `tray_id`, `tray_uuid`, `tag_uid`, `material`, `colour_rgba`, `remain_pct` (nullable), `first_seen_at`, `seen_at`; unique `(printer_id, ams_id, tray_id)`. A row exists only while the tray is loaded and unmatched.

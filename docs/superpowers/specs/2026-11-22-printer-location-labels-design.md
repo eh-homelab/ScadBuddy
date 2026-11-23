@@ -2,7 +2,8 @@
 
 Date: 2026-11-22. Status: short design, approved by the owner on 2026-11-22.
 Issue: #6955. Parent: the filament epic #6260 (spec `2026-11-14-filament-management-design.md` §5.6, §7
-"Labels"). Related: the inventory epic #6949.
+"Labels"). Related: the inventory epic #6949. Slice 1 of the spool onboarding epic
+[#7171](https://github.com/eh-homelab/ScadBuddy/issues/7171).
 
 ## Intent
 

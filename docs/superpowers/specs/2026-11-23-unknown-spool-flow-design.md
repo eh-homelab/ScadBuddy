@@ -1,7 +1,8 @@
 # Unknown spool flow
 
-Issue #7143. Slice 2 of spool onboarding (filament epic #6260), after the printer and AMS
-labels (#6955, `2026-11-22-printer-location-labels-design.md`). Approved by the owner on
+Issue #7143. Slice 2 of the spool onboarding epic
+[#7171](https://github.com/eh-homelab/ScadBuddy/issues/7171) (under the filament epic #6260),
+after the printer and AMS labels (#6955, `2026-11-22-printer-location-labels-design.md`). Approved by the owner on
 2026-11-23.
 
 ## Intent
