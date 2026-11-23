@@ -181,9 +181,27 @@ class ProfileFetch:
 
 # -- #7025: search 3DFP, and add a filament it lacks ----------------------------------------
 
-#: A search is one page; a create one form. Both wait in the queue behind an export the
-#: worker runs (one activity at a time, Decision 16), for at most these.
+#: A search is one page; a create one form. A create waits in the queue behind an export
+#: the worker runs (one activity at a time, Decision 16); a search has a slot of its own on
+#: its own queue (`search_queue`, R-7062-1), so it waits only behind another search. Each
+#: waits at most these.
 SEARCH_SCHEDULE_TO_START: Final = timedelta(minutes=1)
+#: The suffix of the queue a search's activity runs on (`search_queue`).
+SEARCH_QUEUE_SUFFIX: Final = "-search"
+#: The patch that moves a search's activity to its own queue (#7062): a search that started
+#: on an older worker keeps its activity on the fetch queue when it is replayed.
+SEARCH_QUEUE_PATCH: Final = "tdfp-search-own-queue-7062"
+
+
+def search_queue(queue: str) -> str:
+    """The queue of a 3DFP search's activity: the worker's own queue with
+    `SEARCH_QUEUE_SUFFIX`, served by a worker of its own in the same process
+    (`worker.temporal_workers`), with its own slot, so a search never waits for a preset
+    fetch's export to end (R-7062-1). On the browser service it waits at most for the
+    export's step in hand (`browser.BrowserService`'s lock, R-7062-2)."""
+    return f"{queue}{SEARCH_QUEUE_SUFFIX}"
+
+
 SEARCH_TIMEOUT: Final = timedelta(minutes=3)
 #: One attempt (R-7025-10): a search is a read, so the caller sends it again; a second
 #: attempt would double how long the route waits.
@@ -237,6 +255,10 @@ def step_wait(schedule_to_start: timedelta, timeout: timedelta, retry: RetryPoli
     return (attempts * (schedule_to_start + timeout) + backoff + WAIT_MARGIN).total_seconds()
 
 
+#: What a step that no worker took in time may have waited behind (R-7062-1).
+_BUSY_WITH: Final = {"search": "another search", "create": "a preset fetch"}
+
+
 def tdfp_failure(error: ActivityError, step: str) -> tuple[str, str]:
     """The kind and the reason of a search's or create's failed step: the activity's own
     (`activities.site_failure`), or what timed out. A Temporal timeout of the step other
@@ -246,7 +268,7 @@ def tdfp_failure(error: ActivityError, step: str) -> tuple[str, str]:
         if cause.type == TimeoutType.SCHEDULE_TO_START:
             return NOT_STARTED, (
                 f"no profile-fetch worker took the {step} in time: none is running, or it is"
-                " busy with a preset fetch"
+                f" busy with {_BUSY_WITH.get(step, 'other work')}"
             )
         return "step_timeout", f"the {step} did not finish in time"
     if isinstance(cause, ApplicationError):
@@ -256,14 +278,21 @@ def tdfp_failure(error: ActivityError, step: str) -> tuple[str, str]:
 
 @workflow.defn(name=SEARCH_WORKFLOW)
 class TdfpSearch:
-    """One search of 3DFP (`activities.TdfpActivities.search`); the API waits for it."""
+    """One search of 3DFP (`activities.TdfpActivities.search`) on its own queue
+    (`search_queue`); the API waits for it."""
 
     @workflow.run
     async def run(self, ask: SearchAsk) -> TdfpOutcome:
+        queue = (
+            search_queue(workflow.info().task_queue)
+            if workflow.patched(SEARCH_QUEUE_PATCH)
+            else None
+        )
         try:
             answer: SearchAnswer = await workflow.execute_activity(
                 SEARCH_ACTIVITY,
                 ask,
+                task_queue=queue,
                 result_type=SearchAnswer,
                 schedule_to_start_timeout=SEARCH_SCHEDULE_TO_START,
                 start_to_close_timeout=SEARCH_TIMEOUT,

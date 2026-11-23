@@ -93,14 +93,24 @@ class ExportAsk(SpoolAsk):
 
 class RemoteSite:
     """`steps.Site` over the browser service's RPC (the module docstring). Use it as an async
-    context manager; its exit closes the service's browser."""
+    context manager; its exit closes the service's browser (``DELETE /session``), unless
+    ``closes_browser`` is false: a search's client closes only its own connection, so the
+    worker never closes the browser for a search while an export step may run on it
+    (R-7062-3). A search that fails ``browser`` or ``timeout`` is closed by the service
+    itself, under its lock (R-7062-4)."""
 
     def __init__(
-        self, base_url: str, token: str, *, transport: httpx.AsyncBaseTransport | None = None
+        self,
+        base_url: str,
+        token: str,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        closes_browser: bool = True,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._token = token
         self._transport = transport
+        self._closes_browser = closes_browser
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> Self:
@@ -124,7 +134,8 @@ class RemoteSite:
         tb: TracebackType | None,
     ) -> None:
         try:
-            await self._call("DELETE", SESSION, None, MAX_ERROR_BYTES, "")
+            if self._closes_browser:
+                await self._call("DELETE", SESSION, None, MAX_ERROR_BYTES, "")
         except SiteError:
             pass
         finally:
