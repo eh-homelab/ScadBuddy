@@ -71,7 +71,9 @@ these labels, so a label printed now must stay valid.
    unarchived root per printer (unique index). A "beside the printer" place is not a root. A
    unit place whose parent is empty or archived is moved under the root. In the printer merge
    a root clashes only with a root; a root only the merged printer has moves to the kept
-   printer and takes its name (#7081). The labels route calls `ensure_printer_on`. So does capture
+   printer and takes its name (#7081). Every place maker (`ensure_printer_on`,
+   `ensure_ams_unit_on`, `ensure_ams_on`) first takes the printer's advisory place lock
+   (`lock_printer_on`), so the labels route and capture cannot deadlock (#7081). The labels route calls `ensure_printer_on`. So does capture
    (`filament/locations.py` `_printer_parent`; a missing printer kind leaves the place with no
    parent and never fails a capture): when it makes an AMS unit or the external holder, and on
    each tray capture (`filament/capture.py` `reconcile`, a tray change or the refresh's

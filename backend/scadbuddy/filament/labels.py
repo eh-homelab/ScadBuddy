@@ -57,7 +57,9 @@ def printer_labels(
     has none (`LocationStore.ensure_printer_on`), and so is the place of each AMS unit,
     slot and external holder its latest report lists (`_ensure_reported`), so a slot that
     never held a spool gets a label too; a printer with no such report gets labels only for
-    the places it has. A place a person made beside the printer is left out.
+    the places it has. A place a person made beside the printer is left out. Each printer's
+    places are made under its place lock (`LocationStore.lock_printer_on`, taken first by
+    `ensure_printer_on`), as capture makes them, so the two never deadlock (#7081).
     `CatalogRefError` for an unknown printer, `NoPrinterKindError` for no printer kind."""
     labels: list[m.PrinterLabel] = []
     unreported: list[str] = []

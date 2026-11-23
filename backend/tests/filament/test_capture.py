@@ -25,6 +25,7 @@ from scadbuddy.printers.status import STALE_AFTER
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.spools.models import SeenTray
 from tests.conftest import PgPool
+from tests.filament.lock_support import waits_for_the_printer_lock
 from tests.printers.conftest import KEK
 
 pytestmark = pytest.mark.requires_postgres
@@ -583,3 +584,15 @@ def test_a_flat_install_with_no_printer_kind_still_captures(pg_pool: PgPool) -> 
     placed = LocationStore(pg_pool).get(unit)
     assert placed is not None and placed.parent_id is None
     assert _row(pg_pool, spool)["location_id"] is None
+
+
+def test_capture_takes_the_printer_lock_before_it_makes_a_place(pg_pool: PgPool) -> None:
+    """#7081: a capture that makes a unit and a slot takes the printer's place lock first,
+    as the labels route does (`tests/filament/test_locations.py`)."""
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    result = waits_for_the_printer_lock(
+        pg_pool, UUID(pid), lambda: _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    )
+    assert result.loaded == 1
+    assert _row(pg_pool, spool)["location_id"] == _tray_place(pg_pool, pid)

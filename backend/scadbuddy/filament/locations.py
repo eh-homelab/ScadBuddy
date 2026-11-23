@@ -31,6 +31,8 @@ _COLUMNS = ", ".join(m.Location.model_fields)
 #: Held while a place gets a new parent, so two moves in opposite directions cannot both
 #: pass the cycle check and then make a cycle.
 _TREE_LOCK = "filament_locations_tree"
+#: The prefix of a printer's place lock (`LocationStore.lock_printer_on`).
+_PRINTER_LOCK = "filament_printer_places:"
 
 
 class LocationExistsError(ValueError):
@@ -258,6 +260,7 @@ class LocationStore:
             " AND tray_id = %s AND archived_at IS NULL"
         )
         key = (printer_id, ams_id, tray_id)
+        LocationStore.lock_printer_on(conn, printer_id)
         try:
             # The external holder's parent is the printer's place.
             found = conn.execute(select, key).fetchone()
@@ -337,6 +340,7 @@ class LocationStore:
             " AND tray_id IS NULL AND archived_at IS NULL"
         )
         key = (printer_id, ams_id)
+        LocationStore.lock_printer_on(conn, printer_id)
         try:
             found = conn.execute(select, key).fetchone()
             if found is None:
@@ -385,6 +389,20 @@ class LocationStore:
         unit: UUID = found["id"]
         return unit
 
+    @staticmethod
+    def lock_printer_on(conn: Conn, printer_id: UUID) -> None:
+        """Take the printer's place lock, held to the end of ``conn``'s transaction
+        (#7081). Every `ensure_*` takes it before it reads or writes a place of the
+        printer, so a labels request (`filament/labels.py`, units first, then slots) and a
+        capture (`filament/capture.py`, each slot's unit just before the slot) make a
+        printer's places one at a time and never wait on each other's new rows in opposite
+        orders. An advisory lock, not a row lock on the printer's place: it needs no
+        ``printer`` kind, so a capture with none still runs. Taking it again in the same
+        transaction is free."""
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{_PRINTER_LOCK}{printer_id}",)
+        )
+
     def ensure_printer(self, printer_id: UUID) -> UUID:
         """The id of the printer's own place; `ensure_printer_on` on a pool connection."""
         with self._pool.connection() as conn:
@@ -402,6 +420,7 @@ class LocationStore:
             "SELECT id FROM filament_locations WHERE printer_id = %s AND printer_root"
             " AND archived_at IS NULL"
         )
+        LocationStore.lock_printer_on(conn, printer_id)
         try:
             found = conn.execute(select, (printer_id,)).fetchone()
             if found is None:
