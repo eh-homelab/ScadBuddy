@@ -925,6 +925,9 @@ class LibraryListRow(BambuddyModel):
     #: ScadBuddy's own library only (#6394): a print run's per-print copy or slice
     #: (``library_files.print_subject``), which its sweep trashes. Never Bambuddy's.
     per_print: bool = False
+    #: ScadBuddy's own library only (#7073): the row's ``sha256``. Bambuddy's listing
+    #: states no hash; its ``GET /library/files/{id}`` does (`LibraryFile.file_hash`).
+    file_hash: str | None = None
 
 
 class LibraryPlate(BambuddyModel):

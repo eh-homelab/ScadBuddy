@@ -161,6 +161,7 @@ def test_listing_on_native(native_client: TestClient, uploaded: NativeFile) -> N
         "output_id": None,
         "is_external": False,
         "per_print": False,
+        "file_hash": uploaded.sha256,
     }
 
 
@@ -305,6 +306,18 @@ def test_an_entry_names_its_live_output(
     assert one["folder_path"] == []
 
 
+def test_a_native_entry_carries_its_sha256_in_lowercase(
+    native_client: TestClient, in_folder: NativeFile
+) -> None:
+    """#7073: the listing, the search and the file read alone all state the row's
+    sha256, lowercase, whatever case the row holds."""
+    assert in_folder.sha256 == in_folder.sha256.lower()
+    listed = native_client.get("/api/v1/print/library", params={"folder_id": in_folder.folder_id})
+    assert listed.json()["files"][0]["file_hash"] == in_folder.sha256
+    hits = native_client.get("/api/v1/print/library/search", params={"q": "bracket"}).json()
+    assert hits["files"][0]["file_hash"] == in_folder.sha256
+
+
 def test_one_native_file_is_read_with_where_it_is(
     native_client: TestClient, in_folder: NativeFile
 ) -> None:
@@ -324,6 +337,7 @@ def test_one_native_file_is_read_with_where_it_is(
         "output_id": None,
         "is_external": False,
         "per_print": False,
+        "file_hash": in_folder.sha256,
         "folder_path": ["Dinos"],
     }
     # #5333 review: an id in the native range, so the router's `check_served` lets it

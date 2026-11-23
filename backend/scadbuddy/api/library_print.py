@@ -91,6 +91,7 @@ from scadbuddy.bambuddy.library_listing import (
     file_entry,
     folder_views,
     list_library,
+    lower_hash,
     search_library,
 )
 from scadbuddy.bambuddy.library_view import (
@@ -436,15 +437,15 @@ async def get_library_file_entry(
     ScadBuddy's own library) does not have is a 404."""
     native = await library.serving_native()
     if native is not None:
-        folder_id = (await native.library_file(file_id)).folder_id
-        listing = await list_library(native, folder_id=folder_id, show_all=True)
+        file = await native.library_file(file_id)
+        listing = await list_library(native, folder_id=file.folder_id, show_all=True)
         entry = file_entry(listing, file_id)
         if entry is not None:
             await _name_native_outputs(native, outputs, [entry])
     else:
         async with client_for(store.load()) as client:
-            folder_id = (await client.library_file(file_id)).folder_id
-            listing = await list_library(client, folder_id=folder_id, show_all=True)
+            file = await client.library_file(file_id)
+            listing = await list_library(client, folder_id=file.folder_id, show_all=True)
         entry = file_entry(listing, file_id)
         if entry is not None:
             made = await live_outputs_for_files(uploads, outputs, [entry.id])
@@ -452,6 +453,8 @@ async def get_library_file_entry(
     if entry is None:
         # Moved or deleted between the two reads.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"library file {file_id} is not listed")
+    # Bambuddy's listing states no hash; the file's own read does (#7073).
+    entry.file_hash = lower_hash(file.file_hash)
     return entry
 
 
