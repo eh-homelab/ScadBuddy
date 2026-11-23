@@ -85,7 +85,7 @@ def _entry(row: LibraryListRow) -> LibraryEntry:
         created_at=_utc(row.created_at) if row.created_at is not None else None,
         is_external=row.is_external,
         per_print=row.per_print,
-        file_hash=lower_hash(row.file_hash),
+        file_hash=row.file_hash,  # lowercase already: `LibraryListRow` makes it so
     )
 
 
