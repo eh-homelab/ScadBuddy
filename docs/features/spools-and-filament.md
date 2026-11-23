@@ -45,7 +45,10 @@ store; Bambuddy knows each one only by its mirror's local preset id
 configure send. After each refresh of the kept presets, a binding that still names a
 Bambuddy local preset is moved to a ScadBuddy preset made from the kept copy, and a preset
 made in Bambuddy takes a new version when Bambuddy edits it
-(`backend/scadbuddy/filament/sb_presets.py`).
+(`backend/scadbuddy/filament/sb_presets.py`). Until the fetch writes ScadBuddy presets
+itself (#7176's second PR), a re-fetch still imports into Bambuddy: at a key whose `3dfp`
+preset was already adopted, the new Bambuddy id is adopted as a second, `bambuddy` preset
+(plan Decision 6).
 
 A printer's K-profiles (#7154, plan
 `docs/superpowers/plans/2026-11-23-printer-kprofiles.md`) are read from the printer through

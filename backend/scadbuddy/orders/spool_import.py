@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
@@ -32,6 +33,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol, cast, get_args
 from uuid import UUID
 
+from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool
 from scadbuddy.orders.density import DensityTable, ProfileDensity, density_text, resolve
 from scadbuddy.orders.integrations import (
@@ -61,6 +63,8 @@ PLACES = Decimal("0.0001")
 MAX_COST = Decimal(10**8)
 #: ``FilamentInput``'s ``max_length`` for each name.
 MAX_NAME = 100
+
+logger = logging.getLogger(__name__)
 
 
 def _price(value: Decimal | float | None) -> Decimal | None:
@@ -193,12 +197,24 @@ def spool_groups(
 async def own_densities(own: OwnPresets | None, refs: Iterable[str]) -> dict[str, LocalDensity]:
     """The ``filament_density`` of each ScadBuddy preset (``sb-<id>``, #7176) of ``refs``
     whose document has one, by its ref. An adopted binding names its preset so, and the
-    document is the one Bambuddy's local preset had (`filament/sb_presets.py`)."""
+    document is the one Bambuddy's local preset had (`filament/sb_presets.py`). None when
+    the blob store cannot be read (logged); a database error is raised."""
     ids = {found for ref in refs if (found := sb_id(ref)) is not None}
     if own is None or not ids:
         return {}
+    try:
+        docs = await own.documents(ids)
+    except DATABASE_ERRORS:
+        raise
+    except Exception as error:
+        # A blob store that cannot be read leaves these densities out, as a refused
+        # Bambuddy read leaves its local presets' out.
+        logger.warning(
+            "no densities from ScadBuddy's presets: %s", type(error).__name__, exc_info=True
+        )
+        return {}
     out: dict[str, LocalDensity] = {}
-    for preset_id, doc in (await own.documents(ids)).items():
+    for preset_id, doc in docs.items():
         value = doc.get("filament_density")
         if isinstance(value, list):
             value = value[0] if value else None

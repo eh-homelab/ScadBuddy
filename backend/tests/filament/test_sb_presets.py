@@ -222,6 +222,32 @@ async def test_adoption_turns_bambuddy_ids_into_scadbuddy_presets(
         }
 
 
+async def test_one_preset_that_cannot_be_adopted_never_stops_the_rest(
+    pg_pool: PgPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Bambuddy local preset whose row ScadBuddy refuses keeps its bindings' Bambuddy
+    id; the ids after it are still adopted."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    held = HeldPresetStore(pg_pool)
+    refused, kept = _type(pg_pool, "PLA-R"), _type(pg_pool, "PLA-K")
+    await held.keep(_held(5, "Refused", "2026-11-20T01:00:00"))
+    await held.keep(_held(9, "Kept", "2026-11-20T01:00:00"))
+    _bind(pg_pool, refused, "5")
+    _bind(pg_pool, kept, "9")
+    real = sb_presets._adopt_one
+
+    def refusing(pool: Any, detail: LocalPresetDetail, *args: Any) -> bool:
+        if detail.id == 5:
+            raise errors.CheckViolation("name too long")
+        return real(pool, detail, *args)
+
+    monkeypatch.setattr(sb_presets, "_adopt_one", refusing)
+    assert await adopt_held(pg_pool, blobs, held) == 1
+    assert _bindings(pg_pool, refused) == [("5", None)]
+    [(ref, _)] = _bindings(pg_pool, kept)
+    assert sb_id(ref) is not None
+
+
 async def test_a_bambuddy_edit_is_a_new_version_of_its_preset(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:

@@ -26,6 +26,7 @@ from scadbuddy.crud.print import (
     BASE,
     HELD_PRESETS_API_ONLY,
     NATIVE_SLICES_API_ONLY,
+    OWN_PRESET_DOCUMENTS_MAX,
     SLICE_SUBJECT,
     ApiOnlyError,
     RemoteFilamentPresets,
@@ -228,6 +229,29 @@ async def test_the_own_presets_cross_as_the_store_answers() -> None:
     assert set(got) == {12}
     assert not _CREDENTIALS & set(got[12])
     assert got[12]["print_host"] == "octopi.local"
+
+
+async def test_many_own_preset_documents_are_read_in_batches() -> None:
+    """More ids than one request may name (the route's cap) are sent in batches, and
+    every answer is kept."""
+    asked: list[int] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        ids = [int(found) for found in request.url.params.get_list("id")]
+        assert 0 < len(ids) <= OWN_PRESET_DOCUMENTS_MAX
+        asked.append(len(ids))
+        return httpx.Response(
+            200, json={str(found): {"name": str(found)} for found in ids}, headers=CRUD_HEADERS
+        )
+
+    client, blocking = _stand_in(answer)
+    try:
+        got = await RemoteFilamentPresets(client).documents(range(1, 452))
+    finally:
+        await client.aclose()
+        blocking.close()
+    assert asked == [200, 200, 51]
+    assert sorted(got) == list(range(1, 452))
 
 
 async def test_the_routes_refusals_are_raised_as_the_sql_stores_raise() -> None:

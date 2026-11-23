@@ -447,7 +447,16 @@ async def adopt_held(pool: ConnectionPool[Conn], blobs: BlobStore, held: HeldPre
         doc = dict(detail.setting)
         key, sha256 = await keep_document(blobs, document_bytes(doc))
 
-        made += await asyncio.to_thread(_adopt_one, pool, detail, doc, key, sha256)
+        try:
+            made += await asyncio.to_thread(_adopt_one, pool, detail, doc, key, sha256)
+        except Exception as error:
+            # One preset ScadBuddy cannot hold (a name past the column's CHECK) never stops
+            # the ids after it; its bindings keep the Bambuddy id, and the next refresh
+            # tries it again.
+            logger.warning(
+                "a Bambuddy local preset was not adopted",
+                extra={"bb_preset_id": bb_id, "error": type(error).__name__},
+            )
     if made:
         logger.info("adopted Bambuddy local presets as ScadBuddy presets", extra={"count": made})
     return made
