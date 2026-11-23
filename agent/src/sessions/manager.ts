@@ -440,14 +440,17 @@ export function archivedError(id: string): SessionError {
 }
 
 /**
- * The API's 422 on a new session's browser options (#7027) as `invalid_browser`, naming the
- * refused fields and the API's detail; undefined for any other error.
+ * The API's 422 on a new session's browser options (#7027) as `invalid_browser`, naming each
+ * refused field with the API's message for it (the bound it broke, which only the API holds);
+ * undefined for any other error.
  */
 function browserRefusal(error: unknown): SessionError | undefined {
   if (!(error instanceof CrudReadError) || !error.fromRoute || error.status !== 422) return undefined
-  const fields = error.fields.filter((f) => f === 'body.browser' || f.startsWith('body.browser.')).map((f) => f.slice('body.'.length))
-  if (!fields.length) return undefined
-  return new SessionError('invalid_browser', `the browser options were refused: ${fields.join(', ')}: ${error.detail || 'invalid value'}`)
+  const refused = error.errors
+    .filter((e) => e.field === 'body.browser' || e.field.startsWith('body.browser.'))
+    .map((e) => `${e.field.slice('body.'.length)}: ${e.msg || error.detail || 'invalid value'}`)
+  if (!refused.length) return undefined
+  return new SessionError('invalid_browser', `the browser options were refused: ${refused.join('; ')}`)
 }
 
 /** A pending handoff (`handoff`): who may accept it, and until when. */

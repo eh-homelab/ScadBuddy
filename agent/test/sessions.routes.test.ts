@@ -144,7 +144,10 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
         if (row.browser) {
           throw new CrudReadError('the agent CRUD route a new session (HTTP 422)', 422, true, {
             detail: 'the request did not match the expected shape',
-            fields: ['body.browser.user_agent'],
+            errors: [
+              { field: 'body.browser.viewport.width', msg: 'Input should be greater than or equal to 320' },
+              { field: 'body.title', msg: 'not a browser field' },
+            ],
           })
         }
         return super.insert(row)
@@ -155,7 +158,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
     await expect(m.start(browser, { origin: 'chat', browser: { user_agent: 'x' } })).rejects.toMatchObject({
       code: 'invalid_browser',
       status: 422,
-      message: expect.stringMatching(/browser\.user_agent.*the request did not match the expected shape/),
+      message: 'the browser options were refused: browser.viewport.width: Input should be greater than or equal to 320',
     })
     const res = await app.request('/api/v1/ai/sessions', {
       method: 'POST',
@@ -163,7 +166,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
       body: JSON.stringify({ title: 'a', browser: { user_agent: 'x' } }),
     })
     expect(res.status).toBe(422)
-    expect(((await res.json()) as { detail: string }).detail).toMatch(/browser\.user_agent/)
+    expect(((await res.json()) as { detail: string }).detail).toBe(
+      'the browser options were refused: browser.viewport.width: Input should be greater than or equal to 320',
+    )
     expect(await m.list(browser)).toHaveLength(0)
   })
 

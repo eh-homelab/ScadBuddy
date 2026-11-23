@@ -406,7 +406,7 @@ export const sessionTools: Tool[] = [
       'or sessions_approve/sessions_deny from a token holding the approval grant. ' +
       'Returns the session and, with a prompt, the turn; read the reply with sessions_get or sessions_attach. ' +
       "`browser` sets what the session's browser reports (user agent, viewport, locale); the session keeps it for its life, " +
-      'and its forks keep it too. A value out of bounds is refused, naming the field. ' +
+      'and its forks keep it too. A value out of bounds is refused, naming the field and the bound it broke. ' +
       'Every session runs as a Temporal workflow that survives restarts; `mode` is accepted only for compatibility and ignored: omit it.',
     input: z.object({
       prompt: z.string().min(1).max(MESSAGE_MAX).optional().describe('The first user message.'),
