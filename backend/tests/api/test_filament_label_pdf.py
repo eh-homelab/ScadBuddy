@@ -148,9 +148,42 @@ def test_a_place_label_opens_the_label_address(
     ]
 
 
+def test_the_labels_keep_the_request_order(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    first, second, third = (_spool(client) for _ in range(3))
+    shelf, box = _place(client, "Shelf 1"), _place(client, "Box 2")
+    assert (
+        client.put(SETTINGS, json={"filament_label_base_url": "https://sb.example.com"}).status_code
+        == 200
+    )
+    body = {
+        "spool_ids": [third["id"], first["id"], second["id"]],
+        "location_ids": [box["id"], shelf["id"]],
+    }
+    assert client.post(PDF, json=body).status_code == 200
+    qrs = [label.qr for label in drawn[-1][0]]
+    assert qrs == [
+        f"scadbuddy:spool:{third['id']}",
+        f"scadbuddy:spool:{first['id']}",
+        f"scadbuddy:spool:{second['id']}",
+        f"https://sb.example.com/x/L-{box['number']}",
+        f"https://sb.example.com/x/L-{shelf['number']}",
+    ]
+
+
 def test_an_unknown_id_is_a_404_that_names_it(client: TestClient) -> None:
     gone = str(uuid4())
     answer = client.post(PDF, json={"spool_ids": [gone]})
+    assert answer.status_code == 404, answer.text
+    assert gone in answer.text
+    # Among known ones, of either kind, too.
+    spool, place = _spool(client), _place(client, "Shelf 9")
+    base = {"filament_label_base_url": "https://sb.example.com"}
+    assert client.put(SETTINGS, json=base).status_code == 200
+    answer = client.post(
+        PDF, json={"spool_ids": [spool["id"]], "location_ids": [place["id"], gone]}
+    )
     assert answer.status_code == 404, answer.text
     assert gone in answer.text
 

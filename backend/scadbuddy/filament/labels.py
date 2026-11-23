@@ -196,8 +196,10 @@ def pdf_labels(
     material and subtype, colour name and brand, its QR `scadbuddy:spool:<id>`; a place's
     code and name, its QR `<base>/x/L-<n>`. An archived row still gets its label."""
     labels: list[Label] = []
+    # One read per kind (at most `MAX_LABELS` ids); the labels keep the request's order.
+    found_spools = spools.get_many(spool_ids) if spool_ids else {}
     for spool_id in spool_ids:
-        spool = spools.get(spool_id)
+        spool = found_spools.get(spool_id)
         if spool is None:
             raise LabelNotFoundError("spool", spool_id)
         material = " ".join(n for n in (spool.names.material, spool.names.subtype) if n)
@@ -210,8 +212,9 @@ def pdf_labels(
                 qr=f"scadbuddy:spool:{spool_id}",
             )
         )
+    found_places = locations.get_many(location_ids) if location_ids else {}
     for location_id in location_ids:
-        place = locations.get(location_id)
+        place = found_places.get(location_id)
         if place is None:
             raise LabelNotFoundError("location", location_id)
         if base is None:

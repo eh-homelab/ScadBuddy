@@ -212,7 +212,10 @@ def _wrap(text: str, font: str, size: float, column: float, most: int) -> list[s
             head = line
             while len(head) > 1 and _width(head, font, size) > column:
                 head = head[:-1]
-            words.insert(0, line[len(head) :])
+            rest = line[len(head) :]
+            # One character wider than the column stays whole: nothing runs on.
+            if rest:
+                words.insert(0, rest)
             lines.append(head)
             continue
         while words and _width(f"{line} {words[0]}", font, size) <= column:

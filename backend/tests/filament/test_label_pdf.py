@@ -114,6 +114,12 @@ def test_a_place_name_of_one_long_word_runs_onto_the_second_line() -> None:
     assert f"({lines[0]})" in text
 
 
+def test_a_column_narrower_than_one_character_leaves_no_empty_line() -> None:
+    assert label_pdf._wrap("W", label_pdf.BOLD, 3.2, 0.5, 2) == ["W"]
+    lines = label_pdf._wrap("Wx", label_pdf.BOLD, 3.2, 0.5, 2)
+    assert lines[0] == "W" and "" not in lines
+
+
 def test_text_outside_latin_1_prints_as_a_question_mark() -> None:
     odd = SpoolLabel(number=4, material="PLA", colour="翡翠", brand=None, qr="scadbuddy:spool:z")
     assert "(??)" in _streams(render_pdf([odd], BY_ID["roll_50x25"], "roll"))

@@ -1,4 +1,5 @@
 import QRCode from 'qrcode'
+import type { LabelSheet } from '../../api/filament'
 
 /** The default label size, in mm (plan 2026-11-17 Decision 12): a 50 x 25 mm roll label. */
 export const LABEL_WIDTH_MM = 50
@@ -12,15 +13,7 @@ export interface LabelSize {
 }
 
 /** A sheet of labels (`GET /filament/label-templates`): its page and grid, in mm. */
-export interface LabelSheet {
-  page: 'a4' | 'letter'
-  cols: number
-  rows: number
-  top_mm: number
-  left_mm: number
-  col_gap_mm: number
-  row_gap_mm: number
-}
+export type { LabelSheet }
 
 export const DEFAULT_SIZE: LabelSize = { widthMm: LABEL_WIDTH_MM, heightMm: LABEL_HEIGHT_MM, sheet: null }
 
