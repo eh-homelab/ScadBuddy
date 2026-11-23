@@ -40,6 +40,12 @@ vitest (frontend), Node ESM + `node:test` (wrapper), Docker/buildx and GitHub Ac
   only, buildx mirror rules in CLAUDE.md). The clusters change that switches the Deployment to it is
   a SEPARATE PR in eh-homelab/clusters, opened after this one merges and its image exists.
 
+**Amendment (2026-11-23, during the build):** eh-homelab/clusters#3972 moved prod's Deployment to
+`mcr.microsoft.com/playwright/mcp:v0.0.86` the same day, so the wrapper pins 0.0.86, the version prod
+runs (R-7027-4's "the same" version), and the follow-up clusters PR does not downgrade it. The facts
+below were measured on 0.0.85 and measured again on 0.0.86 (`workers/playwright-mcp/server.mjs`'s
+header comment holds the 0.0.86 measurements).
+
 ## Measured facts (2026-11-23, on this machine)
 
 - `@playwright/mcp@0.0.85` (`npm pack`): `index.d.ts` declares
