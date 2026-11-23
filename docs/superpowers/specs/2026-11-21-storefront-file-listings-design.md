@@ -830,7 +830,8 @@ The picker is `LibraryFilePicker` (fact 13), with a `types` filter:
   the search lists only those types; `all` is ignored. The editor sends `types=3mf&types=stl`,
   so a sliced file or another type is never listed.
 - Each hit shows its name, its folder path and its type. A picked file shows its parts,
-  one swatch per used slot in the file's own colour, and its first plate's picture.
+  one swatch per part (as "Parts" below reads them) in the file's own colour, and its
+  first plate's picture.
 
 ### 9.3 Below the Source block
 
@@ -838,7 +839,10 @@ The picker is `LibraryFilePicker` (fact 13), with a `types` filter:
   its ending and without colour words (`withoutWords`, `listingDraft.ts:313`), and the
   "Leave … out of the title" warning (`titleColours`, `listingDraft.ts:303`) runs over the
   file's colours too.
-- **Pictures**: the same `ListingPictures` as a template listing's (fact 25, decision 11).
+- **Pictures**: the same picture list as a template listing's (`ListingPictures`'
+  `PictureList`, in `FilePictures`; fact 25, decision 11). No route reads an upload back
+  before publish, so the editor shows an uploaded picture's image only in the tab that
+  uploaded it; elsewhere it is listed as "Uploaded picture".
   The pictures to add are the file's plate pictures (`plate:<n>`) and the shop's uploads
   (`upload:<sha256>`, §5.4). A new file listing starts with every plate picture in
   `media_ids`. "Upload a picture" saves a new draft first. Live marks, order, remove and
@@ -849,15 +853,25 @@ The picker is `LibraryFilePicker` (fact 13), with a `types` filter:
   `listing-file-<pinned>`, so a file gone from the library still shows its pictures, and
   they are the ones publish copies (§5.2 step 4).
 - **Parts** takes the place of Settings: one row per slot. "Part 1 — the customer picks
-  its colour" with the file's swatch, or, for a support slot, a select of support
-  filaments ("Support: locked"). An unused slot is not shown.
+  its colour" with the file's swatch, or, for a support slot, the support filament
+  publish locks it to, read-only ("Support: locked to PVA Natural"): the first of the
+  listing's support filaments of the slot's material, else its first support filament
+  (§5.1 row 8, `FileSnapshot.support`). No body field sets it; the shop sets it by
+  ticking support filaments under "Colours on offer", and with none ticked the row says
+  so, as publish refuses it (`listing_file_support_unset`). Which slots print (`used`,
+  fact 18) is known only once publish has read the file: before the first publish the
+  editor lists every slot the file declares (`GET /print/library/{id}/filaments`
+  `slots`), marks a slot support by its material (`SUPPORT_MATERIAL`), and says that
+  publish leaves out a slot no part prints in. From the first publish on, the rows are
+  `FileSnapshot.slots`, and an unused slot is not shown.
 - **Materials allowed** and **Colours on offer** as today, with `offersColour` true.
 
 ### 9.4 The file's state
 
 On open, the editor of a file listing with a `pinned` version reads the file
-(`GET /print/library/{id}`). The listing keeps selling its pinned version whatever this
-read finds (§5.3), so the Source block only informs:
+(`GET /print/library/{id}`, whose `file_hash` states the file's sha256 in lowercase hex,
+#7073; a file whose entry states none is "a file with no stated hash" below). The listing
+keeps selling its pinned version whatever this read finds (§5.3), so the Source block only informs:
 
 - A file whose `file_hash` is not the pinned sha256: "This file changed in the library
   since you published. Customers still get the version you published." with the button
@@ -878,8 +892,8 @@ so picking the old file again after it reads the library's version, not the publ
 ### 9.5 Sell from the library
 
 The library page's file menu gains "Sell on storefront…" for a 3MF or an STL. It opens
-`/storefront/listings/new` with the file as the source, as Generate's menu opens it for a
-render (easy listing spec §3).
+`/storefront/listings/new?sell=library:<id>` with the file as the source, as Generate's
+menu opens it for a render (easy listing spec §3).
 
 ### 9.6 Refusals
 

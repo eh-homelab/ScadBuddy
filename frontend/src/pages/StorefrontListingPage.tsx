@@ -2,18 +2,36 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { ArrowLeftIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
-import type { CustomizerSchema, ModelSummary, StorefrontListing, StorefrontListingInput } from '../api/types'
+import type { CustomizerSchema, ModelSummary, StorefrontFileSnapshot, StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
 import { PrepareColours } from '../components/storefront/PrepareColours'
 import type { LivePictures } from '../components/storefront/ListingPictures'
-import { defaultsFor, draftOf, emptyDraft, listingInput, listingRefusal, previewListing, savedKey, sellMedia, storedKey, unsaveable, type ListingDraft, type ListingRefusal } from '../components/storefront/listingDraft'
+import {
+  defaultsFor,
+  draftOf,
+  emptyDraft,
+  fileColours,
+  fileTitle,
+  isFileDraft,
+  listingInput,
+  listingRefusal,
+  previewListing,
+  savedKey,
+  sellMedia,
+  storedKey,
+  switchSource,
+  unsaveable,
+  type ListingDraft,
+  type ListingRefusal,
+} from '../components/storefront/listingDraft'
+import { platePicture, useListedFile } from '../components/storefront/listedFile'
 import { sellListing, type SellListing } from '../components/storefront/sellSource'
 import { ListingView, type ParamValues } from '../storefront/components/ListingView'
 import type { ParamValue } from '../storefront/api/client'
 import { useAsync } from '../lib/useAsync'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
 import { listingPath } from '../components/storefront/listingsQuery'
-import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -48,6 +66,13 @@ interface Open {
   notes: string[]
   /** #6213 — the pictures the public site shows now (`liveMedia`). */
   live: LivePictures
+  /**
+   * #6710 §9.4 — the file the stored listing sells and its pin, as last read or saved: a save
+   * of another file drops that pin, so the page asks first.
+   */
+  stored: { id: number; library: string; pinned: string | null; repin: boolean } | null
+  /** #6710 — the published snapshot of the listing's file: its pinned version's plates and parts. */
+  snapshot: StorefrontFileSnapshot | null
 }
 
 /** The draft's fields a derived value may fill (`Open.touched`). */
@@ -59,14 +84,20 @@ type Field = 'title' | 'params' | 'colours' | 'media_ids'
  * `colours` or `media_ids` only for an edit of it, and keeps the others as they were.
  */
 function touchedBy(touched: readonly Field[], cur: ListingDraft, next: ListingDraft): Field[] {
-  // The title and the ticked filaments outlive a design change (the price book does not change with the design).
-  const kept = next.slug === cur.slug ? touched : touched.filter((field) => field === 'title' || field === 'colours')
+  // The title and the ticked filaments outlive a design or file change (the price book does not change with it).
+  const same = sameSource(cur, next)
+  const kept = same ? touched : touched.filter((field) => field === 'title' || field === 'colours')
   const changed: Field[] = []
   if (next.title !== cur.title) changed.push('title')
-  if (next.slug === cur.slug && (next.params !== cur.params || next.fixed !== cur.fixed)) changed.push('params')
+  if (same && (next.params !== cur.params || next.fixed !== cur.fixed)) changed.push('params')
   if (next.colours !== cur.colours) changed.push('colours')
-  if (next.slug === cur.slug && next.media_ids !== cur.media_ids) changed.push('media_ids')
+  if (same && next.media_ids !== cur.media_ids) changed.push('media_ids')
   return [...new Set([...kept, ...changed])]
+}
+
+/** Whether `a` and `b` sell the same thing: one design, or one library file (#6710). */
+function sameSource(a: ListingDraft, b: ListingDraft): boolean {
+  return a.slug === b.slug && isFileDraft(a) === isFileDraft(b) && a.library_file?.id === b.library_file?.id && a.library_file?.library === b.library_file?.library
 }
 
 /** How many listings were opened on this page: each opening's key is named by its number. */
@@ -79,8 +110,8 @@ function newKey(): symbol {
 }
 
 /** A new listing: blank, or the one "Sell on storefront" filled in. */
-function fresh(sold?: SellListing): Open {
-  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, touched: [], notes: sold?.notes ?? [], live: null }
+function fresh(sold?: SellListing, filled = sold !== undefined): Open {
+  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled, touched: [], notes: sold?.notes ?? [], live: null, stored: null, snapshot: null }
 }
 
 /**
@@ -97,7 +128,32 @@ function liveMedia(listing: StorefrontListing): LivePictures {
 
 function opened(listing: StorefrontListing, key: symbol = newKey()): Open {
   const draft = draftOf(listing)
-  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, touched: [], notes: [], live: liveMedia(listing) }
+  const file = listing.library_file
+  return {
+    key,
+    id: listing.id,
+    updatedAt: listing.updated_at,
+    published: listing.published,
+    draft,
+    saved: storedKey(listing),
+    filled: true,
+    touched: [],
+    notes: [],
+    live: liveMedia(listing),
+    stored: file ? { id: file.id, library: file.library, pinned: file.pinned ?? null, repin: file.repin } : null,
+    snapshot: listing.snapshot?.kind === 'library_file' ? listing.snapshot : null,
+  }
+}
+
+/**
+ * #6710 — `draft` with the pin and the request `listing` stored for its file: a save or a
+ * publish answers them (a publish pins the version it read), and the draft keeps its edits.
+ */
+function withPin(draft: ListingDraft, listing: StorefrontListing): ListingDraft {
+  const picked = draft.library_file
+  const stored = listing.library_file
+  if (!picked || !stored || stored.id !== picked.id || stored.library !== picked.library) return draft
+  return { ...draft, library_file: { ...picked, pinned: stored.pinned ?? null, repin: stored.repin, filename: stored.filename || picked.filename } }
 }
 
 function message(error: unknown): string {
@@ -146,6 +202,8 @@ export function StorefrontListingPage() {
   /** #6258 — the shop's default materials, shown for a listing that names none. */
   const settings = useAsync(() => api.getSettings(), [])
   const shopMaterials = settings.data?.storefront_materials
+  /** #6710 — the library a picked file is of: the one that serves. */
+  const library = settings.data?.library_backend
   const [open, setOpen] = useState<Open | null>(() => (routeId === 'new' ? fresh() : null))
   const [loadError, setLoadError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -166,7 +224,10 @@ export function StorefrontListingPage() {
    * then a saved listing reads as unchanged (#6140 review). A failed one is compared without
    * it, so an edit still reads as unsaved.
    */
-  const loaded = (schema.data !== undefined || schema.error !== undefined) && (book.data !== undefined || book.error !== undefined)
+  const fileSource = draft !== undefined && isFileDraft(draft)
+  const loaded = (fileSource || schema.data !== undefined || schema.error !== undefined) && (book.data !== undefined || book.error !== undefined)
+  /** #6710 — the file a file listing sells, as the library and its publish say. */
+  const file = useListedFile(fileSource ? (draft?.library_file?.id ?? null) : null, open?.snapshot ?? null)
   const media = useMemo(() => models.data?.find((model) => model.slug === slug)?.media ?? [], [models.data, slug])
   /**
    * #6292 review — the listing has loaded, for "Colours on offer"'s one open-or-folded
@@ -212,11 +273,6 @@ export function StorefrontListingPage() {
       .storefrontListing(routeId)
       .then((listing) => {
         if (!live) return
-        if (listing.source === 'library_file') {
-          // #6710: this editor has no Source block yet (PR 5 part 2), so it does not open a file listing.
-          setLoadError('This listing sells a library file, which this editor cannot open yet.')
-          return
-        }
         edited.current = false
         setOpen(opened(listing))
         setValues({})
@@ -235,7 +291,7 @@ export function StorefrontListingPage() {
   // A new listing starts on the first template, at its current version, with the
   // whole of what the schema allows offered.
   useEffect(() => {
-    if (!open || open.id !== null) return
+    if (!open || open.id !== null || isFileDraft(open.draft)) return
     const first = models.data?.[0]
     if (!open.draft.slug && first) {
       // A title the person typed or cleared stays (#6290); an untouched one takes the design's name.
@@ -244,7 +300,7 @@ export function StorefrontListingPage() {
     }
   }, [open, models.data])
   useEffect(() => {
-    if (!open || open.draft.commit || !versions.data?.length) return
+    if (!open || isFileDraft(open.draft) || open.draft.commit || !versions.data?.length) return
     const current = versions.data.find((v) => v.current) ?? versions.data[0]
     if (current) setOpen({ ...open, draft: { ...open.draft, commit: current.commit } })
   }, [open, versions.data])
@@ -252,7 +308,7 @@ export function StorefrontListingPage() {
   // templates (for the pictures) have answered; each fills only a field the person has not
   // edited (#6290).
   useEffect(() => {
-    if (!open || open.filled || !schema.data || !(book.data || book.error) || !(models.data || models.error)) return
+    if (!open || open.filled || isFileDraft(open.draft) || !schema.data || !(book.data || book.error) || !(models.data || models.error)) return
     const defaults = defaultsFor(schema.data, filaments)
     const keep = (field: Field) => open.touched.includes(field)
     const draft = {
@@ -263,6 +319,22 @@ export function StorefrontListingPage() {
     }
     setOpen({ ...open, filled: true, draft })
   }, [open, schema.data, book.data, book.error, models.data, models.error, filaments, media])
+  // #6710 §9.3 — a file's defaults, once its parts, its plates and the price book are read:
+  // a new listing's title from the file's name, the colours nearest the file's own, and
+  // every plate picture. Each fills only a field the person has not edited.
+  useEffect(() => {
+    const picked = open?.draft.library_file
+    if (!open || open.filled || !isFileDraft(open.draft) || !picked || file?.slots == null || !(file.plates || file.state !== 'loading') || !(book.data || book.error)) return
+    const keep = (field: Field) => open.touched.includes(field)
+    const plates = (file.plates ?? []).filter((plate) => plate.has_thumbnail).map((plate) => `plate:${plate.index}`)
+    const draft = {
+      ...open.draft,
+      ...(open.id === null && !keep('title') ? { title: fileTitle(picked.filename, filaments) } : {}),
+      ...(keep('colours') ? {} : { colours: fileColours(file.slots, filaments) }),
+      ...(keep('media_ids') ? {} : { media_ids: plates }),
+    }
+    setOpen({ ...open, filled: true, draft })
+  }, [open, file, book.data, book.error, filaments])
 
   // #6131 — "Sell on storefront" (`?sell=job:<id>` or `?sell=output:<id>`) fills the new
   // listing in. The parameter leaves the address once read, so a reload makes nothing twice.
@@ -271,7 +343,7 @@ export function StorefrontListingPage() {
   const [selling, setSelling] = useState(false)
   const sold = useRef<string | null>(null)
   useEffect(() => {
-    if (!sell || sold.current === sell || !(models.data || models.error) || !(book.data || book.error)) return
+    if (!sell || sold.current === sell || !(models.data || models.error) || !(book.data || book.error) || !(settings.data || settings.error)) return
     sold.current = sell
     setSearch(
       (cur) => {
@@ -286,7 +358,20 @@ export function StorefrontListingPage() {
     // Applied only while the listing open when it started is still the open one: a person
     // who opened another meanwhile keeps it (#6140 review).
     const started = openKey.current
-    sellListing(sell, book.data?.filaments ?? [], models.data ?? [])
+    // #6710 §9.5 — `library:<id>`: the library's file, from its menu's "Sell on storefront…".
+    const fileId = /^library:([1-9][0-9]*)$/.exec(sell)?.[1]
+    const making =
+      fileId !== undefined
+        ? api.getLibraryFile(Number(fileId)).then((entry) => ({
+            draft: {
+              ...switchSource(emptyDraft(), 'library_file'),
+              library_file: { id: entry.id, library: settings.data?.library_backend ?? 'bambuddy', filename: entry.filename, repin: false, pinned: null },
+              title: fileTitle(entry.filename, book.data?.filaments ?? []),
+            },
+            notes: [],
+          }))
+        : sellListing(sell, book.data?.filaments ?? [], models.data ?? [])
+    making
       .then((made) => {
         if (openKey.current !== started) {
           setError('The listing from “Sell on storefront” was not opened, because another listing was opened meanwhile. Choose “Sell on storefront…” again to fill it in.')
@@ -294,12 +379,13 @@ export function StorefrontListingPage() {
         }
         // What the fill-in made is the person's work: leaving it asks first, as an edit does.
         edited.current = true
-        setOpen(fresh(made))
+        // A file's colours and pictures fill in once its parts and plates are read.
+        setOpen(fresh(made, fileId === undefined))
         setValues({})
       })
       .catch((caught: unknown) => setError(`Could not fill in the listing: ${message(caught)}`))
       .finally(() => setSelling(false))
-  }, [sell, models.data, models.error, book.data, book.error, setSearch, location.state])
+  }, [sell, models.data, models.error, book.data, book.error, settings.data, settings.error, setSearch, location.state])
 
   // A version without some of the listing's parameters: they go, or the editor could
   // neither show nor unlock them and publish would refuse the listing.
@@ -318,18 +404,31 @@ export function StorefrontListingPage() {
     })
   }, [open, schema.data])
 
-  const preview = useMemo(
-    () => (draft ? previewListing(draft, schema.data, filaments, media, (item) => api.mediaUrl(slug, item), shopMaterials) : null),
-    [draft, schema.data, filaments, media, slug, shopMaterials],
-  )
+  const listingId = open?.id ?? null
+  const preview = useMemo(() => {
+    if (!draft) return null
+    const shown = previewListing(draft, schema.data, filaments, media, (item) => api.mediaUrl(slug, item), shopMaterials)
+    if (!isFileDraft(draft)) return shown
+    // #6710: a file's plate pictures; an upload has no picture to read back before publish.
+    const plates = draft.media_ids.flatMap((id) => {
+      const plate = /^plate:(\d+)$/.exec(id)?.[1]
+      const url = plate === undefined ? null : platePicture(draft, listingId, Number(plate))
+      return url ? [{ url, kind: 'image' as const, caption: '' }] : []
+    })
+    return { ...shown, media: plates }
+  }, [draft, schema.data, filaments, media, slug, shopMaterials, listingId])
 
   function changed(next: ListingDraft) {
     if (!open) return
     edited.current = true
     // The edit may be the fix: what publish refused is said again only by the next publish.
     setRefusal(null)
-    // Another template's defaults fill in once its schema loads.
-    setOpen({ ...open, draft: next, filled: open.filled && next.slug === open.draft.slug, touched: touchedBy(open.touched, open.draft, next) })
+    // #6710: the stored file picked again is the pinned one again: its pin and request come back.
+    const stored = open.stored
+    const back = next.library_file && stored && next.library_file.id === stored.id && next.library_file.library === stored.library && next.library_file.pinned === null && next.library_file !== open.draft.library_file
+    const draft = back && next.library_file ? { ...next, library_file: { ...next.library_file, pinned: stored.pinned, repin: stored.repin } } : next
+    // Another template's or file's defaults fill in once it is read.
+    setOpen({ ...open, draft, filled: open.filled && sameSource(next, open.draft), touched: touchedBy(open.touched, open.draft, draft) })
   }
 
   /**
@@ -389,12 +488,27 @@ export function StorefrontListingPage() {
       current.id === null || current.updatedAt === null
         ? await api.createStorefrontListing(body)
         : await api.updateStorefrontListing(current.id, body, current.updatedAt)
-    whileOpen(current.key, (cur) => ({ ...opened(saved, cur.key), draft: cur.draft, saved: text }))
+    whileOpen(current.key, (cur) => ({ ...opened(saved, cur.key), draft: withPin(cur.draft, saved), saved: text }))
     return saved
   }
 
-  async function onSave() {
+  /**
+   * #6710 §9.4 — whether saving `current` drops the version its stored listing sells: another
+   * file picked on a listing with a pin. The save drops the kept copy, so the page asks first.
+   */
+  function dropsPin(current: Open): boolean {
+    const picked = current.draft.library_file
+    return Boolean(current.stored?.pinned && picked && (picked.id !== current.stored.id || picked.library !== current.stored.library))
+  }
+  /** The save or publish waiting on the §9.4 question. */
+  const [asking, setAsking] = useState<(() => Promise<void>) | null>(null)
+
+  async function onSave(confirmed = false) {
     if (!open) return
+    if (!confirmed && dropsPin(open)) {
+      setAsking(() => () => onSave(true))
+      return
+    }
     const current = open
     await act(async () => {
       const saved = await save(current)
@@ -402,8 +516,48 @@ export function StorefrontListingPage() {
     })
   }
 
-  async function onPublish() {
+  /** #6710 §9.4 — "Keep the published version": the request withdrawn, saved at once when stored. */
+  async function onKeepPublished() {
+    if (!open?.draft.library_file) return
+    const next = { ...open.draft, library_file: { ...open.draft.library_file, repin: false } }
+    changed(next)
+    if (!open.stored?.repin || open.id === null) return
+    const current = { ...open, draft: next }
+    await act(async () => {
+      await save(current)
+    })
+  }
+
+  /**
+   * #6710 §5.4 — a picture for a file listing: a new listing is saved first (it needs an id),
+   * then the picture is uploaded and its id added to the listing as it is then.
+   */
+  async function onUploadPicture(picture: File): Promise<string | null> {
+    if (!open) return null
+    const current = open
+    let id = current.id
+    if (id === null) {
+      const saved = await save(current)
+      if (!saved) return null
+      settle(current.key, saved)
+      id = saved.id
+    }
+    const uploaded = await api.uploadStorefrontListingPicture(id, picture)
+    whileOpen(current.key, (cur) => {
+      if (cur.draft.media_ids.includes(uploaded.id)) return cur
+      edited.current = true
+      const touched: Field[] = cur.touched.includes('media_ids') ? [...cur.touched] : [...cur.touched, 'media_ids']
+      return { ...cur, touched, draft: { ...cur.draft, media_ids: [...cur.draft.media_ids, uploaded.id] } }
+    })
+    return uploaded.id
+  }
+
+  async function onPublish(confirmed = false) {
     if (!open) return
+    if (!confirmed && dropsPin(open)) {
+      setAsking(() => () => onPublish(true))
+      return
+    }
     const current = open
     await act(async () => {
       const saved = await save(current)
@@ -412,7 +566,7 @@ export function StorefrontListingPage() {
       const published = await api.publishStorefrontListing(id)
       // The row as published: its `fixed` keeps only the shop's locks (the defaults it
       // filled are the snapshot's), so it is the body that was saved.
-      whileOpen(current.key, (cur) => ({ ...opened(published, cur.key), draft: cur.draft, saved: storedKey(published) }))
+      whileOpen(current.key, (cur) => ({ ...opened(published, cur.key), draft: withPin(cur.draft, published), saved: storedKey(published) }))
       settle(current.key, published)
     })
   }
@@ -437,7 +591,19 @@ export function StorefrontListingPage() {
   }
 
   /** #6131 — why Publish and Save draft wait, said beside them. */
-  const missing = !draft ? null : !draft.commit ? 'Choose a design and its version to publish.' : !draft.title.trim() ? 'Give the product a title to publish.' : null
+  const missing = !draft
+    ? null
+    : isFileDraft(draft)
+      ? !draft.library_file
+        ? 'Choose a library file to publish.'
+        : !draft.title.trim()
+          ? 'Give the product a title to publish.'
+          : null
+      : !draft.commit
+        ? 'Choose a design and its version to publish.'
+        : !draft.title.trim()
+          ? 'Give the product a title to publish.'
+          : null
   /** #6131 — a published listing with unsaved changes: saving it takes it off the store. */
   const liveChanged = open !== null && open.published && draft !== undefined && loaded && open.saved !== savedKey(listingInput(draft, schema.data, filaments))
   /** Whether the open listing holds what a save would write and has not: a new one always does. */
@@ -534,6 +700,11 @@ export function StorefrontListingPage() {
                 bookState={book.error ? 'failed' : book.data ? 'ready' : 'loading'}
                 shopMaterials={shopMaterials}
                 refusal={refusal}
+                file={file}
+                library={library}
+                listingId={open.id}
+                onUploadPicture={onUploadPicture}
+                onKeepPublished={() => void onKeepPublished()}
               />
             </section>
 
@@ -557,6 +728,27 @@ export function StorefrontListingPage() {
           </div>
         )}
       </div>
+
+      <AlertDialog open={asking !== null} onOpenChange={(next) => !next && setAsking(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Sell the file you picked?</AlertDialogTitle>
+            <AlertDialogDescription>Customers lose the version you published. The next publish sells the file you picked.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const go = asking
+                setAsking(null)
+                void go?.()
+              }}
+            >
+              Save
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={guard.pending !== null} onOpenChange={(next) => !next && guard.stay()}>
         <AlertDialogContent>

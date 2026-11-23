@@ -1,12 +1,13 @@
-import { fireEvent, screen, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { useState, type ComponentProps } from 'react'
 import { describe, expect, it } from 'vitest'
-import type { CustomizerSchema, Filament, Param, StorefrontListing } from '../../api/types'
+import type { CustomizerSchema, Filament, LibraryFileEntry, Param, StorefrontListing } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
 import { renderPage } from '../../test/utils'
 import { ListingEditor } from './ListingEditor'
+import type { ListedFile } from './listedFile'
 import { ListingView } from '../../storefront/components/ListingView'
-import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, shownParams, unsaveable, type ListingDraft } from './listingDraft'
+import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, shownParams, switchSource, unsaveable, type DraftFile, type DraftSlot, type ListingDraft } from './listingDraft'
 
 const COMMIT = 'a'.repeat(40)
 
@@ -628,5 +629,181 @@ describe('the editor’s preview (#6258)', () => {
     const { materials: _drop, ...bare } = listing
     renderPage(<ListingView listing={bare as typeof listing} values={{}} onChange={() => undefined} headingLevel={2} />)
     expect(screen.getByRole('button', { name: /^Plate/ })).toHaveAccessibleName('Plate Ocean')
+  })
+})
+
+describe('ListingEditor: a library file as the source (#6710 §9)', () => {
+  const PIN = 'a'.repeat(64)
+  const NATURAL = { ...filament('f9', '#F0EAD6', 'Natural'), material: 'PVA' }
+  const SLOTS: DraftSlot[] = [
+    { slot: 0, colour: '#0047BB', material: 'PLA', used: true, support: false },
+    { slot: 1, colour: '#FF1493', material: 'PLA', used: true, support: false },
+    { slot: 2, colour: '#FFFFFF', material: 'PVA', used: true, support: true },
+    { slot: 3, colour: '#000000', material: 'PLA', used: false, support: false },
+  ]
+  const ENTRY = { id: 46, filename: 'Keychain base.3mf', file_type: '3mf', folder_path: ['Prints', 'Keychains'], has_thumbnail: true, printable: true } as LibraryFileEntry
+  const READ: ListedFile = {
+    state: 'ready',
+    entry: ENTRY,
+    plates: [
+      { index: 1, has_thumbnail: true },
+      { index: 2, has_thumbnail: true },
+    ],
+    slots: SLOTS,
+    slotsFrom: 'publish',
+  }
+
+  function fileDraft(over: Partial<DraftFile> = {}, rest: Partial<ListingDraft> = {}): ListingDraft {
+    return {
+      ...switchSource(emptyDraft(), 'library_file'),
+      title: 'Keychain base',
+      library_file: { id: 46, library: 'native', filename: 'Keychain base.3mf', repin: false, pinned: null, ...over },
+      ...rest,
+    }
+  }
+
+  function FileHarness({ seen, start, ...props }: { seen: ListingDraft[]; start: ListingDraft } & Partial<ComponentProps<typeof ListingEditor>>) {
+    const [draft, setDraft] = useState<ListingDraft>(start)
+    return (
+      <ListingEditor
+        models={[]}
+        versions={[]}
+        schema={undefined}
+        filaments={[RED, BLUE, NATURAL]}
+        media={[]}
+        library="native"
+        file={READ}
+        {...props}
+        draft={draft}
+        onChange={(next) => {
+          seen.push(next)
+          setDraft(next)
+        }}
+      />
+    )
+  }
+
+  it('offers both sources on a new listing, with the chosen one’s pickers open', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<FileHarness seen={seen} start={{ ...emptyDraft('name-keychain', COMMIT), title: 'Tag' }} isNew file={undefined} />)
+    const source = screen.getByRole('region', { name: 'Source' })
+    expect(within(source).getByRole('radio', { name: 'A design' })).toBeChecked()
+    expect(within(source).getByLabelText('Design')).toBeInTheDocument()
+    await user.click(within(source).getByRole('radio', { name: 'A library file' }))
+    expect(last(seen)).toMatchObject({ source: 'library_file', library_file: null, slug: '', commit: '', title: 'Tag' })
+    expect(within(source).getByLabelText('Library file')).toBeInTheDocument()
+  })
+
+  it('lists only 3MF and STL files, each with its type, and picks one from the library that serves', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<FileHarness seen={seen} start={switchSource(emptyDraft(), 'library_file')} isNew file={undefined} />)
+    await user.type(screen.getByLabelText('Library file'), 'keychain')
+    const files = await screen.findByRole('list', { name: 'Library files' })
+    const hits = within(files).getAllByRole('button')
+    expect(hits.some((hit) => hit.textContent?.includes('keychain-reagan.gcode.3mf'))).toBe(false)
+    const hit = hits.find((button) => button.textContent?.startsWith('keychain-reagan.3mf'))
+    expect(hit).toHaveTextContent('3MF')
+    await user.click(hit!)
+    expect(last(seen).library_file).toEqual({ id: 140, library: 'native', filename: 'keychain-reagan.3mf', repin: false, pinned: null })
+  })
+
+  it('shows a picked file’s parts: each part a customer colours, and a support part locked', () => {
+    renderPage(<FileHarness seen={[]} start={fileDraft({}, { colours: [RED.id, NATURAL.id] })} isNew />)
+    const source = screen.getByRole('region', { name: 'Source' })
+    expect(within(source).getByText('Keychain base.3mf')).toBeInTheDocument()
+    expect(within(source).getByText(/Prints \/ Keychains/)).toBeInTheDocument()
+    const parts = screen.getByRole('region', { name: 'Parts' })
+    const rows = within(parts).getAllByTestId('listing-part').map((row) => row.textContent)
+    expect(rows).toHaveLength(3)
+    expect(rows[0]).toContain('Part 1')
+    expect(rows[1]).toContain('Part 2')
+    expect(rows[2]).toContain('Support: locked to PVA Natural')
+    expect(screen.queryByRole('region', { name: 'Settings' })).toBeNull()
+  })
+
+  it('says a support part has no support filament on offer', () => {
+    renderPage(<FileHarness seen={[]} start={fileDraft({}, { colours: [RED.id] })} />)
+    expect(within(screen.getByRole('region', { name: 'Parts' })).getByText(/Tick a support filament under “Colours on offer”/)).toBeInTheDocument()
+  })
+
+  it('folds a saved file listing to one line, with Change', async () => {
+    const { user } = renderPage(<FileHarness seen={[]} start={fileDraft({ pinned: PIN })} />)
+    const line = screen.getByTestId('listing-source')
+    expect(line).toHaveTextContent(/^Library file\s*Keychain base\.3mf\s*Change$/)
+    expect(screen.queryByRole('radio', { name: 'A design' })).toBeNull()
+    await user.click(within(line).getByRole('button', { name: 'Change' }))
+    expect(screen.getByRole('radio', { name: 'A library file' })).toBeChecked()
+  })
+
+  it('says under Source and under the colours what publish refused about the file', () => {
+    const { unmount } = renderPage(
+      <FileHarness seen={[]} start={fileDraft()} refusal={{ kind: 'file', code: 'listing_file_unknown', name: 'library_file', detail: 'the file is not in the library that serves; pick another file' }} />,
+    )
+    expect(within(screen.getByRole('region', { name: 'Source' })).getByRole('alert')).toHaveTextContent('Not published: the file is not in the library that serves; pick another file.')
+    unmount()
+    renderPage(<FileHarness seen={[]} start={fileDraft()} refusal={{ kind: 'file', code: 'listing_file_support_unset', name: 'colours', detail: 'add a support filament' }} />)
+    expect(within(screen.getByRole('group', { name: 'Colours on offer' })).getByRole('alert')).toHaveTextContent('Not published: add a support filament.')
+  })
+
+  it('says a file changed in the library still sells the published version, and asks for the library’s on request', async () => {
+    const seen: ListingDraft[] = []
+    const changed = { ...READ, entry: { ...ENTRY, file_hash: 'b'.repeat(64) } }
+    const { user } = renderPage(<FileHarness seen={seen} start={fileDraft({ pinned: PIN })} file={changed} />)
+    const source = screen.getByRole('region', { name: 'Source' })
+    expect(within(source).getByText('This file changed in the library since you published. Customers still get the version you published.')).toBeInTheDocument()
+    await user.click(within(source).getByRole('button', { name: 'Use the library’s version' }))
+    expect(last(seen).library_file?.repin).toBe(true)
+    expect(within(source).getByText('The next publish takes the library’s version.')).toBeInTheDocument()
+  })
+
+  it('says nothing of a file whose stated hash is the pinned one, or that states none', () => {
+    const { unmount } = renderPage(<FileHarness seen={[]} start={fileDraft({ pinned: PIN })} file={{ ...READ, entry: { ...ENTRY, file_hash: PIN } }} />)
+    expect(screen.queryByText(/changed in the library/)).toBeNull()
+    unmount()
+    renderPage(<FileHarness seen={[]} start={fileDraft({ pinned: PIN })} />)
+    expect(screen.queryByText(/changed in the library/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Use the library’s version' })).toBeNull()
+  })
+
+  it('says a file gone from the library still sells the published version', () => {
+    renderPage(<FileHarness seen={[]} start={fileDraft({ pinned: PIN })} file={{ ...READ, state: 'gone', entry: null }} />)
+    expect(screen.getByText('This file is no longer in the library. Customers still get the version you published.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Use the library’s version' })).toBeNull()
+  })
+
+  it('keeps the published version on request', async () => {
+    let kept = 0
+    const { user } = renderPage(<FileHarness seen={[]} start={fileDraft({ pinned: PIN, repin: true })} onKeepPublished={() => (kept += 1)} />)
+    await user.click(screen.getByRole('button', { name: 'Keep the published version' }))
+    expect(kept).toBe(1)
+  })
+
+  it('lists the file’s plate pictures, from the library before a pin and from the listing after', async () => {
+    const seen: ListingDraft[] = []
+    const { user, unmount } = renderPage(<FileHarness seen={seen} start={fileDraft({}, { media_ids: ['plate:1'] })} listingId="l1" />)
+    const pictures = screen.getByRole('group', { name: 'Pictures' })
+    expect(within(pictures).getByRole('img', { name: 'Plate 1' })).toHaveAttribute('src', '/api/v1/print/library/46/plates/1/thumbnail')
+    await user.click(within(pictures).getByRole('button', { name: 'Add Plate 2' }))
+    expect(last(seen).media_ids).toEqual(['plate:1', 'plate:2'])
+    unmount()
+    renderPage(<FileHarness seen={[]} start={fileDraft({ pinned: PIN }, { media_ids: ['plate:1'] })} listingId="l1" />)
+    expect(within(screen.getByRole('group', { name: 'Pictures' })).getByRole('img', { name: 'Plate 1' })).toHaveAttribute('src', '/api/v1/storefront/listings/l1/plates/1.png')
+  })
+
+  it('uploads a picture through the page, which saves a new draft first', async () => {
+    const sent: File[] = []
+    const { user } = renderPage(
+      <FileHarness
+        seen={[]}
+        start={fileDraft()}
+        onUploadPicture={async (file) => {
+          sent.push(file)
+          return null
+        }}
+      />,
+    )
+    const picture = new File([new Uint8Array([137, 80, 78, 71])], 'photo.png', { type: 'image/png' })
+    await user.upload(screen.getByLabelText('Upload a picture'), picture)
+    await waitFor(() => expect(sent.map((file) => file.name)).toEqual(['photo.png']))
   })
 })
