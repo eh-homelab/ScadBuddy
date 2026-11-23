@@ -10,6 +10,8 @@ The **Filament** section is ScadBuddy's own filament inventory. It covers:
 - locations with humidity and temperature sensors;
 - RFID tags, NTAG labels, and printed QR labels for spools, places, printers, AMS units and slots;
 - a printer's K-profiles (pressure advance) through Bambuddy: list, set, batch set, delete and notes;
+- a printer's AMS slots through Bambuddy: configure a slot by hand, its saved slicer preset, refresh
+  and reset, load and unload, and the AMS units' labels;
 - a ledger of spool events, with history, metrics and a forecast.
 
 The print dialog picks from these spools (ScadBuddy's own, "SB" spools). Tray changes and
@@ -100,6 +102,17 @@ worker makes the call. Set, batch and delete run once: Bambuddy dedupes none of 
 write the printer did not acknowledge answers `confirmed: false`. ScadBuddy keeps no copy;
 the notes live in Bambuddy, under the keys its own K-Profiles page uses.
 
+A printer's AMS slots (#7153, plan `docs/superpowers/plans/2026-11-23-ams-slot-control.md`)
+are read from Bambuddy's live status of the printer its registry row links, and shown on its
+card in Settings → Printers ("AMS slots", closed until opened). The routes call Bambuddy in
+the request. Each write that reaches the printer (configure, reset, refresh, load, unload)
+reads Bambuddy's status first and refuses with a 409 and a `code` while the printer prints,
+while the AMS is busy, or where the slot is not there; load also refuses an empty slot or the
+one already feeding, and refresh refuses while filament is loaded. Configure takes any SB
+spool (its values and its type's preset and K value for the slot's nozzle) or the values by
+hand. A slot's saved preset and an AMS unit's label live in Bambuddy; a label write also
+names ScadBuddy's place of the unit. The page asks before every printer write.
+
 Fetching presets is the `ProfileFetch` workflow on the profile-fetch worker, and a 3DFP
 search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
 ([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).
@@ -130,7 +143,7 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
-- Agent tools: `agent/src/tools/filament.ts`, `filamentPurchasing.ts`, `traySpools.ts`.
+- Agent tools: `agent/src/tools/filament.ts`, `filamentPurchasing.ts`, `traySpools.ts`, `printerSlots.ts`.
 
 ## Data
 
@@ -199,8 +212,12 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
     in `test_tray_spools.py`;
   - `backend/tests/test_spool_refresh_replay.py`;
   - `backend/tests/profile_fetch/`;
-  - `backend/tests/api/test_printer_kprofiles.py`, `backend/tests/bambuddy/test_client_kprofiles.py`.
-- Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`).
+  - `backend/tests/api/test_printer_kprofiles.py`, `backend/tests/bambuddy/test_client_kprofiles.py`;
+  - `backend/tests/api/test_printer_slots.py`, `backend/tests/bambuddy/test_client_slots.py`.
+- Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`),
+  `frontend/src/components/settings/PrinterAmsSlots.test.tsx` (mocks `frontend/src/mocks/features/printerAmsSlots.ts`),
+  and the AMS unit place's rename in `frontend/src/pages/filament/LocationsTab.test.tsx`.
+- Agent: `agent/test/printerSlots.test.ts`.
 
 ## Limits and known issues
 
@@ -211,6 +228,14 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   lines 305-307): while Bambuddy's auth is on, every write is the scope problem naming
   `K-profiles (admin only)`. The assistant has no K-profile tool yet
   ([#7162](https://github.com/eh-homelab/ScadBuddy/issues/7162)).
+- A slot preset's and an AMS label's writes need Bambuddy's `PRINTERS_UPDATE`, which no
+  Bambuddy API key can hold
+  ([`core/auth.py`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py)
+  line 280): while Bambuddy's auth is on, they are the scope problem naming
+  `Printers (admin only)`. Renaming an AMS unit's place on Filament → Locations does not write
+  Bambuddy's label.
+- A slot write reads the printer's state, then writes: a print started between the two calls
+  is not caught by ScadBuddy (Bambuddy's own reset refuses it).
 - Parity with Bambuddy 1.2.6b1 (#6270) is not complete yet: [filament-parity.md](filament-parity.md)
   lists every §11 item, its evidence, and the gap issue for each miss.
 - Filament profiles in Postgres, and their follow-ups, are still open:

@@ -63,8 +63,9 @@ Each is posted on #7153.
   (`/printers/{printer_id}/…`), which must be a physical row linked to a BB printer, as
   R-7154-2: 404 for an unknown id, 409 for a virtual printer or an unlinked row. A slot is
   an AMS 0-15 slot 0-3, an AMS-HT 128-135 slot 0, or the external holder 255 slot 0-1
-  (`api/tray_spools.py` `_known_slot`). Load and unload take an AMS 0-3 only, since BB's
-  global tray id stops at 15; refresh takes no external holder (it has no RFID reader).
+  (`api/tray_spools.py` `_known_slot`). Load and unload take an AMS 0-3, an AMS-HT or the external holder: BB's
+  global tray id is `ams * 4 + slot` up to 15, the unit id for an AMS-HT, and 254 or 255
+  for the external holder, so an AMS past 3 has none; refresh takes no external holder (it has no RFID reader).
   Both are 422 otherwise.
 - **R-7153-3 (the state first).** Every write that reaches the printer (configure,
   reset, refresh, load, unload) reads BB's live status of the printer first (`GET
@@ -73,7 +74,9 @@ Each is posted on #7153.
   `RUNNING`, `PAUSE`), `ams_busy` (`ams_status_main` is not 0: the AMS changes filament
   or reads a tag), `no_slot` (the status shows no such unit or slot). Load also refuses
   `tray_empty` (the slot holds no spool) and `already_loaded` (`tray_now` names it);
-  refresh refuses `filament_loaded` (`tray_now` is not 255, as BB itself does). The read
+  refresh refuses `filament_loaded` (`tray_now` is not 255, as BB itself does). On a
+  printer with two extruders, load sends BB the extruder the slot feeds; when the status
+  does not say which, load refuses `extruder_unknown`. The read
   and the write are two calls, so a print started between them is not caught; BB's reset
   refuses that case itself.
 - **R-7153-4 (BB's scope).** The status read and the reads take Read Status. Configure,
@@ -91,9 +94,9 @@ Each is posted on #7153.
   type's preset for the slot's nozzle and its K value, as `rfid_slots.slot_params`
   builds them for an override tag) or the values by hand (material, colour `#RRGGBB` or
   `#RRGGBBAA`, preset id and name, nozzle temperatures, nozzle diameter, and optional
-  K). Values sent beside a `spool_id` replace the spool's. The slot's nozzle is the one
-  BB's status names for the extruder the slot feeds, else the body's, else a 409
-  `no_nozzle`. The answer is what was sent. It links no spool to the tray: the tray
+  K). Values sent beside a `spool_id` replace the spool's. The slot's nozzle is the
+  body's `nozzle_diameter`, else the one BB's status names for the extruder the slot
+  feeds, else a 409 `no_nozzle`. The answer is what was sent. It links no spool to the tray: the tray
   question and a spool's move still do that.
 - **R-7153-7 (slot presets).** The slicer preset a slot shows is BB's slot-preset
   mapping. `PUT …/trays/{ams}/{tray}/preset` saves it (`preset_id`, `preset_name`,
@@ -105,8 +108,11 @@ Each is posted on #7153.
   writes BB's label first (with the unit's serial from BB's status), then renames SB's
   place of the unit (`LocationStore.ensure_ams_unit_on`) to the label. A refused BB write
   changes nothing. `DELETE` deletes BB's label and names the place `<printer> <unit>`
-  again. A name another place holds is a 409 after BB's label is written; the answer
-  says so. Renaming the place on Filament → Locations does not write BB. The
+  again. Once BB's label is written the answer is 200: when no location kind is marked
+  AMS, so the unit has no place, `place_problem` is `no_ams_kind`. A name never clashes:
+  a printer's places are outside the name index (`filament_locations_name` is `WHERE
+  printer_id IS NULL`), so two units may share a label. The Locations tab offers Edit (no Archive) on a unit's place, which was read only like
+  a tray's; renaming it there does not write BB. The
   read shows both, so a place out of step shows.
 - **R-7153-9 (the read).** `GET /printers/{id}/ams` answers the units and the external
   holder from BB's status, each slot with its material, colour, preset id and name,
