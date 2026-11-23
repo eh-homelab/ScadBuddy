@@ -1,4 +1,4 @@
-import { memo, useId, useState, type FormEvent } from 'react'
+import { memo, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { PencilIcon, PlusIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { failure } from '../../lib/mediaFiles'
 import { useAsync } from '../../lib/useAsync'
@@ -122,7 +122,7 @@ function usePatch(onPatch: Patch) {
   }
 }
 
-function PatchFeedback({ patch }: { patch: ReturnType<typeof usePatch> }) {
+function PatchFeedback({ patch, locked }: { patch: ReturnType<typeof usePatch>; locked: boolean }) {
   return (
     <>
       {patch.held && (
@@ -130,7 +130,7 @@ function PatchFeedback({ patch }: { patch: ReturnType<typeof usePatch> }) {
           <span>
             This replaces <span className="font-mono">{patch.held.replaces}</span>&rsquo;s value.
           </span>
-          <Button size="xs" type="button" variant="destructive" disabled={patch.busy} onClick={patch.confirm}>
+          <Button size="xs" type="button" variant="destructive" disabled={patch.busy || locked} onClick={patch.confirm}>
             Replace
           </Button>
           <Button size="xs" type="button" variant="ghost" disabled={patch.busy} onClick={patch.cancel}>
@@ -162,9 +162,23 @@ export const PropertiesPanel = memo(function PropertiesPanel({ entity, title = '
   const docs = keyDocs(schema.data)
   const suggestions = [...new Set([...Object.keys(docs), ...(schema.data?.keys_in_use ?? []).map((row) => row.key)])].sort()
   const keysId = useId()
+  // One PATCH at a time for the whole panel: each reply is the entity's whole set, so a
+  // second write in flight could answer first and the older reply would then show.
+  const [writing, setWriting] = useState(false)
+  const writingNow = useRef(false)
+  // The key whose Edit button takes the focus once its form closes (a rename's new key).
+  const [focusKey, setFocusKey] = useState<string | null>(null)
 
   async function patch(set: PropertySet) {
-    list.setData(await entityApi.setProperties(entity, set), { supersede: true })
+    if (writingNow.current) throw new Error('Another change is being saved. Try again when it is done.')
+    writingNow.current = true
+    setWriting(true)
+    try {
+      list.setData(await entityApi.setProperties(entity, set), { supersede: true })
+    } finally {
+      writingNow.current = false
+      setWriting(false)
+    }
   }
 
   return (
@@ -188,13 +202,26 @@ export const PropertiesPanel = memo(function PropertiesPanel({ entity, title = '
           <table className="w-full text-[13px]">
             <tbody className="divide-y">
               {properties.map((property) => (
-                <PropertyRow key={property.key} property={property} doc={docs[property.key]} docs={docs} keys={keys} keysId={keysId} onPatch={patch} />
+                <PropertyRow
+                  key={property.key}
+                  property={property}
+                  doc={docs[property.key]}
+                  docs={docs}
+                  keys={keys}
+                  keysId={keysId}
+                  locked={writing}
+                  takeFocus={focusKey === property.key}
+                  onFocused={() => setFocusKey(null)}
+                  onClosed={setFocusKey}
+                  onPatch={patch}
+                />
               ))}
             </tbody>
           </table>
         </div>
       )}
-      <AddProperty docs={docs} keys={keys} keysId={keysId} onPatch={patch} />
+      {/* Only once the keys are known: an add onto a stored key must ask before it replaces. */}
+      {list.data && !list.error && <AddProperty docs={docs} keys={keys} keysId={keysId} locked={writing} onPatch={patch} />}
     </section>
   )
 })
@@ -292,6 +319,10 @@ function PropertyRow({
   docs,
   keys,
   keysId,
+  locked,
+  takeFocus,
+  onFocused,
+  onClosed,
   onPatch,
 }: {
   property: EntityProperty
@@ -299,6 +330,13 @@ function PropertyRow({
   docs: Record<string, KeyDoc>
   keys: ReadonlySet<string>
   keysId: string
+  /** Another PATCH of the panel is in flight. */
+  locked: boolean
+  /** Whether this row's Edit button takes the focus (its form, or a rename onto it, closed). */
+  takeFocus: boolean
+  onFocused: () => void
+  /** The form closed; the focus goes to the Edit button of `key`, the row's key after it. */
+  onClosed: (key: string) => void
   onPatch: Patch
 }) {
   const { key } = property
@@ -308,15 +346,42 @@ function PropertyRow({
   // An untouched value is sent as stored, so a rename alone never changes it.
   const [touched, setTouched] = useState(false)
   const patch = usePatch(onPatch)
-  const close = () => setEditing(false)
+  const busy = locked || patch.busy
+  const keyInput = useRef<HTMLInputElement>(null)
+  const editButton = useRef<HTMLButtonElement>(null)
+  const close = (focus: string) => {
+    setEditing(false)
+    onClosed(focus)
+  }
+  const cancel = () => {
+    close(key)
+    patch.cancel()
+    patch.fail(null)
+  }
+
+  useEffect(() => {
+    if (editing) keyInput.current?.focus()
+  }, [editing])
+  useEffect(() => {
+    if (editing || !takeFocus || busy) return
+    editButton.current?.focus()
+    onFocused()
+  }, [editing, takeFocus, busy, onFocused])
 
   function save(event: FormEvent) {
     event.preventDefault()
     const parsed = touched ? valueOf(draft) : { value: property.value }
     if ('error' in parsed) return patch.fail(parsed.error)
     const next = newKey.trim()
-    if (next === key) return patch.send({ [key]: parsed.value }, { done: close })
-    patch.send({ [key]: null, [next]: parsed.value }, { replaces: keys.has(next) ? next : undefined, done: close })
+    if (next === key) return patch.send({ [key]: parsed.value }, { done: () => close(key) })
+    patch.send({ [key]: null, [next]: parsed.value }, { replaces: keys.has(next) ? next : undefined, done: () => close(next) })
+  }
+
+  // Escape cancels; one pressed in a type or value menu (a portal outside the form) only closes the menu.
+  function escape(event: KeyboardEvent<HTMLFormElement>) {
+    if (event.key !== 'Escape' || busy || !event.currentTarget.contains(event.target as Node)) return
+    event.preventDefault()
+    cancel()
   }
 
   const editDraft = (next: Draft) => {
@@ -328,9 +393,10 @@ function PropertyRow({
     return (
       <tr>
         <td colSpan={3} className="p-2">
-          <form noValidate onSubmit={save} className="flex flex-col gap-2">
+          <form noValidate onSubmit={save} onKeyDown={escape} className="flex flex-col gap-2">
             <div className="flex flex-wrap items-start gap-2">
               <Input
+                ref={keyInput}
                 value={newKey}
                 onChange={(event) => setNewKey(event.target.value)}
                 aria-label={`Key of ${key}`}
@@ -343,25 +409,15 @@ function PropertyRow({
             </div>
             {docs[newKey.trim()]?.description && <p className="text-[12px] text-muted-foreground">{docs[newKey.trim()]!.description}</p>}
             <div className="flex gap-1">
-              <Button size="xs" type="submit" disabled={patch.busy || newKey.trim() === ''}>
+              <Button size="xs" type="submit" disabled={busy || newKey.trim() === ''}>
                 {patch.busy && <Spinner />}
                 Save
               </Button>
-              <Button
-                size="xs"
-                type="button"
-                variant="ghost"
-                disabled={patch.busy}
-                onClick={() => {
-                  close()
-                  patch.cancel()
-                  patch.fail(null)
-                }}
-              >
+              <Button size="xs" type="button" variant="ghost" disabled={busy} onClick={cancel}>
                 Cancel
               </Button>
             </div>
-            <PatchFeedback patch={patch} />
+            <PatchFeedback patch={patch} locked={locked} />
           </form>
         </td>
       </tr>
@@ -376,15 +432,16 @@ function PropertyRow({
       </th>
       <td className="px-2.5 py-1.5">
         <Chips value={property.value} />
-        <PatchFeedback patch={patch} />
+        <PatchFeedback patch={patch} locked={locked} />
       </td>
       <td className="w-px py-1 pr-1 whitespace-nowrap">
         <Button
+          ref={editButton}
           variant="ghost"
           size="icon-sm"
           aria-label={`Edit ${key}`}
           title="Edit"
-          disabled={patch.busy}
+          disabled={busy}
           onClick={() => {
             setNewKey(key)
             setDraft(draftOf(property.value))
@@ -400,7 +457,7 @@ function PropertyRow({
           size="icon-sm"
           aria-label={`Remove ${key}`}
           title="Remove"
-          disabled={patch.busy}
+          disabled={busy}
           className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
           onClick={() => patch.send({ [key]: null })}
         >
@@ -413,7 +470,19 @@ function PropertyRow({
 
 const EMPTY: Draft = { type: 'text', text: '', yes: true, items: [''] }
 
-function AddProperty({ docs, keys, keysId, onPatch }: { docs: Record<string, KeyDoc>; keys: ReadonlySet<string>; keysId: string; onPatch: Patch }) {
+function AddProperty({
+  docs,
+  keys,
+  keysId,
+  locked,
+  onPatch,
+}: {
+  docs: Record<string, KeyDoc>
+  keys: ReadonlySet<string>
+  keysId: string
+  locked: boolean
+  onPatch: Patch
+}) {
   const [key, setKey] = useState('')
   const [draft, setDraft] = useState<Draft>(EMPTY)
   // Until the person picks a type, a key the schema knows sets it.
@@ -463,13 +532,13 @@ function AddProperty({ docs, keys, keysId, onPatch }: { docs: Record<string, Key
           label="New property type"
         />
         <ValueField draft={draft} onChange={setDraft} label="New property value" />
-        <Button type="submit" size="sm" disabled={patch.busy || key.trim() === ''}>
+        <Button type="submit" size="sm" disabled={patch.busy || locked || key.trim() === ''}>
           {patch.busy && <Spinner />}
           Add property
         </Button>
       </div>
       {doc?.description && <p className="text-[12px] text-muted-foreground">{doc.description}</p>}
-      <PatchFeedback patch={patch} />
+      <PatchFeedback patch={patch} locked={locked} />
     </form>
   )
 }

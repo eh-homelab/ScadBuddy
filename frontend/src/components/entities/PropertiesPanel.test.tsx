@@ -1,5 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { server } from '../../mocks/server'
 import { resetMockState } from '../../mocks/handlers'
 import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { renderPage } from '../../test/utils'
@@ -7,6 +9,14 @@ import { choose } from '../../test/select'
 import { PropertiesPanel } from './PropertiesPanel'
 
 const TYPE = 'spool_type:7a000000-0000-4000-8000-000000000001'
+const PROPERTIES = '/api/v1/entities/:ref/properties'
+
+/** A gate a handler waits on, opened by the test. */
+function gate() {
+  let open!: () => void
+  const opened = new Promise<void>((resolve) => (open = resolve))
+  return { opened, open }
+}
 
 describe('PropertiesPanel (#7026)', () => {
   beforeEach(() => resetMockState())
@@ -173,5 +183,93 @@ describe('PropertiesPanel (#7026)', () => {
     await user.click(within(row).getByRole('button', { name: 'Remove mpn' }))
     expect(await screen.findByText('No properties yet.')).toBeInTheDocument()
     expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { mpn: null } }])
+  })
+
+  it('offers no add form while the properties load, so a replace cannot go unasked', async () => {
+    seedEntityProperties(TYPE, { gtin: ['1', '2', '3'] })
+    const read = gate()
+    server.use(
+      http.get(PROPERTIES, async () => {
+        await read.opened
+      }),
+    )
+    renderPage(<PropertiesPanel entity={TYPE} />)
+    expect(await screen.findByText('Loading the properties…')).toBeInTheDocument()
+    expect(screen.queryByRole('form', { name: 'Add a property' })).toBeNull()
+    expect(screen.queryByLabelText('New property key')).toBeNull()
+    read.open()
+    expect(await screen.findByRole('form', { name: 'Add a property' })).toBeInTheDocument()
+  })
+
+  it('offers no add form when the properties could not be loaded', async () => {
+    seedEntityProperties(TYPE, { gtin: ['1', '2', '3'] })
+    server.use(http.get(PROPERTIES, () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    renderPage(<PropertiesPanel entity={TYPE} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('The properties could not be loaded')
+    expect(screen.queryByRole('form', { name: 'Add a property' })).toBeNull()
+    expect(screen.queryByLabelText('New property key')).toBeNull()
+  })
+
+  it('sends one PATCH at a time: every other write waits until it answers', async () => {
+    seedEntityProperties(TYPE, { mpn: 'A', part: 'B' })
+    const reply = gate()
+    server.use(
+      http.patch(PROPERTIES, async () => {
+        await reply.opened
+      }),
+    )
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(within(await screen.findByRole('row', { name: /mpn/ })).getByRole('button', { name: 'Remove mpn' }))
+    const part = screen.getByRole('row', { name: /^part/ })
+    expect(within(part).getByRole('button', { name: 'Remove part' })).toBeDisabled()
+    expect(within(part).getByRole('button', { name: 'Edit part' })).toBeDisabled()
+    await user.type(screen.getByLabelText('New property key'), 'td')
+    expect(screen.getByRole('button', { name: 'Add property' })).toBeDisabled()
+    reply.open()
+    await waitFor(() => expect(screen.queryByRole('row', { name: /mpn/ })).toBeNull())
+    expect(within(screen.getByRole('row', { name: /^part/ })).getByRole('button', { name: 'Remove part' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Add property' })).toBeEnabled()
+    expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { mpn: null } }])
+  })
+
+  it("moves focus into a row's form, and back to its Edit button on Cancel, Escape and Save", async () => {
+    seedEntityProperties(TYPE, { mpn: 'A' })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(within(await screen.findByRole('row', { name: /mpn/ })).getByRole('button', { name: 'Edit mpn' }))
+    expect(screen.getByLabelText('Key of mpn')).toHaveFocus()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByRole('button', { name: 'Edit mpn' })).toHaveFocus()
+
+    await user.keyboard('{Enter}')
+    expect(screen.getByLabelText('Key of mpn')).toHaveFocus()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByLabelText('Key of mpn')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Edit mpn' })).toHaveFocus()
+    expect(entityMock.propertyPatches).toEqual([])
+
+    await user.keyboard('{Enter}')
+    await user.type(screen.getByLabelText('Value of mpn'), 'B{Enter}')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit mpn' })).toHaveFocus())
+    expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { mpn: 'AB' } }])
+  })
+
+  it('returns focus to the renamed row after a rename', async () => {
+    seedEntityProperties(TYPE, { mpn: 'A' })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(within(await screen.findByRole('row', { name: /mpn/ })).getByRole('button', { name: 'Edit mpn' }))
+    await user.clear(screen.getByLabelText('Key of mpn'))
+    await user.type(screen.getByLabelText('Key of mpn'), 'part{Enter}')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit part' })).toHaveFocus())
+  })
+
+  it('keeps the form open when Escape only closes its type menu', async () => {
+    seedEntityProperties(TYPE, { mpn: 'A' })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(within(await screen.findByRole('row', { name: /mpn/ })).getByRole('button', { name: 'Edit mpn' }))
+    await user.click(screen.getByRole('combobox', { name: 'Type of mpn' }))
+    expect(await screen.findByRole('listbox')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull())
+    expect(screen.getByLabelText('Key of mpn')).toBeInTheDocument()
   })
 })
