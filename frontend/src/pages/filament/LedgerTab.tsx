@@ -30,6 +30,7 @@ const KINDS: { id: Kind; title: string }[] = [
   { id: 'archived', title: 'Archived' },
   { id: 'restored', title: 'Restored' },
   { id: 'synced_from_bb', title: 'Synced from Bambuddy' },
+  { id: 'consumed_reset', title: 'Used counter reset' },
 ]
 const SOURCES: { id: Source; title: string }[] = [
   { id: 'person', title: 'Person' },
