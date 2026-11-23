@@ -157,7 +157,7 @@ from scadbuddy.filament.spools import (
     TagUnnamedError,
 )
 from scadbuddy.filament.tdfp import CREATE_WAIT, SEARCH_WAIT, Tdfp, tdfp
-from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError
+from scadbuddy.filament.types import PresetUnknownError, TypeRowsDuplicateError, TypeTempError
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.kinds import waiting_on_bambuddy
@@ -483,6 +483,7 @@ _TYPE_REFUSED = (
     CatalogRefError,
     TypeTempError,
     TypeRowsDuplicateError,
+    PresetUnknownError,
 )
 
 
@@ -1012,6 +1013,7 @@ _SPOOL_REFUSED = (
     TagUnnamedError,
     TagKeysClashError,
     TypeRowsDuplicateError,
+    PresetUnknownError,
 )
 
 

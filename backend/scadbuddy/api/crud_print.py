@@ -87,6 +87,10 @@ would not repeat, so each takes an ``Idempotency-Key`` and runs with its ledger 
 one transaction. A LAN start's picks delete the earlier pick's rows and insert the new
 ones: that is one route, one transaction here (plan D6), never several calls.
 
+ScadBuddy's own filament presets (area ``own-presets``, #7176) are
+`filament/sb_presets.py` `FilamentPresetStore`'s reads, for `RemoteFilamentPresets`:
+``…/own-presets`` and ``…/own-presets/documents``.
+
 The kept presets and a native slice's start (Q30, area ``spools``, #5298 Task 31) are
 `HeldPresetStore`'s and `NativeSliceStore`'s, for `RemoteHeldPresets` and
 `RemoteNativeSlices`: the kept presets (reads) and ``…/native-slices/start`` (under the
@@ -1779,6 +1783,19 @@ class HeldPresetRow(BaseModel):
     sha256: str
 
 
+class FilamentPresetRow(BaseModel):
+    """One of ScadBuddy's own filament presets as a native run's catalogue reads it
+    (`slicing/own_presets.py` `OwnRow`, #7176)."""
+
+    id: int
+    name: str
+    sha256: str
+    filament_type: str | None = None
+    filament_colour: str | None = None
+    compatible_printers: list[str] = Field(default_factory=list)
+    bb_preset_id: int | None = None
+
+
 class SliceStartAsk(BaseModel):
     workflow_id: str = Field(min_length=1, max_length=200)
     subject: str = Field(min_length=1)
@@ -2217,6 +2234,24 @@ async def held_preset_documents(
         found: doc.model_copy(update={"setting": strip_credentials(doc.setting)})
         for found, doc in documents.items()
     }
+
+
+@router.get("/own-presets", name="crud_print_own_presets")
+async def own_filament_presets(slicing: SlicingDep) -> list[FilamentPresetRow]:
+    """ScadBuddy's own filament presets, without their documents (area
+    ``own-presets``, #7176)."""
+    return [FilamentPresetRow(**vars(row)) for row in await slicing.own.rows()]
+
+
+@router.get("/own-presets/documents", name="crud_print_own_preset_documents")
+async def filament_preset_documents(
+    slicing: SlicingDep, id: Annotated[list[int], Query(default_factory=list, max_length=200)]
+) -> dict[int, dict[str, Any]]:
+    """The current documents of ScadBuddy's filament presets ``id``, each without
+    print-host credential keys (`core/credentials.py` `strip_credentials`, applied as the
+    store reads them); an id with no preset is left out."""
+    documents = await slicing.own.documents(id)
+    return {found: strip_credentials(doc) for found, doc in documents.items()}
 
 
 @router.post("/native-slices/start", name="crud_print_start_native_slice")

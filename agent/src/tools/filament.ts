@@ -483,7 +483,7 @@ const tools: Tool[] = [
         z.object({
           printer_model: z.string().describe('A printer model, e.g. `H2C`'),
           nozzle_diameter: z.string().describe('e.g. `0.4`'),
-          slicer_filament: z.string().describe("The slicer's filament id, e.g. `GFA00`"),
+          slicer_filament: z.string().describe("The slicer's filament id, e.g. `GFA00`, or a ScadBuddy preset as `sb-<id>`"),
           slicer_filament_name: z.string().optional(),
         }),
       ),
@@ -881,7 +881,7 @@ const tools: Tool[] = [
         z.object({
           printer_model: z.string().describe('A printer model, e.g. `H2C`'),
           nozzle_diameter: z.string().describe('e.g. `0.4`'),
-          slicer_filament: z.string().describe("The slicer's filament id, e.g. `GFA00`"),
+          slicer_filament: z.string().describe("The slicer's filament id, e.g. `GFA00`, or a ScadBuddy preset as `sb-<id>`"),
           slicer_filament_name: z.string().optional(),
         }),
       ),

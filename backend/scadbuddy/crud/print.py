@@ -49,6 +49,10 @@ watch's `settle_lan_ended`, whose one long activity repeats `WriteKeys`' keys ac
 attempts. The watch's call is bounded by `WATCH_CALL_BUDGET`. ``spool_history`` is the
 API's (the rack usage route).
 
+`RemoteFilamentPresets` is ScadBuddy's own filament presets (area ``own-presets``,
+#7176): the rows and documents a native run reads, from `filament/sb_presets.py`
+`FilamentPresetStore` on the API.
+
 `RemoteHeldPresets` and `RemoteNativeSlices` are `slicing/held_presets.py`
 `HeldPresetStore` and `slicing/store.py` `NativeSliceStore` (Q30, #5298 Task 31) for the
 methods the print worker calls: the kept presets a native run reads (``rows``,
@@ -217,6 +221,7 @@ from scadbuddy.printers.store import (
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from scadbuddy.slicing.held_presets import HeldPresetStore, HeldRow
+from scadbuddy.slicing.own_presets import OwnRow
 from scadbuddy.slicing.store import NativeSlice, NativeSliceStore, SliceSubjectError
 from scadbuddy.spools.models import SeenTray
 
@@ -1689,6 +1694,39 @@ class RemoteHeldPresets(HeldPresetStore):
 
 
 _refuse(RemoteHeldPresets, "HeldPresetStore", HELD_PRESETS_API_ONLY)
+
+
+class RemoteFilamentPresets:
+    """ScadBuddy's own filament presets (#7176, `slicing/own_presets.py` `OwnPresets`)
+    over ``…/print/own-presets`` (area ``own-presets``): what a native run's
+    catalogue and presets read. Reads only. No pool."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def rows(self) -> list[OwnRow]:
+        body = (await self._client.request("GET", f"{BASE}/own-presets")).json()
+        return [
+            OwnRow(
+                id=row["id"],
+                name=row["name"],
+                sha256=row["sha256"],
+                filament_type=row.get("filament_type"),
+                filament_colour=row.get("filament_colour"),
+                compatible_printers=list(row.get("compatible_printers") or []),
+                bb_preset_id=row.get("bb_preset_id"),
+            )
+            for row in body
+        ]
+
+    async def documents(self, ids: Collection[int]) -> dict[int, dict[str, Any]]:
+        unique = sorted(set(ids))
+        if not unique:
+            return {}
+        url = f"{BASE}/own-presets/documents?{urlencode({'id': unique}, doseq=True)}"
+        body = (await self._client.request("GET", url)).json()
+        # The route already strips them; stripped here too, as the kept presets are.
+        return {int(found): strip_credentials(doc) for found, doc in body.items()}
 
 
 #: The `NativeSliceStore` methods only the API calls: the `SliceWorkflow`'s activities

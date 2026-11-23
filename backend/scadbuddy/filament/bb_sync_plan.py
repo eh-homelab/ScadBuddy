@@ -420,16 +420,22 @@ def desired_and_unmapped(
     if pushes(sync.presets):
         presets = facts.presets.get(spool_id, [])
         chosen = _preset(presets, place)
-        out["slicer_filament"] = None if chosen is None else chosen.slicer_filament
-        out["slicer_filament_name"] = None if chosen is None else chosen.slicer_filament_name
+        # Bambuddy knows a ScadBuddy preset (#7176) by its mirror's id only: one with no
+        # mirror is sent as none, never as its `sb-` ref.
+        sent = None if chosen is None else chosen.for_bambuddy()
+        out["slicer_filament"] = sent
+        out["slicer_filament_name"] = (
+            None if chosen is None or sent is None else chosen.slicer_filament_name
+        )
         out["filament_presets"] = [
             {
                 "printer_model": p.printer_model,
                 "nozzle_diameter": p.nozzle_diameter,
-                "slicer_filament": p.slicer_filament,
+                "slicer_filament": p.for_bambuddy(),
                 "slicer_filament_name": p.slicer_filament_name,
             }
             for p in presets
+            if p.for_bambuddy() is not None
         ]
         k_values = facts.k_values.get(spool_id, [])
         unmapped = sum(1 for k in k_values if k.printer_id not in refs.printers)

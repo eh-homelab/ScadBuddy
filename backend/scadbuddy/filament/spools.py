@@ -28,7 +28,13 @@ from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
 from scadbuddy.filament.rfid_push import enqueue_tag
-from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError, effective, overridden
+from scadbuddy.filament.types import (
+    PresetUnknownError,
+    TypeRowsDuplicateError,
+    TypeTempError,
+    effective,
+    overridden,
+)
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 Conn = Connection[DictRow]
@@ -778,6 +784,8 @@ class FilamentSpoolStore:
                 return p.effective_presets(conn, spool_id)
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
+        except errors.ForeignKeyViolation:
+            raise PresetUnknownError() from None
 
     def k_values(self, spool_id: UUID) -> _KValues | None:
         """The spool's pressure-advance values, its own over its type's; ``None`` for no

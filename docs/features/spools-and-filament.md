@@ -35,6 +35,17 @@ state.
 Tray changes and print ends are recorded when a printer report is written
 (`backend/scadbuddy/filament/capture.py`). They are not a workflow of their own.
 
+Filament presets are ScadBuddy's own (#7176, plan
+[2026-11-23](../superpowers/plans/2026-11-23-scadbuddy-filament-presets.md)): the table
+`filament_presets`, each document a blob with every version kept. A type or spool names one
+by the ref `sb-<id>` in `slicer_filament`. The native slicer reads them from ScadBuddy's
+store; Bambuddy knows each one only by its mirror's local preset id
+(`EffectivePreset.bambuddy_id`), which its slice path, the spool push and the AMS slot
+configure send. After each refresh of the kept presets, a binding that still names a
+Bambuddy local preset is moved to a ScadBuddy preset made from the kept copy, and a preset
+made in Bambuddy takes a new version when Bambuddy edits it
+(`backend/scadbuddy/filament/sb_presets.py`).
+
 Fetching presets is the `ProfileFetch` workflow on the profile-fetch worker, and a 3DFP
 search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
 ([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).
@@ -57,7 +68,8 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   - `capture.py`, `ledger.py`, `catalog.py`, `types.py`, `locations.py`, `sensors.py`, `invoices.py`, `labels.py`;
   - `backend/scadbuddy/codes/` (code parsing and resolving);
   - `bb_sync_*.py` and `bambuddy_pull.py`;
-  - `profile_fetch.py`.
+  - `profile_fetch.py`, `sb_presets.py` (ScadBuddy's presets) and
+    `backend/scadbuddy/slicing/own_presets.py` (their refs, as the native slicer reads them).
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
@@ -68,7 +80,9 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
 - Tables: `filament_*` (`backend/scadbuddy/migrations/20261114T1300Z_filament_catalogs.sql`,
   `20261114T1301Z…` and later). These cover the catalogs, spool types, spools,
   `filament_spool_events`, tags and bindings, locations and sensors, suppliers and
-  invoices, the Bambuddy sync state and links, and `filament_profile_fetches`. The price
+  invoices, the Bambuddy sync state and links, `filament_profile_fetches`, and the
+  presets `filament_presets` and `filament_preset_versions`
+  (`20261123T0711Z_filament_presets.sql`; blobs held by `filament_preset`). The price
   book is `filaments`.
 - The old spool overlay and native spool tables were dropped
   (`backend/scadbuddy/migrations/20261118T1235Z_drop_native_spool_tables.sql`).
