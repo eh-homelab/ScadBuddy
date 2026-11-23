@@ -1,10 +1,22 @@
 import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type * as embed from '../../lib/embed'
+import { downloadBlob } from '../../lib/embed'
 import { L } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
+import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { LabelsPage } from './LabelsPage'
+
+// Loads the file the way the real one does; saving it is lib/embed's own test.
+const saved: Blob[] = []
+vi.mock('../../lib/embed', async (original) => ({
+  ...(await original<typeof embed>()),
+  downloadBlob: vi.fn(async (load: () => Promise<Blob>) => {
+    saved.push(await load())
+  }),
+}))
 
 const detail = (id: string, number: number) => ({
   id,
@@ -20,7 +32,106 @@ function serve() {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.mocked(downloadBlob).mockClear()
+  saved.length = 0
   localStorage.clear()
+})
+
+/** The settings with the label template `choice`, and every `PUT /settings` body in `puts`. */
+function serveTemplate(choice: object, puts: unknown[] = []) {
+  server.use(
+    http.get('*/api/v1/settings', () => HttpResponse.json({ filament_label_template: choice, filament_label_base_url: 'https://sb.example.com', public_url: null })),
+    http.put('*/api/v1/settings', async ({ request }) => {
+      puts.push(await request.json())
+      return HttpResponse.json({})
+    }),
+  )
+  return puts
+}
+
+describe('the label template (#7157)', () => {
+  it('draws the labels at the stored template', async () => {
+    serve()
+    serveTemplate({ template: 'box_62x29', width_mm: null, height_mm: null })
+    renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 62mm; height: 29mm/))
+    expect(screen.getByTestId('print-label').getAttribute('style')).toMatch(/width: 62mm; height: 29mm/)
+    expect(await screen.findByText('1 of 1 ready, 62 x 29 mm each.')).toBeInTheDocument()
+  })
+
+  it('saves the template chosen, for place labels too', async () => {
+    const puts = serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    const { user } = renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    await choose(user, await screen.findByRole('combobox', { name: 'Label' }), 'AMS holder 75 x 55 mm')
+    await waitFor(() => expect(puts).toEqual([{ filament_label_template: { template: 'ams_holder_75x55' } }]))
+    expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 75mm; height: 55mm/)
+  })
+
+  it('saves a custom size once both lengths are in bounds', async () => {
+    serve()
+    const puts = serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await choose(user, await screen.findByRole('combobox', { name: 'Label' }), 'Custom size')
+    const width = screen.getByRole('spinbutton', { name: 'Width (mm)' })
+    const height = screen.getByRole('spinbutton', { name: 'Height (mm)' })
+    await user.clear(width)
+    await user.type(width, '30')
+    await user.tab()
+    expect(await screen.findByText('A custom label is 40 to 190 mm wide and 25 to 190 mm tall.')).toBeInTheDocument()
+    expect(puts).toEqual([])
+    await user.clear(width)
+    await user.type(width, '80')
+    await user.clear(height)
+    await user.type(height, '40')
+    await user.tab()
+    await waitFor(() => expect(puts.at(-1)).toEqual({ filament_label_template: { template: 'custom', width_mm: 80, height_mm: 40 } }))
+    await waitFor(() => expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 80mm; height: 40mm/))
+  })
+
+  it('prints a sheet template on its own grid, a page per sheet, with no layout choice', async () => {
+    server.use(http.get('*/api/v1/filament/spools/:id', ({ params }) => HttpResponse.json(detail(String(params.id), 1))))
+    serveTemplate({ template: 'avery_l7160', width_mm: null, height_mm: null })
+    const ids = Array.from({ length: 22 }, (_, i) => `s${i}`).join(',')
+    renderPage(<LabelsPage />, { route: `/filament/labels?ids=${ids}` })
+    await waitFor(() => expect(screen.getAllByTestId('print-label')).toHaveLength(22))
+    // 21 a sheet: two pages.
+    expect(document.querySelectorAll('#label-print-root > [data-sheet-page]')).toHaveLength(2)
+    expect(screen.queryByRole('radio', { name: 'Sheet' })).toBeNull()
+    expect(document.querySelector('style')?.textContent).toContain('size: 210mm 297mm')
+  })
+
+  it('downloads the PDF of the labels drawn, at the template shown', async () => {
+    serve()
+    serveTemplate({ template: 'box_40x30', width_mm: null, height_mm: null })
+    let body: unknown = null
+    server.use(
+      http.post('*/api/v1/filament/labels', async ({ request }) => {
+        body = await request.json()
+        return new HttpResponse(new Blob(['%PDF-1.4'], { type: 'application/pdf' }), { headers: { 'Content-Type': 'application/pdf' } })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a,b' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download PDF' })).toBeEnabled())
+    await waitFor(() => expect(screen.getAllByTestId('label')[0]!.getAttribute('style')).toMatch(/width: 40mm/))
+    await user.click(screen.getByRole('button', { name: 'Download PDF' }))
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(vi.mocked(downloadBlob).mock.calls[0]![1]).toBe('labels.pdf')
+    expect(body).toEqual({ spool_ids: ['a', 'b'], location_ids: [], template: { template: 'box_40x30' }, layout: 'roll' })
+  })
+
+  it('says why the PDF was refused', async () => {
+    serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    server.use(
+      http.post('*/api/v1/filament/labels', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'A place label needs an address: set the label address in Settings, or the public URL.', code: 'no_label_base' }, { status: 409 }),
+      ),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download PDF' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Download PDF' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('A place label needs an address')
+  })
 })
 
 describe('the labels page', () => {

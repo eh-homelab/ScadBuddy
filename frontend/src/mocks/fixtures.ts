@@ -1193,6 +1193,8 @@ export const settings: Settings = {
   filament_shopping_auto_add_empty: true,
   // #6905 — how long the sync's pass history is kept; stored only, null is 30 days.
   filament_sync_pass_ttl_days: null,
+  // #7157 — the label template; stored only, the 50 x 25 mm roll label by default.
+  filament_label_template: { template: 'roll_50x25', width_mm: null, height_mm: null },
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,

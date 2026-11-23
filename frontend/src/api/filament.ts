@@ -2,7 +2,7 @@
  * #6262 — the Filament section's client for `/api/v1/filament/*`
  * (`backend/scadbuddy/api/filament.py`), typed from the generated `schema.d.ts`.
  */
-import { command, request } from './client'
+import { command, request, requestRaw } from './client'
 import type { components, operations } from './schema'
 
 type Schemas = components['schemas']
@@ -38,6 +38,10 @@ export type PathStep = Schemas['PathStep']
 export type PlacedSpool = Schemas['PlacedSpool']
 export type Resolved = Schemas['Resolved']
 export type PrinterLabels = Schemas['PrinterLabels']
+export type LabelTemplates = Schemas['LabelTemplates']
+export type LabelTemplate = Schemas['LabelTemplate']
+export type LabelTemplateChoice = Schemas['LabelTemplateChoice']
+export type LabelsPdfRequest = Schemas['LabelsPdfRequest']
 export type PrinterLabel = Schemas['PrinterLabel']
 export type LocationNode = Schemas['LocationNode']
 export type LocationCreate = Schemas['LocationCreate']
@@ -374,6 +378,18 @@ export const resolveCode = (code: string) => request<Resolved>(`/codes/${seg(cod
 /** #6955 — the printers' place labels; `null` is every printer. */
 export const printerLabels = (printerIds: string[] | null) =>
   request<PrinterLabels>(`${BASE}/printer-labels`, json('POST', { printer_ids: printerIds }))
+
+/** #7157 — the label templates, and a custom label's bounds. */
+export const listLabelTemplates = () => request<LabelTemplates>(`${BASE}/label-templates`)
+
+/**
+ * #7157 — the labels PDF of these spools, then these places (`POST /filament/labels`), as the answer's bytes for
+ * `downloadBlob`; a refusal throws `ApiError` with the sentence for the person (`no_label_base`, an unknown id).
+ */
+export async function labelsPdf(body: LabelsPdfRequest): Promise<Blob> {
+  const response = await requestRaw(`${BASE}/labels`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/pdf' }, body: JSON.stringify(body) })
+  return response.blob()
+}
 
 /** Adds a place, or with `id` changes one (only the fields sent). */
 export function upsertLocation(body: LocationCreate): Promise<Location>

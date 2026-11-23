@@ -88,7 +88,9 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
 - Settings: `spool_overlay_refresh_seconds` (the refresh Schedule), `filament_sync`,
   `filament_low_stock_pct`, `filament_default_cost_per_kg`, `profile_fetch_nozzles`,
   `filament_label_base_url` (an https origin of at most 64 characters, live; unset, labels use
-  `public_url` reduced to its https origin, then the page's own origin).
+  `public_url` reduced to its https origin, then the page's own origin),
+  `filament_label_template` (#7157, stored only: the label template the labels page and the
+  labels PDF use; the 50 x 25 mm roll label by default).
 - Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`. A code
   opens at `/x/<code>` (`frontend/src/pages/CodePage.tsx`; route `GET /api/v1/codes/{code}`,
   `backend/scadbuddy/api/codes.py`). Any case works, with or without the dash. A number is
@@ -104,6 +106,15 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   slot and external holder the printer's latest report lists; a printer with no such report is
   named on the page. Spool labels keep `scadbuddy:spool:<id>`. A place links to its own page,
   `/filament/locations/<id>`.
+- Label templates and the PDF (#7157, plan
+  `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): the labels page offers SB's
+  50 x 25 mm roll label, Bambuddy's six templates (two box labels, two AMS holder labels and
+  the Avery 5160 and L7160 sheets) and a custom size, and saves the choice in
+  `filament_label_template`. A sheet template prints on its own grid. "Download PDF" asks
+  `POST /api/v1/filament/labels` (`backend/scadbuddy/filament/label_pdf.py`, ReportLab) for
+  the same labels at the same template and saves it through `downloadBlob`, so it works
+  inside Bambuddy's frame. A place label's PDF needs the label address or an https public
+  URL (409 `no_label_base` otherwise). The browser print stays.
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
   `filament_printer_labels`.
 
