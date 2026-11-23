@@ -70,13 +70,14 @@ class KindPropertySchema(BaseModel):
 
 
 class SchemaBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_: dict[str, Any] = Field(alias="schema")
 
 
 def _entity(text: str) -> EntityRef:
     ref = parsed(text)
-    if ref.kind not in KINDS:
-        raise no_properties_kind(ref.kind)
+    _kind(ref.kind)
     return ref
 
 
@@ -127,7 +128,9 @@ async def list_entity_properties(ref: RefPath, entities: EntitiesDep) -> EntityP
         "`set` maps keys to values; a key set to `null` is removed. The whole patch applies "
         "or none of it. A person's or the agent's write makes a key `manual`. "
         + _RULES
-        + " A bad key or value is 422 `bad_property_value`, naming the key and the reason."
+        + " A bad key or value is 422 `bad_property_value`, naming the key and the reason. A "
+        "malformed body (an empty `set`, an unknown field) is the generic request-validation "
+        "422, not `bad_property_value`."
     ),
     responses={
         404: {"description": "No such entity (`entity_not_found`)"},

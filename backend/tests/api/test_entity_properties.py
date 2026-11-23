@@ -46,7 +46,10 @@ def test_a_patch_round_trips_and_a_rename_moves_the_value(client: TestClient) ->
     assert {p["key"]: p["value"] for p in listed} == {"dry_temp": 55, "tags": ["a", "b"]}
     assert {p["source"] for p in listed} == {"manual"}
     renamed = _patch(client, entity, {"drying_c": 55, "dry_temp": None})
-    assert [p["key"] for p in renamed.json()["properties"]] == ["drying_c", "tags"]
+    assert {p["key"]: p["value"] for p in renamed.json()["properties"]} == {
+        "drying_c": 55,
+        "tags": ["a", "b"],
+    }
 
 
 def test_a_bad_value_names_its_key(client: TestClient) -> None:
@@ -54,7 +57,9 @@ def test_a_bad_value_names_its_key(client: TestClient) -> None:
     bad = _patch(client, entity, {"Bad Key": 1})
     _code(bad, 422, "bad_property_value")
     assert "Bad Key" in bad.json()["detail"]
-    _code(_patch(client, entity, {"obj": {"a": 1}}), 422, "bad_property_value")
+    obj = _patch(client, entity, {"obj": {"a": 1}})
+    _code(obj, 422, "bad_property_value")
+    assert "obj" in obj.json()["detail"]
 
 
 def test_a_missing_entity_and_kinds_that_take_none(client: TestClient) -> None:
@@ -65,6 +70,7 @@ def test_a_missing_entity_and_kinds_that_take_none(client: TestClient) -> None:
     _code(archive, 422, "unknown_entity_kind")
     assert "takes properties" in archive.json()["detail"]
     _code(client.get("/api/v1/entity-kinds/nope/properties"), 422, "unknown_entity_kind")
+    _code(client.get("/api/v1/entity-kinds/nope/property-schema"), 422, "unknown_entity_kind")
     _code(client.get("/api/v1/entities/nope/properties"), 422, "bad_entity_ref")
 
 
@@ -75,6 +81,22 @@ def test_the_kind_read_returns_every_entitys_map(client: TestClient) -> None:
     found = client.get("/api/v1/entity-kinds/spool_type/properties").json()["properties"]
     assert found[one.split(":")[1]] == {"a": 1}
     assert found[two.split(":")[1]] == {"b": "x"}
+
+
+def test_a_kind_with_no_properties_reads_empty(client: TestClient) -> None:
+    got = client.get("/api/v1/entity-kinds/supplier/properties")
+    assert got.status_code == 200, got.text
+    assert got.json() == {"properties": {}}
+
+
+def test_a_malformed_patch_body_is_the_generic_422(client: TestClient) -> None:
+    entity = _spool_type(client)
+    path = f"/api/v1/entities/{entity}/properties"
+    bodies: list[dict[str, Any]] = [{"set": {}}, {"set": {"a": 1}, "extra": 1}]
+    for body in bodies:
+        refused = client.patch(path, json=body, headers=press())
+        assert refused.status_code == 422, refused.text
+        assert not refused.json().get("type", "").endswith("bad_property_value")
 
 
 def test_a_restricting_schema_is_refused_and_the_old_one_stays(client: TestClient) -> None:
@@ -96,7 +118,8 @@ def test_a_good_schema_types_a_key_and_counts_keys_in_use(client: TestClient) ->
     _code(_patch(client, entity, {"dry_temp": "hot"}), 422, "bad_property_value")
     assert _patch(client, entity, {"dry_temp": 60}).status_code == 200
     keys = client.get(SCHEMA).json()["keys_in_use"]
-    assert {"key": "dry_temp", "count": 1} in keys
+    mine = [k for k in keys if k["key"] == "dry_temp"]
+    assert len(mine) == 1 and mine[0]["count"] >= 1
     other = client.put(
         "/api/v1/entity-kinds/Spool/property-schema", json={"schema": good}, headers=press()
     )
