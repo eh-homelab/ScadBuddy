@@ -410,6 +410,9 @@ describe('ExchangeCredential', () => {
       controller.abort()
       await slept
       expect(clear).toHaveBeenCalledWith(timer)
+      // A signal already aborted: it resolves at once and clears its timer too (#7164).
+      await sleep(60_000, AbortSignal.abort())
+      expect(clear).toHaveBeenCalledWith(set.mock.results.at(-1)?.value)
     } finally {
       set.mockRestore()
       clear.mockRestore()
