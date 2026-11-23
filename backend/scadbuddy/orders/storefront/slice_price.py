@@ -990,10 +990,17 @@ async def read_type_presets(
     `effective_presets`), by type (#6574)."""
     # Here, not at the top: the filament component imports the orders' modules.
     from scadbuddy.filament.component import FILAMENT
+    from scadbuddy.filament.sb_presets import bambuddy_refs_on
 
     types = state.components.get(FILAMENT).types
 
     def read() -> dict[UUID, list[EffectivePreset]]:
+        rows = {type_id: types.presets(type_id) for type_id in type_ids}
+        # A ScadBuddy preset's Bambuddy id, for a slice on Bambuddy's path (#7176).
+        with state.settings_store.pool.connection() as conn:
+            bambuddy = bambuddy_refs_on(
+                conn, {row.slicer_filament for group in rows.values() for row in group}
+            )
         return {
             type_id: [
                 EffectivePreset(
@@ -1002,10 +1009,11 @@ async def read_type_presets(
                     slicer_filament=row.slicer_filament,
                     slicer_filament_name=row.slicer_filament_name,
                     overridden=False,
+                    bambuddy_id=bambuddy.get(row.slicer_filament),
                 )
-                for row in types.presets(type_id)
+                for row in group
             ]
-            for type_id in type_ids
+            for type_id, group in rows.items()
         }
 
     return await asyncio.to_thread(read)

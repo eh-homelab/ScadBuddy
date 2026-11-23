@@ -156,10 +156,12 @@ from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.presets import drop_migrated, effective_k_values, own_k_values, own_presets
+from scadbuddy.filament.sb_presets import by_bb_id_on
 from scadbuddy.filament.spools import FilamentSpoolStore, TagKeysClashError
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.kinds import waiting_on_bambuddy
+from scadbuddy.slicing.own_presets import sb_ref
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 if TYPE_CHECKING:
@@ -1013,7 +1015,10 @@ def _bb_presets(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
     never touched. A clear in Bambuddy deletes only the rows that still hold its last
     value. Rows that change record one ``synced_from_bb`` event with the spool's own
     rows before and after (``changes.presets``). A spool with a type takes none: its
-    type gives its presets (F27, `drop_migrated`).
+    type gives its presets (F27, `drop_migrated`). A Bambuddy local preset ScadBuddy
+    holds (`filament/sb_presets.py`, #7176) is written as its ``sb-`` ref, and a row
+    holding that ref holds Bambuddy's last value; one it does not hold yet is written as
+    Bambuddy's id, which the kept presets' refresh then adopts (`adopt_held`).
 
     The spool's row is locked first (after the pull's advisory lock and any tags, the
     pull's order), as `FilamentSpoolStore.set_presets` locks it, so a person's edit in
@@ -1050,14 +1055,28 @@ def _bb_presets(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
         for row in found
     }
     migrated = {row["nozzle_diameter"] for row in found if row["migrated"]}
+    # A Bambuddy local preset ScadBuddy holds is named by its ScadBuddy ref (#7176): a row
+    # holding that ref holds what Bambuddy sent, and what Bambuddy sends is written so.
+    held = by_bb_id_on(
+        conn, [int(ref) for ref in (last[0], sent[0]) if ref is not None and ref.isdigit()]
+    )
+
+    def as_sb(value: tuple[str | None, str | None]) -> tuple[str | None, str | None]:
+        ref = value[0]
+        if ref is not None and ref.isdigit() and int(ref) in held:
+            return sb_ref(held[int(ref)]), value[1]
+        return value
+
+    lasts = {last, as_sb(last)}
+    written = as_sb(sent) if sent[0] else None
     # Bambuddy's own rows: none, or migrated ones still holding what it sent last. A
     # person's row (not migrated) is never Bambuddy's, even when its value matches.
     ours = [
         size
         for size in BB_PRESET_NOZZLES
-        if size not in rows or (last[0] is not None and size in migrated and rows[size] == last)
+        if size not in rows or (last[0] is not None and size in migrated and rows[size] in lasts)
     ]
-    wanted = [size for size in ours if rows.get(size) != (sent if sent[0] else None)]
+    wanted = [size for size in ours if rows.get(size) != written]
     if not wanted:
         return False
     before = own_presets(conn, spool_id)
@@ -1076,7 +1095,7 @@ def _bb_presets(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
                 " ON CONFLICT (spool_id, printer_model, nozzle_diameter) DO UPDATE SET"
                 " slicer_filament = EXCLUDED.slicer_filament,"
                 " slicer_filament_name = EXCLUDED.slicer_filament_name",
-                (spool_id, PRINTER_MODEL, size, *sent),
+                (spool_id, PRINTER_MODEL, size, *as_sb(sent)),
             )
     ledger.record(
         conn,

@@ -602,8 +602,8 @@ async function runGated(
   // markers included. Undefined: the raw arguments, as they run.
   let flowBound: Record<string, unknown> | undefined
   // Whether the resolution gave other input than the call was given (#7199): a call not
-  // approved then is refused with the tool's `movedSinceApproval`, since what it names
-  // changed after the approval, never with the generic "none is recorded".
+  // approved then is refused as matching no approval, with the tool's `movedSinceApproval`
+  // advice. What it names may have changed after an approval, or none was given (#7211).
   let resolvedOther = false
   if (effective.gated && tool.resolvesApproval) {
     const ctx = { ...services, principal, ...(session === undefined ? {} : { session }), progress: async () => {}, signal: call.signal, lookup, gate: 'workflow' as const }
@@ -669,8 +669,12 @@ async function runGated(
       )
     }
     if (resolvedOther) {
-      // Never run: the approval, if any, was for what the call named then (#7199).
-      await refuse('no approval matches what this call names now', `${tool.name} was not run: ${tool.movedSinceApproval}`, NOT_APPROVED)
+      // Never run: the approval, if any, was for what the call named then (#7199, #7211).
+      await refuse(
+        'no approval matches what this call names now',
+        `${tool.name} was not run: no approval matches what it names now; ${tool.movedSinceApproval}`,
+        NOT_APPROVED,
+      )
     }
     await refuse(
       'no approval is recorded for this call',

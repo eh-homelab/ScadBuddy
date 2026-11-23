@@ -28,7 +28,14 @@ from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
 from scadbuddy.filament.rfid_push import enqueue_tag, link_origin
-from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError, effective, overridden
+from scadbuddy.filament.types import (
+    PresetUnknownError,
+    TypeRowsDuplicateError,
+    TypeTempError,
+    effective,
+    names_preset,
+    overridden,
+)
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 Conn = Connection[DictRow]
@@ -791,6 +798,10 @@ class FilamentSpoolStore:
                 return p.effective_presets(conn, spool_id)
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
+        except errors.ForeignKeyViolation as error:
+            if not names_preset(error):
+                raise
+            raise PresetUnknownError() from None
 
     def k_values(self, spool_id: UUID) -> _KValues | None:
         """The spool's pressure-advance values, its own over its type's; ``None`` for no
@@ -1171,8 +1182,10 @@ class FilamentSpoolStore:
             ):
                 return None
             if body.kind == "consumed_reset" and body.at is not None:
+                # FOR SHARE: the link checked stays as read until commit (no delete or relink).
                 link = conn.execute(
-                    "SELECT linked_at FROM filament_bb_links WHERE spool_id = %s", (spool_id,)
+                    "SELECT linked_at FROM filament_bb_links WHERE spool_id = %s FOR SHARE",
+                    (spool_id,),
                 ).fetchone()
                 if link is not None and body.at <= link["linked_at"]:
                     raise ResetBeforeLinkError(link["linked_at"])

@@ -24,6 +24,8 @@ of the inventory matches has no source.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
@@ -31,6 +33,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol, cast, get_args
 from uuid import UUID
 
+from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool
 from scadbuddy.orders.density import DensityTable, ProfileDensity, density_text, resolve
 from scadbuddy.orders.integrations import (
@@ -51,6 +54,7 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.spools import link_rgba
 from scadbuddy.orders.store import ImportRecord, OrderStore
+from scadbuddy.slicing.own_presets import OwnPresets, sb_id, sb_ref
 
 SkipReason = Literal["no_colour", "no_price", "too_long"]
 
@@ -59,6 +63,8 @@ PLACES = Decimal("0.0001")
 MAX_COST = Decimal(10**8)
 #: ``FilamentInput``'s ``max_length`` for each name.
 MAX_NAME = 100
+
+logger = logging.getLogger(__name__)
 
 
 def _price(value: Decimal | float | None) -> Decimal | None:
@@ -188,24 +194,56 @@ def spool_groups(
     return out
 
 
+async def own_densities(own: OwnPresets | None, refs: Iterable[str]) -> dict[str, LocalDensity]:
+    """The ``filament_density`` of each ScadBuddy preset (``sb-<id>``, #7176) of ``refs``
+    whose document has one, by its ref. An adopted binding names its preset so, and the
+    document is the one Bambuddy's local preset had (`filament/sb_presets.py`). None when
+    the blob store cannot be read (logged); a database error is raised."""
+    ids = {found for ref in refs if (found := sb_id(ref)) is not None}
+    if own is None or not ids:
+        return {}
+    try:
+        docs = await own.documents(ids)
+    except DATABASE_ERRORS:
+        raise
+    except Exception as error:
+        # A blob store that cannot be read leaves these densities out, as a refused
+        # Bambuddy read leaves its local presets' out.
+        logger.warning(
+            "no densities from ScadBuddy's presets: %s", type(error).__name__, exc_info=True
+        )
+        return {}
+    out: dict[str, LocalDensity] = {}
+    for preset_id, doc in docs.items():
+        value = doc.get("filament_density")
+        if isinstance(value, list):
+            value = value[0] if value else None
+        density = density_text(value) if isinstance(value, str | int | float) else None
+        if density is not None:
+            name = doc.get("name")
+            out[sb_ref(preset_id)] = LocalDensity(
+                name=name if isinstance(name, str) and name else sb_ref(preset_id),
+                density_g_cm3=density,
+            )
+    return out
+
+
 async def inventory_groups(
-    inventory: SpoolRows, integrations: OrderIntegrations
+    inventory: SpoolRows, integrations: OrderIntegrations, own: OwnPresets | None = None
 ) -> list[SpoolGroup]:
-    """:func:`spool_groups` of ScadBuddy's spools and the trays holding them, with
+    """:func:`spool_groups` of ScadBuddy's spools and the trays holding them, with the
+    densities of the ScadBuddy presets (``own``) a group's preset id names, and
     Bambuddy's local presets read only when a group's preset id (its spools' or its
     tray's) is a numeric local id and a Bambuddy is linked."""
     rows = await asyncio.to_thread(inventory.rows)
     trays = await asyncio.to_thread(inventory.tray_presets)
     groups = spool_groups(rows, trays=trays)
-    if not any(
-        (g.slicer_filament or "").isdigit() or (g.tray_filament or "").isdigit() for g in groups
-    ):
-        return groups
-    try:
-        local = await integrations.local_densities()
-    except NotLinkedError:
-        return groups
-    return spool_groups(rows, local, trays)
+    refs = {ref for g in groups for ref in (g.slicer_filament, g.tray_filament) if ref}
+    local = await own_densities(own, refs)
+    if any(ref.isdigit() for ref in refs):
+        with contextlib.suppress(NotLinkedError):
+            local |= await integrations.local_densities()
+    return spool_groups(rows, local, trays) if local else groups
 
 
 # -- the match -------------------------------------------------------------------------
