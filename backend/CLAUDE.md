@@ -2204,11 +2204,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   counted as a read) takes `ListingPriceBody` (a listing colour per offered slot, one
   material, `file_choice`; a support slot takes the snapshot's lock) and answers
   `slice_estimate` of `held_file.py` `priced_file(snapshot)`; a read that would claim a new
-  slice first takes one render of the visitor's rates (`RenderLimits.admit_slice`, a row
-  whose `job_id` is `slice:<key>`, so never render concurrency), refunded when it claims
-  none. The cart add makes a `library_file` item with those colours and
-  `LibraryFileRef.sha256` and `copy_key` (columns `library_sha256`, `library_copy_key`),
-  holding the copy under (`order_item`, item id) in the add's transaction (dropped with a
+  slice first takes one render of the visitor's rates (`RenderLimits.admit_slice`, a
+  `storefront_renders` row of `kind` `slice` with no job, which render concurrency never
+  counts), refunded when it claims none or its start gives the claim back. The cart add
+  makes a `library_file` item with those colours and `LibraryFileRef.sha256` and
+  `copy_key` (columns `library_sha256`, `library_copy_key`), holding the copy under
+  (`order_item`, item id) in the add's transaction, only while the listing still pins
+  that sha256 under a share lock, else 409 `listing_changed` (dropped with a
   draft item or a draft); `price_of` reads it by the same `priced_file` while the listing
   is still that file at that sha256, so the read, the add and the checkout make one key.
   The print still reads the live file until #6710 PR 4. The variant is sliced with the
