@@ -1,4 +1,5 @@
 import { NOT_UP, transportKind } from './backendUp.js'
+import { refuseDotSegments } from './pathSegments.js'
 
 // The agent's CRUD routes (`/api/v1/internal/crud/agent/`, backend api/crud_agent.py), read
 // with the service credential main.ts adds to `fetch` (`withServiceCredential`). The agent's
@@ -94,6 +95,7 @@ function pause(ms: number, signal: AbortSignal | undefined): Promise<void> {
  * connection dropped (`TRANSIENT_KINDS`, but `NOT_UP`) is tried again after each of
  * RETRY_DELAYS_MS while the deadline allows; any other call is never sent twice, since a write
  * whose answer was lost may have landed. `signal` is the caller's: once it aborts, its reason is thrown.
+ * A URL whose path names a `.` or `..` segment is never sent: DotSegmentError (`pathSegments.ts`).
  */
 export async function crudFetch(
   fetchImpl: typeof fetch,
@@ -103,6 +105,8 @@ export async function crudFetch(
   options: { retry: boolean; timeoutMs?: number; signal?: AbortSignal | undefined },
 ): Promise<Response> {
   options.signal?.throwIfAborted()
+  // A `.` or `..` segment would reach another route once the URL normalises it (#7221).
+  refuseDotSegments(url, step)
   const deadline = AbortSignal.timeout(options.timeoutMs ?? CRUD_READ_TIMEOUT_MS)
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline
   const failed = (kind: string) =>

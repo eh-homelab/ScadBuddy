@@ -22,6 +22,7 @@ from scadbuddy.filament.models import (
     SpoolTypePatch,
 )
 from scadbuddy.filament.spools import (
+    FilamentDefaults,
     FilamentSpoolStore,
     SpoolBambuddyLinkedError,
     SpoolInUseError,
@@ -302,6 +303,39 @@ def test_a_spool_overrides_its_type_drying_values_and_a_reset_takes_the_type_aga
     assert reset is not None
     assert (reset.drying_defaults.temp_c, reset.drying_defaults.temp_from) == (70, "type")
     assert "drying_temp_c" not in reset.overridden
+
+
+def test_the_drying_settings_come_last_after_the_material(pg_pool: PgPool) -> None:
+    """#7156 R-7156-5, R-7156-6: the settings `filament_drying_temp_c` and
+    `filament_drying_hours` are the last level of a spool's drying defaults; any catalog
+    value overrides them, field by field, and a drying that leaves a field out takes them."""
+    defaults = FilamentDefaults(
+        low_stock_pct=20, cost_per_kg=None, drying_temp_c=45, drying_hours=Decimal("4")
+    )
+    store = FilamentSpoolStore(pg_pool, lambda: defaults)
+    material = _material(pg_pool)
+    CatalogStore(pg_pool).update("materials", material, MaterialPatch(drying_temp_c=50))
+    kind = SpoolTypeStore(pg_pool).create(
+        SpoolTypeCreate(code="PLA-SET", material_id=material, rgba="#FF0000", label_weight_g=1000)
+    )
+    spool = store.create(SpoolCreate(type_id=kind.id), actor="ann").id
+    detail = store.detail(spool)
+    assert detail is not None
+    assert detail.drying_defaults.model_dump() == {
+        "temp_c": 50,
+        "hours": Decimal("4"),
+        "temp_from": "material",
+        "hours_from": "setting",
+    }
+
+    store.add_event(spool, SpoolEventAdd(kind="dried"), actor="ann")
+    now = store.get(spool)
+    assert now is not None
+    assert (now.last_dried_temp_c, now.last_dried_hours) == (50, Decimal("4"))
+
+    unset = FilamentSpoolStore(pg_pool).detail(spool)
+    assert unset is not None
+    assert (unset.drying_defaults.hours, unset.drying_defaults.hours_from) == (None, None)
 
 
 def test_a_reading_from_the_future_is_refused() -> None:

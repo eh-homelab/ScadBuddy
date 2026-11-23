@@ -1,7 +1,7 @@
 import { HttpResponse, http } from 'msw'
 import type { components } from '../../../api/schema'
 import type { FilamentSpool } from '../../../api/types'
-import { addDecimals, divDecimal, fromScaled, toScaled } from '../../../lib/decimal'
+import { addDecimals, cmpDecimals, divDecimal, fromScaled, mulDecimal, toScaled } from '../../../lib/decimal'
 // Cycles (`handlers.ts` loads every feature; the purchasing mock imports the Filament one): only inside functions.
 import { mockSettings } from '../../handlers'
 import { purchasingMetrics } from '../filamentPurchasing'
@@ -15,6 +15,7 @@ type Input = ReturnType<typeof metricsInput>
 
 /**
  * #6269 — `GET /filament/forecast`, `GET /filament/metrics` and `GET /filament/metrics/purchasing`
+ * (and #7152's `GET /filament/metrics/material-numbers` and `GET /filament/cost-per-kg`)
  * (`backend/scadbuddy/api/filament.py`) over the Filament and purchasing mocks' state, by
  * `filament/metrics_store.py`'s rules: the plates are `index.ts`'s one plate rule
  * (`metrics.plates`), a type's or a group's burn is the burn of the union of its spools'
@@ -209,6 +210,87 @@ export function inventory(dimension: Dimension, bucket: Bucket, since: string, u
   }
 }
 
+/**
+ * #7152 — `MetricsStore.material_numbers`: per type code, case folded (archived types of the
+ * code in it; the label the live type's code, else the newest archived one's), the stocked
+ * spools, their grams and value, and the range's plates as `inventory` counts them. A key
+ * with no spool in stock and no plate in the range is left out; the untyped row comes last.
+ */
+export function materialNumbers(since: string, until: string): S['MaterialNumberStats'] {
+  const input = metricsInput()
+  const { currency, defaultCost } = settings()
+  const rows = new Map<string | null, { spools: number; grams: number; used: number; wasted: number; milli: string | null; listed: boolean }>()
+  for (const spool of input.spools) {
+    const type = input.types.find((one) => one.id === spool.type_id)
+    const key = type ? upper(type.code) : null
+    const row = rows.get(key) ?? { spools: 0, grams: 0, used: 0, wasted: 0, milli: null, listed: false }
+    if (!spool.archived_at) {
+      row.spools += 1
+      row.grams += spool.grams_left ?? 0
+      row.listed = true
+      const milli = milliValue(spool, defaultCost)
+      if (milli != null) row.milli = row.milli == null ? milli : addDecimals(row.milli, milli)
+    }
+    for (const plate of input.plates.get(spool.id) ?? []) {
+      const at = plate.at.slice(0, 10)
+      if (at < since || at > until) continue
+      row.used += plate.grams
+      if (plate.outcome === 'failed' || plate.outcome === 'cancelled') row.wasted += plate.grams
+      row.listed = true
+    }
+    rows.set(key, row)
+  }
+  const found: S['MaterialNumberRow'][] = []
+  for (const [key, row] of rows) {
+    if (!row.listed) continue
+    const types = key == null ? [] : input.types.filter((type) => upper(type.code) === key)
+    const live = types.find((type) => !type.archived_at)
+    const newest = [...types].sort((a, b) => cmp(b.archived_at ?? '', a.archived_at ?? ''))[0]
+    found.push({
+      key,
+      label: key == null ? 'No material number' : (live ?? newest)!.code,
+      types: types.map((type) => ({ id: type.id, code: type.code, archived: !!type.archived_at })).sort((a, b) => cmp(a.code, b.code) || cmp(a.id, b.id)),
+      spools: row.spools,
+      grams_left: row.grams,
+      used_g: row.used,
+      wasted_g: row.wasted,
+      value: row.milli == null ? null : divDecimal(row.milli, '1000', 2),
+    })
+  }
+  return {
+    currency,
+    since,
+    until,
+    rows: found.sort((a, b) => Number(a.key == null) - Number(b.key == null) || b.grams_left - a.grams_left || cmp(upper(a.label), upper(b.label))),
+  }
+}
+
+/** `filament/cost_calc.py` `CostQuery`'s money: at least 0, at most eight whole digits and four places. */
+const MONEY = /^\d{1,8}(?:\.\d{1,4})?$/
+
+/** #7152 — `GET /filament/cost-per-kg`: `cost_calc.calculate` on decimal strings, never a float. */
+export function costPerKg(url: URL): S['CostCalculation'] | Response {
+  const known = new Set(['price', 'tax', 'shipping', 'quantity', 'net_weight_g'])
+  for (const name of url.searchParams.keys()) if (!known.has(name)) return problem(`${name}: Extra inputs are not permitted`)
+  const price = url.searchParams.get('price')
+  const tax = url.searchParams.get('tax') ?? '0'
+  const shipping = url.searchParams.get('shipping') ?? '0'
+  if (price == null) return problem('price: Field required')
+  for (const [name, value] of [['price', price], ['tax', tax], ['shipping', shipping]] as const) {
+    if (!MONEY.test(value)) return problem(`${name}: Input should be a decimal of at most four places, 0 or more`)
+  }
+  const quantity = Number(url.searchParams.get('quantity') ?? '1')
+  const net = Number(url.searchParams.get('net_weight_g'))
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000) return problem('quantity: Input should be from 1 to 1000')
+  if (!Number.isInteger(net) || net < 1 || net > 100_000) return problem('net_weight_g: Input should be from 1 to 100000')
+  const withTax = addDecimals(price, tax)
+  const total = addDecimals(withTax, shipping)
+  const perKg = (amount: string) => divDecimal(mulDecimal(amount, 1000), String(quantity * net), 4)
+  const cost = perKg(total)
+  if (cmpDecimals(cost, '100000000') >= 0) return problem('the cost per kg is more than a cost per kg can hold (10^8)')
+  return { currency: settings().currency, price, tax, shipping, quantity, net_weight_g: net, total, cost_per_kg: cost, price_per_kg: perKg(withTax) }
+}
+
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/
 
 /** `api/filament.py` `_range`: `until` defaults to today (UTC), `since` to `defaultDays` before it. */
@@ -234,6 +316,15 @@ export const handlers = [
     const found = range(url, 180)
     if (found instanceof Response) return found
     return HttpResponse.json(inventory(dimension, bucket, ...found))
+  }),
+  http.get(`${BASE}/metrics/material-numbers`, ({ request }) => {
+    const found = range(new URL(request.url), 180)
+    if (found instanceof Response) return found
+    return HttpResponse.json(materialNumbers(...found))
+  }),
+  http.get(`${BASE}/cost-per-kg`, ({ request }) => {
+    const found = costPerKg(new URL(request.url))
+    return found instanceof Response ? found : HttpResponse.json(found)
   }),
   http.get(`${BASE}/metrics/purchasing`, ({ request }) => {
     const found = range(new URL(request.url), 365)

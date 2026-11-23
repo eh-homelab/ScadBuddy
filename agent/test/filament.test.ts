@@ -602,6 +602,7 @@ describe('filament location tools', () => {
     ['filament_code_resolve', 'read'],
     ['filament_location_get', 'read'],
     ['filament_printer_labels', 'read'],
+    ['filament_label_templates', 'read'],
     ['filament_location_upsert', 'write'],
     ['filament_spool_move', 'write'],
   ])('%s is %s tier, never gated', (name, risk) => {
@@ -650,6 +651,12 @@ describe('filament location tools', () => {
     await runTool(tool('filament_printer_labels'), {}, ctx())
     await runTool(tool('filament_printer_labels'), { printer_ids: [ROW] }, ctx())
     expect(bodies).toEqual([{ printer_ids: null }, { printer_ids: [ROW] }])
+  })
+
+  it('lists the label templates', async () => {
+    const answer = { templates: [{ id: 'roll_50x25', name: 'Roll label 50 x 25 mm', width_mm: 50, height_mm: 25, sheet: null }], custom: { min_width_mm: 40 } }
+    server.use(http.get(`${BACKEND}/api/v1/filament/label-templates`, () => HttpResponse.json(answer)))
+    expect(firstText(await runTool(tool('filament_label_templates'), {}, ctx()))).toEqual(answer)
   })
 
   it('moves a spool, and takes one out of its place', async () => {
@@ -1141,6 +1148,8 @@ describe('filament history and metrics tools', () => {
     ['filament_forecast'],
     ['filament_metrics'],
     ['filament_purchasing_metrics'],
+    ['filament_material_number_stats'],
+    ['filament_cost_per_kg'],
   ])('%s is read tier', (name) => {
     expect(tool(name).risk).toBe('read')
     expect(tool(name).gated).toBe(false)
@@ -1195,6 +1204,38 @@ describe('filament history and metrics tools', () => {
       }),
     )
     await runTool(tool('filament_purchasing_metrics'), { since: '2026-01-01' }, ctx())
+  })
+
+  it('reads the material number stats for the range it was given (#7152)', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${FIL}/metrics/material-numbers`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ currency: 'USD', rows: [{ key: 'PLA-WHT', used_g: 45 }] })
+      }),
+    )
+    const out = firstText(await runTool(tool('filament_material_number_stats'), { since: '2026-11-01', until: '2026-11-30' }, ctx()))
+    expect(out).toEqual({ currency: 'USD', rows: [{ key: 'PLA-WHT', used_g: 45 }] })
+    await runTool(tool('filament_material_number_stats'), {}, ctx())
+    expect(seen).toEqual(['?since=2026-11-01&until=2026-11-30', ''])
+    expect(() => tool('filament_material_number_stats').parse({ since: '2026-02-30' })).toThrow()
+  })
+
+  it('asks the backend for a cost per kg with money as decimal strings (#7152)', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${FIL}/cost-per-kg`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ currency: 'USD', cost_per_kg: '32.1333' })
+      }),
+    )
+    const t = tool('filament_cost_per_kg')
+    const out = firstText(await runTool(t, { price: '40', tax: '3.20', shipping: '5', quantity: 2, net_weight_g: 750 }, ctx()))
+    expect(out).toEqual({ currency: 'USD', cost_per_kg: '32.1333' })
+    expect(seen).toEqual(['?price=40&tax=3.20&shipping=5&quantity=2&net_weight_g=750'])
+    expect(() => t.parse({ price: 40, net_weight_g: 750 })).toThrow()
+    expect(() => t.parse({ price: '1.00001', net_weight_g: 750 })).toThrow()
+    expect(() => t.parse({ price: '1', net_weight_g: 0 })).toThrow()
   })
 
   it('refuses a dimension the route does not know', () => {
@@ -1420,5 +1461,94 @@ describe('the colour catalog syncs (#6907)', () => {
     )
     const result = await runTool(tool('filament_catalog_list'), { kind: 'colours', q: 'jade white' }, ctx())
     expect(result.isError).toBeFalsy()
+  })
+})
+
+// #7150: bulk create and copy through filament_spool_upsert.
+describe('filament_spool_upsert quantity and copy_of', () => {
+  const BULK = `${SPOOLS}/bulk`
+  const SOURCE_ID = '8d6f3c1e-0000-4000-8000-0000000061b2'
+
+  it('makes N spools through the bulk route, with a key derived from the call', async () => {
+    const seen: { body: unknown; key: string | null }[] = []
+    server.use(
+      http.post(BULK, async ({ request }) => {
+        seen.push({ body: await request.json(), key: request.headers.get('Idempotency-Key') })
+        return HttpResponse.json([{ id: ROW, number: 20 }, { id: ROW, number: 21 }], { status: 201 })
+      }),
+    )
+    const call = { ...ctx(), callKey: 'durable:s1:run-1:toolu_9' }
+    const input = { fields: { material_id: ROW }, quantity: 2 }
+    expect((await runTool(tool('filament_spool_upsert'), input, call)).isError).toBeFalsy()
+    await runTool(tool('filament_spool_upsert'), input, call)
+    expect(seen[0]!.body).toEqual({ spool: { material_id: ROW }, quantity: 2 })
+    expect(seen[0]!.key).toMatch(/^[0-9a-f]{64}$/)
+    // The same call sent again carries the same key, so the backend makes no second set.
+    expect(seen[1]!.key).toBe(seen[0]!.key)
+  })
+
+  it('starts from the copy draft and lays the fields over it', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.get(`${SPOOLS}/${SOURCE_ID}/copy`, () =>
+        HttpResponse.json({ spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false }, location_id: null, presets: [], k_values: [] }),
+      ),
+      http.post(BULK, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json([{ id: ROW, number: 22 }], { status: 201 })
+      }),
+    )
+    const result = await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID, fields: { note: 'second' } }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([
+      { spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false, note: 'second' }, location_id: null, presets: [], k_values: [], quantity: 1 },
+    ])
+  })
+
+  // R-7150-8: a resend reads the copy again, so its key names the draft it read too.
+  const TEAL = { spool: { type_id: ROW, colour_name: 'Teal' }, location_id: null, presets: [], k_values: [] }
+  function copyResends(drafts: (typeof TEAL)[]) {
+    const keys: (string | null)[] = []
+    let read = 0
+    server.use(
+      http.get(`${SPOOLS}/${SOURCE_ID}/copy`, () => HttpResponse.json(drafts[Math.min(read++, drafts.length - 1)])),
+      http.post(BULK, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return HttpResponse.json([{ id: ROW, number: 22 }], { status: 201 })
+      }),
+    )
+    return keys
+  }
+
+  it('sends the same key when a copy is resent with its source unchanged (R-7150-8)', async () => {
+    const keys = copyResends([TEAL, TEAL])
+    const call = { ...ctx(), callKey: 'durable:s1:run-1:toolu_copy' }
+    await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID }, call)
+    await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID }, call)
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toMatch(/^[0-9a-f]{64}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('sends a new key when a copy is resent after its source changed (R-7150-8)', async () => {
+    const keys = copyResends([TEAL, { ...TEAL, spool: { ...TEAL.spool, colour_name: 'Jade' } }])
+    const call = { ...ctx(), callKey: 'durable:s1:run-1:toolu_copy' }
+    await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID }, call)
+    await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID }, call)
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toMatch(/^[0-9a-f]{64}$/)
+    expect(keys[1]).not.toBe(keys[0])
+  })
+
+  it('refuses quantity or copy_of on an edit before calling the backend', async () => {
+    const result = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, quantity: 2 }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('leave out `spool_id`')
+  })
+
+  it('names the bulk and copy routes', () => {
+    expect(tool('filament_spool_upsert').routes).toEqual(
+      expect.arrayContaining(['POST /api/v1/filament/spools/bulk', 'GET /api/v1/filament/spools/{spool_id}/copy']),
+    )
   })
 })

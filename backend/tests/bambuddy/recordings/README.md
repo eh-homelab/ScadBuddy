@@ -425,3 +425,54 @@ Added for #6265 (Bambuddy 1.3.1):
 | File | Source |
 |---|---|
 | `openapi/sync-routes.json` | `GET /openapi.json` of `https://bambuddy.internal.nullreference.io` on 2026-11-18 (200, 1,245,373 bytes, `info.version` 1.3.1, no key): the filament sync's routes (spool create, update, archive, restore, the K-profile, preset and supplier list PUTs, supplier and location list/create/update, spool catalog create/update, filament catalog create/update) and every schema they reference, copied unchanged. `routes` carries each one's `Permission` with its line in the Bambuddy source at tag `v1.3.1`, the API-key flag `_APIKEY_SCOPE_BY_PERMISSION` maps it to (none for the filament catalog's writes: `core/auth.py` lines 300-301), and ScadBuddy's `Scope`. `write_semantics` is read from the same source. `measured_2026-11-18` holds the read-only counts (106 spools, none with a K-profile, 4 with suppliers; 3 suppliers; 0 locations; 91 catalog entries; 0 filaments). Writes were never called. |
+
+Added for #7230 on 2026-11-23, from prod's live Bambuddy **1.3.2** (`GET /api/v1/updates/version`)
+over the ingress, auth off (`GET /api/v1/auth/status` `{"auth_enabled": false}`), so no key
+was sent. Printer 1 (the H2C) was printing archive 322 at the time. Two scan calls, one per
+archive; every other request was a `GET`. Nothing was redacted: the bodies carry no serial,
+IP or user. The source lines below are maziggy/bambuddy at tag `v1.3.2` (commit
+`b7d894b`).
+
+| File | Source |
+|---|---|
+| `timelapse-scan-none.json` | `POST /api/v1/archives/282/timelapse/scan`: **200** in 0.82 s. Archive 282 is `completed`, `timelapse_path` null, and no video on the card is near its print. The body is `{status: "not_found", message, available_files: [{name, path, size, mtime}]}`, every unclaimed video in `/timelapse`, newest `mtime` first. |
+| `timelapse-scan-exists.json` | `POST /api/v1/archives/283/timelapse/scan`: **200** in 0.17 s. Archive 283 already has a timelapse. The body is `{status: "exists", message}`, and the printer is not contacted. |
+
+- **The scan is synchronous.** It lists the card, downloads the video, checks that the
+  printer stopped writing it, attaches it, and only then answers `{status: "attached",
+  message, filename}`
+  ([archives.py#L3467-L3736](https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/api/routes/archives.py#L3467-L3736)).
+  Archive 282's `timelapse_path` was null right after the reply and still null 75 s
+  later. The card's video list was the same before and after.
+- **A match deletes the printer's copy.** After the attach, the route calls
+  `delete_archived_timelapse` on the matched file
+  ([#L3720-L3729](https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/api/routes/archives.py#L3720-L3729)).
+  For this reason no `attached` reply was recorded: the one archive with its video still on
+  the card (254, a failed print of 2026-11-14, `printer-media` offers
+  `video_2026-11-14_07-08-05.mp4`) was not scanned.
+- **The other answers, from the source:** 404 `Archive not found` (measured, archive
+  999999), 400 when the archive has no printer, 404 `No timelapse directory found on the
+  printer`, 503 when the printer's FTPS does not answer, 504 and 502 when the download
+  fails, 409 when the printer is still writing the video, and 500 when the attach fails.
+- **What it matches on.** First it drops each video that is attached to another archive of
+  the printer (L3566). If the archive has a print-start baseline (the card's video names
+  when the print started), it attaches the one video that is new since then. When it finds
+  two or more, it attaches none (L3559-L3579). Without a baseline, it tries these in order:
+  the archive's filename stem inside the video name (L3581); the timestamp in the video
+  name within 4 h of `started_at` at offsets 0, ±1, ±7 and ±8 h, refused when a second
+  video is within 15 min (L3589, `_match_timelapse_by_timestamp` L113-L172); the FTP
+  `mtime` within 2 h of `completed_at` (L3599-L3625); the only video on the card when the
+  archive completed less than 1 h ago (L3627).
+- **The H2C's clock is off.** A video's name is about 1 h 20 min after the archive's
+  `started_at` (254: `started_at` 05:47:54, `video_2026-11-14_07-08-05.mp4`), and its
+  FTP `mtime` uses yet another offset (03:48).
+- **The scan needs only Manage Archives.** It requires `ARCHIVES_UPDATE_ALL`, which maps to
+  the key flag `can_manage_archives`
+  ([core/auth.py#L205](https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/core/auth.py#L205)).
+  Unlike `printer-media`, it does not check `PRINTERS_FILES` (`can_control_printer`, L151).
+  A refusal could not be recorded because auth is off on prod.
+- **Bambuddy already scans by itself.** When a print ends with `timelapse_was_active`, as it
+  does for a failed or cancelled print too, Bambuddy starts the same baseline-diff scan in
+  the background, with retries
+  ([main.py#L11095-L11106](https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/main.py#L11095-L11106)).
+  The route is the manual retry for a print that the automatic scan missed.

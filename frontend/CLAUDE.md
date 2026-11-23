@@ -263,7 +263,7 @@ same way, `vite.config.ts`).
   History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
   the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
   `charts/LineChart`) and metrics panel (`SpoolMetricsPanel`); the Metrics tab (`pages/filament/MetricsTab.tsx`:
-  range, bucket and group in the address through `metricsQuery.ts`, behind "Remember my view"); the
+  range, bucket and group in the address through `metricsQuery.ts`, behind "Remember my view"; its "By material number" table, `MaterialNumberTable`, #7152); the type page's cost calculator (`CostCalculator`, #7152: the sum is `GET /filament/cost-per-kg`'s, and "Use as default cost" only fills the cost field); the
   forecast view of the Spools tab (`SpoolForecast`, `TypeForecastTable`) and the "Consumed" tile. The
   charts are plain SVG in `components/filament/charts/` (`ColumnChart`, `LineChart`, `BarList`, `useWidth`).
   A value's colour follows the value, ranked over 365 days (`MetricsTab` `ranked`); until that request
@@ -306,7 +306,7 @@ same way, `vite.config.ts`).
   (`TypePage`; its Drying section, the temperature and hours a spool's drying form starts
   from unless the spool overrides them in Storage, the spool page saying where they came from
   and that a profile's are the AMS HT's (#6720, R-6714-18); its K table says who set each saved
-  row, and nothing on a row edited since, `KValueTable` `saved`, R-6714-19, R-6714-22; its "3DFP id" and "Fetch from 3DFP", `components/filament/ProfileFetchPanel.tsx`, #6625: the fetch uses the saved id, reads the run again every 10 s while it is `running`, lists the printer models and nozzles with no preset yet (`gaps`) when no run is going, and the page shows the presets it set unless they hold unsaved edits; the nozzles are Settings → Printing → Filament's `profile_fetch_nozzles`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
+  row, and nothing on a row edited since, `KValueTable` `saved`, R-6714-19, R-6714-22; its "3DFP id" and "Fetch from 3DFP", `components/filament/ProfileFetchPanel.tsx`, #6625: the fetch uses the saved id, reads the run again every 10 s while it is `running`, lists the printer models and nozzles with no preset yet (`gaps`) when no run is going, and the page shows the presets it set unless they hold unsaved edits; the nozzles are Settings → Printing → Filament's `profile_fetch_nozzles`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The size is the label template (#7157: `GET /filament/label-templates`, 50 x 25 mm by default, a custom size, or an Avery sheet printed on its own grid, `[data-sheet-page]`), saved in the stored setting `filament_label_template`; "Download PDF" saves `POST /filament/labels` through `downloadBlob` (mocks: `mocks/features/filament/index.ts` `LABEL_TEMPLATES`). The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
   line is an error). Search (#6894): the Spools and Types tabs filter their loaded lists by
   `q=` (`FilamentSearchBox`, "/" focuses it) with `lib/filamentSearch.ts` (every token must
   match a field; `#87` is spool 87 only; a hex with or without `#`; SKUs from the suppliers'
@@ -340,7 +340,7 @@ same way, `vite.config.ts`).
   Bambuddy links?" and the reset sends `expect_kept` and deletes nothing, #6845,
   `linkOtherBambuddy(id, { same: true })`; a 409 `proof_changed` reads the dry run again and
   says why, `loseSameBambuddy`; a dry run with `changed_since_pull` says every linked spool with a time on both sides changed since the last pull and offers the delete, `linkOtherBambuddy(id, { changed: true })`; a dry run that cannot read Bambuddy notes it and offers the
-  delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264;
+  delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264, and above it the stored switch `filament_auto_add_unknown_rfid` (#7156; the mode's status line says when that setting holds Bambuddy's auto-add off, and both statuses are read again after "Save Filament"), and the drying defaults `filament_drying_temp_c` and `filament_drying_hours` (empty offers none; the spool page then says "the default in Settings");
   the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
   `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:

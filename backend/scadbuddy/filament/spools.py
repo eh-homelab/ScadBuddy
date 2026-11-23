@@ -27,6 +27,7 @@ from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
+from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.rfid_push import enqueue_tag, link_origin
 from scadbuddy.filament.types import (
     PresetUnknownError,
@@ -47,6 +48,13 @@ _Presets = list[m.EffectivePreset]
 _KValues = list[m.EffectiveKValue]
 _PresetRows = list[m.SpoolPresetCreate]
 _KRows = list[m.SpoolKValueCreate]
+_Ids = list[UUID]
+
+
+def _carried_migrated(row: m.SpoolPresetCreate) -> bool:
+    """Whether a draft row carries a copied ``migrated`` row's origin (R-7150-11)."""
+    return isinstance(row, m.SpoolDraftPreset) and row.migrated
+
 
 #: The columns of a spool row: every field of `Spool` but the four it is given here.
 _SPOOL_FIELDS = tuple(
@@ -138,6 +146,17 @@ class OverrideKindError(ValueError):
         super().__init__("only a bambu_mifare tag can be an override")
 
 
+class SpoolTrayPlaceError(ValueError):
+    """A new spool's place is a printer's tray (#7150, R-7150-2): a tray holds one spool,
+    and the tray's own link (`PUT /printers/{id}/trays/{ams}/{tray}/spool`) puts it there."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "a new spool cannot go straight into a printer's tray; make it, then link it to"
+            " the tray"
+        )
+
+
 class TagKeysClashError(ValueError):
     """The tag's UID and its tray UUID name two different tags."""
 
@@ -162,12 +181,16 @@ def _by_id(conn: Conn, table: str, columns: str, ids: Iterable[UUID | None]) -> 
 
 @dataclass(frozen=True)
 class FilamentDefaults:
-    """The two Filament settings a spool read leans on, as one read of them: the
-    percentage under which a spool with none of its own is low (``filament_low_stock_pct``)
-    and the cost per kg of a spool and type that name none (``filament_default_cost_per_kg``)."""
+    """The Filament settings a spool read leans on, as one read of them: the percentage
+    under which a spool with none of its own is low (``filament_low_stock_pct``), the cost
+    per kg of a spool and type that name none (``filament_default_cost_per_kg``), and the
+    drying temperature and hours when nothing in the catalog sets them
+    (``filament_drying_temp_c``, ``filament_drying_hours``, #7156 R-7156-5)."""
 
     low_stock_pct: int
     cost_per_kg: Decimal | None
+    drying_temp_c: int | None = None
+    drying_hours: Decimal | None = None
 
 
 #: The settings' own defaults, for a read that shows neither ``low_stock`` nor a value (a
@@ -320,11 +343,14 @@ def _low_stock(grams_left: float | None, values: m.EffectiveValues, default_pct:
     return grams_left / label * 100 < pct
 
 
-def _drying_defaults(conn: Conn, spool_id: UUID) -> m.DryingDefaults:
+def _drying_defaults(
+    conn: Conn, spool_id: UUID, defaults: FilamentDefaults = _SETTING_DEFAULTS
+) -> m.DryingDefaults:
     """The spool's drying defaults (#6720, R-6714-10, R-6714-18): each of temperature and
     hours from its own override, else its type, else its subtype, else its material, the
-    subtype and material being the spool's own override, else its type's. The values are
-    its effective ones (`types.effective`); this names where each came from."""
+    subtype and material being the spool's own override, else its type's, else the
+    setting in ``defaults`` (#7156, R-7156-5). The values are its effective ones
+    (`types.effective`) but for the setting; this names where each came from."""
     row = conn.execute(
         "SELECT s.drying_temp_c AS p_temp, s.drying_hours AS p_hours,"
         " t.drying_temp_c AS t_temp, t.drying_hours AS t_hours,"
@@ -341,11 +367,15 @@ def _drying_defaults(conn: Conn, spool_id: UUID) -> m.DryingDefaults:
     if row is None:
         return m.DryingDefaults()
     fields = (("temp_c", "temp_from", "temp"), ("hours", "hours_from", "hours"))
+    setting = {"temp": defaults.drying_temp_c, "hours": defaults.drying_hours}
     for field, origin, column in fields:
         for level, prefix in (("spool", "p"), ("type", "t"), ("subtype", "s"), ("material", "m")):
             if row[f"{prefix}_{column}"] is not None:
                 found[field], found[origin] = row[f"{prefix}_{column}"], level
                 break
+        else:
+            if setting[column] is not None:
+                found[field], found[origin] = setting[column], "setting"
     return m.DryingDefaults.model_validate(found)
 
 
@@ -408,6 +438,12 @@ class FilamentSpoolStore:
         with self._pool.connection() as conn:
             return self._spool(conn, spool_id, defaults, self._clock())
 
+    def get_many(self, spool_ids: Sequence[UUID]) -> dict[UUID, m.Spool]:
+        """Each spool among ``spool_ids`` that exists, by id, in a fixed number of queries
+        (the labels PDF, #7157). As `read_many`, its hours outside dry storage are not read."""
+        with self._pool.connection() as conn:
+            return self.read_many(conn, spool_ids)
+
     def detail(self, spool_id: UUID) -> m.SpoolDetail | None:
         """The spool with its tags, effective presets and K values, the basis of its
         grams and whether it ever printed; ``None`` for no such spool."""
@@ -462,7 +498,7 @@ class FilamentSpoolStore:
             return m.SpoolDetail.model_validate(
                 spool.model_dump()
                 | {
-                    "drying_defaults": _drying_defaults(conn, spool_id),
+                    "drying_defaults": _drying_defaults(conn, spool_id, defaults),
                     "invoice": None
                     if line is None
                     else m.SpoolInvoiceRef.model_validate(
@@ -658,6 +694,77 @@ class FilamentSpoolStore:
         )
         return spool_id
 
+    def bulk_on(self, conn: Conn, body: m.SpoolBulkCreate, *, actor: str) -> _Ids:
+        """``body.quantity`` spools of one draft, in the caller's transaction (#7150,
+        R-7150-1, R-7150-2): each its own number, its ``created`` event (with
+        ``grams_left`` as its reading), its move to ``location_id``, and its own presets
+        and K values, each an ``edited`` event. Their ids in number order.
+        `SpoolTrayPlaceError` for a printer's tray, `MoveTargetError` for a place that does
+        not exist, is archived or is an AMS unit's; the driver's `ForeignKeyViolation` or
+        `UniqueViolation` for a row the draft names that does not exist or two rows of
+        one key."""
+        if body.location_id is not None:
+            place = conn.execute(
+                "SELECT tray_id FROM filament_locations WHERE id = %s", (body.location_id,)
+            ).fetchone()
+            if place is not None and place["tray_id"] is not None:
+                raise SpoolTrayPlaceError()
+        made: _Ids = []
+        for _ in range(body.quantity):
+            spool_id = self.create_on(conn, body.spool, actor=actor)
+            if body.location_id is not None:
+                LocationStore.move_on(conn, spool_id, body.location_id, actor=actor)
+            if body.presets:
+                self.set_presets_on(conn, spool_id, body.presets, actor=actor)
+            if body.k_values:
+                self.set_k_values_on(conn, spool_id, body.k_values, actor=actor)
+            made.append(spool_id)
+        return made
+
+    def copy(self, spool_id: UUID) -> m.SpoolDraft | None:
+        """A new spool's draft from ``spool_id`` (#7150, R-7150-3): its type, its own
+        overrides and note, its own presets and K values, and its place unless that is a
+        printer's tray or archived. Not its number, tags, tray place, ledger (so no
+        ``grams_left``), weight lock or ``added_full``, a fact of the source's own history
+        (R-7150-10). Each preset row keeps whether it is ``migrated`` (R-7150-11). ``None``
+        for no such spool. Writes nothing."""
+        left_out = {"grams_left", "weight_locked", "added_full"}
+        fields = [f for f in m.SpoolCreate.model_fields if f not in left_out]
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {', '.join(fields)}, location_id FROM filament_spools WHERE id = %s",
+                (spool_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            place = None
+            if row["location_id"] is not None:
+                kept = conn.execute(
+                    "SELECT id FROM filament_locations WHERE id = %s AND tray_id IS NULL"
+                    " AND archived_at IS NULL",
+                    (row["location_id"],),
+                ).fetchone()
+                place = None if kept is None else kept["id"]
+            presets = conn.execute(
+                "SELECT printer_model, nozzle_diameter, slicer_filament, slicer_filament_name,"
+                " migrated FROM filament_spool_presets WHERE spool_id = %s"
+                " ORDER BY printer_model, nozzle_diameter",
+                (spool_id,),
+            ).fetchall()
+            k_values = p.own_k_values(conn, spool_id)
+        own = {f: row[f] for f in fields if row[f] is not None}
+        return m.SpoolDraft(
+            spool=m.SpoolCreate.model_validate(own),
+            location_id=place,
+            presets=[m.SpoolDraftPreset.model_validate(r) for r in presets],
+            k_values=[
+                m.SpoolKValueCreate.model_validate(
+                    {f: r[f] for f in m.SpoolKValueCreate.model_fields}
+                )
+                for r in k_values
+            ],
+        )
+
     def update(self, spool_id: UUID, patch: m.SpoolPatch, *, actor: str) -> m.Spool | None:
         """The fields ``patch`` sends; ``None`` for no such spool. One ``edited`` event
         holds every field that changed, as ``[before, after]``; ``archived`` writes an
@@ -765,36 +872,11 @@ class FilamentSpoolStore:
         `TypeRowsDuplicateError`. A row sent back as a ``migrated`` row was (the same key
         and values) stays ``migrated``, so the spool's first type still drops it
         (`presets.drop_migrated`); a new or changed row is the person's."""
-        table = "filament_spool_presets"
         try:
             with self._pool.connection() as conn, conn.transaction():
                 if self._lock(conn, spool_id) is None:
                     return None
-                before = p.own_presets(conn, spool_id)
-                migrated = {
-                    tuple(r.values())
-                    for r in conn.execute(
-                        f"SELECT printer_model, nozzle_diameter, slicer_filament,"
-                        f" slicer_filament_name FROM {table} WHERE spool_id = %s AND migrated",
-                        (spool_id,),
-                    ).fetchall()
-                }
-                conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
-                for row in rows:
-                    values = (
-                        row.printer_model,
-                        row.nozzle_diameter,
-                        row.slicer_filament,
-                        row.slicer_filament_name,
-                    )
-                    conn.execute(
-                        f"INSERT INTO {table} (spool_id, printer_model, nozzle_diameter,"
-                        " slicer_filament, slicer_filament_name, migrated)"
-                        " VALUES (%s, %s, %s, %s, %s, %s)",
-                        (spool_id, *values, values in migrated),
-                    )
-                after = p.own_presets(conn, spool_id)
-                self._edited(conn, spool_id, "presets", before, after, actor)
+                self.set_presets_on(conn, spool_id, rows, actor=actor)
                 return p.effective_presets(conn, spool_id)
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
@@ -802,6 +884,40 @@ class FilamentSpoolStore:
             if not names_preset(error):
                 raise
             raise PresetUnknownError() from None
+
+    @classmethod
+    def set_presets_on(
+        cls, conn: Conn, spool_id: UUID, rows: Sequence[m.SpoolPresetCreate], *, actor: str
+    ) -> None:
+        """`set_presets` on ``conn``, in the caller's transaction, the spool locked (also a
+        bulk create's new spools, #7150). The driver's errors pass through."""
+        table = "filament_spool_presets"
+        before = p.own_presets(conn, spool_id)
+        migrated = {
+            tuple(r.values())
+            for r in conn.execute(
+                f"SELECT printer_model, nozzle_diameter, slicer_filament,"
+                f" slicer_filament_name FROM {table} WHERE spool_id = %s AND migrated",
+                (spool_id,),
+            ).fetchall()
+        }
+        conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
+        for row in rows:
+            values = (
+                row.printer_model,
+                row.nozzle_diameter,
+                row.slicer_filament,
+                row.slicer_filament_name,
+            )
+            conn.execute(
+                f"INSERT INTO {table} (spool_id, printer_model, nozzle_diameter,"
+                " slicer_filament, slicer_filament_name, migrated)"
+                " VALUES (%s, %s, %s, %s, %s, %s)",
+                # A draft row keeps a copied row's origin (R-7150-11).
+                (spool_id, *values, values in migrated or _carried_migrated(row)),
+            )
+        after = p.own_presets(conn, spool_id)
+        cls._edited(conn, spool_id, "presets", before, after, actor)
 
     def k_values(self, spool_id: UUID) -> _KValues | None:
         """The spool's pressure-advance values, its own over its type's; ``None`` for no
@@ -813,37 +929,43 @@ class FilamentSpoolStore:
 
     def set_k_values(self, spool_id: UUID, rows: _KRows, *, actor: str) -> _KValues | None:
         """`set_presets` for K values. A printer that does not exist is `CatalogRefError`."""
-        table = "filament_spool_k_values"
         try:
             with self._pool.connection() as conn, conn.transaction():
                 if self._lock(conn, spool_id) is None:
                     return None
-                before = p.own_k_values(conn, spool_id)
-                conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
-                for row in rows:
-                    conn.execute(
-                        f"INSERT INTO {table} (spool_id, printer_id, extruder, nozzle_diameter,"
-                        " nozzle_type, k_value, name, cali_idx, setting_id)"
-                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                        (
-                            spool_id,
-                            row.printer_id,
-                            row.extruder,
-                            row.nozzle_diameter,
-                            row.nozzle_type,
-                            row.k_value,
-                            row.name,
-                            row.cali_idx,
-                            row.setting_id,
-                        ),
-                    )
-                after = p.own_k_values(conn, spool_id)
-                self._edited(conn, spool_id, "k_values", before, after, actor)
+                self.set_k_values_on(conn, spool_id, rows, actor=actor)
                 return p.effective_k_values(conn, spool_id)
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
+
+    @classmethod
+    def set_k_values_on(cls, conn: Conn, spool_id: UUID, rows: _KRows, *, actor: str) -> None:
+        """`set_k_values` on ``conn``, in the caller's transaction, the spool locked (also a
+        bulk create's new spools, #7150). The driver's errors pass through."""
+        table = "filament_spool_k_values"
+        before = p.own_k_values(conn, spool_id)
+        conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
+        for row in rows:
+            conn.execute(
+                f"INSERT INTO {table} (spool_id, printer_id, extruder, nozzle_diameter,"
+                " nozzle_type, k_value, name, cali_idx, setting_id)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    spool_id,
+                    row.printer_id,
+                    row.extruder,
+                    row.nozzle_diameter,
+                    row.nozzle_type,
+                    row.k_value,
+                    row.name,
+                    row.cali_idx,
+                    row.setting_id,
+                ),
+            )
+        after = p.own_k_values(conn, spool_id)
+        cls._edited(conn, spool_id, "k_values", before, after, actor)
 
     def archive(self, spool_id: UUID, archived: bool, *, actor: str) -> m.Spool | None:
         """Take a spool off the lists (``True``) or put it back; ``None`` for no such
@@ -1170,9 +1292,12 @@ class FilamentSpoolStore:
     ) -> m.SpoolEvent | None:
         """A person's weighing, drying or consumed reset (#7149 R-7149-4); ``None`` for
         no such spool. A drying's ``temp_c`` or ``hours`` left out (not sent) is the
-        spool's drying default (`_drying_defaults`, #6720). A reset whose ``at`` is not
-        after the spool's Bambuddy link is `ResetBeforeLinkError` (R-7149-12)."""
+        spool's drying default (`_drying_defaults`, #6720; the settings last, #7156). A
+        reset whose ``at`` is not after the spool's Bambuddy link is
+        `ResetBeforeLinkError` (R-7149-12)."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
+        # Read before the store takes its connection (`FilamentDefaults`' rule).
+        settings = self._defaults() if body.kind == "dried" else _SETTING_DEFAULTS
         with self._pool.connection() as conn, conn.transaction():
             if (
                 conn.execute(
@@ -1194,7 +1319,7 @@ class FilamentSpoolStore:
                 defaults = (
                     m.DryingDefaults()
                     if {"temp_c", "hours"} <= sent
-                    else _drying_defaults(conn, spool_id)
+                    else _drying_defaults(conn, spool_id, settings)
                 )
                 temp = body.temp_c if "temp_c" in sent else defaults.temp_c
                 hours = body.hours if "hours" in sent else defaults.hours

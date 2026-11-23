@@ -2,7 +2,17 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../../components/ui/collapsible'
 import { ApiError } from '../../api/client'
-import { getForecast, getMetrics, getPurchasingMetrics, type Forecast, type InventoryMetrics, type PurchasingMetrics } from '../../api/filament'
+import {
+  getForecast,
+  getMaterialNumberStats,
+  getMetrics,
+  getPurchasingMetrics,
+  type Forecast,
+  type InventoryMetrics,
+  type MaterialNumberStats,
+  type PurchasingMetrics,
+} from '../../api/filament'
+import { MaterialNumberTable } from '../../components/filament/MaterialNumberTable'
 import { BarList } from '../../components/filament/charts/BarList'
 import { ColumnChart, type Column, type ColumnSeries } from '../../components/filament/charts/ColumnChart'
 import { LineChart } from '../../components/filament/charts/LineChart'
@@ -227,7 +237,8 @@ export function MetricsTab() {
   const [rank, setRank] = useState<{ dimension: Dimension; order: string[] } | null>(null)
   const [purchasing, setPurchasing] = useState<PurchasingMetrics | null>(null)
   const [forecast, setForecast] = useState<Forecast | null>(null)
-  const [errors, setErrors] = useState<Partial<Record<'metrics' | 'rank' | 'purchasing' | 'forecast', string>>>({})
+  const [numbers, setNumbers] = useState<MaterialNumberStats | null>(null)
+  const [errors, setErrors] = useState<Partial<Record<'metrics' | 'rank' | 'purchasing' | 'forecast' | 'numbers', string>>>({})
 
   const q: MetricsQuery = params.size === 0 && restore ? restore : parseMetricsQuery(params)
 
@@ -290,6 +301,21 @@ export function MetricsTab() {
       live = false
     }
   }, [range, bucket, dimension])
+
+  useEffect(() => {
+    let live = true
+    getMaterialNumberStats(metricsRange({ range, bucket: 'month', dimension: 'material' })).then(
+      (found) => {
+        if (!live) return
+        setNumbers(found)
+        setErrors(({ numbers: _gone, ...rest }) => rest)
+      },
+      (cause) => live && setErrors((now) => ({ ...now, numbers: message(cause, 'The material number stats') })),
+    )
+    return () => {
+      live = false
+    }
+  }, [range])
 
   useEffect(() => {
     let live = true
@@ -396,6 +422,15 @@ export function MetricsTab() {
           {metrics ? <Consumption metrics={metrics} order={rank?.dimension === metrics.dimension ? rank.order : ranked(metrics)} /> : !errors.metrics && loading}
         </Section>
       </div>
+
+      <Section
+        id="metrics-material-numbers"
+        title="By material number"
+        note={`Each type code (Bambuddy's material number), with its archived types: spools in stock, grams on hand and their value at cost, and the grams its prints used, ${numbers ? `${dayText(numbers.since)} to ${dayText(numbers.until)}` : span}.`}
+      >
+        {problem(errors.numbers)}
+        {numbers ? <MaterialNumberTable stats={numbers} money={money} /> : !errors.numbers && loading}
+      </Section>
 
       <Section id="metrics-waste" title="Waste" note={`Grams of failed and cancelled prints, ${span}, and their share of what was used.`}>
         {metrics ? (
