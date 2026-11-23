@@ -76,7 +76,7 @@ class NativeShelf:
 
     async def find(self, folder_id: int, sha256: str, size: int) -> int | None:
         rows = await self.native.library_listing(folder_id=folder_id)
-        return next((row.id for row in rows if row.file_hash == sha256), None)
+        return next((row.id for row in rows if (row.file_hash or "").lower() == sha256), None)
 
     async def upload(self, filename: str, data: BinaryIO, folder_id: int) -> int:
         return (await self.native.upload(filename, data, folder_id)).id

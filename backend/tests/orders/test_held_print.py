@@ -11,7 +11,8 @@ import hashlib
 import io
 from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
-from typing import Any, BinaryIO
+from types import SimpleNamespace
+from typing import Any, BinaryIO, cast
 
 import pytest
 
@@ -358,6 +359,18 @@ async def test_racing_restores_make_one_folder_and_one_file(
     )
     assert first == second
     assert (shelf.folders_made, shelf.uploads) == (1, 1)
+
+
+async def test_the_native_find_takes_a_hash_in_either_case() -> None:
+    """As the print's check and Bambuddy's shelf compare a stated hash."""
+    rows = [SimpleNamespace(id=7, file_hash=SHA256.upper())]
+
+    class Listing:
+        async def library_listing(self, *, folder_id: int) -> list[SimpleNamespace]:
+            return rows
+
+    shelf = NativeShelf(cast(NativeLibrary, Listing()))
+    assert await shelf.find(1, SHA256, len(PINNED)) == 7
 
 
 async def test_the_choices_are_copied_to_an_empty_scope_only(
