@@ -240,9 +240,9 @@ async def test_a_search_cancelled_while_an_export_step_runs_keeps_the_browser() 
         assert (site.opened, site.closed) == (1, 0)
 
 
-async def test_a_search_that_fails_fresh_keeps_the_exports_browser() -> None:
-    """R-7062-3: a search failing ``browser`` drops the search's own client only; the
-    export's next step reuses the signed-in browser."""
+async def test_a_search_that_fails_fresh_lets_the_export_go_on() -> None:
+    """R-7062-4: a search failing ``browser`` closes the browser on the service, under the
+    lock; the export's next step signs in again and succeeds."""
     site = _HeldExport()
     site.tdfp_error = SiteError("browser", "the page crashed")
     async with Service(site) as running, RemoteSite(running.url, TOKEN) as fetch:
@@ -252,7 +252,38 @@ async def test_a_search_that_fails_fresh_keeps_the_exports_browser() -> None:
             await ActivityEnvironment().run(searches.search, SearchAsk(brand="SUNLU"))
         assert caught.value.type == "browser"
         site.release.set()
-        await asyncio.wait_for(fetch.export(30173, "H2C", "0.4"), 5)
+        exported = await asyncio.wait_for(fetch.export(30173, "H2C", "0.4"), 5)
+        assert exported.text
+        assert site.steps == ["search", "export"]
+
+
+@pytest.mark.parametrize("kind", ["browser", "timeout"])
+async def test_a_failed_search_resets_the_browser_for_the_next(kind: str) -> None:
+    """R-7062-4: a search failing ``browser`` or ``timeout`` closes the service's browser
+    while it holds the lock, so the next search gets a fresh one and answers, with no fetch
+    or create to reset it."""
+    site = FakeSite()
+    site.tdfp_error = SiteError(kind, "the page hung")  # type: ignore[arg-type]
+    async with Service(site) as running:
+        searches = _searches(running.url)
+        with pytest.raises(ApplicationError):
+            await ActivityEnvironment().run(searches.search, SearchAsk(brand="SUNLU"))
+        assert (site.opened, site.closed) == (1, 1)
+        site.tdfp_error = None
+        answer = await ActivityEnvironment().run(searches.search, SearchAsk(brand="SUNLU"))
+    assert answer == SEARCH_ANSWER
+    assert site.opened == 2
+
+
+async def test_a_search_that_fails_otherwise_keeps_the_browser() -> None:
+    """Only ``browser`` and ``timeout`` reset it: a search the site answered with another
+    failure leaves the signed-in browser for the next step."""
+    site = FakeSite()
+    site.tdfp_error = SiteError("bot_check", "a check")
+    async with Service(site) as running:
+        searches = _searches(running.url)
+        with pytest.raises(ApplicationError):
+            await ActivityEnvironment().run(searches.search, SearchAsk(brand="SUNLU"))
         assert (site.opened, site.closed) == (1, 0)
 
 

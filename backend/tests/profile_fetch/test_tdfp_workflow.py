@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from temporalio import activity
+from temporalio import workflow as temporal_workflow
 from temporalio.client import Client
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
@@ -31,6 +32,7 @@ from scadbuddy.profile_fetch.wire import (
     CreateAsk,
     ExportReport,
     FetchAsk,
+    SearchAnswer,
     SearchAsk,
 )
 from scadbuddy.profile_fetch.worker import temporal_workers
@@ -276,4 +278,52 @@ async def test_a_search_answers_while_a_preset_fetch_exports(
         await terminate_open_workflows(client, queue)
     assert (outcome.kind, outcome.reason) == (None, None)
     assert outcome.search == SEARCH_ANSWER
+    assert fakes.searches == [SearchAsk(brand="SUNLU")]
+
+
+@temporal_workflow.defn(name="test_search_on_queue_7062")
+class _SearchOnQueue:
+    """A search's activity scheduled on the queue named, as an unpatched `TdfpSearch`
+    schedules it on the fetch queue."""
+
+    @temporal_workflow.run
+    async def run(self, queue: str) -> SearchAnswer:
+        answer: SearchAnswer = await temporal_workflow.execute_activity(
+            SEARCH_ACTIVITY,
+            SearchAsk(brand="SUNLU"),
+            task_queue=queue,
+            result_type=SearchAnswer,
+            schedule_to_close_timeout=timedelta(seconds=30),
+        )
+        return answer
+
+
+async def test_the_fetch_worker_runs_a_search_scheduled_on_its_queue(
+    client: Client, queue: str
+) -> None:
+    """R-7062-1: during a roll, a `TdfpSearch` that started before the patch schedules its
+    activity on the fetch queue; the fetch worker registers it, so it still runs."""
+    fakes = Fakes()
+    probe = f"{queue}-probe"
+    try:
+        async with (
+            _workers(client, queue, fakes),
+            Worker(
+                client,
+                task_queue=probe,
+                workflows=[_SearchOnQueue],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ),
+        ):
+            answer = await client.execute_workflow(
+                _SearchOnQueue.run,
+                queue,
+                id=f"search-on-queue-{uuid.uuid4().hex[:8]}",
+                task_queue=probe,
+                execution_timeout=timedelta(seconds=60),
+            )
+    finally:
+        await terminate_open_workflows(client, queue)
+        await terminate_open_workflows(client, probe)
+    assert answer == SEARCH_ANSWER
     assert fakes.searches == [SearchAsk(brand="SUNLU")]

@@ -244,8 +244,9 @@ class TdfpActivities:
     the workflow returns the answer to the API that started it. A failure of the site is
     `site_failure`'s, raised with no cause; a crash or a timeout drops the holder, as an
     export's does: for a create that closes the browser, and for a search only its own
-    client, which never closes the browser (`remote.RemoteSite` ``closes_browser``,
-    R-7062-3). The create is never retried (`workflow.CREATE_RETRY`): a failure after
+    client, which sends no ``DELETE /session`` (`remote.RemoteSite` ``closes_browser``,
+    R-7062-3); the service closes the browser itself for a search that failed so, under its
+    lock (R-7062-4). The create is never retried (`workflow.CREATE_RETRY`): a failure after
     "Save Filament" is ``not_created``, and the filament may exist."""
 
     def __init__(self, sites: SiteHolder) -> None:

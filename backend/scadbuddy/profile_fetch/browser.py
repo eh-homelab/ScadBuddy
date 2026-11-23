@@ -23,7 +23,10 @@ R-7062-2). When the worker goes away during a step (its activity was cancelled o
 out), the service cancels the step and closes the browser, since the page may be wedged
 mid-export; for a search it cancels the step only, and the browser stays open for the export
 (R-7062-3). One that went away while its step still waited for its turn runs nothing and
-leaves the browser open. A search's worker never sends ``DELETE /session`` (R-7062-3).
+leaves the browser open. A search's worker never sends ``DELETE /session`` (R-7062-3). A
+search that itself fails ``browser`` or ``timeout`` closes the browser here, while it still
+holds the lock, so no export step is running on it; the next step signs in again
+(R-7062-4).
 
 At start it serves, then signs in. A login refused on three tries (`LOGIN_RETRY_DELAYS`
 apart), or a browser that does not launch (Chromium's sandbox cannot start, plan
@@ -43,10 +46,10 @@ import os
 import resource
 import signal
 import sys
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
-from contextlib import suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from pydantic import BaseModel, ValidationError
 
@@ -90,6 +93,9 @@ BODY_TIMEOUT: Final = 10.0
 BROWSER_DID_NOT_START: Final = "the browser did not start"
 #: The pauses between the start's sign-in tries after a refused login (#6941): three tries.
 LOGIN_RETRY_DELAYS: Final = (10.0, 30.0)
+#: A search's failures that close the browser on the service, under the lock (R-7062-4):
+#: the worker's `activities.FRESH_BROWSER_KINDS`, which this module cannot import.
+RESET_KINDS: Final[frozenset[str]] = frozenset({"browser", "timeout"})
 
 Answer = tuple[int, dict[str, str], bytes]
 
@@ -223,7 +229,8 @@ class BrowserService:
             ask = await asyncio.wait_for(reader.readexactly(int(length)), BODY_TIMEOUT)
         except TimeoutError:
             return
-        # A search cut mid-way leaves the browser open: an export may be using it (R-7062-3).
+        # A search cut mid-way leaves the browser open; the next step opens its own page
+        # path (R-7062-3).
         answer = await self._run(reader, step, ask, cut_closes=path != SEARCH)
         if answer is not None:
             await _send(writer, *answer)
@@ -243,37 +250,16 @@ class BrowserService:
     ) -> Answer | None:
         """The step's answer, one step at a time; None when the worker went away during
         it: the step is cancelled, and with ``cut_closes`` the browser closed, since the page
-        may be wedged mid-export. A search's step is cut without closing it (R-7062-3): an
-        export may be using the browser, and its next step opens its own page path. A worker
+        may be wedged mid-export. A search's step is cut without closing it (R-7062-3): the
+        next step opens its own page path; a search that itself fails ``browser`` or
+        ``timeout`` closes it in `_on_site` (R-7062-4). A worker
         that went away while its step waited for its turn (a search waits for the export's
         step in hand, R-7062-2) gets None and runs nothing, and the browser stays open."""
-        # The ask is read whole; the next read ends only when the worker goes away.
-        watcher = asyncio.ensure_future(reader.read(1))
-        turn = asyncio.ensure_future(self.lock.acquire())
-        try:
-            await asyncio.wait({turn, watcher}, return_when=asyncio.FIRST_COMPLETED)
-        except BaseException:
-            turn.cancel()
-            watcher.cancel()
-            # Cancelled after the lock was taken but before this woke: give it back.
-            if turn.done() and not turn.cancelled():
-                self.lock.release()
-            raise
-        if not turn.done():
-            turn.cancel()
-            with suppress(asyncio.CancelledError):
-                await turn
-        if watcher.done() or turn.cancelled():
-            if not turn.cancelled():
-                self.lock.release()
-            watcher.cancel()
-            return None
-        try:
+        async with self._turn(reader) as watcher:
+            if watcher is None:
+                return None
             running = asyncio.ensure_future(step(ask))
-            try:
-                await asyncio.wait({running, watcher}, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                watcher.cancel()
+            await asyncio.wait({running, watcher}, return_when=asyncio.FIRST_COMPLETED)
             if running.done():
                 return running.result()
             running.cancel()
@@ -285,21 +271,51 @@ class BrowserService:
             else:
                 logger.info("the worker went away during a search; the browser stays open")
             return None
-        finally:
-            self.lock.release()
 
-    async def _on_site(self, step: Callable[[Site], Awaitable[Answer]]) -> Answer:
-        """``step`` on the signed-in browser; a failure as its kind only."""
+    @asynccontextmanager
+    async def _turn(
+        self, reader: asyncio.StreamReader
+    ) -> AsyncIterator[asyncio.Future[Any] | None]:
+        """The step's turn on the browser, the one place that takes and gives back
+        `lock`. It yields the watcher, whose read ends when the worker goes away, once the
+        lock is held; or None when the worker went away first, and then no step runs. On
+        exit the lock is given back if it was taken, a handler cancelled after its turn
+        took the lock but before it woke included."""
+        # The ask is read whole; the next read ends only when the worker goes away.
+        watcher = asyncio.ensure_future(reader.read(1))
+        turn = asyncio.ensure_future(self.lock.acquire())
+        try:
+            await asyncio.wait({turn, watcher}, return_when=asyncio.FIRST_COMPLETED)
+            yield watcher if turn.done() and not watcher.done() else None
+        finally:
+            watcher.cancel()
+            if turn.done() and not turn.cancelled():
+                self.lock.release()
+            else:
+                # Not yet taken: a cancelled `Lock.acquire` never holds the lock.
+                turn.cancel()
+
+    async def _on_site(
+        self, step: Callable[[Site], Awaitable[Answer]], *, resets: bool = False
+    ) -> Answer:
+        """``step`` on the signed-in browser; a failure as its kind only. With ``resets``
+        (a search), a failure of a kind in `RESET_KINDS` closes the browser here, while
+        this step still holds the lock, so no export step runs on it; the next step signs
+        in again (R-7062-4)."""
         try:
             return await step(await self._sites.get())
         except SiteError as error:
             # The driver's own text, which never holds the login.
             logger.warning("a step on the site failed (%s): %s", error.kind, error)
-            return _site_failure(error.kind)
+            kind = error.kind
         except Exception as error:
             # The class only: a Playwright error's text can quote a filled value.
             logger.warning("a step on the site failed (browser): %s", type(error).__name__)
-            return _site_failure("browser")
+            kind = "browser"
+        if resets and kind in RESET_KINDS:
+            await self._sites.drop()
+            logger.info("a search failed (%s); the browser is closed", kind)
+        return _site_failure(kind)
 
     async def _open(self, ask: bytes) -> Answer:
         async def signed_in(site: Site) -> Answer:
@@ -344,7 +360,7 @@ class BrowserService:
         async def search(site: Site) -> Answer:
             return _model(await site.search(wanted))
 
-        return await self._on_site(search)
+        return await self._on_site(search, resets=True)
 
     async def _create(self, ask: bytes) -> Answer:
         wanted = _parse(CreateAsk, ask)

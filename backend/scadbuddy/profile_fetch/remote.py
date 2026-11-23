@@ -94,8 +94,10 @@ class ExportAsk(SpoolAsk):
 class RemoteSite:
     """`steps.Site` over the browser service's RPC (the module docstring). Use it as an async
     context manager; its exit closes the service's browser (``DELETE /session``), unless
-    ``closes_browser`` is false: a search's client closes only its own connection, so a
-    search's failure or cancel never closes the browser an export uses (R-7062-3)."""
+    ``closes_browser`` is false: a search's client closes only its own connection, so the
+    worker never closes the browser for a search while an export step may run on it
+    (R-7062-3). A search that fails ``browser`` or ``timeout`` is closed by the service
+    itself, under its lock (R-7062-4)."""
 
     def __init__(
         self,

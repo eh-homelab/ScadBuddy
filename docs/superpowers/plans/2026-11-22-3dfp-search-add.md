@@ -158,7 +158,10 @@ Rulings from the review of PR #7041 at 5c03d8850 (its non-blocking findings):
   on the signed-in browser, which runs two pages on one 3DFP login at once and has never
   been tried against the site. The deployment needs no change: the same process and pod,
   the new queue made by its first poll, no new env var or secret. The API's `no_worker`
-  probe still reads the fetch queue, which the same process polls.
+  probe still reads the fetch queue, which the same process polls. The fetch worker
+  registers the search's activity too: a `TdfpSearch` that started before the patch
+  schedules it on the fetch queue, and it still runs during a roll, behind the fetch slot
+  as before (`test_the_fetch_worker_runs_a_search_scheduled_on_its_queue`).
   `test_a_search_answers_while_a_preset_fetch_exports` holds a fake export and asks for a
   search: before this change it answered `not_started`.
 - **R-7062-2 (the browser takes one step at a time).** The browser service still runs one
@@ -170,23 +173,33 @@ Rulings from the review of PR #7041 at 5c03d8850 (its non-blocking findings):
   that went away while its step still waited for the lock (its activity cancelled or timed
   out) now runs nothing and leaves the browser open; before, the step ran on an already
   closed connection, was cancelled at once, and the browser the export used was closed.
-  A search's failure or cancel never closes the shared browser (R-7062-3). A handler
-  cancelled after its turn took the lock, before it woke, gives the lock back.
-- **R-7062-3 (a search never closes the browser).** The browser service has one
+  A search's cancel never closes the shared browser (R-7062-3); a search's own `browser` or
+  `timeout` failure does, under the lock (R-7062-4). A handler cancelled after its turn took
+  the lock, before it woke, gives the lock back. One context manager,
+  `BrowserService._turn`, takes and gives back the lock.
+- **R-7062-3 (the worker never closes the browser for a search).** The browser service has one
   `SiteHolder`, and `DELETE /session` drops it, whoever sends it. So the search's
   `RemoteSite` is made with `closes_browser=False` (`worker.run`'s `search_sites`): when
   `TdfpActivities` drops it (the search cancelled, or failed `browser` or `timeout`), it
   closes only its own httpx client and sends no `DELETE /session`. On the service, a
   search step cut mid-way (its worker went away) is cancelled, and the browser stays open
   (`BrowserService._run` `cut_closes`, false for `/search`). An export, a My Spools add and a
-  create keep the old rule: cut mid-way, the service closes the browser. A browser that a
-  search left broken is reset only by the fetch's or the create's own failure: their
-  activities run on the fetch slot, one at a time, so when one of them fails `browser` or
-  `timeout` and drops its holder (`DELETE /session`), no export is running, and the next
-  step signs in again. Every step opens its own page path first, so a page a search left
-  mid-load does not carry over to the next step. A search that keeps failing `browser`
-  while the browser is broken answers 502 until a fetch or a create resets it, or the
-  browser service restarts.
+  create keep the old rule: cut mid-way, the service closes the browser. Every step opens
+  its own page path first, so a page a search left mid-load does not carry over to the next
+  step. (Amended by R-7062-4: a search's own `browser` or `timeout` failure closes the
+  browser on the service.)
+- **R-7062-4 (a search resets a dead browser itself).** With R-7062-3 alone, a Chromium
+  crash or a hung page while no fetch runs made every search answer 502 until a fetch or a
+  create failed (the review of #7063). So on the browser service, when a `/search` step's
+  own `_on_site` fails with kind `browser` or `timeout` (`browser.RESET_KINDS`, the
+  worker's `FRESH_BROWSER_KINDS`), the service drops its `SiteHolder` while that step still
+  holds `BrowserService.lock`. No export step can be running then; the next step, a search
+  or an export, signs in again and opens its own page path. A search cut mid-step still
+  leaves the browser alone (`cut_closes` false), and the worker still never sends `DELETE
+  /session` for a search (`closes_browser=False`). An export whose next step finds the
+  browser closed signs in again inside that step (`SiteHolder.get`).
+  `test_a_failed_search_resets_the_browser_for_the_next` fails a search `browser`, then the
+  next search gets a fresh browser and answers.
 
 ## Timeouts
 

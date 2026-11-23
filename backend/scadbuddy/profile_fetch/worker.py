@@ -85,13 +85,16 @@ def temporal_workers(
     (Decision 16): a create never runs beside an export. The other polls
     `workflow.search_queue` for a search's activity alone, one at a time, so a search never
     waits for a fetch's whole export (R-7062-1); on the browser service it takes its turn
-    between the export's steps (R-7062-2). ``options`` go to both (a test's runner)."""
+    between the export's steps (R-7062-2). The first registers the search's activity too, so
+    a `TdfpSearch` that started before the patch, whose activity is on ``queue``, still runs
+    during a roll (R-7062-1). ``options`` go to both (a test's runner)."""
     return [
         Worker(
             client,
             task_queue=queue,
             workflows=[ProfileFetch, TdfpSearch, TdfpCreate],
-            activities=[*fetch, create],
+            # The search too: an unpatched `TdfpSearch` schedules it here (R-7062-1).
+            activities=[*fetch, create, search],
             # One browser, one login: one export at a time (Decision 16).
             max_concurrent_activities=1,
             **options,
@@ -132,8 +135,9 @@ async def run(
     activities = ProfileFetchActivities(crud, sites)
     tdfp = TdfpActivities(sites)
     # A search's own RPC client. Dropping it (a search cancelled, or failed `browser` or
-    # `timeout`) closes only its connection, never the service's browser, which an export
-    # may be using; only a fetch's or a create's own failure closes that (R-7062-3).
+    # `timeout`) closes only its connection and sends no DELETE /session (R-7062-3). A
+    # search that fails `browser` or `timeout` is closed by the service itself, under its
+    # lock, so never while an export step runs (R-7062-4).
     search_sites = SiteHolder(open_site or search_browser_service)
     searches = TdfpActivities(search_sites)
     health = (
