@@ -171,6 +171,55 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       expect(saved?.colours.length).toBeGreaterThan(0)
     })
 
+    it('starts with every plate picture when the plates answer after the file and its parts (#7092 review)', async () => {
+      const release = hold('get', '/api/v1/print/library/:id/plates')
+      const { user } = renderStorefront('/storefront/listings/new?sell=library:120')
+      expect(await within(await screen.findByRole('region', { name: 'Parts' })).findAllByTestId('listing-part')).toHaveLength(2)
+      await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('drawer-label'))
+      release()
+      await waitFor(() => expect(within(screen.getByRole('group', { name: 'Pictures' })).getByRole('img', { name: 'Plate 1' })).toBeInTheDocument())
+      await user.click(screen.getByRole('button', { name: 'Save draft' }))
+      await waitFor(async () => expect((await stored())[0]?.media_ids).toEqual(['plate:1']))
+    })
+
+    it('starts with no pictures when the plates cannot be read, and fills in the rest', async () => {
+      server.use(http.get('/api/v1/print/library/:id/plates', () => HttpResponse.json({ detail: 'down' }, { status: 502 })))
+      renderStorefront('/storefront/listings/new?sell=library:120')
+      await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('drawer-label'))
+      await waitFor(() => expect(within(screen.getByRole('group', { name: 'Colours on offer' })).getByText(/ticked/)).toBeInTheDocument())
+      expect(within(screen.getByRole('group', { name: 'Pictures' })).getByText('No pictures: the customer sees none.')).toBeInTheDocument()
+    })
+
+    it('refuses to list a library file when the library that serves cannot be read (#7092 review)', async () => {
+      server.use(http.get('/api/v1/settings', () => HttpResponse.json({ detail: 'down' }, { status: 502 })))
+      renderStorefront('/storefront/listings/new?sell=library:120')
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not fill in the listing: the settings could not be read, so the library that serves is not known. Reload the page to try again')
+      expect(await stored()).toEqual([])
+    })
+
+    it('holds Publish and Save draft while an upload saves the new listing (#7092 review)', async () => {
+      const release = hold('post', '/api/v1/storefront/listings')
+      const { user } = renderStorefront('/storefront/listings/new?sell=library:120')
+      await waitFor(() => expect(within(screen.getByRole('group', { name: 'Pictures' })).getByRole('img', { name: 'Plate 1' })).toBeInTheDocument())
+      await user.upload(screen.getByLabelText('Upload a picture'), new File([new Uint8Array([137, 80, 78, 71])], 'photo.png', { type: 'image/png' }))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled())
+      expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled()
+      release()
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Publish' })).toBeEnabled())
+      expect(await stored()).toHaveLength(1)
+    })
+
+    it('keeps the published version’s parts after a save, when its file is gone (#7092 review)', async () => {
+      const listing = await seedFile()
+      server.use(http.get('/api/v1/print/library/46*', () => HttpResponse.json({ detail: 'gone' }, { status: 404 })))
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      expect(await within(await screen.findByRole('region', { name: 'Parts' })).findAllByTestId('listing-part')).toHaveLength(2)
+      await user.type(screen.getByLabelText('Title'), '!')
+      await user.click(screen.getByRole('button', { name: 'Save draft' }))
+      await waitFor(() => expect(screen.queryByText('Unsaved changes')).toBeNull())
+      expect(within(screen.getByRole('region', { name: 'Parts' })).getAllByTestId('listing-part')).toHaveLength(2)
+    })
+
     it('opens a saved file listing folded to its file, with nothing unsaved', async () => {
       const listing = await seedFile()
       renderStorefront(`/storefront/listings/${listing.id}`)

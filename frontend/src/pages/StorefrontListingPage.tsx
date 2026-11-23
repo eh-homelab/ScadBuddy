@@ -324,7 +324,7 @@ export function StorefrontListingPage() {
   // every plate picture. Each fills only a field the person has not edited.
   useEffect(() => {
     const picked = open?.draft.library_file
-    if (!open || open.filled || !isFileDraft(open.draft) || !picked || file?.slots == null || !(file.plates || file.state !== 'loading') || !(book.data || book.error)) return
+    if (!open || open.filled || !isFileDraft(open.draft) || !picked || file?.slots == null || (file.plates === null && !file.platesFailed) || !(book.data || book.error)) return
     const keep = (field: Field) => open.touched.includes(field)
     const plates = (file.plates ?? []).filter((plate) => plate.has_thumbnail).map((plate) => `plate:${plate.index}`)
     const draft = {
@@ -362,14 +362,19 @@ export function StorefrontListingPage() {
     const fileId = /^library:([1-9][0-9]*)$/.exec(sell)?.[1]
     const making =
       fileId !== undefined
-        ? api.getLibraryFile(Number(fileId)).then((entry) => ({
+        ? (() => {
+            // The file is of the library that serves: never guessed when the settings failed.
+            const library = settings.data?.library_backend
+            if (!library) return Promise.reject(new Error('the settings could not be read, so the library that serves is not known. Reload the page to try again'))
+            return api.getLibraryFile(Number(fileId)).then((entry) => ({
             draft: {
               ...switchSource(emptyDraft(), 'library_file'),
-              library_file: { id: entry.id, library: settings.data?.library_backend ?? 'bambuddy', filename: entry.filename, repin: false, pinned: null },
+              library_file: { id: entry.id, library, filename: entry.filename, repin: false, pinned: null },
               title: fileTitle(entry.filename, book.data?.filaments ?? []),
             },
             notes: [],
           }))
+          })()
         : sellListing(sell, book.data?.filaments ?? [], models.data ?? [])
     making
       .then((made) => {
@@ -488,7 +493,13 @@ export function StorefrontListingPage() {
       current.id === null || current.updatedAt === null
         ? await api.createStorefrontListing(body)
         : await api.updateStorefrontListing(current.id, body, current.updatedAt)
-    whileOpen(current.key, (cur) => ({ ...opened(saved, cur.key), draft: withPin(cur.draft, saved), saved: text }))
+    // #6710: a save clears the snapshot, but a pin it keeps still names the version that
+    // snapshot read, whose parts and plates the editor goes on showing.
+    whileOpen(current.key, (cur) => {
+      const next = opened(saved, cur.key)
+      const kept = next.snapshot === null && cur.snapshot !== null && next.stored?.pinned === cur.snapshot.sha256 ? cur.snapshot : next.snapshot
+      return { ...next, snapshot: kept, draft: withPin(cur.draft, saved), saved: text }
+    })
     return saved
   }
 
@@ -537,7 +548,14 @@ export function StorefrontListingPage() {
     const current = open
     let id = current.id
     if (id === null) {
-      const saved = await save(current)
+      // Publish and Save draft wait while it is created, so neither creates it again.
+      setBusy(true)
+      let saved: StorefrontListing | null
+      try {
+        saved = await save(current)
+      } finally {
+        setBusy(false)
+      }
       if (!saved) return null
       settle(current.key, saved)
       id = saved.id

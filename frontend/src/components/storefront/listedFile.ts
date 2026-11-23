@@ -21,6 +21,8 @@ export interface ListedFile {
   slotsFrom: 'publish' | 'file'
   /** Whether the read of `slots` failed (they stay null). */
   slotsFailed?: boolean
+  /** Whether the read of `plates` failed (they stay null). */
+  platesFailed?: boolean
 }
 
 /**
@@ -50,7 +52,7 @@ export function useListedFile(fileId: number | null, snapshot: FileSnapshot | nu
       api
         .getLibraryPlates(fileId)
         .then((plates) => set({ plates }))
-        .catch(() => undefined)
+        .catch(() => set({ platesFailed: true }))
       api
         .getLibraryFilaments(fileId)
         .then((options) =>
