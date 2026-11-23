@@ -307,6 +307,11 @@ import type {
   VirtualPrinterCreate,
   VirtualPrinterUpdate,
   VirtualPrinterDiagnostic,
+  KProfileNotes,
+  KProfileRemove,
+  KProfileSet,
+  KProfileTable,
+  KProfileWriteResult,
   ProfileOptions,
 } from './types'
 import type {
@@ -2426,6 +2431,25 @@ export const api = {
     command<BambuddyVirtualPrinter>(`/printers/virtual/${vpId}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteVirtualPrinter: (vpId: number) =>
     command<{ deleted: number }>(`/printers/virtual/${vpId}`, { method: 'DELETE' }),
+  /** #7154: a printer's K table for one nozzle, read from the printer through Bambuddy. */
+  listKProfiles: (id: string, nozzle: string) =>
+    request<KProfileTable>(`/printers/${seg(id)}/kprofiles?nozzle_diameter=${encodeURIComponent(nozzle)}`),
+  kProfileNotes: (id: string) => request<KProfileNotes>(`/printers/${seg(id)}/kprofiles/notes`),
+  /** The writes are commands, each sent once: Bambuddy dedupes none of them (R-7154-5). */
+  setKProfile: (id: string, body: KProfileSet) =>
+    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles`, { method: 'POST', body: JSON.stringify(body) }),
+  setKProfilesBatch: (id: string, profiles: KProfileSet[]) =>
+    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles/batch`, {
+      method: 'POST',
+      body: JSON.stringify({ profiles }),
+    }),
+  deleteKProfile: (id: string, body: KProfileRemove) =>
+    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles/delete`, { method: 'POST', body: JSON.stringify(body) }),
+  setKProfileNote: (id: string, key: string, note: string) =>
+    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles/notes`, {
+      method: 'PUT',
+      body: JSON.stringify({ setting_id: key, note }),
+    }),
   /** #4439, #4747: import and link Bambuddy's printers and virtual printers; idempotent. */
   syncPrintersFromBambuddy: (dryRun = false) =>
     request<PrinterSyncResult>(`/printers/sync-bambuddy?dry_run=${dryRun}`, { method: 'POST' }),

@@ -9,6 +9,7 @@ The **Filament** section is ScadBuddy's own filament inventory. It covers:
 - suppliers, price sheets, invoices and a shopping list;
 - locations with humidity and temperature sensors;
 - RFID tags, NTAG labels, and printed QR labels for spools, places, printers, AMS units and slots;
+- a printer's K-profiles (pressure advance) through Bambuddy: list, set, batch set, delete and notes;
 - a ledger of spool events, with history, metrics and a forecast.
 
 The print dialog picks from these spools (ScadBuddy's own, "SB" spools). Tray changes and
@@ -35,6 +36,15 @@ state.
 Tray changes and print ends are recorded when a printer report is written
 (`backend/scadbuddy/filament/capture.py`). They are not a workflow of their own.
 
+A printer's K-profiles (#7154, plan
+`docs/superpowers/plans/2026-11-23-printer-kprofiles.md`) are read from the printer through
+the Bambuddy printer its registry row links, and shown on its card in Settings → Printers
+(closed until opened: each read asks the printer over MQTT). Each write (set, batch set,
+delete, a note's set and delete) is an operation on the `bambuddy` queue, so the print
+worker makes the call. Set, batch and delete run once: Bambuddy dedupes none of them, and a
+write the printer did not acknowledge answers `confirmed: false`. ScadBuddy keeps no copy;
+the notes live in Bambuddy, under the keys its own K-Profiles page uses.
+
 Fetching presets is the `ProfileFetch` workflow on the profile-fetch worker, and a 3DFP
 search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
 ([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).
@@ -44,20 +54,23 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
 - Routes:
   - `backend/scadbuddy/api/filament.py:173` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
   - `backend/scadbuddy/api/tray_spools.py:36` (a tray's spool link);
-  - `backend/scadbuddy/api/filament_profiles.py:26`.
+  - `backend/scadbuddy/api/filament_profiles.py:26`;
+  - `backend/scadbuddy/api/printer_kprofiles.py:42` (a printer's K-profiles, under `/printers/{id}/kprofiles`).
 - UI:
   - the **Filament** nav item (`frontend/src/components/AppShell.tsx:111`);
   - its routes (`frontend/src/App.tsx:119-135`);
   - `frontend/src/pages/filament/FilamentPage.tsx:45`, `SpoolPage.tsx:330`;
   - `frontend/src/components/filament/`;
   - Settings → Printing → Filament (`frontend/src/pages/settings/sections/filament.tsx:684`);
-  - the print dialog's picker (`frontend/src/components/FilamentPicker.tsx:358`).
+  - the print dialog's picker (`frontend/src/components/FilamentPicker.tsx:358`);
+  - a printer's K-profiles on its card in Settings → Printers (`frontend/src/components/settings/PrinterKProfiles.tsx:67`).
 - Core: `backend/scadbuddy/filament/`:
   - the SB spools a print reads: `inventory.py` (`read_sb_spools` at `:901`, `reconcile_trays` at `:448`);
   - `capture.py`, `ledger.py`, `catalog.py`, `types.py`, `locations.py`, `sensors.py`, `invoices.py`, `labels.py`;
   - `backend/scadbuddy/codes/` (code parsing and resolving);
   - `bb_sync_*.py` and `bambuddy_pull.py`;
-  - `profile_fetch.py`.
+  - `profile_fetch.py`;
+  - a printer's K-profiles: `backend/scadbuddy/bambuddy/kprofiles.py` (the bodies and the operation kinds, `kprofile_kinds` at `:161`) and `BambuddyClient.set_k_profile` and its siblings in `backend/scadbuddy/bambuddy/client.py`.
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
@@ -100,11 +113,19 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   - `backend/tests/filament/`;
   - `backend/tests/api/test_filament*.py`, `test_tray_spools.py`, `test_print_filaments.py`;
   - `backend/tests/test_spool_refresh_replay.py`;
-  - `backend/tests/profile_fetch/`.
+  - `backend/tests/profile_fetch/`;
+  - `backend/tests/api/test_printer_kprofiles.py`, `backend/tests/bambuddy/test_client_kprofiles.py`.
+- Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`).
 
 ## Limits and known issues
 
 - The filament epic is [#6260](https://github.com/eh-homelab/ScadBuddy/issues/6260).
+- K-profile writes need Bambuddy's `KPROFILES_CREATE`, `_UPDATE` and `_DELETE`, which no
+  Bambuddy API key can hold
+  ([`core/auth.py`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py)
+  lines 305-307): while Bambuddy's auth is on, every write is the scope problem naming
+  `K-profiles (admin only)`. The assistant has no K-profile tool yet
+  ([#7162](https://github.com/eh-homelab/ScadBuddy/issues/7162)).
 - Filament profiles in Postgres, and their follow-ups, are still open:
   [#2800](https://github.com/eh-homelab/ScadBuddy/issues/2800),
   [#2801](https://github.com/eh-homelab/ScadBuddy/issues/2801),
