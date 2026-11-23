@@ -13,6 +13,8 @@ type LibraryEntry struct {
 	additionalData map[string]any
 	// The created_at property
 	created_at LibraryEntry_LibraryEntry_created_atable
+	// The file_hash property
+	file_hash LibraryEntry_LibraryEntry_file_hashable
 	// The file_size property
 	file_size LibraryEntry_LibraryEntry_file_sizeable
 	// The file_type property
@@ -123,6 +125,92 @@ func (m *LibraryEntry_LibraryEntry_created_at) SetDateTimeOffset(value *i3360748
 // SetLibraryEntryCreatedAtMember1 sets the LibraryEntry_created_atMember1 property value. Composed type representation for type LibraryEntry_created_atMember1able
 func (m *LibraryEntry_LibraryEntry_created_at) SetLibraryEntryCreatedAtMember1(value LibraryEntry_created_atMember1able) {
 	m.libraryEntry_created_atMember1 = value
+}
+
+// LibraryEntry_LibraryEntry_file_hash composed type wrapper for classes LibraryEntry_file_hashMember1able, string
+type LibraryEntry_LibraryEntry_file_hash struct {
+	// Composed type representation for type LibraryEntry_file_hashMember1able
+	libraryEntry_file_hashMember1 LibraryEntry_file_hashMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewLibraryEntry_LibraryEntry_file_hash instantiates a new LibraryEntry_LibraryEntry_file_hash and sets the default values.
+func NewLibraryEntry_LibraryEntry_file_hash() *LibraryEntry_LibraryEntry_file_hash {
+	m := &LibraryEntry_LibraryEntry_file_hash{}
+	return m
+}
+
+// CreateLibraryEntry_LibraryEntry_file_hashFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateLibraryEntry_LibraryEntry_file_hashFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewLibraryEntry_LibraryEntry_file_hash()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreateLibraryEntry_file_hashMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(LibraryEntry_file_hashMember1able); ok {
+				result.SetLibraryEntryFileHashMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *LibraryEntry_LibraryEntry_file_hash) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *LibraryEntry_LibraryEntry_file_hash) GetIsComposedType() bool {
+	return true
+}
+
+// GetLibraryEntryFileHashMember1 gets the LibraryEntry_file_hashMember1 property value. Composed type representation for type LibraryEntry_file_hashMember1able
+// returns a LibraryEntry_file_hashMember1able when successful
+func (m *LibraryEntry_LibraryEntry_file_hash) GetLibraryEntryFileHashMember1() LibraryEntry_file_hashMember1able {
+	return m.libraryEntry_file_hashMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *LibraryEntry_LibraryEntry_file_hash) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *LibraryEntry_LibraryEntry_file_hash) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetLibraryEntryFileHashMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetLibraryEntryFileHashMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetLibraryEntryFileHashMember1 sets the LibraryEntry_file_hashMember1 property value. Composed type representation for type LibraryEntry_file_hashMember1able
+func (m *LibraryEntry_LibraryEntry_file_hash) SetLibraryEntryFileHashMember1(value LibraryEntry_file_hashMember1able) {
+	m.libraryEntry_file_hashMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *LibraryEntry_LibraryEntry_file_hash) SetString(value *string) {
+	m.string = value
 }
 
 // LibraryEntry_LibraryEntry_file_size composed type wrapper for classes int32, LibraryEntry_file_sizeMember1able
@@ -391,6 +479,14 @@ type LibraryEntry_LibraryEntry_created_atable interface {
 	SetLibraryEntryCreatedAtMember1(value LibraryEntry_created_atMember1able)
 }
 
+type LibraryEntry_LibraryEntry_file_hashable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetLibraryEntryFileHashMember1() LibraryEntry_file_hashMember1able
+	GetString() *string
+	SetLibraryEntryFileHashMember1(value LibraryEntry_file_hashMember1able)
+	SetString(value *string)
+}
+
 type LibraryEntry_LibraryEntry_file_sizeable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetInteger() *int32
@@ -461,6 +557,16 @@ func (m *LibraryEntry) GetFieldDeserializers() map[string]func(i878a80d2330e89d2
 		}
 		if val != nil {
 			m.SetCreatedAt(val.(LibraryEntry_LibraryEntry_created_atable))
+		}
+		return nil
+	}
+	res["file_hash"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateLibraryEntry_LibraryEntry_file_hashFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetFileHash(val.(LibraryEntry_LibraryEntry_file_hashable))
 		}
 		return nil
 	}
@@ -587,6 +693,12 @@ func (m *LibraryEntry) GetFieldDeserializers() map[string]func(i878a80d2330e89d2
 	return res
 }
 
+// GetFileHash gets the file_hash property value. The file_hash property
+// returns a LibraryEntry_LibraryEntry_file_hashable when successful
+func (m *LibraryEntry) GetFileHash() LibraryEntry_LibraryEntry_file_hashable {
+	return m.file_hash
+}
+
 // GetFilename gets the filename property value. The filename property
 // returns a *string when successful
 func (m *LibraryEntry) GetFilename() *string {
@@ -669,6 +781,12 @@ func (m *LibraryEntry) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e
 	}
 	{
 		err := writer.WriteStringValue("filename", m.GetFilename())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("file_hash", m.GetFileHash())
 		if err != nil {
 			return err
 		}
@@ -758,6 +876,11 @@ func (m *LibraryEntry) SetCreatedAt(value LibraryEntry_LibraryEntry_created_atab
 	m.created_at = value
 }
 
+// SetFileHash sets the file_hash property value. The file_hash property
+func (m *LibraryEntry) SetFileHash(value LibraryEntry_LibraryEntry_file_hashable) {
+	m.file_hash = value
+}
+
 // SetFilename sets the filename property value. The filename property
 func (m *LibraryEntry) SetFilename(value *string) {
 	m.filename = value
@@ -822,6 +945,7 @@ type LibraryEntryable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetCreatedAt() LibraryEntry_LibraryEntry_created_atable
+	GetFileHash() LibraryEntry_LibraryEntry_file_hashable
 	GetFilename() *string
 	GetFileSize() LibraryEntry_LibraryEntry_file_sizeable
 	GetFileType() *string
@@ -835,6 +959,7 @@ type LibraryEntryable interface {
 	GetPrintCount() *int32
 	GetSliced() *bool
 	SetCreatedAt(value LibraryEntry_LibraryEntry_created_atable)
+	SetFileHash(value LibraryEntry_LibraryEntry_file_hashable)
 	SetFilename(value *string)
 	SetFileSize(value LibraryEntry_LibraryEntry_file_sizeable)
 	SetFileType(value *string)
