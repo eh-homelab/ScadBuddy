@@ -464,8 +464,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   feed's packages are `ai_plugin_feed_packages` (#6933; a package's delete removes its rows),
   read by the agent through area `plugin-feeds` (`GET …/agent/plugin-feeds/{feed}`, the same
   module: each package at its current pin, whether it is approved, and a hosted one's version
-  by its content hash, the newest one with that hash; `?package=` reads one package); the
-  agent serves the feed itself. Test
+  by its content hash, the newest one with that hash; `?package=` reads one package; #6936:
+  `pin_kind`, `bytes_sha256` and `allow_refused` too, and `PUT`/`DELETE
+  …/plugin-feeds/{feed}/packages/{name}` add and remove a package, 404 `feed-not-found` or
+  `package-not-found`); the agent serves the feed itself. Test
   `tests/api/test_crud_agent_plugin_feeds.py`.
 - The agent's tool-call gate (#5299 step 10): `api/crud_agent_gate.py` (area `gate`) over
   `agent_data/gate.py`, the agent's `gate/store.ts` writers statement for statement, each one

@@ -801,7 +801,11 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     'DELETE /api/v1/ai/capabilities/{source}/items/{item}/loading',
   ].map((route) => ({ route, reason: CAPABILITIES_WRITE })),
   // The marketplace feed (#6933, routes/pluginFeeds.ts).
-  ...['GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json', 'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{file}'].map(
+  ...[
+    'GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json',
+    'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{file}',
+    'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/archives/{file}',
+  ].map(
     (route) => ({
       route,
       reason:
@@ -813,6 +817,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     route: 'GET /api/v1/ai/plugin-feeds/{feed}',
     reason: "Settings → MCP access' view of the feed and its setup snippet, for the person to copy into Claude Code.",
   },
+  ...['PUT /api/v1/ai/plugin-feeds/{feed}/packages/{name}', 'DELETE /api/v1/ai/plugin-feeds/{feed}/packages/{name}'].map((route) => ({
+    route,
+    reason:
+      "Settings → MCP access' choice of which packages the feed lists to every outside client (#6936): a settings write from the " +
+      'ScadBuddy UI only, as installing and approving a package are.',
+  })),
   {
     route: 'POST /api/v1/ai/capabilities/{source}/refresh',
     reason: "Connects to the plugin with its stored secret to list its tools for the Settings page, at the user's click in the UI",

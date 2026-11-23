@@ -178,7 +178,12 @@ and its backend module:
   `mcpTransportProblem`, `authenticate`), only approved pins, each zip URL on the origin the
   `marketplace.json` request came on (`effectiveRequest`; Claude Code sends the marketplace's
   `headers` only to that origin), a zip request reading only its own package;
-  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read.
+  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read. #6936: a commit pin of any source
+  (a bare `marketplace.json` URL's git entry too) is listed with its `sha`; a bytes pin (archive,
+  npm) as an `archive` at `…/plugins/{name}/archives/{sha256}.zip`, served from its mirror
+  (`package-mirrors`): a zip as it is, a tarball as a stored zip of its plugin root
+  (`plugins/packages/zip.ts`, the same bytes on every replica), its sha256 kept per process
+  (`ArchiveMaker`); `PUT`/`DELETE …/{feed}/packages/{name}` are Settings' UI-only writes.
 - `mcp-relay` (#5299 step 11, `api/crud_agent_mcp.py`): `src/mcp/relayRows.ts` `CrudRelayRows`
   (the /mcp session directory and messages; a message's row and its `scadbuddy_mcp` NOTIFY
   commit in one transaction). `test/mcpSessions.pg.test.ts` runs the relay against the

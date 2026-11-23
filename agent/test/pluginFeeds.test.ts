@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import type { McpAuthSettings } from '../src/auth/authenticate.js'
-import type { FeedPackageRow, FeedRead, FeedZip, PluginFeedReader } from '../src/plugins/feed.js'
+import { type FeedPackageRow, type FeedRead, FeedWriteError, type FeedZip, type PluginFeedReader, servedArchive } from '../src/plugins/feed.js'
+import { readArchive } from '../src/plugins/packages/unpack.js'
 import type { PluginFeedView } from '../src/routes/pluginFeeds.js'
 import { appFetch, INGRESS, testApp, UNTRUSTED } from './helpers/mcp.js'
+import { tar, zip } from './support/archives.js'
 
 // The marketplace feed (#6933, spec 2026-11-21 §6.4, routes/pluginFeeds.ts): served on /mcp's
 // auth to Claude Code sessions outside ScadBuddy, listing only approved pins, with zip URLs made from
@@ -21,6 +23,26 @@ const ZIP = new Uint8Array(Buffer.from('PK\u0003\u0004 a zip'))
 const ZIP_SHA = createHash('sha256').update(ZIP).digest('hex')
 const COMMIT = 'c'.repeat(40)
 const HASH = `sha256:${'1'.repeat(64)}`
+const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
+
+const SKILL = '---\nname: hi\ndescription: Says hi\n---\nSay hi.\n'
+/** An archive pin's mirrored zip: served as it is. */
+const ARCHIVE = zip([{ name: 'skills/hi/SKILL.md', data: SKILL }])
+const ARCHIVE_SHA = sha256(ARCHIVE)
+/** An npm pin's mirrored tarball: served as a zip of its `package/` folder. */
+const TARBALL = tar(
+  [
+    { name: 'package/', type: '5', mode: 0o755 },
+    { name: 'package/skills/hi/SKILL.md', data: SKILL },
+    { name: 'package/skills/hi/run.sh', data: 'echo hi\n', mode: 0o755 },
+    { name: 'package/package.json', data: '{"name":"hi"}' },
+  ],
+  { gzip: true },
+)
+const TARBALL_SHA = sha256(TARBALL)
+const TARBALL_ZIP = servedArchive(TARBALL, 'package')
+const TARBALL_ZIP_SHA = sha256(TARBALL_ZIP)
+const GONE_SHA = 'e'.repeat(64)
 
 function pkg(name: string, extra: Partial<FeedPackageRow> = {}): FeedPackageRow {
   return {
@@ -44,11 +66,42 @@ const PACKAGES: FeedPackageRow[] = [
   pkg('waiting', { approved: false }),
   pkg('sha256-repo', { commit_sha: 'd'.repeat(64) }),
   pkg('lost', { source_kind: 'hosted', hosted: null }),
+  // #6936: a git entry of a bare marketplace.json URL is a commit pin.
+  pkg('from-url', { source_kind: 'marketplace-url', pin_kind: 'commit' }),
+  pkg('zipped', bytes('archive', ARCHIVE_SHA, '')),
+  pkg('tarred', { ...bytes('npm', TARBALL_SHA, 'package'), allow_refused: true }),
+  pkg('unmirrored', bytes('archive', GONE_SHA, '')),
 ]
+
+function bytes(kind: string, sha: string, path: string): Partial<FeedPackageRow> {
+  return { source_kind: kind, fetch_url: `https://files.test/${sha}`, fetch_path: path, commit_sha: null, pin_kind: 'bytes', bytes_sha256: sha }
+}
 
 class FakeFeeds implements PluginFeedReader {
   zips = new Map<string, FeedZip>([['greeter@3', { bytes: ZIP }]])
+  mirrors = new Map<string, Buffer>([
+    [ARCHIVE_SHA, ARCHIVE],
+    [TARBALL_SHA, TARBALL],
+  ])
+  mirrorReads: string[] = []
+  members = new Set(PACKAGES.map((p) => p.name))
+  installed = new Set([...PACKAGES.map((p) => p.name), 'outside'])
   reads: (string | undefined)[] = []
+  async mirror(name: string, sha: string): Promise<Buffer | undefined> {
+    this.mirrorReads.push(name)
+    return this.mirrors.get(sha)
+  }
+  async add(feed: string, name: string): Promise<boolean> {
+    if (feed !== 'default') throw new FeedWriteError(`no plugin feed "${feed}"`, 'feed-not-found')
+    if (!this.installed.has(name)) throw new FeedWriteError(`no plugin package named "${name}"`, 'package-not-found')
+    if (this.members.has(name)) return false
+    this.members.add(name)
+    return true
+  }
+  async remove(feed: string, name: string): Promise<boolean> {
+    if (feed !== 'default') throw new FeedWriteError(`no plugin feed "${feed}"`, 'feed-not-found')
+    return this.members.delete(name)
+  }
   async read(feed: string, name?: string): Promise<FeedRead> {
     this.reads.push(name)
     if (feed !== 'default') return { feed: null, packages: [] }
@@ -102,9 +155,59 @@ describe('the feed on the /mcp auth', () => {
             source: { source: 'git-subdir', url: 'https://git.test/mono.git', path: 'plugins/mono', sha: COMMIT },
           },
           { name: 'plain', source: { source: 'url', url: 'https://git.test/plain.git', sha: COMMIT } },
+          {
+            name: 'from-url',
+            description: 'from-url plugin',
+            source: { source: 'url', url: 'https://git.test/from-url.git', sha: COMMIT },
+          },
+          {
+            name: 'zipped',
+            description: 'zipped plugin',
+            source: { source: 'archive', url: `${FEED}/plugins/zipped/archives/${ARCHIVE_SHA}.zip`, sha256: ARCHIVE_SHA },
+          },
+          {
+            name: 'tarred',
+            description: 'tarred plugin',
+            source: { source: 'archive', url: `${FEED}/plugins/tarred/archives/${TARBALL_SHA}.zip`, sha256: TARBALL_ZIP_SHA },
+          },
         ],
       })
     }
+  })
+
+  it('makes a bytes pin\'s zip once per process, and tries a missing mirror again', async () => {
+    const { tokens, get, feeds } = made()
+    const { token } = await tokens.mint({ name: 'x', tier: 'read' })
+    await get(`${FEED}/marketplace.json`, bearer(token))
+    await get(`${FEED}/marketplace.json`, bearer(token))
+    expect(feeds.mirrorReads.sort()).toEqual(['tarred', 'unmirrored', 'unmirrored', 'zipped'])
+    // Once the mirror holds it, the next read lists it.
+    feeds.mirrors.set(GONE_SHA, ARCHIVE)
+    const listed = (await (await get(`${FEED}/marketplace.json`, bearer(token))).json()) as { plugins: { name: string }[] }
+    expect(listed.plugins.map((p) => p.name)).toContain('unmirrored')
+  })
+
+  it('serves a mirrored zip as it is, and a tarball as a zip of its plugin root', async () => {
+    const { tokens, get } = made()
+    const { token } = await tokens.mint({ name: 'x', tier: 'read' })
+    const zipped = await get(`${FEED}/plugins/zipped/archives/${ARCHIVE_SHA}.zip`, bearer(token))
+    expect(zipped.status).toBe(200)
+    expect(zipped.headers.get('content-type')).toBe('application/zip')
+    expect(zipped.headers.get('cache-control')).toBe('private, max-age=31536000, immutable')
+    expect(Buffer.from(await zipped.arrayBuffer())).toEqual(ARCHIVE)
+
+    const tarred = await get(`${FEED}/plugins/tarred/archives/${TARBALL_SHA}.zip`, bearer(token))
+    expect(tarred.status).toBe(200)
+    const body = Buffer.from(await tarred.arrayBuffer())
+    expect(sha256(body)).toBe(TARBALL_ZIP_SHA)
+    expect(tarred.headers.get('etag')).toBe(`"${TARBALL_ZIP_SHA}"`)
+    const entries = readArchive(body)
+    expect(entries.map((e) => [e.path, e.executable])).toEqual([
+      ['package.json', false],
+      ['skills/hi/SKILL.md', false],
+      ['skills/hi/run.sh', true],
+    ])
+    expect(entries[1]!.data!.toString()).toBe(SKILL)
   })
 
   it('stamps the token as an MCP call does, and stops at once when it is revoked', async () => {
@@ -213,6 +316,12 @@ describe('the feed on the /mcp auth', () => {
       // Not a version's file name.
       `${new URL(FEED).pathname}/plugins/greeter/versions/03.zip`,
       `${new URL(FEED).pathname}/plugins/greeter/versions/3.tar`,
+      // An archive that is not the pin, a pin whose mirror is gone, a git package, a hosted one.
+      `${new URL(FEED).pathname}/plugins/zipped/archives/${TARBALL_SHA}.zip`,
+      `${new URL(FEED).pathname}/plugins/unmirrored/archives/${GONE_SHA}.zip`,
+      `${new URL(FEED).pathname}/plugins/mono/archives/${ARCHIVE_SHA}.zip`,
+      `${new URL(FEED).pathname}/plugins/greeter/archives/${ARCHIVE_SHA}.zip`,
+      `${new URL(FEED).pathname}/plugins/zipped/archives/${ARCHIVE_SHA.toUpperCase()}.zip`,
     ]) {
       expect((await get(`${PUBLIC}${path}`, bearer(token))).status, path).toBe(404)
     }
@@ -234,13 +343,17 @@ describe("Settings' read of the feed", () => {
     const view = (await res.json()) as PluginFeedView
     expect(view.marketplace_url).toBe(`${FEED}/marketplace.json`)
     expect(view.auth_mode).toBe('bearer')
-    expect(view.packages.map((p) => [p.name, p.listed, p.reason, p.kind, p.version])).toEqual([
-      ['greeter', true, null, 'hosted', 3],
-      ['mono', true, null, 'git', null],
-      ['plain', true, null, 'git', null],
-      ['waiting', false, 'not-approved', null, null],
-      ['sha256-repo', false, 'unpinnable', null, null],
-      ['lost', false, 'no-version', null, null],
+    expect(view.packages.map((p) => [p.name, p.listed, p.reason, p.kind, p.version, p.archive, p.allow_refused])).toEqual([
+      ['greeter', true, null, 'hosted', 3, null, false],
+      ['mono', true, null, 'git', null, null, false],
+      ['plain', true, null, 'git', null, null, false],
+      ['waiting', false, 'not-approved', null, null, null, false],
+      ['sha256-repo', false, 'unpinnable', null, null, null, false],
+      ['lost', false, 'no-version', null, null, null, false],
+      ['from-url', true, null, 'git', null, null, false],
+      ['zipped', true, null, 'archive', null, ARCHIVE_SHA, false],
+      ['tarred', true, null, 'archive', null, TARBALL_SHA, true],
+      ['unmirrored', false, 'no-mirror', null, null, null, false],
     ])
   })
 
@@ -248,5 +361,47 @@ describe("Settings' read of the feed", () => {
     const { get } = made()
     expect((await get(FEED, { ...UI, origin: 'https://evil.test' })).status).toBe(403)
     expect((await get(`${PUBLIC}/api/v1/ai/plugin-feeds/other`, UI)).status).toBe(404)
+  })
+})
+
+describe("Settings' writes of the feed", () => {
+  const write = (app: ReturnType<typeof made>, method: string, url: string, headers: Record<string, string> = UI) =>
+    appFetch(app.app, { address: INGRESS, headers: { ...HTTPS, 'content-type': 'application/json', ...headers } })(url, {
+      method,
+      ...(method === 'PUT' ? { body: '{}' } : {}),
+    })
+
+  it('adds an installed package and takes it out again', async () => {
+    const app = made()
+    const url = `${FEED}/packages/outside`
+    const added = await write(app, 'PUT', url)
+    expect(added.status).toBe(201)
+    expect(await added.json()).toEqual({ name: 'outside', added: true })
+    expect(app.feeds.members.has('outside')).toBe(true)
+    expect((await write(app, 'PUT', url)).status).toBe(200)
+    expect((await write(app, 'DELETE', url)).status).toBe(204)
+    expect(app.feeds.members.has('outside')).toBe(false)
+    expect((await write(app, 'DELETE', url)).status).toBe(204)
+  })
+
+  it('answers 404 for a feed or package that is not there', async () => {
+    const app = made()
+    const nothing = await write(app, 'PUT', `${FEED}/packages/nothing`)
+    expect(nothing.status).toBe(404)
+    expect(((await nothing.json()) as { reason: string }).reason).toBe('package-not-found')
+    const other = await write(app, 'PUT', `${PUBLIC}/api/v1/ai/plugin-feeds/other/packages/outside`)
+    expect(((await other.json()) as { reason: string }).reason).toBe('feed-not-found')
+    expect((await write(app, 'PUT', `${FEED}/packages/bad%20name`)).status).toBe(404)
+  })
+
+  it('is a UI write: refused from another origin, with no Origin, or with a token', async () => {
+    const app = made()
+    const { token } = await app.tokens.mint({ name: 'x', tier: 'outward' })
+    const url = `${FEED}/packages/outside`
+    expect((await write(app, 'PUT', url, { ...UI, origin: 'https://evil.test' })).status).toBe(403)
+    expect((await write(app, 'PUT', url, { ...HTTPS, ...bearer(token) })).status).toBe(403)
+    expect((await write(app, 'DELETE', url, HTTPS)).status).toBe(403)
+    expect((await write(app, 'PUT', url, { ...UI, 'content-type': 'text/plain' })).status).toBe(403)
+    expect(app.feeds.members.has('outside')).toBe(false)
   })
 })
