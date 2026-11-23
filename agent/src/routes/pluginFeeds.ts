@@ -10,16 +10,31 @@ import {
   type OidcRuntime,
 } from '../auth/authenticate.js'
 import { hasTier } from '../auth/principal.js'
-import { FEED_SLUG, feedEntry, marketplaceOf, marketplaceUrl, PACKAGE_NAME, type PluginFeedReader } from '../plugins/feed.js'
+import {
+  ArchiveMaker,
+  FEED_SLUG,
+  type FeedEntry,
+  feedEntry,
+  FeedWriteError,
+  marketplaceOf,
+  marketplaceUrl,
+  PACKAGE_NAME,
+  pinKindOf,
+  type PluginFeedReader,
+  type Unlisted,
+} from '../plugins/feed.js'
 import { effectiveRequest, requestOrigin } from '../http/origins.js'
-import { requestFacts, uiReadProblem } from './guard.js'
+import { requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
 // A marketplace feed of plugin packages (#6933, spec 2026-11-21 §6.4, plugins/feed.ts):
 //
 //   GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json
 //   GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{N}.zip
+//   GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/archives/{sha256}.zip
 //
+// (the last, #6936: a bytes pin's file, served from ScadBuddy's mirror as plugins/feed.ts
+// `servedArchive` makes it, named by the served zip's sha256)
 // for Claude Code sessions outside ScadBuddy. Each request passes the gates /mcp passes, in the
 // same order and through the same code (mcp/http.ts): HTTPS and Origin (`mcpTransportProblem`),
 // then the auth mode and the principal (`authenticate`): an `sbmcp_` bearer token of any tier, an
@@ -43,6 +58,16 @@ import { ready, type RouteModule } from './module.js'
 //
 // is Settings → MCP access' read (UI-only, `uiReadProblem`): the feed's address, the auth mode,
 // and every package the feed names with whether it is listed, and why not.
+//
+//   PUT    /api/v1/ai/plugin-feeds/{feed}/packages/{name}
+//   DELETE /api/v1/ai/plugin-feeds/{feed}/packages/{name}
+//
+// add an installed package to the feed and take it out (#6936, spec §6.7, §6.8): settings writes
+// from the UI only (`uiRequestProblem`, as the package routes), never an assistant's. The package
+// keeps its own lifecycle (install, review, approval, re-pin through the package routes); the feed
+// lists it only at an approved pin. A PUT answers 201 when it added the package, 200 when it was
+// already in; a DELETE 204. A feed or package that is not there is 404. An API that does not
+// serve the write route yet (a rolling deploy) is 503.
 
 declare module '../app.js' {
   interface AppDeps {
@@ -53,6 +78,7 @@ declare module '../app.js' {
 
 const BASE = '/api/v1/ai/plugin-feeds'
 const ZIP_FILE = /^([1-9][0-9]{0,8})\.zip$/
+const ARCHIVE_FILE = /^([0-9a-f]{64})\.zip$/
 const FEED_CACHE = 'private, max-age=60'
 const ZIP_CACHE = 'private, max-age=31536000, immutable'
 const NOT_FOUND = 'no such plugin feed, plugin or version'
@@ -61,21 +87,25 @@ const NOT_FOUND = 'no such plugin feed, plugin or version'
 export type PluginFeedPackageView = {
   name: string
   listed: boolean
-  /** Why it is not listed: `not-approved`, `no-version` or `unpinnable`; null when listed. */
-  reason: string | null
-  /** `hosted` or `git` when listed. */
-  kind: string | null
+  /** Why it is not listed; null when listed. */
+  reason: Unlisted | null
+  /** How it is listed (`hosted`, `git` or `archive`); null when it is not. */
+  kind: Extract<FeedEntry, { listed: true }>['kind'] | null
   /** A hosted package's listed version. */
   version: number | null
   /** A git package's pinned commit. */
   commit: string | null
+  /** An archive's bytes pin: the sha256 of the mirrored file. */
+  archive: string | null
+  /** Approved with its refused items (hooks, MCP servers) allowed: every client of the feed runs them. */
+  allow_refused: boolean
 }
 
 export type PluginFeedView = {
   slug: string
   name: string
   owner: string
-  /** What `/plugin marketplace add` takes; null without SCADBUDDY_PUBLIC_URL. */
+  /** What `/plugin marketplace add` takes, on the origin the Settings request came on (as the zip URLs are); null when that origin is unknown. */
   marketplace_url: string | null
   /** What /mcp, and so the feed, applies; null when the settings cannot be read. */
   auth_mode: McpAuthMode | null
@@ -100,6 +130,7 @@ export const route: RouteModule = {
     const isReady = ready(deps)
     const mcp = deps.mcp
     const feeds = deps.pluginFeeds
+    const archives = feeds ? new ArchiveMaker(feeds) : undefined
     const publicUrl = mcp?.publicUrl
     const resolveAuth = mcp ? mcpAuthResolver(mcp.authSettings, mcp.tokens) : undefined
     const oidc: OidcRuntime | undefined = mcp?.oidc ? { provider: mcp.oidc, publicUrl } : undefined
@@ -133,7 +164,8 @@ export const route: RouteModule = {
       if (!origin) return c.json({ error: 'the request names no host to make the feed\'s URLs from' }, 400)
       const read = await feeds!.read(slug)
       if (!read.feed) return missing(c)
-      return c.json(marketplaceOf(read.feed, read.packages, origin), 200, { 'Cache-Control': FEED_CACHE })
+      const made = await archives!.resolve(read.packages)
+      return c.json(marketplaceOf(read.feed, read.packages, origin, made), 200, { 'Cache-Control': FEED_CACHE })
     })
 
     app.get(`${BASE}/:feed/plugins/:name/versions/:file`, async (c) => {
@@ -164,6 +196,75 @@ export const route: RouteModule = {
       })
     })
 
+    app.get(`${BASE}/:feed/plugins/:name/archives/:file`, async (c) => {
+      const stop = await gate(c)
+      if (stop) return stop
+      const slug = c.req.param('feed')
+      const name = c.req.param('name')
+      const file = ARCHIVE_FILE.exec(c.req.param('file'))
+      if (!FEED_SLUG.test(slug) || !PACKAGE_NAME.test(name) || !file) return missing(c)
+      const read = await feeds!.read(slug, name)
+      const row = read.feed ? read.packages.find((p) => p.name === name) : undefined
+      if (!row) return missing(c)
+      // Only the current approved bytes pin, as the feed lists it, and only when the zip made
+      // from it now is the one the URL names (its sha256), so an immutable URL never serves
+      // other bytes. The zip comes from ArchiveMaker (kept, or made under its build limit).
+      if (!row.approved || pinKindOf(row) !== 'bytes' || !row.bytes_sha256) return missing(c)
+      let made
+      try {
+        made = await archives!.make(row)
+      } catch {
+        return c.json({ error: "the package's mirrored file cannot be served now" }, 502, { 'Cache-Control': 'no-store' })
+      }
+      if (!made || made.sha256 !== file[1]) return missing(c)
+      return c.body(new Uint8Array(made.bytes), 200, {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': `attachment; filename="${name}-${file[1]!.slice(0, 12)}.zip"`,
+        'Cache-Control': ZIP_CACHE,
+        ETag: `"${made.sha256}"`,
+      })
+    })
+
+    /** A feed write's answer when the API refused it, or rethrows. */
+    function refusedWrite(c: Context, err: unknown) {
+      if (err instanceof FeedWriteError) return c.json({ detail: err.message, reason: err.reason }, err.reason === 'not-served' ? 503 : 404)
+      throw err
+    }
+
+    /** The UI's guard for a feed write; a response when the request stops here. */
+    async function writable(c: Context): Promise<Response | undefined> {
+      const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, 'plugin feed changes')
+      if (problem) return c.json({ detail: problem }, 403)
+      if (!feeds) return c.json({ detail: 'the plugin feed is not served by this process' }, 503)
+      if (!(await isReady())) return c.json({ detail: "AI unavailable: the API does not serve the agent's CRUD areas yet" }, 503)
+      if (!FEED_SLUG.test(c.req.param('feed') ?? '') || !PACKAGE_NAME.test(c.req.param('name') ?? '')) {
+        return c.json({ detail: NOT_FOUND }, 404)
+      }
+      return undefined
+    }
+
+    app.put(`${BASE}/:feed/packages/:name`, async (c) => {
+      const stop = await writable(c)
+      if (stop) return stop
+      try {
+        const added = await feeds!.add(c.req.param('feed'), c.req.param('name'))
+        return c.json({ name: c.req.param('name'), added }, added ? 201 : 200)
+      } catch (err) {
+        return refusedWrite(c, err)
+      }
+    })
+
+    app.delete(`${BASE}/:feed/packages/:name`, async (c) => {
+      const stop = await writable(c)
+      if (stop) return stop
+      try {
+        await feeds!.remove(c.req.param('feed'), c.req.param('name'))
+        return c.body(null, 204)
+      } catch (err) {
+        return refusedWrite(c, err)
+      }
+    })
+
     app.get(`${BASE}/:feed`, async (c) => {
       const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'Plugin feed reads')
       if (problem) return c.json({ detail: problem }, 403)
@@ -174,12 +275,14 @@ export const route: RouteModule = {
       const read = await feeds.read(slug)
       if (!read.feed) return c.json({ detail: NOT_FOUND }, 404)
       const authMode = mcp ? await authModeOf(mcp.authSettings) : null
+      const origin = originOf(c)
+      const made = await archives!.resolve(read.packages)
       const view: PluginFeedView = {
         ...read.feed,
-        marketplace_url: publicUrl ? marketplaceUrl(publicUrl, slug) : null,
+        marketplace_url: origin ? marketplaceUrl(origin, slug) : null,
         auth_mode: authMode,
         packages: read.packages.map((p) => {
-          const e = feedEntry(p, '', slug)
+          const e = feedEntry(p, '', slug, made)
           return {
             name: p.name,
             listed: e.listed,
@@ -187,6 +290,8 @@ export const route: RouteModule = {
             kind: e.listed ? e.kind : null,
             version: e.listed && e.kind === 'hosted' ? e.version : null,
             commit: e.listed && e.kind === 'git' ? e.commit : null,
+            archive: e.listed && e.kind === 'archive' ? e.pin : null,
+            allow_refused: p.allow_refused ?? false,
           }
         }),
       }

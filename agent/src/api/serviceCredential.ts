@@ -61,7 +61,8 @@ export type ExchangeOptions = {
   readProof?: (path: string) => Promise<string>
   now?: () => number
   log?: (message: string) => void
-  sleep?: (ms: number) => Promise<void>
+  /** Waits `ms`, or less when `signal` aborts. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
 }
 
 export class ExchangeCredential implements CredentialSource {
@@ -81,7 +82,7 @@ export class ExchangeCredential implements CredentialSource {
   private readonly readProof: (path: string) => Promise<string>
   private readonly now: () => number
   private readonly log: (message: string) => void
-  private readonly sleep: (ms: number) => Promise<void>
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>
 
   constructor(options: ExchangeOptions) {
     this.options = options
@@ -91,7 +92,7 @@ export class ExchangeCredential implements CredentialSource {
     this.now = options.now ?? Date.now
     this.log = options.log ?? ((message) => console.error(message))
     // Not unref'd: a one-shot process (forget-subject.ts) must wait too, and the wait is bounded.
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+    this.sleep = options.sleep ?? sleepUnlessAborted
   }
 
   async current(): Promise<string | undefined> {
@@ -119,7 +120,7 @@ export class ExchangeCredential implements CredentialSource {
         // A backend not up yet sets no back-off (nextTry is due): the call would be refused too.
         const wait = this.nextTry - this.now()
         if (wait <= 0 || this.now() + wait + EXCHANGE_TIMEOUT_MS > deadline) return undefined
-        await Promise.race([this.sleep(wait), aborted.promise])
+        await Promise.race([this.sleep(wait, signal), aborted.promise])
         if (signal?.aborted) return undefined
       }
     } finally {
@@ -209,6 +210,23 @@ export class ExchangeCredential implements CredentialSource {
   }
 }
 
+/**
+ * Resolves after `ms`, or at once when `signal` aborts, and then clears its timer (#7144): the timer
+ * is ref'd, so a one-shot process does not stay alive for a wait whose call has settled.
+ */
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    if (signal?.aborted) done()
+    else signal?.addEventListener('abort', done, { once: true })
+  })
+}
+
 /** Resolves (with no token) when `signal` aborts; never without one. */
 function abortOf(signal: AbortSignal | undefined): { promise: Promise<undefined>; dispose: () => void } {
   if (!signal) return { promise: new Promise(() => {}), dispose: () => undefined }
@@ -225,18 +243,23 @@ function abortOf(signal: AbortSignal | undefined): { promise: Promise<undefined>
  * `fetchImpl` with the bearer added to requests under `baseUrl` (the backend) only, so a
  * presigned transfer URL elsewhere never sees it. A 401 drops that token, so the next
  * request carries a fresh one; the refused request is not sent again (a write might run twice).
+ * A request to the backend follows no redirect (#7180).
  */
 export function withServiceCredential(fetchImpl: typeof fetch, credential: CredentialSource, baseUrl: string): typeof fetch {
   const base = baseUrl.replace(/\/+$/, '') + '/'
   return async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     if (!url.startsWith(base)) return fetchImpl(input, init)
+    // A backend call follows no redirect (#7180, as `createBackendClient`, #7104): the API's
+    // trailing-slash 307 would send the same method and credential to another route. A presigned
+    // transfer URL elsewhere (above) keeps following them: S3 can answer 307 for its region.
+    const backendInit: RequestInit = { ...init, redirect: 'error' }
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
     const token = await (credential.untilCurrent?.(signal ?? undefined) ?? credential.current())
-    if (token === undefined) return fetchImpl(input, init)
+    if (token === undefined) return fetchImpl(input, backendInit)
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
     if (!headers.has('authorization')) headers.set('authorization', `Bearer ${token}`)
-    const response = await fetchImpl(input, { ...init, headers })
+    const response = await fetchImpl(input, { ...backendInit, headers })
     if (response.status === 401 && headers.get('authorization') === `Bearer ${token}`) credential.invalidate(token)
     return response
   }

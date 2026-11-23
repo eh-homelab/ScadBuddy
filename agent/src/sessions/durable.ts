@@ -186,6 +186,8 @@ export type DurableTurnsDeps = {
  * and its own deadline end before the sweep looks at the row.
  */
 export const RESEND_AFTER_MS = 30_000
+/** close()'s wait for a running re-send, past the send's own deadline (#7163). */
+const CLOSE_MARGIN_MS = 1_000
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
 
@@ -237,6 +239,8 @@ export class DurableTurns {
   readonly #resendAfterMs: number
   /** The re-sends not yet due (#resendLater), which `close` clears. */
   readonly #resends = new Set<NodeJS.Timeout>()
+  /** The re-sends whose timer fired and whose describe or Update still runs, which `close` waits for. */
+  readonly #resending = new Set<Promise<void>>()
   /** Set by `close`: a send still in flight then arms no re-send. */
   #closed = false
 
@@ -514,23 +518,38 @@ export class DurableTurns {
     if (this.#closed) return
     const timer = setTimeout(() => {
       this.#resends.delete(timer)
-      this.#resend(session, turn, sent).catch(() => {
-        console.warn(`durable send: session ${session.id}'s unanswered message could not be sent again`)
-      })
+      const resending: Promise<void> = this.#resend(session, turn, sent)
+        .catch(() => {
+          console.warn(`durable send: session ${session.id}'s unanswered message could not be sent again`)
+        })
+        .finally(() => this.#resending.delete(resending))
+      this.#resending.add(resending)
     }, this.#resendAfterMs)
     timer.unref()
     this.#resends.add(timer)
   }
 
   /**
-   * Clears the re-sends not yet due, and arms none after (a send still in flight) (#7103): the process stops, so its Temporal client closes. A
+   * Clears the re-sends not yet due, arms none after (a send still in flight), and waits for the
+   * ones already running (#7103, #7146): the process stops, so its Temporal client closes. A
    * re-send that ran after that could not reach Temporal anyway, and its call's retry would throw
-   * outside any promise. The running sweep ends a turn that no workflow took, as for any lost send.
+   * outside any promise. The wait is bounded by the send's own deadline plus a second (the
+   * deadline runs from the send's start, before the close, and its rejection can come late on a
+   * loaded host), so a stop never hangs on one. The running sweep ends a turn that no workflow took, as for any lost send.
    */
-  close(): void {
+  async close(): Promise<void> {
     this.#closed = true
     for (const timer of this.#resends) clearTimeout(timer)
     this.#resends.clear()
+    if (this.#resending.size === 0) return
+    let bound: NodeJS.Timeout | undefined
+    await Promise.race([
+      Promise.allSettled([...this.#resending]),
+      new Promise((resolve) => {
+        bound = setTimeout(resolve, this.#sendTimeoutMs + CLOSE_MARGIN_MS)
+      }),
+    ])
+    clearTimeout(bound)
   }
 
   async #resend(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[]): Promise<void> {
@@ -543,6 +562,8 @@ export class DurableTurns {
     if (state !== 'between_turns' && state !== 'not_found') return
     const row = await this.#turns.state(session.id)
     if (!row || row.durable_turn_id !== turn.turnId.toLowerCase() || !TURN_STATUSES.includes(row.status)) return
+    // Closed while it read: the process stops, so nothing is sent (#7146).
+    if (this.#closed) return
     await this.#sendMessage(session, turn, sent)
   }
 

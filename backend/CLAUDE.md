@@ -465,8 +465,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   read by the agent through area `plugin-feeds` (`GET …/agent/plugin-feeds/{feed}`, the same
   module: each package at its current pin, whether it is approved, and a hosted one's version
   as its pin names it (`version`), listed only while that version's content hash is the
-  pin's; `?package=` reads one package); the agent serves the feed itself. Test
-  `tests/api/test_crud_agent_plugin_feeds.py`. A hosted package (#6934) is
+  pin's; `?package=` reads one package; #6936: `pin_kind`, `bytes_sha256` and
+  `allow_refused` too, and `PUT`/`DELETE …/plugin-feeds/{feed}/packages/{name}` add and
+  remove a package, 404 `feed-not-found` or `package-not-found`); the agent serves the feed
+  itself. Test `tests/api/test_crud_agent_plugin_feeds.py`. A hosted package (#6934) is
   `source_kind` `hosted`, `pin_kind` `version`: its install and re-pin are stored only when
   that version of the hosted plugin has the content hash sent (409
   `hosted-version-mismatch`), a package of another kind cannot take a hosted plugin's name

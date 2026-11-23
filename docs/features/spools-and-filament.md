@@ -125,6 +125,8 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
 ## Limits and known issues
 
 - The filament epic is [#6260](https://github.com/eh-homelab/ScadBuddy/issues/6260).
+- Parity with Bambuddy 1.2.6b1 (#6270) is not complete yet: [filament-parity.md](filament-parity.md)
+  lists every §11 item, its evidence, and the gap issue for each miss.
 - Filament profiles in Postgres, and their follow-ups, are still open:
   [#2800](https://github.com/eh-homelab/ScadBuddy/issues/2800),
   [#2801](https://github.com/eh-homelab/ScadBuddy/issues/2801),
