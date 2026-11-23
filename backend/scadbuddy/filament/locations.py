@@ -10,6 +10,7 @@ the tray shows what it showed when the spool was linked (`filament/inventory.py`
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -162,6 +163,16 @@ class LocationStore:
             ).fetchone()
         assert row is not None
         return m.Location.model_validate(row)
+
+    def get_many(self, location_ids: Sequence[UUID]) -> dict[UUID, m.Location]:
+        """Each place among ``location_ids`` that exists, by id, in one query (the labels
+        PDF, #7157)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM filament_locations WHERE id = ANY(%s)",
+                (list(location_ids),),
+            ).fetchall()
+        return {row["id"]: m.Location.model_validate(row) for row in rows}
 
     def detail(self, location_id: UUID) -> m.LocationDetail | None:
         """A place with its code, kind, path from the root (this place excluded, archived

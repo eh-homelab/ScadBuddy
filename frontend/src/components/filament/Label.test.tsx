@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { SpoolDetail } from '../../api/filament'
-import { Label } from './Label'
+import { Label, LocationLabel } from './Label'
 
 const spool = (colour: string) =>
   ({ id: 's1', number: 42, colour_name: colour, effective: { colour_name: colour }, names: { material: 'PLA', subtype: 'Basic', brand: 'Bambu Lab' } }) as unknown as SpoolDetail
@@ -28,5 +28,24 @@ describe('a spool label', () => {
     const size = parseFloat(screen.getByText('#10000').style.fontSize)
     expect(size).toBeLessThan(9)
     expect(size * 0.62 * '#10000'.length).toBeLessThanOrEqual(22.01)
+  })
+})
+
+describe('a label at another size (#7157)', () => {
+  it('draws a spool label at the size it is given', () => {
+    render(<Label spool={spool('Red')} svg="<svg></svg>" size={{ widthMm: 62, heightMm: 29, sheet: null }} />)
+    expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 62mm; height: 29mm/)
+  })
+
+  it('shrinks the number to the narrower text column of a 40 mm label', () => {
+    render(<Label spool={{ ...spool('Red'), number: 999 } as SpoolDetail} svg="<svg></svg>" size={{ widthMm: 40, heightMm: 30, sheet: null }} />)
+    const size = parseFloat(screen.getByText('#999').style.fontSize)
+    // 40 mm less the QR box, its quiet zones and the padding leaves 13.5 mm, 12 mm for the number.
+    expect(size * 0.62 * '#999'.length).toBeLessThanOrEqual(12.01)
+  })
+
+  it('draws a place label at the size it is given', () => {
+    render(<LocationLabel code="L-3" name="Shelf" svg="<svg></svg>" size={{ widthMm: 75, heightMm: 55, sheet: null }} />)
+    expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 75mm; height: 55mm/)
   })
 })
