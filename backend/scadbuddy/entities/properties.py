@@ -147,8 +147,11 @@ def check_schema(schema: dict[str, Any]) -> None:
 
 #: Keywords whose value is data, never a schema.
 _DATA_KEYWORDS = frozenset({"const", "default", "enum", "examples"})
-#: Keywords whose value maps NAMES to subschemas: a name is never a keyword.
-_NAMED_SUBSCHEMAS = frozenset({"properties", "$defs", "definitions", "dependentSchemas"})
+#: Keywords whose value maps NAMES to subschemas: a name is never a keyword. Draft-07's
+#: `dependencies` maps a name to a subschema or to a list of names (plain strings).
+_NAMED_SUBSCHEMAS = frozenset(
+    {"properties", "$defs", "definitions", "dependentSchemas", "dependencies"}
+)
 
 
 def _refused_in(node: Any) -> str | None:

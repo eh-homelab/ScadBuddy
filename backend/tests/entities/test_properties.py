@@ -206,6 +206,49 @@ def test_set_schema_refuses_a_restricting_schema(
     assert props.schema("spool_type") == before
 
 
+_REDOS = {"type": "string", "pattern": "^(a+)+$"}
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {
+            "type": "object",
+            "properties": {"tags": {"type": "array", "items": _REDOS}},
+        },
+        {"type": "object", "allOf": [{"properties": {"mpn": _REDOS}}]},
+        {"type": "object", "if": {"properties": {"mpn": _REDOS}}},
+        {
+            "type": "object",
+            "if": {"properties": {"mpn": {"type": "string"}}},
+            "then": {"properties": {"mpn": _REDOS}},
+        },
+        {
+            "type": "object",
+            "properties": {"meta": {"type": "object", "propertyNames": _REDOS}},
+        },
+        {"type": "object", "dependencies": {"const": {"pattern": "^(a+)+$"}}},
+        {"type": "object", "definitions": {"pattern": _REDOS}},
+    ],
+    ids=["items", "all_of", "if", "then", "property_names", "dependencies", "definitions"],
+)
+def test_set_schema_refuses_a_nested_regex(
+    props: EntityPropertyStore, schema: dict[str, Any]
+) -> None:
+    before = props.schema("spool_type")
+
+    with pytest.raises(BadPropertySchema):
+        props.set_schema("spool_type", schema, BY)
+
+    assert props.schema("spool_type") == before
+
+
+def test_dependencies_names_are_not_keywords(props: EntityPropertyStore) -> None:
+    schema = {"type": "object", "dependencies": {"pattern": {"type": "object"}}}
+
+    assert props.set_schema("spool_type", schema, BY) == schema
+
+
 def test_a_schema_documents_keys_named_like_keywords(
     pg_pool: PgPool, props: EntityPropertyStore
 ) -> None:
