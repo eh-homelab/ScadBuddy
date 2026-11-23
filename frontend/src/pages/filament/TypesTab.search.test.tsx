@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { listTypes } from '../../api/filament'
 import { server } from '../../mocks/server'
 import { T } from '../../mocks/features/filament/seed'
+import { seedEntityProperties } from '../../mocks/features/entities'
 import { renderPage } from '../../test/utils'
 import { TypesTab } from './TypesTab'
 
@@ -60,6 +61,18 @@ describe('the Types tab search', () => {
     render('/filament/types?q=A00-W1')
     await waitFor(async () => expect(ids(await table())).toEqual([T.JADE]))
     expect(screen.getByRole('searchbox', { name: 'Search types' })).toHaveValue('A00-W1')
+  })
+
+  it('finds a type by a GTIN in its properties (#7026)', async () => {
+    seedEntityProperties(`spool_type:${T.MISTLETOE}`, { gtin: ['0123', '0456'] })
+    render('/filament/types?q=0456')
+    await waitFor(async () => expect(ids(await table())).toEqual([T.MISTLETOE]))
+  })
+
+  it('still searches when the properties cannot be read (#7026)', async () => {
+    server.use(http.get('/api/v1/entity-kinds/:kind/properties', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    render('/filament/types?q=elegoo')
+    await waitFor(async () => expect(ids(await table())).toEqual([T.GOLD]))
   })
 
   it('says when nothing matches, and keeps the search beside Show archived', async () => {

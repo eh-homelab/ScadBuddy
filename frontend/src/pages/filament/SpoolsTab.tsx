@@ -49,7 +49,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { downloadBlob } from '../../lib/embed'
-import { loadTypeSkus, spoolSearchDoc, tagsBySpool, traysBySpool } from '../../lib/filamentSearch'
+import { loadKindPropertyTexts, loadTypeSkus, spoolSearchDoc, tagsBySpool, traysBySpool } from '../../lib/filamentSearch'
 import { toast } from '../../lib/toast'
 import { syncText } from './syncText'
 import { cn } from '@/lib/utils'
@@ -160,6 +160,7 @@ export function SpoolsTab() {
   const [skus, setSkus] = useState<ReadonlyMap<string, string[]>>(new Map())
   /** #7151: each spool's open tag keys, so the search finds a spool by its tag. */
   const [tagKeys, setTagKeys] = useState<ReadonlyMap<string, string[]>>(new Map())
+  const [propertyTexts, setPropertyTexts] = useState<ReadonlyMap<string, string[]>>(new Map())
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -206,6 +207,10 @@ export function SpoolsTab() {
       },
       () => {},
     )
+    // #7026: each spool's property values, searched as text; a failed read leaves the map empty.
+    void loadKindPropertyTexts('spool').then((found) => {
+      if (live) setPropertyTexts(found)
+    })
     return () => {
       live = false
     }
@@ -231,9 +236,10 @@ export function SpoolsTab() {
         skus: spool.type_id ? skus.get(spool.type_id) : undefined,
         tray: trayNames.get(spool.id),
         tags: tagKeys.get(spool.id),
+        properties: propertyTexts.get(spool.id),
       })
     return sortSpools(filterSpools(data.spools, q, data.trays, searchDoc), q.sort)
-  }, [data, q, typeCodes, skus, trayNames, tagKeys])
+  }, [data, q, typeCodes, skus, trayNames, tagKeys, propertyTexts])
   const groups = useMemo(() => groupSpools(shown, q.group, typeCodes), [shown, q.group, typeCodes])
   const chosen = shown.filter((spool) => selected.has(spool.id))
 

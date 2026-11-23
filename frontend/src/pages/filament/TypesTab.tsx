@@ -10,7 +10,7 @@ import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { FilamentsEditor } from '../../components/orders/FilamentsEditor'
-import { addSku, matchesSearch, parseSearch, typeSearchDoc } from '../../lib/filamentSearch'
+import { addSku, loadKindPropertyTexts, matchesSearch, parseSearch, typeSearchDoc } from '../../lib/filamentSearch'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 
@@ -73,6 +73,7 @@ export function TypesTab() {
   const [newest, setNewest] = useState<Map<string, PricePoint>>(new Map())
   const [pricesFailed, setPricesFailed] = useState(false)
   const [skus, setSkus] = useState<Map<string, string[]>>(new Map())
+  const [propertyTexts, setPropertyTexts] = useState<Map<string, string[]>>(new Map())
   const [notice, setNotice] = useState<string | null>(null)
   // Types whose add is in flight: a second click meanwhile would make a second pending item.
   const [adding, setAdding] = useState<ReadonlySet<string>>(new Set())
@@ -116,6 +117,10 @@ export function TypesTab() {
       setSkus(found)
       setPricesFailed(failed)
     })
+    // #7026: each type's property values, searched as text; a failed read leaves the map empty.
+    void loadKindPropertyTexts('spool_type').then((found) => {
+      if (live) setPropertyTexts(found)
+    })
     return () => {
       live = false
     }
@@ -157,7 +162,7 @@ export function TypesTab() {
   // Every type is loaded: a price book row linked to an archived type still names it.
   const tokens = parseSearch(search)
   const kept = data?.types.filter((type) => archived || !type.archived_at) ?? []
-  const shown = tokens.length && data ? kept.filter((type) => matchesSearch(typeSearchDoc(type, data.names, skus.get(type.id)), tokens)) : kept
+  const shown = tokens.length && data ? kept.filter((type) => matchesSearch(typeSearchDoc(type, data.names, skus.get(type.id), { properties: propertyTexts.get(type.id) }), tokens)) : kept
   const setParam = (key: string, value: string | null) => {
     const next = new URLSearchParams(params)
     if (value) next.set(key, value)

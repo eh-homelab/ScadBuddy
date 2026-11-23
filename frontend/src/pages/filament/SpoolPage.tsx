@@ -52,6 +52,7 @@ import { NtagPanel } from '../../components/filament/NtagPanel'
 import { TagPanel } from '../../components/filament/TagPanel'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
 import { LinksPanel } from '../../components/entities/LinksPanel'
+import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -1082,7 +1083,10 @@ export function SpoolPage() {
             {saved && !creating ? (
               <div className="grid gap-6 xl:grid-cols-2">
                 <AttachmentsPanel entity={`spool:${saved.id}`} />
-                <LinksPanel entity={`spool:${saved.id}`} />
+                <div className="flex flex-col gap-6">
+                  <LinksPanel entity={`spool:${saved.id}`} />
+                  <PropertiesPanel entity={`spool:${saved.id}`} />
+                </div>
               </div>
             ) : (
               <p className="text-[13px] text-muted-foreground">Save the spool first, then add its photos, receipts and links.</p>

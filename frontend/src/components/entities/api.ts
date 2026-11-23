@@ -12,6 +12,9 @@ export type EntityAttachmentPatch = Schemas['EntityAttachmentPatch']
 export type EntityLink = Schemas['EntityLink']
 export type EntityLinkInput = Schemas['LinkInput']
 export type EntityLinkPatch = Schemas['LinkPatch']
+export type EntityProperty = Schemas['EntityProperty']
+export type PropertyValue = EntityProperty['value']
+export type KindPropertySchema = Schemas['KindPropertySchema']
 
 /** The kinds whose files are written on the order routes (409 `use_order_route`). */
 export const ORDER_KINDS = new Set(['order', 'order_item', 'order_item_fulfilment', 'order_item_revision'])
@@ -57,4 +60,19 @@ export const entityApi = {
   updateLink: (entity: string, id: string, body: EntityLinkPatch) =>
     request<EntityLink>(`${base(entity)}/links/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteLink: (entity: string, id: string) => request<void>(`${base(entity)}/links/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** #7026 — key-value properties: `backend/scadbuddy/api/entity_properties.py`. */
+  properties: (entity: string) =>
+    request<{ properties: EntityProperty[] }>(`${base(entity)}/properties`).then((body) => body.properties),
+  /** A key set to `null` is removed; the whole patch applies or none of it. */
+  setProperties: (entity: string, set: Record<string, PropertyValue | null>) =>
+    request<{ properties: EntityProperty[] }>(`${base(entity)}/properties`, { method: 'PATCH', body: JSON.stringify({ set }) }).then(
+      (body) => body.properties,
+    ),
+  /** Every entity of the kind that has properties: its ref to its keys and values. */
+  kindProperties: (kind: string) =>
+    request<{ properties: Record<string, Record<string, PropertyValue>> }>(`/entity-kinds/${encodeURIComponent(kind)}/properties`).then(
+      (body) => body.properties,
+    ),
+  propertySchema: (kind: string) => request<KindPropertySchema>(`/entity-kinds/${encodeURIComponent(kind)}/property-schema`),
 }

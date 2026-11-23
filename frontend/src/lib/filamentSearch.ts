@@ -1,5 +1,6 @@
 import type { FilamentInventoryView, Spool, SpoolType, TagRow } from '../api/filament'
 import { listProducts, listSuppliers } from '../api/filamentPurchasing'
+import { entityApi, type PropertyValue } from '../components/entities/api'
 
 /**
  * #6894 — the filament text search: the Spools and Types tabs' `q=`, the quick find, and
@@ -12,6 +13,7 @@ import { listProducts, listSuppliers } from '../api/filamentPurchasing'
  *   (brand, material, colour name, SKU, place…), or, from 3 characters, a colour whose hex
  *   contains it, with or without its `#` (`#FF6A13`, `ff6a13`).
  * - #7151: from 4 hex digits (`:` and `-` left out), a tag UID or tray UUID that holds it (`04:A1:B2`).
+ * - A spool's or type's property values (#7026) are text fields too: a GTIN, an MPN, a lot.
  */
 export interface SearchToken {
   /** The token in lower case, without a leading `#`. */
@@ -60,13 +62,38 @@ export function namesNumber(tokens: readonly SearchToken[], number: number): boo
   return tokens.length === 1 && isNumber(tokens[0]!.text, number)
 }
 
-/** What else a spool is searched by: its type's code and SKUs, and the tray it is in. */
+/** What else a spool is searched by: its type's code and SKUs, the tray it is in, and its properties. */
 export interface SpoolExtras {
   typeCode?: string | null
   skus?: readonly string[]
   tray?: string | null
   /** #7151 — its open tag's UID and tray UUID. */
   tags?: readonly string[]
+  /** The spool's property values as text (`propertyTexts`). */
+  properties?: readonly string[]
+}
+
+/** What else a type is searched by: its property values as text (`propertyTexts`). */
+export interface TypeExtras {
+  properties?: readonly string[]
+}
+
+/** An entity's property values as search text: a string as it is, each list item, a number or boolean as text. */
+export function propertyTexts(values: Record<string, PropertyValue> | undefined): string[] {
+  return Object.values(values ?? {}).flatMap((value) => (Array.isArray(value) ? value : [String(value)]))
+}
+
+/**
+ * Every entity of `kind`'s property values as search text, by ref. A failed read gives an
+ * empty map: the search still runs on everything else.
+ */
+export async function loadKindPropertyTexts(kind: 'spool' | 'spool_type'): Promise<Map<string, string[]>> {
+  try {
+    const found = await entityApi.kindProperties(kind)
+    return new Map(Object.entries(found).map(([ref, values]) => [ref, propertyTexts(values)]))
+  } catch {
+    return new Map()
+  }
 }
 
 export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDoc {
@@ -82,6 +109,7 @@ export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDo
       extras.typeCode,
       extras.tray,
       ...(extras.skus ?? []),
+      ...(extras.properties ?? []),
     ],
     hexes: [spool.effective?.rgba ?? spool.rgba],
     tags: extras.tags ?? [],
@@ -89,10 +117,10 @@ export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDo
 }
 
 /** A type, its catalog names read from `names` (catalog row id to name). */
-export function typeSearchDoc(type: SpoolType, names: ReadonlyMap<string, string>, skus: readonly string[] = []): SearchDoc {
+export function typeSearchDoc(type: SpoolType, names: ReadonlyMap<string, string>, skus: readonly string[] = [], extras: TypeExtras = {}): SearchDoc {
   const name = (id: string | null | undefined) => (id ? names.get(id) : null)
   return {
-    texts: [type.code, name(type.brand_id), name(type.material_id), name(type.subtype_id), type.colour_name, ...skus],
+    texts: [type.code, name(type.brand_id), name(type.material_id), name(type.subtype_id), type.colour_name, ...skus, ...(extras.properties ?? [])],
     hexes: [type.rgba],
   }
 }
