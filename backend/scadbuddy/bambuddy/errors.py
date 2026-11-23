@@ -85,6 +85,11 @@ class Scope(StrEnum):
     #: (``backend/app/core/auth.py`` lines 305-307, maziggy/bambuddy v1.3.1), so such a
     #: write works only while Bambuddy's auth is off.
     ADMIN_KPROFILES = "K-profiles (admin only)"
+    #: Bambuddy's ``PRINTERS_UPDATE``, which a slot preset's and an AMS label's writes need
+    #: (#7153). No API key can hold it: it is listed in ``_APIKEY_DENIED_PERMISSIONS``
+    #: (``backend/app/core/auth.py`` line 280, maziggy/bambuddy v1.3.1), so such a write
+    #: works only while Bambuddy's auth is off.
+    ADMIN_PRINTERS = "Printers (admin only)"
 
 
 #: What no API key can do, per admin-only scope, for the 403 that says so.
@@ -92,6 +97,7 @@ _ADMIN_ONLY = {
     Scope.ADMIN_SETTINGS: "change its settings",
     Scope.ADMIN_FILAMENTS: "change its filament catalog",
     Scope.ADMIN_KPROFILES: "change a printer's K-profiles or their notes",
+    Scope.ADMIN_PRINTERS: "change a printer's slot presets or AMS labels",
 }
 
 
