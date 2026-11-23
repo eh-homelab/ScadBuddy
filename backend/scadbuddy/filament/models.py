@@ -1068,6 +1068,15 @@ class SpoolCreate(_In):
         return self
 
 
+class SpoolDraftPreset(SpoolPresetCreate):
+    """A draft's own preset row (#7150, R-7150-11). ``migrated`` keeps a copied row's
+    origin: a row the presets-per-nozzle migration made stays ``migrated`` on the copy, so
+    the copy's first type drops it as it would the source's (`presets.drop_migrated`). A
+    row a person changes is theirs, so the spool form drops the flag on an edit."""
+
+    migrated: bool = False
+
+
 class SpoolDraft(_In):
     """A new spool as the spool form holds it (#7150, R-7150-2): its fields, the place it
     goes to (not a printer's tray) and its own presets and K values. What
@@ -1075,7 +1084,7 @@ class SpoolDraft(_In):
 
     spool: SpoolCreate
     location_id: UUID | None = None
-    presets: list[SpoolPresetCreate] = Field(default_factory=list)
+    presets: list[SpoolDraftPreset] = Field(default_factory=list)
     k_values: list[SpoolKValueCreate] = Field(default_factory=list)
 
 

@@ -1929,12 +1929,12 @@ export const handlers = [
   http.get(`${BASE}/spools/:id/copy`, ({ params }) => {
     const row = findSpool(String(params.id))
     if (!row) return problem(404, `no spool ${String(params.id)}`)
-    const spool = Object.fromEntries(FIELDS.spoolCreate.filter((field) => field !== 'grams_left' && field !== 'weight_locked' && row[field as keyof SpoolRow] != null).map((field) => [field, row[field as keyof SpoolRow]]))
+    const spool = Object.fromEntries(FIELDS.spoolCreate.filter((field) => field !== 'grams_left' && field !== 'weight_locked' && field !== 'added_full' && row[field as keyof SpoolRow] != null).map((field) => [field, row[field as keyof SpoolRow]]))
     const place = state.locations.find((one) => one.id === row.location_id && !one.archived_at && one.tray_id == null)
     const draft: S['SpoolDraft'] = {
       spool: { ...spool, weight_locked: false, grams_left: null } as S['SpoolCreate-Output'],
       location_id: place?.id ?? null,
-      presets: state.spoolPresets.filter((one) => one.spool_id === row.id).map(({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name }) => ({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name })),
+      presets: state.spoolPresets.filter((one) => one.spool_id === row.id).map(({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name }) => ({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name, migrated: false })),
       k_values: state.spoolKValues.filter((one) => one.spool_id === row.id).map(({ spool_id: _s, ...one }) => one),
     }
     return HttpResponse.json(draft)

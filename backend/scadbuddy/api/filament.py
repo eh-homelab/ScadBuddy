@@ -160,7 +160,12 @@ from scadbuddy.filament.spools import (
     TagUnnamedError,
 )
 from scadbuddy.filament.tdfp import CREATE_WAIT, SEARCH_WAIT, Tdfp, tdfp
-from scadbuddy.filament.types import PresetUnknownError, TypeRowsDuplicateError, TypeTempError
+from scadbuddy.filament.types import (
+    PresetUnknownError,
+    TypeRowsDuplicateError,
+    TypeTempError,
+    names_preset,
+)
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.kinds import waiting_on_bambuddy
@@ -1115,7 +1120,10 @@ async def bulk_create_spools(
                 try:
                     with conn.transaction():
                         ids = filament.spools.bulk_on(conn, body, actor=who)
-                except pg_errors.ForeignKeyViolation:
+                except pg_errors.ForeignKeyViolation as error:
+                    # As `PUT …/presets` maps it: an unknown `sb-<id>` preset is its own 422.
+                    if names_preset(error):
+                        raise PresetUnknownError() from None
                     raise CatalogRefError() from None
                 except pg_errors.UniqueViolation:
                     raise TypeRowsDuplicateError() from None

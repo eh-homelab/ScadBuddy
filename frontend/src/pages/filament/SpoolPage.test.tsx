@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
+import { copySpool, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
@@ -499,6 +499,33 @@ describe('the spool page', () => {
     expect(await heading(20)).toBeInTheDocument()
     const twin = (await listSpools()).find((one) => one.number === 20)!
     expect(twin).toMatchObject({ colour_name: 'Teal', label_weight_g: 1000, grams_left: null })
+  })
+
+  it("sends a copied migrated preset row back migrated, and an edited one as the person's (R-7150-11)", async () => {
+    const real = await copySpool(spoolId(6))
+    const row = { printer_model: 'H2C', slicer_filament: 'P1', slicer_filament_name: null }
+    server.use(
+      http.get(`*/api/v1/filament/spools/${spoolId(6)}/copy`, () =>
+        HttpResponse.json({
+          ...real,
+          presets: [
+            { ...row, nozzle_diameter: '0.4', migrated: true },
+            { ...row, nozzle_diameter: '0.6', migrated: true },
+          ],
+        }),
+      ),
+    )
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(6)}`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    const filaments = await screen.findAllByLabelText('Slicer filament')
+    await user.type(filaments[1]!, 'X')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(posts).toHaveLength(1))
+    expect((posts[0] as { presets: unknown[] }).presets).toEqual([
+      { ...row, nozzle_diameter: '0.4', migrated: true },
+      { ...row, nozzle_diameter: '0.6', slicer_filament: 'P1X', migrated: false },
+    ])
   })
 
   it('a copy of a spool in a tray does not take the tray (#7150)', async () => {

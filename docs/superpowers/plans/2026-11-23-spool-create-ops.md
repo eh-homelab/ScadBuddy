@@ -60,6 +60,17 @@ Bambuddy (BB) 1.2.6b1. Spec: `docs/superpowers/specs/2026-11-14-filament-managem
   shelf candidate is still asked about. Its question offers only "New spool from this tray"
   and the skip ("Print from the tray as it is"). A tray question is keyed by its printer too,
   so one printer's error and `Idempotency-Key` never carry over to the next printer.
+- **R-7150-10 A copy does not carry `added_full`.** Whether a spool was added full is a fact
+  of the source spool's own history, as its ledger and weight lock are. `copy` leaves it out
+  of the draft, so the copy's `added_full` is unset (`null`).
+- **R-7150-11 A copy keeps each preset row's origin.** The draft's preset rows
+  (`SpoolDraftPreset`) carry `migrated`. A source's `migrated` row stays `migrated` on the
+  copy, so the copy's first type drops it as it would the source's (`presets.drop_migrated`).
+  The spool form sends a copied row back `migrated` only while its values are unchanged, as
+  `set_presets` keeps a row sent back unchanged; a row the person edited is theirs.
+- **R-7150-12 Bulk preset refusals match `PUT …/presets`.** A bulk create whose preset row names an
+  `sb-<id>` that does not exist is `PresetUnknownError` (`names_preset`), as the presets PUT
+  answers it; any other foreign key is `CatalogRefError`.
 
 ## Tasks
 

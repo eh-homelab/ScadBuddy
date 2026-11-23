@@ -6,9 +6,11 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.filament.types import PresetUnknownError
 from tests.api.test_filament import (
     MISSING,
     SPOOLS,
@@ -191,6 +193,55 @@ def test_a_copy_carries_the_spools_own_k_values(client: TestClient, pg_conninfo:
     (row,) = client.get(f"{SPOOLS}/{twin['id']}/k-values").json()
     assert {f: row[f] for f in same} == same
     assert Decimal(row["k_value"]) == Decimal("0.025")
+
+
+def test_a_bulk_preset_naming_no_sb_preset_is_refused_as_put_presets_refuses_it(
+    client: TestClient,
+) -> None:
+    unknown = PRESET | {"slicer_filament": "sb-987654"}
+    spool = _spool(client)
+    put = client.put(f"{SPOOLS}/{spool['id']}/presets", json=[unknown])
+    assert put.status_code == 422, put.text
+    body = {"spool": {"material_id": _material_id(client)}, "presets": [unknown], "quantity": 2}
+    made = _bulk(client, body, key="unknown-preset")
+    assert made.status_code == 422, made.text
+    assert made.json()["detail"] == put.json()["detail"] == str(PresetUnknownError())
+
+
+def test_a_copy_leaves_added_full_behind(client: TestClient) -> None:
+    """R-7150-10: whether the source was added full is a fact of its own history."""
+    source = _spool(client, added_full=True)
+    assert source["added_full"] is True
+    draft = client.get(f"{SPOOLS}/{source['id']}/copy").json()
+    assert draft["spool"]["added_full"] is None
+    (twin,) = _bulk(client, draft | {"quantity": 1}, key="copy-full").json()
+    assert twin["added_full"] is None
+
+
+def test_a_copy_keeps_a_migrated_preset_row_migrated(client: TestClient, pg_conninfo: str) -> None:
+    """R-7150-11: the copy's first type drops the copied migrated row, as the source's
+    would, and keeps the person's own row."""
+    source = _spool(client)
+    one = f"{SPOOLS}/{source['id']}"
+    own = PRESET | {"nozzle_diameter": "0.6", "slicer_filament": "P6"}
+    assert client.put(f"{one}/presets", json=[PRESET, own]).status_code == 200
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "UPDATE filament_spool_presets SET migrated = true"
+            " WHERE spool_id = %s AND nozzle_diameter = '0.4'",
+            (source["id"],),
+        )
+    draft = client.get(f"{one}/copy").json()
+    assert [(r["nozzle_diameter"], r["migrated"]) for r in draft["presets"]] == [
+        ("0.4", True),
+        ("0.6", False),
+    ]
+    (twin,) = _bulk(client, draft | {"quantity": 1}, key="copy-migrated").json()
+    copied = f"{SPOOLS}/{twin['id']}"
+    kind = _type(client)
+    assert client.patch(copied, json={"type_id": kind["id"]}).status_code == 200
+    left = [r for r in client.get(f"{copied}/presets").json() if r["overridden"]]
+    assert [r["slicer_filament"] for r in left] == ["P6"]
 
 
 def test_a_copy_of_no_spool_is_404(client: TestClient) -> None:

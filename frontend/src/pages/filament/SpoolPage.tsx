@@ -181,6 +181,17 @@ function draftOf(spool: SpoolDetail): Draft {
   }
 }
 
+/** A preset row's key and values, as the server compares a row sent back. */
+const presetValues = (row: PresetInput) => JSON.stringify([row.printer_model, row.nozzle_diameter, row.slicer_filament, row.slicer_filament_name ?? null])
+
+/**
+ * R-7150-11 — a copy's `migrated` rows, by their values: a row saved unchanged stays
+ * `migrated`, so the copy's first type drops it; a row the person edited is theirs.
+ */
+function copiedMigrated(copy: SpoolDraft | null): ReadonlySet<string> {
+  return new Set((copy?.presets ?? []).filter((row) => row.migrated).map(presetValues))
+}
+
 /** #7150 — a copy's draft (`GET /filament/spools/{id}/copy`) as the form holds it. */
 function draftOfCopy(copy: SpoolDraft): Draft {
   const spool = copy.spool
@@ -404,6 +415,8 @@ export function SpoolPage() {
   const [quantity, setQuantity] = useState('1')
   /** One `Idempotency-Key` per opened form: a retry or a second click makes no more spools. */
   const [createKey, setCreateKey] = useState(() => crypto.randomUUID())
+  /** The copied `migrated` preset rows (R-7150-11). */
+  const [migratedRows, setMigratedRows] = useState<ReadonlySet<string>>(() => new Set())
   /** The list's filters this page was opened from: back and a delete return to them. */
   const listPath = `${filamentLinks.spools}${listBack(location.state)}`
   /** Set at once when a new spool's POST lands: the page is then an edit of it. */
@@ -461,6 +474,7 @@ export function SpoolPage() {
           setDraft(draftOf(spool))
         }
         if (copy) setDraft(draftOfCopy(copy))
+        setMigratedRows(copiedMigrated(copy))
       })
       .catch((cause: unknown) => {
         if (live) setLoadError(cause instanceof ApiError && cause.status === 404 ? 'That spool is gone. Pick another from the Spools tab.' : `The spool could not be loaded: ${message(cause)}`)
@@ -576,7 +590,7 @@ export function SpoolPage() {
     try {
       if (creating) {
         // One request makes every spool with its place, presets and K values (#7150).
-        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets, k_values: draft.k_values }, createKey)
+        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets.map((row) => ({ ...row, migrated: migratedRows.has(presetValues(row)) })), k_values: draft.k_values }, createKey)
         const first = made[0]!
         setMadeId(first.id)
         setNotice(made.length > 1 ? `Saved ${made.length} spools, #${first.number} to #${made[made.length - 1]!.number}` : 'Saved')
