@@ -1039,7 +1039,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `reconcile` calls `hang_orphans_on` first, which calls it when a unit place or the external
   holder has no live parent, so an older install gets its root on its next tray capture. A
   "beside the printer" place keeps `printer_root` false and is not touched. In
-  `repoint_printer_locations` (the printer merge) a root clashes only with a root.
+  `repoint_printer_locations` (the printer merge) a root clashes only with a root, and a root
+  only the merged printer has moves and takes the kept printer's name (#7081).
   `filament/labels.py`: `label_base_url` (setting `filament_label_base_url`, else `public_url`
   reduced to its https origin, else `None`) and `printer_labels` (root, units with slots, external
   holder; not "beside" places; it first makes each unit, slot and external holder the printer's

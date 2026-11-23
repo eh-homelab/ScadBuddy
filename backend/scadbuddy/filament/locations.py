@@ -614,7 +614,7 @@ def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
     """Make printer ``merged``'s AMS tray places printer ``into``'s, on ``conn`` and in
     the printer merge's transaction (`printers/store.py` `_merge`). A tray only
     ``merged`` has moves as it is, and so does its printer's own place when ``into`` has none
-    (two of them clash, as two trays do). Where both printers have an unarchived place for one
+    (two of them clash, as two trays do), which then takes ``into``'s printer name. Where both printers have an unarchived place for one
     tray, ``into``'s stands: each spool in ``merged``'s moves there with a ``moved``
     event, its places move under it, and ``merged``'s is archived (not deleted: the
     ledger's ``moved`` events name it). Archived places move as they are.
@@ -665,6 +665,13 @@ def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
             "UPDATE filament_locations SET archived_at = now(), updated_at = now() WHERE id = %s",
             (old,),
         )
+    # A root only ``merged`` had moves to ``into`` and is named as ``into`` (#7081); a
+    # place with a printer is outside the name index, so the name cannot clash.
+    conn.execute(
+        "UPDATE filament_locations l SET name = p.name, updated_at = now() FROM printers p"
+        " WHERE p.id = %s AND l.printer_id = %s AND l.printer_root AND l.archived_at IS NULL",
+        (into, merged),
+    )
     conn.execute(
         "UPDATE filament_locations SET printer_id = %s, updated_at = now() WHERE printer_id = %s",
         (into, merged),

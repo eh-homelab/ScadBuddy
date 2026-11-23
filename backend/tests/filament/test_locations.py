@@ -419,6 +419,20 @@ def test_merge_keeps_the_kept_printers_place(pg_pool: PgPool) -> None:
     assert moved is not None and moved.archived_at is None and moved.printer_id == into
 
 
+def test_a_merged_root_moved_to_the_kept_printer_takes_its_name(pg_pool: PgPool) -> None:
+    """#7081: only the merged printer has a printer place, so it moves to ``into`` and is
+    named as ``into``, in the merge's transaction."""
+    store = LocationStore(pg_pool)
+    merged, into = _printer_named(pg_pool, "Old H2C"), _printer_named(pg_pool, "H2C")
+    root = store.ensure_printer(merged)
+    with pg_pool.connection() as conn, conn.transaction():
+        repoint_printer_locations(conn, merged, into)
+    moved = store.get(root)
+    assert moved is not None and moved.archived_at is None
+    assert (moved.printer_id, moved.name) == (into, "H2C")
+    assert store.ensure_printer(into) == root
+
+
 def test_rehanging_never_makes_a_cycle_through_the_root(pg_pool: PgPool) -> None:
     """Review of #7038: a person hangs the printer's place under its own unit place, then
     the next capture rehangs the parentless unit. The unit stays where it is, and the
