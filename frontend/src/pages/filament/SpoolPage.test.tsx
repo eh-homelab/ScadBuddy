@@ -265,8 +265,9 @@ describe('the spool page', () => {
     expect(mark()).toBeInTheDocument()
   })
 
-  it('loads the history of a spool whose later writes failed after it was made', async () => {
-    server.use(http.put('*/api/v1/filament/spools/:id/presets', () => HttpResponse.json({ type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'two rows name the same printer and nozzle' }, { status: 422, headers: { 'Content-Type': 'application/problem+json' } })))
+  it('makes no spool when its presets are refused, and keeps the form (#7150: one request)', async () => {
+    server.use(http.post('*/api/v1/filament/spools/bulk', () => HttpResponse.json({ type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'two rows name the same printer and nozzle' }, { status: 422, headers: { 'Content-Type': 'application/problem+json' } })))
+    const before = (await listSpools()).length
     const { user } = render('/filament/spools/new')
     await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
     await user.click(screen.getByRole('button', { name: 'Add preset' }))
@@ -275,8 +276,9 @@ describe('the spool page', () => {
     await user.type(within(row).getByLabelText('Slicer filament'), 'GFA00')
     await user.click(screen.getByRole('button', { name: 'Save spool' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('two rows name')
-    const history = await screen.findByRole('list', { name: 'History of this spool' })
-    expect(within(history).getByText('Added')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    expect(within(row).getByLabelText('Slicer filament')).toHaveValue('GFA00')
+    expect((await listSpools()).length).toBe(before)
   })
 
   it('shows what the grams left are made of', async () => {
@@ -420,14 +422,66 @@ describe('the spool page', () => {
   })
 
   it('makes a new spool with one POST and opens it', async () => {
-    const posts = recorded('POST', /\/filament\/spools$/)
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
     const { user } = render('/filament/spools/new')
     await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
     await user.type(screen.getByLabelText('Grams left'), '900')
     await user.click(screen.getByRole('button', { name: 'Save spool' }))
     await waitFor(async () => expect((await listSpools()).length).toBe(12))
     expect(posts).toHaveLength(1)
+    expect(posts[0]).toMatchObject({ quantity: 1, spool: { grams_left: 900 } })
     expect(await heading(20)).toBeInTheDocument()
+  })
+
+  it('makes several identical spools with one POST, each with its own number (#7150)', async () => {
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render('/filament/spools/new')
+    await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
+    const count = screen.getByLabelText('How many spools')
+    await user.clear(count)
+    await user.type(count, '3')
+    await user.click(screen.getByRole('button', { name: 'Save 3 spools' }))
+    expect(await screen.findByText('The spools tab')).toBeInTheDocument()
+    expect(posts).toHaveLength(1)
+    expect(posts[0]).toMatchObject({ quantity: 3 })
+    const numbers = (await listSpools()).map((one) => one.number).filter((n) => n >= 20)
+    expect(numbers).toEqual([20, 21, 22])
+  })
+
+  it('refuses a count outside 1 to 100 and sends nothing (#7150)', async () => {
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render('/filament/spools/new')
+    await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
+    const count = screen.getByLabelText('How many spools')
+    await user.clear(count)
+    await user.type(count, '101')
+    await user.click(screen.getByRole('button', { name: 'Save 101 spools' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('from 1 to 100')
+    expect(posts).toHaveLength(0)
+  })
+
+  it('copies a spool into a new one, leaving its number and weight behind (#7150)', async () => {
+    const { user } = open(6)
+    await heading(6)
+    expect(screen.getByRole('link', { name: 'Copy' })).toHaveAttribute('href', `/filament/spools/new?copy=${spoolId(6)}`)
+    await user.click(screen.getByRole('link', { name: 'Copy' }))
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    expect(await screen.findByLabelText('Colour name')).toHaveValue('Teal')
+    expect(screen.getByLabelText('Grams left')).toHaveValue('')
+    expect(screen.getByText(/stay with it/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    expect(await heading(20)).toBeInTheDocument()
+    const twin = (await listSpools()).find((one) => one.number === 20)!
+    expect(twin).toMatchObject({ colour_name: 'Teal', label_weight_g: 1000, grams_left: null })
+  })
+
+  it('a copy of a spool in a tray does not take the tray (#7150)', async () => {
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(4)}`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(posts).toHaveLength(1))
+    expect(posts[0]).toMatchObject({ location_id: null })
   })
 
   it('shows a server refusal and keeps the edits', async () => {

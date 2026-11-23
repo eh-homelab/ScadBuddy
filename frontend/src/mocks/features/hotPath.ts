@@ -456,6 +456,17 @@ const routes: Route[] = [
       return HttpResponse.json(shelfSpool())
     },
   },
+  {
+    // #7150 — create from slot: the tray's spool is made from its report and placed there.
+    method: 'POST',
+    path: /^\/printers\/([^/]+)\/trays\/(\d+)\/(\d+)\/new-spool$/,
+    answer: (match, request) => {
+      if (match[1] !== HOT_PRINTER.id) return problem(404, `no printer ${match[1]}`)
+      if (!request.headers.get('Idempotency-Key')) return problem(428, 'This write needs an Idempotency-Key header. Nothing was done.')
+      state.linked = true
+      return HttpResponse.json(shelfSpool(), { status: 201 })
+    },
+  },
   { method: 'GET', path: /^\/print\/(?:outputs|library)\/[^/]+\/choices$/, answer: () => HttpResponse.json(hotChoices()) },
   { method: 'GET', path: /^\/print\/(?:outputs|library)\/[^/]+\/filaments$/, answer: () => HttpResponse.json(hotFilaments()) },
   {

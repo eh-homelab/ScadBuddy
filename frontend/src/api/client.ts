@@ -2449,6 +2449,16 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /**
+   * #7150 — create from slot: a new SB spool from what the printer last reported in the
+   * tray (material, colour, tag), placed in it. `key` is one `Idempotency-Key` per click.
+   */
+  newTraySpool: (printer: string, amsId: number, trayId: number, key: string) =>
+    request<FilamentSpool>(`/printers/${seg(printer)}/trays/${amsId}/${trayId}/new-spool`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': key },
+    }),
+
   /** #2351 — Bambuddy's queue in its order; `status` narrows it (finished items stay in it). */
   getPrintQueue: (status?: 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled') =>
     request<QueueItem[]>(`/farm/queue${status ? `?status=${status}` : ''}`),
