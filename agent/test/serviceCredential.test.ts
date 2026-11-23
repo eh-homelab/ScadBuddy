@@ -278,7 +278,7 @@ describe('ExchangeCredential', () => {
 
   // #6647: at pod start the first exchange failed (the API not answering yet), and the calls made in
   // its back-off went out with no credential and got 401.
-  function firstExchangeFails(first: { status: number; retryAfter?: string }) {
+  function firstExchangeFails(first: { status: number; retryAfter?: string }, sleep?: (ms: number) => Promise<void>) {
     const backend = fakeBackend()
     const clock = { now: 0 }
     const slept: number[] = []
@@ -299,10 +299,12 @@ describe('ExchangeCredential', () => {
       readProof: async () => 'jwt-1',
       now: () => clock.now,
       log: () => undefined,
-      sleep: async (ms) => {
-        slept.push(ms)
-        clock.now += ms
-      },
+      sleep:
+        sleep ??
+        (async (ms) => {
+          slept.push(ms)
+          clock.now += ms
+        }),
     })
     const seen: (string | null)[] = []
     // The backend refuses a CRUD call that has no credential.
@@ -338,6 +340,37 @@ describe('ExchangeCredential', () => {
     const wrapped = withServiceCredential(inner, credential, 'http://backend:8080/')
     expect((await wrapped('http://backend:8080/api/v1/internal/crud/agent/events/head')).status).toBe(401)
     expect(seen).toEqual([null])
+    expect(slept).toEqual([])
+  })
+
+  it("ends the wait when the call's own signal aborts, not at the next exchange (#7099 review)", async () => {
+    // A sleep that never ends: only the abort can end the wait.
+    const { credential, seen } = firstExchangeFails({ status: 503 }, () => new Promise(() => {}))
+    expect(await credential.current()).toBeUndefined()
+    const inner = (async (_input: string | URL | Request, init?: RequestInit) => {
+      init?.signal?.throwIfAborted()
+      seen.push(new Headers(init?.headers).get('authorization'))
+      return new Response('{}')
+    }) as typeof fetch
+    const wrapped = withServiceCredential(inner, credential, 'http://backend:8080/')
+    const started = Date.now()
+    const call = wrapped('http://backend:8080/api/v1/internal/crud/agent/events/head', { signal: AbortSignal.timeout(50) })
+    await expect(call).rejects.toMatchObject({ name: 'TimeoutError' })
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(seen).toEqual([])
+
+    const controller = new AbortController()
+    const middleware = serviceCredentialMiddleware(credential)
+    const pending = middleware.onRequest!({ request: new Request('http://backend/api/v1/models', { signal: controller.signal }) } as never)
+    controller.abort()
+    const request = (await pending) as Request
+    expect(request.headers.get('authorization')).toBeNull()
+  })
+
+  it('counts the exchange after the wait in the bound (#7099 review)', async () => {
+    // A next exchange due in 6 s, plus its own 10 s timeout, could end past the 15 s bound.
+    const { credential, slept } = firstExchangeFails({ status: 429, retryAfter: '6' })
+    expect(await credential.untilCurrent()).toBeUndefined()
     expect(slept).toEqual([])
   })
 
