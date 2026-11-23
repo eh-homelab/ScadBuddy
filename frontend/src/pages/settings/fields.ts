@@ -192,6 +192,11 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     kind: 'text',
   },
   {
+    name: 'filament_label_base_url',
+    section: 'filament',
+    kind: 'url',
+  },
+  {
     name: 'filament_burn_window_days',
     section: 'filament',
     kind: 'count',

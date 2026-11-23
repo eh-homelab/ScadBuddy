@@ -582,6 +582,9 @@ const LOCATIONS = `${BACKEND}/api/v1/filament/locations`
 describe('filament location tools', () => {
   it.each([
     ['filament_location_list', 'read'],
+    ['filament_code_resolve', 'read'],
+    ['filament_location_get', 'read'],
+    ['filament_printer_labels', 'read'],
     ['filament_location_upsert', 'write'],
     ['filament_spool_move', 'write'],
   ])('%s is %s tier, never gated', (name, risk) => {
@@ -606,13 +609,30 @@ describe('filament location tools', () => {
       }),
     )
     const listed = await runTool(tool('filament_location_list'), { include_archived: true }, ctx())
-    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: `/filament/spools?place=${ROW}`, children: [] }])
+    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: `/filament/locations/${ROW}`, children: [] }])
     const fields = { name: 'Shelf A', kind_id: ROW }
     expect((await runTool(tool('filament_location_upsert'), { fields }, ctx())).isError).toBeFalsy()
     const edit = { location_id: ROW, fields: { note: null }, archived: true }
     expect((await runTool(tool('filament_location_upsert'), edit, ctx())).isError).toBeFalsy()
     expect(calls).toEqual([['add', fields], ['edit', { note: null, archived: true }]])
     expect((await runTool(tool('filament_location_upsert'), { archived: true }, ctx())).isError).toBe(true)
+  })
+
+  it('resolves a code, reads a place and lists printer labels', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/codes/L-12`, () => HttpResponse.json({ kind: 'location', id: ROW })),
+      http.get(`${LOCATIONS}/${ROW}`, () => HttpResponse.json({ id: ROW, code: 'L-12' })),
+      http.post(`${BACKEND}/api/v1/filament/printer-labels`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ base_url: null, labels: [] })
+      }),
+    )
+    expect(firstText(await runTool(tool('filament_code_resolve'), { code: 'L-12' }, ctx()))).toEqual({ kind: 'location', id: ROW })
+    expect(firstText(await runTool(tool('filament_location_get'), { location_id: ROW }, ctx()))).toMatchObject({ code: 'L-12' })
+    await runTool(tool('filament_printer_labels'), {}, ctx())
+    await runTool(tool('filament_printer_labels'), { printer_ids: [ROW] }, ctx())
+    expect(bodies).toEqual([{ printer_ids: null }, { printer_ids: [ROW] }])
   })
 
   it('moves a spool, and takes one out of its place', async () => {

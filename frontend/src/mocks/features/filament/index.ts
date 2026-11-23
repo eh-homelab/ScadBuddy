@@ -1531,6 +1531,42 @@ function csvRows(body: { rows?: unknown }): Record<string, string | null>[] | Re
   return rows
 }
 
+// -- codes and printer labels (#6955) --
+
+/** `codes/parse.py`: any case, an optional dash, a one-letter prefix and a number. */
+function parseCode(text: string): { prefix: string; number: number } | null {
+  const hit = /^([A-Z])-?([0-9]+)$/.exec(text.trim().toUpperCase())
+  return hit ? { prefix: hit[1]!, number: Number(hit[2]) } : null
+}
+
+const placeCode = (place: S['Location']) => `L-${place.number}`
+const step = (place: S['Location']): S['PathStep'] => ({ id: place.id, code: placeCode(place), name: place.name })
+const byOrder = (a: S['Location'], b: S['Location']) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)
+
+function locationDetail(place: S['Location']): S['LocationDetail'] {
+  const path: S['PathStep'][] = []
+  for (let at = state.locations.find((one) => one.id === place.parent_id); at; at = state.locations.find((one) => one.id === at!.parent_id)) path.unshift(step(at))
+  const kind = state.catalogs['location-kinds'].find((one) => one.id === place.kind_id)
+  return {
+    ...place,
+    code: placeCode(place),
+    kind_name: kind?.name ?? '',
+    path,
+    children: state.locations.filter((one) => one.parent_id === place.id && !one.archived_at).sort(byOrder).map(step),
+    spools: state.spools
+      .filter((row) => row.location_id === place.id && !row.archived_at)
+      .sort((a, b) => a.number - b.number)
+      .map((row) => ({ id: row.id, number: row.number, code: `S-${row.number}`, colour_rgba: row.rgba ?? null, grams_left: row.grams_left ?? null, material: null })),
+  }
+}
+
+/** The printer's place, each AMS unit under it with its slots, then the rest, in order. */
+function printerLabelRows(root: S['Location']): S['PrinterLabel'][] {
+  const row = (place: S['Location'], depth: number): S['PrinterLabel'] => ({ location_id: place.id, code: placeCode(place), name: place.name, depth })
+  const kids = (parent: S['Location']) => state.locations.filter((one) => one.parent_id === parent.id && !one.archived_at).sort(byOrder)
+  return [row(root, 0), ...kids(root).flatMap((unit) => [row(unit, 1), ...kids(unit).map((slot) => row(slot, 2))])]
+}
+
 export const handlers = [
   // -- catalogs --
   http.get(`${BASE}/catalog/:kind`, ({ params, request }) => {
@@ -2079,6 +2115,34 @@ export const handlers = [
   }),
 
   // -- places --
+  http.get('/api/v1/codes/:code', ({ params }) => {
+    const code = String(params.code)
+    const parsed = parseCode(code)
+    const unknown = () => problem(404, `no thing has the code '${code}'`, { code: 'code_unknown' })
+    if (!parsed) return unknown()
+    if (parsed.prefix === 'L') {
+      const place = state.locations.find((one) => one.number === parsed.number)
+      return place ? HttpResponse.json({ kind: 'location', id: place.id, code: placeCode(place), name: place.name, archived: !!place.archived_at } satisfies S['Resolved']) : unknown()
+    }
+    if (parsed.prefix === 'S') {
+      const row = state.spools.find((one) => one.number === parsed.number)
+      return row ? HttpResponse.json({ kind: 'spool', id: row.id, code: `S-${row.number}`, name: null, archived: !!row.archived_at } satisfies S['Resolved']) : unknown()
+    }
+    return unknown()
+  }),
+  http.get(`${BASE}/locations/:id`, ({ params }) => {
+    const place = state.locations.find((one) => one.id === params.id)
+    return place ? HttpResponse.json(locationDetail(place)) : problem(404, `no location ${String(params.id)}`)
+  }),
+  http.post(`${BASE}/printer-labels`, async ({ request }) => {
+    const body = (await request.json()) as S['PrinterLabelsRequest']
+    const roots = state.locations.filter((one) => one.printer_root)
+    const ids = body.printer_ids ?? roots.map((one) => one.printer_id!)
+    const unknown = ids.find((id) => !roots.some((one) => one.printer_id === id))
+    if (unknown) return problem(422, `no printer ${unknown}`)
+    const wanted = ids.map((id) => roots.find((one) => one.printer_id === id)!).sort((a, b) => a.name.localeCompare(b.name))
+    return HttpResponse.json({ base_url: null, labels: wanted.flatMap(printerLabelRows), no_report: [] } satisfies S['PrinterLabels'])
+  }),
   http.get(`${BASE}/locations`, ({ request }) => HttpResponse.json(tree(flag(request, 'include_archived')))),
   http.post(`${BASE}/locations`, async ({ request }) => {
     const body = (await request.json()) as S['LocationCreate']
@@ -2089,6 +2153,8 @@ export const handlers = [
     if (placeTaken(body)) return problem(409, REFUSED.locationExists)
     if (badRef(body, LOCATION_REFS)) return problem(422, REFUSED.catalogRef)
     const made: S['Location'] = {
+      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      printer_root: false,
       parent_id: null,
       identifier: null,
       capacity: null,

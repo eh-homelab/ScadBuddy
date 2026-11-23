@@ -87,6 +87,7 @@ const NULLABLE = new Set([
   'google_fonts_api_key',
   'temporal_ui_url',
   'filament_default_cost_per_kg',
+  'filament_label_base_url',
   'store_s3_endpoint',
   'store_s3_bucket',
   'store_s3_access_key_id',
@@ -291,6 +292,9 @@ function putSettings(body: Record<string, unknown>) {
     }
     if (name === 'filament_default_cost_per_kg' && typeof value === 'string' && !/^\d+(\.\d+)?$/.test(value.trim())) {
       return refused(name, 'Input should be greater than or equal to 0')
+    }
+    if (name === 'filament_label_base_url' && typeof value === 'string' && !/^https:\/\/[^/?#]+$/.test(value)) {
+      return refused(name, `Value error, SCADBUDDY_FILAMENT_LABEL_BASE_URL must be an https:// origin with no path, not '${value}'`)
     }
     if (name === 'temporal_ui_url' && typeof value === 'string' && !/^https?:\/\//.test(value)) {
       return refused(name, `Value error, ${envName(name)} must be an http(s) URL, not '${value}'`)

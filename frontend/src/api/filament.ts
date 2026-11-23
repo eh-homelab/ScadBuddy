@@ -33,6 +33,12 @@ export type FillRequest = Schemas['FillRequest']
 export const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm', 'drying_temp_c', 'drying_hours'] as const
 export type FillField = (typeof FILL_FIELDS)[number]
 export type Location = Schemas['Location']
+export type LocationDetail = Schemas['LocationDetail']
+export type PathStep = Schemas['PathStep']
+export type PlacedSpool = Schemas['PlacedSpool']
+export type Resolved = Schemas['Resolved']
+export type PrinterLabels = Schemas['PrinterLabels']
+export type PrinterLabel = Schemas['PrinterLabel']
 export type LocationNode = Schemas['LocationNode']
 export type LocationCreate = Schemas['LocationCreate']
 export type LocationPatch = Schemas['LocationPatch']
@@ -358,6 +364,16 @@ export const upsertCatalog = <K extends CatalogKind>(kind: K, body: CatalogInput
 
 export const listLocations = (options: { includeArchived?: boolean } = {}) =>
   request<LocationNode[]>(`${BASE}/locations${query({ include_archived: options.includeArchived || undefined })}`)
+
+/** #6955 — one place with its code, kind, path, children and spools; an archived place still answers. */
+export const getLocation = (id: string) => request<LocationDetail>(`${BASE}/locations/${seg(id)}`)
+
+/** #6955 — what a short code (`L-12`, `S-142`) names; the route is `/api/v1/codes/{code}`, outside `BASE`. */
+export const resolveCode = (code: string) => request<Resolved>(`/codes/${seg(code)}`)
+
+/** #6955 — the printers' place labels; `null` is every printer. */
+export const printerLabels = (printerIds: string[] | null) =>
+  request<PrinterLabels>(`${BASE}/printer-labels`, json('POST', { printer_ids: printerIds }))
 
 /** Adds a place, or with `id` changes one (only the fields sent). */
 export function upsertLocation(body: LocationCreate): Promise<Location>

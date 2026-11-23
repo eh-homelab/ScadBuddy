@@ -8,7 +8,7 @@ The **Filament** section is ScadBuddy's own filament inventory. It covers:
 - catalogs (brands, materials, colours and more);
 - suppliers, price sheets, invoices and a shopping list;
 - locations with humidity and temperature sensors;
-- RFID tags and NTAG labels;
+- RFID tags, NTAG labels, and printed QR labels for spools, places, printers, AMS units and slots;
 - a ledger of spool events, with history, metrics and a forecast.
 
 The print dialog picks from these spools (ScadBuddy's own, "SB" spools). Tray changes and
@@ -54,7 +54,8 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   - the print dialog's picker (`frontend/src/components/FilamentPicker.tsx:358`).
 - Core: `backend/scadbuddy/filament/`:
   - the SB spools a print reads: `inventory.py` (`read_sb_spools` at `:901`, `reconcile_trays` at `:448`);
-  - `capture.py`, `ledger.py`, `catalog.py`, `types.py`, `locations.py`, `sensors.py`, `invoices.py`;
+  - `capture.py`, `ledger.py`, `catalog.py`, `types.py`, `locations.py`, `sensors.py`, `invoices.py`, `labels.py`;
+  - `backend/scadbuddy/codes/` (code parsing and resolving);
   - `bb_sync_*.py` and `bambuddy_pull.py`;
   - `profile_fetch.py`.
 - Workflows:
@@ -72,7 +73,26 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
 - The old spool overlay and native spool tables were dropped
   (`backend/scadbuddy/migrations/20261118T1235Z_drop_native_spool_tables.sql`).
 - Settings: `spool_overlay_refresh_seconds` (the refresh Schedule), `filament_sync`,
-  `filament_low_stock_pct`, `filament_default_cost_per_kg`, `profile_fetch_nozzles`.
+  `filament_low_stock_pct`, `filament_default_cost_per_kg`, `profile_fetch_nozzles`,
+  `filament_label_base_url` (an https origin of at most 64 characters, live; unset, labels use
+  `public_url` reduced to its https origin, then the page's own origin).
+- Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`. A code
+  opens at `/x/<code>` (`frontend/src/pages/CodePage.tsx`; route `GET /api/v1/codes/{code}`,
+  `backend/scadbuddy/api/codes.py`). Any case works, with or without the dash. A number is
+  never reused, and an archived thing still resolves.
+- Printer places: a printer has its own place (`filament_locations.printer_root`, kind
+  "Printer"). Its AMS units and external holder hang under it
+  (`LocationStore.ensure_printer_on`, `backend/scadbuddy/filament/locations.py`). A printer
+  label request makes the place when it is missing, and so does a tray capture whose printer
+  has a unit place or external holder with no live parent (`LocationStore.hang_orphans_on`).
+- Labels: a place's QR is `<base>/x/L-<n>`. The labels page (`/filament/labels`) prints places
+  with `?locations=` and printers with `?printers=` (one printer's from its place page, every
+  printer's from the Locations tab). The printer labels first make the place of each AMS unit,
+  slot and external holder the printer's latest report lists; a printer with no such report is
+  named on the page. Spool labels keep `scadbuddy:spool:<id>`. A place links to its own page,
+  `/filament/locations/<id>`.
+  The agent reads codes with `filament_code_resolve`, `filament_location_get` and
+  `filament_printer_labels`.
 
 ## Tests
 

@@ -421,6 +421,11 @@ BB has a flat list (`/inventory/locations`) plus location sensors
 - Each printer's AMS units and external spool holder are locations too, made
   automatically. A loaded spool's location is its AMS slot, so "where is it" is
   always one answer.
+- As built in #6955: a location has a `number` and the code `L-<n>`, and its QR label
+  opens `<base>/x/L-<n>` (spec `2026-11-22-printer-location-labels-design.md`). A printer has
+  its own place (`printer_root`, a kind flagged `printer`), and its AMS units and external holder
+  hang under it (`filament/locations.py` `ensure_printer_on`; migrations
+  `20261122T0603Z_filament_location_numbers.sql` and `20261122T0700Z_filament_printer_place.sql`).
 - Sensors: humidity and temperature per location, read from Home Assistant as
   BB does (`LocationHASensor`: entity id, alert above or below, notify) and from
   the AMS reports for AMS locations. Readings are kept as history.
@@ -659,6 +664,13 @@ holds each decision and what it costs if wrong.
   - Labels: 50 x 25 mm, a QR code of the text `scadbuddy:spool:<spool id>` (no host), with a quiet
     zone of 4 modules, and the spool number, material, colour and brand. The page is
     `/filament/labels`; the layout (roll or sheet) is kept in `localStorage`.
+  - As built in #6955: spool labels keep that payload. Place labels, and labels for a printer, its
+    AMS units and slots, carry the URL `<base>/x/L-<number>` (at most 84 bytes, QR version 5 or
+    less, so a 19.8 mm square QR keeps modules of 0.5 mm). `<base>` is the setting
+    `filament_label_base_url`, else `public_url`, each reduced to an https origin
+    (`filament/labels.py` `label_base_url`), else the page's own origin. A phone camera opens the
+    URL; `/x/:code` resolves it (`backend/scadbuddy/codes/`). Modes `?locations=` and `?printers=`
+    of the labels page print them.
 
 ## 8. Sync with BB
 

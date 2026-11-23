@@ -157,7 +157,7 @@ export const B = {
 }
 export const E = { TRANSLUCENT: catalogId(40), CLEAR: catalogId(41), SILK: catalogId(42) }
 export const IT = { BAMBU_REUSABLE: catalogId(60), CARDBOARD: catalogId(61) }
-export const LK = { ROOM: catalogId(80), SHELF: catalogId(81), DRY_BOX: catalogId(82), AMS: catalogId(83) }
+export const LK = { ROOM: catalogId(80), SHELF: catalogId(81), DRY_BOX: catalogId(82), AMS: catalogId(83), PRINTER: catalogId(84) }
 
 export type Catalogs = {
   materials: S['Material'][]
@@ -211,23 +211,26 @@ function catalogs(): Catalogs {
       { ...row(74, 'Retired Grey'), archived_at: AT, manufacturer: 'Sunlu', rgba: '#808080FF', material_id: M.PLA, material_name: null, extra_colours: null, effect_id: null, source: null, synced_at: null, bb_colour_id: null },
     ],
     'location-kinds': [
-      { ...row(80, 'Room'), dry_storage: false, ams: false },
-      { ...row(81, 'Shelf', 1), dry_storage: false, ams: false },
-      { ...row(82, 'Dry box', 2), dry_storage: true, ams: false },
-      { ...row(83, 'AMS tray', 3), dry_storage: false, ams: true },
+      { ...row(80, 'Room'), dry_storage: false, ams: false, printer: false },
+      { ...row(81, 'Shelf', 1), dry_storage: false, ams: false, printer: false },
+      { ...row(82, 'Dry box', 2), dry_storage: true, ams: false, printer: false },
+      { ...row(83, 'AMS tray', 3), dry_storage: false, ams: true, printer: false },
+      { ...row(84, 'Printer', 4), dry_storage: false, ams: false, printer: true },
     ],
   }
 }
 
 // -- places ---------------------------------------------------------------------------
 
-export const L = { WORKSHOP: locationId(1), SHELF_A: locationId(2), DRY_BOX: locationId(3), AMS_A1: locationId(4), AMS_A4: locationId(5), AMS_A: locationId(6) }
+export const L = { WORKSHOP: locationId(1), SHELF_A: locationId(2), DRY_BOX: locationId(3), AMS_A1: locationId(4), AMS_A4: locationId(5), AMS_A: locationId(6), H2C: locationId(7) }
 
 function place(n: number, name: string, kind_id: string, values: Partial<S['Location']> = {}): S['Location'] {
   return {
     ...row(n, name),
     id: locationId(n),
     kind_id,
+    number: n,
+    printer_root: false,
     parent_id: null,
     identifier: null,
     capacity: null,
@@ -245,7 +248,8 @@ function locations(): S['Location'][] {
     place(2, 'Shelf A', LK.SHELF, { parent_id: L.WORKSHOP, capacity: 12 }),
     place(3, 'Dry box 1', LK.DRY_BOX, { parent_id: L.WORKSHOP, capacity: 4, sort_order: 1 }),
     place(4, 'H2C AMS-A slot 1', LK.AMS, { parent_id: L.AMS_A, printer_id: H2C.printer_id, ams_id: 0, tray_id: 0, sort_order: 2 }),
-    place(6, 'H2C AMS-A', LK.AMS, { printer_id: H2C.printer_id, ams_id: 0, sort_order: 4 }),
+    place(6, 'H2C AMS-A', LK.AMS, { parent_id: L.H2C, printer_id: H2C.printer_id, ams_id: 0, sort_order: 4 }),
+    place(7, '3DP-31B-598', LK.PRINTER, { printer_id: H2C.printer_id, printer_root: true, sort_order: 5 }),
     place(5, 'H2C AMS-A slot 4', LK.AMS, { parent_id: L.AMS_A, printer_id: H2C.printer_id, ams_id: 0, tray_id: 3, sort_order: 3 }),
   ]
 }

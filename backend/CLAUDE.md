@@ -889,7 +889,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `api/filament.py`, `api/filament_purchasing.py` and `api/tray_spools.py` and after a
   settings save that changes `filament_sync`; capture, `sync_ams_weights` and the worker's
   CRUD `filament` writes are not nudged and reach Bambuddy on the timer, and the Bambuddy
-  import and the RFID scan (`api/filament.py` `NOT_NUDGED`) have nothing to push. The print worker
+  import and the RFID scan (`api/filament.py` `NOT_NUDGED`) have nothing to push, and the printer
+  labels (#6955, also in `NOT_NUDGED`) make only places capture makes too. The print worker
   reaches SB through the CRUD area `filament-sync` (`api/crud_print.py`, `…/print/filament/sync/directions`, `plan`, `results` and `pass`;
   client `RemoteFilamentSync` in `crud/print.py`), and the routes `GET /filament/sync/status`
   and `POST /filament/sync/run` (`api/filament.py`) serve people and the agent. At prod's
@@ -1025,6 +1026,32 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `POST /filament/tdfp/filaments` (an `Idempotency-Key`; one workflow per caller, key, type and ask,
   `create_workflow_id`, R-7025-12; the create is never retried, and a failure before Save
   Filament fails its workflow, so the same key runs it again, `workflow.BEFORE_SAVE`, R-7025-11).
+- `backend/scadbuddy/filament/` labels and printer places (#6955, plan
+  `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
+  (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).
+  A printer's own place is the row with `printer_root` true; its kind is the one flagged
+  `filament_location_kinds.printer` (seeded on "Printer"; the flag finds it, never the name;
+  migration `20261122T0700Z_filament_printer_place.sql`). A unique index allows one unarchived
+  root per printer. `LocationStore.ensure_printer_on` makes or finds the root (409
+  `no_printer_kind` through `NoPrinterKindError` when no kind has the flag) and moves the
+  printer's AMS unit places and external holder under it when they have no parent or an archived
+  one. Capture calls it through `_printer_parent` when it makes a unit or the external holder, and
+  `reconcile` calls `hang_orphans_on` first, which calls it when a unit place or the external
+  holder has no live parent, so an older install gets its root on its next tray capture. A
+  "beside the printer" place keeps `printer_root` false and is not touched. In
+  `repoint_printer_locations` (the printer merge) a root clashes only with a root.
+  `filament/labels.py`: `label_base_url` (setting `filament_label_base_url`, else `public_url`
+  reduced to its https origin, else `None`) and `printer_labels` (root, units with slots, external
+  holder; not "beside" places; it first makes each unit, slot and external holder the printer's
+  latest `printer_reports` row lists, and answers `no_report` for a printer with none). Routes in `api/filament.py`: `GET /filament/locations/{id}`
+  (`LocationDetail`) and `POST /filament/printer-labels` (a POST because it may make places; 422
+  for an unknown printer; in `NOT_NUDGED`). Agent tools: `filament_code_resolve`, `filament_location_get`,
+  `filament_printer_labels` (all `read`).
+- `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
+  (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
+  (`L` is `filament_locations`, `S` is `filament_spools`) and `resolve` (`{kind, id, code, name,
+  archived}`; an archived row still resolves). Route `GET /api/v1/codes/{code}` (`api/codes.py`,
+  404 `code_unknown`). A new prefix is one entry in `PREFIXES`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
