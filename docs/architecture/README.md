@@ -136,7 +136,7 @@ document's claim and the code. These specs and docs were not changed in this PR.
   pipeline route; following is the `FollowPrint` workflow
   (`backend/scadbuddy/workflows/follow.py:70`).
 - print-flow `:7-12` ScadBuddy keeps no spool or printer state of its own / its own spools,
-  virtual and LAN printers (`backend/scadbuddy/filament/inventory.py:901`,
+  virtual and LAN printers (`backend/scadbuddy/filament/inventory.py:957`,
   `backend/scadbuddy/printers/store.py`).
 
 **Print library file spec** (`…/2026-09-28-print-library-file-design.md`)
