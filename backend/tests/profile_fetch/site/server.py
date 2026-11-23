@@ -246,12 +246,15 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
                     if tdfp_id is None or tdfp_id not in site.known_ids:
                         self._send(404, b"<!doctype html><title>404</title><h1>Not found</h1>")
                         return
+                    if page == "my-spool.html" and tdfp_id not in site.in_spools:
+                        # No record of it in My Spools: no export button.
+                        self._send(200, b"<!doctype html><title>My spool</title><h1>No spools</h1>")
+                        return
                     self._send(
                         200,
                         _page(
                             page,
                             ID=str(tdfp_id),
-                            IN_SPOOLS="true" if tdfp_id in site.in_spools else "false",
                             OPTIONS=json.dumps(site.options),
                             DOWNLOAD=json.dumps(site.download),
                             OPTION_DELAY_MS=str(site.option_delay_ms),

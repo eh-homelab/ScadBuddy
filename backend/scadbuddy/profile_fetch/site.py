@@ -465,10 +465,20 @@ class ThreeDfpSite:
         logger.info("signed in to 3dfilamentprofiles.com")
 
     async def ensure_in_my_spools(self, tdfp_id: int) -> None:
-        """`3dfp.mjs add`: on the filament's page, click "Add to My Spools" when it is
-        there; a filament already in My Spools has none."""
+        """`3dfp.mjs add`, once per filament (#7228): when the filament's My Spools page
+        offers "Export slicer profile", the owner has a record of it and nothing is added.
+        Only then does it click "Add to My Spools" on the filament's page. 3DFP shows that
+        button every time, and each click adds one more 1000 g record (measured on
+        2026-11-23: one record per fetch)."""
         page = self.page
         try:
+            status = await self._signed_in(f"/my/spools/details/{tdfp_id}", settle_ms=5000)
+            if (
+                status != 404
+                and await page.get_by_role("button", name="Export slicer profile").first.count()
+            ):
+                logger.info("3DFP filament %d is already in My Spools", tdfp_id)
+                return
             await self._open(f"/filament/details/{tdfp_id}", tdfp_id, settle_ms=4000)
             button = page.get_by_role("button", name="Add to My Spools").first
             if await button.count():

@@ -197,10 +197,23 @@ async def test_a_navigation_error_during_the_login_is_browser(
 async def test_add_clicks_add_to_my_spools_once(
     browser: ThreeDfpSite, replica: ReplicaServer
 ) -> None:
+    """3DFP shows "Add to My Spools" every time; the second call finds the record on
+    the My Spools page and adds nothing (#7228)."""
     await browser.login()
     await browser.ensure_in_my_spools(30173)
     await browser.ensure_in_my_spools(30173)
     assert replica.site.adds == [30173]
+
+
+async def test_a_filament_already_in_my_spools_adds_nothing(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    replica.site.in_spools.add(30173)
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    assert replica.site.adds == []
+    exported = await browser.export(30173, "H2C", "0.4")
+    assert exported.name == EXPORT_NAME
 
 
 async def test_an_unknown_id_is_tdfp_not_found(browser: ThreeDfpSite) -> None:
