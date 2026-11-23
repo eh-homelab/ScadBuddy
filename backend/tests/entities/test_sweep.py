@@ -11,6 +11,7 @@ import pytest
 
 from scadbuddy.entities.attachments import EntityAttachmentStore
 from scadbuddy.entities.links import EntityLinkStore, LinkInput
+from scadbuddy.entities.properties import EntityPropertyStore, PropertyPatch
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.entities.sweep import sweep_orphan_entities
@@ -87,6 +88,8 @@ def test_an_orphan_loses_its_files_holds_and_links_and_an_owned_order_item_stays
     spool = _spool(pg_pool)
     attachment = _attach(attachments, pg_pool, spool)
     links.add(spool, LinkInput(url="https://example.com/spool"), BY)
+    props = EntityPropertyStore(pg_pool, entities)
+    props.apply(spool, PropertyPatch(set={"lot_number": "L1"}), BY)
     item = _order_item(pg_pool)
     links.add(item, LinkInput(url="https://example.com/item"), BY)
     with pg_pool.connection() as conn:
@@ -115,6 +118,7 @@ def test_an_orphan_loses_its_files_holds_and_links_and_an_owned_order_item_stays
         )
         == 0
     )
+    assert _count(pg_pool, "SELECT count(*) AS n FROM entity_properties") == 0
     with pg_pool.connection() as conn:
         assert entities.find(conn, spool) is None
         assert entities.find(conn, item) is not None
@@ -169,8 +173,9 @@ def test_a_sweep_takes_at_most_its_limit(pg_pool: PgPool) -> None:
 def test_a_printer_merge_keeps_the_gone_printers_files_and_links(
     pg_pool: PgPool, kept_has_files: bool
 ) -> None:
-    """Review of #6961: a merge deletes the gone printer's row, but its files and links
-    move to the kept printer, so the sweep finds no orphan."""
+    """Review of #6961: a merge deletes the gone printer's row, but its files, links and
+    properties (#7026) move to the kept printer, so the sweep finds no orphan; the kept
+    printer's value wins a key both have."""
     entities = EntityStore(pg_pool)
     attachments = EntityAttachmentStore(pg_pool, entities)
     links = EntityLinkStore(pg_pool, entities)
@@ -179,10 +184,13 @@ def test_a_printer_merge_keeps_the_gone_printers_files_and_links(
     gone = EntityRef("printer", synthetic.id)
     manual = _attach(attachments, pg_pool, gone)
     links.add(gone, LinkInput(url="https://example.com/support"), BY)
+    props = EntityPropertyStore(pg_pool, entities)
+    props.apply(gone, PropertyPatch(set={"a": "gone", "b": "gone"}), BY)
     mine = printers.create(PrinterCreate(serial="0938AB000000006", name="Mine"))
     kept = EntityRef("printer", mine.id)
     if kept_has_files:
         links.add(kept, LinkInput(url="https://example.com/mine"), BY)
+        props.apply(kept, PropertyPatch(set={"b": "kept"}), BY)
 
     assert printers.ensure_bambuddy(4, serial="0938AB000000006", name="H2C", model="H2C").id == (
         mine.id
@@ -193,6 +201,10 @@ def test_a_printer_merge_keeps_the_gone_printers_files_and_links(
     assert sorted(link.url for link in links.list(kept)) == sorted(
         ["https://example.com/support"] + (["https://example.com/mine"] if kept_has_files else [])
     )
+    assert {p.key: p.value for p in props.list(kept)} == {
+        "a": "gone",
+        "b": "kept" if kept_has_files else "gone",
+    }
     with pg_pool.connection() as conn:
         assert entities.find(conn, gone) is None
         row = conn.execute(

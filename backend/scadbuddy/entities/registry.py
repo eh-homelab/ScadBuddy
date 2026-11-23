@@ -84,7 +84,8 @@ def _ref_as_id(kind: EntityKind) -> str:
 
 
 def repoint_entity(conn: Conn, kind: str, gone: str, kept: str) -> None:
-    """Make `kind:kept` own what `kind:gone` owned: its files and links. For a merge that
+    """Make `kind:kept` own what `kind:gone` owned: its files, links and properties (a key
+    both have keeps `kept`'s value). For a merge that
     deletes `gone`'s row and keeps `kept`'s (the printers' `PRINTER_REFERENCES`), in its
     transaction; without it the sweep would take them as an orphan's."""
     rows = conn.execute(
@@ -106,6 +107,12 @@ def repoint_entity(conn: Conn, kind: str, gone: str, kept: str) -> None:
     )
     conn.execute(
         "UPDATE entity_links SET entity_id = %s WHERE entity_id = %s", (ids[kept], ids[gone])
+    )
+    conn.execute(
+        "INSERT INTO entity_properties (entity_id, key, value, source, updated_at, updated_by)"
+        " SELECT %s, key, value, source, updated_at, updated_by FROM entity_properties"
+        " WHERE entity_id = %s ON CONFLICT (entity_id, key) DO NOTHING",
+        (ids[kept], ids[gone]),
     )
     conn.execute("DELETE FROM entities WHERE id = %s", (ids[gone],))
 
