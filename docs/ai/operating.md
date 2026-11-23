@@ -1131,8 +1131,9 @@ the API; those routes are `api` routes, which take it.
 The file tools check each path with the API's own rules (`hosted_plugins/rules.py`
 `check_path`) before they build the URL, and send no request for a path they refuse. A path
 of `.` or `..` is not percent-encoded, so without this check `files/..` would resolve to
-`DELETE /{name}/`, which the API redirects (307) to `DELETE /{name}`, the whole plugin
-(#7104 tracks a check against redirects too).
+`DELETE /{name}/`, which the API redirects (307) to `DELETE /{name}`, the whole plugin. The
+agent's backend client also follows no redirect (`api/backend.ts`), so such a request fails
+instead (#7104).
 
 `hosted_plugin_publish` parks for a person's approval, which names the next version and
 the draft's changes (or, for a draft equal to the latest version, the version it offers). Once approved, the call publishes, then offers the version in the
