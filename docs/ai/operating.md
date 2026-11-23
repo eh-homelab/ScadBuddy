@@ -1112,6 +1112,31 @@ other Settings writes
 Plugins are never updated automatically (issue #297). At most two fetches run at a
 time, and one per package; another request gets 429.
 
+### The assistant's hosted plugin tools (#6938)
+
+The assistant writes and publishes hosted plugins with seven tools
+([`agent/src/tools/hostedPlugins.ts`](../../agent/src/tools/hostedPlugins.ts), spec
+`2026-11-21-hosted-plugin-feeds-design.md` §6.2). They call the API's
+`/api/v1/hosted-plugins` routes with the agent's service credential, as every tool calls
+the API; those routes are `api` routes, which take it.
+
+| Tool | Tier | What it does |
+|---|---|---|
+| `hosted_plugin_list` | `read` | Lists the hosted plugins, or reads one with its draft's files, the caps and the draft against its latest version. |
+| `hosted_plugin_file_read` | `read` | Reads one draft file as text. A file that is not UTF-8 gives its size and sha256 only. |
+| `hosted_plugin_create`, `hosted_plugin_update` | `write` | Creates a plugin, or changes its description, category or tags. |
+| `hosted_plugin_file_write`, `hosted_plugin_file_delete` | `write` | Writes one draft file as UTF-8 text (the route gets the raw bytes), or deletes one. Nothing loads from a draft. |
+| `hosted_plugin_publish` | `outward` | Publishes the draft as the next version, then offers that version to the package model (§6.3 step 5): an install when no package has the name, else a re-pin into the pending pin. |
+
+`hosted_plugin_publish` parks for a person's approval, which names the next version and
+the draft's changes. Once approved, the call publishes, then offers the version in the
+agent's own process (`offerHosted` over `PackageInstaller`, `ToolServices.hostedPackages`),
+never through the UI-guarded package routes. A person still approves the version in
+Settings before it loads. When the draft equals the latest version, the call publishes
+nothing and offers that version only when no pin or pending pin names it, so a call again
+after a failed offer offers it. Deleting a plugin and moving a draft file have no tool:
+they stay the Hosted plugins editor's.
+
 ### Status
 
 The session manager reads the enabled packages at the start of each turn

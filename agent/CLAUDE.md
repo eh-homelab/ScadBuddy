@@ -574,7 +574,10 @@ opens every one and seals it again byte for byte).
     (`hosted.ts` `CrudHostedPlugins`): its zip checked against the version's sha256 and its
     files against the content hash, then vetted; an install of a hosted source re-pins the
     installed hosted package instead (`operations.ts` `offerHosted`), and its view's
-    `not_offered` names a published version no pin names (`test/pluginPackagesHosted.test.ts`). A package's http MCP servers go
+    `not_offered` names a published version no pin names (`test/pluginPackagesHosted.test.ts`). The
+    assistant's `hosted_plugin_*` tools (#6938, `src/tools/hostedPlugins.ts`) write a draft over the
+    API's `api` routes; `hosted_plugin_publish` (`outward`) publishes, then offers in-process through
+    `ToolServices.hostedPackages` (`offerHosted`), never the UI-guarded routes. A package's http MCP servers go
     through the forwarder (`plugins/packages/mcp.ts`), and on Temporal each call is a
     `turn:<server>__<tool>` ToolCall.
   - Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every session offers `Read`,
