@@ -78,8 +78,7 @@ class ArchiveOffer(BaseModel):
     grams: float | None = None
     #: The photos Bambuddy took as the print finished, oldest first.
     finish_photos: list[str] = Field(default_factory=list)
-    #: Whether the archive has a timelapse to copy (pulled off the printer first,
-    #: ``POST /prints/{archive_id}/timelapse/pull``).
+    #: Whether the archive has a timelapse in Bambuddy to copy.
     timelapse: bool = False
     #: The attachment the attempt, or its item, holds of this archive's finish photo,
     #: if any: what is attached now, not what the import started by this read will
@@ -405,8 +404,7 @@ async def copy_in(
     elif not facts.timelapse:
         raise _refused(
             "no_timelapse",
-            f"archive {archive_id} has no timelapse: pull it off the printer first"
-            f" (POST /prints/{archive_id}/timelapse/pull)",
+            f"archive {archive_id} has no timelapse in Bambuddy",
         )
     claims.root.mkdir(parents=True, exist_ok=True)
     staging = claims.root / f".copy-{uuid.uuid4().hex}"

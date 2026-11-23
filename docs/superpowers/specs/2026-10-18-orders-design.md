@@ -876,13 +876,14 @@ The original design follows.
   the blob store and records the row; `GET /attachments/{id}` serves the blob with a
   `Range`-capable response for video.
 - The **finished photo** is the attachment with `role: finished` on the fulfilment
-  attempt. With Bambuddy linked, the archive's `finish_` photo is offered as a
-  one-click copy into it (§8.2); without, the person or the flow (through the
+  attempt. With Bambuddy linked, the archive's latest `finish_` photo is imported into
+  it with no click (§8.2, #7233); the copy route remains for a chosen photo and as the
+  fallback. Without Bambuddy, the person or the flow (through the
   agent's `get_printer_camera` tool, `agent/src/tools/print.ts:386`, which exists
   for Bambuddy printers today) adds one.
-- The **timelapse** is the attachment with `role: timelapse`: with Bambuddy, pulled
-  through `POST /prints/{archive_id}/timelapse/pull` and then copied as a blob; on
-  the native path, whatever #3823's camera work fetches.
+- The **timelapse** is the attachment with `role: timelapse`: with Bambuddy, imported
+  as a blob once Bambuddy's archive has it (§8.2, #7233); ScadBuddy does not pull it off
+  the printer for an attempt. On the native path, whatever #3823's camera work fetches.
 
 ### 6.3 Shipments
 
@@ -1206,9 +1207,10 @@ before the retry is not found under the old project: that narrow gap is accepted
 ### 8.2 Archives
 
 When an item's print settles, `print_links` (F8) names its archive; the fulfilment
-attempt copies `archive_id`, outcome, times and grams, and offers the archive's
-`finish_` photo and timelapse as one-click copies into §6.2's attachments (bytes pulled
-once through the existing proxies, then ScadBuddy's own blob). Nothing is promoted to
+attempt copies `archive_id`, outcome, times and grams, and imports the archive's
+`finish_` photo and timelapse into §6.2's attachments (bytes pulled once through the
+existing proxies, then ScadBuddy's own blob); the copy route remains for a chosen photo
+and as the fallback. Nothing is promoted to
 Bambuddy from an order: the project `Media/` folder copy that `print_attachments`
 makes is that feature's, not this one's.
 
@@ -1234,9 +1236,31 @@ and whether it has a timelapse, so a link Bambuddy made late is still copied. `P
 `timelapse` and the
 caption `Attempt <n>, Bambuddy archive <id>`. The same bytes copied again under the same
 role answer with the attachment already there. An archive with no timelapse is
-`no_timelapse`: pull it off the printer first (`POST /prints/{archive_id}/timelapse/pull`).
+`no_timelapse`: the archive has no timelapse in Bambuddy.
 `timelapse_blob_key` is not a column: the timelapse is an attachment like the photo.
 Agent tools `order_attempt_archives` (read) and `order_attempt_copy` (write).
+
+**As built, the import (#7233, #7234, #7236; spec 2026-11-05).** The copy no longer waits
+for a click. Each attempt has one `AttemptMedia` workflow on the `library` queue (id
+`attempt-media:<fulfilment id>`, `workflows/attempt_media.py`), whose step
+(`orders/archives.py` `mirror_attempt`) copies the archives' facts, then imports each
+archive's latest `finish_` photo (the last by name) and its timelapse that the attempt, or
+its item, does not have yet (`mirror_media`). Three triggers start it: a hand attempt with
+`archive_id` (`record_fulfilment`, `update_fulfilment`, after `_with_archive_facts`), a
+heard `print.outcome` (`mirror_run`), both with steps now, at +2 min and at +15 min; and
+`GET …/fulfilments/{f}/archives`, one step, only when an archive offers a medium the
+attempt lacks. No route waits on a download. The housekeeping sweep
+`housekeeping_import_attempt_media` (#7234, on the prune Schedule) starts one step for each
+attempt of the last 14 days that still lacks a medium and was not checked in the last hour
+(`media_checked_at`). Every copy, imported or by hand, carries `archive_id` and
+`archive_media` (`finished_photo` or `timelapse`) on `entity_attachments` and the audit
+line `source: archive` (#7232), and a partial unique index on
+`(subject, archive_id, archive_media, filename)` makes a race between two copies one row.
+`GET …/archives` answers `finished_attachment_id` and `timelapse_attachment_id` per
+archive: what is attached now, not what the import it started will attach. ScadBuddy
+imports only a timelapse that Bambuddy's archive already has; it never asks Bambuddy to
+scan the printer (spec 2026-11-05 §9). `ArchiveCopy.what` takes `finished_photo` or
+`timelapse` only (#7232).
 
 ### 8.3 Spool prices
 
@@ -1361,7 +1385,10 @@ menu "Order this"; the print detail page "Attach to order item".
     stays closed and never reads inputs (F13).
 11. **Money is integer minor units; rates are decimals.** Floats never enter a quote.
 12. **No body names a principal.** `created_by`, `by` and the run's starter come from
-    the author header, as flows' do.
+    the author header, as flows' do. There is no system actor: a write that no request
+    makes (an automatic import of an attempt's media, #7233) is recorded as the
+    attempt's `created_by`, and its audit line says `source: archive` (spec 2026-11-05
+    §4.5).
 13. **A trigger kind is a bus event's name.** Narrowing is a `match` on the event's
     fields; no kind is invented for one value of a field.
 

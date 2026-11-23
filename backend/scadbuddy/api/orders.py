@@ -3168,7 +3168,9 @@ async def get_attempt_archives(
     Reading them copies what they say onto the attempt once its print settled
     (``archive_ids``, the printer's times, ``actual_seconds``, ``actual_grams``), and,
     when an archive offers a medium the attempt does not have yet, starts one step of the
-    attempt's media import (#7233); the read never waits on the download.
+    attempt's media import (#7233); the read never waits on the download. Each archive's
+    ``finished_attachment_id`` and ``timelapse_attachment_id`` are what is attached now
+    (#7236), so the next read shows what the import did.
     ``linked`` is false, with no archives, without Bambuddy; an attempt by hand naming no
     archive, or one Bambuddy has linked no archive to yet, has none. 404 for an attempt
     not the item's."""
@@ -3210,9 +3212,9 @@ async def copy_archive_media(
     already there. Refused
     with 409: ``not_linked`` (no Bambuddy), ``archive_not_attempts`` (not one of the
     attempt's prints), ``archive_gone`` (deleted in Bambuddy), ``no_finish_photo``,
-    ``no_timelapse`` (pull it off the printer first, ``POST
-    /prints/{archive_id}/timelapse/pull``). Allowed in any state of the order, as an
-    upload is."""
+    ``no_timelapse`` (the archive has no timelapse in Bambuddy). The attempt's media are
+    imported with no call to this route (#7233); it is for a chosen ``name`` and the
+    fallback. Allowed in any state of the order, as an upload is."""
     check_path(order_id, item_id, fulfilment_id)
     result = await run_operation(
         ops,

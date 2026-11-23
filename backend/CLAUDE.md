@@ -1663,6 +1663,35 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   transaction), routes `api/order_attachments.py`; an item's `delivered_attachment_id`
   (`PUT …/items/{item}/delivered`) is its picture. Frontend `components/orders/OrderAttachments.tsx`,
   `ItemPicture.tsx`; mocks `src/mocks/features/orders/attachments.ts`.
+  Attempt media (#7233, #7234, #7236; spec `2026-11-05-attempt-media-auto-import-design.md`,
+  orders spec §8.2): an attempt's archives' latest `finish_` photo and timelapse are imported
+  as its attachments with no click. `workflows/attempt_media.py` `AttemptMedia` (one run per
+  attempt, id `attempt-media:<fulfilment id>`, `library` queue, AUTO_UPGRADE through
+  `VersionedAttemptMedia`), started by `orders/attempt_media.py` `start_media`
+  (`USE_EXISTING`, `ALLOW_DUPLICATE`; a failed start is logged, never raised). Its step,
+  activity `attempt_media_step`, is `orders/archives.py` `mirror_attempt`: `mirror_archives`,
+  then `mirror_media` (each medium its own try, written by the attempt's `created_by`, as
+  there is no system actor, Ruling 12), then `media_checked_at` stamped. The triggers: a
+  hand attempt with `archive_id` (`api/orders.py` `_with_archive_facts`, after the facts) and
+  a heard `print.outcome` (`mirror_run`) start it with retries (steps now, at +2 min and at
+  +15 min, ending once nothing is missing); `GET …/fulfilments/{f}/archives` starts one step
+  when an archive offers a medium the attempt lacks; and the housekeeping sweep
+  `housekeeping_import_attempt_media` (#7234, `ATTEMPT_MEDIA_SWEEP` in `SWEEPS` and
+  `PRUNE_SWEEPS`, behind `ATTEMPT_MEDIA_PATCH`; `sweep_media` over
+  `OrderStore.attempts_missing_media`) starts one step for each attempt of the last 14 days
+  that still lacks a medium and was not checked in the last hour. Provenance: every copy,
+  imported or by the copy route, writes `entity_attachments.archive_id` and `archive_media`
+  (`finished_photo` or `timelapse`), and its audit line carries `source: archive`; a medium
+  is present when the attempt or its item has a row with that pair, whatever its name
+  (`archive_media_present`), so nothing is downloaded to find that out. A partial unique
+  index on `(subject, archive_id, archive_media, filename)` makes a race one row: the loser
+  writes nothing and `copy_in` answers the winner's row. The read answers
+  `finished_attachment_id` and `timelapse_attachment_id` per archive, what is attached now.
+  Trap: `GET …/fulfilments/{f}/archives` is not a pure read. It copies the archives' facts
+  and can start an import that downloads a timelapse of up to `media_upload_max_bytes`. Only
+  a timelapse Bambuddy's archive already has is imported; ScadBuddy never asks Bambuddy to
+  scan the printer for one. `POST …/archives/{archive_id}/copy` stays, for a chosen `name`
+  and as the fallback; `what` is `finished_photo` or `timelapse` (#7232).
   Undo (spec §3.5 "Undo"): `Lifecycle.reopen_order` (a closed order back to what
   `derive` gives its rows; a cancelled one back to the status its cancel's audit row
   recorded, with the items it took) and `reopen_item` (a cancelled item back to what its

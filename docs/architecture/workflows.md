@@ -249,7 +249,10 @@ An attempt that names a Bambuddy archive imports the archive's latest finish pho
 timelapse through `AttemptMedia` (`scadbuddy/workflows/attempt_media.py`, `library`, one run
 per attempt, id `attempt-media:<fulfilment id>`, #7233). A hand attempt, a heard
 `print.outcome` and a read of the attempt's archives start it; its one activity,
-`attempt_media_step`, runs `orders/archives.py` `mirror_attempt`.
+`attempt_media_step`, runs `orders/archives.py` `mirror_attempt`. The housekeeping sweep
+`housekeeping_import_attempt_media` (on the prune Schedule, #7234) starts one step for each
+attempt of the last 14 days that still lacks a medium and was not checked in the last hour.
+The copy route (`order_attempt_copy`) stays, for a chosen finish photo and as the fallback.
 
 ## Flows
 

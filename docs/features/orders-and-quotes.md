@@ -35,6 +35,13 @@ item, markup, optional rounding, × quantity. The machine rate formula is in
 `backend/scadbuddy/orders/machine_rate.py:1-21`. A built-in `order-fulfilment` flow can
 print, wait and notify the customer (`backend/scadbuddy/orders/builtin_flow.py:46`).
 
+Attempt media: with Bambuddy linked, an attempt that names an archive gets the archive's
+latest finish photo and its timelapse as attachments with no click. The `AttemptMedia`
+workflow imports them (`backend/scadbuddy/workflows/attempt_media.py`, `orders/archives.py`
+`mirror_attempt`); a hand attempt, a heard print outcome, a read of the attempt's archives
+and a housekeeping sweep start it. The order page's row shows what is attached and offers
+a copy only for what is still missing ([orders spec §8.2](../superpowers/specs/2026-10-18-orders-design.md#82-archives)).
+
 ## Code
 
 - UI: `frontend/src/pages/OrdersPage.tsx`, `OrderPage.tsx`, `ProfitPage.tsx`,

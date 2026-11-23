@@ -2135,7 +2135,9 @@ export const orderTools: Tool[] = [
       'one (`fulfilment_id` with `accept: true`): its quantity counts as made, and the item is fulfilled once its ' +
       'accepted attempts reach its quantity. An attempt made before the design the accepted quote prices (an item ' +
       'revised after acceptance) is refused `fulfilment_stale`; order_get marks such an attempt `stale: true`. ' +
-      'Needs an accepted order.',
+      "With `archive_id`, the archive's finish photo and timelapse are imported onto the attempt in the background " +
+      'once it is recorded (#7233): the answer does not wait for them, and order_attempt_archives shows them once ' +
+      'attached. Needs an accepted order.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -2283,10 +2285,13 @@ export const orderTools: Tool[] = [
     name: 'order_attempt_archives',
     label: "Read an attempt's Bambuddy archives",
     description:
-      "The Bambuddy archives of a print attempt's run (#4253, one per plate) and what each offers to copy: its " +
-      '`finish_photos` and whether it has a `timelapse`. Reading them copies what they say onto the attempt once ' +
-      'its print settled (`archive_ids`, the times, `actual_seconds`, `actual_grams`). `linked` is false without ' +
-      'Bambuddy; an attempt by hand naming no archive, or one Bambuddy has not linked an archive to yet, has none.',
+      "The Bambuddy archives of a print attempt's run (#4253, one per plate) and what each offers: its " +
+      '`finish_photos` and whether it has a `timelapse`, and what is attached now: `finished_attachment_id` and ' +
+      '`timelapse_attachment_id` (null while not attached, #7236). Reading them copies what they say onto the ' +
+      'attempt once its print settled (`archive_ids`, the times, `actual_seconds`, `actual_grams`), and starts ' +
+      'the import of a finish photo or timelapse not attached yet (#7233); the answer does not wait for it, so ' +
+      'read again to see what it attached. `linked` is false without Bambuddy; an attempt by hand naming no ' +
+      'archive, or one Bambuddy has not linked an archive to yet, has none.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -2310,9 +2315,11 @@ export const orderTools: Tool[] = [
     description:
       "Copy an attempt's Bambuddy archive's finish photo (`finished_photo`, its latest unless `name` names one of " +
       "order_attempt_archives' `finish_photos`) or its `timelapse` onto the attempt, listed under its line item (#4253, #4251), with the role " +
-      '`finished` or `timelapse`; the same bytes again answer with the file already there. Refused with ' +
-      '`not_linked`, `archive_not_attempts`, `archive_gone`, `no_finish_photo` and `no_timelapse` (pull it off the ' +
-      'printer first).',
+      '`finished` or `timelapse`; the same bytes again answer with the file already there. The latest finish photo ' +
+      'and the timelapse are imported with no call (#7233; order_attempt_archives shows them): use this for a ' +
+      'chosen `name`, or when the import has not attached one. `what` is `finished_photo` or `timelapse` only. ' +
+      'Refused with `not_linked`, `archive_not_attempts`, `archive_gone`, `no_finish_photo` and `no_timelapse` ' +
+      '(the archive has no timelapse in Bambuddy).',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
