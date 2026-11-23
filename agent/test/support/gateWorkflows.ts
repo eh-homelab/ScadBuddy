@@ -14,8 +14,6 @@ export const respond = defineUpdate<{ kind: string; outcome: string }, [RespondA
 export const cancelInput = defineUpdate<'cancelled' | 'none', [{ reason: string }]>('cancel_input')
 export const release = defineSignal('release')
 export const rollover = defineSignal('rollover')
-/** Completes the run with its entry still pending, as a session's end does in the real one. */
-export const finish = defineSignal('finish')
 export const interrupt = defineSignal<[{ reason: string }]>('interrupt')
 
 /**
@@ -27,10 +25,6 @@ export async function gateStandIn(entryId: string, kind: 'approval' | 'answer', 
   let rolled = false
   setHandler(rollover, () => {
     rolled = true
-  })
-  let finished = false
-  setHandler(finish, () => {
-    finished = true
   })
   let released = false
   setHandler(release, () => {
@@ -74,8 +68,7 @@ export async function gateStandIn(entryId: string, kind: 'approval' | 'answer', 
     interrupted = reason
     entry.state = 'resolved'
   })
-  await condition(() => finished || interrupted !== undefined || (rolled && entry.state === 'resolved'))
-  if (finished) return 'finished'
+  await condition(() => interrupted !== undefined || (rolled && entry.state === 'resolved'))
   // Continue-as-new, as DurableSession does between turns: the entry's state goes with it.
   if (interrupted === undefined) return continueAsNew<typeof gateStandIn>(entryId, kind, false, true)
   return interrupted ?? ''

@@ -377,7 +377,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     expect(entries.filter((e) => e.session_id === session.id)).toHaveLength(3)
     expect(entries.filter((e) => e.session_id === old.id).map((e) => e.id)).toEqual([`approval:${classic.id}`])
 
-    // One session's entries: its workflow's.
+    // One session's entries: its record's, as the aggregate lists them.
     const app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
@@ -396,12 +396,16 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     expect(page.entries.every((e) => e.session_id === session.id)).toBe(true)
     expect((await app.request(`/api/v1/ai/sessions/${session.id}/pending-input`)).status).toBe(403)
     expect((await app.request(`/api/v1/ai/sessions/${randomUUID()}/pending-input`, { headers: READ })).status).toBe(404)
-    // A session whose workflow is not there (never started, or past Temporal's retention)
-    // has no open run, so no pending input (#7311).
+    // A session whose workflow is not there (never started, or archived after Temporal's
+    // retention) lists its record, as the aggregate does, with no Query (#7311).
     const gone = await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })
     expect(gone.status).toBe(200)
-    expect(await gone.json()).toEqual({ entries: [], summaries_truncated: false })
-    // With no Temporal configured, no session's workflow can be asked.
+    expect(((await gone.json()) as { entries: { id: string }[] }).entries.map((e) => e.id)).toEqual(mine.map((e) => e.id))
+    // A decided entry's row leaves the record, so it is listed nowhere.
+    await db.sql`DELETE FROM ai_pending_input WHERE request_id = ${`durable:${durable}:run-1:toolu_late`}`
+    const after = await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })
+    expect(((await after.json()) as { entries: { id: string }[] }).entries.map((e) => e.id)).toEqual([`durable:${durable}:run-1:toolu_live`])
+    // With no Temporal configured, the record still answers.
     const bare = manager({ sql: db.sql, paths: await tempPaths(), run: parks })
     withoutTemporal(bare)
     const noTemporal = createApp({
@@ -414,7 +418,9 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
       approvals: bare.approvals,
       sessions: bare,
     })
-    expect((await noTemporal.request(`/api/v1/ai/sessions/${session.id}/pending-input`, { headers: READ })).status).toBe(503)
+    const bareRead = await noTemporal.request(`/api/v1/ai/sessions/${session.id}/pending-input`, { headers: READ })
+    expect(bareRead.status).toBe(200)
+    expect(((await bareRead.json()) as { entries: unknown[] }).entries).toHaveLength(3)
     await m.interrupt(session.id, browser)
     await turn.done
   })

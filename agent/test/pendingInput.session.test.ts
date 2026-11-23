@@ -1,97 +1,65 @@
-import type { Client } from '@temporalio/client'
-import { WorkflowNotFoundError } from '@temporalio/common'
 import { describe, expect, it } from 'vitest'
-import { DurableGate, DurableUnavailable } from '../src/gate/durable.js'
-import type { PendingInputEntry } from '../src/gate/projection.js'
+import type { PendingInputEntry, ProjectionFilter } from '../src/gate/projection.js'
 import { sessionPendingInput } from '../src/routes/pendingInput.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import type { Owner } from '../src/sessions/protocol.js'
 
-// A grant holder's read of a durable session it does not own (#2863): its approvals, none
-// of a flow run's, found with one query for every entry rather than one each.
+// One session's pending input is the aggregate read narrowed to it: the record
+// (`ai_pending_input`) through the projection, never a Query of the session's workflow
+// (#7311: a closed workflow is archived after Temporal's retention and cannot be queried).
 
 const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
 const OWNER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 const GRANTED: Owner = { kind: 'bearer', id: 'token:granted', label: 'Another agent' }
+const STRANGER: Owner = { kind: 'bearer', id: 'token:stranger', label: 'Someone' }
 
-const entry = (id: string, kind: 'approval' | 'question'): PendingInputEntry => ({ id, kind }) as unknown as PendingInputEntry
+const entry = (id: string, kind: 'approval' | 'answer'): PendingInputEntry =>
+  ({ id, kind, session_id: SESSION, created_at: '2026-11-23T00:00:00.000Z' }) as unknown as PendingInputEntry
 
-describe('sessionPendingInput for a grant holder', () => {
-  it("reads which entries are a flow run's in one query, and hides those and every question", async () => {
-    const lookups: string[][] = []
-    const sessions = {
-      projection: {
-        session: async () => ({ mode: 'durable', owner: OWNER, creator: OWNER }),
-        inRun: () => Promise.reject(new Error('one query per entry')),
-        inRunOf: async (ids: readonly string[]) => {
-          lookups.push([...ids])
-          return new Set(['b'])
-        },
-        decidedOf: async () => new Set<string>(),
-      },
-      approvals: { holdsGrant: async () => true },
-      durable: { pendingInput: async () => [entry('a', 'approval'), entry('b', 'approval'), entry('q', 'question'), entry('c', 'approval')] },
-    } as unknown as SessionManager
-    const page = await sessionPendingInput(sessions, GRANTED, SESSION)
-    expect(page?.entries.map((e) => e.id)).toEqual(['a', 'c'])
-    expect(lookups).toEqual([['a', 'b', 'c']])
-  })
-})
-
-// A closed or missing workflow has no pending input (#7311, a regression from #7036: archive
-// and forget end the run, and past Temporal's retention a query of it is not found).
-describe("DurableGate.pendingInput and a session's workflow", () => {
-  const parked = [entry('a', 'approval')]
-  function gateOver(describe: () => Promise<unknown>) {
-    const queried: (string | undefined)[] = []
-    const client = {
-      withDeadline: (_deadline: number, fn: () => Promise<unknown>) => fn(),
-      workflow: {
-        getHandle: (_id: string, runId?: string) => ({
-          describe,
-          query: async () => {
-            queried.push(runId)
-            return parked
-          },
-        }),
-      },
-    } as unknown as Client
-    return { gate: new DurableGate(client), queried }
+/** A manager whose record holds `rows`; any call to Temporal fails the test. */
+function managerOver(rows: PendingInputEntry[], grant = false) {
+  const filters: ProjectionFilter[] = []
+  const temporal = () => {
+    throw new Error('the per-session read asked Temporal')
   }
-
-  it("lists an open run's input, from the run it described", async () => {
-    const { gate, queried } = gateOver(async () => ({ runId: 'run-1', status: { name: 'RUNNING' } }))
-    expect(await gate.pendingInput(SESSION)).toEqual(parked)
-    expect(queried).toEqual(['run-1'])
-  })
-
-  it.each(['COMPLETED', 'TERMINATED', 'FAILED', 'TIMED_OUT', 'CANCELLED'])('lists none for a %s run, and does not query it', async (name) => {
-    const { gate, queried } = gateOver(async () => ({ runId: 'run-1', status: { name } }))
-    expect(await gate.pendingInput(SESSION)).toEqual([])
-    expect(queried).toEqual([])
-  })
-
-  it('lists none for a workflow that is not found', async () => {
-    const { gate } = gateOver(() => Promise.reject(new WorkflowNotFoundError('not found', `session-${SESSION}`, undefined)))
-    expect(await gate.pendingInput(SESSION)).toEqual([])
-  })
-
-  it('is unavailable, not empty, while Temporal does not answer', async () => {
-    const { gate } = gateOver(() => Promise.reject(new Error('14 UNAVAILABLE: connect ECONNREFUSED')))
-    await expect(gate.pendingInput(SESSION)).rejects.toBeInstanceOf(DurableUnavailable)
-  })
-})
-
-describe('the one-session read over a closed workflow', () => {
-  it('answers an empty page, not a 404, once the gate lists nothing', async () => {
-    const sessions = {
-      projection: {
-        session: async () => ({ mode: 'durable', owner: OWNER, creator: OWNER }),
-        decidedOf: async () => new Set<string>(),
+  const sessions = {
+    projection: {
+      session: async () => ({ owner: OWNER, creator: OWNER }),
+      entries: async (filter: ProjectionFilter) => {
+        filters.push(filter)
+        return rows
       },
-      approvals: { holdsGrant: async () => false },
-      durable: { pendingInput: async () => [] },
-    } as unknown as SessionManager
+    },
+    approvals: { holdsGrant: async () => grant, listVisiblePending: async () => [] },
+    questions: { listPending: async () => ({ questions: [], summariesTruncated: false }) },
+    queue: { ownEntries: async () => [] },
+    durable: new Proxy({}, { get: temporal }),
+  } as unknown as SessionManager
+  return { sessions, filters }
+}
+
+describe("one session's pending input", () => {
+  it('lists none for an archived session whose workflow is closed or gone, with no Temporal call', async () => {
+    const { sessions } = managerOver([])
     expect(await sessionPendingInput(sessions, OWNER, SESSION)).toEqual({ entries: [], summaries_truncated: false })
+  })
+
+  it("lists an undecided row of the session's record", async () => {
+    const { sessions, filters } = managerOver([entry('durable:a', 'approval')])
+    const page = await sessionPendingInput(sessions, OWNER, SESSION)
+    expect(page?.entries.map((e) => e.id)).toEqual(['durable:a'])
+    expect(filters).toEqual([{ sessionId: SESSION, ownAnswers: true }])
+  })
+
+  it("reads a grant holder's entries with the aggregate's filter", async () => {
+    const { sessions, filters } = managerOver([entry('durable:a', 'approval')], true)
+    expect((await sessionPendingInput(sessions, GRANTED, SESSION))?.entries.map((e) => e.id)).toEqual(['durable:a'])
+    expect(filters).toEqual([{ sessionId: SESSION, ownedBy: GRANTED, allApprovals: true }])
+  })
+
+  it('is undefined for a principal that may not see the session, and reads nothing', async () => {
+    const { sessions, filters } = managerOver([entry('durable:a', 'approval')])
+    expect(await sessionPendingInput(sessions, STRANGER, SESSION)).toBeUndefined()
+    expect(filters).toEqual([])
   })
 })

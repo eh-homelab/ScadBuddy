@@ -1,4 +1,5 @@
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
+import { WorkflowNotFoundError } from '@temporalio/common'
 import { Worker } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -133,19 +134,8 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
     expect((err as Error).message).toMatch(/not answering/)
   }, 60_000)
 
-  it('lists no input for a session whose workflow is not found (past retention, #7311)', async () => {
-    expect(await new DurableGate(env.client).pendingInput(randomUUID())).toEqual([])
-  }, 60_000)
-
-  it.each(['terminated', 'completed'] as const)('lists no input for a session whose run is %s, though it parked an entry (#7311)', async (how) => {
-    const gate = new DurableGate(env.client)
-    const { sessionId } = await park()
-    expect(await gate.pendingInput(sessionId)).toHaveLength(1)
-    const handle = env.client.workflow.getHandle(sessionWorkflowId(sessionId))
-    if (how === 'terminated') await handle.terminate('archived')
-    else await handle.signal('finish')
-    await vi.waitFor(async () => expect((await handle.describe()).status.name).toBe(how.toUpperCase()), { timeout: 20_000 })
-    expect(await gate.pendingInput(sessionId)).toEqual([])
+  it('says a session with no workflow is not found', async () => {
+    await expect(new DurableGate(env.client).pendingInput(randomUUID())).rejects.toBeInstanceOf(WorkflowNotFoundError)
   }, 60_000)
 
   it('is unavailable, within its bound, while no worker answers; the interrupt Signal is recorded all the same', async () => {
@@ -185,8 +175,14 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
       return { m, sessionId, requestId }
     }
 
-    it('the browser user approves a durable entry through respond, and the per-session read asks the workflow', async () => {
+    it('the browser user approves a durable entry through respond, and the per-session read lists its record', async () => {
       const { m, sessionId, requestId } = await durableSession(agentA)
+      // The stand-in writes no record; the read lists the record, not the workflow (#7311).
+      expect((await sessionPendingInput(m, BROWSER_USER, sessionId))?.entries).toEqual([])
+      await db.sql`
+        INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, input_hash, requested_by, responders, expires_at)
+        VALUES (${requestId}, ${sessionId}, ${sessionWorkflowId(sessionId)}, 'run-1', 'approval', 'print_output', '{}',
+                ${'a'.repeat(64)}, ${db.sql.json(agentA)}, ${['browser', 'grant']}, now() + interval '10 minutes')`
       expect((await sessionPendingInput(m, BROWSER_USER, sessionId))?.entries).toEqual([expect.objectContaining({ id: requestId })])
       expect(await respond(m, BROWSER_USER, requestId, { kind: 'approval', decision: 'approve' })).toEqual({
         id: requestId,

@@ -82,12 +82,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`the pending-input read tools${TEST_DATABASE
   })
 
   it("sessions_pending_input reads one session as the caller may see it, and hides one it may not", async () => {
-    const { call, durable, m } = await setUp()
-    // A session's read asks its workflow; with no Temporal configured it fails as retryable.
+    const { call, durable, ids, m } = await setUp()
+    // A session's read is its record's, as pending_input_list's, so it needs no Temporal (#7311).
     withoutTemporal(m)
     const owned = await call(agentB, 'sessions_pending_input', { session_id: durable })
-    expect(owned.isError).toBe(true)
-    expect(JSON.stringify(owned.content)).toMatch(/Temporal/)
+    expect(owned.isError ?? false, JSON.stringify(owned.content)).toBe(false)
+    expect((firstText(owned) as Page).entries.map((e) => e.id).sort()).toEqual([ids.approval, ids.answer].sort())
+    // A grant holder that does not own it sees its approval only, as in the aggregate.
+    const granted = firstText(await call(agentA, 'sessions_pending_input', { session_id: durable })) as Page
+    expect(granted.entries.map((e) => e.id)).toEqual([ids.approval])
     const stranger = { kind: 'bearer', id: 'token:c', label: 'Agent C' } as const
     const hidden = await call(stranger, 'sessions_pending_input', { session_id: durable })
     expect(JSON.stringify(hidden.content)).toMatch(/no session/)
