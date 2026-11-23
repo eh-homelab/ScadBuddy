@@ -174,6 +174,7 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
   }
 
   async function save(target: OpenFile, executable = target.executable) {
+    if (busy !== null) return
     const text = buffers[target.path] ?? target.saved
     if (text === null) return
     const bytes = new TextEncoder().encode(text)
@@ -195,17 +196,18 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
     await act('executable', async () => {
       const written = await hostedPlugins.writeFile(name, open.path, new TextEncoder().encode(open.saved ?? ''), executable)
       setOpen({ ...open, executable: written.executable })
+      setPublished(null)
       await reloadDraft()
     })
   }
 
-  async function create(path: string, content: BlobPart, executable = false): Promise<boolean> {
+  async function create(path: string, content: BlobPart, executable = false, overwrite = false): Promise<boolean> {
     const local = pathProblem(path, executable)
     if (local) {
       setError(local)
       return false
     }
-    if (files?.files.some((f) => f.path === path)) {
+    if (!overwrite && files?.files.some((f) => f.path === path)) {
       setError(`The draft already has ${path}. Open it from the tree.`)
       return false
     }
@@ -216,7 +218,10 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
       setPublished(null)
       made = true
     })
-    if (made) await openFile(path)
+    if (made) {
+      setBuffers(({ [path]: _replaced, ...rest }) => rest)
+      await openFile(path)
+    }
     return made
   }
 
@@ -333,7 +338,7 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
                 onOpen={(path) => void openFile(path)}
               />
             )}
-            <AddFiles busy={busy === 'create'} onCreate={create} />
+            <AddFiles busy={busy === 'create'} existing={files?.files ?? []} onCreate={create} />
           </div>
           <div className="min-w-0">
             {open ? (
@@ -505,7 +510,16 @@ function FileList({
   )
 }
 
-function AddFiles({ busy, onCreate }: { busy: boolean; onCreate: (path: string, content: BlobPart, executable?: boolean) => Promise<boolean> }) {
+function AddFiles({
+  busy,
+  existing,
+  onCreate,
+}: {
+  busy: boolean
+  existing: { path: string; executable: boolean }[]
+  onCreate: (path: string, content: BlobPart, executable?: boolean, overwrite?: boolean) => Promise<boolean>
+}) {
+  const [replacing, setReplacing] = useState<{ target: string; file: File; executable: boolean } | null>(null)
   const [skill, setSkill] = useState('')
   const [skillError, setSkillError] = useState<string | null>(null)
   const [path, setPath] = useState('')
@@ -527,8 +541,20 @@ function AddFiles({ busy, onCreate }: { busy: boolean; onCreate: (path: string, 
   async function uploaded(file: File | undefined) {
     if (!file) return
     const target = path === '' || path.endsWith('/') ? `${path}${file.name}` : path
-    if (await onCreate(target, file)) setPath('')
     if (upload.current) upload.current.value = ''
+    const current = existing.find((f) => f.path === target)
+    if (current) {
+      setReplacing({ target, file, executable: current.executable })
+      return
+    }
+    if (await onCreate(target, file)) setPath('')
+  }
+
+  async function replace() {
+    if (!replacing) return
+    const { target, file, executable } = replacing
+    setReplacing(null)
+    if (await onCreate(target, file, executable, true)) setPath('')
   }
 
   return (
@@ -582,6 +608,22 @@ function AddFiles({ busy, onCreate }: { busy: boolean; onCreate: (path: string, 
         </div>
         <p className="text-[11px] text-muted-foreground">Under skills/, agents/ or commands/. A path ending in / takes the uploaded file&rsquo;s name.</p>
       </form>
+      <AlertDialog open={replacing !== null} onOpenChange={(open) => !open && setReplacing(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace {replacing?.target}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The uploaded file takes its place in the draft. Published versions keep their copy.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep it</AlertDialogCancel>
+            <Button type="button" onClick={() => void replace()}>
+              Replace file
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
@@ -670,8 +712,8 @@ function FilePane({
       </div>
       {text === null ? (
         <p className="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground">
-          This file is not text ({formatBytes(file.size)}), so it is not edited here. Upload a new copy at the same path, or
-          delete it.
+          This file is not text ({formatBytes(file.size)}), so it is not edited here. Upload a new copy at the same path to
+          replace it, or delete it.
         </p>
       ) : (
         <Suspense fallback={<Skeleton role="status" aria-label="Loading the editor" className="h-[26rem] w-full" />}>
@@ -904,6 +946,9 @@ function OfferPanel({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<string | null>(null)
+  useEffect(() => {
+    setResult(null)
+  }, [plugin.latest_version])
   if (pkg === null) {
     return (
       <section aria-label="Assistant" className="space-y-1 rounded-lg border p-3">

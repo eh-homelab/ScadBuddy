@@ -11,8 +11,28 @@ import { HostedPluginsPanel } from './HostedPlugins'
 
 // Monaco needs layout and workers jsdom lacks (SourceEditor.test); a textarea stands in.
 vi.mock('./HostedFileEditor', () => ({
-  default: ({ path, initialValue, onChange }: { path: string; initialValue: string; onChange: (text: string) => void }) => (
-    <textarea aria-label={`Edit ${path}`} defaultValue={initialValue} onChange={(e) => onChange(e.target.value)} />
+  default: ({
+    path,
+    initialValue,
+    onChange,
+    onSave,
+  }: {
+    path: string
+    initialValue: string
+    onChange: (text: string) => void
+    onSave: () => void
+  }) => (
+    <textarea
+      aria-label={`Edit ${path}`}
+      defaultValue={initialValue}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.ctrlKey && e.key === 's') {
+          e.preventDefault()
+          onSave()
+        }
+      }}
+    />
   ),
 }))
 
@@ -261,6 +281,74 @@ describe('HostedPluginsPanel', () => {
     await user.click(within(editor).getByRole('button', { name: 'Close' }))
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Hosted plugin wave-helper' })).not.toBeInTheDocument())
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('replaces a file that is not text with an upload, after a confirm, and keeps its executable bit', async () => {
+    await hostedPlugins.writeFile('print-notes', 'skills/print-notes/blob.bin', new Uint8Array([0xff, 0xfe, 0x00]), true)
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await user.click(await within(editor).findByRole('button', { name: 'skills/print-notes/blob.bin' }))
+    expect(await within(editor).findByText(/Upload a new copy at the same path to\s+replace it/)).toBeInTheDocument()
+
+    await user.type(within(editor).getByLabelText('New file'), 'skills/print-notes/blob.bin')
+    await user.upload(within(editor).getByLabelText('Upload a file into the draft'), new File(['now text'], 'x.txt'))
+    expect(await screen.findByText('Replace skills/print-notes/blob.bin?')).toBeInTheDocument()
+    // Nothing is written until the person confirms.
+    expect((await hostedPlugins.readFile('print-notes', 'skills/print-notes/blob.bin')).bytes.length).toBe(3)
+    await user.click(screen.getByRole('button', { name: 'Replace file' }))
+    await waitFor(async () => {
+      const read = await hostedPlugins.readFile('print-notes', 'skills/print-notes/blob.bin')
+      expect(new TextDecoder().decode(read.bytes)).toBe('now text')
+      expect(read.executable).toBe(true)
+    })
+  })
+
+  it('sends one save for two quick Ctrl+S presses', async () => {
+    let puts = 0
+    server.use(
+      http.put('/api/v1/hosted-plugins/:name/files/*', async () => {
+        puts += 1
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        return HttpResponse.json({ path: 'skills/print-notes/SKILL.md', size: 3, executable: false })
+      }),
+    )
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await user.click(await within(editor).findByRole('button', { name: 'skills/print-notes/SKILL.md' }))
+    const text = await within(editor).findByLabelText('Edit skills/print-notes/SKILL.md')
+    await user.type(text, 'x')
+    await user.keyboard('{Control>}ss{/Control}')
+    await waitFor(() => expect(within(editor).getByRole('button', { name: 'Save' })).toBeDisabled())
+    expect(puts).toBe(1)
+  })
+
+  it('clears the offer result when a later publish changes the version', async () => {
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await user.click(await within(editor).findByRole('button', { name: 'Offer version 1' }))
+    const assistant = within(editor).getByRole('region', { name: 'Assistant' })
+    expect(await within(assistant).findByText(/Offered version 1\./)).toBeInTheDocument()
+
+    await user.click(within(editor).getByRole('button', { name: 'skills/print-notes/SKILL.md' }))
+    await user.type(await within(editor).findByLabelText('Edit skills/print-notes/SKILL.md'), 'More.')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(within(editor).getByRole('button', { name: 'Publish version 2' })).toBeEnabled())
+    await user.click(within(editor).getByRole('button', { name: 'Publish version 2' }))
+    await within(editor).findByText('Published version 2.')
+    expect(within(assistant).queryByText(/Offered version 1\./)).not.toBeInTheDocument()
+  })
+
+  it('clears the published notice when only the executable bit changes', async () => {
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await user.click(await within(editor).findByRole('button', { name: 'skills/print-notes/SKILL.md' }))
+    await user.type(await within(editor).findByLabelText('Edit skills/print-notes/SKILL.md'), 'More.')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(within(editor).getByRole('button', { name: 'Publish version 2' })).toBeEnabled())
+    await user.click(within(editor).getByRole('button', { name: 'Publish version 2' }))
+    await within(editor).findByText('Published version 2.')
+    await user.click(within(editor).getByRole('checkbox', { name: 'Executable' }))
+    await waitFor(() => expect(within(editor).queryByText('Published version 2.')).not.toBeInTheDocument())
   })
 
   it('deletes a plugin and its package', async () => {
