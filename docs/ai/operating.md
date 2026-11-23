@@ -1136,9 +1136,12 @@ the API; those routes are `api` routes, which take it.
 The file tools check each path with the API's own rules (`hosted_plugins/rules.py`
 `check_path`) before they build the URL, and send no request for a path they refuse. A path
 of `.` or `..` is not percent-encoded, so without this check `files/..` would resolve to
-`DELETE /{name}/`, which the API redirects (307) to `DELETE /{name}`, the whole plugin. The
-agent's backend client also follows no redirect (`api/backend.ts`), so such a request fails
-instead (#7104).
+`DELETE /{name}/`, which the API redirects (307) to `DELETE /{name}`, the whole plugin. Every
+backend call of the agent refuses a path parameter of `.` or `..` before it builds the URL
+(`api/pathSegments.ts`: the typed client's `pathSerializer`, `crudFetch`, the order-cost post),
+since mid-path such a segment reaches another route with no redirect at all
+(`/orders/o1/items/../quote` is `/orders/o1/quote`, #7221). The backend client also follows
+no redirect (`api/backend.ts`), a backstop (#7104).
 
 `hosted_plugin_publish` parks for a person's approval, which names the next version and
 the draft's changes (or, for a draft equal to the latest version, the version it offers).
