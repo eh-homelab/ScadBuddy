@@ -261,6 +261,9 @@ def test_a_failure_that_is_not_temporals_is_raised_again(
     runner.search = _not_temporal  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="a bug"):
         client.post(f"{URL}/tdfp/search", json={"brand": "SUNLU"})
+    runner.create = _not_temporal  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="a bug"):
+        client.post(f"{URL}/tdfp/filaments", json=BODY, headers=KEY)
 
 
 def test_a_type_that_took_another_id_meanwhile_keeps_it(
