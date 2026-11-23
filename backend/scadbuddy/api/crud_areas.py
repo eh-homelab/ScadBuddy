@@ -125,7 +125,8 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: its ``hosted-plugins`` area is ``…/agent/hosted-plugins/*``, a hosted plugin's latest
 #: version and a version's zip (#6932, the same module); its ``plugin-feeds`` area is
 #: ``…/agent/plugin-feeds/{feed}``, a marketplace feed's packages at their current pins
-#: (#6933, the same module). Its ``gate`` area is ``…/agent/gate/*``: the tool-call
+#: (#6933, the same module), and ``…/plugin-feeds/{feed}/packages/{name}``, a package added
+#: to the feed or removed (#6936). Its ``gate`` area is ``…/agent/gate/*``: the tool-call
 #: gate's writes, an entry opened, a run grant's approval checked against ``flow_grants``, a
 #: flow's refusal, an entry resolved, a response decided against the row's record by the
 #: gate's validator, and the record read, each with its session events, status, audit row and

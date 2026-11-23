@@ -355,9 +355,11 @@ like a hosted one:
   and remove it. The package is installed, reviewed, approved and re-pinned through the
   existing package routes. Nothing about the feed has a lifecycle of its own.
 - The feed emits a git pin as its source with `sha` set to the pinned commit. A bytes pin
-  (`archive`, `npm`) is emitted as an `archive` that points at ScadBuddy's own mirrored
-  copy (6.6), with its `sha256`. A client therefore gets exactly the bytes that were
-  approved.
+  (`archive`, `npm`) is emitted as an `archive` that ScadBuddy serves from its own mirrored
+  copy (6.6), with the served zip's `sha256`. A zip pin is served as its exact approved
+  bytes. An npm tarball is served as a deterministic zip of its approved files, because
+  Claude Code's `archive` takes a zip only. The archive's URL names the served zip's
+  `sha256`, so an immutable URL never serves other bytes.
 - A package approved with `allow_refused` (hooks, MCP servers) can be listed. The Add to
   feed control says that every client of the feed will run them.
 

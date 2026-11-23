@@ -3645,6 +3645,17 @@ export const api = {
   /** #6933 — the marketplace feed Claude Code installs plugins from, as Settings shows it. */
   getPluginFeed: (feed: string) => request<PluginFeedView>(`/ai/plugin-feeds/${seg(feed)}`),
 
+  /** #6936 — lists an installed plugin package in the feed (a settings write from the UI only). */
+  addPluginFeedPackage: (feed: string, name: string) =>
+    request<{ name: string; added: boolean }>(`/ai/plugin-feeds/${seg(feed)}/packages/${seg(name)}`, {
+      method: 'PUT',
+      body: '{}',
+    }),
+
+  /** #6936 — takes a plugin package out of the feed. */
+  removePluginFeedPackage: (feed: string, name: string) =>
+    request<undefined>(`/ai/plugin-feeds/${seg(feed)}/packages/${seg(name)}`, { method: 'DELETE' }),
+
   /** #251 — the /mcp auth mode and anonymous cap (AI design spec §8.3). */
   getMcpAuth: () => request<McpAuthSetting>('/ai/mcp/auth'),
 
