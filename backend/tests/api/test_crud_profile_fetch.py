@@ -1160,10 +1160,20 @@ def _edits(fetch: Fetch, spool_id: UUID) -> list[Any]:
 
 
 @respx.mock
-def test_an_import_writes_edited_on_spools_that_inherit(fetch: Fetch) -> None:
+def test_an_import_writes_edited_on_spools_that_inherit(
+    fetch: Fetch, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A type edit fans out (spec §5.7): the import's preset and K-value change each write
     one ``edited`` event, as the run's starter, on a spool that inherits it; a spool that
     sets every changed key itself gets none."""
+    from scadbuddy.filament.profile_fill import TypeFiller
+
+    async def no_fill(self: Any, settings: Any, type_ids: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    # The first presets also fill the type's empty fields (#6714): since #7244 they are
+    # ScadBuddy presets the fill reads, and its own edit is not what this counts.
+    monkeypatch.setattr(TypeFiller, "fill", no_fill)
     spools = _state(fetch.client).components.get(FILAMENT).spools
     heir = spools.create(SpoolCreate(type_id=fetch.type_id), actor="ann").id
     own = spools.create(SpoolCreate(type_id=fetch.type_id), actor="ann").id
