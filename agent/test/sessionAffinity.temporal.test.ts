@@ -18,7 +18,7 @@ import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { SessionBlobs } from './support/sql/sessionBlobs.js'
-import { DurableTurns } from '../src/sessions/durable.js'
+import { DurableTurns, seenAtMs } from '../src/sessions/durable.js'
 import { type SessionManager, type SessionManagerDeps, SETTING_SESSION_MAX_TURNS } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
@@ -269,6 +269,38 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     return (pollers ?? []).length > 0
   }
   const pollUntil = <T>(read: () => Promise<T> | T, expected: T, timeout = 30_000) => expect.poll(read, { timeout, interval: 100 }).toEqual(expected)
+
+  /**
+   * Waits, as `pollUntil`, until `replica`'s session host queue is listed live. On a timeout it
+   * says what the listing and each partition of both queues showed, so a failure on CI carries
+   * its evidence (#7306: B was never listed within 30 s on hosted runners, and not reproduced
+   * locally).
+   */
+  async function untilListed(replica: { identity: string }) {
+    const host = sessionHostQueue(replica.identity)
+    try {
+      await pollUntil(async () => (await liveHostQueues(env.client)).has(host), true)
+    } catch (err) {
+      const now = Date.now()
+      const lines: string[] = []
+      const live = await liveHostQueues(env.client).then(
+        (set) => [...set].join(', '),
+        (e: unknown) => `failed: ${String(e)}`,
+      )
+      lines.push(`liveHostQueues now: ${live}`)
+      for (const queue of [TASK_QUEUE, host]) {
+        // The root partition, then the dev server's other three (`/_sys/<queue>/<n>`).
+        for (const name of [queue, ...[1, 2, 3].map((n) => `/_sys/${queue}/${n}`)]) {
+          const listed = await env.client.workflowService.describeTaskQueue({ namespace: 'default', taskQueue: { name }, taskQueueType: 2 }).then(
+            ({ pollers }) => (pollers ?? []).map((p) => `${p.identity} (${now - seenAtMs(p.lastAccessTime)} ms ago)`).join(', ') || 'none',
+            (e: unknown) => `failed: ${String(e)}`,
+          )
+          lines.push(`${name}: ${listed}`)
+        }
+      }
+      throw new Error(`${host} was not listed live (#7306):\n${lines.join('\n')}`, { cause: err })
+    }
+  }
 
   /** The stub tool: counts its calls and answers once `slowGate` lets it. */
   const slow = tool('slow', 'Does something slowly', { q: z.string() }, async ({ q }) => {
@@ -941,7 +973,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const { id, turn } = await startOn(a, 'do the slow thing')
     await pollUntil(() => slowCalls, 1)
     const b = await replica('b')
-    await pollUntil(async () => (await liveHostQueues(env.client)).has(sessionHostQueue(b.identity)), true)
+    await untilListed(b)
     // Only A can answer the shared acquire: B's agent-tools worker stops (its poller stays listed,
     // fresh, for a minute), and B's session host worker still runs.
     await b.tools.stop()
@@ -970,7 +1002,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const run = await runningRun(id)
     await pollUntil(() => slowCalls, 1)
     const b = await replica('b')
-    await pollUntil(async () => (await liveHostQueues(env.client)).has(sessionHostQueue(b.identity)), true)
+    await untilListed(b)
     await Promise.all([b.tools.stop(), b.hosts.stop()])
     replicas.splice(replicas.indexOf(a), 1)
     await stopReplica(a)
