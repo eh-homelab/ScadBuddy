@@ -169,6 +169,26 @@ describe('entity property tools', () => {
     expect(() => tool('entity_property_set').parse({ entity: TYPE, set: { td: 1.8, ok: true, lot: 'L1', gtins: ['a'], gone: null } })).not.toThrow()
   })
 
+  it('lists every keyword the backend allows in the schema tool description', () => {
+    // A copy of backend/scadbuddy/entities/properties.py TOP_KEYWORDS and KEY_KEYWORDS (minus the ones named in prose).
+    const keywords = [
+      'type', 'properties', 'additionalProperties', '$schema', '$comment', 'title', 'description', 'examples',
+      'default', 'deprecated', 'readOnly', 'writeOnly', 'enum', 'const', 'minimum', 'maximum', 'exclusiveMinimum',
+      'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'format', 'items', 'minItems', 'maxItems', 'uniqueItems',
+    ]
+    const text = tool('entity_property_schema_set').description
+    for (const k of keywords) expect(text, k).toContain(`\`${k}`)
+  })
+
+  it('summarises a set with its removals, and counts code points like the backend', () => {
+    const t = tool('entity_property_set')
+    expect(t.summarize?.({ entity: TYPE, set: { mpn: 'x', gtin: null } } as never)).toContain('set mpn; remove gtin')
+    expect(() => t.parse({ entity: TYPE, set: { note: '😀'.repeat(1500) } })).not.toThrow()
+    expect(() => t.parse({ entity: TYPE, set: { note: '😀'.repeat(2001) } })).toThrow()
+    expect(() => t.parse({ entity: TYPE, set: { note: ['😀'.repeat(400)] } })).not.toThrow()
+    expect(() => t.parse({ entity: TYPE, set: { note: 'a\u0000b' } })).toThrow()
+  })
+
   it("reads and replaces a kind's schema", async () => {
     const bodies: unknown[] = []
     const schema = { type: 'object', properties: { td: { type: 'number' } } }

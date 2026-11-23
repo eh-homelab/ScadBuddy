@@ -33,7 +33,12 @@ const deleted = (what: string) => json({ deleted: what })
 // `write`, the same as filament_type_upsert and filament_spool_upsert, which take `properties` too.
 
 const PROPERTY_KEY = /^[a-z][a-z0-9_]{0,63}$/
-const propertyValue = z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.array(z.string().max(500)).max(50)])
+// The backend counts code points, and refuses U+0000.
+const codePoints = (max: number) => (s: string) => [...s].length <= max
+const noNul = (s: string) => !s.includes('\u0000')
+const propertyString = (max: number) =>
+  z.string().refine(codePoints(max), `up to ${max} characters`).refine(noNul, 'no U+0000')
+const propertyValue = z.union([propertyString(2000), z.number().finite(), z.boolean(), z.array(propertyString(500)).max(50)])
 
 /** A properties patch: each key to its new value, `null` removes it. */
 export const propertySet = z
@@ -48,8 +53,17 @@ export const PROPERTY_RULES =
   'boolean or a list of up to 50 strings (each up to 500), and `null` removes the key; an entity has up to 200 ' +
   'keys. The whole set applies or none of it (422 `bad_property_value` names the key). A rename is one set: the ' +
   'old key `null` and the new key its value. Suggested keys, which the kind\'s schema documents and checks: on a ' +
-  'spool type `mpn`, `gtin` (a list), `asin`, `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool ' +
+  'spool type `mpn`, `gtin` and `asin` (lists), `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool ' +
   '`lot_number` (entity_property_schema_get lists them). Any other key is kept as given.'
+
+const code = (k: string) => `\`${k}\``
+/** The keywords the backend allows (entities/properties.py TOP_KEYWORDS, KEY_KEYWORDS): `type` is described apart. */
+export const SCHEMA_TOP_KEYWORDS = ['type: "object"', 'properties', 'additionalProperties: true', '$schema', '$comment', 'title', 'description', 'examples']
+export const SCHEMA_KEY_KEYWORDS = [
+  '$comment', 'title', 'description', 'default', 'examples', 'deprecated', 'readOnly', 'writeOnly', 'enum', 'const',
+  'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'format',
+  'minItems', 'maxItems', 'uniqueItems',
+]
 
 const propertyKind = z.string().regex(/^[a-z_]{1,32}$/).describe('An entity kind: `spool_type`, `spool`, `printer`, `supplier`, ...')
 
@@ -260,7 +274,7 @@ export const entityTools = [
     input: z.object({ entity, set: propertySet.describe('Each key to its new value; `null` removes the key') }),
     risk: 'write',
     routes: ['PATCH /api/v1/entities/{ref}/properties'],
-    summarize: ({ entity: ref, set }) => `Set ${Object.keys(set).join(', ')} on ${ref}`,
+    summarize: ({ entity: ref, set }) => `Change the properties of ${ref}${propertyChanges(set)}`,
     handler: async ({ entity: ref, set }, { backend }) =>
       withPage(
         ref,
@@ -285,11 +299,10 @@ export const entityTools = [
     label: "Replace a kind's property schema",
     description:
       "Replace a kind's property schema whole (read it with entity_property_schema_get first and send it back changed). " +
-      'A JSON Schema (Draft 2020-12) object of plain keywords only: at the top `type: "object"`, `properties`, ' +
-      '`additionalProperties: true`, `$schema`, `$comment`, `title`, `description`; per key a `type` (a scalar or ' +
-      '`array`, or a list of them with `"null"`), with `$comment`, `title`, `description`, `default`, `examples`, ' +
-      '`enum`, `const`, number and length bounds, `format` (not `regex`), `items` (string-typed only), ' +
-      '`minItems`, `maxItems` and `uniqueItems`. Each key must still take some value. Any other keyword is 422 `bad_property_schema`, naming it. Writes ' +
+      'A JSON Schema (Draft 2020-12) object of plain keywords only: at the top ' + SCHEMA_TOP_KEYWORDS.map(code).join(', ') +
+      '; per key a `type` (a scalar or `array`, or a list of them with `"null"`) with ' + SCHEMA_KEY_KEYWORDS.map(code).join(', ') +
+      '; `format` is never `regex`; `items` (string-typed only, with the same keywords but `items`). Each key must still take some value. ' +
+      'Any other keyword is 422 `bad_property_schema`, naming it. Writes ' +
       'ScadBuddy only.',
     input: z.object({ kind: propertyKind, schema: z.record(z.string(), z.unknown()).describe('The whole schema') }),
     risk: 'write',
