@@ -255,8 +255,8 @@ importers:
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.15.0(supports-color@10.2.2))
       '@opentelemetry/context-async-hooks':
-        specifier: 3.1.0
-        version: 3.1.0(@opentelemetry/api@1.10.0)
+        specifier: 3.1.1
+        version: 3.1.1(@opentelemetry/api@1.10.0)
       '@temporalio/testing':
         specifier: 1.25.0
         version: 1.25.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)
@@ -698,12 +698,6 @@ packages:
     engines: {node: '>=22.15.0'}
     peerDependencies:
       '@opentelemetry/api': ^1.10.0
-
-  '@opentelemetry/context-async-hooks@3.1.0':
-    resolution: {integrity: sha512-IEgk4jBcLY1yLej9dFSJJWEIkUZTRsfBkJ0p/M8hpFKYBMYNzB8wwoziACFRiFW8mgpyBTRCjqjnd/IV5OoNLg==}
-    engines: {node: '>=22.15.0'}
-    peerDependencies:
-      '@opentelemetry/api': '>=1.0.0 <1.11.0'
 
   '@opentelemetry/context-async-hooks@3.1.1':
     resolution: {integrity: sha512-xOosgbes1+6bHPhVnYCd3EihFN8MpafEQwzmxeZ2zKXwWwV4F4780Pb097E326RZjCHTvUkwOYnXOALTfRfHVg==}
@@ -3160,10 +3154,6 @@ snapshots:
       '@opentelemetry/api': 1.10.0
       '@opentelemetry/core': 3.1.1(@opentelemetry/api@1.10.0)
       yaml: 2.9.1
-
-  '@opentelemetry/context-async-hooks@3.1.0(@opentelemetry/api@1.10.0)':
-    dependencies:
-      '@opentelemetry/api': 1.10.0
 
   '@opentelemetry/context-async-hooks@3.1.1(@opentelemetry/api@1.10.0)':
     dependencies:
