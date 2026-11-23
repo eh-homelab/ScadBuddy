@@ -263,7 +263,7 @@ same way, `vite.config.ts`).
   History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
   the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
   `charts/LineChart`) and metrics panel (`SpoolMetricsPanel`); the Metrics tab (`pages/filament/MetricsTab.tsx`:
-  range, bucket and group in the address through `metricsQuery.ts`, behind "Remember my view"); the
+  range, bucket and group in the address through `metricsQuery.ts`, behind "Remember my view"; its "By material number" table, `MaterialNumberTable`, #7152); the type page's cost calculator (`CostCalculator`, #7152: the sum is `GET /filament/cost-per-kg`'s, and "Use as default cost" only fills the cost field); the
   forecast view of the Spools tab (`SpoolForecast`, `TypeForecastTable`) and the "Consumed" tile. The
   charts are plain SVG in `components/filament/charts/` (`ColumnChart`, `LineChart`, `BarList`, `useWidth`).
   A value's colour follows the value, ranked over 365 days (`MetricsTab` `ranked`); until that request

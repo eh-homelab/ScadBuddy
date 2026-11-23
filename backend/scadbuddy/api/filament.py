@@ -107,6 +107,7 @@ from scadbuddy.filament.catalog import (
 )
 from scadbuddy.filament.colour_catalog import ColourSync, ColourSyncRequest, ColourSyncs
 from scadbuddy.filament.component import Filament, FilamentDep
+from scadbuddy.filament.cost_calc import CostCalculation, CostQuery, CostTooHighError, calculate
 from scadbuddy.filament.csv_import import (
     ImportPreview,
     ImportRefusedError,
@@ -1717,6 +1718,59 @@ async def get_purchasing_metrics(
 ) -> mm.PurchasingMetrics:
     start, end = _range(since, until, 365)
     return await asyncio.to_thread(filament.metrics.purchasing, start, end)
+
+
+@router.get(
+    "/metrics/material-numbers",
+    response_model=mm.MaterialNumberStats,
+    summary="Stock, use and value by material number",
+    description=(
+        "Per material number (a spool type's `code`, which Bambuddy calls `material_number`, "
+        "case folded; `key` `null` for untyped spools, listed last): every type of that code "
+        "with `archived`, the unarchived spools, their grams left and their value at each "
+        "spool's cost per kg (else the default cost; `null` when none has a cost) in "
+        "`currency`, the shop's; and `used_g` and `wasted_g`, the grams of the plates that "
+        "ended from `since` to `until`, both included (default the 180 days before today), "
+        "counted as `GET /filament/metrics` counts consumption: archived spools too, a plate "
+        "SB and Bambuddy both booked once, failed and cancelled plates also as waste. A "
+        "material number with no spool in stock and no plate in the range is left out. 422 "
+        "when `since` is after `until` or the range is longer than three years."
+    ),
+)
+async def get_material_number_stats(
+    filament: FilamentDep, since: date | None = None, until: date | None = None
+) -> mm.MaterialNumberStats:
+    start, end = _range(since, until, 180)
+    return await asyncio.to_thread(filament.metrics.material_numbers, start, end)
+
+
+@router.get(
+    "/cost-per-kg",
+    response_model=CostCalculation,
+    summary="Work out a cost per kg",
+    description=(
+        "What `price` (paid for `quantity` spools, default 1), `tax` and `shipping` (default "
+        "0) come to per kg of filament when each spool holds `net_weight_g` grams: "
+        "`cost_per_kg` with all three in (what an invoice line gives its spools), and "
+        "`price_per_kg` with shipping out (a price point's basis). Money is a decimal string "
+        "of at most four places, the results rounded half up to four, in `currency`, the "
+        "shop's (`orders_currency`). It writes nothing. 422 for an unknown parameter, an "
+        "amount out of bounds or a cost per kg of 10^8 or more."
+    ),
+)
+async def get_cost_per_kg(
+    store: SettingsStoreDep, query: Annotated[CostQuery, Query()]
+) -> CostCalculation:
+    try:
+        settings = await asyncio.to_thread(store.snapshot)
+    except DATABASE_ERRORS as error:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "the settings could not be read; try again"
+        ) from error
+    try:
+        return calculate(query, settings.runtime.orders_currency)
+    except CostTooHighError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
 
 
 async def _assignments(store: SettingsStore, cache: AssignmentsCache) -> list[SpoolAssignment]:
