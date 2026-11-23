@@ -20,7 +20,7 @@ Queue names are settings (`scadbuddy/core/config.py:40`, `scadbuddy/core/setting
 | `render` | render worker, `python -m scadbuddy.worker` (`scadbuddy/worker.py:1081`) | `RenderPiece`, `RenderPreview`, `TemplatePipeline`, `MigrateInputs` (`scadbuddy/workflows/client.py:143`) |
 | `bambuddy` | print worker, `--queue bambuddy` (`scadbuddy/worker.py:1521`) | `PrintRun`, `PrintLanSequence`, `Operation` (bambuddy kinds), `FollowPrint`, `PrinterWatch`, `LanAutoImport`, `FilamentBbSync`, `FilamentBbPull`, `SensorNotifyPass` (`scadbuddy/workflows/client.py:199-217`) |
 | `bambuddy-follow` | print worker | activities only: `follow_print`, `printer_watch` (`scadbuddy/workflows/client.py:229-250`) |
-| `library` | the API process (`scadbuddy/main.py:1899-1989`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing` (`scadbuddy/main.py:1832-1842`) |
+| `library` | the API process (`scadbuddy/main.py:1899-1989`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing`, `AttemptMedia` (`scadbuddy/main.py:1832-1842`) |
 | `projects` | projects worker, `--queue projects` (`scadbuddy/worker.py:1607`) | `ProjectWorkflow` (flow runs), `Operation` (flow kinds) (`scadbuddy/workflows/projects_worker.py:81-110`) |
 | `slicer` | the Rust slicer (`workers/rust/bins/scadbuddy-slicer/src/main.rs:103-107`) | activity `slice_plate` only (`workers/rust/crates/sb-slicer/src/activity.rs:22-23`) |
 | `profile-fetch` | profile-fetch worker, `python -m scadbuddy.profile_fetch` (`scadbuddy/profile_fetch/worker.py:92`) | `ProfileFetch`, started by the API per run (`scadbuddy/profile_fetch/workflow.py:126`); `TdfpSearch` and `TdfpCreate`, started by the API per 3DFP search or add and awaited (#7025, `scadbuddy/filament/tdfp.py`) |
@@ -245,6 +245,11 @@ The steps and their code are in [features/orders-and-quotes.md](../features/orde
 The order operation kinds are `order_item_quote`, `order_item_render`,
 `order_item_print`, `order_attachment_add` and `order_attempt_copy`
 (`scadbuddy/orders/operations.py:1140-1214`), all on `library`.
+An attempt that names a Bambuddy archive imports the archive's latest finish photo and its
+timelapse through `AttemptMedia` (`scadbuddy/workflows/attempt_media.py`, `library`, one run
+per attempt, id `attempt-media:<fulfilment id>`, #7233). A hand attempt, a heard
+`print.outcome` and a read of the attempt's archives start it; its one activity,
+`attempt_media_step`, runs `orders/archives.py` `mirror_attempt`.
 
 ## Flows
 

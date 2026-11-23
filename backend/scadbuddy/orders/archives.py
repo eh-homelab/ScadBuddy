@@ -10,10 +10,13 @@ and grams summed (:func:`mirror_archives`). That runs when the print's outcome i
 attempt by hand that names its archives copies them when it is recorded or edited too
 (``api/orders.py`` ``record_fulfilment``, ``update_fulfilment``, #6132).
 
-An archive's ``finish_`` photo and its timelapse are offered as one-click copies into the
-attempt's attachments (§6.2, #4251): the bytes are pulled once through the seam into the claim
-store, kept as ScadBuddy's own blob and recorded as the attachment, with the role
-``finished`` or ``timelapse`` (:func:`copy_in`). Nothing goes the other way.
+An archive's ``finish_`` photo and its timelapse are copied into the attempt's
+attachments (§6.2, #4251): the bytes are pulled once through the seam into the claim store,
+kept as ScadBuddy's own blob and recorded as the attachment, with the role ``finished`` or
+``timelapse`` (:func:`copy_in`). Nothing goes the other way. The copy is imported with no
+click (#7233, spec 2026-11-05 §4.1): a hand attempt with an archive, a heard outcome and a
+read of the archives start the attempt's ``AttemptMedia`` workflow, whose step is
+:func:`mirror_attempt`. The copy route stays, for a chosen photo and as the fallback.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -29,6 +32,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders import attachments
+from scadbuddy.orders.attempt_media import MediaStarter, start_media
 from scadbuddy.orders.integrations import (
     ArchiveFacts,
     MediaTooLargeError,
@@ -52,6 +56,7 @@ from scadbuddy.orders.store import (
     item_subject,
 )
 from scadbuddy.store import BlobStore
+from scadbuddy.workflows.attempt_media import AttemptMediaStep
 
 logger = logging.getLogger(__name__)
 
@@ -152,15 +157,137 @@ async def mirror_archives(
     return written, facts
 
 
-async def mirror_run(lifecycle: Lifecycle, integrations: OrderIntegrations, run_id: str) -> None:
-    """:func:`mirror_archives` for the attempt a run started, if any; logged, never
-    raised: the attempt's archives are read again when they are shown."""
+async def mirror_run(
+    lifecycle: Lifecycle, integrations: OrderIntegrations, run_id: str, starter: MediaStarter
+) -> None:
+    """:func:`mirror_archives` for the attempt a run started, if any, then the start of
+    its media import, with retries (spec 2026-11-05 §4.1); logged, never raised: the
+    attempt's archives are read again when they are shown."""
     try:
         attempt = await asyncio.to_thread(lifecycle.store.print_attempt, run_id)
-        if attempt is not None:
-            await mirror_archives(lifecycle, integrations, attempt)
+        if attempt is None:
+            return
+        await mirror_archives(lifecycle, integrations, attempt)
     except Exception:
         logger.warning("could not copy an order item's print archives", exc_info=True)
+        return
+    await start_media(starter, attempt.id, retries=True)
+
+
+def _wanted(facts: ArchiveFacts) -> list[tuple[ArchiveCopyMedia, str | None]]:
+    """What the archive offers: its latest ``finish_`` photo (the last by name, as the
+    names carry a timestamp; Bambuddy's list order is not trusted, spec §4.2) and its
+    timelapse, when it has one."""
+    wanted: list[tuple[ArchiveCopyMedia, str | None]] = []
+    if facts.finish_photos:
+        wanted.append(("finished_photo", sorted(facts.finish_photos)[-1]))
+    if facts.timelapse:
+        wanted.append(("timelapse", None))
+    return wanted
+
+
+async def mirror_media(
+    lifecycle: Lifecycle,
+    integrations: OrderIntegrations,
+    blobs: BlobStore,
+    claims: ClaimStore,
+    attempt: Fulfilment,
+    facts: list[ArchiveFacts],
+    *,
+    limit: int,
+) -> list[Attachment]:
+    """For each archive in ``facts``, the media the attempt is still missing, imported
+    (spec 2026-11-05 §4.2). A medium the attempt, or its item, already has a copy of is
+    skipped with no download. Each medium is its own try: one that fails (too large,
+    Bambuddy down) is logged and does not stop the others. Each copy is written by the
+    attempt's creator (Ruling 12, spec §4.5)."""
+    item = await asyncio.to_thread(lifecycle.store.item, attempt.order_item_id)
+    if item is None:
+        return []
+    present = await asyncio.to_thread(lifecycle.store.archive_media_present, attempt.id, item.id)
+    imported: list[Attachment] = []
+    for archive in facts:
+        for what, name in _wanted(archive):
+            if (archive.archive_id, what) in present:
+                continue
+            try:
+                imported.append(
+                    await copy_in(
+                        store=lifecycle.store,
+                        lifecycle=lifecycle,
+                        integrations=integrations,
+                        blobs=blobs,
+                        claims=claims,
+                        order_id=item.order_id,
+                        item_id=item.id,
+                        fulfilment_id=attempt.id,
+                        archive_id=archive.archive_id,
+                        what=what,
+                        name=name,
+                        by=attempt.created_by,
+                        limit=limit,
+                    )
+                )
+            except ApiError as error:
+                if error.status != status.HTTP_413_CONTENT_TOO_LARGE:
+                    logger.warning(
+                        "could not import the %s of archive %s: %s",
+                        what,
+                        archive.archive_id,
+                        error.detail,
+                    )
+                    continue
+                logger.warning(
+                    "the %s of archive %s is too large to import (%s; the limit is %s bytes)",
+                    what,
+                    archive.archive_id,
+                    error.detail,
+                    limit,
+                )
+            except Exception:
+                logger.warning(
+                    "could not import the %s of archive %s",
+                    what,
+                    archive.archive_id,
+                    exc_info=True,
+                )
+    return imported
+
+
+async def mirror_attempt(
+    lifecycle: Lifecycle,
+    integrations: OrderIntegrations,
+    blobs: BlobStore,
+    claims: ClaimStore,
+    fulfilment_id: str,
+    *,
+    limit: int,
+) -> AttemptMediaStep:
+    """One step of the attempt's ``AttemptMedia`` workflow: :func:`mirror_archives`, then
+    :func:`mirror_media`, then ``media_checked_at`` stamped (spec 2026-11-05 §4.6).
+    Logged, never raised. ``missing`` is true while an archive read lacks its finish
+    photo or its timelapse, or no archive could be read yet, so the workflow steps again;
+    false without a Bambuddy or once the attempt is gone."""
+    if not integrations.linked:
+        return AttemptMediaStep(missing=False)
+    attempt = await asyncio.to_thread(lifecycle.store.fulfilment, fulfilment_id)
+    if attempt is None:
+        return AttemptMediaStep(missing=False)
+    try:
+        attempt, facts = await mirror_archives(lifecycle, integrations, attempt)
+        await mirror_media(lifecycle, integrations, blobs, claims, attempt, facts, limit=limit)
+        present = await asyncio.to_thread(
+            lifecycle.store.archive_media_present, attempt.id, attempt.order_item_id
+        )
+    except Exception:
+        logger.warning("could not import the media of attempt %s", fulfilment_id, exc_info=True)
+        return AttemptMediaStep(missing=True)
+    finally:
+        await asyncio.to_thread(
+            lifecycle.store.stamp_media_checked, fulfilment_id, datetime.now(UTC)
+        )
+    missing = not facts or any((f.archive_id, what) not in present for f in facts for what in ROLES)
+    return AttemptMediaStep(missing=missing)
 
 
 def attempt_of(store: OrderStore, order_id: str, item_id: str, fulfilment_id: str) -> Fulfilment:
@@ -180,9 +307,19 @@ async def attempt_archives(
     order_id: str,
     item_id: str,
     fulfilment_id: str,
+    starter: MediaStarter,
 ) -> AttemptArchives:
+    """The attempt's archives, their facts copied. When an archive offers a medium the
+    attempt does not have yet, one step of its media import is started; the read answers
+    at once and never waits on a download (spec 2026-11-05 §4.1)."""
     attempt = await asyncio.to_thread(attempt_of, lifecycle.store, order_id, item_id, fulfilment_id)
     attempt, facts = await mirror_archives(lifecycle, integrations, attempt)
+    if facts:
+        present = await asyncio.to_thread(
+            lifecycle.store.archive_media_present, attempt.id, item_id
+        )
+        if any((f.archive_id, what) not in present for f in facts for what, _ in _wanted(f)):
+            await start_media(starter, attempt.id, retries=False)
     return AttemptArchives(
         linked=integrations.linked,
         attempt=attempt,
