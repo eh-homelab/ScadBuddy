@@ -60,6 +60,9 @@ def test_a_bad_value_names_its_key(client: TestClient) -> None:
     obj = _patch(client, entity, {"obj": {"a": 1}})
     _code(obj, 422, "bad_property_value")
     assert "obj" in obj.json()["detail"]
+    nul = _patch(client, entity, {"lot_number": "a\u0000b"})
+    _code(nul, 422, "bad_property_value")
+    assert "lot_number" in nul.json()["detail"]
 
 
 def test_a_missing_entity_and_kinds_that_take_none(client: TestClient) -> None:
