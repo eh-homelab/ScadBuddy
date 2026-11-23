@@ -757,6 +757,28 @@ function SyncPassTtlRow({ form }: { form: BackendSettings }) {
 const PASS_PAGE = 10
 
 /**
+ * #7176 — whether ScadBuddy's filament presets are copied to Bambuddy's local presets. A
+ * stored choice, on by default, saved with "Save Filament".
+ */
+function PresetMirrorRow({ form }: { form: BackendSettings }) {
+  return (
+    <FieldRow
+      id="setting-filament_preset_mirror"
+      {...docOf(form.settings, 'filament_preset_mirror')}
+      error={form.errors.filament_preset_mirror}
+    >
+      <SwitchField
+        id="setting-filament_preset_mirror"
+        label="Copy each preset to Bambuddy"
+        userOnly={false}
+        checked={form.value('filament_preset_mirror') === 'true'}
+        onCheckedChange={(checked) => form.setField('filament_preset_mirror', checked ? 'true' : 'false')}
+      />
+    </FieldRow>
+  )
+}
+
+/**
  * #6868 — whether a spool that reaches 0 g, or is archived, adds its type to the shopping
  * list. A stored choice (no environment value, so no badge), on by default, saved with
  * "Save Filament".
@@ -907,6 +929,7 @@ export function Component() {
       <SyncPassTtlRow form={form} />
       <OverrideRow />
       <FetchNozzlesRow form={form} />
+      <PresetMirrorRow form={form} />
       <AutoShoppingRow form={form} />
       <FieldRow
         id="filament-currency"

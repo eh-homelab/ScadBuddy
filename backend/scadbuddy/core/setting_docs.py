@@ -446,6 +446,14 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " shopping list, with a note that names the spool. Nothing is added while an item"
             " for that type is still to buy. It orders nothing.",
         ),
+        "filament_preset_mirror": SettingDoc(
+            "Copy presets to Bambuddy",
+            "On, each filament preset ScadBuddy holds is copied to Bambuddy's local presets after"
+            " a fetch or a change, and kept up to date there. Bambuddy needs the copy to set an"
+            " AMS slot from a spool and to show the preset on its own spools. Off, Bambuddy"
+            " keeps the copies it has, and new presets stay in ScadBuddy only. A failed copy is"
+            " noted on the preset and never stops a fetch.",
+        ),
         "filament_sync_pass_ttl_days": SettingDoc(
             "Keep sync history for (days)",
             "How long the list of Bambuddy sync passes keeps a pass, failed ones too. 1 to"

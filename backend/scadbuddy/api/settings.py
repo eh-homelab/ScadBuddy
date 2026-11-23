@@ -257,6 +257,8 @@ class SettingsView(BaseModel):
     print_auto_import_skip_lan_printers: list[str] = Field(default_factory=list)
     #: #6868: whether an empty spool adds its type to the shopping list.
     filament_shopping_auto_add_empty: bool = True
+    #: #7176: whether ScadBuddy's filament presets are mirrored to Bambuddy.
+    filament_preset_mirror: bool = True
     #: #6905: days a Bambuddy sync pass's history row is kept; ``None``: 30.
     filament_sync_pass_ttl_days: int | None = None
     #: The largest media upload (#274), in bytes, which the UI checks a file against
@@ -534,6 +536,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         print_auto_import_skip_printers=stored.print_auto_import_skip_printers or [],
         print_auto_import_skip_lan_printers=stored.print_auto_import_skip_lan_printers or [],
         filament_shopping_auto_add_empty=stored.filament_shopping_auto_add_empty,
+        filament_preset_mirror=stored.filament_preset_mirror,
         filament_sync_pass_ttl_days=stored.filament_sync_pass_ttl_days,
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],

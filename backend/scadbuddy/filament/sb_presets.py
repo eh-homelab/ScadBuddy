@@ -261,6 +261,16 @@ class FilamentPresetStore:
             ).fetchone()
         return None if row is None else FilamentPreset.model_validate(row)
 
+    def fetched(self, type_id: UUID, printer_model: str, nozzle: str) -> FilamentPreset | None:
+        """The type's ``3dfp`` preset of one key (one per key, Decision 3)."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM filament_presets WHERE source = '3dfp'"
+                " AND type_id = %s AND printer_model = %s AND nozzle_diameter = %s",
+                (type_id, printer_model, nozzle),
+            ).fetchone()
+        return None if row is None else FilamentPreset.model_validate(row)
+
     def all(self) -> list[FilamentPreset]:
         with self._pool.connection() as conn:
             rows = conn.execute(f"SELECT {_COLUMNS} FROM filament_presets ORDER BY id").fetchall()

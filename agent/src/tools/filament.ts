@@ -510,13 +510,15 @@ const tools: Tool[] = [
     description:
       "Start a fetch of a spool type's slicer presets from 3dfilamentprofiles.com by its `tdfp_id`: " +
       "ScadBuddy's profile-fetch worker exports one Bambu Studio preset per printer model ScadBuddy's printers " +
-      'have and per nozzle in the `profile_fetch_nozzles` setting; ScadBuddy imports them into Bambuddy\'s ' +
-      "local presets and makes them the type's presets for those keys (its other presets stay), with K values " +
+      'have and per nozzle in the `profile_fetch_nozzles` setting; ScadBuddy keeps each as its own preset (a ' +
+      "changed one as a new version of the same preset) and makes them the type's presets for those keys as " +
+      '`sb-<id>` (its other presets stay), copies them to Bambuddy\'s local presets while the setting ' +
+      "`filament_preset_mirror` is on, and reads K values " +
       'where a printer has an exact match, never over a K value a person, the fill or a printer calibration set. Answers at once with the run (`run.id`, `run.status` `running`) and ' +
       '`joined`: true when a fetch of the type was already running, which it joins instead of starting another. ' +
       'Follow it with filament_type_profile_fetch. 422 `no_tdfp_id` when the type has no `tdfp_id` ' +
       '(set it with filament_type_upsert), 422 `no_printer_models` when no printer has a model, 503 when the ' +
-      'fetch could not be started. Writes ScadBuddy and Bambuddy\'s local presets. Approved first.',
+      'fetch could not be started. Writes ScadBuddy, and Bambuddy\'s local presets through the copy. Approved first.',
     input: z.object({ type_id: z.string().uuid().describe("A type's `id` from filament_type_list") }),
     risk: 'outward',
     source: SOURCE,
@@ -684,7 +686,7 @@ const tools: Tool[] = [
     description:
       "Fill a spool type's empty print values from its slicer filament profile (#6714): with `type_id` one type, " +
       'without it every unarchived type. The profile is the type preset for the H2C 0.4 mm nozzle, else any 0.4 mm ' +
-      'one, else the first: a numeric id is a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
+      'one, else the first: `sb-<id>` is a ScadBuddy preset, a numeric id a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
       'empty fields (nozzle and bed temperature ranges from the H2C plates, density, drying temperature and hours ' +
       "from the AMS HT's idle drying values, above an AMS 2 Pro's 65 °C for some; a drying value the type's subtype or " +
       "material already sets is left empty, and only a refresh offers it; the diameter is never empty), never the cost (`cost_hint` is only a " +

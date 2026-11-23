@@ -504,6 +504,11 @@ class StoredSettings(BambuddyIds):
     #: only (no row is on), because `filament/shopping.py` `add_for_empty_on` reads it in
     #: the emptying write's own transaction, where no environment value reaches.
     filament_shopping_auto_add_empty: bool = True
+    #: #7176: ScadBuddy's own filament presets are sent to Bambuddy's local presets (the
+    #: mirror, `filament/preset_mirror.py`). On by default: Bambuddy's AMS slot settings and
+    #: spool records name presets it holds (plan 2026-11-23 "Measurement"). Stored only:
+    #: the mirror reads it where it runs, after a fetch and after each preset refresh.
+    filament_preset_mirror: bool = True
     #: #6905: how many days a Bambuddy sync pass's history row is kept. ``None``: 30
     #: (`filament/bb_sync_passes.py` `PASS_TTL_DAYS_DEFAULT`). Stored only: the
     #: housekeeping's activity sweep reads it.
@@ -830,6 +835,9 @@ class SettingsPatch(BaseModel):
     #: #6868: whether an empty spool adds its type to the shopping list; ``null`` puts
     #: back the default (on).
     filament_shopping_auto_add_empty: bool | None = None
+    #: #7176: whether ScadBuddy's filament presets are mirrored to Bambuddy; ``null`` puts
+    #: back the default (on).
+    filament_preset_mirror: bool | None = None
     #: #6905: days a sync pass's history row is kept, 1 to ten years; ``null`` puts back
     #: the default, 30.
     filament_sync_pass_ttl_days: int | None = Field(default=None, ge=1, le=3650)

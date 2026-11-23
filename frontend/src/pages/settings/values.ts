@@ -88,7 +88,13 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   // #6625 — and the nozzles a 3DFP preset fetch exports.
   // #6868 — and whether an empty spool adds its type to the shopping list (stored only).
   // #6905 — and how long the sync's pass history is kept (stored only), beside that history.
-  filament: ['filament_sync', 'profile_fetch_nozzles', 'filament_shopping_auto_add_empty', 'filament_sync_pass_ttl_days'],
+  filament: [
+    'filament_sync',
+    'profile_fetch_nozzles',
+    'filament_preset_mirror',
+    'filament_shopping_auto_add_empty',
+    'filament_sync_pass_ttl_days',
+  ],
 }
 
 /** #6905 — `filament_sync_pass_ttl_days`: empty is the default, 30 days. */
@@ -207,6 +213,7 @@ export function baseline(settings: Settings, name: FieldName): string {
   if (name === 'print_auto_import') return settings.print_auto_import ? 'true' : 'false'
   // #6868 — on until the settings say otherwise, as the backend's default.
   if (name === 'filament_shopping_auto_add_empty') return settings.filament_shopping_auto_add_empty === false ? 'false' : 'true'
+  if (name === 'filament_preset_mirror') return settings.filament_preset_mirror === false ? 'false' : 'true'
   if (name === 'print_auto_import_sources') return sourcesValue(settings.print_auto_import_sources ?? [])
   if (name === 'print_auto_import_skip_printers') return printerIdsValue(settings.print_auto_import_skip_printers ?? [])
   if (name === 'print_auto_import_skip_lan_printers')
@@ -241,7 +248,13 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
     name === 'slicer_backend'
   )
     return raw
-  if (name === 'store_s3_path_style' || name === 'print_auto_import' || name === 'filament_shopping_auto_add_empty') return raw === 'true'
+  if (
+    name === 'store_s3_path_style' ||
+    name === 'print_auto_import' ||
+    name === 'filament_shopping_auto_add_empty' ||
+    name === 'filament_preset_mirror'
+  )
+    return raw === 'true'
   // #6265 — one direction per data type: the form's six-part string, split.
   if (name === 'filament_sync') return syncParts(raw)
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.

@@ -255,6 +255,7 @@ Operation = Literal[
     "slice.start",
     "slicer.local_preset",
     "slicer.local_preset.create",
+    "slicer.local_preset.update",
     "slicer.local_presets",
     "slicer.local_presets.import",
     "slicer.preset_values",
@@ -959,6 +960,25 @@ class BambuddyClient:
             operation="slicer.local_preset.create",
             what=f"create local preset {name}",
             json={"name": name, "preset_type": preset_type, "setting": dict(setting)},
+        )
+        return LocalPreset.model_validate(response.json())
+
+    async def update_local_preset(
+        self, preset_id: int, name: str, setting: Mapping[str, Any]
+    ) -> LocalPreset:
+        """``PUT /api/v1/local-presets/{id}``: the preset rewritten in place under the same
+        id, its name and its document (``routes/local_presets.py`` ``update_local_preset``,
+        which merges ``setting`` over the OrcaSlicer base its ``inherits`` names and moves
+        ``updated_at``; read 2026-11-23). ScadBuddy's mirror of its own presets (#7176).
+        Gated as the create is (``Permission.SETTINGS_UPDATE``); a preset deleted in
+        Bambuddy is a 404."""
+        response = await self._send(
+            "PUT",
+            f"/local-presets/{preset_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.local_preset.update",
+            what=f"update local preset {preset_id}",
+            json={"name": name, "setting": dict(setting)},
         )
         return LocalPreset.model_validate(response.json())
 

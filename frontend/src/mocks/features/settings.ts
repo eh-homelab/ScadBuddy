@@ -232,7 +232,7 @@ function putSettings(body: Record<string, unknown>) {
           ? (value ?? 'mm')
           : name === 'asset_fetch_domains'
             ? (value ?? [...fixtures.DEFAULT_ASSET_FETCH_DOMAINS])
-            : name === 'filament_shopping_auto_add_empty'
+            : name === 'filament_shopping_auto_add_empty' || name === 'filament_preset_mirror'
               ? (value ?? true)
               : value
       continue

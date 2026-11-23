@@ -111,23 +111,23 @@ Without a Bambuddy URL the mirror does nothing.
 
 ## PR 1: the store, adoption, the native read, Bambuddy-facing refs
 
-- [ ] Migration `filament_presets`, `filament_preset_versions`, the generated `preset_id`
+- [x] Migration `filament_presets`, `filament_preset_versions`, the generated `preset_id`
       columns.
-- [ ] `filament/sb_presets.py`: refs, `FilamentPresetStore` (create, version, rows,
+- [x] `filament/sb_presets.py`: refs, `FilamentPresetStore` (create, version, rows,
       documents, by Bambuddy id), `adopt_held` (Decision 6) and `refresh_bambuddy` (Decision
       4). Tests first (`tests/filament/test_sb_presets.py`).
-- [ ] `held_presets_activity` runs adoption after the refresh.
-- [ ] `Profiles.own`, catalogue, `slicing/presets.py`, resolver native mapping; CRUD route and
+- [x] `held_presets_activity` runs adoption after the refresh.
+- [x] `Profiles.own`, catalogue, `slicing/presets.py`, resolver native mapping; CRUD route and
       `RemoteFilamentPresets`; wiring in the API and the print worker.
-- [ ] `EffectivePreset.bambuddy_id` and `for_bambuddy()`; resolver Bambuddy path, `bb_sync_plan`,
+- [x] `EffectivePreset.bambuddy_id` and `for_bambuddy()`; resolver Bambuddy path, `bb_sync_plan`,
       `rfid_slots`, `profile_fill` reads an `sb-` preset's document.
-- [ ] `_bb_presets` (Decision 7).
-- [ ] Docs: backend CLAUDE.md, `docs/features/spools-and-filament.md`.
+- [x] `_bb_presets` (Decision 7).
+- [x] Docs: backend CLAUDE.md, `docs/features/spools-and-filament.md`.
 
 ## PR 2: the fetch writes ScadBuddy, the mirror, #7142
 
-- [ ] `BambuddyClient.update_local_preset` (`PUT`).
-- [ ] Setting `filament_preset_mirror` (settings, docs, frontend field).
-- [ ] `filament/preset_mirror.py`: mirror one, mirror pending; after the fetch, in the refresh.
-- [ ] `profile_fetch.import_run` writes ScadBuddy presets (Decisions 3, 12, 13); tests.
-- [ ] Close #7174 (superseded) and #7142 when it lands.
+- [x] `BambuddyClient.update_local_preset` (`PUT`).
+- [x] Setting `filament_preset_mirror` (settings, docs, frontend field).
+- [x] `filament/preset_mirror.py`: mirror one, mirror pending; after the fetch, in the refresh.
+- [x] `profile_fetch.import_run` writes ScadBuddy presets (Decisions 3, 12, 13); tests.
+- [x] Close #7174 (superseded) and #7142 when it lands.
