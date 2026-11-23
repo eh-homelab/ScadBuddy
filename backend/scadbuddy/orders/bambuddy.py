@@ -448,7 +448,8 @@ class BambuddyShelf:
             if error.status == 404:
                 return False
             raise
-        return (found.file_hash or "").lower() == sha256
+        # A row that states no hash stands while it is there (`Shelf.stands`).
+        return found.file_hash is None or found.file_hash.lower() == sha256
 
     async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
         # Streamed from the content store into the one spool `upload_raw` keeps.

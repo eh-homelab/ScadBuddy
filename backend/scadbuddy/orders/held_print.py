@@ -32,7 +32,7 @@ import asyncio
 import logging
 import tempfile
 from collections.abc import AsyncIterator
-from contextlib import aclosing
+from contextlib import AsyncExitStack, aclosing
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 import psycopg
@@ -74,7 +74,9 @@ class Shelf(Protocol):
         ...
 
     async def stands(self, file_id: int, sha256: str) -> bool:
-        """Whether the live file ``file_id`` still holds the bytes of ``sha256``."""
+        """Whether the live file ``file_id`` still holds the bytes of ``sha256``. A file
+        whose row states no hash stands while it is there: the print's own check reads
+        its bytes (§10.2 step 1) and answers ``restore`` when they are others."""
         ...
 
     async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
@@ -175,27 +177,28 @@ async def _put_back(
     stat = await content.stat(file.copy_key)
     if stat is None:
         raise library_file_gone(item.id, file)
-    try:
-        # One restore at a time: two prints racing would each make "Storefront" when it
-        # is missing, and each upload the bytes the other has not put there yet.
-        async with held_across_awaits(lifecycle.store.restore_lock()):
-            folder = await shelf.storefront_folder()
-            shelved = await shelf.find(folder, file.sha256, stat.ref.size)
-            if shelved is None:
-                async with aclosing(content.get(stat.ref)) as chunks:
-                    shelved = await shelf.upload(file.filename, chunks, folder)
-                logger.info(
-                    "a storefront item's held copy was put back into the library",
-                    extra={"item_id": item.id, "from": from_id, "library_file_id": shelved.id},
-                )
-    except psycopg.errors.LockNotAvailable as error:
-        # Another restore held it past `PROJECT_LOCK_TIMEOUT_MS` (a slow upload to
-        # Bambuddy): transient, as `item_project_of`'s failure is.
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "another storefront item's restore is still running; the print is tried again",
-            type_=UNAVAILABLE_PROBLEM,
-        ) from error
+    async with AsyncExitStack() as stack:
+        try:
+            # One restore at a time: two prints racing would each make "Storefront" when
+            # it is missing, and each upload the bytes the other has not put there yet.
+            await stack.enter_async_context(held_across_awaits(lifecycle.store.restore_lock()))
+        except psycopg.errors.LockNotAvailable as error:
+            # Another restore held it past `PROJECT_LOCK_TIMEOUT_MS` (a slow upload to
+            # Bambuddy): transient, as `item_project_of`'s failure is.
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "another storefront item's restore is still running; the print is tried again",
+                type_=UNAVAILABLE_PROBLEM,
+            ) from error
+        folder = await shelf.storefront_folder()
+        shelved = await shelf.find(folder, file.sha256, stat.ref.size)
+        if shelved is None:
+            async with aclosing(content.get(stat.ref)) as chunks:
+                shelved = await shelf.upload(file.filename, chunks, folder)
+            logger.info(
+                "a storefront item's held copy was put back into the library",
+                extra={"item_id": item.id, "from": from_id, "library_file_id": shelved.id},
+            )
     moved = await asyncio.to_thread(
         lifecycle.move_library_file,
         order_id,

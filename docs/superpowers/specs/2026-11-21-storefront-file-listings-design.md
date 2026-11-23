@@ -988,7 +988,8 @@ racing to restore make one "Storefront" folder and one copy; a wait for it past
 `PROJECT_LOCK_TIMEOUT_MS` (a slow upload to Bambuddy) is a 503 the operation tries again, as
 a failed project ensure is. The find skips a run's per-print copy (`per_print`), which its
 sweep trashes. A retry of the same claim finds the item moved and keeps that file while it
-stands (`Shelf.stands`: live, with the pinned sha256); when it is gone since, the held copy is
+stands (`Shelf.stands`: live, with the pinned sha256, or a Bambuddy row that states no hash,
+whose bytes the next print's check reads); when it is gone since, the held copy is
 put back again, as any missing file is, and only a missing held copy is `library_file_gone`. The Bambuddy side of the restore
 (`BambuddyShelf`, `served_shelf`) is in `orders/bambuddy.py`, the one file of `orders/` that
 reaches the Bambuddy client. The check reads a Bambuddy file that states no hash only when its

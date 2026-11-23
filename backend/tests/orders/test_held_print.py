@@ -544,6 +544,21 @@ async def test_a_restore_lock_waited_for_too_long_is_a_503_tried_again(
     assert shop.get_item(item).library_file == item.library_file
 
 
+async def test_a_lock_timeout_inside_the_library_is_not_the_restore_locks(
+    shop: Shop, content: ContentStore, held: str, native: NativeLibrary
+) -> None:
+    """Only a wait for the restore lock is "another restore is still running": the
+    library's own lock timeout passes as it is."""
+    order, item = storefront_item(shop, GONE_ID, "native")
+
+    class Locked(CountingShelf):
+        async def find(self, folder_id: int, sha256: str, size: int) -> Shelved | None:
+            raise psycopg.errors.LockNotAvailable("the library's own lock")
+
+    with pytest.raises(psycopg.errors.LockNotAvailable):
+        await restore(shop, order, item, content, Locked(native), Choices())
+
+
 def _file(payload: bytes) -> io.BytesIO:
     return io.BytesIO(payload)
 
@@ -652,6 +667,33 @@ async def test_a_restore_into_bambuddy_uploads_once(
     assert again == new_id
     assert recorded.count("POST", "/library/files") == 1
     assert recorded.count("POST", "/library/folders/") == 1
+
+
+async def test_bambuddys_file_stands_while_it_holds_the_pinned_bytes(
+    bambuddy: BambuddyClient,
+) -> None:
+    shelf = bambuddy_shelf(bambuddy)
+    folder = await shelf.storefront_folder()
+    pinned = (await shelf.upload("bracket.3mf", _chunks(PINNED), folder)).id
+    other = (await shelf.upload("other.3mf", _chunks(b"other bytes"), folder)).id
+    assert await shelf.stands(pinned, SHA256)
+    assert not await shelf.stands(other, SHA256)
+    # A 404 is a file that is gone.
+    assert not await shelf.stands(pinned + other + 1000, SHA256)
+
+
+async def test_bambuddys_stated_hash_in_either_case_or_none_stands() -> None:
+    """A hash stated in upper case is the pinned one; a row that states none stands while
+    it is there, since the print's own check reads its bytes."""
+    stated: dict[int, str | None] = {1: SHA256.upper(), 2: None}
+
+    class Client:
+        async def library_file(self, file_id: int) -> LibraryFile:
+            return LibraryFile(id=file_id, filename="bracket.3mf", file_hash=stated[file_id])
+
+    shelf = BambuddyShelf(cast(BambuddyClient, Client()), cast(BambuddyUploadStore, NoUploads()))
+    assert await shelf.stands(1, SHA256)
+    assert await shelf.stands(2, SHA256)
 
 
 class Stored:
