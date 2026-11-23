@@ -2006,7 +2006,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`Slicer.start_library`; the first quote gives the item its slots, `library_colours`; the
   quote names no revision); the print starts `api/library_print.py` `start_library_run`
   (subject `library:<id>`; the check returns `library_file_id`). A file gone since is 409
-  `library_file_gone` in the quote's check and run and the print's check. Its slots'
+  `library_file_gone` in the quote's check and run and the print's check (a storefront
+  item's print restores its held copy instead, below). Its slots'
   filaments are written on the item (`OrderStore.set_library_colours`). Agent
   `order_item_add`'s `library_file_id`. Frontend: `AddItemDialog`'s "Library file" source
   (`components/orders/LibraryFilePicker.tsx` over `GET /print/library/search`), the items
@@ -2220,7 +2221,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   that sha256 under a share lock, else 409 `listing_changed` (dropped with a
   draft item or a draft); `price_of` reads it by the same `priced_file` while the listing
   is still that file at that sha256, so the read, the add and the checkout make one key.
-  The print still reads the live file until #6710 PR 4. The variant is sliced with the
+  The print prints the held copy (#6710 §10.2, PR 4): `printing.py` `_library_stands` checks
+  a storefront item's file by its pinned sha256 (the stated `file_hash`, else a download's
+  digest) and answers `restore` when it is gone or other bytes while the held copy is in the
+  content store (else `library_file_gone`; there is no "changed" refusal), and the run
+  (`operations.py` `item_print_run`, `restored_file`) first calls `held_print.py`
+  `restore_held`: the copy is found by sha256 in the library's top-level folder "Storefront",
+  or uploaded there (`NativeLibrary.upload`, Bambuddy's `send.upload_raw`), the item moved to
+  the new id (`Lifecycle.move_library_file`, event `item.library_file_restored` naming both
+  ids), and `library:<old>`'s remembered choices copied to an empty `library:<new>`
+  (`SettingsStore.copy_library_choices`). The run's subject, `existing` and `start` take the
+  new id; a retry reuses the check, finds the item moved or the file in "Storefront", and
+  uploads nothing. The variant is sliced with the
   choices and presets a back-office quote of a spool of the same filament type on the same
   printer gets (#6574, `test_slice_parity.py`). The shop slice profile gives only the
   printer and a filament type per material (`slice_profile.py`, a

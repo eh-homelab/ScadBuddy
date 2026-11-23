@@ -148,6 +148,7 @@ from scadbuddy.payments.models import (
     ProviderEvent,
 )
 from scadbuddy.payments.provider import EventTooEarlyError
+from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
@@ -5658,6 +5659,39 @@ class Lifecycle:
         if written != attempt:
             self._told(_Change(order, [(item, written.attempt)]))
         return written
+
+    def move_library_file(
+        self, order_id: str, item_id: str, by: Actor, from_id: int, to_id: int
+    ) -> OrderItem:
+        """A storefront item's held copy put back into the library as file ``to_id``
+        (#6710 §10.2): the item names it from now on, and the audit line names both ids
+        (`item.library_file_restored`). An item that no longer names ``from_id`` (a retry
+        of the same claim moved it already) is answered as it is, nothing written. Allowed
+        on hold and on an ended order: it changes where the bytes are read, not what is
+        printed."""
+        library = "native" if is_native_id(to_id) else "bambuddy"
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            item = self.store.item(item_id, conn=conn)
+            if item is None or item.order_id != order.id or item.library_file is None:
+                raise LifecycleError(
+                    "item_not_found", f"no library file item {item_id}", not_found=True
+                )
+            moved = self.store.move_library_file(conn, item_id, from_id, to_id, library)
+            if moved is None:
+                return item
+            self._event(
+                conn,
+                order,
+                by,
+                "item.library_file_restored",
+                item_id=item_id,
+                from_library_file_id=from_id,
+                library_file_id=to_id,
+                sha256=item.library_file.sha256,
+            )
+        self._told(_Change(order, [(moved, None)]))
+        return moved
 
     def attach_print(self, claim: Fulfilment, run_id: str, printer: str | None) -> Fulfilment:
         """The run a claim's print started (`print.started` on the audit line); again
