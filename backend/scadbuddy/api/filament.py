@@ -828,11 +828,12 @@ def _tdfp_temporal(
     error: BaseException, what: str, *, may_have_started: bool | None
 ) -> ApiError | None:
     """A call to Temporal that failed, read as every route reads one (`temporal_failure`,
-    R-7025-15, R-7025-16): unavailable, busy or unreached (the lazy client's first connect
-    failed, or the call timed out) is 503 `temporal-unavailable` with `Retry-After`, worth
-    sending again; a refusal is 500 `temporal-refused`. ``None`` for a failure that is not
-    Temporal's, which the caller raises again. A client that never connected wrote no
-    request, so nothing can have started (`may_have_started` false where the route says it)."""
+    R-7025-15, R-7025-16): unavailable or busy (a call that timed out among them), or
+    unreached (the lazy client's first connect failed) is 503 `temporal-unavailable` with
+    `Retry-After`, worth sending again; a refusal is 500 `temporal-refused`. ``None`` for a
+    failure that is not Temporal's, which the caller raises again. A client that never
+    connected wrote no request, so nothing can have started (`may_have_started` false where
+    the route says it)."""
     failure = temporal_failure(error, what)
     if failure is None:
         return None
