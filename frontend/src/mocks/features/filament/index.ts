@@ -331,7 +331,7 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
   }
 }
 
-/** `spools.py` `_drying_defaults` (#6720, R-6714-18): each field from the spool, else the type, else the subtype, else the material. */
+/** `spools.py` `_drying_defaults` (#6720, R-6714-18): each field from the spool, else the type, else the subtype, else the material, else the setting (#7156). */
 function dryingDefaults(row: SpoolRow): S['DryingDefaults'] {
   const type = state.types.find((one) => one.id === row.type_id)
   const subtype = state.catalogs.subtypes.find((one) => one.id === (row.subtype_id ?? type?.subtype_id))
@@ -347,6 +347,9 @@ function dryingDefaults(row: SpoolRow): S['DryingDefaults'] {
     if (out.temp_c == null && source?.drying_temp_c != null) Object.assign(out, { temp_c: source.drying_temp_c, temp_from: level })
     if (out.hours == null && source?.drying_hours != null) Object.assign(out, { hours: source.drying_hours, hours_from: level })
   }
+  const settings = mockSettings()
+  if (out.temp_c == null && settings.filament_drying_temp_c != null) Object.assign(out, { temp_c: settings.filament_drying_temp_c, temp_from: 'setting' })
+  if (out.hours == null && settings.filament_drying_hours != null) Object.assign(out, { hours: String(settings.filament_drying_hours), hours_from: 'setting' })
   return out
 }
 

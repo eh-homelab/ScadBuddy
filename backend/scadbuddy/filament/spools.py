@@ -142,12 +142,16 @@ def _by_id(conn: Conn, table: str, columns: str, ids: Iterable[UUID | None]) -> 
 
 @dataclass(frozen=True)
 class FilamentDefaults:
-    """The two Filament settings a spool read leans on, as one read of them: the
-    percentage under which a spool with none of its own is low (``filament_low_stock_pct``)
-    and the cost per kg of a spool and type that name none (``filament_default_cost_per_kg``)."""
+    """The Filament settings a spool read leans on, as one read of them: the percentage
+    under which a spool with none of its own is low (``filament_low_stock_pct``), the cost
+    per kg of a spool and type that name none (``filament_default_cost_per_kg``), and the
+    drying temperature and hours when nothing in the catalog sets them
+    (``filament_drying_temp_c``, ``filament_drying_hours``, #7156 R-7156-5)."""
 
     low_stock_pct: int
     cost_per_kg: Decimal | None
+    drying_temp_c: int | None = None
+    drying_hours: Decimal | None = None
 
 
 #: The settings' own defaults, for a read that shows neither ``low_stock`` nor a value (a
@@ -300,11 +304,14 @@ def _low_stock(grams_left: float | None, values: m.EffectiveValues, default_pct:
     return grams_left / label * 100 < pct
 
 
-def _drying_defaults(conn: Conn, spool_id: UUID) -> m.DryingDefaults:
+def _drying_defaults(
+    conn: Conn, spool_id: UUID, defaults: FilamentDefaults = _SETTING_DEFAULTS
+) -> m.DryingDefaults:
     """The spool's drying defaults (#6720, R-6714-10, R-6714-18): each of temperature and
     hours from its own override, else its type, else its subtype, else its material, the
-    subtype and material being the spool's own override, else its type's. The values are
-    its effective ones (`types.effective`); this names where each came from."""
+    subtype and material being the spool's own override, else its type's, else the
+    setting in ``defaults`` (#7156, R-7156-5). The values are its effective ones
+    (`types.effective`) but for the setting; this names where each came from."""
     row = conn.execute(
         "SELECT s.drying_temp_c AS p_temp, s.drying_hours AS p_hours,"
         " t.drying_temp_c AS t_temp, t.drying_hours AS t_hours,"
@@ -321,11 +328,15 @@ def _drying_defaults(conn: Conn, spool_id: UUID) -> m.DryingDefaults:
     if row is None:
         return m.DryingDefaults()
     fields = (("temp_c", "temp_from", "temp"), ("hours", "hours_from", "hours"))
+    setting = {"temp": defaults.drying_temp_c, "hours": defaults.drying_hours}
     for field, origin, column in fields:
         for level, prefix in (("spool", "p"), ("type", "t"), ("subtype", "s"), ("material", "m")):
             if row[f"{prefix}_{column}"] is not None:
                 found[field], found[origin] = row[f"{prefix}_{column}"], level
                 break
+        else:
+            if setting[column] is not None:
+                found[field], found[origin] = setting[column], "setting"
     return m.DryingDefaults.model_validate(found)
 
 
@@ -442,7 +453,7 @@ class FilamentSpoolStore:
             return m.SpoolDetail.model_validate(
                 spool.model_dump()
                 | {
-                    "drying_defaults": _drying_defaults(conn, spool_id),
+                    "drying_defaults": _drying_defaults(conn, spool_id, defaults),
                     "invoice": None
                     if line is None
                     else m.SpoolInvoiceRef.model_validate(
@@ -1107,8 +1118,10 @@ class FilamentSpoolStore:
     ) -> m.SpoolEvent | None:
         """A person's weighing or drying; ``None`` for no such spool. A drying's
         ``temp_c`` or ``hours`` left out (not sent) is the spool's drying default
-        (`_drying_defaults`, #6720)."""
+        (`_drying_defaults`, #6720; the settings last, #7156)."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
+        # Read before the store takes its connection (`FilamentDefaults`' rule).
+        settings = self._defaults() if body.kind == "dried" else _SETTING_DEFAULTS
         with self._pool.connection() as conn, conn.transaction():
             if (
                 conn.execute(
@@ -1122,7 +1135,7 @@ class FilamentSpoolStore:
                 defaults = (
                     m.DryingDefaults()
                     if {"temp_c", "hours"} <= sent
-                    else _drying_defaults(conn, spool_id)
+                    else _drying_defaults(conn, spool_id, settings)
                 )
                 temp = body.temp_c if "temp_c" in sent else defaults.temp_c
                 hours = body.hours if "hours" in sent else defaults.hours

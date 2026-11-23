@@ -74,6 +74,11 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   (`backend/scadbuddy/migrations/20261118T1235Z_drop_native_spool_tables.sql`).
 - Settings: `spool_overlay_refresh_seconds` (the refresh Schedule), `filament_sync`,
   `filament_low_stock_pct`, `filament_default_cost_per_kg`, `profile_fetch_nozzles`,
+  `filament_drying_temp_c` and `filament_drying_hours` (#7156: the drying a spool is offered
+  when its spool, type, subtype and material set none; empty by default, so none is offered),
+  `filament_auto_add_unknown_rfid` (#7156, stored only, on by default: off, no spool is made
+  from an RFID tag ScadBuddy does not know, and Bambuddy's own auto-add is held off as the RFID
+  override mode holds it; the value Bambuddy had goes back only when neither holds),
   `filament_label_base_url` (an https origin of at most 64 characters, live; unset, labels use
   `public_url` reduced to its https origin, then the page's own origin).
 - Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`. A code

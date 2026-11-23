@@ -1184,6 +1184,47 @@ def test_the_mode_route_writes_the_row_then_turns_auto_add_off(client: TestClien
 
 
 @respx.mock
+def test_the_auto_add_setting_round_trips_and_holds_bambuddy_off_on_save(
+    client: TestClient,
+) -> None:
+    """#7156 R-7156-1 to R-7156-4: stored only, on by default; a save that turns it off
+    reconciles Bambuddy at once, and a save back on restores the saved value."""
+    name = "filament_auto_add_unknown_rfid"
+    configure(client)
+    body = client.get("/api/v1/settings").json()
+    assert body[name] is True
+    assert name not in body["sources"]
+    _auto_add(True, False, False)
+    patch = respx.patch(SETTINGS_URL).mock(return_value=httpx.Response(200, json={}))
+
+    assert client.put("/api/v1/settings", json={name: False}).status_code == 200
+
+    assert client.get("/api/v1/settings").json()[name] is False
+    assert [json.loads(c.request.content) for c in patch.calls] == [
+        {"auto_add_unknown_rfid": False}
+    ]
+    respx.get(f"{API}/spoolbuddy/devices").mock(return_value=httpx.Response(200, json=[]))
+    status_now = client.get(f"{RFID}/status").json()
+    assert (status_now["override_mode"], status_now["auto_add_unknown_rfid"]) == (False, False)
+    assert (status_now["state"], status_now["saved_auto_add"]) == ("applied", True)
+    _auto_add(False)
+
+    assert client.put("/api/v1/settings", json={name: None}).status_code == 200
+
+    assert client.get("/api/v1/settings").json()[name] is True
+    assert json.loads(patch.calls[-1].request.content) == {"auto_add_unknown_rfid": True}
+
+
+@respx.mock
+def test_a_save_that_leaves_the_auto_add_setting_calls_no_bambuddy(client: TestClient) -> None:
+    configure(client)
+
+    assert client.put("/api/v1/settings", json={"filament_low_stock_pct": 30}).status_code == 200
+
+    assert not [c for c in respx.calls if c.request.url.path.endswith("/settings/")]
+
+
+@respx.mock
 def test_a_blocked_write_is_still_a_200(client: TestClient) -> None:
     configure(client)
     _auto_add(True)

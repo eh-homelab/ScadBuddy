@@ -12,6 +12,7 @@ import httpx
 import psycopg
 import pytest
 import respx
+from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
@@ -453,3 +454,98 @@ async def test_one_reconcile_holds_the_lock_from_its_first_call_to_its_last_writ
     assert free_during == [False, False, False]
     assert store.state().saved_auto_add is True  # the saved value survived the mid-run flip
     assert _lock_is_free(store)  # and the lock is released
+
+
+def _auto_add(pg_pool: PgPool, on: bool) -> None:
+    """The stored-only setting `filament_auto_add_unknown_rfid` (#7156), as `PUT
+    /settings` stores it: a JSON boolean."""
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO settings (name, value) VALUES (%s, %s)"
+            " ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
+            ("filament_auto_add_unknown_rfid", Jsonb(on)),
+        )
+
+
+@respx.mock
+async def test_the_setting_off_holds_auto_add_off_with_the_mode_off(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    """R-7156-2: with SB's own setting off, Bambuddy makes no spool of an unknown tag
+    either; the value it had is saved first, as the mode saves it."""
+    store = RfidModeStore(pg_pool)
+    _auto_add(pg_pool, False)
+    _reads(True, False)
+    _patch()
+
+    status = await reconcile_mode(store, client)
+
+    assert _patches() == [{"auto_add_unknown_rfid": False}]
+    assert store.state().saved_auto_add is True
+    assert (status.override_mode, status.auto_add_unknown_rfid, status.state) == (
+        False,
+        False,
+        "applied",
+    )
+
+
+@respx.mock
+async def test_the_setting_on_again_restores_the_saved_value(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    store = RfidModeStore(pg_pool)
+    _auto_add(pg_pool, False)
+    store.save_found(True)
+    _auto_add(pg_pool, True)
+    _reads(False)
+    _patch()
+
+    status = await reconcile_mode(store, client)
+
+    assert _patches() == [{"auto_add_unknown_rfid": True}]
+    assert store.state().saved_auto_add is None
+    assert (status.auto_add_unknown_rfid, status.state) == (True, "off")
+
+
+@respx.mock
+async def test_the_mode_off_keeps_the_hold_while_the_setting_is_off(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    """R-7156-3: two holds on one value; the saved value goes back only when neither
+    holds."""
+    store = RfidModeStore(pg_pool)
+    store.set_mode(True)
+    store.save_found(True)
+    _auto_add(pg_pool, False)
+    store.set_mode(False)
+    _reads(False)
+    _patch()
+
+    status = await reconcile_mode(store, client)
+
+    assert _patches() == []
+    assert store.state().saved_auto_add is True
+    assert status.state == "applied"
+    assert store.clear_saved(True) is False  # the setting still holds it
+
+
+def test_save_found_takes_the_setting_as_a_hold(pg_pool: PgPool) -> None:
+    store = RfidModeStore(pg_pool)
+    _auto_add(pg_pool, False)
+
+    assert store.save_found(True) is True
+    assert store.state().auto_add_off is True
+
+
+@respx.mock
+async def test_reconcile_now_reaches_bambuddy_for_the_setting_alone(pg_pool: PgPool) -> None:
+    """A mode that is off with nothing saved calls nothing, unless the setting holds."""
+    store = RfidModeStore(pg_pool)
+    _auto_add(pg_pool, False)
+    _reads(True, False)
+    _patch()
+
+    status = await reconcile_mode_now(store, _settings)
+
+    assert _patches() == [{"auto_add_unknown_rfid": False}]
+    assert status.state == "applied"

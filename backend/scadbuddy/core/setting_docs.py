@@ -434,6 +434,23 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "What a kilogram of filament costs when its spool and type name no cost, in the"
             " shop's currency, such as 24.50. Empty sets none.",
         ),
+        "filament_drying_temp_c": SettingDoc(
+            "Default drying temperature, °C",
+            "The temperature a spool's drying starts from when its spool, type, subtype and"
+            " material set none. A value in the catalog wins. 1 to 150. Empty offers none.",
+        ),
+        "filament_drying_hours": SettingDoc(
+            "Default drying time, hours",
+            "The hours a spool's drying starts from when its spool, type, subtype and material"
+            " set none. A value in the catalog wins. 0.1 to 999.9. Empty offers none.",
+        ),
+        "filament_auto_add_unknown_rfid": SettingDoc(
+            "Add spools for unknown RFID tags",
+            "On, an AMS tray with an RFID tag that no spool holds gets a spool made from the"
+            " tag. Off, no spool is made: Bambuddy's own auto-add is held off too (the value it"
+            " had comes back when this is on again and the RFID override mode is off), and you"
+            " link the spool by hand.",
+        ),
         "filament_label_base_url": SettingDoc(
             "Label address",
             "The address that location labels open, such as https://scadbuddy.example.com."
