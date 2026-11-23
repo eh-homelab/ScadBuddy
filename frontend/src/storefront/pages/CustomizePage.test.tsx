@@ -917,6 +917,18 @@ describe('CustomizePage of a file listing (#6710)', () => {
     expect(screen.queryByText('Working out the price…')).toBeNull()
   })
 
+  it('reads no price again when the colour on screen is picked again', async () => {
+    const sent = requests()
+    const { user } = show(FILE_ID)
+    await screen.findByText('$7.00 for one')
+    const before = sent.filter(({ what }) => what === 'POST /api/store/v1/listings/l4/price').length
+    await user.click(screen.getByRole('button', { name: /Part 1/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Ocean blue' }))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(sent.filter(({ what }) => what === 'POST /api/store/v1/listings/l4/price')).toHaveLength(before)
+    expect(screen.queryByText('Updating this price…')).toBeNull()
+  })
+
   it('adds the colours to the order, with no values', async () => {
     const sent = requests()
     const { user } = show(FILE_ID)

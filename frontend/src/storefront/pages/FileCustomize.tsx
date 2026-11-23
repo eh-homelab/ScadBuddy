@@ -93,11 +93,21 @@ export function FileCustomize({
     saveChoices(listing.id, { values, quantity })
   }, [listing.id, values, quantity])
 
+  /** The listing as the page shows it, for a price read's refusal text: the read follows
+   * the price key (`current`), never a new `view` or `chosen` of the same key. */
+  const shown = useRef(view)
   useEffect(() => {
-    if (blocked || chosen === null) return
+    shown.current = view
+  }, [view])
+
+  useEffect(() => {
+    if (blocked) return
     let live = true
     const key = current
-    const body = { listing_updated_at: listing.updated_at, colours: chosen }
+    // The key is the body: a change that keeps it (a pick of the colour on screen, a reload
+    // that keeps the colours) reads nothing again and leaves a read that runs alone.
+    const [listingUpdatedAt, colours] = JSON.parse(key) as [string, Record<string, string>]
+    const body = { listing_updated_at: listingUpdatedAt, colours }
     const read = async () => {
       setPriceError(null)
       const began = now()
@@ -134,7 +144,7 @@ export function FileCustomize({
           // The colours on screen have no price now: no other price stays as if it were updating.
           setPriced((p) => (p && p.key !== key ? undefined : p))
           if (changedListing(caught)) setStale(true)
-          setPriceError(refusalText(caught, view))
+          setPriceError(refusalText(caught, shown.current))
           return
         }
       }
@@ -150,7 +160,7 @@ export function FileCustomize({
       live = false
       clearTimeout(timer)
     }
-  }, [blocked, chosen, current, listing, view, timing, wait, now, debounceMs])
+  }, [blocked, current, listing.id, timing, wait, now, debounceMs])
 
   const setValue = (name: string, next: ParamValue | undefined) => {
     setValues((before) => {
