@@ -852,7 +852,7 @@ const tools: Tool[] = [
       'ledger event. To record a weighing use filament_spool_add_event; to archive use filament_spool_archive. ' +
       'When adding, `quantity` (1 to 100) makes that many identical spools in one request, each with its own number, ' +
       "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
-      'values and its place unless that is a tray, never its number, tag, tray, weight or weight lock; `fields` ' +
+      'values and its place unless that is a tray, never its number, tag, tray, weight, weight lock or `added_full`; `fields` ' +
       'then change the copy. Either answers the list of spools made, and a resend of the same call makes none twice; ' +
       'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
@@ -893,7 +893,8 @@ const tools: Tool[] = [
         // One key per call: a resend after a lost answer makes no second set of spools. A
         // resend reads the copy again, so its key names that draft too (R-7150-8): a changed
         // source is a new request, never a 422 for a key sent with another body.
-        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1 } as SpoolBulkCreate
+        // `copy_of` names the source, so a copied migrated preset row stays so (R-7150-13).
+        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1, ...(copy_of ? { copy_of } : {}) } as SpoolBulkCreate
         const key = copy_of
           ? createHash('sha256').update(`${idempotencyKey(ctx)}\x1f${JSON.stringify(draft)}`).digest('hex')
           : idempotencyKey(ctx)

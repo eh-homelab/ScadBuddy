@@ -1068,24 +1068,20 @@ class SpoolCreate(_In):
         return self
 
 
-class SpoolDraftPreset(SpoolPresetCreate):
-    """A draft's own preset row (#7150, R-7150-11). ``migrated`` keeps a copied row's
-    origin: a row the presets-per-nozzle migration made stays ``migrated`` on the copy, so
-    the copy's first type drops it as it would the source's (`presets.drop_migrated`). A
-    row a person changes is theirs, so the spool form drops the flag on an edit."""
-
-    migrated: bool = False
-
-
 class SpoolDraft(_In):
     """A new spool as the spool form holds it (#7150, R-7150-2): its fields, the place it
     goes to (not a printer's tray) and its own presets and K values. What
-    ``GET /filament/spools/{id}/copy`` answers (R-7150-3)."""
+    ``GET /filament/spools/{id}/copy`` answers (R-7150-3), with ``copy_of`` its source.
+    A client never marks a preset row ``migrated`` (R-7150-13): with ``copy_of``, a row
+    whose key and values match a ``migrated`` row of that spool is written ``migrated``,
+    so the copy's first type drops it as it would the source's (R-7150-11); any other row
+    is the person's."""
 
     spool: SpoolCreate
     location_id: UUID | None = None
-    presets: list[SpoolDraftPreset] = Field(default_factory=list)
+    presets: list[SpoolPresetCreate] = Field(default_factory=list)
     k_values: list[SpoolKValueCreate] = Field(default_factory=list)
+    copy_of: UUID | None = None
 
 
 #: The most spools one bulk create makes (R-7150-1).
