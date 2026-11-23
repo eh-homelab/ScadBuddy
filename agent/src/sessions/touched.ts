@@ -774,6 +774,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_spool_ntag_write',
   'filament_spool_ntag_confirm',
   'filament_spool_ntag_cancel',
+  // #7155: a tare moves a SpoolBuddy scale's zero through Bambuddy, no recorded kind.
+  'filament_spoolbuddy_tare',
   // Purchasing (#6266: suppliers, products, price points, invoices, the shopping list) is
   // no recorded resource kind either; an invoice's spools are in each spool's ledger.
   'filament_supplier_upsert',
