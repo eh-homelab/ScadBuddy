@@ -99,38 +99,16 @@ shows up as the `freshness` job's diff comment and regenerates the Go client.
 
 ### Story 1: Spike — record Bambuddy's `timelapse/scan` replies (#7230)
 
-**Done.** PR #7238 is closed without merge. Its findings live in spec §4.3a.
+**Done** (merged in #7238). Its findings live in spec §4.3a and led to the drop of
+story 6 (spec §9).
 
 **Goal:** Know what `POST /api/v1/archives/{id}/timelapse/scan` answers, whether its FTP
-pull is complete when it returns, and what it matches on (spec §4.3, F5).
+pull is complete when it returns, and what it matches on (spec §4.3a, F5).
 
-**Who:** the owner, or a session with LAN access to the live Bambuddy and its API key
-(1Password, read with `op.exe`, never printed). A session without LAN access cannot do it.
-
-**Files:**
-- Create: `backend/tests/bambuddy/recordings/timelapse-scan-found.json`,
-  `timelapse-scan-none.json` (replies, serials and IPs replaced as the other recordings)
-- Modify: `backend/tests/bambuddy/recordings/README.md` (a row per file: request, date,
-  Bambuddy version, archive state)
-- Modify: `docs/superpowers/specs/2026-11-05-attempt-media-auto-import-design.md` F5 (the
-  measured facts, with where and how measured)
-
-**Steps:**
-- [ ] Read the live `/openapi.json` for the route's response schema; note the Bambuddy
-  version.
-- [ ] Pick two finished archives of the H2C: one whose timelapse is on the printer and not
-  in Bambuddy (`GET /archives/{id}/printer-media` lists it in `remote_files`), one with none.
-- [ ] Call the scan once on each, with a key that has Manage Archives and Control Printer.
-  Time each call. Read the archive again after it: is `timelapse_path` set at once?
-- [ ] Call it once with a key that lacks Control Printer; record the refusal.
-- [ ] Check the match: does the attached file's name and mtime belong to this print
-  (compare `printer-media`'s list and the archive's `completed_at`)?
-- [ ] Vendor the replies; update F5.
-
-**Acceptance:** two (or three) recordings with a README row each; F5 states the reply's
-shape, whether the call blocks until the pull ends, and the match rule. If the match is
-loose (a wrong print's file can attach), stop: the owner decides before story 6 ships
-the switch on (spec §8.1).
+**What it recorded:** `backend/tests/bambuddy/recordings/timelapse-scan-none.json` and
+`timelapse-scan-exists.json`, with a row each in the recordings' README. The scan needs
+only the Manage Archives scope (read from Bambuddy 1.3.2's source). No `attached` reply
+is recorded: a match deletes the video from the printer's card (spec §4.3a).
 
 **Lanes:** `backend`, `image` (recordings live under `backend/tests/`).
 
@@ -140,8 +118,9 @@ the switch on (spec §8.1).
 double insert is impossible, and the attempt can record its last check (spec §4.2,
 §4.6).
 
-PR #7241 added `timelapse_scanned_at` and `stamp_timelapse_scanned` before the drop; a
-follow-up commit on that PR removes them.
+PR #7241 (merged) added `timelapse_scanned_at` and `stamp_timelapse_scanned` before the
+drop. A follow-up PR adds a new migration that drops the column and removes the store
+method and the model field. Merged migrations are never edited.
 
 **Files:**
 - Create: `backend/scadbuddy/migrations/<ts>_attempt_media_provenance.sql`

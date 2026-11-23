@@ -49,7 +49,7 @@ The draft was written on 2026-11-05. Main moved since. This review read the code
 - **The media proxy accepts an archive that an attempt claims** (#6406). The manual
   timelapse pull still needs a print link (F11). §4.3.
 - **Bambuddy's queue can record a timelapse** (#5565 for #5352). §2 and F4.
-- **`timelapse/scan` is still not wrapped and has no recorded reply** (F5).
+- **`timelapse/scan` is not wrapped** (F5). The spike recorded its replies (§4.3a).
 - **The timelapse scan is dropped** (owner's direction, 2026-11-23: ScadBuddy distances
   itself from Bambuddy). ScadBuddy never calls `timelapse/scan`. It imports only a
   timelapse that Bambuddy's archive already has. The spike's findings (§4.3a) stay as
@@ -139,7 +139,7 @@ commit). F11 to F14 are new in the review.
 | F2 | `copy_in` is the one-click copy: `copy_check` → `integrations.archive` → `download_archive_media` into the claim store → sha256+role dedupe against the attempt's and the item's attachments → `lifecycle.add_attachment` with caption `Attempt <n>, Bambuddy archive <id>`. It downloads **before** it dedupes. | `orders/archives.py:180-296` (download 245-256, dedupe 260-267, caption 291) |
 | F3 | The copy is the `order_attempt_copy` operation: `run_attempts=2`, `queue="library"`, `run_timeout=PIN_TIMEOUT`, size-capped by `media_upload_max_bytes` (413 past it). Started only from the HTTP route, with the author header as `by` (Ruling 12). The `library` queue's worker runs inside the API process. | `orders/operations.py:1091-1135,1206-1215`, `api/orders.py:3174-3222`, `main.py:1960-1969` |
 | F4 | `ArchiveFacts` carries `finish_photos` (Bambuddy's order), `timelapse: bool`, `timelapse_name`. `timelapse` is true only once Bambuddy has the file: queued with timelapse on **and** processed, or pulled later through `POST /prints/{archive_id}/timelapse/pull` (`timelapse_pull` operation → Bambuddy `timelapse/select`, FTP from the printer, needs a filename from `printer-media`). | `orders/integrations.py:123-141`, `orders/bambuddy.py:81-104,128-130`, `bambuddy/operations.py:330-347,483`, `bambuddy/client.py:1552-1590`, `api/print_history.py:1674-1720` |
-| F5 | Bambuddy also has `POST /archives/{id}/timelapse/scan`: "Scan printer for timelapse matching this archive and attach it", no parameters. Read off the **running** instance's `/openapi.json` on 2026-11-05. On main 2026-11-23: the route list recorded from Bambuddy 1.2.5.5 names it (`tests/bambuddy/recordings/openapi/routes.txt:78`); the vendored spec `tests/fixtures/bambuddy-openapi-1.2.6b1.json:636-640` carries only its operationId, no response schema; no file under `tests/bambuddy/recordings/` records its reply; the client does not wrap it (no `archives.timelapse.scan` in the closed `Operation` set). Bambuddy's own policy on `printer-media` is "files are downloaded only after the user explicitly selects them in the UI". | live Bambuddy OpenAPI (2026-11-05), `bambuddy/client.py:178-232` |
+| F5 | Bambuddy also has `POST /archives/{id}/timelapse/scan`: "Scan printer for timelapse matching this archive and attach it", no parameters. Read off the **running** instance's `/openapi.json` on 2026-11-05. On main 2026-11-23: the route list recorded from Bambuddy 1.2.5.5 names it (`tests/bambuddy/recordings/openapi/routes.txt:78`); the vendored spec `tests/fixtures/bambuddy-openapi-1.2.6b1.json:636-640` carries only its operationId, no response schema; the spike recorded its replies later (§4.3a, merged in #7238); the client does not wrap it (no `archives.timelapse.scan` in the closed `Operation` set). Bambuddy's own policy on `printer-media` is "files are downloaded only after the user explicitly selects them in the UI". | live Bambuddy OpenAPI (2026-11-05), `bambuddy/client.py:178-232` |
 | F6 | Order attachments are rows of `entity_attachments` since #6961 (the table `order_attachments` renamed, `entity_id` added; the compatibility view dropped in #6960). An attempt's file has the subject `order_item_fulfilment:<id>` and `attempt_item_id` set. The table has no column naming the archive a copy came from; the only link is the caption text. It has no unique index except its key. The frontend's "copied" state is a per-page `Set` that forgets on reload. | `migrations/20261122T0426Z_entities.sql:26-77`, `migrations/20261123T0651Z_drop_order_attachments_view.sql`, `orders/store.py:251-254,3086-3137`, `ArchiveCopies.tsx:16,41,64-65` |
 | F7 | There is no system actor. Every write names the actor from the request (Ruling 12). `Actor.kind` is `browser`, `agent`, `provider`, `visitor` or `customer`. | spec §10 Ruling 12, `orders/actor.py`, `orders/models.py:164-176` |
 | F8 | Every replica hears every bus event (the API runs three: eh-homelab/clusters `applications/scadbuddy/scadbuddy.yaml:120`, `replicas: 3`, read on clusters main `802ddba9` on 2026-11-23). `follow_print` writes under the order's lock and only what is still open. `mirror_run` is logged, never raised. `copy_in`'s dedupe is a read then an insert in separate transactions, and `entity_attachments` has no unique index, so two replicas can both insert. | `orders/printing.py:709-757`, `orders/archives.py:142-150,260-294` |
@@ -237,10 +237,10 @@ timelapse in Bambuddy for this print" for both, once the archive is no longer fr
 ### 4.3a What the spike measured (#7230, PR #7238, 2026-11-23)
 
 These findings led to the drop of the scan (§9). Measured on prod's Bambuddy 1.3.2
-(auth off) with two scan calls. PR #7238 vendored the replies as
+(auth off) with two scan calls. The replies are vendored as
 `backend/tests/bambuddy/recordings/timelapse-scan-none.json` and
-`timelapse-scan-exists.json`, and its README section cites the Bambuddy source lines.
-That PR is closed without merge; this section keeps its findings.
+`timelapse-scan-exists.json` (merged in #7238), and the recordings' README section cites
+the Bambuddy source lines. They stay as the evidence for the drop.
 
 - **Replies.** Always 200 with a `status`: `not_found` (with `available_files`, the
   card's unclaimed videos; archive 282, 0.82 s), `exists` (a timelapse is already
