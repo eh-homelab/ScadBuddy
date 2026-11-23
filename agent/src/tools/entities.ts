@@ -286,9 +286,11 @@ export const entityTools = [
     description:
       "Replace a kind's property schema whole (read it with entity_property_schema_get first and send it back changed). " +
       'A JSON Schema (Draft 2020-12) object of plain keywords only: at the top `type: "object"`, `properties`, ' +
-      '`additionalProperties: true`, `title`, `description`; per key a scalar `type` (or an `array` of strings), with ' +
-      '`title`, `description`, `default`, `examples`, `enum`, `const`, number and length bounds, `format` (not ' +
-      '`regex`) and `items`. Any other keyword is 422 `bad_property_schema`, naming it. Writes ScadBuddy only.',
+      '`additionalProperties: true`, `$schema`, `$comment`, `title`, `description`; per key a `type` (a scalar or ' +
+      '`array`, or a list of them with `"null"`), with `$comment`, `title`, `description`, `default`, `examples`, ' +
+      '`enum`, `const`, number and length bounds, `format` (not `regex`), `items` (a scalar-typed subschema only), ' +
+      '`minItems`, `maxItems` and `uniqueItems`. Any other keyword is 422 `bad_property_schema`, naming it. Writes ' +
+      'ScadBuddy only.',
     input: z.object({ kind: propertyKind, schema: z.record(z.string(), z.unknown()).describe('The whole schema') }),
     risk: 'write',
     routes: ['PUT /api/v1/entity-kinds/{kind}/property-schema'],

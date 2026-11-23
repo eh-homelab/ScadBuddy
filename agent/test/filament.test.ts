@@ -273,6 +273,31 @@ describe('filament type tools', () => {
     expect(tool('filament_type_upsert').summarize({ type_id: ROW, properties: { mpn: 'M1', td: null } })).toBe(
       `Edit spool type ${ROW}; properties: set mpn; remove td`,
     )
+    calls.length = 0
+    await runTool(tool('filament_type_upsert'), { type_id: ROW, archived: true, properties: { mpn: 'M1' } }, ctx())
+    expect(calls).toEqual(['PATCH type {"archived":true}', 'PATCH props {"set":{"mpn":"M1"}}'])
+  })
+
+  it('answers a refused properties-only edit with the API detail and no "was saved" lead (#7026)', async () => {
+    const refusal = () =>
+      HttpResponse.json(
+        { type: 'https://scadbuddy.dev/problems/entities/bad_property_value', title: 'Bad property value', status: 422, detail: 'td: not a number' },
+        { status: 422 },
+      )
+    server.use(
+      http.patch(`${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`, refusal),
+      http.patch(`${BACKEND}/api/v1/entities/${encodeURIComponent(`spool:${ROW}`)}/properties`, refusal),
+    )
+    for (const [name, args] of [
+      ['filament_type_upsert', { type_id: ROW, properties: { td: 'thick' } }],
+      ['filament_spool_upsert', { spool_id: ROW, properties: { td: 'thick' } }],
+    ] as const) {
+      const result = await runTool(tool(name), args, ctx())
+      expect(result.isError, name).toBe(true)
+      const text = String(firstText(result))
+      expect(text, name).toContain('td: not a number')
+      expect(text, name).not.toContain('was saved')
+    }
   })
 
   it('replaces the presets and the K values', async () => {
