@@ -64,6 +64,7 @@ from scadbuddy.filament.sb_presets import (
     create_on,
     document_bytes,
     keep_document,
+    lock_presets_on,
     version_on,
 )
 from scadbuddy.filament.types import SpoolTypeStore, list_edit
@@ -99,6 +100,9 @@ Status = Literal["running", "imported", "partial", "failed"]
 HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
+#: How long an import waits for the mirror of what it wrote (#7176); the next kept-preset
+#: refresh sends what is left.
+IMPORT_MIRROR_TIMEOUT: Final = 30.0
 #: How often a request that finds the run's import lease held looks again (R-PR3).
 LEASE_POLL_SECONDS: float = 2.0
 PROBLEMS: Final = "https://scadbuddy.dev/problems/profile-fetch/"
@@ -907,7 +911,14 @@ async def _import_once(
         # After the commit, and a failure never fails the import (#7176 Decision 11).
         settings = await asyncio.to_thread(state.settings_store.load)
         own = FilamentPresetStore(pool, lambda: state.store.blobs)
-        await mirror_pending(pool, own, settings, ending.written)
+        # Bounded, so the worker's import call never waits on a slow Bambuddy; what is
+        # left is sent by the next kept-preset refresh.
+        try:
+            await asyncio.wait_for(
+                mirror_pending(pool, own, settings, ending.written), IMPORT_MIRROR_TIMEOUT
+            )
+        except TimeoutError:
+            logger.warning("the preset mirror ran past the import's bound; the refresh sends")
     if first_presets == [True]:
         # A type's first presets fill its empty fields from their profile (#6714, R-6714-a);
         # after the commit, and a failure never fails the import.
@@ -1096,6 +1107,9 @@ def _write_presets(conn: Conn, run: Any, ending: _Ending) -> None:
     ``3dfp`` preset, or a new version of the one there when the document changed
     (Decision 3), each a note. Fills ``ending.presets`` and ``ending.written``. On
     ``conn``, in the end's transaction."""
+    # The presets' lock first, as an adoption takes it, so one making this key's
+    # preset meanwhile is seen here, never a unique violation.
+    lock_presets_on(conn)
     for w in ending.writes:
         f = w.file
         found = conn.execute(

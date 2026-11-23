@@ -49,7 +49,10 @@ made in Bambuddy takes a new version when Bambuddy edits it
 `filament_preset_mirror` is on (the default), each preset ScadBuddy owns is copied to
 Bambuddy's local presets after a fetch and after each refresh, rewritten in place under the
 same Bambuddy id when it changes; a failed copy is the preset's `mirror_error`
-(`backend/scadbuddy/filament/preset_mirror.py`).
+(`backend/scadbuddy/filament/preset_mirror.py`). One mirror runs at a time, a preset's
+Bambuddy id is kept with the Bambuddy it belongs to (an id of another Bambuddy, after the
+URL changed, is never rewritten: the preset is created again), and a create whose answer
+was lost is found by name above the highest id listed before it, not made twice.
 
 A fetch writes ScadBuddy only: each file is the type's `3dfp` preset of its key, a changed
 one a new version with its changed keys in the run's notes, and the type's own nozzle range

@@ -25,7 +25,7 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import Callable, Collection
+from collections.abc import Awaitable, Callable, Collection
 from datetime import datetime
 from typing import Any, Final, Literal
 from uuid import UUID
@@ -74,6 +74,9 @@ class FilamentPreset(BaseModel):
     filament_colour: str | None
     compatible_printers: list[str]
     bb_preset_id: int | None
+    #: The Bambuddy ``bb_preset_id`` belongs to (`bb_sync_nudge.instance_for`); ``None``
+    #: for a row from before it was kept, taken for the configured one's.
+    bb_instance: str | None
     bb_updated_at: str | None
     mirrored_sha256: str | None
     mirror_error: str | None
@@ -105,6 +108,11 @@ def _hold(conn: Conn, key: str, preset_id: int, version: int) -> None:
     )
 
 
+def lock_presets_on(conn: Conn) -> None:
+    """`LOCK` for ``conn``'s transaction: every write of a preset row takes it."""
+    _lock(conn)
+
+
 def _lock(conn: Conn) -> None:
     conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (LOCK,))
 
@@ -124,6 +132,7 @@ def create_on(
     tdfp_id: int | None = None,
     fetch_run_id: UUID | None = None,
     bb_preset_id: int | None = None,
+    bb_instance: str | None = None,
     bb_updated_at: str | None = None,
     mirrored_sha256: str | None = None,
 ) -> int:
@@ -134,8 +143,9 @@ def create_on(
     row = conn.execute(
         "INSERT INTO filament_presets (name, source, type_id, printer_model, nozzle_diameter,"
         " tdfp_id, fetch_run_id, blob_key, sha256, filament_type, filament_colour,"
-        " compatible_printers, bb_preset_id, bb_updated_at, mirrored_sha256)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        " compatible_printers, bb_preset_id, bb_instance, bb_updated_at, mirrored_sha256)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        " RETURNING id",
         (
             name,
             source,
@@ -150,6 +160,7 @@ def create_on(
             colour,
             printers,
             bb_preset_id,
+            bb_instance,
             bb_updated_at,
             mirrored_sha256,
         ),
@@ -360,6 +371,7 @@ def _adopt_one(
     doc: dict[str, Any],
     key: str,
     sha256: str,
+    instance: str | None = None,
 ) -> bool:
     """Kept preset ``detail`` (its document ``doc``, kept as blob ``key``) made a
     ScadBuddy preset, and its bindings moved to it; false when another adoption made it
@@ -387,6 +399,7 @@ def _adopt_one(
             tdfp_id=None if fetched is None else fetched["tdfp_id"],
             fetch_run_id=None if fetched is None else fetched["run_id"],
             bb_preset_id=detail.id,
+            bb_instance=instance,
             bb_updated_at=detail.updated_at,
             # The document came from Bambuddy: its mirror holds it already.
             mirrored_sha256=sha256,
@@ -425,7 +438,12 @@ def _take_version(
         return version is not None
 
 
-async def adopt_held(pool: ConnectionPool[Conn], blobs: BlobStore, held: HeldPresetStore) -> int:
+async def adopt_held(
+    pool: ConnectionPool[Conn],
+    blobs: BlobStore,
+    held: HeldPresetStore,
+    instance: str | None = None,
+) -> int:
     """Every binding that names a Bambuddy local preset the kept copy holds as a filament
     preset names a ScadBuddy preset instead (Decision 6); how many presets it made. One
     whose preset the copy lacks keeps its Bambuddy id, which the native slicer still
@@ -458,7 +476,7 @@ async def adopt_held(pool: ConnectionPool[Conn], blobs: BlobStore, held: HeldPre
         key, sha256 = await keep_document(blobs, document_bytes(doc))
 
         try:
-            made += await asyncio.to_thread(_adopt_one, pool, detail, doc, key, sha256)
+            made += await asyncio.to_thread(_adopt_one, pool, detail, doc, key, sha256, instance)
         except Exception as error:
             # One preset ScadBuddy cannot hold (a name past the column's CHECK) never stops
             # the ids after it; its bindings keep the Bambuddy id, and the next refresh
@@ -514,18 +532,26 @@ async def refresh_bambuddy(
 
 
 async def sync_from_held(
-    pool: ConnectionPool[Conn], blobs: BlobStore, held: HeldPresetStore
+    pool: ConnectionPool[Conn],
+    blobs: BlobStore,
+    held: HeldPresetStore,
+    instance: str | None = None,
 ) -> None:
-    """`refresh_bambuddy`, then `adopt_held`: what the kept copy's refresh runs after it
-    (`slicing/held_presets.py` `refresh_held`). Each step fails alone, logged by type, so
-    a failure never fails the refresh."""
-    for step in (refresh_bambuddy, adopt_held):
+    """`refresh_bambuddy`, then `adopt_held` (its presets marked as ``instance``'s, the
+    Bambuddy the copy was read from): what the kept copy's refresh runs after it
+    (`filament/preset_mirror.py` `sync_and_mirror`). Each step fails alone, logged by
+    type, so a failure never fails the refresh."""
+    steps: tuple[Callable[[], Awaitable[int]], ...] = (
+        lambda: refresh_bambuddy(pool, blobs, held),
+        lambda: adopt_held(pool, blobs, held, instance),
+    )
+    for name, step in zip(("refresh_bambuddy", "adopt_held"), steps, strict=True):
         try:
-            await step(pool, blobs, held)
+            await step()
         except Exception as error:
             logger.warning(
                 "a ScadBuddy filament preset step failed; the next refresh retries",
-                extra={"step": step.__name__, "error": type(error).__name__},
+                extra={"step": name, "error": type(error).__name__},
             )
 
 

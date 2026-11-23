@@ -156,7 +156,8 @@ def fetch(client: TestClient) -> Fetch:
 
 def mirror(first_id: int = 101, status_code: int = 200) -> respx.Route:
     """Bambuddy's ``POST /local-presets/``, the mirror's create (#7176): each call answers
-    the next id from ``first_id``, or ``status_code`` when it is not 200."""
+    the next id from ``first_id``, or ``status_code`` when it is not 200; and an empty
+    ``GET /local-presets/``, the listing the mirror reads before a create."""
     ids = itertools.count(first_id)
 
     def answer(request: httpx.Request) -> httpx.Response:
@@ -173,6 +174,10 @@ def mirror(first_id: int = 101, status_code: int = 200) -> respx.Route:
             },
         )
 
+    # The mirror lists Bambuddy's presets once before its first create.
+    respx.get(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(200, json={"filament": [], "printer": [], "process": []})
+    )
     return respx.post(f"{API}/local-presets/").mock(side_effect=answer)
 
 
@@ -1054,11 +1059,17 @@ def _edits(fetch: Fetch, spool_id: UUID) -> list[Any]:
 
 
 @respx.mock
-def test_an_import_writes_edited_on_spools_that_inherit(fetch: Fetch) -> None:
+def test_an_import_writes_edited_on_spools_that_inherit(
+    fetch: Fetch, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A type edit fans out (spec §5.7): the import's preset and K-value change each write
     one ``edited`` event, as the run's starter, on a spool that inherits it; a spool that
-    sets every changed key itself gets none."""
-    spools = _state(fetch.client).components.get(FILAMENT).spools
+    sets every changed key itself gets none. The image's vendor tree is left out: with it
+    (in CI's image), the type's fill from its new ScadBuddy preset writes a third edit of
+    its own (the fill after the commit, `test_the_first_presets_an_import_sets_fill_the_type`)."""
+    filament = _state(fetch.client).components.get(FILAMENT)
+    monkeypatch.setattr(filament, "profile_table", lambda: None)
+    spools = filament.spools
     heir = spools.create(SpoolCreate(type_id=fetch.type_id), actor="ann").id
     own = spools.create(SpoolCreate(type_id=fetch.type_id), actor="ann").id
     spools.set_presets(

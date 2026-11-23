@@ -105,7 +105,11 @@ Without a Bambuddy URL the mirror does nothing.
     Settings, #6219). After each write and on each refresh, a ScadBuddy-owned preset whose
     `mirrored_sha256` differs from its `sha256` is sent: `PUT /local-presets/{id}` when it
     has a Bambuddy id, else `POST /local-presets/`; the id is kept. A 404 on `PUT` creates it
-    again. A failure is `mirror_error` on the preset and never fails the write.
+    again. A failure is `mirror_error` on the preset and never fails the write. One mirror
+    runs at a time (a session try-lock); the Bambuddy id is kept with its instance
+    (`bb_instance`), and a `PUT` goes only to that instance; before a `POST` the mirror
+    keeps the highest listed id (`mirror_create_floor`), so a create whose answer was lost
+    is found by name above it (review of #7201).
 12. **The fetch (PR 2).** Writes ScadBuddy only: no zip import. K values still come from the
     printers' K tables through Bambuddy, as before.
 13. **#7142 (PR 2).** The fetch writes the type's own `nozzle_temp_min`/`max` into

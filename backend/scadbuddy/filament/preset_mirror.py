@@ -11,8 +11,16 @@ else ``POST /local-presets/``, whose id is kept. A ``PUT`` that finds the preset
 (404) creates it again. A ``bambuddy`` preset is never sent back: it is Bambuddy's.
 
 A failure is the preset's ``mirror_error`` and never fails the write that asked for the
-mirror; the next refresh of the kept presets (`filament/sb_presets.py` `sync_from_held`)
-sends it again. An edit made in Bambuddy to a mirrored preset is not read back.
+mirror; the next refresh of the kept presets (`sync_and_mirror`) sends it again. An edit
+made in Bambuddy to a mirrored preset is not read back.
+
+One mirror runs at a time (the session try-lock `LOCK`): another caller meanwhile sends
+nothing, and the next refresh sends what it left. A preset's Bambuddy id is kept with
+the Bambuddy it belongs to (``bb_instance``); a preset whose id is another Bambuddy's (the
+URL changed) is created again on the configured one, never rewritten there by id. Before
+a ``POST`` the mirror keeps the highest id Bambuddy lists (``mirror_create_floor``), so
+when the answer is lost the next send takes the one preset of that name above it instead
+of making a second one.
 """
 
 from __future__ import annotations
@@ -26,7 +34,10 @@ from fastapi import status
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.models import LocalPreset
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.rfid_push import acquire_lock
 from scadbuddy.filament.sb_presets import Conn, FilamentPresetStore, sync_from_held
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.slicing.held_presets import HeldPresetStore
@@ -36,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 #: The longest mirror error kept on a preset.
 MAX_ERROR = 500
+#: The session try-lock one mirror run holds.
+LOCK = "scadbuddy:filament:preset_mirror"
 
 
 def wants_mirror(settings: StoredSettings) -> bool:
@@ -43,10 +56,17 @@ def wants_mirror(settings: StoredSettings) -> bool:
     return bool(settings.filament_preset_mirror and settings.bambuddy_url)
 
 
+def instance_of(settings: StoredSettings) -> str | None:
+    """The configured Bambuddy's instance id (`bb_sync_nudge.instance_for`); ``None``
+    with no Bambuddy URL."""
+    return instance_for(settings.bambuddy_url) if settings.bambuddy_url else None
+
+
 def _pending(pool: ConnectionPool[Conn], ids: Collection[int] | None) -> list[dict[str, Any]]:
     with pool.connection() as conn:
         return conn.execute(
-            "SELECT id, name, blob_key, sha256, bb_preset_id FROM filament_presets"
+            "SELECT id, name, blob_key, sha256, bb_preset_id, bb_instance, mirror_create_floor"
+            " FROM filament_presets"
             " WHERE source IN ('3dfp', 'manual')"
             " AND mirrored_sha256 IS DISTINCT FROM sha256"
             " AND (%(ids)s::bigint[] IS NULL OR id = ANY(%(ids)s))"
@@ -55,15 +75,28 @@ def _pending(pool: ConnectionPool[Conn], ids: Collection[int] | None) -> list[di
         ).fetchall()
 
 
-def _mirrored(pool: ConnectionPool[Conn], preset_id: int, sha256: str, bb_id: int) -> None:
-    """Bambuddy holds document ``sha256`` as its preset ``bb_id``. Only while the preset
-    still holds that document: a version written meanwhile stays pending."""
+def _mirrored(
+    pool: ConnectionPool[Conn], preset_id: int, sha256: str, bb_id: int, instance: str
+) -> None:
+    """Bambuddy ``instance`` holds document ``sha256`` as its preset ``bb_id``. The id is
+    kept whatever the document; the document counts as sent only while the preset still
+    holds it: a version written meanwhile stays pending."""
     with pool.connection() as conn:
         conn.execute(
-            "UPDATE filament_presets SET bb_preset_id = %s, mirrored_sha256 = %s,"
+            "UPDATE filament_presets SET bb_preset_id = %s, bb_instance = %s,"
+            " mirror_create_floor = NULL,"
+            " mirrored_sha256 = CASE WHEN sha256 = %s THEN %s ELSE mirrored_sha256 END,"
             " mirror_error = NULL, mirror_error_at = NULL"
-            " WHERE id = %s AND sha256 = %s",
-            (bb_id, sha256, preset_id, sha256),
+            " WHERE id = %s",
+            (bb_id, instance, sha256, sha256, preset_id),
+        )
+
+
+def _create_floor(pool: ConnectionPool[Conn], preset_id: int, floor: int) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_presets SET mirror_create_floor = %s WHERE id = %s",
+            (floor, preset_id),
         )
 
 
@@ -75,15 +108,50 @@ def _failed(pool: ConnectionPool[Conn], preset_id: int, error: str) -> None:
         )
 
 
-async def _send(client: BambuddyClient, row: dict[str, Any], doc: dict[str, Any]) -> int:
-    """The Bambuddy id that holds ``doc`` once sent."""
-    if row["bb_preset_id"] is not None:
+class _Listing:
+    """Bambuddy's filament local presets, read at most once per mirror run."""
+
+    def __init__(self, client: BambuddyClient) -> None:
+        self._client = client
+        self._presets: list[LocalPreset] | None = None
+
+    async def _all(self) -> list[LocalPreset]:
+        if self._presets is None:
+            self._presets = (await self._client.local_presets()).filament
+        return self._presets
+
+    async def made_after(self, name: str, floor: int) -> int | None:
+        """The one preset named ``name`` with an id above ``floor``, else ``None``."""
+        found = [p.id for p in await self._all() if p.name == name and p.id > floor]
+        return found[0] if len(found) == 1 else None
+
+    async def floor(self) -> int:
+        """The highest id listed, 0 for none."""
+        return max((p.id for p in await self._all()), default=0)
+
+
+async def _send(
+    client: BambuddyClient,
+    pool: ConnectionPool[Conn],
+    listing: _Listing,
+    row: dict[str, Any],
+    doc: dict[str, Any],
+    instance: str,
+) -> int:
+    """The Bambuddy id that holds ``doc`` once sent. An id is rewritten in place only on
+    the Bambuddy it belongs to."""
+    bb_id = row["bb_preset_id"] if row["bb_instance"] in (None, instance) else None
+    if bb_id is None and row["mirror_create_floor"] is not None:
+        # A create whose answer was lost: the preset it made, when Bambuddy lists one.
+        bb_id = await listing.made_after(row["name"], row["mirror_create_floor"])
+    if bb_id is not None:
         try:
-            await client.update_local_preset(row["bb_preset_id"], row["name"], doc)
-            return int(row["bb_preset_id"])
+            await client.update_local_preset(bb_id, row["name"], doc)
+            return int(bb_id)
         except ApiError as error:
             if error.status != status.HTTP_404_NOT_FOUND:
                 raise
+    await asyncio.to_thread(_create_floor, pool, row["id"], await listing.floor())
     made = await client.create_local_preset(row["name"], "filament", doc)
     return made.id
 
@@ -92,18 +160,39 @@ async def mirror_with(
     client: BambuddyClient,
     pool: ConnectionPool[Conn],
     store: FilamentPresetStore,
+    instance: str,
     ids: Collection[int] | None = None,
 ) -> int:
-    """Send each pending preset of ``ids`` (every one for ``None``) through ``client``;
-    how many Bambuddy took. Each failure is kept on its preset and logged by type."""
+    """Send each pending preset of ``ids`` (every one for ``None``) through ``client``,
+    to Bambuddy ``instance``; how many Bambuddy took. Each failure is kept on its preset
+    and logged by type. 0 when another mirror holds `LOCK`."""
+    conninfo = pool.conninfo
+    lock = await acquire_lock(conninfo() if callable(conninfo) else str(conninfo), LOCK)
+    if lock is None:
+        logger.info("another filament preset mirror is running; the next refresh sends")
+        return 0
+    try:
+        return await _mirror_locked(client, pool, store, instance, ids)
+    finally:
+        await asyncio.to_thread(lock.close)  # closing the connection ends the lock
+
+
+async def _mirror_locked(
+    client: BambuddyClient,
+    pool: ConnectionPool[Conn],
+    store: FilamentPresetStore,
+    instance: str,
+    ids: Collection[int] | None,
+) -> int:
     sent = 0
+    listing = _Listing(client)
     for row in await asyncio.to_thread(_pending, pool, ids):
         doc = await store.read(row["blob_key"])
         if doc is None:
             await asyncio.to_thread(_failed, pool, row["id"], "the preset's document is missing")
             continue
         try:
-            bb_id = await _send(client, row, doc)
+            bb_id = await _send(client, pool, listing, row, doc, instance)
         except ApiError as error:
             await asyncio.to_thread(_failed, pool, row["id"], f"Bambuddy: {error.detail}")
             logger.warning(
@@ -111,7 +200,16 @@ async def mirror_with(
                 extra={"preset_id": row["id"], "status": error.status},
             )
             continue
-        await asyncio.to_thread(_mirrored, pool, row["id"], row["sha256"], bb_id)
+        except Exception as error:
+            # Not an answer of Bambuddy's (a transport error the client does not map): kept
+            # on this preset, and the rest are still sent.
+            await asyncio.to_thread(_failed, pool, row["id"], type(error).__name__)
+            logger.warning(
+                "could not mirror a filament preset to Bambuddy",
+                extra={"preset_id": row["id"], "error": type(error).__name__},
+            )
+            continue
+        await asyncio.to_thread(_mirrored, pool, row["id"], row["sha256"], bb_id, instance)
         sent += 1
     return sent
 
@@ -124,11 +222,12 @@ async def mirror_pending(
 ) -> int:
     """`mirror_with` over a client of its own, while the mirror runs (`wants_mirror`);
     0 otherwise. Never raises: a failure is logged, and the next refresh sends again."""
-    if not wants_mirror(settings):
+    instance = instance_of(settings)
+    if not wants_mirror(settings) or instance is None:
         return 0
     try:
         async with client_for(settings) as client:
-            return await mirror_with(client, pool, store, ids)
+            return await mirror_with(client, pool, store, instance, ids)
     except Exception as error:
         logger.warning(
             "the filament preset mirror did not run; the next refresh retries",
@@ -143,8 +242,9 @@ async def sync_and_mirror(
     held: HeldPresetStore,
     settings: Callable[[], StoredSettings],
 ) -> None:
-    """What the kept presets' refresh runs after it: `sync_from_held`, then every pending
-    preset sent (`mirror_pending`), so one that failed before is sent again."""
-    await sync_from_held(pool, blobs, held)
+    """What the kept presets' refresh runs after it: `sync_from_held` (its adopted
+    presets marked as the configured Bambuddy's), then every pending preset sent
+    (`mirror_pending`), so one that failed before is sent again."""
     loaded = await asyncio.to_thread(settings)
+    await sync_from_held(pool, blobs, held, instance_of(loaded))
     await mirror_pending(pool, FilamentPresetStore(pool, lambda: blobs), loaded)
