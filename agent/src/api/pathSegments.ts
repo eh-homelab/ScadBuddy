@@ -26,7 +26,8 @@ export function isDotSegment(value: string): boolean {
  * segment. Its query and fragment are not read. `what` names the call; the message never holds the URL.
  */
 export function refuseDotSegments(url: string, what: string): string {
-  const path = url.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, '').split(/[?#]/, 1)[0] ?? ''
+  // The host ends at a raw `\` too, as the path's segments do (#7277).
+  const path = url.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/\\?#]*/i, '').split(/[?#]/, 1)[0] ?? ''
   // The URL parser reads a raw `\` as a separator too, in an http(s) URL (#7225).
   if (path.split(/[/\\]/).some(isDotSegment)) throw new DotSegmentError(`${what}: a path segment is "." or "..", so it was not sent`)
   return url
