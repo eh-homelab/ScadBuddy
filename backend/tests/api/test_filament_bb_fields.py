@@ -96,13 +96,16 @@ def test_a_consumed_reset_keeps_the_grams_and_starts_the_counter(client: TestCli
     assert grams.status_code == 422
 
 
-def _linked_a_day_ago(client: TestClient, pg_conninfo: str) -> str:
+def _linked_a_day_ago(
+    client: TestClient, pg_conninfo: str, linked_at: datetime | None = None
+) -> str:
     made = str(_spool(client)["id"])
+    when = linked_at or datetime.now(UTC) - timedelta(days=1)
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO filament_bb_links (spool_id, bb_spool_id, bb_updated_at, linked_at)"
-            " VALUES (%s, 11, now(), now() - interval '1 day')",
-            (made,),
+            " VALUES (%s, 11, now(), %s)",
+            (made, when),
         )
     return f"{SPOOLS}/{made}"
 
@@ -121,7 +124,24 @@ def test_a_reset_dated_before_the_bambuddy_link_is_refused(
     assert refused.status_code == 422, refused.text
     assert refused.json()["code"] == "reset_before_link"
     assert "predates the spool's Bambuddy link" in refused.json()["detail"]
+    linked_at = datetime.fromisoformat(refused.json()["linked_at"])
+    assert timedelta(hours=23) < datetime.now(UTC) - linked_at < timedelta(hours=25)
     assert "consumed_reset" not in [e["kind"] for e in client.get(f"{one}/events").json()]
+
+
+def test_a_reset_at_the_link_time_itself_is_refused(client: TestClient, pg_conninfo: str) -> None:
+    """R-7149-12: the check is ``at <= linked_at``, the mirror of the sync's strict
+    ``at > linked_at`` (R-7149-11). The sync never sends a reset at the link's own
+    instant, so SB refuses it too; one microsecond later is taken."""
+    linked_at = datetime(2026, 11, 20, 12, 0, 0, 123456, tzinfo=UTC)
+    one = _linked_a_day_ago(client, pg_conninfo, linked_at)
+    body = {"kind": "consumed_reset", "at": linked_at.isoformat()}
+    refused = client.post(f"{one}/events", json=body)
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "reset_before_link"
+    assert datetime.fromisoformat(refused.json()["linked_at"]) == linked_at
+    later = {"kind": "consumed_reset", "at": (linked_at + timedelta(microseconds=1)).isoformat()}
+    assert client.post(f"{one}/events", json=later).status_code == 201
 
 
 def test_a_reset_dated_after_the_bambuddy_link_is_taken(
