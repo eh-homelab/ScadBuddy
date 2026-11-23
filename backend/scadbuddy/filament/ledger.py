@@ -83,6 +83,9 @@ PRINT_ACTUAL: Final = "print_actual"
 BB_USAGE: Final = "bb_usage"
 #: The ``ref_kind`` of a BB pull's ``created`` and ``synced_from_bb`` events.
 BB_SPOOL: Final = "bb_spool"
+#: The event that starts a spool's consumed counter again (#7149 R-7149-4): no grams. Its
+#: source is ``bb`` when the pull booked Bambuddy's reset, else ``person``.
+CONSUMED_RESET: Final = "consumed_reset"
 #: The ``ref_kind``s of the events that carry BB's clock.
 BB_REFS: Final = frozenset({BB_SPOOL, "bb_scale", "bb_dried", BB_USAGE})
 

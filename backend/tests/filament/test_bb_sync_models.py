@@ -37,6 +37,8 @@ _DECISION_14_FIELDS = {
     "nozzle_temp_min", "nozzle_temp_max", "note", "cost_per_kg", "low_stock_threshold_pct",
     "material_number", "archived_at", "weight_used", "weight_locked", "last_dried_at",
     "slicer_filament", "slicer_filament_name", "suppliers", "location_id",
+    # #7149 R-7149-1: the one new field Bambuddy's update takes.
+    "data_origin",
 }  # fmt: skip
 
 

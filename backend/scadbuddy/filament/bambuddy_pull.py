@@ -109,6 +109,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -143,7 +144,7 @@ from scadbuddy.filament import models as m
 # Re-exported: the wire of #6772 holds them, and the pull's callers import them from here.
 from scadbuddy.filament.bb_pull_models import PullReport as PullReport
 from scadbuddy.filament.bb_pull_models import Pulls as Pulls
-from scadbuddy.filament.bb_sync_models import BbLinked, json_form, seen_row
+from scadbuddy.filament.bb_sync_models import SEEN_FIELDS, BbLinked, json_form, seen_row
 from scadbuddy.filament.catalog import KIND_OF_TABLE, lookup_key, resolve_or_add
 from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
@@ -192,11 +193,24 @@ _PLAIN = (
     "nozzle_temp_min",
     "nozzle_temp_max",
     "weight_locked",
+    "data_origin",
+    "added_full",
+    "tag_encoded_at",
 )
-#: The snapshot fields that are no column: what is left, the tags and the product code.
+#: The snapshot fields that are no column: what is left, the tags, the product code and
+#: the consumed counter's baseline (#7149 R-7149-7: SB's ledger keeps the counter).
 _NOT_COLUMNS = frozenset(
-    {"remaining_g", "tag_uid", "tray_uuid", "material_number", "core_weight_catalog_id"}
+    {
+        "remaining_g",
+        "tag_uid",
+        "tray_uuid",
+        "material_number",
+        "core_weight_catalog_id",
+        "consumed_baseline",
+    }
 )
+#: Bambuddy's ``data_origin`` as the column takes it (its ``String(20)``, R-7149-1).
+_ORIGIN = re.compile(r"[a-z0-9_]{1,20}")
 #: The `snapshot` fields by their `seen_row` name (#6265 Task 9); the tags have none.
 _SEEN_NAMES: dict[str, str] = {
     "material": "material",
@@ -215,6 +229,10 @@ _SEEN_NAMES: dict[str, str] = {
     "remaining_g": "weight_used",
     "material_number": "material_number",
     "core_weight_catalog_id": "core_weight_catalog_id",
+    "data_origin": "data_origin",
+    "added_full": "added_full",
+    "tag_encoded_at": "encode_time",
+    "consumed_baseline": "weight_used_baseline",
 }
 #: The SB spool columns the pull writes, by the `seen_row` name of the BB field it took.
 _COLUMN_SEEN: dict[str, str] = {
@@ -233,6 +251,9 @@ _COLUMN_SEEN: dict[str, str] = {
     "weight_locked": "weight_locked",
     "type_id": "material_number",
     "insert_type_id": "core_weight_catalog_id",
+    "data_origin": "data_origin",
+    "added_full": "added_full",
+    "tag_encoded_at": "encode_time",
 }
 #: The catalog entries already warned about as skipped, so a clash is told once a process.
 _WARNED_SKIPS: set[tuple[int, str]] = set()
@@ -272,11 +293,26 @@ def snapshot(bb: BbSpool) -> dict[str, Any]:
         "tray_uuid": clean_tray_uuid(bb.tray_uuid),
         "material_number": _text(bb.material_number),
         "core_weight_catalog_id": bb.core_weight_catalog_id,
+        "data_origin": _origin(bb.data_origin),
+        "added_full": bb.added_full,
+        "tag_encoded_at": None if bb.encode_time is None else json_form(bb.encode_time),
+        "consumed_baseline": bb.weight_used_baseline,
     }
 
 
+def _origin(value: str | None) -> str | None:
+    """BB's ``data_origin`` when the column takes it, else none (R-7149-1)."""
+    return value if value is not None and _ORIGIN.fullmatch(value) else None
+
+
 def _column_value(field: str, value: Any) -> Any:
-    return Decimal(value) if field == "cost_per_kg" and value is not None else value
+    if value is None:
+        return None
+    if field == "cost_per_kg":
+        return Decimal(value)
+    if field == "tag_encoded_at":
+        return as_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    return value
 
 
 #: Some SB row or spool is linked to a Bambuddy row (Decision 12).
@@ -621,7 +657,10 @@ def _quiet(
         }
         if not steady:
             return {}
-        facts = plan.SpoolFacts.read(conn, [link["spool_id"] for link in steady.values()], _ALL)
+        # The pull compares values only; a reset is the push's (#7149), so it reads none.
+        facts = plan.SpoolFacts.read(
+            conn, [link["spool_id"] for link in steady.values()], _ALL, resets=False
+        )
         quiet: dict[int, _Outcome] = {}
         for bb_id, link in steady.items():
             stored: dict[str, Any] = link["bb_seen"]
@@ -677,7 +716,7 @@ def _steady(
         pulls.of_field(k)
         and (_SEEN_NAMES[k] not in stored or stored[_SEEN_NAMES[k]] != seen.get(_SEEN_NAMES[k]))
         for k in after
-        if k in _SEEN_NAMES
+        if _SEEN_NAMES.get(k) in SEEN_FIELDS
     ):
         return False
     spool_id = link["spool_id"]
@@ -1348,7 +1387,7 @@ def _update(
 
     def moved_off(field: str, value: Any) -> bool:
         name = _SEEN_NAMES.get(field)
-        if echo is not None and name is not None:
+        if echo is not None and name in SEEN_FIELDS:
             return name not in echo or seen_now.get(name) != echo[name]
         return bool(value != before.get(field))
 
@@ -1412,6 +1451,12 @@ def _update(
     fresh = {f for f in moved if pulls.of_field(f)}
     if pulls.weights and moved_off("remaining_g", after["remaining_g"]):
         fresh.add("remaining_g")
+    # R-7149-6: a baseline that moved off one SB saw is BB's reset; a first reading is none.
+    reset = bool(
+        pulls.weights
+        and "consumed_baseline" in before
+        and after["consumed_baseline"] != before["consumed_baseline"]
+    )
     if seen == before and not fresh:
         return False
     # The newer change wins per field (Decision 8): what SB changed after BB's change
@@ -1424,7 +1469,12 @@ def _update(
     }
     # `_values` resolves a BB material once, and scopes the subtype by it.
     values = _values(conn, after, wanted, material=spool.effective.material_id, skipped=skipped)
-    current = spool.effective.model_dump() | {"weight_locked": spool.weight_locked}
+    current = spool.effective.model_dump() | {
+        "weight_locked": spool.weight_locked,
+        "data_origin": spool.data_origin,
+        "added_full": spool.added_full,
+        "tag_encoded_at": spool.tag_encoded_at,
+    }
     changes = {c: [current.get(c), v] for c, v in values.items() if current.get(c) != v}
     if changes.get("weight_locked") == [True, False] and not _lock_from_bb(conn, spool_id):
         # A BB unlock never clears a lock SB set.
@@ -1471,12 +1521,32 @@ def _update(
         # Nothing taken after the push's echo: it stays the last reading.
         return False
     _synced(conn, spool_id, bb, seen, changes, reading, actor, weight=weight, ref=ref)
+    if reset:
+        _bb_reset(conn, spool_id, bb, actor)
     FilamentSpoolStore.read(conn, spool_id, check=True)
     if taken is not None:
         taken |= {_COLUMN_SEEN[c] for c in changes if c in _COLUMN_SEEN}
         if reading is not None:
             taken.add("weight_used")
-    return bool(changes) or retag or reading is not None
+    return bool(changes) or retag or reading is not None or reset
+
+
+def _bb_reset(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> None:
+    """R-7149-6: Bambuddy's consumed-counter reset as a ``consumed_reset`` event of source
+    ``bb``, at BB's ``updated_at``, once per BB change (its ref). The push never sends a
+    ``bb`` reset back (`bb_sync_plan.SpoolFacts`)."""
+    stamp = None if bb.updated_at is None else bb.updated_at.isoformat()
+    ledger.record(
+        conn,
+        spool_id,
+        ledger.CONSUMED_RESET,
+        source="bb",
+        ref_kind=REF_KIND if stamp else None,
+        ref_id=f"{bb.id}@{stamp}" if stamp else None,
+        actor=actor,
+        at=bb.updated_at,
+        data={"bb_spool_id": bb.id, "bb_baseline": bb.weight_used_baseline},
+    )
 
 
 def _reading(bb: BbSpool, before: Mapping[str, Any], insert_id: UUID | None) -> dict[str, Any]:

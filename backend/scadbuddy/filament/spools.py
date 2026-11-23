@@ -9,7 +9,7 @@ ledger is never deleted (`SpoolInUseError`); it is archived.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -878,6 +878,7 @@ class FilamentSpoolStore:
         kind: m.TagKind,
         override: bool = False,
         actor: str,
+        origin: str | None = None,
     ) -> m.TagBinding | None:
         """Put a tag on a spool; ``None`` for no such spool. The tag is found by its
         cleaned UID or tray UUID (`spools.models.clean_tag_uid`, `clean_tray_uuid`), and
@@ -890,6 +891,8 @@ class FilamentSpoolStore:
         ``bambu_mifare`` tag (`OverrideKindError`) and locks the spool's weight, with one
         ``edited`` event when it was unlocked. Every tag whose binding this changes is
         queued for Bambuddy (`filament/rfid_push.py`), whatever the sync setting says.
+        ``origin`` is the spool's ``data_origin`` once a new binding is made (#7149
+        R-7149-1: ``nfc_link`` for a person's bind), in one ``edited`` event.
 
         Locks, in this order: the tag, then the new and the old spool by id. Every writer of
         bindings takes the tag first, so two binds in opposite directions wait rather than
@@ -899,7 +902,7 @@ class FilamentSpoolStore:
             raise TagUnnamedError()
         try:
             with self._pool.connection() as conn, conn.transaction():
-                return self.bind_on(conn, spool_id, uid, tray, kind, override, actor)
+                return self.bind_on(conn, spool_id, uid, tray, kind, override, actor, origin)
         except _NoSpoolError:
             return None
 
@@ -912,6 +915,7 @@ class FilamentSpoolStore:
         kind: m.TagKind,
         override: bool | None,
         actor: str,
+        origin: str | None = None,
     ) -> m.TagBinding:
         """`bind_tag` on ``conn``'s transaction, its keys already cleaned; `_NoSpoolError`
         when the spool does not exist, and `OverrideKindError`, which the caller rolls back
@@ -986,8 +990,42 @@ class FilamentSpoolStore:
         )
         if override:
             FilamentSpoolStore._lock_weight(conn, spool_id, actor)
+        if origin is not None:
+            FilamentSpoolStore.set_origin(conn, spool_id, actor, data_origin=origin)
         enqueue_tag(conn, tag_id)
         return m.TagBinding.model_validate(row)
+
+    @staticmethod
+    def set_origin(
+        conn: Conn,
+        spool_id: UUID,
+        actor: str,
+        *,
+        data_origin: str,
+        tag_encoded_at: datetime | None = None,
+    ) -> None:
+        """How the spool's tag came in, and when it was written when that is known (#7149
+        R-7149-1, R-7149-3), with one ``edited`` event of what changed, on ``conn``'s
+        transaction. Only ScadBuddy's own writers call it: a person's bind and a confirmed
+        NTAG write."""
+        current = conn.execute(
+            "SELECT data_origin, tag_encoded_at FROM filament_spools WHERE id = %s FOR UPDATE",
+            (spool_id,),
+        ).fetchone()
+        if current is None:
+            return
+        after: dict[str, Any] = {"data_origin": data_origin}
+        if tag_encoded_at is not None:
+            after["tag_encoded_at"] = tag_encoded_at
+        changes = {c: [current[c], v] for c, v in after.items() if current[c] != v}
+        if not changes:
+            return
+        conn.execute(
+            f"UPDATE filament_spools SET {', '.join(f'{c} = %s' for c in changes)},"
+            " updated_at = now() WHERE id = %s",
+            [*(changes[c][1] for c in changes), spool_id],
+        )
+        ledger.record(conn, spool_id, "edited", actor=actor, data={"changes": changes})
 
     @staticmethod
     def _lock_weight(conn: Conn, spool_id: UUID, actor: str) -> None:
@@ -1137,6 +1175,28 @@ class FilamentSpoolStore:
                 actor=actor,
                 data=data,
             )
+
+    def reset_consumed(self, spool_ids: Sequence[UUID], *, actor: str) -> m.ConsumedResetDone:
+        """A person's ``consumed_reset`` on each spool named, in one transaction, the spools
+        locked in id order (#7149 R-7149-4); the grams left stay. An id that names no
+        spool is answered, not refused."""
+        wanted = sorted(set(spool_ids))
+        with self._pool.connection() as conn, conn.transaction():
+            found = {
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM filament_spools WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+                    (wanted,),
+                ).fetchall()
+            }
+            for spool_id in wanted:
+                if spool_id in found:
+                    ledger.record(
+                        conn, spool_id, ledger.CONSUMED_RESET, source="person", actor=actor
+                    )
+        return m.ConsumedResetDone(
+            reset=len(found), not_found=[i for i in dict.fromkeys(spool_ids) if i not in found]
+        )
 
     # -- internals --------------------------------------------------------------------
 

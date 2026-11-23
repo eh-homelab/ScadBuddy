@@ -76,6 +76,26 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   `filament_low_stock_pct`, `filament_default_cost_per_kg`, `profile_fetch_nozzles`,
   `filament_label_base_url` (an https origin of at most 64 characters, live; unset, labels use
   `public_url` reduced to its https origin, then the page's own origin).
+- Bambuddy's spool fields (#7149, plan
+  `docs/superpowers/plans/2026-11-23-spool-bb-fields.md`,
+  migration `20261123T0609Z_filament_spool_bb_fields.sql`):
+  - `data_origin` says how the spool's data came in, in Bambuddy's words (`rfid_auto`,
+    `rfid_linked`, `nfc_link`, `opentag3d`). It is read only. The pull takes Bambuddy's
+    value; a person's tag bind sets `nfc_link`; a confirmed NTAG write sets `opentag3d`.
+    The push sends it when SB has one, and the tag push sends it to `link-tag`.
+  - `added_full` (a person edits it) and `tag_encoded_at` (Bambuddy's `encode_time`, set
+    by a confirmed NTAG write) come from Bambuddy on the pull. Bambuddy takes no write of
+    either, so they are never pushed.
+  - The consumed counter is a ledger event, `consumed_reset` (no grams; the grams left
+    stay). The spool metrics' `consumed_g` counts the plates after the newest reset, and
+    the spool page's "Used" tile shows it, with "Reset the used counter". Reset one spool
+    with `POST /filament/spools/{id}/events` (`kind: consumed_reset`), or 1 to 500 spools
+    with `POST /filament/spools/reset-consumed` (agent `filament_spool_add_event` and
+    `filament_spools_reset_consumed`). Under `filament_sync.weights` the sync
+    resets Bambuddy's counter of a linked spool once per SB reset (op `reset_consumed`,
+    `POST /inventory/spools/{id}/reset-consumed-counter`), and the pull books a Bambuddy
+    reset (its `weight_used_baseline` moved) as a `consumed_reset` of source `bb`, which
+    is never sent back. No baseline column is kept.
 - Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`. A code
   opens at `/x/<code>` (`frontend/src/pages/CodePage.tsx`; route `GET /api/v1/codes/{code}`,
   `backend/scadbuddy/api/codes.py`). Any case works, with or without the dash. A number is

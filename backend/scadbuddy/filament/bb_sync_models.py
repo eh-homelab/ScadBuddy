@@ -45,7 +45,15 @@ BbLinked = Literal["found", "linked", "made"]
 #: (Decision 13), a filament entry's ``GET`` by id (a 404 there confirmed by its listing),
 #: any other row's listing read again (#6688, decisions 187-192, 200 and 201).
 Op = Literal[
-    "create", "update", "archive", "restore", "k_profiles", "presets", "suppliers", "probe"
+    "create",
+    "update",
+    "archive",
+    "restore",
+    "k_profiles",
+    "presets",
+    "suppliers",
+    "probe",
+    "reset_consumed",
 ]
 
 #: A spool's fields the sync carries (Decision 14), by Bambuddy's names: ``spools``, then
@@ -77,6 +85,7 @@ SEEN_FIELDS: tuple[str, ...] = (
     "slicer_filament_name",
     "suppliers",
     "location_id",
+    "data_origin",
 )
 
 #: A spool's supplier link as the sync compares it: what ``PUT …/suppliers`` sends.
