@@ -165,29 +165,35 @@ would rebuild the same parts.
   `rtsp_url: "rtsps://172.16.0.187:322/streaming/live/1"` and `resolution: "1080p"`
   (`.claude/skills/h2c-print-from-scadbuddy/evals/decode-mapping-from-printer-report/files/printer-report-boys1.json:952-953`).
   The relay connects to the link's pinned host with the URL's port and path.
-  A report that adds, drops or changes the URL also emits `printer.changed`
-  (`printers/watch.py` compares it with the stored report's). The camera streams do not
+  A report that adds, drops or changes the URL also emits `printer.changed`. This is new:
+  `printers/watch.py` gains the comparison with the last announced URL (plan Task 2).
+  Today it emits only `printer.report`. The camera streams do not
   carry `printer.report`, which fires on every progress change.
-- The relay's controller reads the list from a new route, `GET
-  /api/v1/internal/crud/camera/printers`, which returns each printer's id, host, certificate
-  fingerprint and access code. It follows `crud_print_access_code`
-  (`backend/scadbuddy/api/crud_print.py:905`): the code is opened only for the
-  `crud.camera-relay` credential. The recorders and the edge read the same list without
-  codes (`crud.camera`), to know which relay paths exist. Below, "the controller" is any of
+- The relay's controller reads the list, with access codes, from `GET
+  /api/v1/internal/crud/camera-relay/printers` (and one printer from
+  `…/camera-relay/printers/{id}`): each printer's id, host, certificate fingerprint and
+  access code. It follows `crud_print_access_code`
+  (`backend/scadbuddy/api/crud_print.py:905`): only the `crud.camera-relay` credential
+  reaches these routes. The recorders and the edge read `GET
+  /api/v1/internal/crud/camera/printers` (and `…/camera/printers/{id}`) with
+  `crud.camera`: the same list with no access code, to know which relay paths exist. Below, "the controller" is any of
   them; each follows the bus the same way.
 - **No polling: the controller follows the event bus.** It uses the agent's pattern
   (#5299 D4): one server-sent event stream from the CRUD service, opened with its service
   credential, as `GET /api/v1/internal/crud/agent/changes` is for the agent
   (`agent/src/events/changeStream.ts`, `backend/scadbuddy/api/crud_agent_changes.py`). A
-  new `GET /api/v1/internal/crud/camera/changes` (`crud.camera`) carries only the events the
-  controller needs: `printer.changed` and a settings change. The API already emits
+  new `GET /api/v1/internal/crud/camera/changes` (`crud.camera`), and the same stream at
+  `…/camera-relay/changes` (`crud.camera-relay`), carry only the events the controllers
+  need: `printer.changed` and `camera.reconnect` (§6.9; the route that emits it comes with
+  live view, phase 3). No camera setting is read by the relay or the recorders in
+  phase 1; the retention settings (phase 5) are read by the API's sweep. The API already emits
   `printer.changed` with the printer's id for every case that matters here: a new printer
   (`create_printer`, `backend/scadbuddy/api/printers.py:136`), a printer the Bambuddy sync
   creates or changes (`printers/bambuddy_sync.py`), a LAN link added
   (`printers/lan_link.py:58`) or removed (`unlink_lan`), a rename or path change
   (`patch_printer`), and a delete (`delete_printer`). The new `camera_recording` toggle
-  emits it too. On each event the controller re-reads that one printer
-  (`GET /api/v1/internal/crud/camera/printers/{id}`) and acts:
+  emits it too. On each event the controller re-reads that one printer (the relay from
+  `…/camera-relay/printers/{id}`, the others from `…/camera/printers/{id}`) and acts:
   - an id it does not record yet that now qualifies (§6.2's rule): start its path, so a
     new printer is recorded as soon as it has a LAN link;
   - a recorded printer whose host, access code, fingerprint or model changed: replace its
@@ -202,9 +208,10 @@ would rebuild the same parts.
     `Last-Event-ID`, so the API replays the log when it can.
   It reconnects with the agent's back-off (500 ms doubling to 30 s, with jitter) and treats
   a stream silent past the keepalive as dead. It runs no timer that re-reads the list.
-- **The feed publishes events too.** Each part reports its own state for a printer through
-  `POST /api/v1/internal/crud/camera/feeds/{printer_id}/state`: the relay its pull (`pulling`,
-  `retrying`, `stopped`, with the error), the leader recorder its recording (leader
+- **The feed publishes events too.** Each part reports its own state for a printer on its
+  own caller's route: the relay its pull (`pulling`, `retrying`, `stopped`, with the error)
+  through `POST /api/v1/internal/crud/camera-relay/printers/{printer_id}/feed`, the leader
+  recorder its recording through `POST /api/v1/internal/crud/camera/printers/{printer_id}/feed` (leader
   replica, last segment time, upload lag, buffered bytes). A report is sent on a change of
   state, not on a timer. The API stores it and emits `camera.feed` on `printers` and
   `printer:<id>`. The UI and the alerts design follow that event; nothing polls the feed.
@@ -226,8 +233,9 @@ would rebuild the same parts.
   length at the start of the object), `init_sha256`, `recorder` (the replica that recorded
   it), and `discontinuity` (true for the first segment after a gap, a new init, or a
   handover, D14).
-- **Route:** `POST /api/v1/internal/crud/camera/segments` (`crud.camera`). It takes a batch, so a
-  backlog after an API outage uploads quickly. The upload to the bucket happens before the
+- **Route:** `POST /api/v1/internal/crud/camera/printers/{printer_id}/segments`
+  (`crud.camera`), refused with 409 to a recorder that does not hold the printer's lease.
+  It takes a batch, so a backlog after an API outage uploads quickly. The upload to the bucket happens before the
   index row; a row always names an object that exists.
 - An object with no row (the controller died between upload and index) is found and deleted
   by the retention sweep's orphan pass (§6.6).
@@ -478,8 +486,8 @@ By the owner, 2026-11-23:
 
 By the designer (owner to check):
 
-- D1. MediaMTX as the relay and the live edge; our own Go recorder (§6.1).
-- D2. 4-second fMP4 segments; init segments stored once by hash (§6.3).
+- D1. MediaMTX as the relay, the recorders' segmenter and the live edge; Python controllers (D7, §6.1).
+- D2. 4-second fMP4 segments, each carrying its own init (D15, §6.3).
 - D3. Defaults only; both are settings the shop changes (§6.6): unused footage
   (`camera_footage_retention_seconds`) 7 days, empty keeps it all; print videos
   (`camera_print_video_retention_seconds`) empty, so kept while the recording exists.

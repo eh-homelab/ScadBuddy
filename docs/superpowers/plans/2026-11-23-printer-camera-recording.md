@@ -228,7 +228,7 @@ Follow exactly what commit `3576b1712` did for `profile-fetch` in each of these 
 - Modify: `.github/workflows/ci.yml` (the backend pytest job fetches the pinned MediaMTX release by sha256 into `$PATH`)
 
 **Interfaces:**
-- Consumes: everything above. A publisher (`ffmpeg -re -f lavfi -i testsrc … -c:v libx264 -g 10 -f rtsp`) stands in for the printer: the relay's path for the test uses `source: rtsp://…` instead of `rtsps` (a test-only override in `RelaySettings`, `camera_test_plain_source: bool = False`, refused when `SCADBUDDY_ENV=prod`).
+- Consumes: everything above. A publisher (`ffmpeg -re -f lavfi -i testsrc … -c:v libx264 -g 10 -f rtsp`) stands in for the printer: the relay's path for the test uses `source: rtsp://…` instead of `rtsps` (a test-only path: the test builds `Relay` with a `source_for: Callable[[CameraSourceWithCode], str]` argument that returns the plain `rtsp://` URL; `main()` always passes the `rtsps://` builder, and no setting or environment variable can change it).
 
 - [ ] **Step 1: Write** `test_two_recorders_no_gap_on_leader_kill`: start relay, two recorders, a fake CRUD backed by `CameraStore` on the test Postgres, and the publisher; wait for 10 indexed segments; kill the leader's process; wait for 10 more; assert the indexed segments, ordered by `started_at`, have no hole longer than 1 s between one's end and the next's start, and that exactly one `discontinuity=True` appears after the kill.
 - [ ] **Step 2: Run** `uv run pytest tests/camera/test_e2e_mediamtx.py -v`. Expected: PASS (it exercises code already written; a failure is a bug in Tasks 6–8, fixed there).
@@ -243,7 +243,7 @@ Follow exactly what commit `3576b1712` did for `profile-fetch` in each of these 
 **Interfaces:**
 - Consumes: metrics registered in Tasks 7 and 8: `scadbuddy_camera_segments_indexed_total{printer}`, `scadbuddy_camera_upload_lag_seconds{printer}`, `scadbuddy_camera_backlog_bytes{printer}`, `scadbuddy_camera_leader{printer,recorder}`, `scadbuddy_camera_relay_reconnects_total{printer}`.
 
-- [ ] **Step 1: Run** `bash .github/scripts/select-lanes.test.sh` after adding a case "a change under `backend/scadbuddy/camera/` selects `backend` and `image`". Expected: FAIL, then fix `select-lanes.sh`, then PASS.
+- [ ] **Step 1: Add a regression pin** to `.github/scripts/select-lanes.test.sh`: "a change under `backend/scadbuddy/camera/` selects `backend` and `image`". `select-lanes.sh` already selects `backend` for every `backend/` path, so it passes at once; run `bash .github/scripts/select-lanes.test.sh`. Expected: PASS.
 - [ ] **Step 2: Build** `docker build --target camera-relay -t camera-relay:dev . && docker build --target camera-recorder -t camera-recorder:dev .`. Expected: both build; `docker run --rm camera-recorder:dev mediamtx --version` prints the pinned version.
 - [ ] **Step 3: Run** `KUSTOMIZE=<v5.8.1 path> bash .github/scripts/lint-dashboard.sh`. Expected: PASS with the new panels.
 - [ ] **Step 4: Write** the docs listed; every fact cites its source.
