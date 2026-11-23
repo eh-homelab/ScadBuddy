@@ -60,7 +60,7 @@ describe('backend client', () => {
       body: {} as never,
     })
     await expect(call).rejects.toBeInstanceOf(DotSegmentError)
-    await expect(call).rejects.toThrow(/item_id is "\." or "\.\."/)
+    await expect(call).rejects.toThrow('/api/v1/orders/{order_id}/items/{item_id}/quote: a path segment is "." or ".."')
     expect(sent).toEqual([])
     // Dots among other text, or a `%2e` (its `%` is encoded), are sent as one segment.
     for (const safe of ['../x', '%2e%2e']) {

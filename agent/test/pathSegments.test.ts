@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { crudRead } from '../src/api/crudRead.js'
-import { DotSegmentError, isDotSegment, refuseDotSegments } from '../src/api/pathSegments.js'
+import { crudCall, crudJson } from '../src/api/crudStores.js'
+import { defaultPathSerializer } from 'openapi-fetch'
+import { DotSegmentError, isDotSegment, refuseDotSegments, refusingDotParams } from '../src/api/pathSegments.js'
 import { crudCostPoster } from '../src/sessions/orderCosts.js'
 
 describe('dot segments in backend paths (#7221)', () => {
@@ -17,13 +19,25 @@ describe('dot segments in backend paths (#7221)', () => {
     expect(refuseDotSegments('http://api.example/a/..%2Fx/b', 'a read')).toBe('http://api.example/a/..%2Fx/b')
   })
 
-  it('a CRUD read with a dot segment mid-path is never sent', async () => {
+  it('refuses a dot segment from a parameter of any style, as serialized', () => {
+    const serialize = refusingDotParams(defaultPathSerializer)
+    expect(() => serialize('/a/{id}/b', { id: ['..'] })).toThrow(DotSegmentError)
+    expect(() => serialize('/a/{id}/b', { id: '.' })).toThrow(DotSegmentError)
+    expect(serialize('/a/{id}/b', { id: ['x', 'y'] })).toBe('/a/x,y/b')
+    expect(serialize('/a/{id}/b', { id: '%2e%2e' })).toBe('/a/%252e%252e/b')
+  })
+
+  it('a CRUD read or write with a dot segment mid-path is never sent', async () => {
     const sent: string[] = []
     const fetchImpl = (async (url: string) => {
       sent.push(url)
       return new Response('{}', { headers: { 'x-scadbuddy-crud': '1' } })
     }) as unknown as typeof fetch
     await expect(crudRead(fetchImpl, 'http://api.example', 'a background task', '/background-tasks/../operations/x')).rejects.toBeInstanceOf(DotSegmentError)
+    expect(sent).toEqual([])
+    // A write is never sent either: every CRUD call goes through `crudFetch`.
+    await expect(crudCall(fetchImpl, 'http://api.example', 'a lease released', '/leases/../sessions/x', { method: 'DELETE' })).rejects.toBeInstanceOf(DotSegmentError)
+    await expect(crudJson(fetchImpl, 'http://api.example', 'a lease taken', '/leases/./x', { body: {} })).rejects.toBeInstanceOf(DotSegmentError)
     expect(sent).toEqual([])
   })
 

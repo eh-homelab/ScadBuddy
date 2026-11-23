@@ -53,8 +53,8 @@ export type AssistantCostReport = {
 }
 
 /**
- * `recorded` (written now or before), `refused` (400, 404, 409 or 422 from the route: never sent
- * again), `deferred` (under one minor unit: nothing written, sent again with more spend),
+ * `recorded` (written now or before), `refused` (400, 404, 409 or 422 from the route, or an order
+ * id of `.` or `..`, refused before it is sent, #7221: never sent again), `deferred` (under one minor unit: nothing written, sent again with more spend),
  * `failed` (anything else: the same share sent again at the next report).
  */
 export type ReportAnswer = 'recorded' | 'refused' | 'deferred' | 'failed'

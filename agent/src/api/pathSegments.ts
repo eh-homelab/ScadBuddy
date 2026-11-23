@@ -28,16 +28,11 @@ export function refuseDotSegments(url: string, what: string): string {
 }
 
 /**
- * openapi-fetch's `pathSerializer` check: every path parameter of `pathname` that is `.` or `..`
- * is refused before `serialize` builds the URL. A `%2e` is not: the serializer encodes its `%`.
+ * openapi-fetch's `pathSerializer` check: the path `serialize` builds from `pathname` and its
+ * parameters is refused when a segment is `.` or `..`, before any URL is made. It reads the
+ * serialized path, so a parameter of any style (a string, an array of one `..`) is caught; a
+ * `%2e` is not, since the serializer encodes its `%`.
  */
 export function refusingDotParams(serialize: (pathname: string, params: Record<string, unknown>) => string) {
-  return (pathname: string, params: Record<string, unknown>): string => {
-    for (const [name, value] of Object.entries(params)) {
-      if (value === '.' || value === '..') {
-        throw new DotSegmentError(`${pathname}: path parameter ${name} is "." or "..", so it was not sent`)
-      }
-    }
-    return serialize(pathname, params)
-  }
+  return (pathname: string, params: Record<string, unknown>): string => refuseDotSegments(serialize(pathname, params), pathname)
 }
