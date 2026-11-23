@@ -15,6 +15,9 @@ class DirtyRegistry {
   private reports = new Map<string, Report>()
   private listeners = new Set<() => void>()
   private dirtyIds: readonly string[] = []
+  /** #7192 — what holds a leave without being a settings form, by holder: its words for the dialog. */
+  private holds = new Map<string, string>()
+  private heldLabels: readonly string[] = []
 
   subscribe = (listener: () => void) => {
     this.listeners.add(listener)
@@ -33,6 +36,16 @@ class DirtyRegistry {
   }
 
   dirtySections = (): readonly string[] => this.dirtyIds
+
+  /** `label` holds a leave for `id`; null lets it go. Never a dirty section: no reload or agent reads it. */
+  hold(id: string, label: string | null) {
+    if (label === null ? !this.holds.delete(id) : this.holds.get(id) === label) return
+    if (label !== null) this.holds.set(id, label)
+    this.heldLabels = [...this.holds.values()]
+    for (const listener of this.listeners) listener()
+  }
+
+  leaveHolds = (): readonly string[] => this.heldLabels
 
   anyDirty = (): boolean => this.dirtyIds.length > 0
 
@@ -74,6 +87,29 @@ export function useReportDirty(id: string, dirty: boolean, drafts?: Drafts): voi
     registry.set(id, { dirty, drafts: JSON.parse(published) as Drafts })
   }, [registry, id, dirty, published])
   useEffect(() => () => registry.remove(id), [registry, id])
+}
+
+const NO_HOLDS: readonly string[] = []
+const NO_SUBSCRIPTION = () => () => {}
+
+/**
+ * #7192 — holds the Settings leave guard while `label` is set (unsaved work that is not a
+ * settings form, such as a hosted plugin's draft files), named in its dialog by `label`. It
+ * is not a dirty section: the Settings reload and the agent's "unsaved" flag never see it.
+ * Outside Settings (a component rendered on its own) it does nothing.
+ */
+export function useHoldLeave(id: string, label: string | null): void {
+  const registry = useContext(DirtyContext)
+  useLayoutEffect(() => {
+    registry?.hold(id, label)
+  }, [registry, id, label])
+  useEffect(() => () => registry?.hold(id, null), [registry, id])
+}
+
+/** What holds a leave now (`useHoldLeave`), each by its label. */
+export function useLeaveHolds(): readonly string[] {
+  const registry = useContext(DirtyContext)
+  return useSyncExternalStore(registry?.subscribe ?? NO_SUBSCRIPTION, registry?.leaveHolds ?? (() => NO_HOLDS))
 }
 
 /** The ids of the sections dirty now, in the order they first reported. */

@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { aiPlugins, isBuiltIn, type PluginPackage } from '../../api/aiPlugins'
 import { hostedPlugins, type HostedPlugin } from '../../api/hostedPlugins'
 import { useAsync } from '../../lib/useAsync'
+import { useHoldLeave } from '../../pages/settings/dirty'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -39,6 +40,16 @@ export function HostedPluginsPanel() {
   /** The plugin to open (null: none) once the person agrees to drop the unsaved edits. */
   const [pending, setPending] = useState<{ next: string | null } | null>(null)
   const onDirty = useCallback((paths: string[]) => setUnsaved(paths), [])
+  // #7192 — leaving Settings asks first while a draft file is unsaved, as Close does. A hold
+  // of its own, not a dirty section: the Settings reload and the agent's flag stay the forms'.
+  useHoldLeave('hosted-plugin-editor', unsaved.length > 0 && selected !== null ? `${selected}'s ${unsaved.join(', ')}` : null)
+  // A reload or a closed tab asks too, where the browser lets a page ask (as the flow editor).
+  useEffect(() => {
+    if (unsaved.length === 0) return
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault()
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [unsaved.length])
   const choose = (next: string | null) => {
     if (next === selected) return
     if (unsaved.length > 0) {
