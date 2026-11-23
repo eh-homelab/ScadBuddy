@@ -359,6 +359,8 @@ def _adopt_one(
         again = by_bb_id_on(conn, [detail.id])
         if again:
             rebind_on(conn, detail.id, again[detail.id])
+            # Blob ``key`` stays unheld on purpose: the blob sweep reclaims it once its
+            # grace ends (`keep_document`).
             return False
         fetched = _fetched_key(conn, detail.id)
         preset_id = create_on(
@@ -461,7 +463,7 @@ async def refresh_bambuddy(
     def ours() -> list[dict[str, Any]]:
         with pool.connection() as conn:
             return conn.execute(
-                "SELECT id, bb_preset_id, bb_updated_at FROM filament_presets"
+                "SELECT id, bb_preset_id, bb_updated_at, sha256 FROM filament_presets"
                 " WHERE source = 'bambuddy' AND bb_preset_id IS NOT NULL"
             ).fetchall()
 
@@ -482,7 +484,11 @@ async def refresh_bambuddy(
         if detail is None or not detail.setting:
             continue
         doc = dict(detail.setting)
-        key, sha256 = await keep_document(blobs, document_bytes(doc))
+        body = document_bytes(doc)
+        if detail.updated_at is None and hashlib.sha256(body).hexdigest() == p["sha256"]:
+            # With no stamp, every refresh reads it: an unchanged document writes no blob.
+            continue
+        key, sha256 = await keep_document(blobs, body)
 
         changed += await asyncio.to_thread(_take_version, pool, p["id"], detail, doc, key, sha256)
     return changed

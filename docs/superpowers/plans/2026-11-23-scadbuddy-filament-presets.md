@@ -81,6 +81,10 @@ Without a Bambuddy URL the mirror does nothing.
    `bambuddy`. Its Bambuddy id is kept (the mirror's, or the origin's). The bytes go to the
    blob store, so this is code, not SQL; it runs as part of the deployed refresh. A row whose
    preset the copy lacks keeps its Bambuddy id, and the native slicer reads it as before.
+   Between PR 1 and PR 2 a fetch still imports into Bambuddy. A re-fetch of a type whose
+   key already has an adopted `3dfp` preset binds a new Bambuddy id there, and adoption
+   makes that one a `bambuddy` preset, so the key holds two presets until PR 2 (whose fetch
+   versions the `3dfp` preset in place) lands.
 7. **The pull (comment steps 1 and 4).** `_bb_presets` writes `sb-<id>` when a ScadBuddy
    preset has the Bambuddy id Bambuddy sent, else the id (the next refresh adopts it). A row
    still holds "what Bambuddy sent last" when it holds that id or the `sb-` ref of the

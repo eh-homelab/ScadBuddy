@@ -16,6 +16,7 @@ import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from psycopg.rows import dict_row
 
 from scadbuddy.api import orders as orders_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
@@ -23,6 +24,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.filament.component import FILAMENT, Filament
 from scadbuddy.filament.models import SpoolPatch
+from scadbuddy.filament.sb_presets import create_on, document_bytes, keep_document, rebind_on
 from scadbuddy.orders import component as orders_component
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.slicing.profiles import ProfileImageError
@@ -197,6 +199,50 @@ def test_no_local_read_when_every_spool_names_a_bambu_preset(client: TestClient)
     local = local_presets()
     _inventory(client, spool(1, cost_per_kg=20, slicer_filament="GFA00"))
     assert client.post(IMPORT).status_code == 200
+    assert local.call_count == 0
+
+
+def adopted(client: TestClient, pg_conninfo: str, bb_id: int, density: str) -> str:
+    """A ScadBuddy preset made from Bambuddy local preset ``bb_id`` (its document's
+    ``filament_density`` is ``density``), with every binding that named ``bb_id``
+    rebound to it, as `adopt_held` does (#7176); its ref."""
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    name = "Cookiecad PETG Magic @H2C"
+    doc: dict[str, Any] = {"name": name, "inherits": "", "filament_density": [density]}
+    key, sha256 = asyncio.run(keep_document(state.store.blobs, document_bytes(doc)))
+    with psycopg.connect(pg_conninfo, row_factory=dict_row) as conn:
+        preset_id = create_on(
+            conn,
+            name=name,
+            source="bambuddy",
+            key=key,
+            sha256=sha256,
+            doc=doc,
+            made_by="test",
+            bb_preset_id=bb_id,
+        )
+        assert rebind_on(conn, bb_id, preset_id) > 0
+    return f"sb-{preset_id}"
+
+
+@respx.mock
+def test_an_adopted_preset_gives_its_density(client: TestClient, pg_conninfo: str) -> None:
+    """#7176: once a spool's Bambuddy local preset is adopted, its binding names the
+    ScadBuddy preset (``sb-<id>``), whose document gives the density; Bambuddy's local
+    presets are not read for it."""
+    configure(client)
+    _inventory(client, spool(3, brand="Cookiecad", cost_per_kg=30, slicer_filament="2"))
+    ref = adopted(client, pg_conninfo, 2, "1.275")
+    local = local_presets()
+
+    response = client.post(IMPORT)
+
+    assert response.status_code == 200, response.text
+    [row] = response.json()["rows"]
+    assert (row["density_g_cm3"], row["density_profile"]) == (
+        "1.275",
+        f"ScadBuddy preset Cookiecad PETG Magic @H2C (spool preset {ref})",
+    )
     assert local.call_count == 0
 
 

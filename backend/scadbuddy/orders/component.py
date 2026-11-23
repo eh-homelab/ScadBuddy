@@ -31,6 +31,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.sb_presets import FilamentPresetStore
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.definitions import FlowDefinitions
@@ -134,6 +135,12 @@ class OrdersComponent:
         and what the price book imports from."""
         assert self._components is not None
         return self._components.get(FILAMENT).inventory
+
+    @property
+    def own_presets(self) -> FilamentPresetStore | None:
+        """ScadBuddy's own filament presets (#7176): an ``sb-`` preset's density."""
+        assert self._components is not None
+        return self._components.get(FILAMENT).own_presets
 
     def densities(self) -> DensityTable | None:
         """The image's vendor presets by id (#6136, `orders/density.py`), built once per
