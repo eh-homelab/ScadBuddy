@@ -30,7 +30,7 @@ export interface PluginFeedView {
   /** The marketplace's name: what `/plugin install <plugin>@<name>` takes. */
   name: string
   owner: string
-  /** What `/plugin marketplace add` takes; null while SCADBUDDY_PUBLIC_URL is unset. */
+  /** What `/plugin marketplace add` takes; on the origin Settings was opened on; null when the agent cannot tell it. */
   marketplace_url: string | null
   /** What /mcp, and so the feed, applies; null when the agent could not read it. */
   auth_mode: McpAuthMode | null
