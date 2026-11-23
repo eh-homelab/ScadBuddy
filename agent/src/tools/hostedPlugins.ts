@@ -341,6 +341,12 @@ export const hostedPluginTools: readonly Tool[] = [
         summary: `Publish hosted plugin ${args.name} as version ${next} (${changes}) and offer it to the assistant`,
       }
     },
+    // #7199: a flow's call that sends no `draft` binds the draft as it is now, so a person's
+    // approval on the run page binds that draft, and the run sends it as `expect_draft`. As
+    // backend flows/print_binding.py binds a person's approval.
+    flowBinding: (args, resolved) => (args.draft !== undefined ? {} : { draft: resolved.draft ?? null }),
+    // #7199: a durable call whose draft changed since its approval resolves to another digest.
+    movedSinceApproval: DRAFT_MOVED,
     handler: async ({ name: plugin, draft }, ctx) => {
       const offers = ctx.hostedPackages
       if (!offers) throw new ToolError(NOT_HERE)
