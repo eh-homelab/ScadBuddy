@@ -65,6 +65,22 @@ def test_colour_match_is_remembered_and_nothing_is_none(store: SettingsStore) ->
     assert store.load().model_print_choices["gear"].force_colour_match is True
 
 
+def test_a_files_choices_are_copied_to_a_new_file_holding_none(store: SettingsStore) -> None:
+    """#6710 §10.2: a storefront item's held copy put back as a new file takes the old
+    file's choices, only when the new file's scope holds none."""
+    store.set_library_choices(89, CHOSEN)
+
+    assert store.copy_library_choices(89, 90) is True
+    assert store.library_choices(90) == store.library_choices(89)
+    own = ModelPrintChoices(tier="fine")
+    store.set_library_choices(91, own)
+    assert store.copy_library_choices(89, 91) is False
+    assert store.library_choices(91) == own
+    # Nothing remembered for the old file: nothing copied.
+    assert store.copy_library_choices(67, 92) is False
+    assert store.library_choices(92) == ModelPrintChoices()
+
+
 def test_remembering_nothing_deletes_the_row(store: SettingsStore, pg_conninfo: str) -> None:
     store.set_library_choices(89, CHOSEN)
     store.set_library_choices(89, ModelPrintChoices())

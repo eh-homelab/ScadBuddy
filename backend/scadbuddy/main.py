@@ -108,6 +108,7 @@ from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_load
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.print_uses import PoolPrintUses
+from scadbuddy.filament.sb_presets import sync_from_held
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
 from scadbuddy.filament.sensors import PoolSensorNotifications
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
@@ -2029,8 +2030,11 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
         ),
         # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
+        # Then ScadBuddy's own filament presets take what the copy read (#7176).
         held_presets_activity(
-            lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
+            lambda: HeldPresetStore(state.projection.pool),
+            lambda: state.settings_store.load(),
+            lambda held: sync_from_held(state.settings_store.pool, state.store.blobs, held),
         ),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,

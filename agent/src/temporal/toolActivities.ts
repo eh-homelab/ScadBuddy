@@ -9,7 +9,7 @@ import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/
 import type { Owner } from '../sessions/protocol.js'
 import type { SessionRows } from '../sessions/rows.js'
 import { isUuid } from '../harness/stateDirs.js'
-import { withApprovalLine } from '../approvals/service.js'
+import { canonicalJson, withApprovalLine } from '../approvals/service.js'
 import {
   effectiveTool,
   type FlowImages,
@@ -586,8 +586,9 @@ async function runGated(
   // A tool that resolves what its arguments name (#4442) runs what it resolves now, which
   // must be what the approval was given: a printer re-linked since hashes otherwise. A flow's
   // call is the script's raw arguments plus the tool's `flowBinding` (a registry printer's
-  // `printer_id`, or null for a row only the LAN reaches), which the backend binds a person's
-  // approval to (flows/print_binding.py, #4445): a printer re-linked since hashes otherwise.
+  // `printer_id`, or null for a row only the LAN reaches; a hosted plugin's `draft` digest,
+  // #7199), which the backend binds a person's approval to (flows/print_binding.py, #4445): a
+  // printer re-linked or a draft edited since hashes otherwise.
   //
   // Its activity runs once (Temporal never retries a gated call; only a flow's keyed call whose
   // one attempt lost its heartbeat is asked once more, by the flow's workflow, with its commands
@@ -600,6 +601,10 @@ async function runGated(
   // A flow's call as its approval binds it (#4445): the raw arguments plus `binds`, null
   // markers included. Undefined: the raw arguments, as they run.
   let flowBound: Record<string, unknown> | undefined
+  // Whether the resolution gave other input than the call was given (#7199): a call not
+  // approved then is refused as matching no approval, with the tool's `movedSinceApproval`
+  // advice. What it names may have changed after an approval, or none was given (#7211).
+  let resolvedOther = false
   if (effective.gated && tool.resolvesApproval) {
     const ctx = { ...services, principal, ...(session === undefined ? {} : { session }), progress: async () => {}, signal: call.signal, lookup, gate: 'workflow' as const }
     const waits = deps.resolveBackoffMs ?? RESOLVE_BACKOFF_MS
@@ -614,9 +619,12 @@ async function runGated(
       try {
         // Only the input: the line naming the printer was the approval's, so its reads are skipped.
         const { input: resolved, binds } = await tool.prepareApproval(input, ctx, { summary: false })
-        if (flow === undefined) runInput = resolved
-        else if (Object.keys(binds).length > 0) {
+        if (flow === undefined) {
+          runInput = resolved
+          resolvedOther = canonicalJson(resolved) !== canonicalJson(parsedOrRaw(tool, input))
+        } else if (Object.keys(binds).length > 0) {
           flowBound = { ...(input as Record<string, unknown>), ...binds }
+          resolvedOther = true
           // A null marker is hashed only: the handler gets the raw arguments without it.
           runInput = { ...(input as Record<string, unknown>), ...Object.fromEntries(Object.entries(binds).filter(([, value]) => value !== null)) }
         }
@@ -649,6 +657,7 @@ async function runGated(
       // A run grant's raw-argument approval, revoked or expired since: refused GrantRevoked
       // below, as any lapsed grant's call is, never "no approval is recorded".
       binding = raw
+      resolvedOther = false
     }
   }
   if (effective.gated && !(await caller.approvals?.approved(requestId, binding))) {
@@ -657,6 +666,14 @@ async function runGated(
         "the run's grant was revoked or expired before this call ran",
         `${tool.name}: the run's grant was revoked or expired before this call ran`,
         GRANT_REVOKED,
+      )
+    }
+    if (resolvedOther) {
+      // Never run: the approval, if any, was for what the call named then (#7199, #7211).
+      await refuse(
+        'no approval matches what this call names now',
+        `${tool.name} was not run: no approval matches what it names now; ${tool.movedSinceApproval}`,
+        NOT_APPROVED,
       )
     }
     await refuse(

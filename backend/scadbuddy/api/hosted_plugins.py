@@ -278,6 +278,18 @@ def _draft_digest(row: Any, rows: list[Any]) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+async def draft_digest(state: Any, name: str) -> str | None:
+    """The draft-diff's ``draft_digest`` of hosted plugin ``name`` now, or None when no
+    hosted plugin has the name. A flow's run page binds a publish's approval to it (#7199,
+    `flows/print_binding.py`)."""
+
+    def run(conn: psycopg.Connection[Any]) -> str | None:
+        row = store.plugin(conn, name)
+        return None if row is None else _draft_digest(row, store.draft(conn, row["id"]))
+
+    return await _in_tx(state, run)
+
+
 def _draft_changed(what: str) -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, what, reason=DRAFT_CHANGED)
 

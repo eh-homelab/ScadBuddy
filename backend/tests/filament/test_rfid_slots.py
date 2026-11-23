@@ -48,6 +48,7 @@ from scadbuddy.filament.rfid_slots import (
     reconcile_slots,
     reconcile_slots_now,
 )
+from scadbuddy.filament.sb_presets import create_on
 from scadbuddy.filament.sensors import SensorStore
 from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
@@ -57,6 +58,7 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import PrinterReportStore, report_status
 from scadbuddy.printers.store import PrinterStore
+from scadbuddy.slicing.own_presets import sb_ref
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -403,6 +405,38 @@ async def test_a_deleted_spool_cascades_its_row_away(
     assert len(w.rows()) == 1
     assert w.filament.spools.delete(w.spool)
     assert w.rows() == []
+
+
+@respx.mock
+async def test_a_scadbuddy_preset_is_configured_by_its_mirrors_id(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    """#7176: Bambuddy knows a ScadBuddy preset only by its mirror's local id; one with
+    no mirror is no preset Bambuddy can set."""
+    w = World(pg_pool)
+    with pg_pool.connection() as conn, conn.transaction():
+        mirrored, bare = (
+            create_on(
+                conn,
+                name=name,
+                source="manual",
+                key=f"attachment-{n:064d}",
+                sha256=f"{n:064d}",
+                doc={"name": name},
+                made_by="test",
+                bb_preset_id=bb_id,
+            )
+            for n, name, bb_id in ((1, "Mirrored", 141), (2, "Bare", None))
+        )
+    route = _configure()
+    w.preset("0.4", sb_ref(mirrored))
+    report = await w.run(client)
+    assert route.call_count == 1 and report.configured == 1
+    assert dict(route.calls[0].request.url.params)["tray_info_idx"] == "141"
+
+    w.preset("0.4", sb_ref(bare))
+    report = await w.run(client)
+    assert route.call_count == 1 and report.no_preset == 1
 
 
 @respx.mock

@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 
 from scadbuddy.orders.integrations import OrderIntegrations
 from scadbuddy.orders.lifecycle import has_design
@@ -62,15 +62,19 @@ ENSURE_TIMEOUT_SECONDS = 30.0
 EXISTS_TTL_SECONDS = 60.0
 
 
+def _locked(store: OrderStore, order_id: str) -> AbstractAsyncContextManager[None]:
+    """``OrderStore.project_lock`` held across awaits (:func:`held_across_awaits`)."""
+    return held_across_awaits(store.project_lock(order_id))
+
+
 @asynccontextmanager
-async def _locked(store: OrderStore, order_id: str) -> AsyncIterator[None]:
-    """``OrderStore.project_lock`` held across awaits. The lock is taken in a worker
-    thread, which a cancelled task cannot stop, so that thread itself lets go of a lock
-    it got after its task gave up waiting, and a task cancelled just after the thread got
-    it lets go in a thread of its own: neither depends on the event loop still running.
-    The release in ``finally`` runs in a thread that completes even if the task is
-    cancelled again."""
-    held = store.project_lock(order_id)
+async def held_across_awaits(held: AbstractContextManager[None]) -> AsyncIterator[None]:
+    """A session lock of ``OrderStore`` (``project_lock``, ``restore_lock``) held across
+    awaits. The lock is taken in a worker thread, which a cancelled task cannot stop, so
+    that thread itself lets go of a lock it got after its task gave up waiting, and a task
+    cancelled just after the thread got it lets go in a thread of its own: neither depends
+    on the event loop still running. The release in ``finally`` runs in a thread that
+    completes even if the task is cancelled again."""
     guard = threading.Lock()
     state = {"abandoned": False, "held": False}
 

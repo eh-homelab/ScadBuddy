@@ -29,7 +29,14 @@ from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.rfid_push import enqueue_tag, link_origin
-from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError, effective, overridden
+from scadbuddy.filament.types import (
+    PresetUnknownError,
+    TypeRowsDuplicateError,
+    TypeTempError,
+    effective,
+    names_preset,
+    overridden,
+)
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 Conn = Connection[DictRow]
@@ -110,6 +117,19 @@ class TagUnnamedError(ValueError):
 
 class _NoSpoolError(Exception):
     """The spool a tag is bound to does not exist; raised to roll back the bind."""
+
+
+class ResetBeforeLinkError(ValueError):
+    """A ``consumed_reset`` dated at or before the spool's Bambuddy link (#7149
+    R-7149-12): the sync never sends such a reset (R-7149-11), so SB's counter and
+    Bambuddy's would disagree."""
+
+    def __init__(self, linked_at: datetime) -> None:
+        super().__init__(
+            "the reset predates the spool's Bambuddy link"
+            f" (linked at {linked_at.isoformat()}); date it after the link"
+        )
+        self.linked_at = linked_at
 
 
 class OverrideKindError(ValueError):
@@ -834,6 +854,10 @@ class FilamentSpoolStore:
                 return p.effective_presets(conn, spool_id)
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
+        except errors.ForeignKeyViolation as error:
+            if not names_preset(error):
+                raise
+            raise PresetUnknownError() from None
 
     @classmethod
     def set_presets_on(cls, conn: Conn, spool_id: UUID, rows: _PresetRows, *, actor: str) -> None:
@@ -1239,7 +1263,8 @@ class FilamentSpoolStore:
     ) -> m.SpoolEvent | None:
         """A person's weighing, drying or consumed reset (#7149 R-7149-4); ``None`` for
         no such spool. A drying's ``temp_c`` or ``hours`` left out (not sent) is the
-        spool's drying default (`_drying_defaults`, #6720)."""
+        spool's drying default (`_drying_defaults`, #6720). A reset whose ``at`` is not
+        after the spool's Bambuddy link is `ResetBeforeLinkError` (R-7149-12)."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
         with self._pool.connection() as conn, conn.transaction():
             if (
@@ -1249,6 +1274,12 @@ class FilamentSpoolStore:
                 is None
             ):
                 return None
+            if body.kind == "consumed_reset" and body.at is not None:
+                link = conn.execute(
+                    "SELECT linked_at FROM filament_bb_links WHERE spool_id = %s", (spool_id,)
+                ).fetchone()
+                if link is not None and body.at <= link["linked_at"]:
+                    raise ResetBeforeLinkError(link["linked_at"])
             if body.kind == "dried":
                 sent = body.model_fields_set
                 defaults = (

@@ -19,6 +19,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.models import NozzleSize
 from scadbuddy.filament import models as m
+from scadbuddy.filament.sb_presets import bambuddy_refs_on
 
 Conn = Connection[DictRow]
 
@@ -86,8 +87,9 @@ def effective_presets(conn: Conn, spool_id: UUID) -> list[m.EffectivePreset]:
 def effective_presets_of(
     conn: Conn, spool_ids: Iterable[UUID]
 ) -> dict[UUID, list[m.EffectivePreset]]:
-    """`effective_presets` of each of ``spool_ids``, in three queries whatever their
-    number (#6902); a spool that does not exist has none."""
+    """`effective_presets` of each of ``spool_ids``, in four queries whatever their
+    number (#6902); a spool that does not exist has none. A ScadBuddy preset's row
+    carries its Bambuddy id (`EffectivePreset.bambuddy_id`, #7176)."""
     ids = list(dict.fromkeys(spool_ids))
     types = _type_ids(conn, ids)
     by_type = _type_rows(
@@ -101,6 +103,10 @@ def effective_presets_of(
         (ids,),
     ).fetchall():
         own.setdefault(row["spool_id"], []).append(row)
+    bambuddy = bambuddy_refs_on(
+        conn,
+        {row["slicer_filament"] for group in (*by_type.values(), *own.values()) for row in group},
+    )
     out: dict[UUID, list[m.EffectivePreset]] = {}
     for spool_id in ids:
         type_id = types.get(spool_id)
@@ -117,6 +123,7 @@ def effective_presets_of(
                 slicer_filament_name=row["slicer_filament_name"],
                 overridden=is_own,
                 migrated=is_own and bool(row["migrated"]),
+                bambuddy_id=bambuddy.get(row["slicer_filament"]),
             )
             for _, (row, is_own) in sorted(rows.items())
         ]

@@ -847,7 +847,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (instances and tag bindings; every writer locks the tag before the spool; archive closes
   the open binding; `detail()` is the spool page's read: tags, last tag and its holder, the
   grams `basis`, `in_use`; `ledger()` pages every spool's events by an opaque `(at, seq)`
-  cursor; `low_stock` is computed per spool against its effective `low_stock_pct`, else the setting `filament_low_stock_pct` (20 by default, read once per call, before the store takes a pool connection, by its `defaults` reader (`FilamentDefaults`); the summary's `value_left` uses `filament_default_cost_per_kg` for a spool with no cost; Settings → Printing → Filament), `presets.py` (a spool's own presets and K values over its type's, by key; `preset_for` is exact, never a near nozzle; no key is `*`: the 0706Z migration made each `*` row one `migrated` row per model and nozzle, `drop_migrated` deletes them when a spool gets its first type), `ledger.py` (`filament_spool_events`, the one source of grams left:
+  cursor; `low_stock` is computed per spool against its effective `low_stock_pct`, else the setting `filament_low_stock_pct` (20 by default, read once per call, before the store takes a pool connection, by its `defaults` reader (`FilamentDefaults`); the summary's `value_left` uses `filament_default_cost_per_kg` for a spool with no cost; Settings → Printing → Filament), `presets.py` (a spool's own presets and K values over its type's, by key; `preset_for` is exact, never a near nozzle; no key is `*`: the 0706Z migration made each `*` row one `migrated` row per model and nozzle, `drop_migrated` deletes them when a spool gets its first type; a ScadBuddy preset's row carries its mirror's Bambuddy id, `EffectivePreset.bambuddy_id`, and every path that hands a preset to Bambuddy sends `for_bambuddy()`), `sb_presets.py` (ScadBuddy's own filament presets, #7176, plan `docs/superpowers/plans/2026-11-23-scadbuddy-filament-presets.md`: `filament_presets`, each document a blob held by `filament_preset` per version, a changed document a new version of the same id; a binding names one by `sb-<id>` in `slicer_filament`, a foreign key through the generated `preset_id` column, refs in `slicing/own_presets.py`; `sync_from_held` runs after the kept presets' refresh in its activity: `refresh_bambuddy` versions a `bambuddy` preset whose Bambuddy `updated_at` moved, `adopt_held` moves every binding that names a kept Bambuddy local preset to a ScadBuddy one; the native slicer reads them through `Profiles.own`, on the print worker over `…/print/own-presets`, area `own-presets`, `RemoteFilamentPresets`), `ledger.py` (`filament_spool_events`, the one source of grams left:
   the newest absolute reading, then the deltas after it (`basis()` returns that anchor and those
   deltas, and `grams_left()` is built on it); events carry their physical time,
   ordered by `(at, delta before reading, seq)` (a paired plate's `print_run` is skipped for its `bb_usage` row); a time-less event gets a clock-step guard because the WSL clock
@@ -2009,7 +2009,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`Slicer.start_library`; the first quote gives the item its slots, `library_colours`; the
   quote names no revision); the print starts `api/library_print.py` `start_library_run`
   (subject `library:<id>`; the check returns `library_file_id`). A file gone since is 409
-  `library_file_gone` in the quote's check and run and the print's check. Its slots'
+  `library_file_gone` in the quote's check and run and the print's check (a storefront
+  item's print restores its held copy instead, below). Its slots'
   filaments are written on the item (`OrderStore.set_library_colours`). Agent
   `order_item_add`'s `library_file_id`. Frontend: `AddItemDialog`'s "Library file" source
   (`components/orders/LibraryFilePicker.tsx` over `GET /print/library/search`), the items
@@ -2223,7 +2224,20 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   that sha256 under a share lock, else 409 `listing_changed` (dropped with a
   draft item or a draft); `price_of` reads it by the same `priced_file` while the listing
   is still that file at that sha256, so the read, the add and the checkout make one key.
-  The print still reads the live file until #6710 PR 4. The variant is sliced with the
+  The print prints the held copy (#6710 §10.2, PR 4): `printing.py` `_library_stands` checks
+  a storefront item's file by its pinned sha256 (the stated `file_hash`, else a download's
+  digest, skipped when the stated size is not the held copy's) and answers `restore` when it is gone or other bytes while the held copy is in the
+  content store (else `library_file_gone`; there is no "changed" refusal), and the run
+  (`operations.py` `item_print_run`, `restored_file`) first calls `held_print.py`
+  `restore_held`: under one advisory lock (`OrderStore.restore_lock`, so racing prints make
+  one folder and one copy), the copy is found by sha256 in the library's top-level folder
+  "Storefront", or uploaded there (`NativeLibrary.upload`, or Bambuddy's `send.upload_raw`
+  through `orders/bambuddy.py` `BambuddyShelf`), the item moved to
+  the new id and the library's name for it (`Lifecycle.move_library_file`, event `item.library_file_restored` naming both
+  ids), and `library:<old>`'s remembered choices copied to an empty `library:<new>`
+  (`SettingsStore.copy_library_choices`). The run's subject, `existing` and `start` take the
+  new id; a retry reuses the check, finds the item moved or the file in "Storefront", and
+  uploads nothing. The variant is sliced with the
   choices and presets a back-office quote of a spool of the same filament type on the same
   printer gets (#6574, `test_slice_parity.py`). The shop slice profile gives only the
   printer and a filament type per material (`slice_profile.py`, a

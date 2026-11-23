@@ -108,6 +108,13 @@ Each ruling is also a comment on #7149.
   covers a spool that the pull's import links after its reset, and a relink after
   `POST /filament/sync/reset-links`. Without this rule, either link would zero BB's
   counter at link time (review round 2 of #7181).
+- **R-7149-12 — SB refuses a reset dated before the link.** On a spool with a BB link,
+  `POST /filament/spools/{id}/events` refuses a `consumed_reset` whose `at` is not after
+  the link's `linked_at`. The answer is a 422 with `code` `reset_before_link` and the
+  link's `linked_at`. R-7149-11 never sends such a reset, but SB's own `consumed_since`
+  would still move, so the two counters would disagree. A spool with no link takes any
+  `at`. The bulk route and the agent tools take no `at`: their resets are dated now, which
+  is after the link (`spools.ResetBeforeLinkError`; the final review of #7181).
 - **Upgrade (review nit 2 of #7181).** A reading made before this change lacks the new
   snapshot keys. The pull fills each missing key with BB's value when it says nothing
   new: the baseline, a null, or a value SB holds already (`bambuddy_pull._seeded`). So

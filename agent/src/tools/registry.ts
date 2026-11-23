@@ -355,6 +355,14 @@ export type ToolSpec<S extends z.ZodRawShape> = {
    */
   flowBinding?: (args: z.infer<z.ZodObject<S>>, resolved: z.infer<z.ZodObject<S>>) => Record<string, unknown>
   /**
+   * What the model is told when a gated call is refused because what it names resolved to
+   * other input than the call was given, and no approval matches that input (#7199). The gate
+   * cannot tell whether an approval was ever given (#7211), so this is advice for both cases:
+   * if a person approved the call, what it names changed since, and a call again asks for a
+   * new approval. Without it, a generic line (`movedSinceApproval`).
+   */
+  movedSinceApproval?: string
+  /**
    * What a call does, in a few words, for the assistant panel (#782): worded as
    * the action ("Render cable-clip"), since the panel shows whether it is
    * running or done beside it. Defaults to the name in words, with the `slug`
@@ -417,6 +425,8 @@ export type Tool = {
   ): Promise<{ input: Record<string, unknown>; summary: string; binds: Record<string, unknown> }>
   /** Whether it has its own `prepareApproval`: the session gates resolve only those (#4442). */
   readonly resolvesApproval: boolean
+  /** ToolSpec.movedSinceApproval, else a generic line that names the tool (#7199). */
+  readonly movedSinceApproval: string
   /** The call's title for the panel (ToolSpec.title); `defaultTitle` when the arguments do not parse. */
   title(args: unknown): string
   /** The arguments as the handler would see them (defaults applied): what an approval's input hash covers. */
@@ -471,6 +481,9 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
     },
     resolvesApproval: spec.prepareApproval !== undefined,
+    movedSinceApproval:
+      spec.movedSinceApproval ??
+      `if a person approved this call, what it names changed since. Call ${spec.name} again to ask for a new approval`,
     async prepareApproval(args, ctx, needs = { summary: true }) {
       const parsed = spec.input.parse(args)
       if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args), binds: {} }

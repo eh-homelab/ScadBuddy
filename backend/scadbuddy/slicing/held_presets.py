@@ -40,7 +40,7 @@ import hashlib
 import json
 import logging
 import threading
-from collections.abc import Callable, Collection
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -273,21 +273,30 @@ async def refresh_held_presets(store: HeldPresetStore, client: BambuddyClient) -
 
 
 def held_presets_activity(
-    store: Callable[[], HeldPresetStore], load: Callable[[], StoredSettings]
+    store: Callable[[], HeldPresetStore],
+    load: Callable[[], StoredSettings],
+    after: Callable[[HeldPresetStore], Awaitable[None]] | None = None,
 ) -> Callable[[], Any]:
     """``held_presets_refresh``, on the ``library`` worker beside the spool refresh's
     other activities (`spools/activities.py`); ``store`` and ``load`` are asked at each
     run, as the app's state is set up after its worker's activities are listed. Raises
-    on a failed refresh, which the workflow logs; the next tick is the retry."""
+    on a failed refresh, which the workflow logs; the next tick is the retry. ``after``
+    runs once the copy is current: ScadBuddy's own presets take what it read
+    (`filament/sb_presets.py` `sync_from_held`, #7176), in this activity, so the
+    Schedule's workflow commands do not change."""
 
     @activity.defn(name=HELD_ACTIVITY)
     async def held_presets_refresh() -> Outcome:
-        return await refresh_held(store(), load)
+        return await refresh_held(store(), load, after)
 
     return held_presets_refresh
 
 
-async def refresh_held(store: HeldPresetStore, load: Callable[[], StoredSettings]) -> Outcome:
+async def refresh_held(
+    store: HeldPresetStore,
+    load: Callable[[], StoredSettings],
+    after: Callable[[HeldPresetStore], Awaitable[None]] | None = None,
+) -> Outcome:
     settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:
         return "skipped"
@@ -296,4 +305,6 @@ async def refresh_held(store: HeldPresetStore, load: Callable[[], StoredSettings
     # A row an older build's refresh kept with its keys during a roll, after this build's
     # strip at start passed it, or every row when that strip failed: stripped here too.
     await asyncio.to_thread(store.strip_kept, threading.Event())
+    if after is not None:
+        await after(store)
     return "refreshed"

@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -91,6 +94,50 @@ def test_a_consumed_reset_keeps_the_grams_and_starts_the_counter(client: TestCli
     assert metrics["consumed_since"] == reset.json()["at"]
     grams = client.post(f"{one}/events", json={"kind": "consumed_reset", "grams": 5})
     assert grams.status_code == 422
+
+
+def _linked_a_day_ago(client: TestClient, pg_conninfo: str) -> str:
+    made = str(_spool(client)["id"])
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_links (spool_id, bb_spool_id, bb_updated_at, linked_at)"
+            " VALUES (%s, 11, now(), now() - interval '1 day')",
+            (made,),
+        )
+    return f"{SPOOLS}/{made}"
+
+
+def _reset_at(client: TestClient, one: str, hours_ago: int) -> Any:
+    at = (datetime.now(UTC) - timedelta(hours=hours_ago)).isoformat()
+    return client.post(f"{one}/events", json={"kind": "consumed_reset", "at": at})
+
+
+def test_a_reset_dated_before_the_bambuddy_link_is_refused(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """R-7149-12: Bambuddy never takes such a reset (R-7149-11), so SB takes none either."""
+    one = _linked_a_day_ago(client, pg_conninfo)
+    refused = _reset_at(client, one, 48)
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "reset_before_link"
+    assert "predates the spool's Bambuddy link" in refused.json()["detail"]
+    assert "consumed_reset" not in [e["kind"] for e in client.get(f"{one}/events").json()]
+
+
+def test_a_reset_dated_after_the_bambuddy_link_is_taken(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """R-7149-12."""
+    one = _linked_a_day_ago(client, pg_conninfo)
+    taken = _reset_at(client, one, 1)
+    assert taken.status_code == 201, taken.text
+
+
+def test_an_unlinked_spool_takes_a_backdated_reset(client: TestClient) -> None:
+    """R-7149-12: with no link there is no Bambuddy counter to disagree with."""
+    one = f"{SPOOLS}/{_spool(client)['id']}"
+    taken = _reset_at(client, one, 48)
+    assert taken.status_code == 201, taken.text
 
 
 def test_the_bulk_reset_takes_an_explicit_list(client: TestClient) -> None:
