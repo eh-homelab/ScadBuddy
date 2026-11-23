@@ -236,7 +236,9 @@ function putSettings(body: Record<string, unknown>) {
             ? (value ?? [...fixtures.DEFAULT_ASSET_FETCH_DOMAINS])
             : name === 'filament_shopping_auto_add_empty' || name === 'filament_auto_add_unknown_rfid'
               ? (value ?? true)
-              : value
+              : name === 'filament_label_template'
+                ? (value ?? { template: 'roll_50x25', width_mm: null, height_mm: null })
+                : value
       continue
     }
     if (value === null && !NULLABLE.has(name)) {
