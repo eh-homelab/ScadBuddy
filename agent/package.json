@@ -21,8 +21,8 @@
     "gen:api": "node scripts/gen-api.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.327",
-    "@anthropic-ai/sdk": "^1.10.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.329",
+    "@anthropic-ai/sdk": "^1.11.0",
     "@hono/node-server": "^2.1.9",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@opentelemetry/api": "1.10.0",
