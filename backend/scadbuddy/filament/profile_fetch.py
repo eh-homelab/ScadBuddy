@@ -1090,7 +1090,9 @@ async def _changed_keys(
     own: FilamentPresetStore, type_id: UUID, f: _File, doc: dict[str, Any]
 ) -> list[str] | None:
     """The keys of ``doc`` that differ from the type's fetched preset of ``f``'s key;
-    ``None`` when it has none yet."""
+    ``None`` when it has none yet. Read before the write takes the presets' lock, so the
+    note it makes is best-effort: a version written meanwhile is compared against the
+    one read here."""
     current = await asyncio.to_thread(own.fetched, type_id, f.printer_model, f.nozzle)
     if current is None:
         return None

@@ -839,6 +839,11 @@ def reset_links(
                 " CASE WHEN usage_read_instance = %s THEN %s ELSE usage_read_instance END",
                 (configured, instance, configured),
             )
+            # ScadBuddy's presets' Bambuddy ids are the same Bambuddy's too (#7176).
+            conn.execute(
+                "UPDATE filament_presets SET bb_instance = %s WHERE bb_instance = %s",
+                (configured, instance),
+            )
             logger.info(
                 "the Bambuddy links were kept: the new URL reaches the same Bambuddy",
                 extra={"instance": instance, "configured": configured},
@@ -866,6 +871,16 @@ def reset_links(
         # A colour's link only: the pull never pushes a colour, so it has no hashes (#6907).
         conn.execute(
             "UPDATE filament_colours SET bb_colour_id = NULL WHERE bb_colour_id IS NOT NULL"
+        )
+        # ScadBuddy's presets (#7176): an id of the old Bambuddy names nothing on the new
+        # one. Each preset is sent to the new one by the next mirror, a preset made in
+        # the old Bambuddy too, which ScadBuddy now holds as its own (`manual`).
+        conn.execute(
+            "UPDATE filament_presets SET bb_preset_id = NULL, bb_instance = NULL,"
+            " bb_updated_at = NULL, mirrored_sha256 = NULL, mirror_create_floor = NULL,"
+            " source = CASE WHEN source = 'bambuddy' THEN 'manual' ELSE source END"
+            " WHERE bb_preset_id IS NOT NULL AND (bb_instance IS NULL OR bb_instance = %s)",
+            (instance,),
         )
         conn.execute(
             "UPDATE filament_bb_sync_state SET instance = NULL, usage_read_instance = NULL,"

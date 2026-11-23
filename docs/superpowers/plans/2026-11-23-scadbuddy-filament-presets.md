@@ -109,7 +109,9 @@ Without a Bambuddy URL the mirror does nothing.
     runs at a time (a session try-lock); the Bambuddy id is kept with its instance
     (`bb_instance`), and a `PUT` goes only to that instance; before a `POST` the mirror
     keeps the highest listed id (`mirror_create_floor`), so a create whose answer was lost
-    is found by name above it (review of #7201).
+    is found by name above it. After a URL change the mirror waits for the filament
+    sync's reset of the links, which moves the ids (same Bambuddy) or drops them (review
+    of #7201).
 12. **The fetch (PR 2).** Writes ScadBuddy only: no zip import. K values still come from the
     printers' K tables through Bambuddy, as before.
 13. **#7142 (PR 2).** The fetch writes the type's own `nozzle_temp_min`/`max` into

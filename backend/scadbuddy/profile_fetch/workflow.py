@@ -57,13 +57,15 @@ EXPORT_SCHEDULE_TO_START = timedelta(hours=6)
 EXPORT_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(minutes=1), backoff_coefficient=2.0, maximum_attempts=3
 )
-#: The API imports into Bambuddy and reads K tables: idempotent by its key, so a lost
-#: answer or a Bambuddy 5xx is tried again.
+#: The API keeps the files as ScadBuddy presets, reads K tables and mirrors the presets
+#: (#7176): idempotent by its key, so a lost answer is tried again. A K table Bambuddy
+#: does not give is a note of the run, not a retry.
 IMPORT_TIMEOUT: Final = timedelta(minutes=10)
 #: How long the import activity's one request waits for the API's answer (R-F2). The route
-#: does all of the import's Bambuddy calls in that request: about 12 (two listings, the
-#: zip, a K table per printer and nozzle, the held copy's refresh), each up to the
-#: Bambuddy client's 30 s. Under `IMPORT_TIMEOUT`, so the attempt ends by its own read.
+#: makes the import's Bambuddy calls in that request: a K table per printer and nozzle,
+#: each up to the Bambuddy client's 30 s, then the mirror, bounded by
+#: `filament/profile_fetch.py` `IMPORT_MIRROR_TIMEOUT`. Under `IMPORT_TIMEOUT`, so the
+#: attempt ends by its own read.
 IMPORT_REQUEST_TIMEOUT: Final = timedelta(minutes=9)
 IMPORT_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(seconds=10),

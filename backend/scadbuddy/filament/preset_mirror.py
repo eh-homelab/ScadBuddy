@@ -16,8 +16,15 @@ made in Bambuddy to a mirrored preset is not read back.
 
 One mirror runs at a time (the session try-lock `LOCK`): another caller meanwhile sends
 nothing, and the next refresh sends what it left. A preset's Bambuddy id is kept with
-the Bambuddy it belongs to (``bb_instance``); a preset whose id is another Bambuddy's (the
-URL changed) is created again on the configured one, never rewritten there by id. Before
+the Bambuddy it belongs to (``bb_instance``). After the Bambuddy URL changes the mirror
+waits, as the filament sync does, until a person resets the links (#6773): a reset that
+finds the same Bambuddy moves the ids to the new URL's instance
+(`bb_sync_results.reset_links`), and one that deletes the links drops them, so each
+preset is created on the new Bambuddy. A preset whose id is still another Bambuddy's is
+created on the configured one, never rewritten there by id. Bambuddy's ``PUT`` merges
+the document over the OrcaSlicer base its ``inherits`` names, while its ``POST`` keeps it
+as sent (`BambuddyClient.update_local_preset`), so a rewritten copy can carry inherited
+keys the first one lacked. Before
 a ``POST`` the mirror keeps the highest id Bambuddy lists (``mirror_create_floor``), so
 when the answer is lost the next send takes the one preset of that name above it instead
 of making a second one.
@@ -62,16 +69,31 @@ def instance_of(settings: StoredSettings) -> str | None:
     return instance_for(settings.bambuddy_url) if settings.bambuddy_url else None
 
 
-def _pending(pool: ConnectionPool[Conn], ids: Collection[int] | None) -> list[dict[str, Any]]:
+def _links_elsewhere(pool: ConnectionPool[Conn], instance: str) -> bool:
+    """Whether the filament sync's links name another Bambuddy than ``instance``: the URL
+    changed, and until a person resets the links (#6773) it is not known whether the new
+    URL reaches the same Bambuddy, so the mirror waits, as the sync does."""
+    with pool.connection() as conn:
+        row = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+    return row is not None and row["instance"] not in (None, instance)
+
+
+def _pending(
+    pool: ConnectionPool[Conn], ids: Collection[int] | None, instance: str
+) -> list[dict[str, Any]]:
+    """The presets to send: a document Bambuddy has not taken, or an id of another
+    Bambuddy than ``instance``."""
     with pool.connection() as conn:
         return conn.execute(
             "SELECT id, name, blob_key, sha256, bb_preset_id, bb_instance, mirror_create_floor"
             " FROM filament_presets"
             " WHERE source IN ('3dfp', 'manual')"
-            " AND mirrored_sha256 IS DISTINCT FROM sha256"
+            " AND (mirrored_sha256 IS DISTINCT FROM sha256"
+            " OR (bb_preset_id IS NOT NULL AND bb_instance IS DISTINCT FROM %(instance)s"
+            " AND bb_instance IS NOT NULL))"
             " AND (%(ids)s::bigint[] IS NULL OR id = ANY(%(ids)s))"
             " ORDER BY id",
-            {"ids": None if ids is None else sorted(set(ids))},
+            {"ids": None if ids is None else sorted(set(ids)), "instance": instance},
         ).fetchall()
 
 
@@ -126,8 +148,12 @@ class _Listing:
         return found[0] if len(found) == 1 else None
 
     async def floor(self) -> int:
-        """The highest id listed, 0 for none."""
+        """The highest id listed or made in this run, 0 for none."""
         return max((p.id for p in await self._all()), default=0)
+
+    async def made(self, preset: LocalPreset) -> None:
+        """``preset``, made in this run, counts for the next floor."""
+        (await self._all()).append(preset)
 
 
 async def _send(
@@ -153,6 +179,7 @@ async def _send(
                 raise
     await asyncio.to_thread(_create_floor, pool, row["id"], await listing.floor())
     made = await client.create_local_preset(row["name"], "filament", doc)
+    await listing.made(made)
     return made.id
 
 
@@ -184,9 +211,15 @@ async def _mirror_locked(
     instance: str,
     ids: Collection[int] | None,
 ) -> int:
+    if await asyncio.to_thread(_links_elsewhere, pool, instance):
+        logger.warning(
+            "the filament preset mirror waits: the Bambuddy URL changed and its links"
+            " are not reset yet"
+        )
+        return 0
     sent = 0
     listing = _Listing(client)
-    for row in await asyncio.to_thread(_pending, pool, ids):
+    for row in await asyncio.to_thread(_pending, pool, ids, instance):
         doc = await store.read(row["blob_key"])
         if doc is None:
             await asyncio.to_thread(_failed, pool, row["id"], "the preset's document is missing")

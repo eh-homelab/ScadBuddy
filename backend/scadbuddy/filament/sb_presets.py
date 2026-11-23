@@ -570,12 +570,19 @@ async def sync_from_held(
 
 def bambuddy_refs_on(conn: Conn, refs: Collection[str]) -> dict[str, str | None]:
     """The ref Bambuddy knows for each ``sb-`` ref among ``refs``: the preset's Bambuddy
-    id as text, or ``None`` when it has none (no mirror). Other refs are left out."""
+    id as text, or ``None`` when it has none (no mirror) or its id is of another Bambuddy
+    than the one the filament sync's links name (`filament_bb_sync_state`, which a reset of
+    the links moves, #6773). Other refs are left out."""
     ids = {i for ref in refs if (i := sb_id(ref)) is not None}
     if not ids:
         return {}
     rows = conn.execute(
-        "SELECT id, bb_preset_id FROM filament_presets WHERE id = ANY(%s)", (sorted(ids),)
+        "SELECT p.id, CASE WHEN p.bb_instance IS NULL OR s.instance IS NULL"
+        " OR p.bb_instance = s.instance THEN p.bb_preset_id END AS bb_preset_id"
+        " FROM filament_presets p"
+        " LEFT JOIN (SELECT instance FROM filament_bb_sync_state LIMIT 1) s ON true"
+        " WHERE p.id = ANY(%s)",
+        (sorted(ids),),
     ).fetchall()
     found = {row["id"]: row["bb_preset_id"] for row in rows}
     return {

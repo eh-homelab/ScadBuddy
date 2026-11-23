@@ -15,6 +15,7 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.filament.bb_sync_results import reset_links
 from scadbuddy.filament.preset_mirror import (
     LOCK,
     mirror_pending,
@@ -24,6 +25,7 @@ from scadbuddy.filament.preset_mirror import (
 from scadbuddy.filament.rfid_push import try_lock_on
 from scadbuddy.filament.sb_presets import (
     FilamentPresetStore,
+    bambuddy_refs_on,
     create_on,
     document_bytes,
     keep_document,
@@ -32,6 +34,7 @@ from scadbuddy.filament.sb_presets import (
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.store.local import LocalBlobStore
 from tests.conftest import PgPool
+from tests.filament.test_bambuddy_pull import _filament
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -324,3 +327,53 @@ async def test_a_version_written_during_a_create_keeps_the_new_id(
     assert await mirror_with(client, pg_pool, store, HERE) == 1
     assert put.call_count == 1
     assert _row(pg_pool, made)["mirrored_sha256"] == sha256
+
+
+#: The Bambuddy the filament sync's links name before the URL changes.
+OLD = "0ld0ld0ld0ld"
+
+
+def _links_name(pool: PgPool, instance: str | None) -> None:
+    with pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (instance,))
+
+
+def _refs(pool: PgPool, preset_id: int) -> str | None:
+    ref = f"sb-{preset_id}"
+    with pool.connection() as conn:
+        return bambuddy_refs_on(conn, [ref])[ref]
+
+
+@respx.mock
+async def test_after_a_url_change_the_mirror_waits_for_the_reset_then_creates(
+    pg_pool: PgPool, tmp_path: Path, client: BambuddyClient
+) -> None:
+    """The URL changed to another Bambuddy: until the links are reset, the mirror sends
+    nothing and no path hands Bambuddy the old id; a reset that deletes the links drops
+    the ids, and the next mirror creates each preset on the new Bambuddy, one made in
+    the old Bambuddy too."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    store = FilamentPresetStore(pg_pool, lambda: blobs)
+    ours = await _make(pg_pool, blobs, {"name": "Ours"}, bb_id=7, instance=OLD)
+    theirs = await _make(
+        pg_pool, blobs, {"name": "Theirs"}, source="bambuddy", bb_id=8, instance=OLD
+    )
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_presets SET mirrored_sha256 = sha256")
+    _links_name(pg_pool, OLD)
+    assert _refs(pg_pool, ours) == "7"
+    listed()
+    create = respx.post(f"{API}/local-presets/").mock(
+        side_effect=[
+            httpx.Response(200, json=_preset_json(31, "Ours")),
+            httpx.Response(200, json=_preset_json(32, "Theirs")),
+        ]
+    )
+    assert await mirror_with(client, pg_pool, store, HERE) == 0
+    assert create.call_count == 0
+
+    reset_links(_filament(pg_pool), OLD, HERE, None, expect_kept=False)
+    assert _refs(pg_pool, ours) is None
+    assert await mirror_with(client, pg_pool, store, HERE) == 2
+    assert [_row(pg_pool, i)["bb_preset_id"] for i in (ours, theirs)] == [31, 32]
+    assert _refs(pg_pool, ours) == "31"

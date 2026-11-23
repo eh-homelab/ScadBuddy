@@ -82,7 +82,6 @@ from scadbuddy.bambuddy.models import (
     MaintenanceHistoryEntry,
     MoveResult,
     PresetCatalogue,
-    PresetImport,
     PresetRef,
     PresetValues,
     Printer,
@@ -995,20 +994,6 @@ class BambuddyClient:
             json={"name": name, "setting": dict(setting)},
         )
         return LocalPreset.model_validate(response.json())
-
-    async def import_local_presets(self, zip_bytes: bytes) -> PresetImport:
-        """``POST /api/v1/local-presets/import``: one zip of presets, sent as the multipart
-        part ``file`` named ``profiles.zip``. Bambuddy gates it like the create call
-        (:meth:`create_local_preset`), so a refusal names the same scope (#6625)."""
-        response = await self._send(
-            "POST",
-            "/local-presets/import",
-            scope=Scope.MANAGE_LIBRARY,
-            operation="slicer.local_presets.import",
-            what="import local presets",
-            files={"file": ("profiles.zip", zip_bytes, "application/zip")},
-        )
-        return PresetImport.model_validate(response.json())
 
     async def k_profiles(self, printer_id: int, nozzle_diameter: str) -> list[KProfile]:
         """``GET /api/v1/printers/{id}/kprofiles/?nozzle_diameter=``: the K table the
