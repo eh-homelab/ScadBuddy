@@ -315,6 +315,15 @@ describe('colourProblems (#6144)', () => {
   })
 })
 
+describe('isSupportMaterial (#6710, #7189 review)', () => {
+  it('reads a support material as the backend and the page do (`SUPPORT_MATERIAL`), case aside', () => {
+    for (const material of ['PVA', 'BVOH', 'HIPS', 'PLA Support', 'support-w', 'pva']) expect(isSupportMaterial(material), material).toBe(true)
+    for (const material of ['PLA', 'PETG', 'ABS', 'TPU', '']) expect(isSupportMaterial(material), material).toBe(false)
+    expect(isSupportMaterial(null)).toBe(false)
+    expect(isSupportMaterial(undefined)).toBe(false)
+  })
+})
+
 describe('draftMaterials (#6302 review)', () => {
   it('allows the materials the draft offers, support left out, PETG and PLA first', () => {
     const made = (id: string, material: string): Filament => ({ ...(owl.filaments[0] as Filament), id, material })
