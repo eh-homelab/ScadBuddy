@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { components } from '../../../api/schema'
+import { mockSettings } from '../../handlers'
 import { bindWrittenNtag, hasBambuddyLink, holdsOverrideTag } from './index'
 
 const WRITTEN_UID = '04A1B2C3D4E5F6'
@@ -49,14 +50,20 @@ export function setPendingCommand(deviceId: string, command: string | null) {
   if (device) device.pending_command = command
 }
 
-const status = (devices: S['SpoolBuddyDevice'][]): S['RfidStatus'] => ({
-  override_mode: overrideMode,
-  state: overrideMode ? 'applied' : 'off',
-  bambuddy_auto_add: overrideMode ? false : null,
-  saved_auto_add: overrideMode ? true : null,
-  detail: null,
-  devices,
-})
+/** #7156 — the mode and the setting `filament_auto_add_unknown_rfid` are two holds on one value. */
+const status = (devices: S['SpoolBuddyDevice'][]): S['RfidStatus'] => {
+  const autoAdd = mockSettings().filament_auto_add_unknown_rfid !== false
+  const holds = overrideMode || !autoAdd
+  return {
+    override_mode: overrideMode,
+    auto_add_unknown_rfid: autoAdd,
+    state: holds ? 'applied' : 'off',
+    bambuddy_auto_add: holds ? false : null,
+    saved_auto_add: holds ? true : null,
+    detail: null,
+    devices,
+  }
+}
 
 const conflict = (detail: string, code: string) =>
   HttpResponse.json(

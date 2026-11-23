@@ -69,14 +69,24 @@ import { useLeaveGuard } from '../../lib/useLeaveGuard'
 /**
  * Where the drying form's values come from, or `null` when the spool has none (#6720). A
  * profile fill takes the AMS HT's values, which can be above what an AMS 2 Pro dries at
- * (65 °C), so the line says so (R-6714-9).
+ * (65 °C), so the line says so (R-6714-9) whenever the catalog gave a value; the Settings
+ * default (#7156) is the shop's own.
  */
 function dryingDefaultsText(defaults: NonNullable<SpoolDetail['drying_defaults']>): string | null {
   const from = [...new Set([defaults.temp_from, defaults.hours_from].filter((one) => one != null))]
   if (from.length === 0) return null
-  const levels = from.filter((one) => one !== 'spool')
-  const where = [from.includes('spool') ? 'this spool' : null, levels.length > 0 ? `its ${levels.join(' and ')}` : null].filter(Boolean).join(' and ')
-  return `Filled from ${where}. A slicer profile gives the AMS HT's values; lower them when you dry in an AMS 2 Pro (65 °C at most).`
+  const levels = from.filter((one) => one !== 'spool' && one !== 'setting')
+  const where = [
+    from.includes('spool') ? 'this spool' : null,
+    levels.length > 0 ? `its ${levels.join(' and ')}` : null,
+    from.includes('setting') ? 'the default in Settings' : null,
+  ]
+    .filter(Boolean)
+    .join(' and ')
+  const catalog = from.some((one) => one !== 'setting')
+  return catalog
+    ? `Filled from ${where}. A slicer profile gives the AMS HT's values; lower them when you dry in an AMS 2 Pro (65 °C at most).`
+    : `Filled from ${where}.`
 }
 
 /** What a field holds while it is edited: text, `''` for none (the spool takes its type's value). */
