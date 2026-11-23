@@ -58,8 +58,9 @@ FULL_SWEEP_EVERY: Final = 1.0
 RATE_LIMITED: Final = f"{STOREFRONT_PROBLEMS}rate_limited"
 _READS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
 #: The POSTs under the prefix that only read (#6921: the instant read of a visitor's
-#: choices takes a render's body): counted as reads, as the estimate read is.
-READ_POSTS: Final = re.compile(r"/listings/[^/]+/variant")
+#: choices takes a render's body; #6710: a file listing's price takes its colours):
+#: counted as reads, as the estimate read is.
+READ_POSTS: Final = re.compile(r"/listings/[^/]+/(variant|price)")
 #: The key of a request with no client address at all.
 _UNKNOWN: Final = "unknown"
 

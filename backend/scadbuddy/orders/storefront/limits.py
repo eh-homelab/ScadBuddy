@@ -57,6 +57,8 @@ DAY: Final = timedelta(days=1)
 CONCURRENCY_RETRY: Final = 5
 #: The job states that are no longer open.
 SETTLED: Final = ("done", "failed", "cancelled")
+#: The ``render_key`` and ``job_id`` prefix of a price read's row (`admit_slice`).
+SLICE_PREFIX: Final = "slice:"
 #: The CRUD caller whose ledger records a render's reply.
 CALLER: Final = "storefront"
 
@@ -193,6 +195,41 @@ class RenderLimits:
             self._check(conn, visitor_id, client_key(client), settings, None)
             conn.execute("UPDATE storefront_renders SET counted = true WHERE id = %s", (row_id,))
 
+    def admit_slice(
+        self, visitor_id: str, client: str, *, listing_id: str, price_key: str, settings: Settings
+    ) -> int:
+        """A counted row for a file listing's price read that claims a new slice (#6710
+        §7.5): one render against the visitor's and the client's rates, and its id;
+        `RenderLimited` when either is at its limit. A slice is not a render, so the row
+        names no render job (its ``job_id`` is ``slice:<price key>``, which no job has):
+        it never counts against the shop's render concurrency, and the slice's own cap is
+        ``storefront_slices_concurrent``."""
+        client = client_key(client)
+        with self._pool.connection() as conn, conn.transaction():
+            self._check(conn, visitor_id, client, settings, None, concurrency=False)
+            row = conn.execute(
+                "INSERT INTO storefront_renders (visitor_id, client, listing_id, render_key,"
+                " job_id, counted) VALUES (%s, %s, %s, %s, %s, true) RETURNING id",
+                (
+                    visitor_id,
+                    client,
+                    listing_id,
+                    SLICE_PREFIX + price_key,
+                    SLICE_PREFIX + price_key,
+                ),
+            ).fetchone()
+        assert row is not None
+        row_id: int = row["id"]
+        return row_id
+
+    def refund_slice(self, row_id: int) -> None:
+        """An `admit_slice` row whose read claimed no slice after all: it costs nothing."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM storefront_renders WHERE id = %s AND job_id LIKE %s",
+                (row_id, SLICE_PREFIX + "%"),
+            )
+
     def _check(
         self,
         conn: Conn,
@@ -200,10 +237,12 @@ class RenderLimits:
         client: str,
         settings: Settings,
         now: datetime | None,
+        *,
+        concurrency: bool = True,
     ) -> None:
         """Inside the caller's transaction: the locks, then `RenderLimited` when the
-        visitor, the client or the open renders are at their limit. ``client`` is a
-        `client_key`."""
+        visitor, the client or (with ``concurrency``) the open renders are at their
+        limit. ``client`` is a `client_key`."""
         # The concurrency limit is the whole shop's, so every admit takes one lock
         # (`LOCK_OPEN`) and admits run one at a time. Keep this transaction short: a
         # few counts and one write, never a Temporal call or other I/O.
@@ -226,6 +265,8 @@ class RenderLimits:
             wait = self._rate(conn, visitor_id, client, window=window, limit=most, at=at)
             if wait is not None:
                 raise RenderLimited(limit, wait)  # type: ignore[arg-type]
+        if not concurrency:
+            return
         row = conn.execute(
             "SELECT count(*) AS n FROM storefront_renders r"
             " WHERE r.counted AND r.created_at > %s"

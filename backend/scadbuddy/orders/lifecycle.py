@@ -425,6 +425,10 @@ class NewModelItem(NewItem):
 @dataclass(frozen=True, kw_only=True)
 class NewLibraryItem(NewItem):
     file: LibraryFileRef
+    #: The slots a storefront line's customer chose (#6710 §10.1), from 0: each with its
+    #: colour and its price-book filament. Empty for a back-office add, whose slots come
+    #: from its first quote (`library_colours`).
+    colours: tuple[ColourSlot, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1033,16 +1037,21 @@ class Lifecycle:
     def _firm_quotes(
         self, conn: Conn, order: Order, by: Actor, firm: Mapping[str, FirmLine]
     ) -> tuple[Order, list[tuple[OrderItem, Quote]] | None]:
-        """A `storefront` quote of each open model item that ``firm`` prices in the
-        order's currency (#6153), for the item's quantity and its current revision: the
-        item is `quoted`. The order as it then stands, and each item with its quote when
-        every open item has one, else None (the shop prices the others by hand). A line
+        """A `storefront` quote of each open model or library file item (#6710) that
+        ``firm`` prices in the order's currency (#6153), for the item's quantity and its
+        current revision (none for a library file item): the item is `quoted`. The order as
+        it then stands, and each item with its quote when every open item has one, else
+        None (the shop prices the others by hand). A line
         ``firm`` does not name, a request among them, has no quote."""
         items = [i for i in self.store.items(order.id, conn=conn) if i.status != "cancelled"]
         quoted: list[tuple[OrderItem, Quote]] = []
         for item in items:
             line = firm.get(item.id)
-            if line is None or item.kind != "model" or line.currency != order.currency:
+            if (
+                line is None
+                or item.kind not in ("model", "library_file")
+                or line.currency != order.currency
+            ):
                 continue
             quote = self.store.insert_quote(
                 conn,
@@ -3851,6 +3860,7 @@ class Lifecycle:
                 notes=entry.notes,
                 sku=entry.sku,
                 origin_archive_ids=entry.origin_archive_ids,
+                colours=entry.colours,
             )
             self._added(
                 conn,

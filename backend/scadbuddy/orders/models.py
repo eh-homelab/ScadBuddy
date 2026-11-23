@@ -489,6 +489,11 @@ class LibraryFileRef(BaseModel):
     id: int = Field(ge=1)
     filename: str
     library: ItemLibrary
+    #: A storefront line's (#6710 §10.1): the sha256 its listing pinned and the listing's
+    #: held copy of those bytes, ``listing-file-<sha256>``, which the item holds in
+    #: ``blob_refs`` (`ORDER_ITEM_HOLDER`). None for an item the back office adds.
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    copy_key: str | None = None
 
 
 class OrderItem(BaseModel):

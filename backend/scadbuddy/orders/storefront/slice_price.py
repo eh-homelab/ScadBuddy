@@ -58,7 +58,7 @@ import weakref
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -935,9 +935,10 @@ def _orders(state: AppState) -> OrdersComponent:
 async def _planned(
     state: AppState,
     *,
-    reference: Reference,
-    model_sha256: str,
     filaments: Sequence[Filament] | None,
+    reference: Reference | None = None,
+    model_sha256: str | None = None,
+    library_file: PricedFile | None = None,
     variant_key: str | None = None,
     listing_id: str | None = None,
 ) -> Planned | None:
@@ -945,7 +946,9 @@ async def _planned(
     book, the live machine rate, the printer's status and the filament types' presets
     stand now; None when it has no slice price (a slot with no filament, no shop slice
     profile, a printer the registry lacks or whose status cannot be read, or no type or
-    type preset for a slot's material)."""
+    type preset for a slot's material). Its subject is a render (``reference`` and the
+    sha256 of its 3MF) or a file listing's file (``library_file``, #6710), as
+    :func:`plan_variant` takes them: every read of a price builds its key here."""
     if filaments is None:
         return None
     orders = _orders(state)
@@ -967,6 +970,7 @@ async def _planned(
         settings=settings,
         reference=reference,
         model_sha256=model_sha256,
+        library_file=library_file,
         filaments=filaments,
         currency=currency,
         policy=policy,
@@ -1010,9 +1014,10 @@ async def read_type_presets(
 async def firm_price(
     state: AppState,
     *,
-    reference: Reference,
-    model_sha256: str,
     filaments: Sequence[Filament] | None,
+    reference: Reference | None = None,
+    model_sha256: str | None = None,
+    library_file: PricedFile | None = None,
 ) -> PriceRow | None:
     """The variant's firm price as it stands now, read only (#6153): the ``done`` row of
     the key made from the variant and the shop's settings, the price book and the live
@@ -1020,9 +1025,13 @@ async def firm_price(
     no ``done`` row (a slice still running or failed, or a key that moved because the
     book, the rate or the profile changed). It starts no slice. A cart line's add and the
     checkout read it (``line_prices.py``), so the server never takes a price from the
-    browser."""
+    browser. Its subject is a render's or a file listing's file, as `_planned` takes it."""
     planned = await _planned(
-        state, reference=reference, model_sha256=model_sha256, filaments=filaments
+        state,
+        reference=reference,
+        model_sha256=model_sha256,
+        library_file=library_file,
+        filaments=filaments,
     )
     if planned is None:
         return None
@@ -1032,14 +1041,22 @@ async def firm_price(
     return row
 
 
+#: What a read that would claim a new slice of a key pays first (#6710 §7.5): it takes
+#: one render of the visitor's limits (raising when over them) and answers how to give it
+#: back, which the read calls when it claims no slice after all.
+Charge = Callable[[str], Awaitable[Callable[[], Awaitable[None]]]]
+
+
 async def slice_estimate(
     state: AppState,
     *,
-    reference: Reference,
-    model_sha256: str,
     filaments: Sequence[Filament] | None,
+    reference: Reference | None = None,
+    model_sha256: str | None = None,
+    library_file: PricedFile | None = None,
     variant_key: str | None = None,
     listing_id: str | None = None,
+    charge: Charge | None = None,
 ) -> StoreEstimate:
     """The firm price of the render on screen (#6153): the cached price of its variant,
     else its slice started (the read starts it, and a re-read joins it) while fewer than
@@ -1048,11 +1065,15 @@ async def slice_estimate(
     shop slice profile, no preset for a slot's material or no printer status, there is no
     price. ``variant_key`` is the render's and ``listing_id`` its listing's (#6921): the
     slice's ``done`` row records them, and a ``done`` row from before #6921 takes them
-    (:meth:`SlicePrices.adopt`)."""
+    (:meth:`SlicePrices.adopt`). Its subject is a render's or a file listing's file, as
+    `_planned` takes it. With ``charge``, a read that would claim a slice pays it first,
+    and is refunded when it claims none; a read that finds a price, or a slice that
+    stands, pays nothing."""
     planned = await _planned(
         state,
         reference=reference,
         model_sha256=model_sha256,
+        library_file=library_file,
         filaments=filaments,
         variant_key=variant_key,
         listing_id=listing_id,
@@ -1069,9 +1090,17 @@ async def slice_estimate(
         return answer_of(row)
     await _settle_ended(state, prices)
     limit = (await asyncio.to_thread(state.settings_store.snapshot)).runtime
+    refund = None
+    if charge is not None and (row is None or not _stands(row, datetime.now(UTC))):
+        refund = await charge(planned.key)
     claim = await asyncio.to_thread(
-        prices.claim, planned.key, model_sha256, limit=limit.storefront_slices_concurrent
+        prices.claim,
+        planned.key,
+        planned.variant.model_sha256,
+        limit=limit.storefront_slices_concurrent,
     )
+    if not claim.claimed and refund is not None:
+        await refund()
     if not claim.claimed:
         # Another read's slice of this variant, or no room yet: the page reads again.
         return pending(planned.key) if claim.row is None else answer_of(claim.row)
@@ -1119,7 +1148,7 @@ async def instant_price(
     filaments = (
         None
         if newest.slot_filaments is None
-        else await asyncio.to_thread(_book_filaments, orders, newest.slot_filaments)
+        else await asyncio.to_thread(book_filaments, orders, newest.slot_filaments)
     )
     planned = await _planned(
         state, reference=reference, model_sha256=newest.model_sha256, filaments=filaments
@@ -1133,7 +1162,7 @@ async def instant_price(
     return last_answer(newest)
 
 
-def _book_filaments(orders: OrdersComponent, ids: Sequence[str]) -> list[Filament] | None:
+def book_filaments(orders: OrdersComponent, ids: Sequence[str]) -> list[Filament] | None:
     """The price-book filament of each id, or None when one is gone or archived. Blocking:
     call it in a thread."""
     found = [orders.store.filament(filament_id) for filament_id in ids]

@@ -37,6 +37,11 @@ visitor's own render of them while it is held. It starts no render and no slice.
 …/variants/{key}/preview.glb`` streams that preview; a key that names none is 404
 ``variant_not_found``.
 
+Area ``file-prices`` (#6710, `orders/storefront/file_prices.py`): ``POST
+…/listings/{id}/price`` takes a visitor's colours on a file listing (``ListingPriceBody``;
+any other body is 422 ``price_body_invalid``) and answers the slice price of its held copy,
+or starts that slice: a read that claims one counts as one render.
+
 Area ``drafts`` (`orders/storefront/drafts.py`): ``GET …/draft`` is the visitor's draft
 order, or ``null`` when it has none; ``POST …/draft/items`` adds a listing at the visitor's
 values to it, and ``DELETE …/draft/items/{item_id}`` removes an item of it (each with an
@@ -145,6 +150,7 @@ from scadbuddy.orders.storefront.drafts import (
     request_sent,
     requests_disabled,
 )
+from scadbuddy.orders.storefront.file_prices import listing_price
 from scadbuddy.orders.storefront.intake import draft_preview
 from scadbuddy.orders.storefront.listings import (
     cursor_after,
@@ -190,6 +196,7 @@ from scadbuddy.orders.storefront.wire import (
     CancelBody,
     CustomerOrderView,
     DraftView,
+    ListingPriceBody,
     ModelRequestBody,
     PublicFilament,
     PublicListing,
@@ -449,6 +456,33 @@ async def variant(
             "This request is not a render of a listing.",
         )
     return await instant_variant(state, visitor, body)
+
+
+@router.post(
+    "/listings/{listing_id}/price",
+    name="crud_storefront_listing_price",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": ListingPriceBody.model_json_schema()}},
+        }
+    },
+)
+async def listing_price_route(
+    listing_id: str, request: Request, state: StateDep, visitor: Visitor, client: StoreClient
+) -> StoreEstimate:
+    """The price of a visitor's colours on a file listing (#6710 §7.5): the slice price of
+    its held copy, ``pending`` while it is worked out, or ``none``. A read that claims a
+    new slice counts as one render (429 ``render_limited`` over the limits)."""
+    body = await _body(
+        request,
+        ListingPriceBody,
+        "price_body_invalid",
+        "This request is not a price of a listing's colours.",
+    )
+    return await listing_price(
+        state, visitor, client, listing_id, body.listing_updated_at, body.colours
+    )
 
 
 @router.get(

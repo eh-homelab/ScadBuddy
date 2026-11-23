@@ -186,7 +186,7 @@ _ITEM = (
     " slug, commit, inputs, libraries, template_name, render_key, colours, output_id,"
     " delivered_attachment_id, current_revision_id, approval, created_at, updated_at,"
     " revised_after_acceptance, library_file_id, library_filename, library_source,"
-    " origin_archive_ids"
+    " origin_archive_ids, library_sha256, library_copy_key"
 )
 _REVISION = (
     "id, item_id, number, slug, commit, inputs, libraries, template_name, render_key, colours,"
@@ -314,6 +314,8 @@ def _item_of(row: DictRow) -> OrderItem:
             id=row["library_file_id"],
             filename=row["library_filename"],
             library=row["library_source"],
+            sha256=row["library_sha256"],
+            copy_key=row["library_copy_key"],
         ),
         colours=row["colours"],
         output_id=row["output_id"],
@@ -352,6 +354,9 @@ def _revision_of(row: DictRow) -> Revision:
     )
 
 
+#: The ``blob_refs`` holder kind of a storefront line's held copy of its listing's file
+#: (#6710 §10.1), by item id.
+ORDER_ITEM_HOLDER = "order_item"
 #: The ``blob_refs`` holder kind of an attachment's file (§6.2's ``attachment:<id>``),
 #: written and removed with the attachment's row, in its transaction.
 ATTACHMENT_HOLDER = "attachment"
@@ -1186,7 +1191,14 @@ class OrderStore:
     def delete_draft(self, conn: Conn, order_id: str) -> bool:
         """The unsubmitted storefront cart's row; its items, revisions and audit rows
         cascade. Its attachments must be gone first (`delete_attachment`): their foreign
-        key refuses the delete otherwise. Never a submitted or back office order."""
+        key refuses the delete otherwise. Never a submitted or back office order. Its
+        items' holds on held copies (#6710) go with it."""
+        conn.execute(
+            "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id IN (SELECT i.id"
+            " FROM order_items i JOIN orders o ON o.id = i.order_id WHERE o.id = %s"
+            " AND o.source = 'storefront' AND o.submitted_at IS NULL)",
+            (ORDER_ITEM_HOLDER, order_id),
+        )
         row = conn.execute(
             "DELETE FROM orders WHERE id = %s AND source = 'storefront'"
             " AND submitted_at IS NULL RETURNING id",
@@ -1586,15 +1598,20 @@ class OrderStore:
         notes: str = "",
         sku: str | None = None,
         origin_archive_ids: Sequence[int] = (),
+        colours: Sequence[ColourSlot] = (),
     ) -> OrderItem:
         """A library file item (#5544), appended after the order's items: the file's
-        reference, no template reference, no colours until its first slice quote, no
-        output. ``title`` defaults to the file's name."""
+        reference, no template reference, no output, and no colours until its first slice
+        quote unless ``colours`` gives them (a storefront line's, #6710). ``title``
+        defaults to the file's name. A file with a ``copy_key`` (a storefront line) holds
+        that copy under (`ORDER_ITEM_HOLDER`, item id) in the caller's transaction, so the
+        order keeps the bytes it prints whatever becomes of its listing (§10.1)."""
         row = conn.execute(
             "INSERT INTO order_items (order_id, position, kind, quantity, title, notes, sku,"
-            " library_file_id, library_filename, library_source, origin_archive_ids) VALUES"
+            " library_file_id, library_filename, library_source, origin_archive_ids,"
+            " library_sha256, library_copy_key, colours) VALUES"
             " (%s, (SELECT COALESCE(MAX(position) + 1, 0) FROM order_items WHERE order_id = %s),"
-            f" 'library_file', %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
+            f" 'library_file', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
             (
                 order_id,
                 order_id,
@@ -1606,9 +1623,18 @@ class OrderStore:
                 file.filename,
                 file.library,
                 list(origin_archive_ids),
+                file.sha256,
+                file.copy_key,
+                Jsonb(_dump(list(colours))),
             ),
         ).fetchone()
         assert row is not None
+        if file.copy_key is not None:
+            conn.execute(
+                "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+                " ON CONFLICT DO NOTHING",
+                (file.copy_key, ORDER_ITEM_HOLDER, row["id"]),
+            )
         return _item_of(row)
 
     def item(self, item_id: str, *, conn: Conn | None = None) -> OrderItem | None:
@@ -1792,10 +1818,16 @@ class OrderStore:
         return _revision_of(row)
 
     def delete_draft_item(self, conn: Conn, item_id: str) -> bool:
-        """Deletes the item while it is `draft` (Ruling 6, 10); False when it is not."""
+        """Deletes the item while it is `draft` (Ruling 6, 10), with its hold on a held
+        copy (#6710); False when it is not."""
         deleted = conn.execute(
             "DELETE FROM order_items WHERE id = %s AND status = 'draft' RETURNING id", (item_id,)
         ).fetchone()
+        if deleted is not None:
+            conn.execute(
+                "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+                (ORDER_ITEM_HOLDER, item_id),
+            )
         return deleted is not None
 
     def item_inputs(self) -> Iterator[dict[str, Any]]:
