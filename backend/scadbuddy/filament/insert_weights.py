@@ -53,6 +53,7 @@ def is_placeholder(basis: str, note: str | None) -> bool:
     return basis == "placeholder" or (note or "").lstrip().lower().startswith(PLACEHOLDER_NOTE)
 
 
+# `check_on` uses `consumed` and `full` separately so it can name `used` before `not_full`.
 def unused(events: Sequence[m.SpoolEvent], *, grams_left: float | None, label: int) -> bool:
     """Whether a spool is new by D2: no event uses filament and its grams left still
     equal the label weight."""
@@ -157,6 +158,9 @@ def check_on(
         ).fetchall()
     ]
     derived = reading_g - label
+    new_weight = mean_weight([*others, derived])
+    if new_weight < 1:  # the table's CHECK (empty_weight_g > 0)
+        return answer("not_above_label")
     placeholder = is_placeholder(insert["empty_weight_basis"], insert["note"])
     offer = m.InsertWeightOffer(
         insert_type_id=insert["id"],
@@ -168,7 +172,7 @@ def check_on(
         current_empty_weight_g=insert["empty_weight_g"],
         current_basis=insert["empty_weight_basis"],
         placeholder=placeholder,
-        new_empty_weight_g=mean_weight([*others, derived]),
+        new_empty_weight_g=new_weight,
         sample_count=len(others) + 1,
         checked_by_default=checked_by_default(insert["empty_weight_basis"], placeholder),
     )

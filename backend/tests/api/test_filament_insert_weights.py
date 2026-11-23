@@ -88,6 +88,17 @@ def test_no_offer_is_a_reason_and_an_accept_without_one_is_409(
     assert refused.status_code == 409, refused.text
     assert (refused.json()["code"], refused.json()["reason"]) == ("no_insert_weight_offer", "used")
 
+    fresh = _spool(client, insert["id"])
+    sliver = client.get(f"{SPOOLS}/{fresh}/insert-weight-offer", params={"reading_g": 1000.3})
+    assert sliver.status_code == 200, sliver.text
+    assert (sliver.json()["reason"], sliver.json()["offer"]) == ("not_above_label", None)
+    refused = client.post(f"{SPOOLS}/{fresh}/insert-weight", json={"reading_g": 1000.3})
+    assert refused.status_code == 409, refused.text
+    assert (refused.json()["code"], refused.json()["reason"]) == (
+        "no_insert_weight_offer",
+        "not_above_label",
+    )
+
 
 def test_an_unknown_spool_is_404_and_a_bad_reading_422(client: TestClient) -> None:
     offer = f"{SPOOLS}/{MISSING}/insert-weight-offer"

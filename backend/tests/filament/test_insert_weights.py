@@ -231,6 +231,12 @@ def test_a_spool_with_no_offer_says_why(pg_pool: PgPool) -> None:
     assert heavy is not None and heavy.reason == "derived_too_heavy"
     light = store.check(fresh, 1000)
     assert light is not None and light.reason == "not_above_label"
+    # 0.3 g over the label rounds to a 0 g weight, which the table refuses.
+    sliver = store.check(fresh, 1000.3)
+    assert sliver is not None and (sliver.reason, sliver.offer) == ("not_above_label", None)
+    with pytest.raises(NoInsertWeightOfferError) as slivered:
+        store.accept(fresh, 1000.3)
+    assert slivered.value.reason == "not_above_label"
 
     # 900 g left is a reading below the label: use. 1100 g left is no use, but not full.
     part = store.check(_spool(pg_pool, insert, grams_left=900), 1150)
