@@ -88,6 +88,12 @@ SEEN_FIELDS: tuple[str, ...] = (
     "data_origin",
 )
 
+#: Bambuddy fields only the pull takes (#7149 R-7149-8): never pushed, and never in a
+#: plan's compare, but kept in a link's ``bb_seen`` so the pull judges a change of them
+#: against what SB last saw of Bambuddy, never against a push's echo, which holds
+#: Bambuddy's whole answer (the R-T5-5 hazard).
+PULL_SEEN_FIELDS: tuple[str, ...] = ("added_full", "encode_time", "weight_used_baseline")
+
 #: A spool's supplier link as the sync compares it: what ``PUT …/suppliers`` sends.
 _SUPPLIER_FIELDS = frozenset(
     {"supplier_id", "supplier_article_number", "quoted_price_per_kg", "is_purchase_source"}
@@ -181,7 +187,7 @@ def seen_row(row: BbSpool) -> dict[str, Any]:
     ``PUT …/suppliers`` sends, by ``supplier_id``.
 
     `bambuddy_pull.snapshot` is another shape, for the ``synced_from_bb`` event only."""
-    raw = row.model_dump(include=set(SEEN_FIELDS))
+    raw = row.model_dump(include={*SEEN_FIELDS, *PULL_SEEN_FIELDS})
     return {k: seen_value(k, v) for k, v in raw.items()}
 
 

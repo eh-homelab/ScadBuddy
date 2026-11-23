@@ -39,6 +39,8 @@ _DECISION_14_FIELDS = {
     "slicer_filament", "slicer_filament_name", "suppliers", "location_id",
     # #7149 R-7149-1: the one new field Bambuddy's update takes.
     "data_origin",
+    # #7149 R-7149-8: the pull-only fields, kept so an echo hides no Bambuddy change.
+    "added_full", "encode_time", "weight_used_baseline",
 }  # fmt: skip
 
 

@@ -120,6 +120,49 @@ def test_a_pushed_reset_hash_skips_the_write(pg_pool: PgPool) -> None:
     assert _plan(f, _snap([row]), WEIGHTS).writes == []
 
 
+def _bb_change_then_unrelated_push(
+    f: Any, pool: PgPool, spool: Any, change: dict[str, Any]
+) -> dict[str, Any]:
+    """R-7149-8: pull once, BB changes ``change``, then SB pushes an unrelated note before
+    the next pull. Answers BB's row as the push's answer left it."""
+    row = _matching(pool, spool, 50, WEIGHTS) | {
+        "weight_used_baseline": 0.0,
+        "added_full": None,
+        "updated_at": _bb_now(-30),
+    }
+    _link(pool, spool, 50)
+    pull(f, [_parse(row)], now=datetime.now(UTC))
+    moved = row | change | {"updated_at": _bb_now(-20)}
+    f.spools.update(spool, SpoolPatch(note="unrelated"), actor="ann")
+    (write,) = _plan(f, _snap([moved]), WEIGHTS).writes
+    assert (write.op, write.body) == ("update", {"note": "unrelated"})
+    answer = moved | {"note": "unrelated", "updated_at": _bb_now(-10)}
+    assert _apply(f, [write], [_ok(write, answer)]).failed == 0
+    return answer
+
+
+def test_a_bb_reset_behind_a_pushed_echo_is_booked_once(pg_pool: PgPool) -> None:
+    """R-7149-8: the echo already holds BB's new baseline; the link's ``bb_seen`` does not."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    answer = _bb_change_then_unrelated_push(f, pg_pool, spool, {"weight_used_baseline": 75.0})
+    pull(f, [_parse(answer)], now=datetime.now(UTC))
+    pull(f, [_parse(answer)], now=datetime.now(UTC))
+    resets = [e.source for e in f.spools.events(spool) if e.kind == "consumed_reset"]
+    assert resets == ["bb"]
+
+
+def test_a_bb_added_full_behind_a_pushed_echo_is_taken(pg_pool: PgPool) -> None:
+    """R-7149-8."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    answer = _bb_change_then_unrelated_push(f, pg_pool, spool, {"added_full": True})
+    pull(f, [_parse(answer)], now=datetime.now(UTC))
+    got = f.spools.get(spool)
+    assert got is not None
+    assert got.added_full is True
+
+
 def _link_pushed(pool: PgPool, spool: Any, pushed: dict[str, str]) -> None:
     from psycopg.types.json import Jsonb
 

@@ -144,7 +144,13 @@ from scadbuddy.filament import models as m
 # Re-exported: the wire of #6772 holds them, and the pull's callers import them from here.
 from scadbuddy.filament.bb_pull_models import PullReport as PullReport
 from scadbuddy.filament.bb_pull_models import Pulls as Pulls
-from scadbuddy.filament.bb_sync_models import SEEN_FIELDS, BbLinked, json_form, seen_row
+from scadbuddy.filament.bb_sync_models import (
+    PULL_SEEN_FIELDS,
+    SEEN_FIELDS,
+    BbLinked,
+    json_form,
+    seen_row,
+)
 from scadbuddy.filament.catalog import KIND_OF_TABLE, lookup_key, resolve_or_add
 from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
@@ -209,6 +215,17 @@ _NOT_COLUMNS = frozenset(
         "consumed_baseline",
     }
 )
+#: The `seen_row` names a link's ``bb_seen`` holds, which a push's echo is judged by.
+_WATCHED = frozenset({*SEEN_FIELDS, *PULL_SEEN_FIELDS})
+#: The snapshot keys #7149 added. A reading from before it lacks them (review nit 2 on
+#: #7181): `_seeded` fills them in quietly.
+_NEW_KEYS = ("data_origin", "added_full", "tag_encoded_at", "consumed_baseline")
+#: The snapshot name of each `PULL_SEEN_FIELDS` field.
+_PULL_SEEN_SNAPSHOT = {
+    "added_full": "added_full",
+    "encode_time": "tag_encoded_at",
+    "weight_used_baseline": "consumed_baseline",
+}
 #: Bambuddy's ``data_origin`` as the column takes it (its ``String(20)``, R-7149-1).
 _ORIGIN = re.compile(r"[a-z0-9_]{1,20}")
 #: The `snapshot` fields by their `seen_row` name (#6265 Task 9); the tags have none.
@@ -298,6 +315,26 @@ def snapshot(bb: BbSpool) -> dict[str, Any]:
         "tag_encoded_at": None if bb.encode_time is None else json_form(bb.encode_time),
         "consumed_baseline": bb.weight_used_baseline,
     }
+
+
+def _seeded(
+    before: Mapping[str, Any], snap: Mapping[str, Any], holds: Callable[[str, Any], bool]
+) -> dict[str, Any]:
+    """Review nit 2 on #7181: a reading from before #7149 lacks `_NEW_KEYS`. Each missing
+    key takes Bambuddy's value as if it had been read, so the first pull after the deploy
+    books no event and no reset for it, when the value says nothing new: the baseline
+    (a first reading of it is no reset, R-7149-6), a null, or a value SB already holds
+    (``holds``). Any other value stays missing, so the pull takes it as a change."""
+    if not before:
+        return dict(before)
+    out = dict(before)
+    for key in _NEW_KEYS:
+        if key in out:
+            continue
+        value = snap[key]
+        if key == "consumed_baseline" or value is None or holds(key, value):
+            out[key] = value
+    return out
 
 
 def _origin(value: str | None) -> str | None:
@@ -707,7 +744,14 @@ def _steady(
         return True
     if last is None:
         return False
-    before: dict[str, Any] = last["bb"] or {}
+    # A value the link's seen copy holds already is one SB took or agreed with.
+    before = _seeded(
+        last["bb"] or {},
+        snapshot(bb),
+        lambda key, _value: (
+            _SEEN_NAMES[key] in stored and stored[_SEEN_NAMES[key]] == seen.get(_SEEN_NAMES[key])
+        ),
+    )
     insert = None if bb.core_weight_catalog_id is None else inserts.get(bb.core_weight_catalog_id)
     after = _reading(bb, before, insert)
     if _seen(after, before, pulls) != before:
@@ -716,7 +760,7 @@ def _steady(
         pulls.of_field(k)
         and (_SEEN_NAMES[k] not in stored or stored[_SEEN_NAMES[k]] != seen.get(_SEEN_NAMES[k]))
         for k in after
-        if _SEEN_NAMES.get(k) in SEEN_FIELDS
+        if _SEEN_NAMES.get(k) in _WATCHED
     ):
         return False
     spool_id = link["spool_id"]
@@ -1384,10 +1428,25 @@ def _update(
         ).fetchone()
         echo = None if held is None else held["bb_seen"]
     seen_now = seen_row(bb) if echo is not None else {}
+    held_row: dict[str, Any] = {}
+
+    def sb_holds(key: str, value: Any) -> bool:
+        if not held_row:
+            held_row.update(
+                conn.execute(
+                    "SELECT data_origin, added_full, tag_encoded_at FROM filament_spools"
+                    " WHERE id = %s",
+                    (spool_id,),
+                ).fetchone()
+                or {}
+            )
+        return key != "consumed_baseline" and _column_value(key, value) == held_row.get(key)
+
+    before = _seeded(before, snapshot(bb), sb_holds)
 
     def moved_off(field: str, value: Any) -> bool:
         name = _SEEN_NAMES.get(field)
-        if echo is not None and name in SEEN_FIELDS:
+        if echo is not None and name in _WATCHED:
             return name not in echo or seen_now.get(name) != echo[name]
         return bool(value != before.get(field))
 
@@ -1452,12 +1511,14 @@ def _update(
     if pulls.weights and moved_off("remaining_g", after["remaining_g"]):
         fresh.add("remaining_g")
     # R-7149-6: a baseline that moved off one SB saw is BB's reset; a first reading is none.
-    reset = bool(
-        pulls.weights
-        and "consumed_baseline" in before
-        and after["consumed_baseline"] != before["consumed_baseline"]
+    # R-7149-8: after a push's echo, what SB saw is the link's ``bb_seen``, not the echo.
+    old_baseline = (
+        echo.get("weight_used_baseline") if echo is not None else before.get("consumed_baseline")
     )
-    if seen == before and not fresh:
+    reset = bool(
+        pulls.weights and old_baseline is not None and after["consumed_baseline"] != old_baseline
+    )
+    if seen == before and not fresh and not reset:
         return False
     # The newer change wins per field (Decision 8): what SB changed after BB's change
     # stays SB's.
@@ -1517,12 +1578,19 @@ def _update(
         reading = None
     elif locked:
         reading, weight = None, "locked"
-    if seen == before and not changes and not retag and reading is None and weight is None:
+    if (
+        seen == before
+        and not changes
+        and not retag
+        and reading is None
+        and weight is None
+        and not reset
+    ):
         # Nothing taken after the push's echo: it stays the last reading.
         return False
     _synced(conn, spool_id, bb, seen, changes, reading, actor, weight=weight, ref=ref)
     if reset:
-        _bb_reset(conn, spool_id, bb, actor)
+        _bb_reset(conn, spool_id, bb, actor, old_baseline)
     FilamentSpoolStore.read(conn, spool_id, check=True)
     if taken is not None:
         taken |= {_COLUMN_SEEN[c] for c in changes if c in _COLUMN_SEEN}
@@ -1531,11 +1599,25 @@ def _update(
     return bool(changes) or retag or reading is not None or reset
 
 
-def _bb_reset(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> None:
+def _bb_reset(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, old: Any) -> None:
     """R-7149-6: Bambuddy's consumed-counter reset as a ``consumed_reset`` event of source
-    ``bb``, at BB's ``updated_at``, once per BB change (its ref). The push never sends a
-    ``bb`` reset back (`bb_sync_plan.SpoolFacts`)."""
+    ``bb``, once per BB change (its ref). The push never sends a ``bb`` reset back
+    (`bb_sync_plan.SpoolFacts`).
+
+    R-7149-9: Bambuddy keeps no reset time, and its ``updated_at`` moves with any later
+    edit, so the reset is dated at the earlier of ``updated_at`` and the newest reading
+    that still held the ``old`` baseline. A plate between that reading and the reset then
+    counts as used since the reset: never a plate lost, at worst one counted twice."""
     stamp = None if bb.updated_at is None else bb.updated_at.isoformat()
+    held = conn.execute(
+        "SELECT max(at) AS at FROM filament_spool_events WHERE spool_id = %s"
+        " AND kind = 'synced_from_bb'"
+        " AND (data -> 'bb' ->> 'consumed_baseline')::float8 = %s",
+        (spool_id, float(old)),
+    ).fetchone()
+    at = bb.updated_at
+    if held is not None and held["at"] is not None:
+        at = held["at"] if at is None else min(as_utc(at), held["at"])
     ledger.record(
         conn,
         spool_id,
@@ -1544,7 +1626,7 @@ def _bb_reset(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> None:
         ref_kind=REF_KIND if stamp else None,
         ref_id=f"{bb.id}@{stamp}" if stamp else None,
         actor=actor,
-        at=bb.updated_at,
+        at=at,
         data={"bb_spool_id": bb.id, "bb_baseline": bb.weight_used_baseline},
     )
 
@@ -1782,7 +1864,10 @@ def _seen_parts(
     agree = {
         n: v
         for n, v in seen.items()
-        if n in taken or (n in sb and plan.bb_form(n, seen, k_rows) == sb[n])
+        if n in taken
+        or (n in sb and plan.bb_form(n, seen, k_rows) == sb[n])
+        # R-7149-8: only Bambuddy writes these, so SB's seen copy is its last value.
+        or (n in _PULL_SEEN_SNAPSHOT and run.pulls.of_field(_PULL_SEEN_SNAPSHOT[n]))
     }
     stale = False
     seeds = {

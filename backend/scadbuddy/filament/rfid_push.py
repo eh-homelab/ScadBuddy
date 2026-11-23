@@ -37,6 +37,15 @@ PUSH_LOCK = "scadbuddy:filament:rfid_push"
 #: person's bind in ScadBuddy sets on the spool, and what the push sends for a spool with
 #: no origin (#7149 R-7149-1).
 HAND_LINK_ORIGIN = "nfc_link"
+#: Bambuddy's ``data_origin`` when it matches a Bambu tag to a spool
+#: (``spool_tag_matcher.py`` L417, ``data_origin_values``): what a person's bind of a
+#: ``bambu_mifare`` tag sets (#7149 R-7149-10).
+BAMBU_LINK_ORIGIN = "rfid_linked"
+
+
+def link_origin(kind: str | None) -> str:
+    """The ``data_origin`` a person's bind of a tag of ``kind`` gives the spool."""
+    return BAMBU_LINK_ORIGIN if kind == "bambu_mifare" else HAND_LINK_ORIGIN
 
 
 def enqueue_tag(conn: Conn, tag_id: UUID) -> None:
@@ -133,8 +142,8 @@ async def _push_one(
         report.unchanged += 1
     elif desired is not None:
         kind = "bambu" if tag["kind"] == "bambu_mifare" else "ntag"
-        # The spool's own origin; a hand link's word when it has none (R-7149-1).
-        origin = tag["origin"] or HAND_LINK_ORIGIN
+        # The spool's own origin; a hand link's word when it has none (R-7149-10).
+        origin = tag["origin"] or link_origin(tag["kind"])
         try:
             await client.link_tag(
                 desired, tag_uid=uid, tray_uuid=tray, tag_type=kind, data_origin=origin

@@ -81,7 +81,9 @@ def test_a_bb_reset_is_booked_once_and_a_first_reading_books_none(pg_pool: PgPoo
     pull(f, [reset], now=NOW)
     pull(f, [reset], now=NOW)
     ((source, at, data),) = _resets(f, made)
-    assert (source, at) == ("bb", datetime(2026, 11, 14, 11, tzinfo=UTC))
+    # R-7149-9: at the newest reading that still held the old baseline (10:00), not BB's
+    # ``updated_at`` (11:00), so no plate between the two is dropped.
+    assert (source, at) == ("bb", datetime(2026, 11, 14, 10, tzinfo=UTC))
     assert data["bb_baseline"] == 100.0
     assert f.metrics.history(made) is not None
 
@@ -94,3 +96,60 @@ def test_a_bb_reset_waits_while_weights_do_not_pull(pg_pool: PgPool) -> None:
     assert _resets(f, made) == []
     pull(f, [reset], now=NOW)
     assert [s for s, _, _ in _resets(f, made)] == ["bb"]
+
+
+def test_a_reset_seen_after_a_later_bb_change_is_dated_at_the_last_old_reading(
+    pg_pool: PgPool,
+) -> None:
+    """R-7149-9: BB keeps no reset time. Its row changed again after the reset, so its
+    ``updated_at`` is too late; the reset is dated at the newest reading that still held
+    the old baseline, and a plate between the two counts."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(weight_used_baseline=40.0)], now=NOW).created_ids
+    later = bb(weight_used_baseline=100.0, note="edited after", updated_at="2026-11-14T15:00:00")
+    pull(f, [later], now=NOW)
+    ((_, at, _),) = _resets(f, made)
+    assert at == datetime(2026, 11, 14, 10, tzinfo=UTC)
+
+
+def _strip_new_keys(pool: PgPool, spool: object) -> None:
+    """A link and its readings as a build before #7149 left them."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_spool_events SET data = jsonb_set(data, '{bb}', (data -> 'bb')"
+            " - 'data_origin' - 'added_full' - 'tag_encoded_at' - 'consumed_baseline')"
+            " WHERE spool_id = %s AND kind = 'synced_from_bb'",
+            (spool,),
+        )
+        conn.execute(
+            "UPDATE filament_bb_links SET bb_seen = bb_seen - 'data_origin' - 'added_full'"
+            " - 'encode_time' - 'weight_used_baseline' WHERE spool_id = %s",
+            (spool,),
+        )
+
+
+def _synced(f: object, spool: object) -> int:
+    events = f.spools.events(spool)  # type: ignore[attr-defined]
+    return sum(e.kind == "synced_from_bb" for e in events)
+
+
+@pytest.mark.parametrize("moved", [False, True])
+def test_the_first_pull_after_the_deploy_books_nothing_for_the_new_keys(
+    pg_pool: PgPool, moved: bool
+) -> None:
+    """Review nit 2 on #7181: a reading that lacks only the new keys is seeded quietly;
+    no ``synced_from_bb`` event and no reset."""
+    f = _filament(pg_pool)
+    row = bb(data_origin="rfid_auto", weight_used_baseline=40.0)
+    (made,) = pull(f, [row], now=NOW).created_ids
+    _strip_new_keys(pg_pool, made)
+    before = _synced(f, made)
+    again = bb(
+        data_origin="rfid_auto",
+        weight_used_baseline=40.0,
+        updated_at="2026-11-14T11:00:00" if moved else "2026-11-14T10:00:00",
+    )
+    pull(f, [again], now=NOW)
+    pull(f, [again], now=NOW)
+    assert _synced(f, made) == before
+    assert _resets(f, made) == []

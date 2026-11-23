@@ -81,11 +81,14 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   migration `20261123T0609Z_filament_spool_bb_fields.sql`):
   - `data_origin` says how the spool's data came in, in Bambuddy's words (`rfid_auto`,
     `rfid_linked`, `nfc_link`, `opentag3d`). It is read only. The pull takes Bambuddy's
-    value; a person's tag bind sets `nfc_link`; a confirmed NTAG write sets `opentag3d`.
+    value; a person's tag bind sets `rfid_linked` for a Bambu tag, else `nfc_link`; a
+    confirmed NTAG write sets `opentag3d`.
     The push sends it when SB has one, and the tag push sends it to `link-tag`.
   - `added_full` (a person edits it) and `tag_encoded_at` (Bambuddy's `encode_time`, set
     by a confirmed NTAG write) come from Bambuddy on the pull. Bambuddy takes no write of
-    either, so they are never pushed.
+    either, so they are never pushed. With the baseline below they are kept in the link's
+    `bb_seen` (`PULL_SEEN_FIELDS`), and after a push the pull judges them against it, never
+    against the push's echo (R-7149-8).
   - The consumed counter is a ledger event, `consumed_reset` (no grams; the grams left
     stay). The spool metrics' `consumed_g` counts the plates after the newest reset, and
     the spool page's "Used" tile shows it, with "Reset the used counter". Reset one spool
@@ -95,7 +98,9 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
     resets Bambuddy's counter of a linked spool once per SB reset (op `reset_consumed`,
     `POST /inventory/spools/{id}/reset-consumed-counter`), and the pull books a Bambuddy
     reset (its `weight_used_baseline` moved) as a `consumed_reset` of source `bb`, which
-    is never sent back. No baseline column is kept.
+    is never sent back. BB keeps no reset time, so that event is dated at the newest reading
+    that still held the old baseline, or BB's `updated_at` when earlier (R-7149-9). No
+    baseline column is kept.
 - Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`. A code
   opens at `/x/<code>` (`frontend/src/pages/CodePage.tsx`; route `GET /api/v1/codes/{code}`,
   `backend/scadbuddy/api/codes.py`). Any case works, with or without the dash. A number is

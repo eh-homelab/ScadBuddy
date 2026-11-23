@@ -35,6 +35,21 @@ def test_the_origin_and_the_encode_time_are_read_only(client: TestClient) -> Non
     assert client.patch(one, json={"tag_encoded_at": "2026-11-23T00:00:00Z"}).status_code == 422
 
 
+def test_a_persons_bind_of_a_bambu_tag_marks_the_spool_rfid_linked(client: TestClient) -> None:
+    """R-7149-1, as amended by R-7149-10: Bambuddy says ``rfid_linked`` when a Bambu tag
+    is matched to a spool (``spool_tag_matcher.py`` L417), and ``nfc_link`` for any other
+    hand link."""
+    made = _spool(client)
+    one = f"{SPOOLS}/{made['id']}"
+    tag = {
+        "tag_uid": "A1B2C3D4",
+        "tray_uuid": "7F3E1C0A9B8D4E2F8A6B5C4D3E2F1A0B",
+        "kind": "bambu_mifare",
+    }
+    assert client.post(f"{one}/tags", json=tag).status_code == 201
+    assert client.get(one).json()["data_origin"] == "rfid_linked"
+
+
 def test_a_persons_tag_bind_marks_the_spool_nfc_link(client: TestClient) -> None:
     """R-7149-1: a hand link, in Bambuddy's word for it; a bind that changes nothing
     writes nothing."""

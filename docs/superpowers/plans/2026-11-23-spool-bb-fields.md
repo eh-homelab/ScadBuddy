@@ -37,11 +37,12 @@ Each ruling is also a comment on #7149.
   it and takes no value for it: a person cannot claim a tag was written by a machine.
   Three writers only. The BB pull takes BB's value (newer change wins; a BB `null` never
   clears SB's; a value outside the pattern is not taken). A person's new tag binding in
-  SB sets `nfc_link`, BB's own value for a hand link. A confirmed NTAG write sets
+  SB sets BB's own value for that link: `rfid_linked` for a Bambu tag, else `nfc_link`
+  (amended by R-7149-10). A confirmed NTAG write sets
   `opentag3d`, as BB does. Each SB write is one `edited` event. The `spools` push sends
   it on create and update only when SB has one, so SB never clears BB's value. The tag
-  push (`rfid_push.py`) sends the spool's value to `link-tag`, else `nfc_link`; before,
-  it always sent `nfc_link`. The pull still reads `opentag3d` to pick the tag kind.
+  push (`rfid_push.py`) sends the spool's value to `link-tag`, else the bind's value
+  for the tag's kind (R-7149-10); before, it always sent `nfc_link`. The pull still reads `opentag3d` to pick the tag kind.
 - **R-7149-2 — `added_full` is kept and editable, and syncs BB to SB only.** A new
   nullable boolean column. A person sets it on create and patch (`null` means not known).
   The pull takes BB's value. SB never pushes it: BB takes no write of it (table above).
@@ -69,11 +70,40 @@ Each ruling is also a comment on #7149.
   SB never calls BB's bulk route: one write per spool keeps one result per write.
 - **R-7149-6 — A BB reset reaches SB's ledger.** The pull reads `weight_used_baseline`
   under `weights`. The first reading of it only records it. A later change books a
-  `consumed_reset` event with source `bb` at BB's `updated_at`, once per BB change (its
-  ref). The push echo of SB's own reset holds the new baseline, so that reset does not
+  `consumed_reset` event with source `bb`, once per BB change (its ref), dated by
+  R-7149-9. The push echo of SB's own reset holds the new baseline, so that reset does not
   come back. A `bb` reset is never pushed back.
 - **R-7149-7 — No baseline column.** SB's ledger stays the truth. BB's baseline lives
   only in the pull's reading (`data.bb.consumed_baseline`) and the link's `bb_seen`.
+- **R-7149-8 — The pull-only fields are judged against `bb_seen`, never a push's echo**
+  (the review of #7181 at a500e3a83). After a push, the newest reading is the echo, which
+  holds BB's whole answer. A BB reset or a BB change of `added_full` made before that
+  push would read as already seen, and be lost (the R-T5-5 hazard). So `added_full`,
+  `encode_time` and `weight_used_baseline` are `PULL_SEEN_FIELDS`
+  (`bb_sync_models.py`): `seen_row` keeps them in the link's `bb_seen`, the pull's
+  `_write_seen` takes BB's value of each while its type pulls (only BB writes them), and
+  `apply_results` keeps the old seen value through a push's answer, except the baseline
+  in the answer of SB's own `reset_consumed`. After an echo the pull judges them, and
+  the reset, against `bb_seen`, as it judges `SEEN_FIELDS`. They are never pushed and
+  never in a plan's compare.
+- **R-7149-9 — A BB reset is dated at the last reading that held the old baseline, or
+  earlier.** BB keeps no reset time, and its `updated_at` moves with any later edit, so a
+  reset dated at it can be too late and drop plates from `consumed_g`. The event is dated
+  at the earlier of BB's `updated_at` and the newest `synced_from_bb` reading whose
+  `consumed_baseline` is the old value. A plate between that reading and the real reset
+  then counts as used since the reset: the counter may hold a plate too many, never one
+  too few.
+- **R-7149-10 — A person's bind of a Bambu tag sets `rfid_linked`** (amends R-7149-1).
+  BB writes `rfid_linked` when it adopts a Bambu tag onto a matching spool
+  (`spool_tag_matcher.py` L417), and `nfc_link` for `link-tag`'s default
+  (`inventory.py` L2747), as `data_origin_values` in
+  `backend/tests/bambuddy/recordings/openapi/rfid-routes.json` records from BB v1.3.1. So
+  a bind of a `bambu_mifare` tag sets `rfid_linked`, and any other kind `nfc_link`
+  (`rfid_push.link_origin`).
+- **Upgrade (review nit 2 of #7181).** A reading made before this change lacks the new
+  snapshot keys. The pull fills each missing key with BB's value when it says nothing
+  new: the baseline, a null, or a value SB holds already (`bambuddy_pull._seeded`). So
+  the first pull after the deploy books no `synced_from_bb` event and no reset for them.
 
 ## Tasks
 
