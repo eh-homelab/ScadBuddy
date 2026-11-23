@@ -258,10 +258,11 @@ An outside package's entry is in section 6.7.
   `public_url`. Claude Code sends a marketplace `url` source's `headers` only to archive
   downloads on the marketplace URL's own origin (same scheme, host and port)
   ([host-marketplace, "Authenticate archive downloads"](https://code.claude.com/docs/en/plugins/host-marketplace.md#authenticate-archive-downloads),
-  read 2026-11-22). Prod's `public_url` is the Pomerium SSO host. The catalog and the zips
-  need one public prefix on that host, `/api/v1/ai/plugin-feeds/` (§9). The zip URLs follow
-  the request's origin, so they work on the LAN host and on the SSO host, whichever the client
-  added. Until the eh-homelab/clusters change is live, only the LAN host works.
+  read 2026-11-22). Prod's `public_url` is the Pomerium SSO host, which a bearer token cannot
+  pass. The feed has no public prefix on that host (owner decision, eh-homelab/clusters#4017,
+  closed; §9). It is LAN-only, as `/mcp` is, and off-LAN clients get no feed. The zip URLs and
+  Settings' `marketplace_url` follow the request's origin, so a person on the LAN host gets
+  LAN URLs.
 - Readers are outside callers, not only the owner (owner, 2026-11-21: "outward calls").
 - Auth is the `/mcp` auth, unchanged (owner, 2026-11-21: "same auth as mcp"; operating.md
   §4.1, §6a, §10):
@@ -409,13 +410,12 @@ Steps 4 and 5 do not depend on 1 to 3 and can run in parallel with them.
 
 - Front door (found 2026-11-22, evidence in the PR #7042 and issue #6933 comments): `/mcp` is
   reached only on the LAN HTTPRoute. On the Pomerium SSO host `/api/v1/ai` is behind the
-  sign-in. The catalog and the zips therefore need an eh-homelab/clusters change: a public
-  Pomerium Ingress for exactly the prefix `/api/v1/ai/plugin-feeds/` on the SSO host, to the
-  agent on port 8081, with the agent checking the token as for `/mcp`. Change no other path.
-  Settings keeps the snippet on `public_url`; the zip URLs follow the request's origin because
-  Claude Code sends `headers` only to the marketplace URL's origin
+  sign-in. Outcome: the feed gets no public prefix on the SSO host (owner decision on
+  eh-homelab/clusters#4017, closed). It is LAN-only like `/mcp`, with the `sbmcp_` bearer
+  token, and off-LAN clients get no feed. The zip URLs and Settings' `marketplace_url` follow
+  the request's origin, not `public_url`. Claude Code sends `headers` only to the marketplace
+  URL's origin
   ([authenticate archive downloads](https://code.claude.com/docs/en/plugins/host-marketplace.md#authenticate-archive-downloads)).
-  Until that change is live, only the LAN host works.
 - Check whether `headers` values in `extraKnownMarketplaces` expand environment variables.
   Pick the snippet form (literal token, `headersHelper`, or env var) from what works.
 - The exact Monaco and file-tree components.

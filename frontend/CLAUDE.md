@@ -148,7 +148,8 @@ same way, `vite.config.ts`).
   a support setting is never offered, `isSupport`; an offered colour whose template default
   no colour on offer has starts at one that is, `fittedDefault`, #6144), pinned by
   `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
-  (`agent/src/tools/storefrontDraft.ts`) is tested against too; a
+  (`agent/src/tools/storefrontDraft.ts`) is tested against too (its case with `file` is a new
+  file listing's body, #6710: `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`); a
   colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
 
 - The Storefront back office (#6157): `pages/StorefrontPage.tsx` is the list, a table the

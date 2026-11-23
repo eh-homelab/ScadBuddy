@@ -46,7 +46,26 @@ interface Vector {
   input?: unknown
 }
 
-const vectors = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as Vector[]
+/**
+ * #6710 — a library-file case: the file as the library's routes answer it, and the body a new
+ * listing of it saves, but `materials`, which each side sets its own way.
+ */
+interface FileVector {
+  name: string
+  file: {
+    id: number
+    library: 'bambuddy' | 'native'
+    filename: string
+    slots: components['schemas']['SlotNeed'][]
+    plates: components['schemas']['OutputPlate'][]
+  }
+  filaments: Filament[]
+  expected: Record<string, unknown>
+}
+
+const shared = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (Vector | FileVector)[]
+const vectors = shared.filter((vector): vector is Vector => !('file' in vector))
+const fileVectors = shared.filter((vector): vector is FileVector => 'file' in vector)
 const owl = vectors[0] as Vector
 
 const OUTPUT = 'a'.repeat(32)
@@ -192,6 +211,59 @@ describe('storefront tools (#6131)', () => {
   it('names exactly one source', async () => {
     await expect(tool('storefront_listing_draft').execute({}, ctx())).rejects.toThrow('exactly one')
     await expect(tool('storefront_listing_draft').execute({ output_id: OUTPUT, slug: 'owl' }, ctx())).rejects.toThrow('exactly one')
+    await expect(tool('storefront_listing_draft').execute({ slug: 'owl', library_file_id: 46 }, ctx())).rejects.toThrow('exactly one')
+  })
+
+  describe('a library file (#6710 §11.3)', () => {
+    /** The vector's file in the library that serves; `onPost` gets the listing a draft posts. */
+    function serveFile(vector: FileVector, onPost: (body: unknown) => void, fileType = '3mf'): void {
+      const { file } = vector
+      server.use(
+        http.get(`${BACKEND}/api/v1/settings`, () => HttpResponse.json({ library_backend: file.library })),
+        http.get(`${BACKEND}/api/v1/print/library/${file.id}`, () =>
+          HttpResponse.json({ id: file.id, filename: file.filename, file_type: fileType, has_thumbnail: true, is_external: false, per_print: false, print_count: 0, printable: true, sliced: false }),
+        ),
+        http.get(`${BACKEND}/api/v1/print/library/${file.id}/filaments`, () => HttpResponse.json({ library_file_id: file.id, source: 'inventory', track_switch: false, slots: file.slots })),
+        http.get(`${BACKEND}/api/v1/print/library/${file.id}/plates`, () => HttpResponse.json(file.plates)),
+        http.get(`${BACKEND}/api/v1/orders/price-book`, () => HttpResponse.json({ filaments: vector.filaments })),
+        http.post(`${BACKEND}/api/v1/storefront/listings`, async ({ request }) => {
+          const body = (await request.json()) as Record<string, unknown>
+          onPost(body)
+          return HttpResponse.json({ id: LISTING, ...body, published: false }, { status: 201 })
+        }),
+      )
+    }
+
+    it('drafts the body the page saves for the same file (the shared vectors)', async () => {
+      expect(fileVectors.length).toBeGreaterThan(0)
+      for (const vector of fileVectors) {
+        let posted: Record<string, unknown> | undefined
+        serveFile(vector, (body) => (posted = body as Record<string, unknown>))
+        const result = firstText(await tool('storefront_listing_draft').execute({ library_file_id: vector.file.id }, ctx())) as Record<string, unknown>
+        const { materials, ...body } = posted ?? {}
+        expect(body, vector.name).toEqual(vector.expected)
+        // The assistant allows the materials it offers, support left out, as for a design (#6302 review).
+        expect(materials, vector.name).toEqual(['PLA'])
+        expect(result, vector.name).toMatchObject({ listing_id: LISTING, published: false, colour_problems: [], page: `/storefront/listings/${LISTING}` })
+      }
+    })
+
+    it('takes a colour on offer out of a title it is given', async () => {
+      const vector = fileVectors[0] as FileVector
+      let posted: { title?: string } | undefined
+      serveFile(vector, (body) => (posted = body as typeof posted))
+      const result = firstText(await tool('storefront_listing_draft').execute({ library_file_id: vector.file.id, title: 'Pencil cup – Navy' }, ctx())) as Record<string, unknown>
+      expect(posted?.title).toBe('Pencil cup')
+      expect(result['notes']).toEqual(['Took Navy out of the title: the customer chooses the colour.'])
+    })
+
+    it('refuses a file a listing cannot sell, and the design-only fields', async () => {
+      const vector = fileVectors[0] as FileVector
+      serveFile(vector, () => {}, 'gcode.3mf')
+      await expect(tool('storefront_listing_draft').execute({ library_file_id: vector.file.id }, ctx())).rejects.toThrow('not a 3MF or an STL')
+      await expect(tool('storefront_listing_draft').execute({ library_file_id: vector.file.id, values: { a: 1 } }, ctx())).rejects.toThrow('values go with slug')
+      await expect(tool('storefront_listing_draft').execute({ library_file_id: vector.file.id, lock: ['a'] }, ctx())).rejects.toThrow('lock goes with')
+    })
   })
 
   it('publishes the listing named', async () => {

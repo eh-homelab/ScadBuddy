@@ -15,6 +15,7 @@ import {
   isFileDraft,
   listingInput,
   listingRefusal,
+  platePictures,
   previewListing,
   savedKey,
   sellMedia,
@@ -326,7 +327,7 @@ export function StorefrontListingPage() {
     const picked = open?.draft.library_file
     if (!open || open.filled || !isFileDraft(open.draft) || !picked || file?.slots == null || (file.plates === null && !file.platesFailed) || !(book.data || book.error)) return
     const keep = (field: Field) => open.touched.includes(field)
-    const plates = (file.plates ?? []).filter((plate) => plate.has_thumbnail).map((plate) => `plate:${plate.index}`)
+    const plates = platePictures(file.plates ?? [])
     const draft = {
       ...open.draft,
       ...(open.id === null && !keep('title') ? { title: fileTitle(picked.filename, filaments) } : {}),

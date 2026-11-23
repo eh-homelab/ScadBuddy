@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { LibraryFileEntry, OutputPlate, StorefrontFileSnapshot as FileSnapshot } from '../../api/types'
-import { isSupportMaterial, type DraftSlot, type ListingDraft } from './listingDraft'
+import { declaredSlots, type DraftSlot, type ListingDraft } from './listingDraft'
 
 /** #6710 §9 — a file listing's library file, as the page reads it and the editor shows it. */
 
@@ -55,17 +55,7 @@ export function useListedFile(fileId: number | null, snapshot: FileSnapshot | nu
         .catch(() => set({ platesFailed: true }))
       api
         .getLibraryFilaments(fileId)
-        .then((options) =>
-          set({
-            slots: (options.slots ?? []).map((slot) => ({
-              slot: slot.slot_id - 1,
-              colour: slot.colour || '#808080',
-              material: slot.material ?? null,
-              used: true,
-              support: isSupportMaterial(slot.material),
-            })),
-          }),
-        )
+        .then((options) => set({ slots: declaredSlots(options.slots ?? []) }))
         .catch(() => set({ slotsFailed: true }))
     }
     return () => {

@@ -364,6 +364,15 @@ describe('the feed on the /mcp auth', () => {
 })
 
 describe("Settings' read of the feed", () => {
+  it('makes the marketplace URL from the request origin, not the public URL', async () => {
+    const { get } = made({ publicUrl: 'https://sso.example' })
+    const view = (await (await get(FEED, UI)).json()) as PluginFeedView
+    expect(view.marketplace_url).toBe(`${FEED}/marketplace.json`)
+    const none = made({ publicUrl: null })
+    const noUrl = (await (await none.get(FEED, UI)).json()) as PluginFeedView
+    expect(noUrl.marketplace_url).toBe(`${FEED}/marketplace.json`)
+  })
+
   it('lists every package the feed names, with whether it is listed and why not', async () => {
     const { get } = made()
     const res = await get(FEED, UI)

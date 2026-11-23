@@ -186,6 +186,8 @@ export type DurableTurnsDeps = {
  * and its own deadline end before the sweep looks at the row.
  */
 export const RESEND_AFTER_MS = 30_000
+/** close()'s wait for a running re-send, past the send's own deadline (#7163). */
+const CLOSE_MARGIN_MS = 1_000
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
 
@@ -531,8 +533,9 @@ export class DurableTurns {
    * Clears the re-sends not yet due, arms none after (a send still in flight), and waits for the
    * ones already running (#7103, #7146): the process stops, so its Temporal client closes. A
    * re-send that ran after that could not reach Temporal anyway, and its call's retry would throw
-   * outside any promise. The wait is bounded by the send's own deadline, so a stop never hangs on
-   * one. The running sweep ends a turn that no workflow took, as for any lost send.
+   * outside any promise. The wait is bounded by the send's own deadline plus a second (the
+   * deadline runs from the send's start, before the close, and its rejection can come late on a
+   * loaded host), so a stop never hangs on one. The running sweep ends a turn that no workflow took, as for any lost send.
    */
   async close(): Promise<void> {
     this.#closed = true
@@ -543,7 +546,7 @@ export class DurableTurns {
     await Promise.race([
       Promise.allSettled([...this.#resending]),
       new Promise((resolve) => {
-        bound = setTimeout(resolve, this.#sendTimeoutMs)
+        bound = setTimeout(resolve, this.#sendTimeoutMs + CLOSE_MARGIN_MS)
       }),
     ])
     clearTimeout(bound)
