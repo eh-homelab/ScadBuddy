@@ -12,8 +12,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import AsyncGenerator, Callable
-from contextlib import AsyncExitStack
+from collections.abc import AsyncGenerator, Callable, Iterator
+from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, BinaryIO, Final, get_args
@@ -21,7 +21,9 @@ from typing import TYPE_CHECKING, BinaryIO, Final, get_args
 from aiobotocore.config import AioConfig
 from aiobotocore.session import get_session
 from botocore.exceptions import ClientError
+from opentelemetry.trace import Span, SpanKind
 
+from scadbuddy.core.tracing import span, traced_thread
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.content_models import (
     BlobData,
@@ -33,7 +35,7 @@ from scadbuddy.store.content_models import (
 
 if TYPE_CHECKING:
     from types_aiobotocore_s3 import S3Client
-    from types_aiobotocore_s3.type_defs import CompletedPartTypeDef
+    from types_aiobotocore_s3.type_defs import CompletedPartTypeDef, ObjectTypeDef
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,36 @@ class Frozen:
 
 def _missing(error: ClientError) -> bool:
     return error.response.get("Error", {}).get("Code") in _MISSING
+
+
+@contextmanager
+def _request(operation: str, kind: str, *, size: int | None = None) -> Iterator[Span]:
+    """One span per S3 request (#7245), named as OpenTelemetry's AWS SDK conventions name
+    one (``S3.PutObject``). The span carries the kind of object and its size when known,
+    never the key, the bucket or a URL.
+
+    Made here, not by ``opentelemetry-instrumentation-botocore``'s
+    ``AiobotocoreInstrumentor`` (it wraps ``AioBaseClient._make_api_call``,
+    https://github.com/open-telemetry/opentelemetry-python-contrib/blob/f1b9368aa6e2ad4cb0aaa79d341cd19b0b9cd13b/instrumentation/opentelemetry-instrumentation-botocore/src/opentelemetry/instrumentation/botocore/__init__.py):
+    by default it injects an X-Ray trace header into every request it sends, and trace
+    context never leaves ScadBuddy (spec 2026-10-01 §4); and it knows neither the kind
+    of object nor a streamed body's size."""
+    attributes: dict[str, str | int] = {
+        "rpc.system": "aws-api",
+        "rpc.service": "S3",
+        "rpc.method": operation,
+        "scadbuddy.blob_kind": kind,
+    }
+    if size is not None:
+        attributes["scadbuddy.bytes"] = size
+    with span(f"S3.{operation}", kind=SpanKind.CLIENT, attributes=attributes) as current:
+        yield current
+
+
+def _kind_of(prefix: str, key: str) -> str:
+    """The kind of object a key names (`object_key`), or ``staging``; never the key."""
+    first = key.removeprefix(f"{prefix}/").split("/", 1)[0]
+    return first if first in get_args(BlobKind) or first == "staging" else "other"
 
 
 class S3ContentBackend:
@@ -178,7 +210,9 @@ class S3ContentBackend:
         self._signer = None
 
     async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
-        sha256, size = await asyncio.to_thread(blob_digest, data)
+        sha256, size = await traced_thread(
+            "store.digest", blob_digest, data, attributes={"scadbuddy.blob_kind": kind}
+        )
         key = object_key(self.settings.prefix, kind, sha256)
         if await self.exists(key):
             # Not atomic with the row the caller inserts next: a remove of the last row
@@ -190,36 +224,44 @@ class S3ContentBackend:
         client = await self._s3()
         bucket = self.settings.bucket
         if isinstance(data, bytes):
-            await client.put_object(Bucket=bucket, Key=key, Body=data)
+            with _request("PutObject", kind, size=size):
+                await client.put_object(Bucket=bucket, Key=key, Body=data)
             return key
         try:
             if size <= self.multipart_threshold:
                 # The file itself: botocore and aiohttp read it a chunk at a time.
-                await client.put_object(Bucket=bucket, Key=key, Body=data, ContentLength=size)
+                with _request("PutObject", kind, size=size):
+                    await client.put_object(Bucket=bucket, Key=key, Body=data, ContentLength=size)
             else:
-                await self._multipart(client, key, data)
+                await self._multipart(client, key, data, kind)
         finally:
             data.seek(0)
         return key
 
-    async def _multipart(self, client: S3Client, key: str, data: BinaryIO) -> None:
+    async def _multipart(self, client: S3Client, key: str, data: BinaryIO, kind: str) -> None:
         bucket = self.settings.bucket
-        upload_id = (await client.create_multipart_upload(Bucket=bucket, Key=key))["UploadId"]
+        with _request("CreateMultipartUpload", kind):
+            created = await client.create_multipart_upload(Bucket=bucket, Key=key)
+        upload_id = created["UploadId"]
         try:
             parts: list[CompletedPartTypeDef] = []
             number = 1
             while part := await asyncio.to_thread(data.read, self.part_size):
-                done = await client.upload_part(
-                    Bucket=bucket, Key=key, UploadId=upload_id, PartNumber=number, Body=part
-                )
+                with _request("UploadPart", kind, size=len(part)):
+                    done = await client.upload_part(
+                        Bucket=bucket, Key=key, UploadId=upload_id, PartNumber=number, Body=part
+                    )
                 parts.append({"ETag": done["ETag"], "PartNumber": number})
                 number += 1
-            await client.complete_multipart_upload(
-                Bucket=bucket, Key=key, UploadId=upload_id, MultipartUpload={"Parts": parts}
-            )
+            with _request("CompleteMultipartUpload", kind) as current:
+                current.set_attribute("scadbuddy.parts", len(parts))
+                await client.complete_multipart_upload(
+                    Bucket=bucket, Key=key, UploadId=upload_id, MultipartUpload={"Parts": parts}
+                )
         except BaseException:
             try:
-                await client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+                with _request("AbortMultipartUpload", kind):
+                    await client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
             except Exception:
                 logger.warning("aborting multipart upload %s failed", upload_id, exc_info=True)
             raise
@@ -227,12 +269,18 @@ class S3ContentBackend:
     async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
         key = self._key(backend_id)
         client = await self._s3()
-        try:
-            response = await client.get_object(Bucket=self.settings.bucket, Key=key)
-        except ClientError as error:
-            if _missing(error):
-                raise BlobMissingError(backend_id) from None
-            raise
+        # The request up to its headers only: a span held across this generator's
+        # `yield` would be current in its consumer. The consumer's own span (the
+        # download cache's) covers the body's read.
+        with _request("GetObject", _kind_of(self.settings.prefix, key)) as current:
+            try:
+                response = await client.get_object(Bucket=self.settings.bucket, Key=key)
+            except ClientError as error:
+                if _missing(error):
+                    current.set_attribute("scadbuddy.blob_found", False)
+                    raise BlobMissingError(backend_id) from None
+                raise
+            current.set_attribute("scadbuddy.bytes", response["ContentLength"])
         body = response["Body"]
         async with body:
             async for chunk in body.iter_chunks(_CHUNK):
@@ -241,12 +289,15 @@ class S3ContentBackend:
     async def exists(self, backend_id: str) -> bool:
         key = self._key(backend_id)
         client = await self._s3()
-        try:
-            await client.head_object(Bucket=self.settings.bucket, Key=key)
-        except ClientError as error:
-            if _missing(error):
-                return False
-            raise
+        with _request("HeadObject", _kind_of(self.settings.prefix, key)) as current:
+            try:
+                await client.head_object(Bucket=self.settings.bucket, Key=key)
+            except ClientError as error:
+                if _missing(error):
+                    current.set_attribute("scadbuddy.blob_found", False)
+                    return False
+                raise
+            current.set_attribute("scadbuddy.blob_found", True)
         return True
 
     async def presign_get(
@@ -275,7 +326,8 @@ class S3ContentBackend:
     async def remove(self, backend_id: str) -> None:
         key = self._key(backend_id)
         client = await self._s3()
-        await client.delete_object(Bucket=self.settings.bucket, Key=key)
+        with _request("DeleteObject", _kind_of(self.settings.prefix, key)):
+            await client.delete_object(Bucket=self.settings.bucket, Key=key)
 
     def _staged(self, key: str) -> str:
         prefix = f"{self.settings.prefix}/"
@@ -333,12 +385,15 @@ class S3ContentBackend:
         it is read."""
         checked = self._staged(key)
         client = await self._s3()
-        try:
-            head = await client.head_object(Bucket=self.settings.bucket, Key=checked)
-        except ClientError as error:
-            if _missing(error):
-                return None
-            raise
+        with _request("HeadObject", "staging") as current:
+            try:
+                head = await client.head_object(Bucket=self.settings.bucket, Key=checked)
+            except ClientError as error:
+                if _missing(error):
+                    current.set_attribute("scadbuddy.blob_found", False)
+                    return None
+                raise
+            current.set_attribute("scadbuddy.blob_found", True)
         return int(head["ContentLength"])
 
     async def freeze_staged(self, key: str, frozen: str) -> Frozen | None:
@@ -350,19 +405,22 @@ class S3ContentBackend:
         passes through this process."""
         source, target = self._staged(key), self._staged(frozen)
         client = await self._s3()
-        try:
-            copied = await client.copy_object(
-                Bucket=self.settings.bucket,
-                Key=target,
-                CopySource={"Bucket": self.settings.bucket, "Key": source},
-                ACL=STAGED_ACL,
-                ChecksumAlgorithm="SHA256",
-            )
-        except ClientError as error:
-            if _missing(error):
-                return None
-            raise
-        head = await client.head_object(Bucket=self.settings.bucket, Key=target)
+        with _request("CopyObject", "staging") as current:
+            try:
+                copied = await client.copy_object(
+                    Bucket=self.settings.bucket,
+                    Key=target,
+                    CopySource={"Bucket": self.settings.bucket, "Key": source},
+                    ACL=STAGED_ACL,
+                    ChecksumAlgorithm="SHA256",
+                )
+            except ClientError as error:
+                if _missing(error):
+                    current.set_attribute("scadbuddy.blob_found", False)
+                    return None
+                raise
+        with _request("HeadObject", "staging"):
+            head = await client.head_object(Bucket=self.settings.bucket, Key=target)
         sha256 = copied.get("CopyObjectResult", {}).get("ChecksumSHA256")
         return Frozen(int(head["ContentLength"]), str(head["ETag"]), sha256 or None)
 
@@ -371,26 +429,30 @@ class S3ContentBackend:
         them), or None when there is none or it is past ``max_bytes``."""
         checked = self._staged(key)
         client = await self._s3()
-        try:
-            response = await client.get_object(Bucket=self.settings.bucket, Key=checked)
-        except ClientError as error:
-            if _missing(error):
-                return None
-            raise
-        body = response["Body"]
-        taken = bytearray()
-        async with body:
-            async for chunk in body.iter_chunks(_CHUNK):
-                taken += chunk
-                if len(taken) > max_bytes:
+        with _request("GetObject", "staging") as current:
+            try:
+                response = await client.get_object(Bucket=self.settings.bucket, Key=checked)
+            except ClientError as error:
+                if _missing(error):
+                    current.set_attribute("scadbuddy.blob_found", False)
                     return None
+                raise
+            body = response["Body"]
+            taken = bytearray()
+            async with body:
+                async for chunk in body.iter_chunks(_CHUNK):
+                    taken += chunk
+                    if len(taken) > max_bytes:
+                        return None
+            current.set_attribute("scadbuddy.bytes", len(taken))
         return bytes(taken)
 
     async def remove_staged(self, key: str) -> None:
         """The staging object deleted (none is no error: S3's delete is idempotent)."""
         checked = self._staged(key)
         client = await self._s3()
-        await client.delete_object(Bucket=self.settings.bucket, Key=checked)
+        with _request("DeleteObject", "staging"):
+            await client.delete_object(Bucket=self.settings.bucket, Key=checked)
 
     async def remove_staged_of(self, key: str) -> None:
         """Every staging object of the upload ``key`` deleted: the upload, its preview and
@@ -399,23 +461,18 @@ class S3ContentBackend:
         if staged_upload(self.settings.prefix, checked) != checked:
             raise ValueError(f"not an upload's own staging key: {key!r}")
         client = await self._s3()
-        pages = client.get_paginator("list_objects_v2").paginate(
-            Bucket=self.settings.bucket, Prefix=checked
-        )
-        async for page in pages:
-            for item in page.get("Contents", []):
+        async for items in self._listed(client, checked, "staging"):
+            for item in items:
                 if staged_upload(self.settings.prefix, item["Key"]) == checked:
-                    await client.delete_object(Bucket=self.settings.bucket, Key=item["Key"])
+                    with _request("DeleteObject", "staging"):
+                        await client.delete_object(Bucket=self.settings.bucket, Key=item["Key"])
 
     async def staged_objects(self) -> AsyncGenerator[tuple[str, datetime]]:
         """Every staging object's key and its last write."""
         prefix = f"{self.settings.prefix}/staging/"
         client = await self._s3()
-        pages = client.get_paginator("list_objects_v2").paginate(
-            Bucket=self.settings.bucket, Prefix=prefix
-        )
-        async for page in pages:
-            for item in page.get("Contents", []):
+        async for items in self._listed(client, prefix, "staging"):
+            for item in items:
                 key = item["Key"]
                 if _STAGED.fullmatch(key.removeprefix(f"{self.settings.prefix}/")):
                     yield key, item["LastModified"]
@@ -429,15 +486,36 @@ class S3ContentBackend:
         prefix = f"{self.settings.prefix}/"
         client = await self._s3()
         removed = 0
-        pages = client.get_paginator("list_objects_v2").paginate(
-            Bucket=self.settings.bucket, Prefix=prefix
-        )
-        async for page in pages:
-            for item in page.get("Contents", []):
+        async for items in self._listed(client, prefix, "other"):
+            for item in items:
                 key = item["Key"]
                 if not _OBJECT.fullmatch(key.removeprefix(prefix)):
                     continue
                 if item["LastModified"] < cutoff and not await asyncio.to_thread(recorded, key):
-                    await client.delete_object(Bucket=self.settings.bucket, Key=key)
+                    with _request("DeleteObject", _kind_of(self.settings.prefix, key)):
+                        await client.delete_object(Bucket=self.settings.bucket, Key=key)
                     removed += 1
         return removed
+
+    async def _listed(
+        self, client: S3Client, prefix: str, kind: str
+    ) -> AsyncGenerator[list[ObjectTypeDef]]:
+        """The objects under ``prefix``, a page at a time, as botocore's paginator pages
+        them (``ContinuationToken``). Each page's request is a span of its own, ended
+        before the page is handed on: a span held across a ``yield`` would be current
+        in the consumer."""
+        token: str | None = None
+        while True:
+            with _request("ListObjectsV2", kind) as current:
+                if token is None:
+                    page = await client.list_objects_v2(Bucket=self.settings.bucket, Prefix=prefix)
+                else:
+                    page = await client.list_objects_v2(
+                        Bucket=self.settings.bucket, Prefix=prefix, ContinuationToken=token
+                    )
+                items = page.get("Contents", [])
+                current.set_attribute("scadbuddy.objects", len(items))
+            yield items
+            token = page.get("NextContinuationToken")
+            if not page.get("IsTruncated") or token is None:
+                return

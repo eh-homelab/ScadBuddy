@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
 
 from psycopg.errors import DeadlockDetected
 
+from scadbuddy.core.tracing import traced_thread
 from scadbuddy.store.content_models import (
     SWEPT_KINDS,
     BlobCorruptError,
@@ -146,7 +147,10 @@ class ContentStore:
         be written with ``reuse=True``, which fails if a release freed it meanwhile.
         ``lost_reuse`` stores the copy that stands in for such a reuse: no lookup, and,
         like the re-put it replaces, no room check."""
-        sha, size = await asyncio.to_thread(blob_digest, data)
+        # Hashes the whole file: a span of its own (#7245), with the thread wait.
+        sha, size = await traced_thread(
+            "store.digest", blob_digest, data, attributes={"scadbuddy.blob_kind": kind}
+        )
         existing = (
             None if lost_reuse else await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
         )
@@ -297,7 +301,7 @@ class ContentStore:
             return
         if not isinstance(data, bytes):
             try:
-                await asyncio.to_thread(downloads.keep_file, sha, data)
+                await traced_thread("store.keep_download", downloads.keep_file, sha, data)
             except OSError:
                 logger.warning(
                     "could not keep an uploaded blob", extra={"sha256": sha}, exc_info=True

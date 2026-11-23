@@ -1437,7 +1437,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the
   standard `OTEL_*` variables, the sampler (parentless `CLIENT` spans dropped), and the
   helpers every traced file uses (`span`, `detached_span` for a span exited in another
-  task such as a stream, `current_traceparent`, `link_to`, `use_traceparent`).
+  task such as a stream, `traced_thread` for an `asyncio.to_thread` call whose span says how
+  long it waited for a free thread (`scadbuddy.thread_wait_ms`, #7245), `current_traceparent`,
+  `link_to`, `use_traceparent`). The S3 backend makes its own CLIENT span per request
+  (`S3.<Operation>`, `store/s3.py` `_request`, whose docstring says why not the
+  `AiobotocoreInstrumentor`).
   `core/trace_scrub.py` strips exception messages and status
   descriptions before anything is exported; never record a parameter value, a log
   line or anything Bambuddy returns. Tests share one provider (`tests/conftest.py`,
