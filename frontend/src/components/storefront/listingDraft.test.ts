@@ -50,6 +50,8 @@ interface FileVector {
   file: { id: number; library: 'bambuddy' | 'native'; filename: string; slots: SlotNeed[]; plates: OutputPlate[] }
   filaments: Filament[]
   expected: Record<string, unknown>
+  /** Titles and the colour names in each that a customer can pick (`titleColours` of the new draft). */
+  titles: { title: string; colours: string[] }[]
 }
 
 const sharedVectors = JSON.parse(readFileSync(`${import.meta.dirname}/../../../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (TemplateVector | FileVector)[]
@@ -482,7 +484,7 @@ describe('a file listing’s draft (#6710 §9)', () => {
   it('drafts a new file listing as the shared vectors say (the assistant drafts the same, #6710 §11.3)', () => {
     const vectors = sharedVectors.filter((vector): vector is FileVector => 'file' in vector)
     expect(vectors.length).toBeGreaterThan(0)
-    for (const { name, file, filaments, expected } of vectors) {
+    for (const { name, file, filaments, expected, titles } of vectors) {
       // As the editor fills a new file listing in: "Sell on storefront…" (or a pick), then the
       // file's parts and plates once read (`StorefrontListingPage`, `useListedFile`).
       const draft: ListingDraft = {
@@ -496,6 +498,8 @@ describe('a file listing’s draft (#6710 §9)', () => {
       expect(body, name).toEqual(expected)
       // The page leaves a new listing on the shop's default materials.
       expect(materials, name).toEqual([])
+      // The "Leave … out of the title" warning, which the assistant's copy acts on.
+      for (const { title, colours } of titles) expect(titleColours({ ...draft, title }, undefined, filaments), `${name}: ${title}`).toEqual(colours)
     }
   })
 
