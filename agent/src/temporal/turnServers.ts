@@ -21,6 +21,7 @@ import type { HttpBodiesFor } from '../sessions/httpBodies.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
+import type { SessionBrowser } from '../sessions/rows.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
 import { type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
@@ -85,8 +86,10 @@ export async function sweepTurnDirs(root: string, presence: SessionPresence, now
 }
 
 export type TurnServerDeps = {
-  /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
-  remotePlugins?: (() => Promise<PluginsForRun>) | undefined
+  /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`), with a session's browser options (#7027). */
+  remotePlugins?: ((browser?: SessionBrowser) => Promise<PluginsForRun>) | undefined
+  /** A session's browser options (#7027, the session row's), or undefined; never read for a flow, which has none. */
+  sessionBrowser?: ((sessionId: string) => Promise<SessionBrowser | undefined>) | undefined
   /**
    * Tool access (#2171, ai_access): http_request's switch and tier, each package server's
    * switch, and what each package has off (#4757). Defaults without it.
@@ -149,7 +152,9 @@ function keptRoute(keep: ReturnType<NonNullable<PluginsForRun['keep']>>): Pick<T
 export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Promise<TurnServers> {
   return async (context) => {
     const servers: TurnServer[] = []
-    const forwarded = deps.remotePlugins ? await deps.remotePlugins() : undefined
+    const remote = deps.remotePlugins
+    const browserOptions = !context.flow && deps.sessionBrowser ? await deps.sessionBrowser(context.session) : undefined
+    const forwarded = remote ? await remote(browserOptions) : undefined
     // The forwarder URLs carry the registration's token: as secret as the header it adds.
     const secrets: string[] = [
       ...(forwarded?.secrets ?? []),

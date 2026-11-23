@@ -772,11 +772,11 @@ export type SessionManagerDeps = {
   /**
    * The registered, enabled remote MCP plugins for a turn (#297), registered
    * with the loopback forwarder: in production
-   * `forwardForRun(await loadEnabledPlugins(store), forwarder)`. Read once
+   * `forwardForRun(await loadEnabledPlugins(store), forwarder, { browser })`. Read once
    * per turn, so enabling or changing a plugin applies from the next turn on;
-   * released when the turn ends.
+   * released when the turn ends. `browser` is the session's browser options (#7027).
    */
-  remotePlugins?: () => Promise<PluginsForRun>
+  remotePlugins?: (browser?: SessionBrowser) => Promise<PluginsForRun>
   /**
    * The enabled plugin packages for a turn (#297), each materialised from its
    * pin and verified: in production

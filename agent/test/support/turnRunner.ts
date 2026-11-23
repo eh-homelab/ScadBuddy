@@ -122,6 +122,8 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
   const appended: unknown[] = []
   /** What each assembly gave the in-process servers. */
   const serverExtras: unknown[] = []
+  /** The browser options each assembly gave `remotePlugins`. */
+  const remoteBrowsers: unknown[] = []
   const runner = new TurnRunner({
     httpBodies: () => unusedBodies,
     browserOrigins: new BrowserOrigins(undefined, new MemorySessionOrigins()),
@@ -158,8 +160,9 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     ownPlugin: options.ownPlugin ?? '/plugins/own',
     // The real forwardForRun over a forwarder that, like the real one, gives
     // every registration a loopback URL of its own.
-    remotePlugins: () =>
-      Promise.resolve(
+    remotePlugins: (browser) => {
+      remoteBrowsers.push(browser)
+      return Promise.resolve(
         forwardForRun(
           {
             plugins: [
@@ -178,7 +181,8 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
           },
           { register: () => ({ url: `http://127.0.0.1:1/p/${randomUUID()}`, release: () => {} }) } as unknown as PluginForwarder,
         ),
-      ),
+      )
+    },
     packagePlugins: () =>
       Promise.resolve(options.packages ? { ...options.packages, release: () => {} } : {
         paths: ['/plugins/a'],
@@ -240,5 +244,5 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
       }
     },
   }
-  return { runner, session, principal, gateCalls, paths, access: store.access, appended, serverExtras }
+  return { runner, session, principal, gateCalls, paths, access: store.access, appended, serverExtras, remoteBrowsers }
 }

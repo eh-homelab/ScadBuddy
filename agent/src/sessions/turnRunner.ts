@@ -358,7 +358,8 @@ export class TurnRunner {
       const builtInTools = this.deps.builtInTools
       builtIn = builtInTools ? await phase('built_in_tools', () => builtInTools()) : undefined
       const remote = this.deps.remotePlugins
-      forwarded = remote ? await phase('remote_plugins', () => remote()) : undefined
+      // The session's browser options go to its plugins' routes (#7027), never from the model.
+      forwarded = remote ? await phase('remote_plugins', () => remote(session.browser ?? undefined)) : undefined
       const remotePlugins = [...(forwarded?.plugins ?? [])]
       // Plugin header values (and their bare tokens) are redacted from the
       // event log like the credential. Claude Code never holds them (the

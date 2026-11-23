@@ -357,6 +357,26 @@ describe('turn tools in a durable session', () => {
     expect(notes.tierOf('mcp__notes__delete', {})).toBe('outward')
   })
 
+  it("gives a session's browser options to its remote plugins, and a flow's none (#7027)", async () => {
+    const options = { user_agent: 'Mozilla/5.0 (Test)', locale: 'en-GB' }
+    const given: unknown[] = []
+    const asked: string[] = []
+    const build = turnServers({
+      remotePlugins: async (browser) => {
+        given.push(browser)
+        return { plugins: [], problems: [], secrets: [], terminate: async () => {}, release: () => {} }
+      },
+      sessionBrowser: async (id) => {
+        asked.push(id)
+        return options
+      },
+    })
+    await build({ session: SESSION, owner: BROWSER, signal: new AbortController().signal })
+    await build({ session: 'flow-run-1', flow: 'run-1', owner: BROWSER, signal: new AbortController().signal })
+    expect(given).toEqual([options, undefined])
+    expect(asked).toEqual([SESSION])
+  })
+
   it("lists the real http_request as may_park, and tiers a POST outward and refuses it unapproved (review of #2324)", async () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const deps: TurnToolsDeps = {
