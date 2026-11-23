@@ -2,6 +2,7 @@ package multipartserialization
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"time"
 
@@ -38,10 +39,22 @@ func (w *MultipartSerializationWriter) WriteStringValue(key string, value *strin
 	if strings.ContainsAny(key, "\r\n") {
 		return errors.New("header key cannot contain CRLF characters")
 	}
+	if strings.Contains(key, "\x00") {
+		return errors.New("header key cannot contain null characters")
+	}
 	trimmedKey := strings.TrimSpace(key)
 	if trimmedKey != "" {
+		if strings.Contains(trimmedKey, ":") {
+			return errors.New("header key cannot contain colon characters")
+		}
+		if strings.ContainsAny(trimmedKey, " \t") {
+			return errors.New("header key cannot contain whitespace")
+		}
 		if strings.ContainsAny(*value, "\r\n") {
 			return errors.New("header value cannot contain CRLF characters")
+		}
+		if strings.Contains(*value, "\x00") {
+			return errors.New("header value cannot contain null characters")
 		}
 		if err := w.WriteByteArrayValue("", []byte(trimmedKey)); err != nil {
 			return err
@@ -200,13 +213,29 @@ func (w *MultipartSerializationWriter) WriteByteArrayValue(key string, value []b
 }
 
 // WriteObjectValue writes a Parsable value to underlying the byte array.
+func isNil(i any) bool {
+	if i == nil {
+		return true
+	}
+	val := reflect.ValueOf(i)
+	switch val.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Func, reflect.Chan, reflect.Slice, reflect.Interface, reflect.UnsafePointer:
+		return val.IsNil()
+	}
+	return false
+}
+
 func (w *MultipartSerializationWriter) WriteObjectValue(key string, item absser.Parsable, additionalValuesToMerge ...absser.Parsable) error {
 	if w == nil {
 		return errors.New("writer cannot be nil")
 	}
-	if item != nil {
-		if _, ok := item.(abstractions.MultipartBody); !ok {
+	if item != nil && !isNil(item) {
+		body, ok := item.(abstractions.MultipartBody)
+		if !ok {
 			return errors.New("only the serialization of multipart bodies is supported with MultipartSerializationWriter")
+		}
+		if body.GetBoundary() == "" {
+			return errors.New("multipart body boundary cannot be empty")
 		}
 		abstractions.InvokeParsableAction(w.GetOnBeforeSerialization(), item)
 		err := abstractions.InvokeParsableWriter(w.GetOnStartObjectSerialization(), item, w)
