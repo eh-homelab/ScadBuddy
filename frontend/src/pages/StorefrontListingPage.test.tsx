@@ -220,6 +220,68 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       expect(within(screen.getByRole('region', { name: 'Parts' })).getAllByTestId('listing-part')).toHaveLength(2)
     })
 
+    it('saves the listing as it is when Save is clicked, after the file’s reads finished under the question (#7092 review)', async () => {
+      const listing = await seedFile()
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      await user.click(within(await screen.findByTestId('listing-source')).getByRole('button', { name: 'Change' }))
+      await user.click(within(screen.getByTestId('listing-file')).getByRole('button', { name: 'Change' }))
+      const release = hold('get', '/api/v1/print/library/:id/plates')
+      await user.type(screen.getByLabelText('Library file'), 'drawer')
+      await user.click(await screen.findByRole('button', { name: /^drawer-label\.3mf/ }))
+      await user.click(screen.getByRole('button', { name: 'Save draft' }))
+      const ask = await screen.findByRole('alertdialog')
+      release()
+      // The question holds the page modal; the defaults fill in behind it.
+      await waitFor(() => expect(within(screen.getByRole('group', { name: 'Pictures', hidden: true })).getByRole('img', { name: 'Plate 1', hidden: true })).toBeInTheDocument())
+      await user.click(within(ask).getByRole('button', { name: 'Save' }))
+      await waitFor(async () => expect((await stored())[0]).toMatchObject({ library_file: { id: 120 }, media_ids: ['plate:1'] }))
+      await waitFor(() => expect(screen.queryByText('Unsaved changes')).toBeNull())
+    })
+
+    it('asks before a pinned file listing is saved as a design (#7092 review)', async () => {
+      const listing = await seedFile()
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      await user.click(within(await screen.findByTestId('listing-source')).getByRole('button', { name: 'Change' }))
+      await user.click(screen.getByRole('radio', { name: 'A design' }))
+      await user.click(screen.getByRole('combobox', { name: 'Design' }))
+      await user.click(await screen.findByRole('option', { name: 'Name Keychain' }))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Save draft' })).toBeEnabled())
+      await user.click(screen.getByRole('button', { name: 'Save draft' }))
+      expect(await screen.findByRole('alertdialog')).toHaveTextContent('Customers lose the version you published. The next publish sells the design you picked.')
+    })
+
+    it('brings back the stored file’s pictures when it is picked again (#7092 review)', async () => {
+      const saved = await seedFile(46, false)
+      await api.updateStorefrontListing(saved.id, { source: 'library_file', library_file: { id: 46, library: 'bambuddy' }, title: 'Desiccant box', colours: [FILAMENT_PLA], media_ids: ['upload:' + 'c'.repeat(64)] }, saved.updated_at)
+      const listing = await api.publishStorefrontListing(saved.id)
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      await user.click(within(await screen.findByTestId('listing-source')).getByRole('button', { name: 'Change' }))
+      const change = async (query: string, name: RegExp) => {
+        await user.click(within(screen.getByTestId('listing-file')).getByRole('button', { name: 'Change' }))
+        await user.type(screen.getByLabelText('Library file'), query)
+        await user.click(await screen.findByRole('button', { name }))
+      }
+      await change('drawer', /^drawer-label\.3mf/)
+      await waitFor(() => expect(within(screen.getByRole('group', { name: 'Pictures' })).getByRole('img', { name: 'Plate 1' })).toBeInTheDocument())
+      await change('desiccant', /^Desiccant_Box\.stl/)
+      expect(within(screen.getByRole('group', { name: 'Pictures' })).getByText('Uploaded picture')).toBeInTheDocument()
+      expect(within(screen.getByRole('list', { name: 'Pictures shown' })).getAllByTestId('listing-picture')).toHaveLength(1)
+      expect(screen.queryByText('Unsaved changes')).toBeNull()
+    })
+
+    it('fills the colours and plate pictures in after an upload saved the new listing first (#7092 review)', async () => {
+      const release = hold('get', '/api/v1/print/library/:id/filaments')
+      const { user } = renderStorefront('/storefront/listings/new?sell=library:120')
+      await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('drawer-label'))
+      await user.upload(screen.getByLabelText('Upload a picture'), new File([new Uint8Array([137, 80, 78, 71])], 'photo.png', { type: 'image/png' }))
+      await waitFor(() => expect(within(screen.getByRole('group', { name: 'Pictures' })).getByText('Uploaded picture')).toBeInTheDocument())
+      release()
+      await waitFor(() => expect(within(screen.getByRole('group', { name: 'Pictures' })).getByRole('img', { name: 'Plate 1' })).toBeInTheDocument())
+      await user.click(screen.getByRole('button', { name: 'Save draft' }))
+      await waitFor(async () => expect((await stored())[0]?.media_ids).toEqual(['plate:1', expect.stringMatching(/^upload:/)]))
+      expect((await stored())[0]?.colours.length).toBeGreaterThan(0)
+    })
+
     it('opens a saved file listing folded to its file, with nothing unsaved', async () => {
       const listing = await seedFile()
       renderStorefront(`/storefront/listings/${listing.id}`)

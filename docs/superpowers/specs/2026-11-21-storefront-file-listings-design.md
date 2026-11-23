@@ -886,8 +886,11 @@ unsaved; the next publish reads the library and pins its version (§5.1). While 
 with "Keep the published version", which saves with `repin: false`. Picking another file
 in the picker clears the pin by its changed id. On a listing with a pin, the editor asks
 before it saves that change: "Customers lose the version you published. The next publish
-sells the file you picked." with "Save" and "Cancel". The save drops the kept copy (§4.1),
+sells the file you picked." with "Save" and "Cancel"; a switch of such a listing to "A design"
+asks the same, naming the design. The save drops the kept copy (§4.1),
 so picking the old file again after it reads the library's version, not the published one.
+Picking the stored file again before a save brings back its pin, its request, its pictures and
+(unless the person ticked others) its colours.
 
 ### 9.5 Sell from the library
 

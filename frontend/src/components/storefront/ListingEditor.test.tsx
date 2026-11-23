@@ -707,6 +707,12 @@ describe('ListingEditor: a library file as the source (#6710 §9)', () => {
     expect(last(seen).library_file).toEqual({ id: 140, library: 'native', filename: 'keychain-reagan.3mf', repin: false, pinned: null })
   })
 
+  it('says why no file can be picked when the settings could not be read (#7092 review)', () => {
+    renderPage(<FileHarness seen={[]} start={switchSource(emptyDraft(), 'library_file')} isNew file={undefined} library={null} />)
+    expect(screen.getByText('The settings could not be read, so the library that serves is not known. Reload the page to try again.')).toBeInTheDocument()
+    expect(screen.queryByText('Reading which library serves…')).toBeNull()
+  })
+
   it('shows a picked file’s parts: each part a customer colours, and a support part locked', () => {
     renderPage(<FileHarness seen={[]} start={fileDraft({}, { colours: [RED.id, NATURAL.id] })} isNew />)
     const source = screen.getByRole('region', { name: 'Source' })

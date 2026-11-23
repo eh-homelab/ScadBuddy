@@ -61,8 +61,8 @@ export interface ListingEditorProps {
   refusal?: ListingRefusal | null
   /** #6710 — what the page read of a file listing's library file. */
   file?: ListedFile
-  /** #6710 — the library that serves (`library_backend`), which a picked file is of; undefined until read. */
-  library?: 'bambuddy' | 'native'
+  /** #6710 — the library that serves (`library_backend`), which a picked file is of; undefined until read, null when the settings could not be read. */
+  library?: 'bambuddy' | 'native' | null
   /** #6710 — the saved listing's id, whose pinned copy shows its plate pictures; null for a new one. */
   listingId?: string | null
   /** #6710 §5.4 — a picture uploaded to the file listing (saved first when new); answers its id. */

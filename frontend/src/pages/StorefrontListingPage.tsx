@@ -70,7 +70,7 @@ interface Open {
    * #6710 §9.4 — the file the stored listing sells and its pin, as last read or saved: a save
    * of another file drops that pin, so the page asks first.
    */
-  stored: { id: number; library: string; pinned: string | null; repin: boolean } | null
+  stored: { id: number; library: string; pinned: string | null; repin: boolean; media_ids: readonly string[]; colours: readonly string[] } | null
   /** #6710 — the published snapshot of the listing's file: its pinned version's plates and parts. */
   snapshot: StorefrontFileSnapshot | null
 }
@@ -140,7 +140,7 @@ function opened(listing: StorefrontListing, key: symbol = newKey()): Open {
     touched: [],
     notes: [],
     live: liveMedia(listing),
-    stored: file ? { id: file.id, library: file.library, pinned: file.pinned ?? null, repin: file.repin } : null,
+    stored: file ? { id: file.id, library: file.library, pinned: file.pinned ?? null, repin: file.repin, media_ids: listing.media_ids, colours: listing.colours } : null,
     snapshot: listing.snapshot?.kind === 'library_file' ? listing.snapshot : null,
   }
 }
@@ -331,7 +331,8 @@ export function StorefrontListingPage() {
       ...open.draft,
       ...(open.id === null && !keep('title') ? { title: fileTitle(picked.filename, filaments) } : {}),
       ...(keep('colours') ? {} : { colours: fileColours(file.slots, filaments) }),
-      ...(keep('media_ids') ? {} : { media_ids: plates }),
+      // An upload made before the file was read (it saves a new listing first) stays.
+      ...(keep('media_ids') ? {} : { media_ids: [...plates, ...open.draft.media_ids.filter((id) => id.startsWith('upload:'))] }),
     }
     setOpen({ ...open, filled: true, draft })
   }, [open, file, book.data, book.error, filaments])
@@ -431,9 +432,17 @@ export function StorefrontListingPage() {
     // #6710: the stored file picked again is the pinned one again: its pin and request come back.
     const stored = open.stored
     const back = next.library_file && stored && next.library_file.id === stored.id && next.library_file.library === stored.library && next.library_file.pinned === null && next.library_file !== open.draft.library_file
-    const draft = back && next.library_file ? { ...next, library_file: { ...next.library_file, pinned: stored.pinned, repin: stored.repin } } : next
+    if (back && next.library_file) {
+      // Its stored pictures come back too, and its colours unless the person ticked others;
+      // no default fills over them.
+      const colours = open.touched.includes('colours') ? next.colours : [...stored.colours]
+      const draft = { ...next, library_file: { ...next.library_file, pinned: stored.pinned, repin: stored.repin }, media_ids: [...stored.media_ids], colours }
+      const touched = touchedBy(open.touched, open.draft, draft)
+      setOpen({ ...open, draft, filled: true, touched: touched.includes('media_ids') ? touched : [...touched, 'media_ids'] })
+      return
+    }
     // Another template's or file's defaults fill in once it is read.
-    setOpen({ ...open, draft, filled: open.filled && sameSource(next, open.draft), touched: touchedBy(open.touched, open.draft, draft) })
+    setOpen({ ...open, draft: next, filled: open.filled && sameSource(next, open.draft), touched: touchedBy(open.touched, open.draft, next) })
   }
 
   /**
@@ -498,26 +507,35 @@ export function StorefrontListingPage() {
     whileOpen(current.key, (cur) => {
       const next = opened(saved, cur.key)
       const kept = next.snapshot === null && cur.snapshot !== null && next.stored?.pinned === cur.snapshot.sha256 ? cur.snapshot : next.snapshot
-      return { ...next, snapshot: kept, draft: withPin(cur.draft, saved), saved: text }
+      // A new listing saved before its file's defaults filled in (an upload's save) still takes them.
+      const filling = cur.filled ? {} : { filled: false, touched: cur.touched }
+      return { ...next, ...filling, snapshot: kept, draft: withPin(cur.draft, saved), saved: text }
     })
     return saved
   }
 
   /**
-   * #6710 §9.4 — whether saving `current` drops the version its stored listing sells: another
-   * file picked on a listing with a pin. The save drops the kept copy, so the page asks first.
+   * #6710 §9.4 — what saving `current` sells instead of the version its stored listing
+   * pins (another file, or a design), or null when it keeps it. The save drops the kept
+   * copy, so the page asks first.
    */
-  function dropsPin(current: Open): boolean {
+  function dropsPin(current: Open): 'file' | 'design' | null {
+    if (!current.stored?.pinned) return null
     const picked = current.draft.library_file
-    return Boolean(current.stored?.pinned && picked && (picked.id !== current.stored.id || picked.library !== current.stored.library))
+    if (!isFileDraft(current.draft)) return 'design'
+    return picked && (picked.id !== current.stored.id || picked.library !== current.stored.library) ? 'file' : null
   }
-  /** The save or publish waiting on the §9.4 question. */
-  const [asking, setAsking] = useState<(() => Promise<void>) | null>(null)
+  /**
+   * The save or publish waiting on the §9.4 question, and what it sells instead. Its Save runs
+   * it from the render that handles the click, so it sends the listing as it is then.
+   */
+  const [asking, setAsking] = useState<{ run: 'save' | 'publish'; instead: 'file' | 'design' } | null>(null)
 
   async function onSave(confirmed = false) {
     if (!open) return
-    if (!confirmed && dropsPin(open)) {
-      setAsking(() => () => onSave(true))
+    const instead = confirmed ? null : dropsPin(open)
+    if (instead) {
+      setAsking({ run: 'save', instead })
       return
     }
     const current = open
@@ -564,7 +582,8 @@ export function StorefrontListingPage() {
     whileOpen(current.key, (cur) => {
       if (cur.draft.media_ids.includes(uploaded.id)) return cur
       edited.current = true
-      const touched: Field[] = cur.touched.includes('media_ids') ? [...cur.touched] : [...cur.touched, 'media_ids']
+      // Before the file's defaults fill in, the plate pictures still join it (they keep uploads).
+      const touched: Field[] = !cur.filled || cur.touched.includes('media_ids') ? [...cur.touched] : [...cur.touched, 'media_ids']
       return { ...cur, touched, draft: { ...cur.draft, media_ids: [...cur.draft.media_ids, uploaded.id] } }
     })
     return uploaded.id
@@ -572,8 +591,9 @@ export function StorefrontListingPage() {
 
   async function onPublish(confirmed = false) {
     if (!open) return
-    if (!confirmed && dropsPin(open)) {
-      setAsking(() => () => onPublish(true))
+    const instead = confirmed ? null : dropsPin(open)
+    if (instead) {
+      setAsking({ run: 'publish', instead })
       return
     }
     const current = open
@@ -719,7 +739,7 @@ export function StorefrontListingPage() {
                 shopMaterials={shopMaterials}
                 refusal={refusal}
                 file={file}
-                library={library}
+                library={library ?? (settings.error ? null : undefined)}
                 listingId={open.id}
                 onUploadPicture={onUploadPicture}
                 onKeepPublished={() => void onKeepPublished()}
@@ -750,16 +770,19 @@ export function StorefrontListingPage() {
       <AlertDialog open={asking !== null} onOpenChange={(next) => !next && setAsking(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Sell the file you picked?</AlertDialogTitle>
-            <AlertDialogDescription>Customers lose the version you published. The next publish sells the file you picked.</AlertDialogDescription>
+            <AlertDialogTitle>{asking?.instead === 'design' ? 'Sell the design you picked?' : 'Sell the file you picked?'}</AlertDialogTitle>
+            <AlertDialogDescription>
+              Customers lose the version you published. The next publish sells the {asking?.instead === 'design' ? 'design' : 'file'} you picked.
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                const go = asking
+                const run = asking?.run
                 setAsking(null)
-                void go?.()
+                if (run === 'save') void onSave(true)
+                else if (run === 'publish') void onPublish(true)
               }}
             >
               Save

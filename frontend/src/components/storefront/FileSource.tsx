@@ -44,7 +44,8 @@ export function FileChoice({
 }: {
   draft: ListingDraft
   file: ListedFile | undefined
-  library: 'bambuddy' | 'native' | undefined
+  /** The library that serves; undefined while read, null when the settings could not be read. */
+  library: 'bambuddy' | 'native' | null | undefined
   listingId: string | null | undefined
   onChange: (draft: ListingDraft) => void
 }) {
@@ -67,7 +68,8 @@ export function FileChoice({
     return (
       <div className="flex flex-col gap-1">
         {search}
-        {!library && <p className="text-xs text-muted-foreground">Reading which library serves…</p>}
+        {library === undefined && <p className="text-xs text-muted-foreground">Reading which library serves…</p>}
+        {library === null && <p className="text-xs text-warn">The settings could not be read, so the library that serves is not known. Reload the page to try again.</p>}
       </div>
     )
   }
