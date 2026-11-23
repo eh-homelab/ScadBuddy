@@ -58,6 +58,8 @@ import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
 import { Tip } from './Tip'
+import { browserOptions, browserProblem, EMPTY_BROWSER, type BrowserDraft } from '../../agent/chat/browserDraft'
+import { NewChatBrowser } from './NewChatBrowser'
 
 function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -247,7 +249,13 @@ export function AssistantChat({
   // turn is still on its way, so nothing is sent until it has started.
   const queued = active?.queued ?? []
   const queueFull = queued.length >= QUEUE_MAX
-  const holdSend = state.awaitingStart || (busy && (!active || queueFull))
+  // #7027 — a new chat's browser options, sent with its first message. Kept through a refused
+  // start (the agent's `invalid_browser` notice), so they can be fixed; cleared once a chat is on screen.
+  const [newChatBrowser, setNewChatBrowser] = useState<BrowserDraft>(EMPTY_BROWSER)
+  useEffect(() => {
+    if (state.activeId) setNewChatBrowser(EMPTY_BROWSER)
+  }, [state.activeId])
+  const holdSend = state.awaitingStart || (busy && (!active || queueFull)) || (!active && browserProblem(newChatBrowser) !== null)
   const streaming = active?.items.some((i) => i.kind === 'assistant' && !i.done) ?? false
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
   const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && !i.attention) ?? false
@@ -452,7 +460,12 @@ export function AssistantChat({
     speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
     const images = attachedNow.current.map((a) => ({ kind: 'attachment' as const, id: a.id }))
-    chat.send(text, pageContext(pathname, { tools, dialogs, page }), images.length ? images : undefined)
+    chat.send(
+      text,
+      pageContext(pathname, { tools, dialogs, page }),
+      images.length ? images : undefined,
+      active ? undefined : browserOptions(newChatBrowser),
+    )
     writeDraft('')
     writeAttached([])
     setImageErrors([])
@@ -1113,6 +1126,9 @@ export function AssistantChat({
                   ? `${QUEUE_MAX} messages are waiting. Remove one, or wait for one to run.`
                   : 'Sent now, it waits and runs after this turn.'}
             </span>
+          )}
+          {!active && (
+            <NewChatBrowser value={newChatBrowser} onChange={setNewChatBrowser} disabled={!canSend || state.awaitingStart} />
           )}
           <input
             ref={filePicker}
