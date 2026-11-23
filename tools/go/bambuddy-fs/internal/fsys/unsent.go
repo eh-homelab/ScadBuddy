@@ -559,8 +559,12 @@ func (q *queue) reschedule(e *entry) {
 }
 
 // backoff is the wait after attempts failed attempts: retryFirst doubling up to
-// retryMax, each within 20% either way, and never past retryMax.
+// retryMax, each within 20% either way, and never past retryMax. A write queued before
+// any attempt (--write-back) waits for nothing.
 func (q *queue) backoff(attempts int) time.Duration {
+	if attempts == 0 {
+		return 0
+	}
 	d := q.first
 	for i := 1; i < attempts && d < q.max; i++ {
 		d *= 2

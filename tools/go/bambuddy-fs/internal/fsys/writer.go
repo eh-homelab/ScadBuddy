@@ -303,7 +303,8 @@ func (h *pendingHandle) Fsync(context.Context, uint32) syscall.Errno {
 // without waiting, so the upload is here for the caller to learn its outcome. A flush
 // with nothing new (closing a duplicate descriptor, or a second handle's close) sends
 // nothing, and a reader's flush never uploads. An upload that fails but is queued
-// (pending.queue) is a success.
+// (pending.queue) is a success. With --write-back the flush only queues the contents,
+// and the retrier sends them once the last handle is released (#7286).
 func (h *pendingHandle) Flush(ctx context.Context) syscall.Errno {
 	if !h.write {
 		return 0
@@ -321,6 +322,9 @@ func (p *pending) tracedUpload(ctx context.Context, name string) syscall.Errno {
 		return 0
 	}
 	ctx, op := telemetry.StartOp(ctx, name, p.attrs()...)
+	if p.node.tree.opts.WriteBack {
+		op.Set(telemetry.WriteBack())
+	}
 	errno := p.upload(ctx)
 	op.End(errno)
 	return errno
@@ -431,8 +435,8 @@ func (n *file) drop() {
 // conflict copy if a file it does not replace has taken the name (tree.target), makes
 // them the new ID's cached contents, and only then deletes the files they replace that
 // are still in place. If a delete fails the new file stays, and the error says the old
-// one remains. A failure is queued (pending.queue); a refusal stays unsent. The caller
-// holds p.mu.
+// one remains. A failure is queued (pending.queue); a refusal stays unsent. With
+// --write-back nothing is sent: the contents are queued at once. The caller holds p.mu.
 //
 // The node takes the new file's ID unless an old file remains: a stored file's inode
 // number names its ID, so the parent's entry is invalidated and the name is looked up
@@ -450,6 +454,15 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 	}
 	if errno := p.ensure(ctx); errno != 0 {
 		return errno
+	}
+	if t.opts.WriteBack {
+		if p.key == "" {
+			p.key = api.NewKey()
+		}
+		n.mu.Lock()
+		bases, over := slices.Clone(p.bases), slices.Clone(p.over)
+		n.mu.Unlock()
+		return p.queue(n.current(), bases, over, nil, attempt{Key: p.key})
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadTimeout)
 	defer cancel()
@@ -527,9 +540,10 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 	return errno
 }
 
-// queue keeps contents whose upload failed for the retrier: the temp file moves into
-// the unsent queue, under the state directory, superseding the queued saves the write
-// held (over), and the write goes on from a copy of it. The caller holds p.mu.
+// queue keeps contents whose upload failed (cause), or that --write-back queues before
+// any attempt (cause nil), for the retrier: the temp file moves into the unsent queue,
+// under the state directory, superseding the queued saves the write held (over), and
+// the write goes on from a copy of it. The caller holds p.mu.
 //
 // Once the contents are fsync'd there, the failure is answered with success: the bytes
 // are safe, and the retrier sends them under whatever name and folder they then have.
@@ -541,8 +555,10 @@ func (p *pending) queue(cur api.File, bases []base, over []*entry, cause error, 
 	size := p.size.Load()
 	rec := record{
 		FolderID: cur.FolderID, Name: cur.Name, Size: size, Created: now.UTC(),
-		Attempts: 1, LastError: cause.Error(), LastAttempt: now.UTC(), Bases: bases, SavedAt: now,
-		Attempt: &sent,
+		Bases: bases, SavedAt: now, Attempt: &sent,
+	}
+	if cause != nil {
+		rec.Attempts, rec.LastError, rec.LastAttempt = 1, cause.Error(), now.UTC()
 	}
 	e, f, err := q.add(p.tmp, p.path, size, rec, over...)
 	if err != nil {
@@ -563,6 +579,12 @@ func (p *pending) queue(cur api.File, bases []base, over []*entry, cause error, 
 	}), e)
 	n.mu.Unlock()
 	n.bind(e)
+	if cause == nil {
+		telemetry.Queued(telemetry.QueuedWriteBack)
+		slog.Info("write queued; the retrier sends it", "path", e.dir, "folder", cur.FolderID, "name", cur.Name)
+		return 0
+	}
+	telemetry.Queued(telemetry.QueuedUploadFailed)
 	slog.Warn("upload failed; the contents are kept and will be sent again", "path", e.dir, "folder", cur.FolderID, "name", cur.Name, "err", cause)
 	return 0
 }

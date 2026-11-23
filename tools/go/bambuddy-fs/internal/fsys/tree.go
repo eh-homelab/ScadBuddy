@@ -39,11 +39,13 @@ var _ Library = (*api.Client)(nil)
 // write with EROFS, TTL is how long a folder's listing is kept, CacheDir holds
 // downloaded contents (at most CacheMax bytes of them, 0 no bound) and files being
 // written, and StateDir the writes whose upload failed, under unsent/ (#2865).
+// WriteBack makes a close queue what was written there instead of uploading it (#7286).
 type Options struct {
 	All, ReadOnly      bool
 	TTL                time.Duration
 	CacheDir, StateDir string
 	CacheMax           int64
+	WriteBack          bool
 }
 
 // NewRoot returns the root directory, the library's top level, with the unsent writes

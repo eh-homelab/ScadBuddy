@@ -23,6 +23,8 @@ const (
 	folderKey    = attribute.Key("bambuddy_fs.folder.id")
 	toFolderKey  = attribute.Key("bambuddy_fs.to_folder.id")
 	bytesKey     = attribute.Key("bambuddy_fs.bytes")
+	writeBackKey = attribute.Key("bambuddy_fs.write_back")
+	reasonKey    = attribute.Key("reason")
 	opKey        = attribute.Key("op")
 	resultKey    = attribute.Key("result")
 	errorTypeKey = attribute.Key("error.type")
@@ -34,6 +36,10 @@ func FileID(id int) attribute.KeyValue     { return fileKey.Int(id) }
 func FolderID(id int) attribute.KeyValue   { return folderKey.Int(id) }
 func ToFolderID(id int) attribute.KeyValue { return toFolderKey.Int(id) }
 func Bytes(n int64) attribute.KeyValue     { return bytesKey.Int64(n) }
+
+// WriteBack marks a flush or release that queued its write instead of uploading it
+// (--write-back).
+func WriteBack() attribute.KeyValue { return writeBackKey.Bool(true) }
 
 const scope = "github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs"
 
@@ -56,6 +62,7 @@ type recorder struct {
 
 	fuseOps       metric.Int64Counter
 	fuseDuration  metric.Float64Histogram
+	unsentQueued  metric.Int64Counter
 	httpDuration  metric.Float64Histogram
 	transfer      metric.Int64Counter
 	unsentUploads metric.Int64Counter
@@ -91,6 +98,8 @@ func install(tp trace.TracerProvider, mp metric.MeterProvider) (restore func()) 
 		metric.WithDescription("FUSE operations that reached the library or did work, by op and result"))
 	r.fuseDuration, _ = m.Float64Histogram("bambuddy_fs.fuse.operation.duration", metric.WithUnit("s"),
 		metric.WithDescription("Duration of those FUSE operations"), metric.WithExplicitBucketBoundaries(durationBuckets...))
+	r.unsentQueued, _ = m.Int64Counter("bambuddy_fs.unsent.queued", metric.WithUnit("{write}"),
+		metric.WithDescription("Writes put in the unsent queue, by reason: write_back or upload_failed"))
 	r.httpDuration, _ = m.Float64Histogram("http.client.request.duration", metric.WithUnit("s"),
 		metric.WithDescription("Duration of ScadBuddy API requests, until the answer's body is closed"),
 		metric.WithExplicitBucketBoundaries(durationBuckets...))
@@ -165,6 +174,17 @@ func (o *Op) End(errno syscall.Errno) {
 	ctx := context.Background()
 	r.fuseOps.Add(ctx, 1, set)
 	r.fuseDuration.Record(ctx, time.Since(o.start).Seconds(), set)
+}
+
+// Why a write was queued.
+const (
+	QueuedWriteBack    = "write_back"
+	QueuedUploadFailed = "upload_failed"
+)
+
+// Queued counts a write put in the unsent queue, for reason, one of the Queued constants.
+func Queued(reason string) {
+	rec().unsentQueued.Add(context.Background(), 1, metric.WithAttributes(reasonKey.String(reason)))
 }
 
 // Retry is one attempt to send an unsent write.
