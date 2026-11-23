@@ -61,6 +61,26 @@ makes a spool from a tray. A resend of a copy reads its source again: its key na
 draft it read, so an unchanged source makes nothing twice and a changed one makes a new set
 (R-7150-8).
 
+The Spools tab's bulk bar acts on the selected spools (#7151, plan
+`docs/superpowers/plans/2026-11-23-spool-bulk-ops.md`):
+
+- **Edit fields.** A dialog lists every field a spool's edit sets, except archived. Each
+  ticked field is set on every selected spool; a ticked field left empty clears the spool's
+  own value, so it takes its type's. It is one request, `POST /filament/spools/bulk-update`,
+  and all or none: when one spool refuses, nothing changes and the reason names that spool.
+  Each spool that changed gets its own `edited` event.
+- **Archive and Restore.** One request each, `POST /filament/spools/bulk-archive` and
+  `/bulk-restore`. The answer lists the spools changed, those already so and the ids that
+  name no spool, and the bar reports it once.
+
+An AMS tray's place page that holds a spool has "Take the spool out of this tray"
+(`DELETE /printers/{id}/trays/{ams}/{tray}/spool`): the spool moves to no place.
+
+The Spools and Tags tabs find a tag by its UID or tray UUID. A search token of at least 4 hex
+digits matches a spool's open tag that holds it, with `:` and `-` left out, so `04:A1:B2`
+finds tag `04A1B2…`. The agent's `filament_spool_list` `q` does the same. Its bulk tools are
+`filament_spools_bulk_update` and `filament_spools_bulk_archive`.
+
 Tray changes and print ends are recorded when a printer report is written
 (`backend/scadbuddy/filament/capture.py`). They are not a workflow of their own.
 
@@ -204,10 +224,13 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   - `backend/tests/api/test_filament*.py`, `test_tray_spools.py`, `test_print_filaments.py`;
   - the create operations (#7150): `test_filament_spool_create_ops.py`, and create from slot
     in `test_tray_spools.py`;
+  - bulk edit, archive and restore (#7151): `test_filament_spool_bulk_ops.py`;
   - `backend/tests/test_spool_refresh_replay.py`;
   - `backend/tests/profile_fetch/`;
   - `backend/tests/api/test_printer_kprofiles.py`, `backend/tests/bambuddy/test_client_kprofiles.py`.
-- Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`).
+- Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`);
+  the #7151 operations in `components/filament/BulkBar.test.tsx`, `pages/filament/LocationPage.test.tsx`,
+  `pages/filament/SpoolsTab.search.test.tsx` and `pages/filament/TagsTab.test.tsx`.
 
 ## Limits and known issues
 

@@ -1943,6 +1943,16 @@ export const handlers = [
     return HttpResponse.json(draft)
   }),
   // #7150 — create from slot: the mock's report is the tray's place; a new PLA spool, placed there.
+  // #7151 — unassign: the tray's spool moves to no place; a tray with none answers 204 too.
+  http.delete('/api/v1/printers/:printer/trays/:ams/:tray/spool', ({ params }) => {
+    const place = state.locations.find((one) => one.printer_id === params.printer && one.ams_id === Number(params.ams) && one.tray_id === Number(params.tray))
+    for (const [at, row] of state.spools.entries()) {
+      if (!place || row.location_id !== place.id) continue
+      state.spools[at] = { ...row, location_id: null, updated_at: now() }
+      addEvent(row.id, 'moved', { data: { from: place.id, to: null } })
+    }
+    return new HttpResponse(null, { status: 204 })
+  }),
   http.post('/api/v1/printers/:printer/trays/:ams/:tray/new-spool', ({ params, request }) => {
     const ams = Number(params.ams)
     const tray = Number(params.tray)
@@ -1966,6 +1976,59 @@ export const handlers = [
     const row = findSpool(String(params.id))
     return row ? HttpResponse.json(detail(row)) : problem(404, `no spool ${String(params.id)}`)
   }),
+  // #7151 — `POST /filament/spools/bulk-update`: one patch on every spool named, all or none.
+  http.post(`${BASE}/spools/bulk-update`, async ({ request }) => {
+    const raw = (await request.json()) as { spool_ids?: string[]; patch?: Record<string, unknown> }
+    const extra = extraKeys(raw, ['spool_ids', 'patch']) ?? extraKeys(raw.patch, PATCH_FIELDS.spool.filter((field) => field !== 'archived'))
+    if (extra) return extra
+    const ids = raw.spool_ids ?? []
+    const patch = raw.patch ?? {}
+    if (ids.length < 1 || ids.length > 500) return problem(422, 'spool_ids: List should have 1 to 500 items')
+    if (!Object.keys(patch).length) return problem(422, 'the patch sets no field')
+    const clear = cleared(patch, ['weight_locked'])
+    if (clear) return problem(422, clear)
+    const fields = normalised(patch) as Partial<SpoolRow>
+    const found = state.spools.filter((row) => ids.includes(row.id)).sort((a, b) => a.id.localeCompare(b.id))
+    for (const row of found) {
+      const refused = spoolRefusal({ ...row, ...fields })
+      if (refused) return problem(422, `spool #${row.number}: ${((await refused.clone().json()) as { detail: string }).detail}`)
+    }
+    for (const row of found) {
+      const at = state.spools.indexOf(row)
+      const changes = Object.fromEntries(
+        Object.keys(fields)
+          .filter((field) => row[field as keyof SpoolRow] !== fields[field as keyof SpoolRow])
+          .map((field) => [field, [row[field as keyof SpoolRow], fields[field as keyof SpoolRow]]]),
+      )
+      if (!Object.keys(changes).length) continue
+      state.spools[at] = { ...row, ...fields, updated_at: now() }
+      if (!row.type_id && fields.type_id) state.spoolPresets = state.spoolPresets.filter((one) => !(one.spool_id === row.id && one.migrated))
+      addEvent(row.id, 'edited', { data: { changes } })
+    }
+    return HttpResponse.json({ updated: found.map((row) => row.id), not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
+  }),
+  // #7151 — `POST /filament/spools/bulk-archive` and `bulk-restore`: each spool's outcome, reported once.
+  ...([true, false] as const).map((archived) =>
+    http.post(`${BASE}/spools/${archived ? 'bulk-archive' : 'bulk-restore'}`, async ({ request }) => {
+      const raw = (await request.json()) as { spool_ids?: string[] }
+      const extra = extraKeys(raw, ['spool_ids'])
+      if (extra) return extra
+      const ids = raw.spool_ids ?? []
+      if (ids.length < 1 || ids.length > 500) return problem(422, 'spool_ids: List should have 1 to 500 items')
+      const found = state.spools.filter((row) => ids.includes(row.id)).sort((a, b) => a.id.localeCompare(b.id))
+      const changed: string[] = []
+      const unchanged: string[] = []
+      for (const row of found) {
+        if ((row.archived_at != null) === archived) {
+          unchanged.push(row.id)
+          continue
+        }
+        setArchived(state.spools.indexOf(row), archived)
+        changed.push(row.id)
+      }
+      return HttpResponse.json({ changed, unchanged, not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
+    }),
+  ),
   http.patch(`${BASE}/spools/:id`, async ({ params, request }) => {
     const at = state.spools.findIndex((row) => row.id === params.id)
     if (at < 0) return problem(404, `no spool ${String(params.id)}`)
