@@ -278,49 +278,18 @@ export const PACKAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 /**
  * A row as the API answers it: every column, its times as ISO text. An API of the build
- * before #6935 (during a roll) answers no pin kind and none of the bytes or version columns,
- * and one before #6934 no `hosted_latest_version` (read as none: nothing shows as not offered).
+ * before #6934 answers no `hosted_latest_version` (read as none: nothing shows as not offered).
  */
-type WireRow = Omit<
-  PackageRow,
-  | 'approved_at'
-  | 'created_at'
-  | 'updated_at'
-  | 'pin_kind'
-  | 'bytes_sha256'
-  | 'version'
-  | 'pending_pin_kind'
-  | 'pending_bytes_sha256'
-  | 'pending_version'
-  | 'hosted_latest_version'
-> & {
+type WireRow = Omit<PackageRow, 'approved_at' | 'created_at' | 'updated_at' | 'hosted_latest_version'> & {
   approved_at: string | null
   created_at: string
   updated_at: string
-  pin_kind?: PinKind
-  bytes_sha256?: string | null
-  version?: number | null
-  pending_pin_kind?: PinKind | null
-  pending_bytes_sha256?: string | null
-  pending_version?: number | null
   hosted_latest_version?: number | null
 }
 
 function fromWire(row: WireRow): PackageRow {
   return {
     ...row,
-    // Every row such an API knows is a commit pin, and so is every re-pin it stores.
-    pin_kind: row.pin_kind ?? 'commit',
-    bytes_sha256: row.bytes_sha256 ?? null,
-    version: row.version ?? null,
-    pending_pin_kind:
-      row.pending_pin_kind !== undefined
-        ? row.pending_pin_kind
-        : row.pending_content_hash !== null && row.pending_commit_sha !== null
-          ? 'commit'
-          : null,
-    pending_bytes_sha256: row.pending_bytes_sha256 ?? null,
-    pending_version: row.pending_version ?? null,
     hosted_latest_version: row.hosted_latest_version ?? null,
     approved_at: row.approved_at === null ? null : new Date(row.approved_at),
     created_at: new Date(row.created_at),
@@ -328,21 +297,13 @@ function fromWire(row: WireRow): PackageRow {
   }
 }
 
-/**
- * A prepared pin as the routes take it. A commit pin is sent in the shape of the build
- * before #6935 (no `pin_kind`), so during a roll an API pod of that build still takes its
- * install and its re-pin; that pod stores, discards and approves a commit re-pin without
- * `pending_pin_kind`, which the migration's checks read as a commit
- * (`20261122T0323Z_plugin_package_pins.sql`). Such a pod refuses a bytes pin (422), and its
- * discard of a bytes re-pin, or its approve of a commit re-pin over a bytes pin, fails with
- * nothing written: send it again once the roll is over.
- */
+/** A prepared pin as the routes take it: its kind and that kind's one column. */
 function pinBody(p: PreparedPackage) {
   const pinned =
     p.version !== undefined
       ? { pin_kind: 'version', version: p.version }
       : p.bytesSha256 === undefined
-        ? { commit_sha: p.commit }
+        ? { pin_kind: 'commit', commit_sha: p.commit }
         : { pin_kind: 'bytes', bytes_sha256: p.bytesSha256 }
   return { fetch_url: p.fetchUrl, fetch_path: p.fetchPath, ...pinned, content_hash: p.contentHash, files: p.files, review: p.review }
 }
