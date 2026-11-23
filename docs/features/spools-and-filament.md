@@ -175,8 +175,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 
 - Each kind has a schema that documents and types the keys it knows. It never refuses a
   key. The schema is an allowlisted subset of JSON Schema Draft 2020-12 (`TOP_KEYWORDS`,
-  `KEY_KEYWORDS`, `ITEM_KEYWORDS`; list items are strings). Each known key must still take
-  some value. Anything else is 422 `bad_property_schema`, naming the keyword. Values
+  `KEY_KEYWORDS`, `ITEM_KEYWORDS`; list items are strings). An `enum` or `const` must fit its
+  key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. Values
   already stored are not checked again after a schema change.
 - The migration seeds the keys `mpn`, `gtin`, `asin`, `manufacturer_url`,
   `empty_spool_weight_g` and `td` for `spool_type`, and `lot_number` for `spool`
