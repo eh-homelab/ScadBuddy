@@ -1717,6 +1717,24 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     expect(keys[1]).not.toBe(keys[0])
   })
 
+  it('sets properties on each spool a bulk add made, and answers them (#7026)', async () => {
+    const set: string[] = []
+    server.use(
+      http.post(BULK, () => HttpResponse.json([{ id: ROW, number: 1 }, { id: SOURCE_ID, number: 2 }], { status: 201 })),
+      http.patch(`${BACKEND}/api/v1/entities/:ref/properties`, async ({ params, request }) => {
+        set.push(`${String(params.ref)} ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ properties: [{ key: 'mpn', value: 'M1', source: 'manual' }] })
+      }),
+    )
+    const result = await runTool(tool('filament_spool_upsert'), { quantity: 2, fields: { type_id: ROW }, properties: { mpn: 'M1' } }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject([
+      { id: ROW, properties: [{ key: 'mpn' }] },
+      { id: SOURCE_ID, properties: [{ key: 'mpn' }] },
+    ])
+    expect(set).toEqual([`spool:${ROW} {"set":{"mpn":"M1"}}`, `spool:${SOURCE_ID} {"set":{"mpn":"M1"}}`])
+  })
+
   it('refuses quantity or copy_of on an edit before calling the backend', async () => {
     const result = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, quantity: 2 }, ctx())
     expect(result.isError).toBe(true)
