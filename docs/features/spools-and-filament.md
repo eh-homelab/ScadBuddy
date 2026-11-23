@@ -165,6 +165,8 @@ names ScadBuddy's place of the unit. The page asks before every printer write.
 
 ### Properties (#7026)
 
+Design: [inventory spec §6.3a](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md), D17.
+
 A spool and a spool type can hold properties: free key-value pairs, such as a part number,
 barcodes or a lot number. The store is generic and works for any entity, so it is not
 specific to filament. A value is a string, a number, a boolean or a list of strings. A key
@@ -185,12 +187,12 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   (`backend/scadbuddy/api/entity_properties.py`).
 - UI: the section "Files, links and properties" of the spool and type pages
   (`frontend/src/components/entities/PropertiesPanel.tsx`; the anchor `#files-and-links`
-  stays). A list value has one field per item. A rename, or an add onto an existing key,
-  asks first.
+  stays). A list value has one field per item. A rename or an add onto a key the entity
+  already has asks first, since it replaces that key's value.
 - Search: the Spools and Types tabs' search also matches property values
   (`frontend/src/lib/filamentSearch.ts` `propertyTexts`, loaded by
   `frontend/src/components/entities/api.ts`). The agent's search matches them too
-  (`agent/src/tools/filamentSearch.ts`); both use the shared vectors
+  (`agent/src/tools/filament.ts` loads them, `agent/src/tools/filamentSearch.ts` matches); both use the shared vectors
   `test-fixtures/filament/search-vectors.json`.
 - Agent: `entity_property_list`, `entity_property_set`, `entity_property_schema_get` and
   `entity_property_schema_set` (`agent/src/tools/entities.ts`), and a `properties` field on
