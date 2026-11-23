@@ -2899,6 +2899,15 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ media_ids: mediaIds, updated_at: updatedAt }),
     }),
+  /** #6710 §5.4 — an image for a file listing, kept for it; answers its id, `upload:<sha256>`. */
+  uploadStorefrontListingPicture: (id: string, file: File) =>
+    uploadForm<{ id: string }>(`/storefront/listings/${seg(id)}/pictures`, () => {
+      const body = new FormData()
+      body.append('file', file)
+      return body
+    }),
+  /** #6710 §9.3 — plate `plate`'s picture in the copy of the file the listing pins. */
+  storefrontListingPlateUrl: (id: string, plate: number) => `${API_BASE}/storefront/listings/${seg(id)}/plates/${plate}.png`,
   publishStorefrontListing: (id: string) =>
     request<StorefrontListing>(`/storefront/listings/${seg(id)}/publish`, { method: 'POST' }),
   unpublishStorefrontListing: (id: string) =>
@@ -3002,9 +3011,11 @@ export const api = {
   },
 
   /** #3630 — library files whose name or folder holds every word, from every folder. */
-  searchLibrary: (query: { q: string; all: boolean; fresh?: boolean }, signal?: AbortSignal) => {
+  searchLibrary: (query: { q: string; all: boolean; fresh?: boolean; types?: readonly ('3mf' | 'stl')[] }, signal?: AbortSignal) => {
     const search = new URLSearchParams({ q: query.q })
     if (query.all) search.set('all', 'true')
+    // #6710 §9.2 — only files of these types; `all` is then ignored.
+    for (const type of query.types ?? []) search.append('types', type)
     if (query.fresh) search.set('fresh', 'true')
     return request<LibrarySearch>(`/print/library/search?${search}`, { signal })
   },

@@ -576,6 +576,8 @@ export type StorefrontListingInput = Defaulted<
   Schemas['ListingInput'],
   'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'materials'
 >
+/** #6710 §4.2 — what publish read from a file listing's library file. */
+export type StorefrontFileSnapshot = Schemas['FileSnapshot']
 /** #6237 — a listing's colour combinations and how far their renders are; a prepare's answer. */
 export type ListingPrepareProgress = Schemas['PrepareProgress']
 export type ListingPrepareStarted = Schemas['PrepareStarted']
