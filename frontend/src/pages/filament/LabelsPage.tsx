@@ -1,5 +1,5 @@
 import { ChevronLeftIcon, FileDownIcon, PrinterIcon } from 'lucide-react'
-import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { type FocusEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useSearchParams } from 'react-router'
 import { api } from '../../api/client'
@@ -175,6 +175,12 @@ export function LabelsPage() {
   const [pdfProblem, setPdfProblem] = useState<string | null>(null)
   const [pdfBusy, setPdfBusy] = useState(false)
   const size = sizeOf(choice, templates)
+  // A pick made on this page outranks the stored choice that arrives after it.
+  const picked = useRef(false)
+  // R-7157-9: one PUT at a time; a newer save replaces one still waiting, so the newest choice is stored last.
+  const saving = useRef<{ busy: boolean; next: LabelTemplateChoice | null; seq: number }>({ busy: false, next: null, seq: 0 })
+  const picker = useRef<HTMLButtonElement>(null)
+  const pickerList = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let live = true
@@ -187,7 +193,7 @@ export function LabelsPage() {
       .getSettings()
       .then((settings) => {
         const stored = settings.filament_label_template
-        if (!live || !stored) return
+        if (!live || !stored || picked.current) return
         setChoice(cleanChoice(stored))
         if (stored.template === 'custom') setDraft({ width: String(stored.width_mm ?? ''), height: String(stored.height_mm ?? '') })
       })
@@ -198,20 +204,47 @@ export function LabelsPage() {
   }, [])
 
   const save = (next: LabelTemplateChoice) => {
+    picked.current = true
     setChoice(next)
     setSaveProblem(null)
-    api.putSettings({ filament_label_template: cleanChoice(next) }).catch(() => setSaveProblem('The label choice could not be saved. It holds on this page only.'))
+    const queue = saving.current
+    queue.seq += 1
+    queue.next = next
+    if (queue.busy) return
+    queue.busy = true
+    void (async () => {
+      while (queue.next) {
+        const body = cleanChoice(queue.next)
+        queue.next = null
+        const seq = queue.seq
+        try {
+          await api.putSettings({ filament_label_template: body })
+        } catch {
+          // Only the newest save's failure is the page's to tell.
+          if (seq === queue.seq) setSaveProblem('The label choice could not be saved. It holds on this page only.')
+        }
+      }
+      queue.busy = false
+    })()
   }
 
   const pick = (value: string) => {
     setCustomProblem(null)
     if (value === 'custom') {
+      picked.current = true
       setEditingCustom(true)
       setDraft({ width: String(size.widthMm), height: String(size.heightMm) })
       return
     }
     setEditingCustom(false)
     save({ template: value as LabelTemplateChoice['template'] })
+  }
+
+  /** A field left for the template picker saves nothing: the pick that follows decides. */
+  const leaveCustom = (event: FocusEvent<HTMLInputElement>) => {
+    const to = event.relatedTarget
+    if (to instanceof Node && (picker.current?.contains(to) || pickerList.current?.contains(to))) return
+    commitCustom()
   }
 
   /** A custom size is saved once both lengths are numbers within the bounds. */
@@ -373,10 +406,10 @@ export function LabelsPage() {
             {readyPlaces && readyPlaces.error === null && !readyPlaces.tooMany && <p className="text-[13px] text-muted-foreground">{`Labels open ${readyPlaces.base}`}</p>}
           </div>
           <Select value={pickerValue} onValueChange={pick}>
-            <SelectTrigger aria-label="Label" className="w-auto min-w-52">
+            <SelectTrigger ref={picker} aria-label="Label" className="w-auto min-w-52">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent ref={pickerList}>
               {(templates?.templates ?? [{ id: 'roll_50x25' as const, name: 'Roll label 50 x 25 mm' }]).map((one) => (
                 <SelectItem key={one.id} value={one.id}>
                   {one.name}
@@ -422,7 +455,7 @@ export function LabelsPage() {
                 value={draft.width}
                 aria-invalid={customProblem !== null}
                 onChange={(event) => setDraft((was) => ({ ...was, width: event.target.value }))}
-                onBlur={commitCustom}
+                onBlur={leaveCustom}
                 onKeyDown={(event) => event.key === 'Enter' && commitCustom()}
               />
             </span>
@@ -438,7 +471,7 @@ export function LabelsPage() {
                 value={draft.height}
                 aria-invalid={customProblem !== null}
                 onChange={(event) => setDraft((was) => ({ ...was, height: event.target.value }))}
-                onBlur={commitCustom}
+                onBlur={leaveCustom}
                 onKeyDown={(event) => event.key === 'Enter' && commitCustom()}
               />
             </span>

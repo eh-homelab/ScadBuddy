@@ -67,7 +67,14 @@ with no body schema.
   actual size.
 - **R-7157-8 Text in the PDF** is Helvetica, ReportLab's built-in font, so nothing is read
   from the image's font folders. A character outside its Latin-1 set prints as `?`. A long
-  line is cut with an ellipsis, as the browser cuts it; a place name takes at most two lines.
+  line is cut with an ellipsis, as the browser cuts it; a place name takes at most two lines;
+  a word wider than its line is broken there and runs onto the next, and only the last line
+  is cut.
+- **R-7157-9 Only the newest template choice is stored.** The page sends one `PUT /settings`
+  at a time. A pick made while one is in flight waits, and a newer pick replaces it, so the
+  last PUT holds the newest choice and the page shows it; only that save's failure is shown.
+  A choice made before the stored setting is read outranks the stored one. A custom size
+  field left for the template picker saves nothing: the pick that follows decides.
 
 ## Steps
 

@@ -98,6 +98,22 @@ def test_a_long_name_is_cut_with_an_ellipsis() -> None:
     assert "Silk " * 20 not in text
 
 
+def test_a_place_name_of_one_long_word_runs_onto_the_second_line() -> None:
+    word = "Filamentdryboxshelfnumberseventeen"
+    lines = label_pdf._wrap(word, label_pdf.BOLD, 3.2, 23.5, 2)
+    assert len(lines) == 2
+    # The first line is as much of the word as fits, uncut; the overflow goes on line 2,
+    # which alone is cut.
+    assert word.startswith(lines[0])
+    assert lines[0] and not lines[0].endswith(label_pdf.ELLIPSIS)
+    assert lines[1].endswith(label_pdf.ELLIPSIS)
+    assert word[len(lines[0]) :].startswith(lines[1][:-1])
+    text = _streams(
+        render_pdf([PlaceLabel("L-1", word, "https://x/x/L-1")], BY_ID["roll_50x25"], "roll")
+    )
+    assert f"({lines[0]})" in text
+
+
 def test_text_outside_latin_1_prints_as_a_question_mark() -> None:
     odd = SpoolLabel(number=4, material="PLA", colour="翡翠", brand=None, qr="scadbuddy:spool:z")
     assert "(??)" in _streams(render_pdf([odd], BY_ID["roll_50x25"], "roll"))

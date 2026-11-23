@@ -201,11 +201,20 @@ def _fit(text: str, font: str, size: float, column: float) -> str:
 
 
 def _wrap(text: str, font: str, size: float, column: float, most: int) -> list[str]:
-    """``text`` in at most ``most`` lines of ``column`` mm, broken at spaces, the last cut."""
+    """``text`` in at most ``most`` lines of ``column`` mm, broken at spaces, the last cut.
+    A word wider than the column is broken where it overflows, and the rest goes on the
+    next line, so only the last line is ever cut."""
     lines: list[str] = []
     words = text.split()
     while words and len(lines) < most - 1:
         line = words.pop(0)
+        if _width(line, font, size) > column:
+            head = line
+            while len(head) > 1 and _width(head, font, size) > column:
+                head = head[:-1]
+            words.insert(0, line[len(head) :])
+            lines.append(head)
+            continue
         while words and _width(f"{line} {words[0]}", font, size) <= column:
             line = f"{line} {words.pop(0)}"
         lines.append(_fit(line, font, size, column))

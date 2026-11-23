@@ -68,6 +68,71 @@ describe('the label template (#7157)', () => {
     expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 75mm; height: 55mm/)
   })
 
+  it('keeps a pick made before the stored template arrives', async () => {
+    serve()
+    const puts = serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    let answer: () => void = () => {}
+    const held = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.get('*/api/v1/settings', async () => {
+        await held
+        return HttpResponse.json({ filament_label_template: { template: 'box_62x29', width_mm: null, height_mm: null }, filament_label_base_url: null, public_url: null })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await choose(user, await screen.findByRole('combobox', { name: 'Label' }), 'Box label 40 x 30 mm')
+    await waitFor(() => expect(puts).toHaveLength(1))
+    answer()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 40mm; height: 30mm/)
+    expect(puts).toEqual([{ filament_label_template: { template: 'box_40x30' } }])
+  })
+
+  it('sends only the newest of quick picks, after the one in flight (R-7157-9)', async () => {
+    serve()
+    serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    const puts: unknown[] = []
+    let answer: () => void = () => {}
+    const held = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.put('*/api/v1/settings', async ({ request }) => {
+        puts.push(await request.json())
+        if (puts.length === 1) await held
+        return HttpResponse.json({})
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    const picker = await screen.findByRole('combobox', { name: 'Label' })
+    await choose(user, picker, 'Box label 40 x 30 mm')
+    await waitFor(() => expect(puts).toHaveLength(1))
+    await choose(user, picker, 'Box label 62 x 29 mm')
+    await choose(user, picker, 'AMS holder 75 x 55 mm')
+    expect(puts).toHaveLength(1)
+    answer()
+    await waitFor(() => expect(puts).toHaveLength(2))
+    expect(puts[1]).toEqual({ filament_label_template: { template: 'ams_holder_75x55' } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(puts).toHaveLength(2)
+    expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 75mm; height: 55mm/)
+  })
+
+  it('does not save a custom size when another template is picked from its field', async () => {
+    serve()
+    const puts = serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    const picker = await screen.findByRole('combobox', { name: 'Label' })
+    await choose(user, picker, 'Custom size')
+    const width = screen.getByRole('spinbutton', { name: 'Width (mm)' })
+    await user.clear(width)
+    await user.type(width, '80')
+    // The field is still focused: the picker's click blurs it.
+    await choose(user, picker, 'Box label 40 x 30 mm')
+    await waitFor(() => expect(puts).toEqual([{ filament_label_template: { template: 'box_40x30' } }]))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(puts).toHaveLength(1)
+    expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 40mm; height: 30mm/)
+  })
+
   it('saves a custom size once both lengths are in bounds', async () => {
     serve()
     const puts = serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
