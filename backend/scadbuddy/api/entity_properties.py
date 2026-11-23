@@ -186,10 +186,14 @@ async def get_property_schema(kind: KindPath, entities: EntitiesDep) -> KindProp
     response_model=KindPropertySchema,
     summary="Set a kind's property schema",
     description=(
-        "Replaces the schema. It is a valid Draft 2020-12 object schema "
-        '(`"type": "object"`) that refuses no key: no `required`, `propertyNames`, '
-        "`patternProperties`, `$ref`, false subschema or `additionalProperties` other than "
-        "`true`. Else 422 `bad_property_schema` and the old schema stays. Values already "
+        "Replaces the schema. It is a Draft 2020-12 object schema in a small subset that "
+        "documents keys and never refuses one. Top level: `type` `object`, `properties`, "
+        "`additionalProperties` `true`, `$schema` (the 2020-12 URI), `$comment`, `title`, "
+        "`description`, `examples`. Per key: `type` (string, number, integer, boolean, array, "
+        'or a list of them with `"null"`), annotations, `enum`, `const`, number and length '
+        "bounds, `format` (an annotation, not `regex`), `items` (strings), `minItems`, "
+        "`maxItems`, `uniqueItems`; each key must still take some value. Anything else is 422 "
+        "`bad_property_schema`, naming the keyword, and the old schema stays. Values already "
         "stored are not checked again."
     ),
     responses={422: {"description": "`unknown_entity_kind` or `bad_property_schema`"}},
