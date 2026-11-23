@@ -122,6 +122,7 @@ from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
+from scadbuddy.library.output_copy import copy_outputs
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
@@ -578,6 +579,34 @@ async def _index_outputs_logged(state: AppState, *, stop: threading.Event) -> No
         logger.info("indexed the saved outputs", extra={"added": added, "dropped": dropped})
     except Exception:
         logger.exception("could not index the saved outputs; the next start retries")
+
+
+async def _copy_outputs_logged(state: AppState, *, stop: threading.Event) -> None:
+    """The start's copy of the saved outputs' files into rows (#7255, `copy_outputs`),
+    best effort: a failure is logged, and the next start runs it again."""
+    rows = state.outputs.rows
+    if rows is None:
+        return
+    try:
+        result = await asyncio.to_thread(
+            copy_outputs, state.outputs, rows, state.projection.pool, stop
+        )
+    except Exception:
+        logger.exception("could not copy the saved outputs to rows; the next start retries")
+        return
+    if result is None:
+        return
+    logger.info(
+        "copied the saved outputs to rows",
+        extra={
+            "copied": result.copied,
+            "refreshed": result.refreshed,
+            "dropped": result.dropped,
+            "not_copied": len(result.not_copied),
+            "damaged": len(result.damaged),
+            "stopped": stop.is_set(),
+        },
+    )
 
 
 #: How often a long sweep heartbeats: well inside its `HEARTBEAT_TIMEOUT`.
@@ -2330,6 +2359,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
     adopt_now: asyncio.Task[None] | None = None
+    index_now: asyncio.Task[None] | None = None
+    copy_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -2374,6 +2405,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # missing from the cross-model list meanwhile.
         index_now = asyncio.create_task(
             _index_outputs_logged(state, stop=stop_background), name="index outputs"
+        )
+        # #7255: every saved output's files copied to its row, and the rows reconciled
+        # with the files; until a copy run finishes, a missing row falls back to them.
+        copy_now = asyncio.create_task(
+            _copy_outputs_logged(state, stop=stop_background), name="copy outputs"
         )
         # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
         # VP's, with the sweeps off too.
@@ -2426,7 +2462,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
             await unfollow_backfills()
-        await _join_background(stop_background, backfill, attach_now, adopt_now, index_now)
+        await _join_background(
+            stop_background, backfill, attach_now, adopt_now, index_now, copy_now
+        )
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")

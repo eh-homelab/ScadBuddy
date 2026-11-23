@@ -178,25 +178,17 @@ def test_upsert_sets_copied_at_and_ids_copied_before_finds_the_rest(
     rows: OutputRows,
 ) -> None:
     rows.upsert(make_row("a"))
-    mark = datetime.now(UTC)
+    # The mark is the database's clock, as the copy's is (`run_started_at`).
+    mark = rows.run_started_at(rows.start_run())
     rows.upsert(make_row("b"))
     rows.upsert(make_row("a", name="again"))
     assert rows.ids_copied_before(mark) == set()
     rows.upsert(make_row("c"))
-    later = datetime.now(UTC) + timedelta(seconds=1)
+    later = rows.run_started_at(rows.start_run())
     assert rows.ids_copied_before(later) == {"a", "b", "c"}
     got = rows.get("a")
     assert got is not None
     assert got.meta.name == "again"
-
-
-def test_set_record_replaces_record_and_manifest(rows: OutputRows) -> None:
-    rows.insert(make_row("o1"))
-    rows.set_record("o1", {"plate_key": "k"}, [{"part": "p"}])
-    got = rows.get("o1")
-    assert got is not None
-    assert got.record == {"plate_key": "k"}
-    assert got.manifest == [{"part": "p"}]
 
 
 def test_attach_backfill_keeps_a_record_and_clears_the_backfill(rows: OutputRows) -> None:

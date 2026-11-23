@@ -10,7 +10,7 @@ this module.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -161,6 +161,20 @@ class OutputRows:
         with self._pool.connection() as conn:
             conn.execute(_UPSERT, _values(row))
 
+    def upsert_many(self, rows: Sequence[OutputRow]) -> None:
+        """`upsert` for each row, in one transaction: one commit for a batch of the copy."""
+        if not rows:
+            return
+        with self._pool.connection() as conn, conn.transaction():
+            for row in rows:
+                conn.execute(_UPSERT, _values(row))
+
+    def copied_times(self) -> dict[str, datetime]:
+        """Each row's ``copied_at``, by output id: what the copy compares the files with."""
+        with self._pool.connection() as conn:
+            found = conn.execute("SELECT output_id, copied_at FROM outputs").fetchall()
+        return {str(item["output_id"]): item["copied_at"] for item in found}
+
     def update_meta(self, output_id: str, meta: OutputMeta) -> None:
         with self._pool.connection() as conn:
             conn.execute(
@@ -173,15 +187,6 @@ class OutputRows:
             conn.execute(
                 "UPDATE outputs SET backfill = %s WHERE output_id = %s",
                 (_json(backfill), output_id),
-            )
-
-    def set_record(
-        self, output_id: str, record: dict[str, Any] | None, manifest: list[Any] | None
-    ) -> None:
-        with self._pool.connection() as conn:
-            conn.execute(
-                "UPDATE outputs SET record = %s, manifest = %s WHERE output_id = %s",
-                (_json(record), _json(manifest), output_id),
             )
 
     def attach_backfill(self, output_id: str, record: dict[str, Any], manifest: list[Any]) -> None:
@@ -249,6 +254,17 @@ class OutputRows:
             ).fetchone()
         assert found is not None
         return int(found["id"])
+
+    def run_started_at(self, run_id: int) -> datetime:
+        """When the run started, by the database's clock, as every ``copied_at`` is."""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                "SELECT started_at FROM output_copy_runs WHERE id = %s", (run_id,)
+            ).fetchone()
+        if found is None:
+            raise LookupError(f"no copy run {run_id}")
+        started: datetime = found["started_at"]
+        return started
 
     def finish_run(
         self,

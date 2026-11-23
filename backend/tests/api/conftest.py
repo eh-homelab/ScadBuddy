@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 import zipfile
@@ -249,6 +250,21 @@ def app_payment_sweep_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(main_module, "_retry_payment_closes_logged", off)
     monkeypatch.setattr(main_module, "_settle_payment_captures_logged", off)
+
+
+@pytest.fixture(autouse=True)
+def app_output_copy_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#7255: the app's start copy of the outputs' files to rows does nothing, unless the
+    test is marked `output_copy`. A finished copy ends the files' fallback for a missing
+    row, at a time the test does not choose, and many tests make an output with no row
+    to stand for one saved before the rows (`OutputStore._row_of`)."""
+    if request.node.get_closest_marker("output_copy") is not None:
+        return
+
+    async def off(state: AppState, *, stop: threading.Event) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "_copy_outputs_logged", off)
 
 
 @pytest.fixture(autouse=True)

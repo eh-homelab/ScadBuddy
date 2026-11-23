@@ -1426,3 +1426,17 @@ def test_an_unattributed_analysis_is_not_cached(
     assert _joint_object(client, output) is None
     _live_directory(monkeypatch, paths, model)
     assert _joint_object(client, output) == "o1"
+
+
+@pytest.mark.output_copy
+def test_the_start_copies_the_saved_outputs_to_rows(client: TestClient) -> None:
+    """#7255: the app's start runs one copy, which finishes, so a missing row is a
+    missing output from then on."""
+    rows = _rows(client)
+    deadline = time.monotonic() + 30
+    while not rows.copied():
+        assert time.monotonic() < deadline, "the start's copy did not finish"
+        time.sleep(0.1)
+    last = rows.last_run()
+    assert last is not None and last["finished_at"] is not None
+    assert client.get(f"/api/v1/outputs/{'0' * 32}").status_code == 404
