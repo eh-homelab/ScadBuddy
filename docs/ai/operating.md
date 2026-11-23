@@ -1148,7 +1148,7 @@ the publish sends it as `?expect_draft=`. A draft written after the approval is 
 `draft-changed`, and nothing is published (#6931 review M3); the model then asks again.
 In a session on Temporal, a call that sent no `draft` reads the draft's digest again at its
 run, so a draft written after the approval hashes otherwise. The gate refuses that call
-`NotApproved` as matching no approval, with the same advice (`movedSinceApproval`), and runs
+`NotApproved` as matching no approval, with the tool's `movedSinceApproval` advice, and runs
 nothing (#7199, #7211). A call that sent its own `draft` is not read again: the publish's
 `expect_draft` refuses it 409 `draft-changed`. A flow's call that sends no
 `draft` binds the draft as the run page read it (`flowBinding`, backend
