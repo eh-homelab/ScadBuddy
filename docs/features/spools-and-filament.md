@@ -32,6 +32,29 @@ On the API's `library` queue, `SpoolRefresh` runs on a Schedule. It refreshes th
 presets, runs the pull, re-records any tray changes that were missed, and reconciles RFID
 state.
 
+A spool is made in three ways besides one at a time (#7150, plan
+`docs/superpowers/plans/2026-11-23-spool-create-ops.md`):
+
+- **Bulk create.** The spool form's "How many spools" (1 to 100) makes that many identical
+  spools in one request, `POST /filament/spools/bulk`. Each gets its own number and its own
+  `created` event. The place, presets and K values are written in the same transaction. The
+  request needs an `Idempotency-Key`; the form sends one per opened form, so a retry or a
+  second click makes no more spools. A bulk create never goes into a printer's tray.
+- **Copy.** A spool's "Copy" button opens a new spool form filled from
+  `GET /filament/spools/{id}/copy`. The copy keeps the type, the spool's own values, its
+  note, presets, K values and shelf place. It leaves out the number, tags, tray, weight
+  history and weight lock.
+- **Create from slot.** "New spool from this tray" makes a spool from what the printer last
+  reported in the tray over the LAN: its material, its `#RRGGBBAA` colour and a tagged
+  tray's tag. The spool is placed in the tray, and the tray's previous spool moves to no
+  place. ScadBuddy builds it from its own report; nothing reaches Bambuddy. The spool has no
+  type yet. The route is `POST /printers/{id}/trays/{ams}/{tray}/new-spool` and needs an
+  `Idempotency-Key`. The button is on the native print dialog's tray question and on an
+  empty AMS tray's place page.
+
+The agent's `filament_spool_upsert` takes `quantity` and `copy_of`, and `create_tray_spool`
+makes a spool from a tray.
+
 Tray changes and print ends are recorded when a printer report is written
 (`backend/scadbuddy/filament/capture.py`). They are not a workflow of their own.
 
@@ -42,18 +65,18 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
 ## Code
 
 - Routes:
-  - `backend/scadbuddy/api/filament.py:173` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
-  - `backend/scadbuddy/api/tray_spools.py:36` (a tray's spool link);
+  - `backend/scadbuddy/api/filament.py:214` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
+  - `backend/scadbuddy/api/tray_spools.py:44` (a tray's spool link, and create from slot);
   - `backend/scadbuddy/api/filament_profiles.py:26`.
 - UI:
   - the **Filament** nav item (`frontend/src/components/AppShell.tsx:111`);
   - its routes (`frontend/src/App.tsx:119-135`);
-  - `frontend/src/pages/filament/FilamentPage.tsx:45`, `SpoolPage.tsx:330`;
+  - `frontend/src/pages/filament/FilamentPage.tsx:45`, `SpoolPage.tsx:380`;
   - `frontend/src/components/filament/`;
   - Settings → Printing → Filament (`frontend/src/pages/settings/sections/filament.tsx:684`);
   - the print dialog's picker (`frontend/src/components/FilamentPicker.tsx:358`).
 - Core: `backend/scadbuddy/filament/`:
-  - the SB spools a print reads: `inventory.py` (`read_sb_spools` at `:901`, `reconcile_trays` at `:448`);
+  - the SB spools a print reads: `inventory.py` (`read_sb_spools` at `:957`, `reconcile_trays` at `:453`);
   - `capture.py`, `ledger.py`, `catalog.py`, `types.py`, `locations.py`, `sensors.py`, `invoices.py`, `labels.py`;
   - `backend/scadbuddy/codes/` (code parsing and resolving);
   - `bb_sync_*.py` and `bambuddy_pull.py`;
@@ -99,6 +122,8 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
 - Backend:
   - `backend/tests/filament/`;
   - `backend/tests/api/test_filament*.py`, `test_tray_spools.py`, `test_print_filaments.py`;
+  - the create operations (#7150): `test_filament_spool_create_ops.py`, and create from slot
+    in `test_tray_spools.py`;
   - `backend/tests/test_spool_refresh_replay.py`;
   - `backend/tests/profile_fetch/`.
 

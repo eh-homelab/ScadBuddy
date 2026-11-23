@@ -371,7 +371,9 @@ def test_a_spool_is_made_from_an_untagged_tray_and_placed_in_it(
     assert len(_filament(client).spools.list()) == 2
 
 
-def test_a_spool_from_a_tagged_tray_takes_its_tag_once(client: TestClient, lan_printer: str) -> None:
+def test_a_spool_from_a_tagged_tray_takes_its_tag_once(
+    client: TestClient, lan_printer: str
+) -> None:
     made = _new(client, lan_printer, 0)
     assert made.status_code == 201, made.text
     detail = client.get(f"/api/v1/filament/spools/{made.json()['id']}").json()

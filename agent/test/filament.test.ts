@@ -1405,3 +1405,57 @@ describe('the colour catalog syncs (#6907)', () => {
     expect(result.isError).toBeFalsy()
   })
 })
+
+// #7150: bulk create and copy through filament_spool_upsert.
+describe('filament_spool_upsert quantity and copy_of', () => {
+  const BULK = `${SPOOLS}/bulk`
+  const SOURCE_ID = '8d6f3c1e-0000-4000-8000-0000000061b2'
+
+  it('makes N spools through the bulk route, with a key derived from the call', async () => {
+    const seen: { body: unknown; key: string | null }[] = []
+    server.use(
+      http.post(BULK, async ({ request }) => {
+        seen.push({ body: await request.json(), key: request.headers.get('Idempotency-Key') })
+        return HttpResponse.json([{ id: ROW, number: 20 }, { id: ROW, number: 21 }], { status: 201 })
+      }),
+    )
+    const call = { ...ctx(), callKey: 'durable:s1:run-1:toolu_9' }
+    const input = { fields: { material_id: ROW }, quantity: 2 }
+    expect((await runTool(tool('filament_spool_upsert'), input, call)).isError).toBeFalsy()
+    await runTool(tool('filament_spool_upsert'), input, call)
+    expect(seen[0]!.body).toEqual({ spool: { material_id: ROW }, quantity: 2 })
+    expect(seen[0]!.key).toMatch(/^[0-9a-f]{64}$/)
+    // The same call sent again carries the same key, so the backend makes no second set.
+    expect(seen[1]!.key).toBe(seen[0]!.key)
+  })
+
+  it('starts from the copy draft and lays the fields over it', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.get(`${SPOOLS}/${SOURCE_ID}/copy`, () =>
+        HttpResponse.json({ spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false }, location_id: null, presets: [], k_values: [] }),
+      ),
+      http.post(BULK, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json([{ id: ROW, number: 22 }], { status: 201 })
+      }),
+    )
+    const result = await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID, fields: { note: 'second' } }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([
+      { spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false, note: 'second' }, location_id: null, presets: [], k_values: [], quantity: 1 },
+    ])
+  })
+
+  it('refuses quantity or copy_of on an edit before calling the backend', async () => {
+    const result = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, quantity: 2 }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('leave out `spool_id`')
+  })
+
+  it('names the bulk and copy routes', () => {
+    expect(tool('filament_spool_upsert').routes).toEqual(
+      expect.arrayContaining(['POST /api/v1/filament/spools/bulk', 'GET /api/v1/filament/spools/{spool_id}/copy']),
+    )
+  })
+})

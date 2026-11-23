@@ -109,3 +109,40 @@ describe('tray spool tools', () => {
     expect(result.isError).toBe(true)
   })
 })
+
+// #7150: create from slot.
+describe('create_tray_spool', () => {
+  const NEW = `${BACKEND}/api/v1/printers/${PRINTER}/trays/0/1/new-spool`
+
+  it('is write tier, never outward, on the new-spool route', () => {
+    const t = tool('create_tray_spool')
+    expect(t.risk).toBe('write')
+    expect(t.gated).toBe(false)
+    expect(t.routes).toEqual(['POST /api/v1/printers/{printer_id}/trays/{ams_id}/{tray_id}/new-spool'])
+  })
+
+  it('makes a spool with one key per call', async () => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.post(NEW, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return HttpResponse.json({ id: SPOOL, number: 20 }, { status: 201 })
+      }),
+    )
+    const call = { ...ctx(), callKey: 'durable:s1:run-1:toolu_3' }
+    const input = { printer_id: PRINTER, ams_id: 0, tray_id: 1 }
+    const result = await runTool(tool('create_tray_spool'), input, call)
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ id: SPOOL, number: 20 })
+    await runTool(tool('create_tray_spool'), input, call)
+    expect(keys[0]).toMatch(/^[0-9a-f]{64}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it("passes the backend's refusal back", async () => {
+    server.use(http.post(NEW, () => HttpResponse.json({ detail: "the tray's tag is on another spool" }, { status: 409 })))
+    const result = await runTool(tool('create_tray_spool'), { printer_id: PRINTER, ams_id: 0, tray_id: 1 }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('HTTP 409')
+  })
+})

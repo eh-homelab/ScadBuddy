@@ -26,6 +26,10 @@ import { defineTool, idempotencyKey, json, ToolError, type Tool } from './regist
 
 const SOURCE = "ScadBuddy's own filament inventory"
 
+type SpoolCreate = components['schemas']['SpoolCreate-Input']
+type SpoolDraft = components['schemas']['SpoolDraft']
+type SpoolBulkCreate = components['schemas']['SpoolBulkCreate']
+
 /** A SpoolBuddy device id, as the backend's `DeviceId` accepts it (`filament/models.py`). */
 const DEVICE_ID = z.string().regex(/^[A-Za-z0-9._:-]{1,50}$/)
 
@@ -841,19 +845,56 @@ const tools: Tool[] = [
       "string) override its type's drying values, which a drying that leaves them out records. A new spool needs a `type_id` (filament_type_list) " +
       'or, while it needs a type, a `material_id`; `grams_left` is its first reading. Each edit is one `edited` ' +
       'ledger event. To record a weighing use filament_spool_add_event; to archive use filament_spool_archive. ' +
+      'When adding, `quantity` (1 to 100) makes that many identical spools in one request, each with its own number, ' +
+      "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
+      'values and its place unless that is a tray, never its number, tag, tray, weight or weight lock; `fields` ' +
+      'then change the copy. Either answers the list of spools made, and a resend of the same call makes none twice. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
       'material. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       spool_id: z.string().uuid().optional().describe("A spool's `id`; omit to add"),
       fields: z.record(z.string(), z.unknown()).default({}).describe('The spool fields to set'),
+      quantity: z.number().int().min(1).max(100).optional().describe('When adding: how many identical spools to make'),
+      copy_of: z.string().uuid().optional().describe("When adding: the `id` of a spool to copy"),
     }),
     risk: 'write',
     source: SOURCE,
-    routes: ['POST /api/v1/filament/spools', 'PATCH /api/v1/filament/spools/{spool_id}'],
-    summarize: ({ spool_id }) => (spool_id ? `Edit spool ${spool_id}` : 'Add a spool'),
-    handler: async ({ spool_id, fields }, { backend }) => {
+    routes: [
+      'POST /api/v1/filament/spools',
+      'PATCH /api/v1/filament/spools/{spool_id}',
+      'POST /api/v1/filament/spools/bulk',
+      'GET /api/v1/filament/spools/{spool_id}/copy',
+    ],
+    summarize: ({ spool_id, quantity, copy_of }) =>
+      spool_id
+        ? `Edit spool ${spool_id}`
+        : `Add ${quantity && quantity > 1 ? `${quantity} spools` : 'a spool'}${copy_of ? ` copied from ${copy_of}` : ''}`,
+    handler: async ({ spool_id, fields, quantity, copy_of }, ctx) => {
+      const { backend } = ctx
+      if (spool_id !== undefined && (quantity !== undefined || copy_of !== undefined)) {
+        throw new ToolError('`quantity` and `copy_of` are for adding a spool; leave out `spool_id`')
+      }
+      if (spool_id === undefined && quantity === undefined && copy_of === undefined) {
+        return json(await ok(backend.POST('/api/v1/filament/spools', { body: fields as SpoolCreate }), 'add a spool'))
+      }
       if (spool_id === undefined) {
-        return json(await ok(backend.POST('/api/v1/filament/spools', { body: fields }), 'add a spool'))
+        const draft: SpoolDraft = copy_of
+          ? await ok(
+              backend.GET('/api/v1/filament/spools/{spool_id}/copy', { params: { path: { spool_id: copy_of } } }),
+              `copy spool ${copy_of}`,
+            )
+          : { spool: {} as SpoolDraft['spool'] }
+        // One key per call: a resend after a lost answer makes no second set of spools.
+        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1 } as SpoolBulkCreate
+        return json(
+          await ok(
+            backend.POST('/api/v1/filament/spools/bulk', {
+              body,
+              headers: { 'Idempotency-Key': idempotencyKey(ctx) },
+            }),
+            'add the spools',
+          ),
+        )
       }
       return json(
         await ok(

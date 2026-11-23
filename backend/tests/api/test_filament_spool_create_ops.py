@@ -108,7 +108,9 @@ def test_a_refused_bulk_create_writes_nothing(client: TestClient, change: dict[s
 def test_a_bulk_create_does_not_go_into_a_tray(client: TestClient, pg_conninfo: str) -> None:
     printer = bambuddy_printer(pg_conninfo, 1)
     unit = _location(client, "AMS-A", printer_id=printer, ams_id=0)
-    tray = _location(client, "Slot 1", printer_id=printer, ams_id=0, tray_id=0, parent_id=unit["id"])
+    tray = _location(
+        client, "Slot 1", printer_id=printer, ams_id=0, tray_id=0, parent_id=unit["id"]
+    )
     body = {"spool": {"material_id": _material_id(client)}, "location_id": tray["id"]}
     refused = _bulk(client, body)
     assert refused.status_code == 422, refused.text
