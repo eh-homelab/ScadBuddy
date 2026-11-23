@@ -280,6 +280,18 @@ describe('hosted plugin tools (#6938)', () => {
     expect(expected).toBe(DIGEST)
   })
 
+  // #7199: a flow's call binds the draft it resolved, as backend flows/print_binding.py binds it.
+  it("binds a flow's approval to the resolved draft, and a draft the call sent as sent", async () => {
+    server.use(
+      http.get(`${BASE}/shop-notes/draft-diff`, () =>
+        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: [], manifest_changed: false, draft_digest: DIGEST }),
+      ),
+    )
+    const publish = tool('hosted_plugin_publish')
+    expect((await publish.prepareApproval({ name: 'shop-notes' }, ctx(), { summary: false })).binds).toEqual({ draft: DIGEST })
+    expect((await publish.prepareApproval({ name: 'shop-notes', draft: DIGEST }, ctx(), { summary: false })).binds).toEqual({})
+  })
+
   it('refuses a draft that changed since the approval, and publishes nothing', async () => {
     server.use(
       http.get(`${BASE}/shop-notes`, () => HttpResponse.json(PLUGIN)),

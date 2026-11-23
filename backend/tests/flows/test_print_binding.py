@@ -1,5 +1,6 @@
 """#4445: a flow's `print_output` call names, and its approval binds, the registry
-printer that prints, as the agent's `prepareApproval` resolves it."""
+printer that prints, as the agent's `prepareApproval` resolves it. A flow's
+`hosted_plugin_publish` call binds the draft it publishes in the same way (#7199)."""
 
 import logging
 from datetime import UTC, datetime
@@ -9,7 +10,7 @@ import httpx
 import pytest
 
 from scadbuddy.api import flows as flows_api
-from scadbuddy.flows.print_binding import api_lookup, bind_call
+from scadbuddy.flows.print_binding import BoundCall, api_drafts, api_lookup, bind_call
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.printers.component import Printers
 from scadbuddy.printers.models import PrinterRow
@@ -215,6 +216,91 @@ async def test_the_api_lookup_raises_when_the_api_fails() -> None:
     ) as client:
         with pytest.raises(httpx.HTTPStatusError):
             await api_lookup(client)(PRINTER)
+
+
+DIGEST = "sha256:" + "d" * 64
+PUBLISH: dict[str, Any] = {"name": "shop-notes"}
+
+
+def drafted(digest: str | None) -> Any:
+    async def drafts(plugin: str) -> str | None:
+        assert plugin == "shop-notes"
+        return digest
+
+    return drafts
+
+
+async def no_draft(plugin: str) -> str | None:
+    raise AssertionError("no draft is read for this call")
+
+
+# #7199: a flow's publish binds the draft's digest now, as the agent's `flowBinding` adds it.
+async def test_a_publish_binds_the_draft_digest_and_names_it() -> None:
+    bound = await bind_call("hosted_plugin_publish", PUBLISH, nothing, drafts=drafted(DIGEST))
+    assert bound.args == {"name": "shop-notes", "draft": DIGEST}
+    assert bound.summary == (
+        "Publishes the draft of hosted plugin shop-notes as it is now (draft dddddddddddd)"
+    )
+
+
+async def test_a_publish_of_a_plugin_that_does_not_exist_binds_no_draft() -> None:
+    bound = await bind_call("hosted_plugin_publish", PUBLISH, nothing, drafts=drafted(None))
+    assert bound.args == {"name": "shop-notes", "draft": None}
+    assert bound.summary == "Publishes hosted plugin shop-notes, which does not exist"
+
+
+async def test_a_publish_without_a_draft_lookup_is_not_bound() -> None:
+    bound = await bind_call("hosted_plugin_publish", PUBLISH, nothing)
+    assert bound == BoundCall(PUBLISH)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        # A draft the script sent is bound as sent: the agent refuses one that moved.
+        {"name": "shop-notes", "draft": DIGEST},
+        {"name": "shop-notes", "draft": None},
+        # A name the agent's schema refuses is bound as sent, and never put in a path.
+        {"name": "../printers"},
+        {"name": "shop--notes"},
+        {"name": "shop-notes\n"},
+        {"name": 7},
+        {},
+    ],
+)
+async def test_other_publishes_read_no_draft(args: dict[str, Any]) -> None:
+    bound = await bind_call("hosted_plugin_publish", args, nothing, drafts=no_draft)
+    assert bound.args == args
+    assert bound.summary is None
+
+
+async def test_the_api_drafts_read_the_digest_and_say_none_for_a_404() -> None:
+    found = {"digest": DIGEST}
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/hosted-plugins/shop-notes/draft-diff"
+        if found["digest"] == "":
+            return httpx.Response(404, json={"detail": "no hosted plugin"})
+        return httpx.Response(200, json={"draft_digest": found["digest"]})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(answer), base_url="http://api.example"
+    ) as client:
+        drafts = api_drafts(client)
+        assert await drafts("shop-notes") == DIGEST
+        found["digest"] = ""
+        assert await drafts("shop-notes") is None
+
+
+async def test_the_api_drafts_raise_when_the_api_fails() -> None:
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"detail": "away"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(answer), base_url="http://api.example"
+    ) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await api_drafts(client)("shop-notes")
 
 
 class _Settings:

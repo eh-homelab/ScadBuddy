@@ -26,7 +26,8 @@ from temporal_agent_harness.harness.agent_protocol import AgentConfig
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowUpdateFailedError
 from temporalio.service import RPCError, RPCStatusCode
 
-from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.deps import AppState, SettingsStoreDep, StateDep
+from scadbuddy.api.hosted_plugins import draft_digest as hosted_draft_digest
 from scadbuddy.api.operations import (
     KEY_REQUIRED_DETAIL,
     KEY_REQUIRED_PROBLEM,
@@ -97,7 +98,7 @@ from scadbuddy.flows.operations import (
     NOT_PARENT,
     seal_answer,
 )
-from scadbuddy.flows.print_binding import NativeCheck, PrinterLookup, bind_call
+from scadbuddy.flows.print_binding import DraftLookup, NativeCheck, PrinterLookup, bind_call
 from scadbuddy.flows.store import GrantStateError, author_principal
 from scadbuddy.flows.tool_names import unknown_tools
 from scadbuddy.flows.typecheck import (
@@ -899,10 +900,12 @@ async def _pending(
     lookup: PrinterLookup,
     hash_key: bytes | None,
     native: NativeCheck | None = None,
+    drafts: DraftLookup | None = None,
 ) -> tuple[list[PendingEntry], bool]:
     """The run's parked calls: from the workflow's `agent_status`, joined with the row's
     `waiting_on` for the prompt and the time; from the row alone if it does not answer.
-    A `print_output` call names the registry printer it prints on (#4445)."""
+    A `print_output` call names the registry printer it prints on (#4445), and a
+    `hosted_plugin_publish` call the draft it publishes (`drafts`, #7199)."""
     waiting = {w.call_id: w for w in run.waiting_on}
     try:
         async with asyncio.timeout(_STATUS_SECONDS):
@@ -924,11 +927,12 @@ async def _pending(
         if (call := parked_call(approval.tool_name, approval.tool_input)) is not None:
             _, tool, args = call
             try:
-                bound = await bind_call(tool, args, lookup, native)
+                bound = await bind_call(tool, args, lookup, native, drafts)
             except Exception:
                 # Whatever failed, the page still shows the call; with no binding, an
-                # approval is refused until a read names the printer (`flow-printer-unbound`).
-                logger.warning("could not read the printer a parked print names", exc_info=True)
+                # approval is refused until a read names what it binds
+                # (`flow-printer-unbound`, `flow-draft-unbound`).
+                logger.warning("could not read what a parked call names", exc_info=True)
                 continue
             entries[-1].summary = bound.summary
             if bound.summary is not None and hash_key is not None and tool is not None:
@@ -954,8 +958,9 @@ async def get_flow_run(
     triggers: TriggersDep,
     printers: PrintersDep,
     settings: SettingsStoreDep,
+    state: StateDep,
 ) -> RunView:
-    view = await _run_view(run_id, flows, printers, settings)
+    view = await _run_view(run_id, flows, printers, settings, _drafts(state))
     if (fired := await triggers.store.fire_of_run(run_id)) is not None:
         fire, trigger = fired
         view.trigger = RunTrigger(
@@ -969,7 +974,11 @@ async def get_flow_run(
 
 
 async def _run_view(
-    run_id: str, flows: Flows, printers: Printers, settings: SettingsStore
+    run_id: str,
+    flows: Flows,
+    printers: Printers,
+    settings: SettingsStore,
+    drafts: DraftLookup | None = None,
 ) -> RunView:
     run = await flows.store.get_run(run_id)
     if run is None:
@@ -1006,6 +1015,7 @@ async def _run_view(
         _registry(printers),
         approval_key(flows.settings),
         _native(printers, settings),
+        drafts,
     )
     return view
 
@@ -1015,6 +1025,15 @@ def _registry(printers: Printers) -> PrinterLookup:
 
     async def lookup(printer: str) -> PrinterRow | None:
         return await asyncio.to_thread(printers.store.get, printer)
+
+    return lookup
+
+
+def _drafts(state: AppState) -> DraftLookup:
+    """A lookup of a hosted plugin's draft digest, which this process reads itself (#7199)."""
+
+    async def lookup(plugin: str) -> str | None:
+        return await hosted_draft_digest(state, plugin)
 
     return lookup
 
