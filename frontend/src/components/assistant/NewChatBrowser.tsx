@@ -1,5 +1,5 @@
 import { useId } from 'react'
-import { ChevronDownIcon, MonitorIcon, SmartphoneIcon } from 'lucide-react'
+import { ChevronDownIcon, MonitorIcon, SmartphoneIcon, TriangleAlertIcon } from 'lucide-react'
 import { browserProblem, PHONE, presetOf, type BrowserDraft } from '../../agent/chat/browserDraft'
 import { Button } from '../ui/button'
 import { Input } from '../ui/input'
@@ -9,8 +9,12 @@ import { Input } from '../ui/input'
 // the tab order follows what is on screen. Every button is `type="button"`: they sit inside
 // the composer's form, and a submit would send the draft with the options not yet set.
 
-/** What the toggle shows beside "Browser": the preset, or the locale alone, or nothing. */
+/**
+ * What the toggle shows beside "Browser": "Check size" while the viewport holds the send, else
+ * the preset, or the locale alone, or nothing.
+ */
 function summary(d: BrowserDraft): string | null {
+  if (browserProblem(d)) return 'Check size'
   const preset = presetOf(d)
   if (preset === 'phone') return 'Phone'
   if (preset === 'desktop') return d.locale.trim() || null
@@ -27,6 +31,7 @@ interface ToggleProps {
 
 export function NewChatBrowserToggle({ value, open, onOpenChange, panelId, disabled }: ToggleProps) {
   const shown = summary(value)
+  const held = browserProblem(value) !== null
   return (
     <Button
       type="button"
@@ -38,9 +43,24 @@ export function NewChatBrowserToggle({ value, open, onOpenChange, panelId, disab
       onClick={() => onOpenChange(!open)}
     >
       Browser
-      {shown && <span className="max-w-24 truncate font-normal text-muted-foreground">{shown}</span>}
+      {held && <TriangleAlertIcon data-icon="inline-start" className="text-warn" aria-hidden />}
+      {shown && <span className={`max-w-24 truncate font-normal ${held ? 'text-warn' : 'text-muted-foreground'}`}>{shown}</span>}
       <ChevronDownIcon data-icon="inline-end" className={`transition-transform motion-reduce:transition-none ${open ? 'rotate-180' : ''}`} />
     </Button>
+  )
+}
+
+/**
+ * The viewport's problem while the panel is closed: Send is held, so the reason stays on screen
+ * (the open panel says it under the fields instead).
+ */
+export function NewChatBrowserNotice({ value, id }: { value: BrowserDraft; id: string }) {
+  const problem = browserProblem(value)
+  if (!problem) return null
+  return (
+    <p id={id} className="mt-1.5 text-[12px] text-warn">
+      Browser: {problem} Open Browser to change it.
+    </p>
   )
 }
 

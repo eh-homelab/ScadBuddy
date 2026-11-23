@@ -94,6 +94,25 @@ describe("a new chat's browser options", () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
   })
 
+  it('keeps the reason Send is held on screen once the panel is closed', async () => {
+    const { user, box } = await openComposer()
+    await user.click(browserToggle())
+    await user.type(within(settings()).getByRole('spinbutton', { name: 'Width' }), '1024')
+    await user.type(box, 'hello')
+    await user.click(browserToggle())
+    expect(screen.queryByRole('group', { name: "This chat's browser" })).not.toBeInTheDocument()
+    expect(browserToggle()).toHaveTextContent('Check size')
+    const send = screen.getByRole('button', { name: 'Send' })
+    expect(send).toBeDisabled()
+    expect(screen.getByText('Browser: Set both width and height, or neither. Open Browser to change it.')).toBeInTheDocument()
+    expect(send).toHaveAccessibleDescription('Browser: Set both width and height, or neither. Open Browser to change it.')
+    // Open again, the panel says it under the fields and the line under the composer goes.
+    await user.click(browserToggle())
+    expect(within(settings()).getByText('Set both width and height, or neither.')).toBeInTheDocument()
+    expect(screen.queryByText(/^Browser: Set both/)).not.toBeInTheDocument()
+    expect(send).not.toHaveAccessibleDescription()
+  })
+
   it('sends nothing when Browser, a preset or Image is clicked after the message is typed', async () => {
     const { user, box } = await openComposer()
     await user.type(box, 'hello')

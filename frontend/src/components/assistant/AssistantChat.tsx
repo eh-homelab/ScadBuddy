@@ -59,7 +59,7 @@ import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
 import { Tip } from './Tip'
 import { browserOptions, browserProblem, EMPTY_BROWSER, type BrowserDraft } from '../../agent/chat/browserDraft'
-import { NewChatBrowserPanel, NewChatBrowserToggle } from './NewChatBrowser'
+import { NewChatBrowserNotice, NewChatBrowserPanel, NewChatBrowserToggle } from './NewChatBrowser'
 
 function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -254,6 +254,8 @@ export function AssistantChat({
   const [newChatBrowser, setNewChatBrowser] = useState<BrowserDraft>(EMPTY_BROWSER)
   const [browserOpen, setBrowserOpen] = useState(false)
   const browserPanelId = useId()
+  const browserNoticeId = useId()
+  const browserHeld = !active && !browserOpen && browserProblem(newChatBrowser) !== null
   useEffect(() => {
     if (!state.activeId) return
     setNewChatBrowser(EMPTY_BROWSER)
@@ -1172,7 +1174,12 @@ export function AssistantChat({
             </Button>
           </Tip>
           <MicButton dictation={dictation} disabled={!canSend} embedded={embedded} describedBy={voiceNoteId} />
-          <Button type="submit" size="sm" disabled={!draft.trim() || holdSend || !canSend || preparing > 0}>
+          <Button
+            type="submit"
+            size="sm"
+            disabled={!draft.trim() || holdSend || !canSend || preparing > 0}
+            aria-describedby={browserHeld ? browserNoticeId : undefined}
+          >
             {busy && !holdSend ? 'Queue' : 'Send'}
           </Button>
         </div>
@@ -1184,6 +1191,7 @@ export function AssistantChat({
             disabled={!canSend || state.awaitingStart}
           />
         )}
+        {browserHeld && <NewChatBrowserNotice id={browserNoticeId} value={newChatBrowser} />}
         <VoiceDisclosure id={voiceNoteId} />
       </form>
     </div>
