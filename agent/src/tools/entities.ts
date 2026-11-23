@@ -288,8 +288,8 @@ export const entityTools = [
       'A JSON Schema (Draft 2020-12) object of plain keywords only: at the top `type: "object"`, `properties`, ' +
       '`additionalProperties: true`, `$schema`, `$comment`, `title`, `description`; per key a `type` (a scalar or ' +
       '`array`, or a list of them with `"null"`), with `$comment`, `title`, `description`, `default`, `examples`, ' +
-      '`enum`, `const`, number and length bounds, `format` (not `regex`), `items` (a scalar-typed subschema only), ' +
-      '`minItems`, `maxItems` and `uniqueItems`. Any other keyword is 422 `bad_property_schema`, naming it. Writes ' +
+      '`enum`, `const`, number and length bounds, `format` (not `regex`), `items` (string-typed only), ' +
+      '`minItems`, `maxItems` and `uniqueItems`. Each key must still take some value. Any other keyword is 422 `bad_property_schema`, naming it. Writes ' +
       'ScadBuddy only.',
     input: z.object({ kind: propertyKind, schema: z.record(z.string(), z.unknown()).describe('The whole schema') }),
     risk: 'write',
