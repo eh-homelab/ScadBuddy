@@ -11,7 +11,12 @@ import pytest
 
 from scadbuddy.entities.attachments import EntityAttachmentStore
 from scadbuddy.entities.links import EntityLinkStore, LinkInput
-from scadbuddy.entities.properties import EntityPropertyStore, PropertyPatch
+from scadbuddy.entities.properties import (
+    MAX_KEYS,
+    BadPropertyValue,
+    EntityPropertyStore,
+    PropertyPatch,
+)
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.entities.sweep import sweep_orphan_entities
@@ -231,3 +236,24 @@ def test_an_owner_back_under_the_same_id_keeps_its_links(
     assert sweep_orphan_entities(entities, attachments) == 0
 
     assert [link.url for link in links.list(spool)] == ["https://example.com/spool"]
+
+
+def test_a_merge_past_the_key_limit_may_shrink_but_not_grow(pg_pool: PgPool) -> None:
+    """Spec 6.3a: a merge never drops keys, so an entity can end past `MAX_KEYS`; a patch
+    after it may change and remove keys, never add one."""
+    entities = EntityStore(pg_pool)
+    props = EntityPropertyStore(pg_pool, entities)
+    printers = PrinterStore(pg_pool, None)
+    synthetic = printers.ensure_bambuddy(5, serial=None, name="H2C", model="H2C")
+    gone = EntityRef("printer", synthetic.id)
+    props.apply(gone, PropertyPatch(set={f"g{i}": i for i in range(MAX_KEYS)}), BY)
+    mine = printers.create(PrinterCreate(serial="0938AB000000007", name="Mine"))
+    kept = EntityRef("printer", mine.id)
+    props.apply(kept, PropertyPatch(set={f"k{i}": i for i in range(10)}), BY)
+    printers.ensure_bambuddy(5, serial="0938AB000000007", name="H2C", model="H2C")
+    assert len(props.list(kept)) == MAX_KEYS + 10
+
+    with pytest.raises(BadPropertyValue):
+        props.apply(kept, PropertyPatch(set={"new": 1}), BY)
+    assert len(props.apply(kept, PropertyPatch(set={"g0": "changed"}), BY)) == MAX_KEYS + 10
+    assert len(props.apply(kept, PropertyPatch(set={"g1": None}), BY)) == MAX_KEYS + 9

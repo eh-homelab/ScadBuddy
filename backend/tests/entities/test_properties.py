@@ -376,9 +376,9 @@ def test_a_schema_documents_keys_named_like_keywords(
         "type": "object",
         "properties": {
             "pattern": {"type": "string", "default": {"pattern": "x", "$ref": "y"}},
-            "$ref": {"type": "string", "enum": ["a", "b", {"allOf": [], "not": {}}]},
+            "items": {"type": "string", "enum": ["a", "b", {"allOf": [], "not": {}}]},
             "format": {"type": "string", "examples": [{"patternProperties": 1}]},
-            "patternProperties": {"type": "integer", "const": 3},
+            "enum": {"type": "integer", "const": 3},
         },
     }
 
@@ -537,3 +537,31 @@ def test_set_schema_refuses_a_kind_the_registry_does_not_have(
 ) -> None:
     with pytest.raises(UnknownEntityKind):
         props.set_schema("not_a_kind", {"type": "object"}, BY)
+
+
+@pytest.mark.parametrize("name", ["GTIN", "$ref", "1st", "lot-number", "a" * 65])
+def test_set_schema_refuses_a_property_no_value_can_be_set_under(
+    props: EntityPropertyStore, name: str
+) -> None:
+    before = props.schema("spool_type")
+
+    with pytest.raises(BadPropertySchema) as caught:
+        props.set_schema(
+            "spool_type", {"type": "object", "properties": {name: {"type": "string"}}}, BY
+        )
+
+    assert "no key a value can be set under" in caught.value.reason
+    assert props.schema("spool_type") == before
+
+
+def test_a_pattern_is_refused_before_the_metaschema_compiles_it(
+    props: EntityPropertyStore,
+) -> None:
+    """A broken regex would make the metaschema's format check raise; the keyword
+    allowlist answers first, so no pattern a person sent is compiled."""
+    schema = {"type": "object", "properties": {"mpn": {"type": "string", "pattern": "("}}}
+
+    with pytest.raises(BadPropertySchema) as caught:
+        props.set_schema("spool_type", schema, BY)
+
+    assert caught.value.reason == "keyword 'pattern' is not allowed in property 'mpn'"

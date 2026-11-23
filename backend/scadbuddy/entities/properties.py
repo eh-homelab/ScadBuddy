@@ -198,13 +198,17 @@ def check_schema(schema: dict[str, Any]) -> None:
     names only `KEY_TYPES` (or a list of them, with "null"). Its `items` uses only
     `ITEM_KEYWORDS` and names only `ITEM_TYPES`. In either, `enum` holds a value the key
     takes, `const` is one, no lower bound passes its upper bound, and no minimum length or
-    count passes the value caps. Other empty schemas, such as an integer between two
+    count passes the value caps. A property name must be a key a value can be set
+    under (`KEY_PATTERN`), and the keywords are checked before the metaschema runs, so no
+    pattern a person sent is ever compiled. Other empty schemas, such as an integer between two
     exclusive bounds, are not found. `format` is an annotation only (it checks nothing),
     but "regex" is refused all the same. Any other keyword is refused."""
     if not isinstance(schema, dict):
         raise BadPropertySchema("a schema is a JSON object")
     if _has_nul(schema):
         raise BadPropertySchema("a schema may not hold U+0000 in a string or a key")
+    # Keywords first, so the metaschema never compiles a pattern a person sent.
+    _keywords_only(schema)
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError as e:
@@ -217,7 +221,24 @@ def check_schema(schema: dict[str, Any]) -> None:
     if "$schema" in schema and schema["$schema"] != DRAFT_2020_12:
         raise BadPropertySchema(f'"$schema" may only be "{DRAFT_2020_12}"')
     for key, sub in schema.get("properties", {}).items():
+        if KEY_PATTERN.fullmatch(key) is None:
+            raise BadPropertySchema(f"property '{key}' is no key a value can be set under")
         _check_key(sub, f"in property '{key}'", item=False)
+
+
+def _keywords_only(schema: dict[str, Any]) -> None:
+    """The allowlist of keyword names alone, before any value is looked at."""
+    _only(schema, TOP_KEYWORDS, "at the top level")
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        raise BadPropertySchema('"properties" is a JSON object')
+    for key, sub in properties.items():
+        if not isinstance(sub, dict):
+            raise BadPropertySchema(f"the subschema in property '{key}' is a JSON object")
+        _only(sub, KEY_KEYWORDS, f"in property '{key}'")
+        items = sub.get("items")
+        if isinstance(items, dict):
+            _only(items, ITEM_KEYWORDS, f"in the items of property '{key}'")
 
 
 def _only(node: dict[str, Any], allowed: frozenset[str], where: str) -> None:
