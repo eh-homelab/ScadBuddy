@@ -41,6 +41,11 @@ describe('the service credential on a call', () => {
       await expect(wrapped(`http://127.0.0.1:${port}/api/v1/internal/crud/agent/x/`, { method: 'DELETE' })).rejects.toThrow()
       expect((await wrapped(`http://127.0.0.1:${port}/bucket/old`)).status).toBe(200)
       expect(seen).toEqual(['DELETE /api/v1/internal/crud/agent/x/', 'GET /bucket/old', 'GET /bucket/new'])
+      // With no token held, the call goes out without one, and still follows no redirect (#7183).
+      const none: CredentialSource = { current: async () => undefined, invalidate: () => undefined }
+      const bare = withServiceCredential(globalThis.fetch, none, `http://127.0.0.1:${port}/api`)
+      await expect(bare(`http://127.0.0.1:${port}/api/v1/internal/crud/agent/y/`, { method: 'DELETE' })).rejects.toThrow()
+      expect(seen.slice(3)).toEqual(['DELETE /api/v1/internal/crud/agent/y/'])
     } finally {
       await new Promise((resolve) => server.close(resolve))
     }
