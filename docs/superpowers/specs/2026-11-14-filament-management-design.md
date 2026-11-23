@@ -671,6 +671,10 @@ holds each decision and what it costs if wrong.
     (`filament/labels.py` `label_base_url`), else the page's own origin. A phone camera opens the
     URL; `/x/:code` resolves it (`backend/scadbuddy/codes/`). Modes `?locations=` and `?printers=`
     of the labels page print them.
+  - As built in #7157 (plan `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): the
+    size is a label template, the 50 x 25 mm roll above by default, or one of BB's templates or
+    a custom size, kept in the setting `filament_label_template`. `POST /filament/labels` gives
+    the same labels as a PDF.
 
 ## 8. Sync with BB
 
@@ -1063,8 +1067,8 @@ Every item needs an SB equivalent:
   low-stock threshold, drying presets.
 
 Gap recorded by #6264, for #6270: BB's label templates (custom label sizes) and its
-`/inventory/labels` PDF output are not matched. SB prints one fixed 50 x 25 mm label from the
-browser (§7).
+`/inventory/labels` PDF output were not matched. Matched by #7157 (§7): templates, a custom
+size and `POST /filament/labels`.
 
 ## 12. Phases
 
