@@ -397,16 +397,51 @@ describe('ExchangeCredential', () => {
     expect(slept).toEqual([5_000])
   })
 
-  it('the default wait keeps a one-shot process alive (#7099 review)', async () => {
+  it('the default wait keeps a one-shot process alive, and an abort clears its timer (#7099 review, #7144)', async () => {
     const credential = new ExchangeCredential({ backendUrl: 'http://backend:8080/', proofFile: '/x', proof: 'k8s' })
-    const spy = vi.spyOn(globalThis, 'setTimeout')
+    const sleep = (credential as unknown as { sleep: (ms: number, signal?: AbortSignal) => Promise<void> }).sleep
+    const set = vi.spyOn(globalThis, 'setTimeout')
+    const clear = vi.spyOn(globalThis, 'clearTimeout')
     try {
-      void (credential as unknown as { sleep: (ms: number) => Promise<void> }).sleep(1)
-      const timer = spy.mock.results.at(-1)?.value as NodeJS.Timeout
+      const controller = new AbortController()
+      const slept = sleep(60_000, controller.signal)
+      const timer = set.mock.results.at(-1)?.value as NodeJS.Timeout
       expect(timer.hasRef()).toBe(true)
+      controller.abort()
+      await slept
+      expect(clear).toHaveBeenCalledWith(timer)
     } finally {
-      spy.mockRestore()
+      set.mockRestore()
+      clear.mockRestore()
     }
+  })
+
+  it('a call soon after a 401 waits out the re-exchange hold-off and carries the new token (#7144)', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const slept: number[] = []
+    const credential = new ExchangeCredential({
+      backendUrl: 'http://backend:8080/',
+      proofFile: '/var/run/scadbuddy/token',
+      proof: 'k8s',
+      fetchImpl: backend.fetchImpl,
+      readProof: async () => 'jwt-1',
+      now: () => clock.now,
+      log: () => undefined,
+      sleep: async (ms) => {
+        slept.push(ms)
+        clock.now += ms
+      },
+    })
+    const first = (await credential.current())!
+    // A 401 7 s after the exchange: the next exchange is held off until 10 s after it.
+    clock.now = 7_000
+    credential.invalidate(first)
+    const second = await credential.untilCurrent()
+    expect(slept).toEqual([3_000])
+    expect(second).toMatch(/^sbsvc_/)
+    expect(second).not.toBe(first)
+    expect(backend.state.calls.length).toBe(2)
   })
 
   it('counts the exchange after the wait in the bound (#7099 review)', async () => {
