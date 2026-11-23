@@ -220,11 +220,13 @@ def api_drafts(client: httpx.AsyncClient) -> DraftLookup:
         # An answer that is no JSON, or holds no digest, is a failed read, as an HTTP error is:
         # `flow_decide` turns any `httpx.HTTPError` into its "could not read" refusal (#7211).
         try:
-            digest = answer.json().get("draft_digest")
+            body = answer.json()
         except ValueError as err:
             raise httpx.DecodingError(
                 "the draft-diff answered no JSON", request=answer.request
             ) from err
+        # JSON that is no object (`[]`, `"x"`) holds no digest either (#7219).
+        digest = body.get("draft_digest") if isinstance(body, dict) else None
         if not isinstance(digest, str):
             raise httpx.DecodingError(
                 "the draft-diff answered no draft_digest", request=answer.request
