@@ -38,7 +38,7 @@ from scadbuddy.bambuddy.filaments import colour_distance
 from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
 from scadbuddy.bambuddy.trays import CLOSE_COLOUR, place_label, seen_trays, tray_label
 from scadbuddy.filament import models as m
-from scadbuddy.filament.catalog import catalog_key
+from scadbuddy.filament.catalog import catalog_key, resolve_or_add
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
@@ -195,6 +195,11 @@ def _reason(tray: SeenTray, holder: m.Spool, assigned: m.Spool) -> str:
         f" {holder.effective.rgba or 'with no colour'}, and Bambuddy assigns"
         f" #{assigned.number} there"
     )
+
+
+#: Where a material a tray names first is sorted in its catalog: after the seeded ones, as
+#: the Bambuddy pull and the CSV import add theirs (`bambuddy_pull._ADDED_SORT`).
+_ADDED_SORT: Final = 1000
 
 
 class TrayNotFilledError(ValueError):
@@ -684,43 +689,94 @@ class FilamentInventory:
         first); the spools by id; then the place, ``FOR SHARE`` in
         `LocationStore.move_on`, after its spool, as `LocationStore.move` does. The
         place's row is never locked ``FOR UPDATE`` here, which would invert that order."""
+        place = self.tray_place(printer_id, ams_id, tray_id, seen)
+        defaults = self._spools.defaults()
+        with self._pool.connection() as conn, conn.transaction():
+            self.link_on(conn, place, printer_id, ams_id, tray_id, spool_id, seen, actor=actor)
+            linked = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
+        assert linked is not None
+        return linked
+
+    def tray_place(self, printer_id: UUID, ams_id: int, tray_id: int, seen: SeenTray) -> UUID:
+        """The tray's place, made when it has none (`LocationStore.ensure_ams`), for `link`
+        and `create_in_tray_on`. `TrayNotFilledError` when ``seen`` is not that tray
+        filled; `LookupError` for no such printer."""
         material = (seen.material or "").strip()
         if (seen.ams_id, seen.tray_id) != (ams_id, tray_id) or not material:
             raise TrayNotFilledError()
-        defaults = self._spools.defaults()
         with self._pool.connection() as conn:
             printer = conn.execute(
                 "SELECT name FROM printers WHERE id = %s", (printer_id,)
             ).fetchone()
         if printer is None:
             raise LookupError(f"no printer {printer_id}")
-        place = self._locations.ensure_ams(
+        return self._locations.ensure_ams(
             printer_id, ams_id, tray_id, label=place_label(printer["name"], ams_id, tray_id)
+        ).id
+
+    def create_in_tray_on(
+        self,
+        conn: Conn,
+        place_id: UUID,
+        printer_id: UUID,
+        ams_id: int,
+        tray_id: int,
+        seen: SeenTray,
+        *,
+        actor: str,
+    ) -> m.Spool:
+        """A new spool from what the tray reports, placed in it, in the caller's
+        transaction (#7150, R-7150-4, R-7150-5): the tray's material (by key against every
+        material name and alias, added when no row has it), its ``#RRGGBBAA``, and its RFID
+        keys as the spool's tag; then `link_on`'s steps. No type, label weight or grams.
+        `TrayTagClashError` when the tray's tag is on an unarchived spool (that spool is
+        the tray's), checked before anything is written."""
+        _tray_lock(conn, printer_id, ams_id, tray_id)
+        self._no_tag_clash(conn, seen, None)
+        material = resolve_or_add(
+            conn, "materials", (seen.material or "").strip(), sort_order=_ADDED_SORT
         )
-        with self._pool.connection() as conn, conn.transaction():
-            _tray_lock(conn, printer_id, ams_id, tray_id)
-            self._no_tag_clash(conn, seen, spool_id)
-            uid, tray = clean_tag_uid(seen.tag_uid), clean_tray_uuid(seen.tray_uuid)
-            kind: m.TagKind = "bambu_mifare" if tray is not None else "other"
-            if uid is not None or tray is not None:
-                FilamentSpoolStore.tag_on(conn, uid, tray, kind)
-            rows = conn.execute(
-                "SELECT id, location_id, archived_at FROM filament_spools"
-                " WHERE id = %s OR location_id = %s ORDER BY id FOR UPDATE",
-                (spool_id, place.id),
-            ).fetchall()
-            spool = next((row for row in rows if row["id"] == spool_id), None)
-            if spool is None or spool["archived_at"] is not None:
-                raise LookupError(f"no spool {spool_id}")
-            for row in rows:
-                if row["id"] != spool_id:
-                    LocationStore.move_on(conn, row["id"], None, actor=actor)
-            self.place_on(conn, spool_id, place.id, seen, actor=actor)
-            if uid is not None or tray is not None:
-                FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, None, actor)
-            linked = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
-        assert linked is not None
-        return linked
+        body = m.SpoolCreate(material_id=material, rgba=seen.rgba)
+        spool_id = self._spools.create_on(conn, body, actor=actor)
+        self.link_on(conn, place_id, printer_id, ams_id, tray_id, spool_id, seen, actor=actor)
+        made = FilamentSpoolStore.read(conn, spool_id, defaults=self._spools.defaults())
+        assert made is not None
+        return made
+
+    def link_on(
+        self,
+        conn: Conn,
+        place_id: UUID,
+        printer_id: UUID,
+        ams_id: int,
+        tray_id: int,
+        spool_id: UUID,
+        seen: SeenTray,
+        *,
+        actor: str,
+    ) -> None:
+        """`link` on ``conn``, in the caller's transaction, at the tray's place
+        ``place_id`` (`tray_place`)."""
+        _tray_lock(conn, printer_id, ams_id, tray_id)
+        self._no_tag_clash(conn, seen, spool_id)
+        uid, tray = clean_tag_uid(seen.tag_uid), clean_tray_uuid(seen.tray_uuid)
+        kind: m.TagKind = "bambu_mifare" if tray is not None else "other"
+        if uid is not None or tray is not None:
+            FilamentSpoolStore.tag_on(conn, uid, tray, kind)
+        rows = conn.execute(
+            "SELECT id, location_id, archived_at FROM filament_spools"
+            " WHERE id = %s OR location_id = %s ORDER BY id FOR UPDATE",
+            (spool_id, place_id),
+        ).fetchall()
+        spool = next((row for row in rows if row["id"] == spool_id), None)
+        if spool is None or spool["archived_at"] is not None:
+            raise LookupError(f"no spool {spool_id}")
+        for row in rows:
+            if row["id"] != spool_id:
+                LocationStore.move_on(conn, row["id"], None, actor=actor)
+        self.place_on(conn, spool_id, place_id, seen, actor=actor)
+        if uid is not None or tray is not None:
+            FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, None, actor)
 
     def unlink(self, printer_id: UUID, ams_id: int, tray_id: int, *, actor: str) -> None:
         """Move every spool in the tray's place to no place, each with a ``moved``
@@ -798,7 +854,7 @@ class FilamentInventory:
         return found
 
     @staticmethod
-    def _no_tag_clash(conn: Conn, seen: SeenTray, spool_id: UUID) -> None:
+    def _no_tag_clash(conn: Conn, seen: SeenTray, spool_id: UUID | None) -> None:
         """`TrayTagClashError` when a tag the tray reports (its ``tray_uuid``'s or its
         ``tag_uid``'s, both checked, as `_Keys.hold` reads both) is bound to an unarchived
         spool other than ``spool_id``. An archived holder does not count: `_Keys` ignores

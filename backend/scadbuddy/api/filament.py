@@ -36,6 +36,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 from fastapi.responses import JSONResponse
+from psycopg import errors as pg_errors
 from pydantic import AwareDatetime, BaseModel, ValidationError
 from temporalio.service import RPCError
 
@@ -152,6 +153,7 @@ from scadbuddy.filament.spools import (
     OverrideKindError,
     SpoolBambuddyLinkedError,
     SpoolInUseError,
+    SpoolTrayPlaceError,
     SpoolTypelessError,
     TagKeysClashError,
     TagUnnamedError,
@@ -1068,6 +1070,86 @@ async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCr
         return await asyncio.to_thread(filament.spools.create, body, actor=actor(caller))
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None
+
+
+BULK_ROUTE = "POST /filament/spools/bulk"
+
+
+@router.post(
+    "/spools/bulk",
+    response_model=list[m.Spool],
+    status_code=status.HTTP_201_CREATED,
+    summary="Add several identical spools",
+    description=(
+        "`quantity` (1 to 100) spools of one `spool` body, in one transaction (#7150): each "
+        "gets its own number and its own `created` event (`grams_left` is each one's first "
+        "reading), its move to `location_id`, and its own `presets` and `k_values`. Answers "
+        "the spools in number order. Needs an `Idempotency-Key` (428 without one): a retry "
+        "with the same key answers the first result and writes nothing, and the key with "
+        "another body is a 422. 422 for a bad field, a row it names that does not exist, an "
+        "effective minimum temperature above its maximum, two preset or K rows of one key, "
+        "or a place that does not exist, is archived, is an AMS unit's or is a printer's "
+        "tray (a tray takes one spool, through its own link). Nothing is written on a "
+        "refusal."
+    ),
+)
+async def bulk_create_spools(
+    filament: FilamentDep,
+    caller: CallerDep,
+    body: m.SpoolBulkCreate,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> JSONResponse:
+    who = actor(caller)
+    # A person's key, under their own name, as the CSV import keys it.
+    key = f"{who}\x1f{required_key(idempotency_key)}"
+    asked = body.model_dump(mode="json")
+
+    def write() -> Replay:
+        defaults = filament.spools.defaults()
+        with filament.spools.transaction() as conn:
+
+            def run() -> Replay:
+                try:
+                    with conn.transaction():
+                        ids = filament.spools.bulk_on(conn, body, actor=who)
+                except pg_errors.ForeignKeyViolation:
+                    raise CatalogRefError() from None
+                except pg_errors.UniqueViolation:
+                    raise TypeRowsDuplicateError() from None
+                spools = []
+                for spool_id in ids:
+                    made = filament.spools.read(conn, spool_id, defaults=defaults)
+                    assert made is not None
+                    spools.append(made.model_dump(mode="json"))
+                return Replay(status.HTTP_201_CREATED, spools)
+
+            return idempotent_write(conn, "filament", key, BULK_ROUTE, asked, run)
+
+    try:
+        done = await asyncio.to_thread(write)
+    except (*_SPOOL_REFUSED, SpoolTrayPlaceError, MoveTargetError, CatalogRefError) as exc:
+        raise _refused(exc) from None
+    return JSONResponse(done.body, status_code=done.status)
+
+
+@router.get(
+    "/spools/{spool_id}/copy",
+    response_model=m.SpoolDraft,
+    summary="Start a new spool from an existing one",
+    description=(
+        "The body `POST /filament/spools/bulk` takes, less its `quantity`, filled from the "
+        "spool (#7150): its type, its own overrides, its note, its own presets and K values, "
+        "and its place unless that is a printer's tray or archived. It leaves out what stays "
+        "the first spool's own: its number, tags, tray, ledger (so no `grams_left`) and "
+        "weight lock. An archived spool can be copied. Writes nothing; 404 for no such "
+        "spool."
+    ),
+)
+async def copy_spool(filament: FilamentDep, spool_id: UUID) -> m.SpoolDraft:
+    draft = await asyncio.to_thread(filament.spools.copy, spool_id)
+    if draft is None:
+        raise _no_spool(spool_id)
+    return draft
 
 
 @router.get(

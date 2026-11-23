@@ -332,3 +332,78 @@ def test_a_unit_no_printer_has_is_422(
     external holders 255 with trays 0-1 (`trays.unit_label`'s spaces)."""
     assert client.put(_path(lan_printer, ams_id, tray_id), json=_ANY).status_code == 422
     assert client.delete(_path(lan_printer, ams_id, tray_id)).status_code == 422
+
+
+# -- create from slot (#7150) -------------------------------------------------------------
+
+
+def _new(
+    client: TestClient, printer_id: str, tray_id: int, key: str | None = "n-1", ams_id: int = 0
+) -> Any:
+    headers = {} if key is None else {"Idempotency-Key": key}
+    return client.post(
+        f"/api/v1/printers/{printer_id}/trays/{ams_id}/{tray_id}/new-spool", headers=headers
+    )
+
+
+def test_a_spool_is_made_from_an_untagged_tray_and_placed_in_it(
+    client: TestClient, lan_printer: str, spans: InMemorySpanExporter
+) -> None:
+    """R-7150-5: the tray's material and RGBA, no type, placed in the tray; the tray's
+    previous spool moves out. A retry with the key answers the same spool. Nothing reaches
+    Bambuddy."""
+    before = _sb_spool(client)
+    assert client.put(_path(lan_printer), json={"spool_id": str(before)}).status_code == 200
+    with forbid_bambuddy(spans, "https://bambuddy.test"):
+        assert _new(client, lan_printer, 1, key=None).status_code == 428
+        made = _new(client, lan_printer, 1)
+        assert made.status_code == 201, made.text
+        again = _new(client, lan_printer, 1)
+    spool = made.json()
+    assert again.json() == spool
+    assert spool["names"]["material"] == "PLA"
+    assert spool["rgba"] == "#FFFFFFFF"
+    assert spool["type_id"] is None
+    assert _held(client, lan_printer) == UUID(spool["id"])
+    moved_out = _filament(client).spools.get(before)
+    assert moved_out is not None
+    assert moved_out.location_id is None
+    assert len(_filament(client).spools.list()) == 2
+
+
+def test_a_spool_from_a_tagged_tray_takes_its_tag_once(client: TestClient, lan_printer: str) -> None:
+    made = _new(client, lan_printer, 0)
+    assert made.status_code == 201, made.text
+    detail = client.get(f"/api/v1/filament/spools/{made.json()['id']}").json()
+    assert detail["tag"]["tray_uuid"] == UUID_A
+    assert _held(client, lan_printer, tray_id=0) == UUID(made.json()["id"])
+    # The tag is on that spool now: a second create from the tray is refused.
+    second = _new(client, lan_printer, 0, key="n-2")
+    assert second.status_code == 409, second.text
+    assert len(_filament(client).spools.list()) == 1
+
+
+def test_a_slot_whose_material_no_row_has_adds_it(client: TestClient, lan_printer: str) -> None:
+    report = _report()
+    report["ams"]["ams"][0]["tray"][1]["tray_type"] = "PPS-CF"
+    _printers(client).reports.put(lan_printer, report, datetime.now(UTC))
+    made = _new(client, lan_printer, 1)
+    assert made.status_code == 201, made.text
+    assert made.json()["names"]["material"] == "PPS-CF"
+    names = [r.name for r in _filament(client).catalog.list("materials") if isinstance(r, Material)]
+    assert names.count("PPS-CF") == 1
+
+
+def test_create_from_slot_refuses_what_link_refuses(client: TestClient, lan_printer: str) -> None:
+    assert _new(client, lan_printer, 2).status_code == 409
+    assert _new(client, lan_printer, 9, key="n-9").status_code == 422
+    unknown = "8d6f3c1e-0000-4000-8000-0000000000aa"
+    assert _new(client, unknown, 1, key="n-u").status_code == 404
+    assert _filament(client).spools.list() == []
+
+
+def test_a_copy_leaves_the_tray_behind(client: TestClient, lan_printer: str) -> None:
+    made = _new(client, lan_printer, 1).json()
+    draft = client.get(f"/api/v1/filament/spools/{made['id']}/copy").json()
+    assert draft["location_id"] is None
+    assert draft["spool"]["rgba"] == "#FFFFFFFF"

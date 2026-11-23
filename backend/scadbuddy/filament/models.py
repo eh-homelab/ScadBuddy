@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Final, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -1054,6 +1054,27 @@ class SpoolCreate(_In):
         if self.type_id is None and self.material_id is None:
             raise ValueError("a spool needs a type_id or a material_id")
         return self
+
+
+class SpoolDraft(_In):
+    """A new spool as the spool form holds it (#7150, R-7150-2): its fields, the place it
+    goes to (not a printer's tray) and its own presets and K values. What
+    ``GET /filament/spools/{id}/copy`` answers (R-7150-3)."""
+
+    spool: SpoolCreate
+    location_id: UUID | None = None
+    presets: list[SpoolPresetCreate] = Field(default_factory=list)
+    k_values: list[SpoolKValueCreate] = Field(default_factory=list)
+
+
+#: The most spools one bulk create makes (R-7150-1).
+BULK_MAX: Final = 100
+
+
+class SpoolBulkCreate(SpoolDraft):
+    """``quantity`` identical spools, each with its own number (#7150, R-7150-1)."""
+
+    quantity: Annotated[int, Field(ge=1, le=BULK_MAX)] = 1
 
 
 class SpoolPatch(_Patch):
