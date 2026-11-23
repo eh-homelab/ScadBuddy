@@ -17,6 +17,8 @@ afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
 const BASE = `${BACKEND}/api/v1/hosted-plugins`
+const DIGEST = `sha256:${'d'.repeat(64)}`
+const MOVED = `sha256:${'e'.repeat(64)}`
 
 function tool(name: string): Tool {
   const t = ALL_TOOLS.find((x) => x.name === name)
@@ -103,13 +105,13 @@ describe('hosted plugin tools (#6938)', () => {
         HttpResponse.json({
           files: [{ path: 'skills/notes/SKILL.md', sha256: 'a'.repeat(64), size: 12, executable: false, updated_at: '' }],
           total_bytes: 12,
-          max_files: 500,
+          max_files: 499,
           max_file_bytes: 2097152,
           max_total_bytes: 20971520,
         }),
       ),
       http.get(`${BASE}/shop-notes/draft-diff`, () =>
-        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: ['skills/notes/SKILL.md'], manifest_changed: false }),
+        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: ['skills/notes/SKILL.md'], manifest_changed: false, draft_digest: DIGEST }),
       ),
     )
     const all = firstText(await tool('hosted_plugin_list').execute({}, ctx())) as { plugins: { name: string }[] }
@@ -215,7 +217,7 @@ describe('hosted plugin tools (#6938)', () => {
     server.use(
       http.get(`${BASE}/shop-notes`, () => HttpResponse.json(PLUGIN)),
       http.get(`${BASE}/shop-notes/draft-diff`, () =>
-        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: ['skills/notes/SKILL.md'], manifest_changed: false }),
+        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: ['skills/notes/SKILL.md'], manifest_changed: false, draft_digest: DIGEST }),
       ),
       http.post(`${BASE}/shop-notes/publish`, () => {
         posted = true
@@ -236,7 +238,7 @@ describe('hosted plugin tools (#6938)', () => {
     server.use(
       http.get(`${BASE}/shop-notes`, () => HttpResponse.json(PLUGIN)),
       http.get(`${BASE}/shop-notes/draft-diff`, () =>
-        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: [], manifest_changed: false }),
+        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: [], manifest_changed: false, draft_digest: DIGEST }),
       ),
     )
     const prepared = await tool('hosted_plugin_publish').prepareApproval({ name: 'shop-notes' }, ctx())
@@ -247,11 +249,58 @@ describe('hosted plugin tools (#6938)', () => {
     server.use(
       http.get(`${BASE}/shop-notes`, () => HttpResponse.json(PLUGIN)),
       http.get(`${BASE}/shop-notes/draft-diff`, () =>
-        HttpResponse.json({ base_version: 1, added: ['skills/b/SKILL.md'], removed: [], changed: ['skills/notes/SKILL.md'], manifest_changed: false }),
+        HttpResponse.json({ base_version: 1, added: ['skills/b/SKILL.md'], removed: [], changed: ['skills/notes/SKILL.md'], manifest_changed: false, draft_digest: DIGEST }),
       ),
     )
     const prepared = await tool('hosted_plugin_publish').prepareApproval({ name: 'shop-notes' }, ctx())
     expect(prepared.summary).toBe('Publish hosted plugin shop-notes as version 2 (1 added, 1 changed) and offer it to the assistant')
+  })
+
+  it('binds the approval to the draft it describes, and publishes only that draft', async () => {
+    let expected: string | null = 'unsent'
+    server.use(
+      http.get(`${BASE}/shop-notes`, () => HttpResponse.json(PLUGIN)),
+      http.get(`${BASE}/shop-notes/draft-diff`, () =>
+        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: ['skills/notes/SKILL.md'], manifest_changed: false, draft_digest: DIGEST }),
+      ),
+      http.post(`${BASE}/shop-notes/publish`, ({ request }) => {
+        expected = new URL(request.url).searchParams.get('expect_draft')
+        return HttpResponse.json({ version: 2, zip_sha256: 'z', content_hash: 'h', files: {}, published_at: '', published_by: 'service:agent' })
+      }),
+    )
+    const publish = tool('hosted_plugin_publish')
+    const prepared = await publish.prepareApproval({ name: 'shop-notes' }, ctx())
+    expect(prepared.input).toEqual({ name: 'shop-notes', draft: DIGEST })
+    // At the run only the input is wanted: a `draft` sent is kept with no read.
+    server.use(http.get(`${BASE}/shop-notes/draft-diff`, () => HttpResponse.error()))
+    const kept = await publish.prepareApproval(prepared.input, ctx(), { summary: false })
+    expect(kept.input).toEqual(prepared.input)
+    const { fake } = offers(undefined, view({ version: 2 }))
+    await publish.execute(prepared.input, { ...ctx(fake), gate: 'workflow' })
+    expect(expected).toBe(DIGEST)
+  })
+
+  it('refuses a draft that changed since the approval, and publishes nothing', async () => {
+    server.use(
+      http.get(`${BASE}/shop-notes`, () => HttpResponse.json(PLUGIN)),
+      http.get(`${BASE}/shop-notes/draft-diff`, () =>
+        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: [], manifest_changed: false, draft_digest: MOVED }),
+      ),
+      http.post(`${BASE}/shop-notes/publish`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'the draft changed since it was approved', instance: '', reason: 'draft-changed' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const publish = tool('hosted_plugin_publish')
+    // confirm_action with the approved input asks again: the draft is no longer that one.
+    await expect(publish.prepareApproval({ name: 'shop-notes', draft: DIGEST }, ctx())).rejects.toThrow(/changed since a person approved/)
+    const { fake, calls } = offers(undefined)
+    await expect(publish.execute({ name: 'shop-notes', draft: DIGEST }, { ...ctx(fake), gate: 'workflow' })).rejects.toThrow(
+      /changed since a person approved this publish; nothing was published/,
+    )
+    expect(calls).toEqual([])
   })
 
   it('publishes, then installs when no package has the name', async () => {

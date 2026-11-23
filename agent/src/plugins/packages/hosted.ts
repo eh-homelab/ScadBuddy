@@ -23,8 +23,11 @@ export interface HostedPlugins {
   zip(name: string, version: number, zipSha256?: string): Promise<Buffer>
 }
 
-/** A version's zip: as large as a hosted plugin's (20 MiB unpacked), at a LAN's speed. */
-const ZIP_TIMEOUT_MS = 120_000
+/**
+ * A version's zip: as large as a hosted plugin's (20 MiB unpacked), at a LAN's speed. The
+ * installer and the feed (plugins/feed.ts `CrudPluginFeeds.zip`) read the same route with it.
+ */
+export const HOSTED_ZIP_TIMEOUT_MS = 120_000
 
 export class CrudHostedPlugins implements HostedPlugins {
   readonly #target: CrudTarget
@@ -51,7 +54,7 @@ export class CrudHostedPlugins implements HostedPlugins {
     let bytes: Buffer
     try {
       const response = await crudCall(this.#target.fetch ?? globalThis.fetch, this.#target.baseUrl, 'a hosted plugin version', path, {
-        timeoutMs: ZIP_TIMEOUT_MS,
+        timeoutMs: HOSTED_ZIP_TIMEOUT_MS,
       })
       bytes = Buffer.from(await response.arrayBuffer())
     } catch (err) {

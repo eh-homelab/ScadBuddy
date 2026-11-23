@@ -18,7 +18,8 @@ import { dropHostedPackage, packageNameTaken, setHostedLookup } from '../aiPlugi
 
 const BASE = '/api/v1/hosted-plugins'
 const MAX_FILE_BYTES = 2 * 1024 * 1024
-const MAX_FILES = 500
+// backend hosted_plugins/rules.py MAX_FILES: the agent unpacks at most 500 entries, and plugin.json is one.
+const MAX_FILES = 499
 const MAX_TOTAL_BYTES = 20 * 1024 * 1024
 const TOP_LEVEL = ['skills', 'agents', 'commands']
 const MANIFEST = '.claude-plugin/plugin.json'
@@ -168,6 +169,8 @@ function diff(p: Plugin): HostedPluginDraftDiff {
     removed: Object.keys(before).filter((f) => !(f in after)).sort(),
     changed: Object.keys(after).filter((f) => f in before && before[f]!.sha256 !== after[f]).sort(),
     manifest_changed: base !== undefined && base.description !== p.description,
+    // The backend hashes the same three things (api/hosted_plugins.py `_draft_digest`).
+    draft_digest: `mock:${JSON.stringify([[...p.files].map(([path, f]) => [path, f.sha256]).sort(), p.description, base?.version ?? null])}`,
   }
 }
 

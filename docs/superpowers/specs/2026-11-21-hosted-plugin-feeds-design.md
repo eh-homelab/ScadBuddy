@@ -1,6 +1,10 @@
 # Hosted plugins and marketplace feeds
 
-Date: 2026-11-21. Status: draft for the owner's review.
+Date: 2026-11-21. Status: implemented (epic #6931, Tasks 1 to 7 merged by 2026-11-23), with
+the amendments below: the feed is LAN-only (owner decision on eh-homelab/clusters#4017,
+§6.4, §9), and the final review's fixes (#6931 review: the file cap in §6.2, the bound
+publish approval in §6.2, the hosted zip URL in §6.4). The §7 end-to-end run with a real
+Claude Code is not done yet (#7190).
 
 ## 1. Intent
 
@@ -164,7 +168,11 @@ access token, and the agent's credential is what the MCP tools of #6938 call the
 Path rules, checked at write: UTF-8, relative, no `..`, no segment that starts with `.`,
 no symlinks. Allowed top-level folders are `skills/`, `agents/` and
 `commands/`. `.claude-plugin/plugin.json` is generated at publish and refused as a write.
-Caps (my call, change them in review): 2 MiB per file, 500 files and 20 MiB per plugin.
+Caps (my call, change them in review): 2 MiB per file, 499 files and 20 MiB per plugin.
+The published zip is the draft plus the generated `plugin.json`, and the agent unpacks at
+most 500 entries (`agent/src/plugins/packages/unpack.ts` `UNPACK_MAX_FILES`), so the draft
+keeps one place for it. A publish also refuses (422 `draft-invalid`) a tree of more than
+500 files or 20 MiB with its `plugin.json` (#6931 review I1).
 
 The assistant gets matching MCP tools: `hosted_plugin_create`, `hosted_plugin_list`,
 `hosted_plugin_update` (the `PATCH`), `hosted_plugin_file_read`, `hosted_plugin_file_write`, `hosted_plugin_file_delete` and
@@ -175,7 +183,11 @@ spec §8.1). It returns a pending action. Once a human approves it in the UI,
 `confirm_action` publishes the version and runs the install or re-pin once. That happens
 in-process, through `PackageInstaller`, not through the UI-guarded package routes, which
 refuse a call that does not come from the UI's origin. After that, the package approval
-(6.5) is still needed before anything loads, as for every package.
+(6.5) is still needed before anything loads, as for every package. The approval names the
+draft it described: the tool's approved input holds the draft-diff's `draft_digest` (the
+draft's files, its description and its latest version), and the publish sends it as
+`expect_draft`. A draft that changed after the approval is refused (409 `draft-changed`),
+and nothing is published (#6931 review M3).
 
 The UI is an editor under Settings → Tools & plugins → Hosted plugins: a file tree, a
 Monaco editor (the one the template editor uses), "New skill" (it writes a `SKILL.md`
@@ -240,7 +252,7 @@ entry is:
       "version": "<N>.0.0",
       "source": {
         "source": "archive",
-        "url": "<request origin>/api/v1/ai/plugin-feeds/<feed>/plugins/<plugin>/versions/<N>.zip",
+        "url": "<request origin>/api/v1/ai/plugin-feeds/<feed>/plugins/<plugin>/versions/<N>/<zip_sha256>.zip",
         "sha256": "<zip_sha256>"
       }
     }
@@ -250,8 +262,11 @@ entry is:
 
 An outside package's entry is in section 6.7.
 
-- `GET …/plugins/{name}/versions/{N}.zip` serves the zip bytes. A version never changes,
-  so it is served with a long `Cache-Control: immutable`.
+- `GET …/plugins/{name}/versions/{N}/{zip_sha256}.zip` serves the zip bytes. A version never
+  changes, so it is served with a long `Cache-Control: immutable`. The URL names the zip's
+  sha256 as well as the number: a hosted plugin deleted and made again numbers its versions
+  from 1 again, and the sha256 keeps an immutable URL from serving other bytes (#6931
+  review M2). A URL whose sha256 is not the listed version's is 404.
 - Each zip URL uses the origin the `marketplace.json` request came on: its `Host`, or a
   trusted proxy's `X-Forwarded-Proto` and `X-Forwarded-Host`, read as the agent's origin
   checks read them (`agent/src/http/origins.ts` `effectiveRequest`). It does not use

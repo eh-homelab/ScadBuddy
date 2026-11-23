@@ -17,7 +17,11 @@ from collections.abc import Iterable
 
 #: The caps (spec §6.2, "my call, change them in review").
 MAX_FILE_BYTES = 2 * 1024 * 1024
-MAX_FILES = 500
+#: The agent unpacks at most ``agent/src/plugins/packages/unpack.ts`` ``UNPACK_MAX_FILES``
+#: (500) zip entries. The published zip is the draft plus the generated
+#: ``.claude-plugin/plugin.json``, so a draft holds one file fewer.
+PACKAGE_MAX_FILES = 500
+MAX_FILES = PACKAGE_MAX_FILES - 1
 MAX_TOTAL_BYTES = 20 * 1024 * 1024
 #: The longest path in UTF-8 bytes, and the longest segment (a file name on most systems).
 MAX_PATH_BYTES = 1024

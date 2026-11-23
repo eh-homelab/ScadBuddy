@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import type { McpAuthSettings } from '../src/auth/authenticate.js'
+import { defaultOidcConfig, OidcProvider } from '../src/auth/oidc.js'
 import {
   ARCHIVE_FAILURE_KEPT_MS,
   ArchiveMaker,
@@ -16,6 +17,7 @@ import { readArchive } from '../src/plugins/packages/unpack.js'
 import type { PluginFeedView } from '../src/routes/pluginFeeds.js'
 import { appFetch, INGRESS, testApp, UNTRUSTED } from './helpers/mcp.js'
 import { tar, zip } from './support/archives.js'
+import { startFakeIdp } from './support/fakeIdp.js'
 
 // The marketplace feed (#6933, spec 2026-11-21 §6.4, routes/pluginFeeds.ts): served on /mcp's
 // auth to Claude Code sessions outside ScadBuddy, listing only approved pins, with zip URLs made from
@@ -127,7 +129,13 @@ class FakeFeeds implements PluginFeedReader {
 }
 
 function made(
-  options: { settings?: Partial<McpAuthSettings>; authSettings?: () => McpAuthSettings; publicUrl?: string | null; ready?: boolean } = {},
+  options: {
+    settings?: Partial<McpAuthSettings>
+    authSettings?: () => McpAuthSettings
+    publicUrl?: string | null
+    ready?: boolean
+    oidc?: OidcProvider
+  } = {},
 ) {
   const feeds = new FakeFeeds()
   const ready = options.ready ?? true
@@ -135,7 +143,10 @@ function made(
     settings: options.settings,
     ...(options.authSettings ? { authSettings: options.authSettings } : {}),
     deps: { pluginFeeds: feeds, database: { ping: async () => true, ready: async () => ready, areasReady: async () => ready } },
-    mcp: { publicUrl: options.publicUrl === null ? undefined : (options.publicUrl ?? PUBLIC) },
+    mcp: {
+      publicUrl: options.publicUrl === null ? undefined : (options.publicUrl ?? PUBLIC),
+      ...(options.oidc ? { oidc: options.oidc } : {}),
+    },
   })
   const get = (url: string, headers: Record<string, string> = {}, address = INGRESS) =>
     appFetch(app.app, { address, headers: { ...HTTPS, ...headers } })(url)
@@ -160,7 +171,7 @@ describe('the feed on the /mcp auth', () => {
             name: 'greeter',
             description: 'greeter plugin',
             version: '3.0.0',
-            source: { source: 'archive', url: `${FEED}/plugins/greeter/versions/3.zip`, sha256: ZIP_SHA },
+            source: { source: 'archive', url: `${FEED}/plugins/greeter/versions/3/${ZIP_SHA}.zip`, sha256: ZIP_SHA },
           },
           {
             name: 'mono',
@@ -233,7 +244,37 @@ describe('the feed on the /mcp auth', () => {
     const feed = await get(`${FEED}/marketplace.json`, bearer(token))
     expect(feed.status).toBe(401)
     expect(feed.headers.get('www-authenticate')).toContain('invalid_token')
-    expect((await get(`${FEED}/plugins/greeter/versions/3.zip`, bearer(token))).status).toBe(401)
+    expect((await get(`${FEED}/plugins/greeter/versions/3/${ZIP_SHA}.zip`, bearer(token))).status).toBe(401)
+  })
+
+  it('refuses an expired token, as /mcp does', async () => {
+    const { tokens, get } = made()
+    const { token } = await tokens.mint({ name: 'old', tier: 'read', expiresAt: new Date(Date.now() - 1000) })
+    for (const path of ['marketplace.json', `plugins/greeter/versions/3/${ZIP_SHA}.zip`]) {
+      const res = await get(`${FEED}/${path}`, bearer(token))
+      expect(res.status, path).toBe(401)
+      expect(res.headers.get('www-authenticate')).toContain('invalid_token')
+    }
+  })
+
+  it('takes an OIDC access token in oidc mode, as /mcp does, and refuses an expired one', async () => {
+    const idp = await startFakeIdp()
+    try {
+      const { get } = made({
+        settings: { mode: 'oidc', oidc: { ...defaultOidcConfig(idp.issuer), enabled: true } },
+        oidc: new OidcProvider(),
+      })
+      const good = bearer(await idp.sign({ scope: 'scadbuddy:read' }))
+      expect((await get(`${FEED}/marketplace.json`, good)).status).toBe(200)
+      expect((await get(`${FEED}/plugins/greeter/versions/3/${ZIP_SHA}.zip`, good)).status).toBe(200)
+      const old = bearer(await idp.sign({ scope: 'scadbuddy:read', exp: Math.floor(Date.now() / 1000) - 600 }))
+      const refused = await get(`${FEED}/marketplace.json`, old)
+      expect(refused.status).toBe(401)
+      expect(refused.headers.get('www-authenticate')).toContain('invalid_token')
+      expect((await get(`${FEED}/marketplace.json`)).status).toBe(401)
+    } finally {
+      await idp.close()
+    }
   })
 
   it('needs a token in bearer mode, and fails closed when the settings cannot be read', async () => {
@@ -271,13 +312,13 @@ describe('the feed on the /mcp auth', () => {
       ((await res.json()) as { plugins: { name: string; source: { url?: string } }[] }).plugins.find((p) => p.name === 'greeter')
         ?.source.url
     const lan = 'https://scadbuddy.lan.test/api/v1/ai/plugin-feeds/default'
-    expect(await zipOf(await get(`${lan}/marketplace.json`, bearer(token)))).toBe(`${lan}/plugins/greeter/versions/3.zip`)
+    expect(await zipOf(await get(`${lan}/marketplace.json`, bearer(token)))).toBe(`${lan}/plugins/greeter/versions/3/${ZIP_SHA}.zip`)
     // A trusted proxy's X-Forwarded-Host (and its port) is honoured, as the origin checks honour it.
     const forwarded = await get(`${FEED}/marketplace.json`, { ...bearer(token), 'x-forwarded-host': 'feed.lan.test:8443' })
-    expect(await zipOf(forwarded)).toBe('https://feed.lan.test:8443/api/v1/ai/plugin-feeds/default/plugins/greeter/versions/3.zip')
+    expect(await zipOf(forwarded)).toBe(`https://feed.lan.test:8443/api/v1/ai/plugin-feeds/default/plugins/greeter/versions/3/${ZIP_SHA}.zip`)
     // A loopback peer with no proxy is plain HTTP to its Host.
     const local = await appFetch(app, { headers: bearer(token) })('http://localhost:8081/api/v1/ai/plugin-feeds/default/marketplace.json')
-    expect(await zipOf(local)).toBe('http://localhost:8081/api/v1/ai/plugin-feeds/default/plugins/greeter/versions/3.zip')
+    expect(await zipOf(local)).toBe(`http://localhost:8081/api/v1/ai/plugin-feeds/default/plugins/greeter/versions/3/${ZIP_SHA}.zip`)
   })
 
   it('answers 400 when the request names no usable host', async () => {
@@ -292,7 +333,7 @@ describe('the feed on the /mcp auth', () => {
     const noUrl = made({ publicUrl: null })
     const { token } = await noUrl.tokens.mint({ name: 'x', tier: 'read' })
     expect((await noUrl.get(`${FEED}/marketplace.json`, bearer(token))).status).toBe(200)
-    expect((await noUrl.get(`${FEED}/plugins/greeter/versions/3.zip`, bearer(token))).status).toBe(200)
+    expect((await noUrl.get(`${FEED}/plugins/greeter/versions/3/${ZIP_SHA}.zip`, bearer(token))).status).toBe(200)
     const early = made({ ready: false })
     const t2 = await early.tokens.mint({ name: 'x', tier: 'read' })
     expect((await early.get(`${FEED}/marketplace.json`, bearer(t2.token))).status).toBe(503)
@@ -301,7 +342,7 @@ describe('the feed on the /mcp auth', () => {
   it('serves the listed version of a hosted plugin as an immutable zip', async () => {
     const { tokens, get, feeds } = made()
     const { token } = await tokens.mint({ name: 'x', tier: 'read' })
-    const res = await get(`${FEED}/plugins/greeter/versions/3.zip`, bearer(token))
+    const res = await get(`${FEED}/plugins/greeter/versions/3/${ZIP_SHA}.zip`, bearer(token))
     expect(res.status).toBe(200)
     // It reads only its own package of the feed.
     expect(feeds.reads).toEqual(['greeter'])
@@ -319,16 +360,21 @@ describe('the feed on the /mcp auth', () => {
       '/api/v1/ai/plugin-feeds/other/marketplace.json',
       '/api/v1/ai/plugin-feeds/Bad_Feed/marketplace.json',
       // A version that is not the approved pin (an older one, a pending or a draft's next).
-      `${new URL(FEED).pathname}/plugins/greeter/versions/2.zip`,
-      `${new URL(FEED).pathname}/plugins/greeter/versions/4.zip`,
+      `${new URL(FEED).pathname}/plugins/greeter/versions/2/${ZIP_SHA}.zip`,
+      `${new URL(FEED).pathname}/plugins/greeter/versions/4/${ZIP_SHA}.zip`,
       // A package the feed does not name, one with no approved pin, a git one, a hosted one with no version.
-      `${new URL(FEED).pathname}/plugins/stranger/versions/1.zip`,
-      `${new URL(FEED).pathname}/plugins/waiting/versions/1.zip`,
-      `${new URL(FEED).pathname}/plugins/mono/versions/1.zip`,
-      `${new URL(FEED).pathname}/plugins/lost/versions/1.zip`,
+      `${new URL(FEED).pathname}/plugins/stranger/versions/1/${ZIP_SHA}.zip`,
+      `${new URL(FEED).pathname}/plugins/waiting/versions/1/${ZIP_SHA}.zip`,
+      `${new URL(FEED).pathname}/plugins/mono/versions/1/${ZIP_SHA}.zip`,
+      `${new URL(FEED).pathname}/plugins/lost/versions/1/${ZIP_SHA}.zip`,
       // Not a version's file name.
-      `${new URL(FEED).pathname}/plugins/greeter/versions/03.zip`,
+      `${new URL(FEED).pathname}/plugins/greeter/versions/03/${ZIP_SHA}.zip`,
       `${new URL(FEED).pathname}/plugins/greeter/versions/3.tar`,
+      // The listed version under another zip's sha256 (an earlier plugin of the same name,
+      // deleted and made again), or with none (the URL form before #6931's review).
+      `${new URL(FEED).pathname}/plugins/greeter/versions/3/${GONE_SHA}.zip`,
+      `${new URL(FEED).pathname}/plugins/greeter/versions/3/${ZIP_SHA.toUpperCase()}.zip`,
+      `${new URL(FEED).pathname}/plugins/greeter/versions/3.zip`,
       // An archive that is not the pin, a pin whose mirror is gone, a git package, a hosted one.
       `${new URL(FEED).pathname}/plugins/zipped/archives/${TARBALL_SHA}.zip`,
       // A tarball pin's URL names the served zip's sha256, not the pin's.
@@ -359,7 +405,7 @@ describe('the feed on the /mcp auth', () => {
     const { tokens, get, feeds } = made()
     const { token } = await tokens.mint({ name: 'x', tier: 'read' })
     feeds.zips.set('greeter@3', { bytes: new Uint8Array([1, 2, 3]) })
-    expect((await get(`${FEED}/plugins/greeter/versions/3.zip`, bearer(token))).status).toBe(502)
+    expect((await get(`${FEED}/plugins/greeter/versions/3/${ZIP_SHA}.zip`, bearer(token))).status).toBe(502)
   })
 })
 
