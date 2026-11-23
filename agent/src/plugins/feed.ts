@@ -23,17 +23,18 @@ import { storedZip } from './packages/zip.js'
 //   `version` is given: the `sha` pins it, and a re-pin then reaches clients
 //   ([marketplace reference, plugin sources](https://code.claude.com/docs/en/plugins/marketplace-reference.md#plugin-sources));
 // - a bytes pin (an archive or npm package, directly or as a marketplace entry; #6935, #6936,
-//   spec §6.7) as an `archive` of ScadBuddy's own mirrored copy, served by this agent under the
-//   feed's URL with its sha256, so a client gets the bytes that were approved, even after
-//   upstream changed or deleted them. Claude Code's `archive` is a zip whose plugin is "at the
-//   top of the zip or one directory down"
+//   spec §6.7) as an `archive` made from ScadBuddy's own mirrored copy, served by this agent
+//   under the feed's URL with its sha256, so a client gets the files that were approved, even
+//   after upstream changed or deleted them. Claude Code's `archive` is a zip whose plugin is "at
+//   the top of the zip or one directory down"
 //   ([archive plugin source](https://code.claude.com/docs/en/plugins/marketplace-reference.md#archive-plugin-source)),
-//   the rule the installer found the pin's root by (unpack.ts `pluginRoot`). So a mirrored zip
-//   is served as it is; a tarball (an npm package) is served as a zip of the pin's root
-//   (`storedZip`, the same bytes on every replica), whose files are the approved ones. Its
-//   sha256 is known only once it is made, so `ArchiveMaker` makes it from the mirror once per
-//   process and keeps the digest; a mirror that cannot be read leaves the package unlisted
-//   (`no-mirror`) until it can.
+//   the rule the installer found the pin's root by (unpack.ts `pluginRoot`). So a zip pin is
+//   served as its exact approved bytes; an npm tarball is served as a deterministic zip of the
+//   approved files under the pin's root (`storedZip`, the same bytes on every replica), not as
+//   the tarball's bytes. The served zip's sha256 is known only once it is made, and it names
+//   the zip's URL, so an immutable URL never serves other bytes. `ArchiveMaker` makes the zip
+//   from the mirror and keeps its digest (and the last few zips); a mirror that cannot be read
+//   leaves the package unlisted (`no-mirror`) until it can.
 
 /** `ai_plugin_feeds.slug`'s CHECK. */
 export const FEED_SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/
@@ -81,11 +82,14 @@ export interface PluginFeedReader {
   remove(feed: string, name: string): Promise<boolean>
 }
 
-/** A feed write the API refused: the feed or the package is not there. */
+/**
+ * A feed write the API refused: the feed or the package is not there, or (`not-served`) the API
+ * does not serve the write route yet (an older API during a rolling deploy).
+ */
 export class FeedWriteError extends Error {
   override name = 'FeedWriteError'
-  readonly reason: 'feed-not-found' | 'package-not-found'
-  constructor(message: string, reason: 'feed-not-found' | 'package-not-found') {
+  readonly reason: 'feed-not-found' | 'package-not-found' | 'not-served'
+  constructor(message: string, reason: 'feed-not-found' | 'package-not-found' | 'not-served') {
     super(message)
     this.reason = reason
   }
@@ -158,6 +162,10 @@ export class CrudPluginFeeds implements PluginFeedReader {
         if (err.reason === 'feed-not-found') throw new FeedWriteError(`no plugin feed "${feed}"`, 'feed-not-found')
         if (err.reason === 'package-not-found') throw new FeedWriteError(`no plugin package named "${name}"`, 'package-not-found')
       }
+      // Any other 404 or 405 is an API that has no such route yet (a rolling deploy).
+      if (err instanceof CrudReadError && (err.status === 404 || err.status === 405)) {
+        throw new FeedWriteError('the API does not serve plugin feed changes yet; try again when the deploy is done', 'not-served')
+      }
       throw err
     }
   }
@@ -203,9 +211,12 @@ export function zipUrl(origin: string, feed: string, name: string, version: numb
   return `${feedBase(origin, feed)}/plugins/${encodeURIComponent(name)}/versions/${version}.zip`
 }
 
-/** A bytes pin's served zip, on `origin`, named by the pin (the mirrored file's sha256). */
-export function archiveUrl(origin: string, feed: string, name: string, pin: string): string {
-  return `${feedBase(origin, feed)}/plugins/${encodeURIComponent(name)}/archives/${pin}.zip`
+/**
+ * A bytes pin's served zip, on `origin`, named by the served zip's sha256 (not the pin's): the
+ * URL is immutable, and the zip's bytes also depend on the pin's root and on `storedZip`.
+ */
+export function archiveUrl(origin: string, feed: string, name: string, zipSha256: string): string {
+  return `${feedBase(origin, feed)}/plugins/${encodeURIComponent(name)}/archives/${zipSha256}.zip`
 }
 
 /** The row's pin kind; an API older than #6936 sends none, so it is read from the columns. */
@@ -255,7 +266,7 @@ export function feedEntry(row: FeedPackageRow, origin: string, feed: string, arc
       kind: 'archive',
       pin,
       sha256,
-      entry: { name: row.name, ...described, source: { source: 'archive', url: archiveUrl(origin, feed, row.name, pin), sha256 } },
+      entry: { name: row.name, ...described, source: { source: 'archive', url: archiveUrl(origin, feed, row.name, sha256), sha256 } },
     }
   }
   if (kind !== 'commit' || !row.fetch_url || !row.commit_sha || !GIT_SHA.test(row.commit_sha)) {
@@ -297,28 +308,57 @@ export function servedArchive(bytes: Buffer, fetchPath: string): Buffer {
 }
 
 const ARCHIVES_KEPT = 256
+/** How long a failed mirror read or build is kept before a read tries it again: the feed's `max-age`. */
+export const ARCHIVE_FAILURE_KEPT_MS = 60_000
+/** At most this many mirrors are fetched and made into zips at once. */
+export const ARCHIVE_BUILDS_AT_ONCE = 3
+/** The total size of the last made zips that are kept to answer downloads. */
+const ARCHIVE_BYTES_KEPT = 64 * 1024 * 1024
+
+export type ServedArchive = { bytes: Buffer; sha256: string }
 
 /**
- * The served zips of bytes pins (#6936): made from the mirror once per process and pin, and their
- * sha256 kept (only the digest, at most `ARCHIVES_KEPT`), so a feed read fetches a mirror only the
- * first time it lists a pin. A read that fails is not kept, so the next one tries again.
+ * The served zips of bytes pins (#6936). A zip is made from the mirror once per process and pin.
+ * Its sha256 is kept (only the digest, at most `ARCHIVES_KEPT`), and the last made zips are kept
+ * up to `ARCHIVE_BYTES_KEPT` for downloads. Concurrent reads of one pin share one build, and at
+ * most `ARCHIVE_BUILDS_AT_ONCE` builds run at once (feed reads and downloads alike). A failed
+ * build is kept for `ARCHIVE_FAILURE_KEPT_MS`, so repeated reads do not fetch a failing mirror
+ * again. A missing mirror (a 404, cheap) is not kept, so the next read tries again.
  */
 export class ArchiveMaker {
   readonly #reader: Pick<PluginFeedReader, 'mirror'>
-  readonly #known = new Map<string, Promise<string | null>>()
+  readonly #now: () => number
+  readonly #limit: number
+  readonly #digests = new Map<string, string>()
+  readonly #zips = new Map<string, ServedArchive>()
+  readonly #failed = new Map<string, { until: number; error: Error }>()
+  readonly #building = new Map<string, Promise<ServedArchive | undefined>>()
+  readonly #queue: Array<() => void> = []
+  #running = 0
 
-  constructor(reader: Pick<PluginFeedReader, 'mirror'>) {
+  constructor(reader: Pick<PluginFeedReader, 'mirror'>, options: { now?: () => number; buildsAtOnce?: number } = {}) {
     this.#reader = reader
+    this.#now = options.now ?? Date.now
+    this.#limit = options.buildsAtOnce ?? ARCHIVE_BUILDS_AT_ONCE
   }
 
-  /** The served zip of `row`'s bytes pin; undefined when no mirror is kept for it. */
-  async make(row: FeedPackageRow): Promise<{ bytes: Buffer; sha256: string } | undefined> {
-    const mirrored = await this.#reader.mirror(row.name, row.bytes_sha256!)
-    if (!mirrored) return undefined
-    const bytes = servedArchive(mirrored, row.fetch_path ?? '')
-    const sha256 = createHash('sha256').update(bytes).digest('hex')
-    this.#keep(archiveKey(row), Promise.resolve(sha256))
-    return { bytes, sha256 }
+  /** The served zip of `row`'s bytes pin; undefined when no mirror is kept for it. Rejects with a kept or a new failure. */
+  make(row: FeedPackageRow): Promise<ServedArchive | undefined> {
+    const key = archiveKey(row)
+    const zip = this.#zips.get(key)
+    if (zip) {
+      this.#zips.delete(key)
+      this.#zips.set(key, zip)
+      return Promise.resolve(zip)
+    }
+    const failed = this.#failed.get(key)
+    if (failed && failed.until > this.#now()) return Promise.reject(failed.error)
+    let building = this.#building.get(key)
+    if (!building) {
+      building = this.#slot(() => this.#build(row, key)).finally(() => this.#building.delete(key))
+      this.#building.set(key, building)
+    }
+    return building
   }
 
   /** Each approved bytes pin of `rows` with its served zip's sha256, or null when its mirror cannot be read. */
@@ -328,29 +368,72 @@ export class ArchiveMaker {
     await Promise.all(
       wanted.map(async (row) => {
         const key = archiveKey(row)
-        let known = this.#known.get(key)
-        if (!known) {
-          known = this.make(row).then(
-            (made) => made?.sha256 ?? null,
-            (err: unknown) => {
-              console.error(`plugin feed: the mirrored file of ${row.name} could not be served: ${(err as Error).message}`)
-              return null
-            },
-          )
-          this.#keep(key, known)
+        const known = this.#digests.get(key)
+        if (known) {
+          out.set(key, known)
+          return
         }
-        const sha256 = await known
-        // A failure is not kept: the next read tries again.
-        if (sha256 === null && this.#known.get(key) === known) this.#known.delete(key)
-        out.set(key, sha256)
+        try {
+          out.set(key, (await this.make(row))?.sha256 ?? null)
+        } catch {
+          // `#build` logged it once, and keeps it for ARCHIVE_FAILURE_KEPT_MS.
+          out.set(key, null)
+        }
       }),
     )
     return out
   }
 
-  #keep(key: string, value: Promise<string | null>): void {
-    this.#known.delete(key)
-    this.#known.set(key, value)
-    if (this.#known.size > ARCHIVES_KEPT) this.#known.delete(this.#known.keys().next().value!)
+  async #build(row: FeedPackageRow, key: string): Promise<ServedArchive | undefined> {
+    try {
+      const mirrored = await this.#reader.mirror(row.name, row.bytes_sha256!)
+      if (!mirrored) return undefined
+      const bytes = servedArchive(mirrored, row.fetch_path ?? '')
+      const made = { bytes, sha256: createHash('sha256').update(bytes).digest('hex') }
+      this.#failed.delete(key)
+      this.#keepDigest(key, made.sha256)
+      this.#keepZip(key, made)
+      return made
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err))
+      console.error(`plugin feed: the mirrored file of ${row.name} could not be served: ${error.message}`)
+      this.#failed.delete(key)
+      this.#failed.set(key, { until: this.#now() + ARCHIVE_FAILURE_KEPT_MS, error })
+      if (this.#failed.size > ARCHIVES_KEPT) this.#failed.delete(this.#failed.keys().next().value!)
+      throw error
+    }
+  }
+
+  /** Runs `work` once fewer than the limit of builds run. */
+  async #slot<T>(work: () => Promise<T>): Promise<T> {
+    if (this.#running >= this.#limit) await new Promise<void>((resolve) => this.#queue.push(resolve))
+    else this.#running++
+    try {
+      return await work()
+    } finally {
+      // The slot goes to the next waiting build, or is freed.
+      const next = this.#queue.shift()
+      if (next) next()
+      else this.#running--
+    }
+  }
+
+  #keepDigest(key: string, sha256: string): void {
+    this.#digests.delete(key)
+    this.#digests.set(key, sha256)
+    if (this.#digests.size > ARCHIVES_KEPT) this.#digests.delete(this.#digests.keys().next().value!)
+  }
+
+  #keepZip(key: string, zip: ServedArchive): void {
+    this.#zips.delete(key)
+    if (zip.bytes.length > ARCHIVE_BYTES_KEPT) return
+    this.#zips.set(key, zip)
+    let total = 0
+    for (const kept of this.#zips.values()) total += kept.bytes.length
+    for (const [oldest, kept] of this.#zips) {
+      if (total <= ARCHIVE_BYTES_KEPT) break
+      this.#zips.delete(oldest)
+      total -= kept.bytes.length
+    }
   }
 }

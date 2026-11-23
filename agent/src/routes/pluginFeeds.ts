@@ -34,7 +34,7 @@ import { ready, type RouteModule } from './module.js'
 //   GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/archives/{sha256}.zip
 //
 // (the last, #6936: a bytes pin's file, served from ScadBuddy's mirror as plugins/feed.ts
-// `servedArchive` makes it, named by the pin)
+// `servedArchive` makes it, named by the served zip's sha256)
 // for Claude Code sessions outside ScadBuddy. Each request passes the gates /mcp passes, in the
 // same order and through the same code (mcp/http.ts): HTTPS and Origin (`mcpTransportProblem`),
 // then the auth mode and the principal (`authenticate`): an `sbmcp_` bearer token of any tier, an
@@ -66,7 +66,8 @@ import { ready, type RouteModule } from './module.js'
 // from the UI only (`uiRequestProblem`, as the package routes), never an assistant's. The package
 // keeps its own lifecycle (install, review, approval, re-pin through the package routes); the feed
 // lists it only at an approved pin. A PUT answers 201 when it added the package, 200 when it was
-// already in; a DELETE 204. A feed or package that is not there is 404.
+// already in; a DELETE 204. A feed or package that is not there is 404. An API that does not
+// serve the write route yet (a rolling deploy) is 503.
 
 declare module '../app.js' {
   interface AppDeps {
@@ -205,11 +206,17 @@ export const route: RouteModule = {
       const read = await feeds!.read(slug, name)
       const row = read.feed ? read.packages.find((p) => p.name === name) : undefined
       if (!row) return missing(c)
-      // Only the current approved bytes pin, as the feed lists it. The zip is made again here
-      // (the same bytes the feed's sha256 was taken of), so ETag is that digest.
-      if (!row.approved || pinKindOf(row) !== 'bytes' || row.bytes_sha256 !== file[1]) return missing(c)
-      const made = await archives!.make(row)
-      if (!made) return missing(c)
+      // Only the current approved bytes pin, as the feed lists it, and only when the zip made
+      // from it now is the one the URL names (its sha256), so an immutable URL never serves
+      // other bytes. The zip comes from ArchiveMaker (kept, or made under its build limit).
+      if (!row.approved || pinKindOf(row) !== 'bytes' || !row.bytes_sha256) return missing(c)
+      let made
+      try {
+        made = await archives!.make(row)
+      } catch {
+        return c.json({ error: "the package's mirrored file cannot be served now" }, 502, { 'Cache-Control': 'no-store' })
+      }
+      if (!made || made.sha256 !== file[1]) return missing(c)
       return c.body(new Uint8Array(made.bytes), 200, {
         'Content-Type': 'application/zip',
         'Content-Disposition': `attachment; filename="${name}-${file[1]!.slice(0, 12)}.zip"`,
@@ -220,7 +227,7 @@ export const route: RouteModule = {
 
     /** A feed write's answer when the API refused it, or rethrows. */
     function refusedWrite(c: Context, err: unknown) {
-      if (err instanceof FeedWriteError) return c.json({ detail: err.message, reason: err.reason }, 404)
+      if (err instanceof FeedWriteError) return c.json({ detail: err.message, reason: err.reason }, err.reason === 'not-served' ? 503 : 404)
       throw err
     }
 

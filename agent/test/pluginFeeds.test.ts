@@ -1,7 +1,17 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import type { McpAuthSettings } from '../src/auth/authenticate.js'
-import { type FeedPackageRow, type FeedRead, FeedWriteError, type FeedZip, type PluginFeedReader, servedArchive } from '../src/plugins/feed.js'
+import {
+  ARCHIVE_FAILURE_KEPT_MS,
+  ArchiveMaker,
+  archiveKey,
+  type FeedPackageRow,
+  type FeedRead,
+  FeedWriteError,
+  type FeedZip,
+  type PluginFeedReader,
+  servedArchive,
+} from '../src/plugins/feed.js'
 import { readArchive } from '../src/plugins/packages/unpack.js'
 import type { PluginFeedView } from '../src/routes/pluginFeeds.js'
 import { appFetch, INGRESS, testApp, UNTRUSTED } from './helpers/mcp.js'
@@ -91,7 +101,9 @@ class FakeFeeds implements PluginFeedReader {
     this.mirrorReads.push(name)
     return this.mirrors.get(sha)
   }
+  notServed = false
   async add(feed: string, name: string): Promise<boolean> {
+    if (this.notServed) throw new FeedWriteError('the API does not serve plugin feed changes yet', 'not-served')
     if (feed !== 'default') throw new FeedWriteError(`no plugin feed "${feed}"`, 'feed-not-found')
     if (!this.installed.has(name)) throw new FeedWriteError(`no plugin package named "${name}"`, 'package-not-found')
     if (this.members.has(name)) return false
@@ -99,6 +111,7 @@ class FakeFeeds implements PluginFeedReader {
     return true
   }
   async remove(feed: string, name: string): Promise<boolean> {
+    if (this.notServed) throw new FeedWriteError('the API does not serve plugin feed changes yet', 'not-served')
     if (feed !== 'default') throw new FeedWriteError(`no plugin feed "${feed}"`, 'feed-not-found')
     return this.members.delete(name)
   }
@@ -168,7 +181,7 @@ describe('the feed on the /mcp auth', () => {
           {
             name: 'tarred',
             description: 'tarred plugin',
-            source: { source: 'archive', url: `${FEED}/plugins/tarred/archives/${TARBALL_SHA}.zip`, sha256: TARBALL_ZIP_SHA },
+            source: { source: 'archive', url: `${FEED}/plugins/tarred/archives/${TARBALL_ZIP_SHA}.zip`, sha256: TARBALL_ZIP_SHA },
           },
         ],
       })
@@ -196,7 +209,7 @@ describe('the feed on the /mcp auth', () => {
     expect(zipped.headers.get('cache-control')).toBe('private, max-age=31536000, immutable')
     expect(Buffer.from(await zipped.arrayBuffer())).toEqual(ARCHIVE)
 
-    const tarred = await get(`${FEED}/plugins/tarred/archives/${TARBALL_SHA}.zip`, bearer(token))
+    const tarred = await get(`${FEED}/plugins/tarred/archives/${TARBALL_ZIP_SHA}.zip`, bearer(token))
     expect(tarred.status).toBe(200)
     const body = Buffer.from(await tarred.arrayBuffer())
     expect(sha256(body)).toBe(TARBALL_ZIP_SHA)
@@ -318,6 +331,8 @@ describe('the feed on the /mcp auth', () => {
       `${new URL(FEED).pathname}/plugins/greeter/versions/3.tar`,
       // An archive that is not the pin, a pin whose mirror is gone, a git package, a hosted one.
       `${new URL(FEED).pathname}/plugins/zipped/archives/${TARBALL_SHA}.zip`,
+      // A tarball pin's URL names the served zip's sha256, not the pin's.
+      `${new URL(FEED).pathname}/plugins/tarred/archives/${TARBALL_SHA}.zip`,
       `${new URL(FEED).pathname}/plugins/unmirrored/archives/${GONE_SHA}.zip`,
       `${new URL(FEED).pathname}/plugins/mono/archives/${ARCHIVE_SHA}.zip`,
       `${new URL(FEED).pathname}/plugins/greeter/archives/${ARCHIVE_SHA}.zip`,
@@ -325,6 +340,19 @@ describe('the feed on the /mcp auth', () => {
     ]) {
       expect((await get(`${PUBLIC}${path}`, bearer(token))).status, path).toBe(404)
     }
+  })
+
+  it('answers 502 for an archive whose mirror cannot be read, and keeps the failure', async () => {
+    const { tokens, get, feeds } = made()
+    const { token } = await tokens.mint({ name: 'x', tier: 'read' })
+    feeds.mirror = async (name: string) => {
+      feeds.mirrorReads.push(name)
+      throw new Error('the mirrored copy does not hash to it')
+    }
+    const url = `${FEED}/plugins/zipped/archives/${ARCHIVE_SHA}.zip`
+    expect((await get(url, bearer(token))).status).toBe(502)
+    expect((await get(url, bearer(token))).status).toBe(502)
+    expect(feeds.mirrorReads).toEqual(['zipped'])
   })
 
   it('serves no zip whose bytes differ from the recorded sha256', async () => {
@@ -394,6 +422,16 @@ describe("Settings' writes of the feed", () => {
     expect((await write(app, 'PUT', `${FEED}/packages/bad%20name`)).status).toBe(404)
   })
 
+  it('answers 503 while the API does not serve the write yet (a rolling deploy)', async () => {
+    const app = made()
+    app.feeds.notServed = true
+    for (const method of ['PUT', 'DELETE']) {
+      const res = await write(app, method, `${FEED}/packages/outside`)
+      expect(res.status, method).toBe(503)
+      expect(((await res.json()) as { reason: string }).reason).toBe('not-served')
+    }
+  })
+
   it('is a UI write: refused from another origin, with no Origin, or with a token', async () => {
     const app = made()
     const { token } = await app.tokens.mint({ name: 'x', tier: 'outward' })
@@ -403,5 +441,84 @@ describe("Settings' writes of the feed", () => {
     expect((await write(app, 'DELETE', url, HTTPS)).status).toBe(403)
     expect((await write(app, 'PUT', url, { ...UI, 'content-type': 'text/plain' })).status).toBe(403)
     expect(app.feeds.members.has('outside')).toBe(false)
+  })
+})
+
+describe('ArchiveMaker', () => {
+  const zipped = pkg('zipped', bytes('archive', ARCHIVE_SHA, ''))
+  const tarred = pkg('tarred', bytes('npm', TARBALL_SHA, 'package'))
+  const broken = pkg('broken', bytes('archive', GONE_SHA, ''))
+
+  /** A mirror whose reads are counted, and that throws for `GONE_SHA` while `failing` is set. */
+  function mirror() {
+    const state = { reads: 0, failing: true, inFlight: 0, most: 0, gate: Promise.resolve() }
+    const reader = {
+      async mirror(_name: string, sha: string): Promise<Buffer | undefined> {
+        state.reads++
+        state.inFlight++
+        state.most = Math.max(state.most, state.inFlight)
+        try {
+          await state.gate
+          if (sha === GONE_SHA) {
+            if (state.failing) throw new Error('the mirrored copy does not hash to it')
+            return ARCHIVE
+          }
+          return sha === ARCHIVE_SHA ? ARCHIVE : sha === TARBALL_SHA ? TARBALL : undefined
+        } finally {
+          state.inFlight--
+        }
+      },
+    }
+    return { state, reader }
+  }
+
+  it('keeps a failed build for a minute, then tries it again', async () => {
+    let now = 1_000_000
+    const { state, reader } = mirror()
+    const maker = new ArchiveMaker(reader, { now: () => now })
+    expect((await maker.resolve([broken])).get(archiveKey(broken))).toBeNull()
+    expect((await maker.resolve([broken])).get(archiveKey(broken))).toBeNull()
+    await expect(maker.make(broken)).rejects.toThrow(/does not hash/)
+    expect(state.reads).toBe(1)
+    now += ARCHIVE_FAILURE_KEPT_MS + 1
+    state.failing = false
+    expect((await maker.resolve([broken])).get(archiveKey(broken))).toBe(ARCHIVE_SHA)
+    expect(state.reads).toBe(2)
+  })
+
+  it('does not keep a missing mirror', async () => {
+    const { state, reader } = mirror()
+    const maker = new ArchiveMaker(reader)
+    const none = pkg('none', bytes('archive', 'a'.repeat(64), ''))
+    expect(await maker.make(none)).toBeUndefined()
+    expect(await maker.make(none)).toBeUndefined()
+    expect(state.reads).toBe(2)
+  })
+
+  it('runs at most the limit of builds at once, and shares one build per pin', async () => {
+    const { state, reader } = mirror()
+    let open!: () => void
+    state.gate = new Promise<void>((resolve) => (open = resolve))
+    state.failing = false
+    const maker = new ArchiveMaker(reader, { buildsAtOnce: 2 })
+    const rows = [zipped, tarred, broken, pkg('other', bytes('archive', ARCHIVE_SHA, ''))]
+    const reads = Promise.all([maker.resolve(rows), maker.make(tarred), maker.make(tarred)])
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(state.inFlight).toBe(2)
+    open()
+    const [made, a, b] = await reads
+    expect(state.most).toBe(2)
+    expect(state.reads).toBe(4)
+    expect(a).toBe(b)
+    expect(made.get(archiveKey(tarred))).toBe(TARBALL_ZIP_SHA)
+  })
+
+  it('answers a download from the zip a feed read made', async () => {
+    const { state, reader } = mirror()
+    const maker = new ArchiveMaker(reader)
+    await maker.resolve([zipped, tarred])
+    expect((await maker.make(tarred))!.sha256).toBe(TARBALL_ZIP_SHA)
+    expect((await maker.make(zipped))!.bytes).toEqual(ARCHIVE)
+    expect(state.reads).toBe(2)
   })
 })

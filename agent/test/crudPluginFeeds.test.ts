@@ -39,6 +39,18 @@ describe('CrudPluginFeeds', () => {
     }
   })
 
+  it('names a 404 or 405 that is not the route\'s own as an API that does not serve the write yet', async () => {
+    for (const answer of [
+      () => new Response('{"detail":"Not Found"}', { status: 404, headers: { 'content-type': 'application/json' } }),
+      () => new Response('{"detail":"Method Not Allowed"}', { status: 405, headers: { 'content-type': 'application/json' } }),
+    ]) {
+      const { feeds } = fake(answer)
+      const err = await feeds.remove('default', 'hello').catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(FeedWriteError)
+      expect((err as FeedWriteError).reason).toBe('not-served')
+    }
+  })
+
   it('reads a mirror, checks it against its sha256, and answers undefined for none', async () => {
     const bytes = Buffer.from('PK\u0003\u0004 a zip')
     const sha = createHash('sha256').update(bytes).digest('hex')
