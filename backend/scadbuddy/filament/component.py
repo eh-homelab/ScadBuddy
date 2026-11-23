@@ -83,10 +83,19 @@ def _build(core: Core, components: Components) -> Filament:
     def defaults() -> FilamentDefaults:
         # Two rows in one query, read on each use: a change applies to the next read. It
         # takes a connection of its own, so the stores call it before they take theirs.
-        read = core.settings_store.read({"filament_low_stock_pct", "filament_default_cost_per_kg"})
+        read = core.settings_store.read(
+            {
+                "filament_low_stock_pct",
+                "filament_default_cost_per_kg",
+                "filament_drying_temp_c",
+                "filament_drying_hours",
+            }
+        )
         return FilamentDefaults(
             low_stock_pct=int(read["filament_low_stock_pct"]),
             cost_per_kg=read["filament_default_cost_per_kg"],
+            drying_temp_c=read["filament_drying_temp_c"],
+            drying_hours=read["filament_drying_hours"],
         )
 
     def shop_currency() -> str:

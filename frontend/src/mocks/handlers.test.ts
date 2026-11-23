@@ -993,6 +993,21 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect((await put({ library_folder_id: null })).status).toBe(422)
   })
 
+  it('refuses drying hours out of range with the side they are out on, as the backend does (#7156)', async () => {
+    const refusal = async (hours: string) => {
+      const answer = await fetch('/api/v1/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filament_drying_hours: hours }),
+      })
+      expect(answer.status).toBe(422)
+      return ((await answer.json()) as { errors: { msg: string }[] }).errors[0]?.msg
+    }
+    expect(await refusal('0')).toBe('Input should be greater than or equal to 0.1')
+    expect(await refusal('1000')).toBe('Input should be less than or equal to 999.9')
+    expect((await api.getSettings()).filament_drying_hours).toBeNull()
+  })
+
   it('refuses the S3 store without its endpoint, bucket and keys, as the backend does', async () => {
     const put = (body: Record<string, unknown>) =>
       fetch('/api/v1/settings', {

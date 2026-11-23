@@ -62,6 +62,8 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
   const [picked, setPicked] = useState<string | null>(candidates[0] ? keyOf(candidates[0]) : null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** #7150 — one `Idempotency-Key` per question: a second click makes no second spool. */
+  const [slotKey] = useState(() => crypto.randomUUID())
   const what = [tray.colour_word, tray.material].filter(Boolean).join(' ')
   const one = candidates.length === 1 ? candidates[0] : undefined
   const base = native ? null : bambuddyBase()
@@ -89,6 +91,20 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
     } catch (cause) {
       const fallback = native ? 'ScadBuddy could not link it.' : 'ScadBuddy could not record it.'
       setError(cause instanceof ApiError ? cause.detail : fallback)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** #7150 — create from slot: a new SB spool from what the tray reports, placed in it. */
+  async function fromSlot(printer: string) {
+    setSaving(true)
+    setError(null)
+    try {
+      const made = await api.newTraySpool(printer, tray.ams_id, tray.tray_id, slotKey)
+      onAssigned({ spool_id: made.id })
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.detail : 'ScadBuddy could not make the spool.')
     } finally {
       setSaving(false)
     }
@@ -166,6 +182,11 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
         <Button type="button" size="sm" variant="outline" disabled={saving} onClick={onDecline} data-testid="tray-decline">
           {candidates.length > 0 ? 'No / not sure' : 'Print from the tray as it is'}
         </Button>
+        {native && (
+          <Button type="button" size="sm" variant="outline" disabled={saving} onClick={() => void fromSlot(native.printer)}>
+            New spool from this tray
+          </Button>
+        )}
         {base && (
           <Button type="button" size="sm" variant="link" onClick={() => openExternal(`${base}/inventory`)}>
             Add it in Bambuddy&apos;s inventory

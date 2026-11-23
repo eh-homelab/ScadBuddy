@@ -1,11 +1,12 @@
-import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, PrinterIcon, Trash2Icon } from 'lucide-react'
+import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, CopyIcon, PrinterIcon, Trash2Icon } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Link, useLocation, useParams } from 'react-router'
+import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api, ApiError } from '../../api/client'
 import {
   addSpoolEvent,
   archiveSpool,
-  createSpool,
+  bulkCreateSpools,
+  copySpool,
   deleteSpool,
   getSpool,
   getSpoolHistory,
@@ -23,6 +24,7 @@ import {
   type PresetInput,
   type SpoolCreate,
   type SpoolDetail,
+  type SpoolDraft,
   type SpoolHistory,
   type SpoolPatch,
   type SpoolType,
@@ -66,14 +68,24 @@ import { useLeaveGuard } from '../../lib/useLeaveGuard'
 /**
  * Where the drying form's values come from, or `null` when the spool has none (#6720). A
  * profile fill takes the AMS HT's values, which can be above what an AMS 2 Pro dries at
- * (65 °C), so the line says so (R-6714-9).
+ * (65 °C), so the line says so (R-6714-9) whenever the catalog gave a value; the Settings
+ * default (#7156) is the shop's own.
  */
 function dryingDefaultsText(defaults: NonNullable<SpoolDetail['drying_defaults']>): string | null {
   const from = [...new Set([defaults.temp_from, defaults.hours_from].filter((one) => one != null))]
   if (from.length === 0) return null
-  const levels = from.filter((one) => one !== 'spool')
-  const where = [from.includes('spool') ? 'this spool' : null, levels.length > 0 ? `its ${levels.join(' and ')}` : null].filter(Boolean).join(' and ')
-  return `Filled from ${where}. A slicer profile gives the AMS HT's values; lower them when you dry in an AMS 2 Pro (65 °C at most).`
+  const levels = from.filter((one) => one !== 'spool' && one !== 'setting')
+  const where = [
+    from.includes('spool') ? 'this spool' : null,
+    levels.length > 0 ? `its ${levels.join(' and ')}` : null,
+    from.includes('setting') ? 'the default in Settings' : null,
+  ]
+    .filter(Boolean)
+    .join(' and ')
+  const catalog = from.some((one) => one !== 'setting')
+  return catalog
+    ? `Filled from ${where}. A slicer profile gives the AMS HT's values; lower them when you dry in an AMS 2 Pro (65 °C at most).`
+    : `Filled from ${where}.`
 }
 
 /** What a field holds while it is edited: text, `''` for none (the spool takes its type's value). */
@@ -178,6 +190,53 @@ function draftOf(spool: SpoolDetail): Draft {
       .map(({ overridden: _own, k_value, ...row }) => ({ ...row, k_value: String(k_value) })),
   }
 }
+
+/** A preset row's key and values, as the server compares a row sent back. */
+const presetValues = (row: PresetInput) => JSON.stringify([row.printer_model, row.nozzle_diameter, row.slicer_filament, row.slicer_filament_name ?? null])
+
+/**
+ * R-7150-11 — a copy's `migrated` rows, by their values: a row saved unchanged stays
+ * `migrated`, so the copy's first type drops it; a row the person edited is theirs.
+ */
+function copiedMigrated(copy: SpoolDraft | null): ReadonlySet<string> {
+  return new Set((copy?.presets ?? []).filter((row) => row.migrated).map(presetValues))
+}
+
+/** #7150 — a copy's draft (`GET /filament/spools/{id}/copy`) as the form holds it. */
+function draftOfCopy(copy: SpoolDraft): Draft {
+  const spool = copy.spool
+  return {
+    ...BLANK,
+    type_id: str(spool.type_id),
+    material_id: str(spool.material_id),
+    subtype_id: str(spool.subtype_id),
+    brand_id: str(spool.brand_id),
+    category_id: str(spool.category_id),
+    effect_id: str(spool.effect_id),
+    insert_type_id: str(spool.insert_type_id),
+    rgba: spool.rgba ?? null,
+    colour_name: str(spool.colour_name),
+    extra_colours: (spool.extra_colours ?? []).join(', '),
+    diameter_mm: str(spool.diameter_mm),
+    density_g_cm3: str(spool.density_g_cm3),
+    cost_per_kg: str(spool.cost_per_kg),
+    label_weight_g: str(spool.label_weight_g),
+    low_stock_pct: str(spool.low_stock_pct),
+    nozzle_temp_min: str(spool.nozzle_temp_min),
+    nozzle_temp_max: str(spool.nozzle_temp_max),
+    bed_temp_min: str(spool.bed_temp_min),
+    bed_temp_max: str(spool.bed_temp_max),
+    drying_temp_c: str(spool.drying_temp_c),
+    drying_hours: str(spool.drying_hours),
+    note: str(spool.note),
+    location_id: str(copy.location_id),
+    presets: (copy.presets ?? []).map(({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name }) => ({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name })),
+    k_values: (copy.k_values ?? []).map((row) => ({ ...row, k_value: String(row.k_value) })),
+  }
+}
+
+/** The most spools one save makes (`BULK_MAX`, R-7150-1). */
+const MOST_SPOOLS = 100
 
 const INTEGER = /^\d+$/
 const DECIMAL = /^\d+(\.\d+)?$/
@@ -349,14 +408,25 @@ const grams = (value: number) => `${Number(value.toFixed(1))} g`
  * order: Identity, Weight, Colour and cost, Printers, Storage, History. A field the spool
  * may override shows its type's value as the placeholder; one it sets carries "Set on
  * this spool" and "Reset to type" (a PATCH of `null` for that field, at once). Saving
- * sends one PATCH of what changed (a POST for a new spool), a move through the move route
- * when the place changed, and the presets' and K values' PUTs when they changed; a created
- * spool keeps its id, so a retry is an edit. Weighings and dryings are ledger events and
- * land at once. Unsaved edits hold every way out (`useLeaveGuard`).
+ * sends one PATCH of what changed, a move through the move route when the place changed,
+ * and the presets' and K values' PUTs when they changed. A new spool, or several (#7150,
+ * "How many spools"), is one bulk POST with its place, presets and K values, under one
+ * `Idempotency-Key` per opened form, so a retry makes no more; `?copy=<id>` fills the form
+ * from that spool's copy draft. Weighings and dryings are ledger events and land at once.
+ * Unsaved edits hold every way out (`useLeaveGuard`).
  */
 export function SpoolPage() {
   const { id = 'new' } = useParams()
   const location = useLocation()
+  const [search] = useSearchParams()
+  /** #7150 — the spool a new one is copied from (`?copy=<id>`). */
+  const copyOf = id === 'new' ? search.get('copy') : null
+  /** How many identical spools a save makes (#7150). */
+  const [quantity, setQuantity] = useState('1')
+  /** One `Idempotency-Key` per opened form: a retry or a second click makes no more spools. */
+  const [createKey, setCreateKey] = useState(() => crypto.randomUUID())
+  /** The copied `migrated` preset rows (R-7150-11). */
+  const [migratedRows, setMigratedRows] = useState<ReadonlySet<string>>(() => new Set())
   /** The list's filters this page was opened from: back and a delete return to them. */
   const listPath = `${filamentLinks.spools}${listBack(location.state)}`
   /** Set at once when a new spool's POST lands: the page is then an edit of it. */
@@ -391,8 +461,11 @@ export function SpoolPage() {
     setMadeId(null)
     setHistory(null)
     setHistoryError(null)
+    setQuantity('1')
+    setCreateKey(crypto.randomUUID())
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getSpool(id),
+      copyOf ? copySpool(copyOf) : Promise.resolve(null),
       listCatalog('materials'),
       listCatalog('subtypes'),
       listCatalog('brands'),
@@ -403,13 +476,15 @@ export function SpoolPage() {
       listLocations(),
       api.listPrinters(),
     ])
-      .then(([spool, materials, subtypes, brands, categories, effects, insertTypes, types, places, printers]) => {
+      .then(([spool, copy, materials, subtypes, brands, categories, effects, insertTypes, types, places, printers]) => {
         if (!live) return
         setLists({ materials, subtypes, brands, categories, effects, insertTypes, types, places: flatten(places), placeNames: named(places), placeHrefs: placeLinks(places), printers: printers.map((p) => ({ id: p.id, name: p.name, model: p.model ?? null })) })
         if (spool) {
           setSaved(spool)
           setDraft(draftOf(spool))
         }
+        if (copy) setDraft(draftOfCopy(copy))
+        setMigratedRows(copiedMigrated(copy))
       })
       .catch((cause: unknown) => {
         if (live) setLoadError(cause instanceof ApiError && cause.status === 404 ? 'That spool is gone. Pick another from the Spools tab.' : `The spool could not be loaded: ${message(cause)}`)
@@ -418,7 +493,7 @@ export function SpoolPage() {
     return () => {
       live = false
     }
-  }, [id])
+  }, [id, copyOf])
 
   const base = useMemo(() => (saved ? draftOf(saved) : BLANK), [saved])
   /** The catalogs and places by id and name: the names the timeline shows for an event's ids. */
@@ -509,7 +584,9 @@ export function SpoolPage() {
 
   async function save() {
     const body = bodyOf(draft)
-    const refused = typeof body === 'string' ? body : (presetRowsError(draft.presets) ?? kValueRowsError(draft.k_values) ?? (draft.grams_left.trim() !== '' && !DECIMAL.test(draft.grams_left.trim()) ? 'Enter the grams left as a number, such as 640.' : null))
+    const count = Number(quantity.trim())
+    const badCount = creating && (!INTEGER.test(quantity.trim()) || count < 1 || count > MOST_SPOOLS) ? `Enter how many spools to make, from 1 to ${MOST_SPOOLS}.` : null
+    const refused = typeof body === 'string' ? body : (badCount ?? presetRowsError(draft.presets) ?? kValueRowsError(draft.k_values) ?? (draft.grams_left.trim() !== '' && !DECIMAL.test(draft.grams_left.trim()) ? 'Enter the grams left as a number, such as 640.' : null))
     if (refused) {
       setError(refused)
       return
@@ -518,34 +595,25 @@ export function SpoolPage() {
     setBusy(true)
     setError(null)
     setNotice(null)
-    let spoolId = spoolKey
+    const spoolId = spoolKey
     const firstType = !creating && saved !== null && !saved.type_id && draft.type_id !== ''
     try {
-      let presetsWere = base.presets
-      let kWere = base.k_values
-      let placeWas = base.location_id
       if (creating) {
-        const made = await createSpool(created(body, draft.grams_left))
-        spoolId = made.id
-        // From here the page is an edit of this spool: a later failure retries as one.
-        setMadeId(made.id)
-        setSaved({ ...made, effective: made.effective ?? {}, overridden: made.overridden ?? [], names: made.names ?? {}, low_stock: made.low_stock ?? false, presets: [], k_values: [], tag: null, last_tag: null, basis: { anchor: null, deltas: [] }, in_use: false, invoice: null, type_suppliers: [] })
-        presetsWere = []
-        kWere = []
-        placeWas = ''
-      } else {
-        const patch = changed(body, bodyOf(base))
-        if (Object.keys(patch).length > 0) await patchSpool(spoolId, patch)
-      }
-      if (draft.location_id !== placeWas) await moveSpool(spoolId, draft.location_id || null)
-      // The first type drops the carried-over presets: the form's copy of them is not written back.
-      if (!firstType && JSON.stringify(draft.presets) !== JSON.stringify(presetsWere)) await setSpoolPresets(spoolId, draft.presets)
-      if (JSON.stringify(draft.k_values) !== JSON.stringify(kWere)) await setSpoolKValues(spoolId, draft.k_values)
-      setNotice('Saved')
-      if (id === 'new') {
-        guard.leaveTo(filamentLinks.spool(spoolId), { replace: true, state: location.state })
+        // One request makes every spool with its place, presets and K values (#7150).
+        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets.map((row) => ({ ...row, migrated: migratedRows.has(presetValues(row)) })), k_values: draft.k_values }, createKey)
+        const first = made[0]!
+        setMadeId(first.id)
+        setNotice(made.length > 1 ? `Saved ${made.length} spools, #${first.number} to #${made[made.length - 1]!.number}` : 'Saved')
+        guard.leaveTo(made.length > 1 ? listPath : filamentLinks.spool(first.id), { replace: true, state: location.state })
         return
       }
+      const patch = changed(body, bodyOf(base))
+      if (Object.keys(patch).length > 0) await patchSpool(spoolId, patch)
+      if (draft.location_id !== base.location_id) await moveSpool(spoolId, draft.location_id || null)
+      // The first type drops the carried-over presets: the form's copy of them is not written back.
+      if (!firstType && JSON.stringify(draft.presets) !== JSON.stringify(base.presets)) await setSpoolPresets(spoolId, draft.presets)
+      if (JSON.stringify(draft.k_values) !== JSON.stringify(base.k_values)) await setSpoolKValues(spoolId, draft.k_values)
+      setNotice('Saved')
       const [fresh] = await Promise.all([getSpool(spoolId), readHistory(spoolId)])
       setSaved(fresh)
       setDraft(draftOf(fresh))
@@ -666,6 +734,13 @@ export function SpoolPage() {
         )}
         {!creating && saved && (
           <Button asChild variant="outline" size="sm">
+            <Link to={filamentLinks.copySpool(saved.id)}>
+              <CopyIcon /> Copy
+            </Link>
+          </Button>
+        )}
+        {!creating && saved && (
+          <Button asChild variant="outline" size="sm">
             <Link to={filamentLinks.labels([saved.id])}>
               <PrinterIcon /> Print label
             </Link>
@@ -675,12 +750,17 @@ export function SpoolPage() {
           Discard changes
         </Button>
         <Button type="button" size="sm" disabled={busy || (!dirty && !creating)} onClick={() => void save()}>
-          Save spool
+          {creating && Number(quantity) > 1 && INTEGER.test(quantity.trim()) ? `Save ${Number(quantity)} spools` : 'Save spool'}
         </Button>
       </header>
       <p role="status" className="mb-2 min-h-5 text-[13px] text-muted-foreground">
         {notice}
       </p>
+      {creating && copyOf && (
+        <p className="mb-4 text-[13px] text-muted-foreground">
+          A copy of <Link to={filamentLinks.spool(copyOf)} className="underline">the first spool</Link>. Its number, tag, tray, weight history and weight lock stay with it.
+        </p>
+      )}
       {error && (
         <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
           {error}
@@ -698,6 +778,17 @@ export function SpoolPage() {
                 </Label>
                 <Input id="spool-number" readOnly value={creating ? 'Assigned when saved' : `#${saved?.number}`} className="tabular-nums" />
               </div>
+              {creating && (
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="spool-quantity" className="text-[13px]">
+                    How many spools
+                  </Label>
+                  <Input id="spool-quantity" inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value)} aria-describedby="spool-quantity-hint" className="tabular-nums" />
+                  <p id="spool-quantity-hint" className="text-[12px] text-muted-foreground">
+                    Each gets its own number. Up to {MOST_SPOOLS}.
+                  </p>
+                </div>
+              )}
               <div className="flex min-w-0 flex-col gap-1">
                 <Label htmlFor="spool-type" className="text-[13px]">
                   Type

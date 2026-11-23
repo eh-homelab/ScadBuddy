@@ -33,6 +33,8 @@ const anchored = (path: string, anchor: string) => `${path}#${encodeURIComponent
 export const filamentLinks = {
   spools,
   newSpool: `${spools}/new`,
+  /** #7150 — a new spool filled from an existing one. */
+  copySpool: (id: string) => query(`${spools}/new`, { copy: id }),
   spool: (id: string) => at(spools, id),
   types,
   newType: `${types}/new`,

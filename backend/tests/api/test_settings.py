@@ -1099,6 +1099,36 @@ def test_filament_settings_round_trip(client: TestClient) -> None:
         assert client.put("/api/v1/settings", json={"filament_sync": bad}).status_code == 422
 
 
+def test_the_drying_settings_round_trip_live_and_bounded(client: TestClient) -> None:
+    """#7156 R-7156-5: empty by default (no drying offered), live, and bounded."""
+    body = client.get("/api/v1/settings").json()
+    assert (body["filament_drying_temp_c"], body["filament_drying_hours"]) == (None, None)
+    assert body["applies"]["filament_drying_temp_c"] == "live"
+    saved = client.put(
+        "/api/v1/settings",
+        json={"filament_drying_temp_c": 55, "filament_drying_hours": "8.5"},
+    )
+    assert saved.status_code == 200, saved.text
+    again = client.get("/api/v1/settings").json()
+    assert again["filament_drying_temp_c"] == 55
+    assert Decimal(again["filament_drying_hours"]) == Decimal("8.5")
+    for bad in ({"filament_drying_temp_c": 0}, {"filament_drying_temp_c": 151}):
+        assert client.put("/api/v1/settings", json=bad).status_code == 422
+    assert client.put("/api/v1/settings", json={"filament_drying_hours": "0"}).status_code == 422
+    # R-7156-7: one bound everywhere, 0.1 to 999.9 hours.
+    assert (
+        client.put("/api/v1/settings", json={"filament_drying_hours": "999.9"}).status_code == 200
+    )
+    assert Decimal(client.get("/api/v1/settings").json()["filament_drying_hours"]) == Decimal(
+        "999.9"
+    )
+    for bad_hours in ("999.95", "1000"):
+        assert (
+            client.put("/api/v1/settings", json={"filament_drying_hours": bad_hours}).status_code
+            == 422
+        )
+
+
 def test_the_shopping_auto_add_switch_round_trips(client: TestClient) -> None:
     """#6868: stored only, on by default, and a null puts the default back."""
     name = "filament_shopping_auto_add_empty"

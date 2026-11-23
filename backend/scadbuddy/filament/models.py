@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Final, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -1106,6 +1106,36 @@ class SpoolCreate(_In):
         return self
 
 
+class SpoolDraftPreset(SpoolPresetCreate):
+    """A draft's own preset row (#7150, R-7150-11). ``migrated`` keeps a copied row's
+    origin: a row the presets-per-nozzle migration made stays ``migrated`` on the copy, so
+    the copy's first type drops it as it would the source's (`presets.drop_migrated`). A
+    row a person changes is theirs, so the spool form drops the flag on an edit."""
+
+    migrated: bool = False
+
+
+class SpoolDraft(_In):
+    """A new spool as the spool form holds it (#7150, R-7150-2): its fields, the place it
+    goes to (not a printer's tray) and its own presets and K values. What
+    ``GET /filament/spools/{id}/copy`` answers (R-7150-3)."""
+
+    spool: SpoolCreate
+    location_id: UUID | None = None
+    presets: list[SpoolDraftPreset] = Field(default_factory=list)
+    k_values: list[SpoolKValueCreate] = Field(default_factory=list)
+
+
+#: The most spools one bulk create makes (R-7150-1).
+BULK_MAX: Final = 100
+
+
+class SpoolBulkCreate(SpoolDraft):
+    """``quantity`` identical spools, each with its own number (#7150, R-7150-1)."""
+
+    quantity: Annotated[int, Field(ge=1, le=BULK_MAX)] = 1
+
+
 class SpoolPatch(_Patch):
     """``null`` on an override clears it, and the spool takes its type's value again."""
 
@@ -1709,13 +1739,15 @@ class SpoolTypeSupplier(BaseModel):
     price_per_kg: Decimal | None
 
 
-DryingFrom = Literal["spool", "type", "subtype", "material"]
+DryingFrom = Literal["spool", "type", "subtype", "material", "setting"]
 
 
 class DryingDefaults(BaseModel):
     """What a drying of the spool records when it does not say (#6720, R-6714-10,
     R-6714-18): each field from the spool's own override, else its type, else its subtype,
-    else its material; ``*_from`` names which. ``None`` when none of them sets it."""
+    else its material, else the setting ``filament_drying_temp_c`` or
+    ``filament_drying_hours`` (#7156); ``*_from`` names which. ``None`` when none of them
+    sets it."""
 
     temp_c: int | None = None
     hours: Decimal | None = None
@@ -1847,16 +1879,28 @@ class RfidState(BaseModel):
     #: The last reconcile was refused because Bambuddy's auth is on.
     blocked: bool = False
     changed_at: AwareDatetime
+    #: ScadBuddy's own setting ``filament_auto_add_unknown_rfid`` is off (#7156, R-7156-2),
+    #: read in the same statement as the row.
+    auto_add_off: bool = False
+
+    @property
+    def holds(self) -> bool:
+        """Bambuddy's ``auto_add_unknown_rfid`` is held off: by the mode, or by the setting
+        (R-7156-3)."""
+        return self.override_mode or self.auto_add_off
 
 
 class RfidStatus(BaseModel):
-    """The answer on the RFID override mode (#6264). ``state`` is ``applied`` when the
-    mode is on and Bambuddy reads ``false``; ``pending`` when a write has not landed or
-    Bambuddy could not be reached (``detail`` then names the error); ``blocked`` when
-    Bambuddy refused the write because its auth is on; ``off`` when the mode is off and
-    nothing is saved."""
+    """The answer on the RFID override mode (#6264) and the setting
+    ``filament_auto_add_unknown_rfid`` (#7156), the two holds on Bambuddy's
+    ``auto_add_unknown_rfid``. ``state`` is ``applied`` when either holds it and Bambuddy
+    reads ``false``; ``pending`` when a write has not landed or Bambuddy could not be
+    reached (``detail`` then names the error); ``blocked`` when Bambuddy refused the write
+    because its auth is on; ``off`` when neither holds and nothing is saved."""
 
     override_mode: bool
+    #: ScadBuddy's setting: ``False`` holds Bambuddy's value off as the mode does.
+    auto_add_unknown_rfid: bool = True
     state: Literal["off", "applied", "pending", "blocked"]
     bambuddy_auto_add: bool | None = None
     saved_auto_add: bool | None = None
