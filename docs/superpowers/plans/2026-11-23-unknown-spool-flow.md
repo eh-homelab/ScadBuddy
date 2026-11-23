@@ -47,8 +47,18 @@ D1 to D5 are the spec's D1 to D5 ("Decisions made while planning"), with the rea
 - **D2 External holders (ams 255) never get a row.** `vt_tray` has no presence state; `_filled` is true whenever a `tray_type` is configured, so an empty external holder would block the printer for good. An RFID external tray is still auto-created. Decided 2026-11-23 (spec "Decisions made while planning").
 - **D3 `remain_pct` is stored but is NULL in practice.** `trays._remain` gives a remain only for a tray with RFID keys (#6263 preflight C4), and only untagged trays get rows. The prefill code exists; it fires only if `_remain` changes. Decided 2026-11-23 (spec "Decisions made while planning").
 - **D4 The label weight override applies only to a first weight.** The spec's rule makes `label_weight_g` the typed net weight when it differs from the type's. For a half-used spool that sets the label to the grams left and breaks every `remain_pct` reading. The override applies only when the spool has no event other than `created`, `edited`, `moved`, `tag_bound` and `tag_unbound` (no reading, use or load yet). The `weighed` reading is booked either way. Decided 2026-11-23 (spec "Decisions made while planning").
-- **D5 "The owner is told" of an RFID spool** = the list route also returns the spools capture made from tags in the last 24 h (`made_from_tags`), and the frontend toasts each new one once. The spec does not say how.
+- **D5 "The owner is told" of an RFID spool** = the list route also returns the spools capture made from tags in the last 24 h (`made_from_tags`), and the frontend toasts each new one once. Decided 2026-11-23 (spec "Decisions made while planning").
 - **P1 The rows' SQL lives in its own module** (`filament/unknown_tray_rows.py`) because `inventory.py` must clear a row inside `link_on`, and `unknown_trays.py` imports `inventory.py`.
+
+## Changes after the design review (2026-11-23): spec D9, D10, D11
+
+These bind the tasks named, on top of their text below.
+
+- **D9, Task 3:** `FilamentInventory.reconcile_trays` (`filament/inventory.py:448`) also handles an untagged tray of a fresh report that holds no placed spool. When Bambuddy's assignment names a linked, unarchived SB spool that agrees with the tray (`_verdict`), place it there (`place_on`, a `moved` event by `RECONCILE_ACTOR`, `data.reason` `"assigned_to_empty_tray"`) and `clear_on` the tray's row in the same transaction. An assigned spool that another reported tray holds stays where it is, as today. Tests: `test_reconcile_places_an_assigned_spool_into_an_unknown_tray` (row gone, spool placed, one `moved` event) and `test_reconcile_leaves_a_disagreeing_assigned_spool` (row kept).
+- **D9, Task 4:** on the Bambuddy path, `prepare_run` leaves out a row whose tray the run's own `read_inventory` result gives an SB spool. Test: `test_bambuddy_path_does_not_block_an_assigned_tray`. The native path keeps the block (no Bambuddy read there).
+- **D10, Task 3:** `POST /filament/unknown-trays/{id}/dismiss` deletes the row (204; 404 when it is gone). **Task 5:** the resolve dialog has "Dismiss" with the text "Only for a slot that is no longer there; if a spool is still loaded, it comes back on the next report." **Task 7:** no agent tool. Tests: the route (204 then 404) and the dialog button.
+- **D11, Task 2:** in `note_unknown`, take `try_tray_lock` before every `clear_on` too (the "empty" and "holder found" branches); when it is busy, leave the row. Test: `test_a_busy_tray_lock_leaves_the_row_on_clear` (a row at (0,2), the lock held by another connection, an empty-tray report: the row is still there).
+- **Task 8:** the spec's "Data" section now states the three cases that keep a row; the as-built notes keep them.
 
 ## Review Focus
 

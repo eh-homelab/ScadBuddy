@@ -103,8 +103,10 @@ ScadBuddy must not print from that printer, because its grams and costs would go
 
 `filament_unknown_trays`: `id`, `printer_id` (FK printers, cascade), `ams_id`, `tray_id`,
 `tray_uuid`, `tag_uid`, `material`, `colour_rgba`, `remain_pct` (nullable),
-`first_seen_at`, `seen_at`. Unique `(printer_id, ams_id, tray_id)`. A row exists only
-while the tray is loaded and unmatched; resolving or emptying deletes it. The row's
+`first_seen_at`, `seen_at`. Unique `(printer_id, ams_id, tray_id)`. A row exists while the
+tray is loaded and unmatched; resolving, dismissing (D10) or emptying deletes it. Three
+cases keep a row as it is: a tray that is loading, an AMS unit the report no longer shows
+(the owner can dismiss its rows), and a tray whose lock is busy (D11). The row's
 `seen_at` and reported fields are the resolve's guard.
 
 ### Capture
@@ -170,8 +172,23 @@ For each tray with a holder, or not loaded: delete its row if one exists.
 - D8. An RFID tray still gets a (blocking) row in two cases: when making or linking its
   spool fails, and when no location kind is flagged `ams` (there is no place to put the
   spool). Goal 2's "nothing is blocked" holds whenever the spool can be made and placed.
+- D9. A tray that Bambuddy assigns to a linked, unarchived ScadBuddy spool that agrees
+  with it is matched, not unknown (the anti-goal). The print picker already reads that
+  assignment (`bambuddy/filaments.py` `read_inventory`). Two changes keep it from
+  blocking: the pull's `FilamentInventory.reconcile_trays` (#6713) also places such a
+  spool into an untagged tray that holds no placed spool, and clears the tray's row in
+  the same transaction; and on the Bambuddy path, `prepare_run` leaves out a row whose
+  tray the run's own inventory read gives an SB spool. The native path has no Bambuddy
+  read, so there a row blocks until the next pull places the spool.
+- D10. A row can be dismissed (`POST /filament/unknown-trays/{id}/dismiss`, 204). It is for
+  a row of an AMS unit that was taken off. If the tray is still loaded and unmatched, the
+  next capture writes the row again.
+- D11. Capture takes the tray's try-lock before it clears a row too, not only before it
+  writes one, and leaves the row when the lock is busy. A resolve holds the row and then
+  locks spools, while the report write already holds spool locks; taking the tray lock
+  first means the two never wait on each other in opposite orders.
 - After deploy, every loaded untagged tray with no linked spool blocks its printer once
-  capture or the backstop sees it. That is the intent.
+  capture or the backstop sees it. That is the intent, apart from the trays D9 matches.
 
 ## Left to the builder
 
