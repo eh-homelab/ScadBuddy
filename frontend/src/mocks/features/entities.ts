@@ -16,6 +16,7 @@ const PROBLEMS = 'https://scadbuddy.dev/problems/entities/'
 const ROLE = /^[a-z_]{1,32}$/
 const KIND = /^[a-z_]{1,32}$/
 const PROPERTY_KEY = /^[a-z][a-z0-9_]{0,63}$/
+const MAX_KEYS = 200
 
 /** The seeded schemas of `20261123T0017Z_entity_properties.sql`. */
 function seededSchemas(): Record<string, Record<string, unknown>> {
@@ -117,14 +118,19 @@ const PROPERTY_TYPES: Record<string, (value: unknown) => boolean> = {
   array: (value) => Array.isArray(value),
 }
 
+/** A string's length as Python counts it: in code points, not UTF-16 units. */
+const characters = (text: string) => [...text].length
+
 /** `entities/properties.py`'s checks, in short: the reason a value is refused, else null. */
 function propertyRefusal(kind: string, key: string, value: unknown): string | null {
   if (!PROPERTY_KEY.test(key)) return 'a key is `^[a-z][a-z0-9_]{0,63}$`'
+  // Postgres's jsonb holds no U+0000, so the backend refuses it in any string.
+  if ([value].flat().some((text) => typeof text === 'string' && text.includes('\u0000'))) return 'a string holds no U+0000'
   const shaped =
-    (typeof value === 'string' && value.length <= 2000) ||
+    (typeof value === 'string' && characters(value) <= 2000) ||
     (typeof value === 'number' && Number.isFinite(value)) ||
     typeof value === 'boolean' ||
-    (Array.isArray(value) && value.length <= 50 && value.every((item) => typeof item === 'string' && item.length <= 500))
+    (Array.isArray(value) && value.length <= 50 && value.every((item) => typeof item === 'string' && characters(item) <= 500))
   if (!shaped) return 'a value is a string (up to 2000 characters), a finite number, a boolean or a list of up to 50 strings of up to 500 characters'
   const known = (entityMock.schemas[kind]?.properties as Record<string, { type?: string | string[] }> | undefined)?.[key]
   const types = known?.type === undefined ? [] : ([] as string[]).concat(known.type).filter((type) => PROPERTY_TYPES[type])
@@ -205,14 +211,37 @@ const KEY_KEYWORDS = new Set([
   'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'format', 'items',
   'minItems', 'maxItems', 'uniqueItems',
 ])
+// ITEM_KEYWORDS, KEY_TYPES, ITEM_TYPES, DRAFT_2020_12: a list holds no list, and strings only.
+const ITEM_KEYWORDS = new Set([...KEY_KEYWORDS].filter((k) => k !== 'items'))
+const KEY_TYPES = new Set(['string', 'number', 'integer', 'boolean', 'array'])
+const ITEM_TYPES = new Set(['string'])
+const DRAFT_2020_12 = 'https://json-schema.org/draft/2020-12/schema'
+
+/** `_check_key`'s keyword and type checks (not its enum, const and bounds checks). */
+function keyProblem(sub: unknown, where: string, item: boolean): string | null {
+  if (!sub || typeof sub !== 'object' || Array.isArray(sub)) return `the subschema ${where} is a JSON object`
+  const node = sub as Record<string, unknown>
+  for (const k of Object.keys(node)) if (!(item ? ITEM_KEYWORDS : KEY_KEYWORDS).has(k)) return `keyword '${k}' is not allowed ${where}`
+  const types = item ? ITEM_TYPES : KEY_TYPES
+  if ('type' in node) {
+    const named = ([] as unknown[]).concat(node.type)
+    if (!named.some((t) => t !== 'null') || !named.every((t) => t === 'null' || types.has(t as string))) {
+      return `the type ${where} is one of ${[...types].sort().join(', ')}, or a list of them and "null"`
+    }
+  }
+  if ('items' in node) return keyProblem(node.items, `in the items of ${where.replace(/^in /, '')}`, true)
+  return null
+}
 
 function schemaProblem(schema: Record<string, unknown> | undefined): string | null {
-  if (!schema || schema.type !== 'object') return 'a property schema is an object schema'
+  if (!schema || typeof schema !== 'object') return 'a schema is a JSON object'
   for (const k of Object.keys(schema)) if (!TOP_KEYWORDS.has(k)) return `keyword '${k}' is not allowed at the top level`
-  if ('additionalProperties' in schema && schema.additionalProperties !== true) return "'additionalProperties' may only be true"
+  if (schema.type !== 'object') return 'a schema\'s "type" is "object"'
+  if ('additionalProperties' in schema && schema.additionalProperties !== true) return '"additionalProperties" may only be true'
+  if ('$schema' in schema && schema.$schema !== DRAFT_2020_12) return `"$schema" may only be "${DRAFT_2020_12}"`
   for (const [key, sub] of Object.entries((schema.properties ?? {}) as Record<string, unknown>)) {
-    if (!sub || typeof sub !== 'object' || Array.isArray(sub)) return `the subschema in property '${key}' is a JSON object`
-    for (const k of Object.keys(sub)) if (!KEY_KEYWORDS.has(k)) return `keyword '${k}' is not allowed in property '${key}'`
+    const problem = keyProblem(sub, `in property '${key}'`, false)
+    if (problem) return problem
   }
   return null
 }
@@ -324,15 +353,21 @@ export const handlers = [
     if (!set || typeof set !== 'object' || Object.keys(set).length === 0 || Object.keys(body).some((k) => k !== 'set')) {
       return problem(request, 422, 'set: the patch sets or removes at least one key')
     }
+    if (Object.keys(set).length > MAX_KEYS) return problem(request, 422, `set: the patch names at most ${MAX_KEYS} keys`)
     entityMock.propertyPatches.push({ entity, set })
     for (const [key, value] of Object.entries(set)) {
       if (value === null) continue
       const reason = propertyRefusal(kind, key, value)
       if (reason) return coded(request, 422, 'bad_property_value', `property '${key}': ${reason}`)
     }
-    const kept = (entityMock.properties.get(entity) ?? []).filter((p) => !(p.key in set))
+    const before = entityMock.properties.get(entity) ?? []
+    const kept = before.filter((p) => !(p.key in set))
     for (const [key, value] of Object.entries(set)) {
       if (value !== null) kept.push({ key, value: value as PropertyValue, source: 'manual', updated_at: now(), updated_by: BROWSER })
+    }
+    // `MAX_KEYS`: an entity already past it (a printer merge) can still remove and change keys.
+    if (kept.length > Math.max(MAX_KEYS, before.length)) {
+      return coded(request, 422, 'bad_property_value', `property '*': an entity has at most ${MAX_KEYS} keys`)
     }
     entityMock.properties.set(entity, kept.sort((a, b) => a.key.localeCompare(b.key)))
     return HttpResponse.json({ properties: entityMock.properties.get(entity) })
