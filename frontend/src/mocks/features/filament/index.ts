@@ -136,6 +136,84 @@ export function reset() {
   created.clear()
   invoicedLine.clear()
   fetches.clear()
+  insertReadings.clear()
+}
+
+type InsertBasis = S['InsertType']['empty_weight_basis']
+type NoOfferReason = NonNullable<S['InsertWeightCheck']['reason']>
+
+/** #7280 R-7280-2 — each accepted new-spool reading, by spool (`filament_insert_weight_readings`). */
+const insertReadings = new Map<string, { insert_type_id: string; reading_g: number; label_weight_g: number; derived_g: number }>()
+
+/** `insert_weights.is_placeholder` (R-7280-3). */
+const isPlaceholder = (basis: InsertBasis, note: string | null) => basis === 'placeholder' || (note ?? '').trimStart().toLowerCase().startsWith('placeholder weight')
+
+/** An insert row as the catalog reads it: `placeholder` and `derived_count` are worked out. */
+function insertView(row: S['InsertType']): S['InsertType'] {
+  const derived = [...insertReadings.values()].filter((one) => one.insert_type_id === row.id).length
+  return { ...row, placeholder: isPlaceholder(row.empty_weight_basis, row.note), derived_count: derived }
+}
+
+/** D6: a person's weight is `person` unless the body says `placeholder`. */
+function insertBasis(body: Record<string, unknown>): InsertBasis {
+  return body.empty_weight_basis === 'placeholder' ? 'placeholder' : 'person'
+}
+
+/** `insert_weights.check_on` (#7280 R-7280-1, D1, D2) over the mock's spools and ledger. */
+function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck'] {
+  const effective = view(row).effective ?? {}
+  const inserts = state.catalogs['insert-types']
+  const insert = inserts.find((one) => one.id === effective.insert_type_id)
+  const label = effective.label_weight_g ?? null
+  const weight = insert?.empty_weight_g ?? null
+  const answer = (reason: NoOfferReason | null, offer: S['InsertWeightOffer'] | null = null): S['InsertWeightCheck'] => ({
+    offer,
+    reason,
+    insert_type_id: insert?.id ?? null,
+    empty_weight_g: weight,
+    filament_g: weight == null ? null : reading - weight,
+  })
+  if (row.archived_at) return answer('archived')
+  if (!insert) return answer('no_insert')
+  if (label == null) return answer('no_label_weight')
+  const used = state.events
+    .filter((event) => event.spool_id === row.id)
+    .some((event) => {
+      if (event.kind === 'print_started' || event.kind === 'print_ended' || event.source === 'print_estimate' || event.source === 'print_actual') return true
+      if (event.delta_g != null && event.delta_g < 0) return true
+      const read = readingOf(event, label)
+      return read != null && read < label - 0.5
+    })
+  if (used) return answer('used')
+  if (row.grams_left == null || Math.abs(row.grams_left - label) >= 0.5) return answer('not_full')
+  const derived = reading - label
+  if (derived <= 0) return answer('not_above_label')
+  if (derived > label) return answer('derived_too_heavy')
+  const others = [...insertReadings.entries()].filter(([spool, one]) => spool !== row.id && one.insert_type_id === insert.id).map(([, one]) => one.derived_g)
+  const all = [...others, derived]
+  const mean = Math.floor(all.reduce((sum, one) => sum + one, 0) / all.length + 0.5)
+  if (mean < 1) return answer('not_above_label')
+  const placeholder = isPlaceholder(insert.empty_weight_basis, insert.note)
+  return answer(null, {
+    insert_type_id: insert.id,
+    insert_name: insert.name,
+    spool_id: row.id,
+    reading_g: reading,
+    label_weight_g: label,
+    derived_g: derived,
+    current_empty_weight_g: insert.empty_weight_g,
+    current_basis: insert.empty_weight_basis,
+    placeholder,
+    new_empty_weight_g: mean,
+    sample_count: all.length,
+    checked_by_default: placeholder || insert.empty_weight_basis === 'derived',
+  })
+}
+
+/** `reading_g` as the query takes it: above 0, at most 100 kg. */
+const readingParam = (raw: unknown): number | null => {
+  const value = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN
+  return Number.isFinite(value) && value > 0 && value <= 100_000 ? value : null
 }
 
 /** The invoice line each spool `addInvoicedSpools` made was bought on (#6266). */
@@ -620,7 +698,7 @@ function cleared(body: Record<string, unknown>, fields: readonly string[]): stri
 const CATALOG_FIELDS = Object.fromEntries(
   Object.entries(seed().catalogs).map(([kind, rows]) => [
     kind,
-    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id', 'aliases', 'source', 'synced_at', 'bb_colour_id'].includes(field))),
+    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id', 'aliases', 'source', 'synced_at', 'bb_colour_id', 'placeholder', 'derived_count'].includes(field))),
   ]),
 ) as Record<keyof Catalogs, Set<string>>
 
@@ -1634,7 +1712,8 @@ export const handlers = [
       rows
         .filter((row) => archived || !row.archived_at)
         .filter((row) => words.every((word) => texts(row).some((text) => text.includes(word))))
-        .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)),
+        .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name))
+        .map((row) => (params.kind === 'insert-types' ? insertView(row as unknown as S['InsertType']) : row)),
     )
   }),
   // -- the colour catalog's syncs (#6907) --
@@ -1689,10 +1768,10 @@ export const handlers = [
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
     // #6907: a person's colour has no source, no sync time and no Bambuddy link.
-    const own = kind === 'colours' ? { source: null, synced_at: null, bb_colour_id: null } : {}
+    const own = kind === 'colours' ? { source: null, synced_at: null, bb_colour_id: null } : kind === 'insert-types' ? { empty_weight_basis: insertBasis(body) } : {}
     const made = { ...blank, sort_order: 0, ...body, ...own, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
-    return HttpResponse.json(made, { status: 201 })
+    return HttpResponse.json(kind === 'insert-types' ? insertView(made as unknown as S['InsertType']) : made, { status: 201 })
   }),
   http.patch(`${BASE}/catalog/:kind/:id`, async ({ params, request }) => {
     const kind = params.kind as keyof Catalogs
@@ -1715,8 +1794,10 @@ export const handlers = [
     // A copy of the backend's `_SYNCED_VALUES` (`backend/scadbuddy/filament/catalog.py`).
     const values = ['name', 'manufacturer', 'rgba', 'material_name', 'material_id', 'extra_colours', 'effect_id']
     if (kind === 'colours' && values.some((field) => field in body)) (next as unknown as { synced_at: string | null }).synced_at = null
+    // #7280 D6: a person's weight is `person` unless it says `placeholder`.
+    if (kind === 'insert-types' && body.empty_weight_g != null) (next as unknown as S['InsertType']).empty_weight_basis = insertBasis(body)
     rows[at] = next
-    return HttpResponse.json(next)
+    return HttpResponse.json(kind === 'insert-types' ? insertView(next as unknown as S['InsertType']) : next)
   }),
   http.get(`${BASE}/catalog/:kind/resolve`, ({ params, request }) => {
     const kind = String(params.kind)
@@ -2172,6 +2253,31 @@ export const handlers = [
     const hours = 'hours' in sent ? (body.hours ?? null) : defaults.hours
     state.spools[at] = { ...row, last_dried_at: when, last_dried_temp_c: temp ?? null, last_dried_hours: hours ?? null }
     return HttpResponse.json(addEvent(row.id, 'dried', { at: when, data: { temp_c: temp ?? null, hours: hours ?? null } }), { status: 201 })
+  }),
+  // #7280 — `api/filament.py` `insert_weight_offer` and `accept_insert_weight`.
+  http.get(`${BASE}/spools/:id/insert-weight-offer`, ({ params, request }) => {
+    const row = findSpool(String(params.id))
+    if (!row) return problem(404, `no spool ${String(params.id)}`)
+    const reading = readingParam(new URL(request.url).searchParams.get('reading_g'))
+    if (reading == null) return problem(422, 'reading_g: Input should be greater than 0')
+    return HttpResponse.json(insertWeightCheck(row, reading))
+  }),
+  http.post(`${BASE}/spools/:id/insert-weight`, async ({ params, request }) => {
+    const row = findSpool(String(params.id))
+    if (!row) return problem(404, `no spool ${String(params.id)}`)
+    const raw = await request.json()
+    const extra = extraKeys(raw, ['reading_g'])
+    if (extra) return extra
+    const reading = readingParam((raw as { reading_g?: unknown }).reading_g)
+    if (reading == null) return problem(422, 'body.reading_g: Input should be greater than 0')
+    const { offer, reason } = insertWeightCheck(row, reading)
+    if (!offer) return problem(409, `no insert weight offer for spool ${row.id}: ${reason}`, { code: 'no_insert_weight_offer', reason })
+    insertReadings.set(row.id, { insert_type_id: offer.insert_type_id, reading_g: reading, label_weight_g: offer.label_weight_g, derived_g: offer.derived_g })
+    const inserts = state.catalogs['insert-types']
+    const at = inserts.findIndex((one) => one.id === offer.insert_type_id)
+    inserts[at] = { ...inserts[at]!, empty_weight_g: offer.new_empty_weight_g, empty_weight_basis: 'derived', updated_at: now() }
+    const insert = insertView(inserts[at]!)
+    return HttpResponse.json({ insert_type: insert, empty_weight_g: insert.empty_weight_g, sample_count: insert.derived_count, filament_g: reading - insert.empty_weight_g } satisfies S['InsertWeightAccepted'])
   }),
   http.post(`${BASE}/spools/:id/move`, async ({ params, request }) => {
     const at = state.spools.findIndex((row) => row.id === params.id)
