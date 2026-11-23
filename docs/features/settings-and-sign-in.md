@@ -21,6 +21,12 @@ mode `off | observe | enforce` decides whether a route without a valid caller is
 [backend auth spec](../superpowers/specs/2026-11-01-backend-auth-design.md) and the
 [service credentials spec](../superpowers/specs/2026-11-05-service-credentials-without-db-design.md).
 
+Some settings are stored only: no environment variable seeds them, and no row means the
+default. A feature that must read one inside its own transaction reads its `settings` row with
+SQL, such as `filament_shopping_auto_add_empty` (`backend/scadbuddy/filament/shopping.py`) and
+`filament_auto_add_unknown_rfid` (`backend/scadbuddy/filament/rfid_mode.py`, #7156). Every other
+setting is read through the settings store.
+
 ## Code
 
 - UI: `frontend/src/pages/SettingsPage.tsx`, areas `frontend/src/pages/settings/areas.ts:17-26`,

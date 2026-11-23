@@ -57,6 +57,11 @@ from scadbuddy.core.settings import (
 )
 from scadbuddy.filament.bb_sync_models import pushes_anything
 from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.rfid_mode import (
+    AUTO_ADD_SETTING,
+    RFID_MODE_LOCK_WAIT_SECONDS,
+    reconcile_mode_now,
+)
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
@@ -257,6 +262,8 @@ class SettingsView(BaseModel):
     print_auto_import_skip_lan_printers: list[str] = Field(default_factory=list)
     #: #6868: whether an empty spool adds its type to the shopping list.
     filament_shopping_auto_add_empty: bool = True
+    #: #7156: off holds Bambuddy's auto-add of unknown RFID spools off.
+    filament_auto_add_unknown_rfid: bool = True
     #: #6905: days a Bambuddy sync pass's history row is kept; ``None``: 30.
     filament_sync_pass_ttl_days: int | None = None
     #: The largest media upload (#274), in bytes, which the UI checks a file against
@@ -304,6 +311,8 @@ class SettingsView(BaseModel):
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
     filament_low_stock_pct: int = 20
     filament_default_cost_per_kg: Decimal | None = None
+    filament_drying_temp_c: int | None = None
+    filament_drying_hours: Decimal | None = None
     filament_label_base_url: str | None = None
     filament_burn_window_days: int = 30
     filament_lead_time_days: int = 7
@@ -534,6 +543,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         print_auto_import_skip_printers=stored.print_auto_import_skip_printers or [],
         print_auto_import_skip_lan_printers=stored.print_auto_import_skip_lan_printers or [],
         filament_shopping_auto_add_empty=stored.filament_shopping_auto_add_empty,
+        filament_auto_add_unknown_rfid=stored.filament_auto_add_unknown_rfid,
         filament_sync_pass_ttl_days=stored.filament_sync_pass_ttl_days,
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
@@ -653,6 +663,11 @@ async def put_settings(
     # Decision 153: a running workflow waits the interval its last pass read, for the
     # instance it was started for.
     timer_keys = {"spool_overlay_refresh_seconds", "bambuddy_url"} & touched
+    auto_add_touched = AUTO_ADD_SETTING in touched
+    if auto_add_touched:
+        auto_add_before = (await asyncio.to_thread(store.read, {AUTO_ADD_SETTING}))[
+            AUTO_ADD_SETTING
+        ]
     timer_before = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
     try:
         await asyncio.to_thread(store.save, patch)
@@ -686,6 +701,16 @@ async def put_settings(
         # next pass; switched off, it forgets the moment. It reads the committed switch
         # itself, under the lock a pass takes (#6011).
         await state.components.get(AUTO_IMPORTS).floor()
+    if auto_add_touched and snapshot.stored.filament_auto_add_unknown_rfid != auto_add_before:
+        # #7156 R-7156-4: Bambuddy's auto-add follows a changed setting at once, as the
+        # mode's PUT does; a save of the same value calls nothing and waits on no lock. A
+        # failure never fails the save, and the spool refresh retries.
+        try:
+            await reconcile_mode_now(filament.rfid, store.load, wait=RFID_MODE_LOCK_WAIT_SECONDS)
+        except Exception as error:
+            logger.warning(
+                "could not reconcile Bambuddy's auto-add", extra={"error": type(error).__name__}
+            )
     apply_runtime(state, snapshot.runtime)
     # This process sees its own write at once, `/healthz` too, which only reads what the
     # source last read (#6354); workers within the source's TTL.

@@ -88,8 +88,18 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   // #6625 — and the nozzles a 3DFP preset fetch exports.
   // #6868 — and whether an empty spool adds its type to the shopping list (stored only).
   // #6905 — and how long the sync's pass history is kept (stored only), beside that history.
-  filament: ['filament_sync', 'profile_fetch_nozzles', 'filament_shopping_auto_add_empty', 'filament_sync_pass_ttl_days'],
+  // #7156 — and whether ScadBuddy holds Bambuddy's auto-add of unknown RFID spools off (stored only).
+  filament: [
+    'filament_sync',
+    'profile_fetch_nozzles',
+    'filament_shopping_auto_add_empty',
+    'filament_sync_pass_ttl_days',
+    'filament_auto_add_unknown_rfid',
+  ],
 }
+
+/** #7156 — the drying defaults' bounds (`core/settings.py`): empty offers none. */
+export const DRYING = { tempMin: 1, tempMax: 150, hoursMin: 0.1, hoursMax: 999.9 }
 
 /** #6905 — `filament_sync_pass_ttl_days`: empty is the default, 30 days. */
 export const SYNC_PASS_TTL = { min: 1, max: 3650, default: 30 }
@@ -207,6 +217,8 @@ export function baseline(settings: Settings, name: FieldName): string {
   if (name === 'print_auto_import') return settings.print_auto_import ? 'true' : 'false'
   // #6868 — on until the settings say otherwise, as the backend's default.
   if (name === 'filament_shopping_auto_add_empty') return settings.filament_shopping_auto_add_empty === false ? 'false' : 'true'
+  // #7156 — on until the settings say otherwise, as the backend's default.
+  if (name === 'filament_auto_add_unknown_rfid') return settings.filament_auto_add_unknown_rfid === false ? 'false' : 'true'
   if (name === 'print_auto_import_sources') return sourcesValue(settings.print_auto_import_sources ?? [])
   if (name === 'print_auto_import_skip_printers') return printerIdsValue(settings.print_auto_import_skip_printers ?? [])
   if (name === 'print_auto_import_skip_lan_printers')
@@ -241,7 +253,31 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
     name === 'slicer_backend'
   )
     return raw
-  if (name === 'store_s3_path_style' || name === 'print_auto_import' || name === 'filament_shopping_auto_add_empty') return raw === 'true'
+  if (
+    name === 'store_s3_path_style' ||
+    name === 'print_auto_import' ||
+    name === 'filament_shopping_auto_add_empty' ||
+    name === 'filament_auto_add_unknown_rfid'
+  )
+    return raw === 'true'
+  // #7156 — a whole °C and a decimal of hours, each in its bounds; empty offers none.
+  if (name === 'filament_drying_temp_c') {
+    if (raw.trim() === '') return null
+    const temp = Number(raw)
+    if (!Number.isInteger(temp) || temp < DRYING.tempMin || temp > DRYING.tempMax) {
+      return { problem: `Enter ${DRYING.tempMin} to ${DRYING.tempMax} °C, or leave it empty to offer none.` } satisfies Problem
+    }
+    return temp
+  }
+  if (name === 'filament_drying_hours') {
+    const text = raw.trim()
+    if (text === '') return null
+    const hours = Number(text)
+    if (!/^\d+(\.\d+)?$/.test(text) || hours < DRYING.hoursMin || hours > DRYING.hoursMax) {
+      return { problem: `Enter ${DRYING.hoursMin} to ${DRYING.hoursMax} hours, or leave it empty to offer none.` } satisfies Problem
+    }
+    return text
+  }
   // #6265 — one direction per data type: the form's six-part string, split.
   if (name === 'filament_sync') return syncParts(raw)
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.

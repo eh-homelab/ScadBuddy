@@ -191,6 +191,17 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'filament',
     kind: 'text',
   },
+  // #7156 — the drying a spool is offered when the catalog sets none; empty offers none.
+  {
+    name: 'filament_drying_temp_c',
+    section: 'filament',
+    kind: 'text',
+  },
+  {
+    name: 'filament_drying_hours',
+    section: 'filament',
+    kind: 'text',
+  },
   {
     name: 'filament_label_base_url',
     section: 'filament',

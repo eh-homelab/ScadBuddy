@@ -1,24 +1,48 @@
-import { ChevronLeftIcon, PrinterIcon } from 'lucide-react'
+import { ChevronLeftIcon, PlusIcon, PrinterIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router'
-import { ApiError } from '../../api/client'
+import { Link, useNavigate, useParams } from 'react-router'
+import { ApiError, api } from '../../api/client'
 import { getLocation, type LocationDetail } from '../../api/filament'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
 import { LinksPanel } from '../../components/entities/LinksPanel'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { SpoolLink } from '../../components/filament/SpoolLink'
 import { filamentLinks } from '../../lib/filamentLinks'
+import { Button } from '@/components/ui/button'
 
 /** #6955 — a place's page: what `/x/L-12` opens. Its path, what is inside it, and the link to its label. */
 export function LocationPage() {
   const { id = '' } = useParams()
   const [place, setPlace] = useState<LocationDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const navigate = useNavigate()
+  /** #7150 — one `Idempotency-Key` per opened place: a second click makes no second spool. */
+  const [slotKey, setSlotKey] = useState(() => crypto.randomUUID())
+  const [making, setMaking] = useState(false)
+  const [slotError, setSlotError] = useState<string | null>(null)
+
+  /** Create from slot: a spool from what the printer last reported in this tray, placed in it. */
+  async function fromSlot(printerId: string, amsId: number, trayId: number) {
+    setMaking(true)
+    setSlotError(null)
+    try {
+      const made = await api.newTraySpool(printerId, amsId, trayId, slotKey)
+      void navigate(filamentLinks.spool(made.id))
+    } catch (cause) {
+      setSlotError(cause instanceof ApiError ? cause.detail : 'ScadBuddy could not make the spool. Try again.')
+    } finally {
+      setMaking(false)
+    }
+  }
 
   useEffect(() => {
     let live = true
     setPlace(null)
     setError(null)
+    // React Router keeps this page when only `:id` changes: one tray's error and key are not the next one's.
+    setSlotError(null)
+    setMaking(false)
+    setSlotKey(crypto.randomUUID())
     getLocation(id).then(
       (found) => live && setPlace(found),
       (cause: unknown) => {
@@ -97,7 +121,21 @@ export function LocationPage() {
           <section aria-label="Spools" className="flex flex-col gap-1">
             <h2 className="font-medium">Spools</h2>
             {place.spools.length === 0 ? (
-              <p className="text-muted-foreground">Nothing is here.</p>
+              place.printer_id && place.ams_id != null && place.tray_id != null ? (
+                <div className="flex flex-col items-start gap-2">
+                  <p className="text-muted-foreground">No spool is linked to this tray. ScadBuddy can make one from what the printer reports in it: its material, colour and tag.</p>
+                  <Button type="button" size="sm" variant="outline" disabled={making} onClick={() => void fromSlot(place.printer_id!, place.ams_id!, place.tray_id!)}>
+                    <PlusIcon /> New spool from this tray
+                  </Button>
+                  {slotError && (
+                    <p role="alert" className="text-warn">
+                      {slotError}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-muted-foreground">Nothing is here.</p>
+              )
             ) : (
               <ul className="flex flex-col gap-1">
                 {place.spools.map((spool) => (

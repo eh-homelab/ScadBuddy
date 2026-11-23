@@ -11,13 +11,15 @@ type Query<Op extends keyof operations> = NonNullable<operations[Op]['parameters
 export type Spool = Schemas['Spool']
 /** The spec lists a field the server always sends (it has a default) as optional; here it is required. */
 export type SpoolDetail = Schemas['SpoolDetail'] & Required<Pick<Schemas['SpoolDetail'], 'effective' | 'overridden' | 'names' | 'presets' | 'k_values' | 'low_stock' | 'in_use' | 'type_suppliers'>>
-export type SpoolCreate = Schemas['SpoolCreate']
+export type SpoolCreate = Schemas['SpoolCreate-Input']
 export type SpoolPatch = Schemas['SpoolPatch']
+export type SpoolDraft = Schemas['SpoolDraft']
+export type SpoolBulkCreate = Schemas['SpoolBulkCreate']
 export type TagBind = Schemas['TagBind']
 export type TagBinding = Schemas['TagBinding']
 export type PresetInput = Schemas['SpoolPresetCreate']
 export type EffectivePreset = Schemas['EffectivePreset']
-export type KValueInput = Schemas['SpoolKValueCreate']
+export type KValueInput = Schemas['SpoolKValueCreate-Input']
 export type EffectiveKValue = Schemas['EffectiveKValue']
 export type SpoolType = Schemas['SpoolType']
 export type SpoolTypeDetail = Schemas['SpoolTypeDetail']
@@ -156,6 +158,17 @@ export const importSpools = (rows: CsvRow[], options: { dryRun: true } | { dryRu
   })
 
 export const createSpool = (body: SpoolCreate) => request<Spool>(`${BASE}/spools`, json('POST', body))
+
+/**
+ * #7150 — `quantity` identical spools, each with its own number, with their place, presets
+ * and K values, in one transaction. `key` is one `Idempotency-Key` per opened form, so a
+ * retry or a double click answers the first spools and makes no more.
+ */
+export const bulkCreateSpools = (body: SpoolBulkCreate, key: string) =>
+  request<Spool[]>(`${BASE}/spools/bulk`, { ...json('POST', body), headers: { 'Idempotency-Key': key } })
+
+/** #7150 — a new spool's draft from an existing one: not its number, tags, tray, ledger or weight lock. */
+export const copySpool = (id: string) => request<SpoolDraft>(`${BASE}/spools/${seg(id)}/copy`)
 
 /** Only the fields sent change; `null` clears an override. */
 export const patchSpool = (id: string, body: SpoolPatch) => request<Spool>(`${BASE}/spools/${seg(id)}`, json('PATCH', body))
