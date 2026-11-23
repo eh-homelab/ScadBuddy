@@ -26,13 +26,16 @@ from scadbuddy.crud.print import (
     BASE,
     HELD_PRESETS_API_ONLY,
     NATIVE_SLICES_API_ONLY,
+    OWN_PRESET_DOCUMENTS_MAX,
     SLICE_SUBJECT,
     ApiOnlyError,
+    RemoteFilamentPresets,
     RemoteHeldPresets,
     RemoteNativeSlices,
 )
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.slicing.held_presets import HeldPresetStore
+from scadbuddy.slicing.own_presets import OwnRow
 from scadbuddy.slicing.store import NativeSliceStore, SliceSubjectError
 from scadbuddy.worker import PRINT_CRUD_AREAS
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
@@ -176,6 +179,81 @@ async def test_the_remote_documents_drop_a_print_host_credential() -> None:
     assert setting["print_host"] == "octopi.local"
 
 
+def test_the_own_presets_area_is_served_and_awaited() -> None:
+    """ScadBuddy's own filament presets (#7176), an area of their own, appended."""
+    assert "own-presets" in PRINT_CRUD_AREAS
+    areas = CRUD_AREAS["print"]
+    assert areas.index("own-presets") > areas.index("sensor-notify")
+
+
+async def test_the_own_presets_cross_as_the_store_answers() -> None:
+    """The worker reads the rows and documents the API's store answers, and strips a
+    print-host credential an older API might still send."""
+    row = OwnRow(
+        id=12,
+        name="Silk",
+        sha256="a" * 64,
+        filament_type="PLA",
+        filament_colour="#C0C0C0",
+        compatible_printers=["Bambu Lab H2C 0.4 nozzle"],
+        bb_preset_id=141,
+    )
+
+    class Own:
+        async def rows(self) -> list[OwnRow]:
+            return [row]
+
+        async def documents(self, ids: list[int]) -> dict[int, dict[str, Any]]:
+            return {found: {**_HOSTED, "name": "Silk"} for found in ids if found == 12}
+
+    slicing = SimpleNamespace(own=Own())
+    rows = await crud_print.own_filament_presets(slicing)  # type: ignore[arg-type]
+    docs = await crud_print.filament_preset_documents(slicing, [12, 13])  # type: ignore[arg-type]
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/own-presets"):
+            body: Any = [r.model_dump(mode="json") for r in rows]
+        else:
+            assert request.url.params.get_list("id") == ["12", "13"]
+            body = {str(k): v for k, v in docs.items()}
+        return httpx.Response(200, json=body, headers=CRUD_HEADERS)
+
+    client, blocking = _stand_in(answer)
+    try:
+        remote = RemoteFilamentPresets(client)
+        assert await remote.rows() == [row]
+        got = await remote.documents([13, 12])
+    finally:
+        await client.aclose()
+        blocking.close()
+    assert set(got) == {12}
+    assert not _CREDENTIALS & set(got[12])
+    assert got[12]["print_host"] == "octopi.local"
+
+
+async def test_many_own_preset_documents_are_read_in_batches() -> None:
+    """More ids than one request may name (the route's cap) are sent in batches, and
+    every answer is kept."""
+    asked: list[int] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        ids = [int(found) for found in request.url.params.get_list("id")]
+        assert 0 < len(ids) <= OWN_PRESET_DOCUMENTS_MAX
+        asked.append(len(ids))
+        return httpx.Response(
+            200, json={str(found): {"name": str(found)} for found in ids}, headers=CRUD_HEADERS
+        )
+
+    client, blocking = _stand_in(answer)
+    try:
+        got = await RemoteFilamentPresets(client).documents(range(1, 452))
+    finally:
+        await client.aclose()
+        blocking.close()
+    assert asked == [200, 200, 51]
+    assert sorted(got) == list(range(1, 452))
+
+
 async def test_the_routes_refusals_are_raised_as_the_sql_stores_raise() -> None:
     def answer(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -301,6 +379,8 @@ def test_another_callers_credential_is_refused(store: SettingsStore) -> None:
         for method, path in (
             ("GET", f"{BASE}/held-presets"),
             ("GET", f"{BASE}/held-presets/documents?id=1"),
+            ("GET", f"{BASE}/own-presets"),
+            ("GET", f"{BASE}/own-presets/documents?id=1"),
             ("POST", f"{BASE}/native-slices/start"),
         ):
             with pytest.raises(CrudRefusedError) as refused:

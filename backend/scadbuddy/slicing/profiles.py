@@ -71,6 +71,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from scadbuddy.slicing.held_presets import HeldPresets
+    from scadbuddy.slicing.own_presets import OwnPresets
 
 #: One flattened preset: every option, ``inherits`` and ``include`` resolved and gone.
 Flat = dict[str, str | list[str]]
@@ -308,17 +309,25 @@ class Profiles:
     ``held`` is the kept copy of Bambuddy's local presets (#4645,
     `slicing/held_presets.py`), which a native run offers and slices over this tree; it
     rides here because every reader of the tree on a native run (the catalogue, the
-    values, the slice's files) reads it too. ``None``: only the tree's presets."""
+    values, the slice's files) reads it too. ``None``: only the tree's presets.
 
-    def __init__(self, root: Path, *, held: HeldPresets | None = None) -> None:
+    ``own`` is ScadBuddy's own filament presets (#7176, `slicing/own_presets.py`), which a
+    native run offers and slices over this tree as it does the kept copy's."""
+
+    def __init__(
+        self, root: Path, *, held: HeldPresets | None = None, own: OwnPresets | None = None
+    ) -> None:
         self.root = root
         self.held = held
+        self.own = own
         self._indexes: dict[Kind, _Index] = {}
 
     @classmethod
-    def installed(cls, root: Path, *, held: HeldPresets | None = None) -> Profiles | None:
+    def installed(
+        cls, root: Path, *, held: HeldPresets | None = None, own: OwnPresets | None = None
+    ) -> Profiles | None:
         """The tree under ``root``, or ``None`` without one (a dev run outside the image)."""
-        return cls(root, held=held) if (root / f"{VENDOR}.json").is_file() else None
+        return cls(root, held=held, own=own) if (root / f"{VENDOR}.json").is_file() else None
 
     @cached_property
     def version(self) -> str:
