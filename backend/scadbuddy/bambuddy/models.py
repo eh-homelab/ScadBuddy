@@ -1114,6 +1114,10 @@ class KProfile(BambuddyModel):
     name: str
     k_value: str
     setting_id: str | None = None
+    #: Bambuddy's defaults (``backend/app/schemas/kprofile.py``, v1.3.1, #7154).
+    n_coef: str = "0.000000"
+    ams_id: int = 0
+    tray_id: int = -1
 
 
 class KProfileTable(BambuddyModel):
@@ -1121,6 +1125,24 @@ class KProfileTable(BambuddyModel):
 
     profiles: list[KProfile] = Field(default_factory=list)
     nozzle_diameter: str | None = None
+
+
+class KProfileWriteResult(BambuddyModel):
+    """A K-profile write's answer (#7154): ``{success, confirmed, message}`` for a set, a
+    batch and a delete, where ``confirmed`` is false when the printer sent no
+    acknowledgement in time; ``{success, message}`` for a note's set and delete
+    (``backend/app/api/routes/kprofiles.py``, maziggy/bambuddy v1.3.1)."""
+
+    success: bool
+    confirmed: bool | None = None
+    message: str = ""
+
+
+class KProfileNotes(BambuddyModel):
+    """``GET /api/v1/printers/{id}/kprofiles/notes`` (``KProfileNoteResponse``): each
+    note by the key Bambuddy's page stores it under (#7154)."""
+
+    notes: dict[str, str] = Field(default_factory=dict)
 
 
 class SpoolKProfile(BambuddyModel):
