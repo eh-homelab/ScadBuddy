@@ -5,6 +5,7 @@ Bambuddy owns."""
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -27,7 +28,6 @@ from scadbuddy.filament.sb_presets import (
     version_on,
 )
 from scadbuddy.filament.types import PresetUnknownError, SpoolTypeStore
-from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.own_presets import sb_id, sb_ref
 from scadbuddy.store.local import LocalBlobStore
 from tests.conftest import PgPool
@@ -57,6 +57,23 @@ def _held(bb_id: int, name: str, stamp: str | None, **over: Any) -> LocalPresetD
         updated_at=stamp,
         setting=_doc(name, **over),
     )
+
+
+class MemoryPresets:
+    """`sb_presets.PresetSource` in memory: Bambuddy's local presets as a read answers
+    them."""
+
+    def __init__(self) -> None:
+        self.presets: dict[int, LocalPresetDetail] = {}
+
+    async def keep(self, detail: LocalPresetDetail) -> None:
+        self.presets[detail.id] = detail
+
+    async def stamps(self) -> dict[int, str | None]:
+        return {bb_id: p.updated_at for bb_id, p in self.presets.items()}
+
+    async def documents(self, ids: Collection[int]) -> dict[int, LocalPresetDetail]:
+        return {i: self.presets[i] for i in ids if i in self.presets}
 
 
 def _bind(pool: PgPool, type_id: UUID, ref: str, nozzle: str = "0.4") -> None:
@@ -163,7 +180,7 @@ async def test_adoption_turns_bambuddy_ids_into_scadbuddy_presets(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     fetched_type = _type(pg_pool, "PLA-F")
     person_type = _type(pg_pool, "PLA-P")
     unheld_type = _type(pg_pool, "PLA-U")
@@ -207,7 +224,7 @@ async def test_adoption_turns_bambuddy_ids_into_scadbuddy_presets(
     assert fetched.mirrored_sha256 == fetched.sha256
     assert _bindings(pg_pool, fetched_type) == [(sb_ref(fetched.id), fetched.id)]
     assert _bindings(pg_pool, person_type) == [(sb_ref(person.id), person.id)]
-    # Not in the kept copy: left for a later refresh, still Bambuddy's id.
+    # Not in Bambuddy's answer: left, still Bambuddy's id.
     assert _bindings(pg_pool, unheld_type) == [("300", None)]
     assert (await store.documents([person.id]))[person.id] == _doc("Mine")
     # A binding that names it again later (the pull) is moved to the same preset.
@@ -228,7 +245,7 @@ async def test_one_preset_that_cannot_be_adopted_never_stops_the_rest(
     """A Bambuddy local preset whose row ScadBuddy refuses keeps its bindings' Bambuddy
     id; the ids after it are still adopted."""
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     refused, kept = _type(pg_pool, "PLA-R"), _type(pg_pool, "PLA-K")
     await held.keep(_held(5, "Refused", "2026-11-20T01:00:00"))
     await held.keep(_held(9, "Kept", "2026-11-20T01:00:00"))
@@ -252,7 +269,7 @@ async def test_a_bambuddy_edit_is_a_new_version_of_its_preset(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     type_id = _type(pg_pool, "PLA-B")
     await held.keep(_held(7, "Mine", "2026-11-20T01:00:00"))
     _bind(pg_pool, type_id, "7")
@@ -279,10 +296,10 @@ async def test_a_bambuddy_edit_is_a_new_version_of_its_preset(
 async def test_a_preset_with_no_stamp_writes_no_blob_while_unchanged(
     pg_pool: PgPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A kept preset Bambuddy sent with no ``updated_at`` is read at every refresh; its
+    """A preset Bambuddy sent with no ``updated_at`` is read at every refresh; its
     unchanged document keeps no new blob, and a changed one is a new version."""
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     await held.keep(_held(8, "Stampless", None))
     _bind(pg_pool, _type(pg_pool, "PLA-N"), "8")
     await adopt_held(pg_pool, blobs, held)
@@ -309,7 +326,7 @@ async def test_a_preset_with_no_stamp_writes_no_blob_while_unchanged(
 
 async def test_a_scadbuddy_owned_preset_is_never_read_back(pg_pool: PgPool, tmp_path: Path) -> None:
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     doc = _doc("Ours")
     key, sha256 = await keep_document(blobs, document_bytes(doc))
     with pg_pool.connection() as conn, conn.transaction():

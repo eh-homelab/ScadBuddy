@@ -416,16 +416,16 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "spool_overlay_refresh_seconds": SettingDoc(
             "Pull from Bambuddy every",
-            "How often Bambuddy's spools are pulled and a copy of its local presets kept for"
-            " native slices, on a schedule of their own so a print never waits on Bambuddy."
-            " The copy never changes ScadBuddy's own presets; the pull imports Bambuddy's"
-            " filament presets only while Filament sync's presets pulls. The same run"
+            "How often Bambuddy's spools are pulled, on a schedule of their own so a print"
+            " never waits on Bambuddy. The pull imports Bambuddy's filament presets into"
+            " ScadBuddy's own only while Filament sync's presets pulls; ScadBuddy keeps no"
+            " copy of them and slices none of them. The same run"
             " reconciles each printer's report with the filament ledger (the capture"
             " backstop) and reads the Home Assistant sensors. A sensor's alert notification"
             " does not wait for it: it goes out within about a minute of the reading that"
             " starts or stops the alert, whatever this says. It is also how often the"
             " Bambuddy sync runs a full pass of what ScadBuddy sends to Bambuddy. 0 turns the"
-            " pull, the presets copy and the backstop off, and stops the sync's timer: the"
+            " pull, the presets import and the backstop off, and stops the sync's timer: the"
             " sync then runs only after a filament change or Sync now."
             " A change applies to the pull at the next start, and to the sync after its"
             " next pass.",

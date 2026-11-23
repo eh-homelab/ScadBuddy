@@ -13,13 +13,14 @@ posts the zip to Bambuddy's local presets, and maps each file to a local preset 
 name that this run made (absent from the listing kept before its first import) or that an
 earlier fetch of the type made or bound; a preset of that name a person made is never
 bound (#6625 S1). It merges those ids over the type's preset rows of the fetched keys, reads
-the K values the type's printers hold for an exact filament match, refreshes the kept
-copy of the local presets, and ends the run. Every write of the end is in one transaction with the
-idempotency ledger's row. One run's import runs once at a time: it holds a lease on the
-run row (``import_lease_until``, `_claim`). A second request for the run (the worker's
-client retrying a slow one) polls with short statements, holding no pooled connection,
-then answers the first one's outcome without calling Bambuddy, or claims the lease once
-it has expired (R-PR3).
+the K values the type's printers hold for an exact filament match, and ends the run. Every
+write of the end is in one transaction with the idempotency ledger's row. After it, those
+bindings name ScadBuddy presets made from the same documents (`_adopt_made`, #7244: the
+native slicer reads no Bambuddy local preset). One run's import runs once at a time: it
+holds a lease on the run row (``import_lease_until``, `_claim`). A second request for the
+run (the worker's client retrying a slow one) polls with short statements, holding no
+pooled connection, then answers the first one's outcome without calling Bambuddy, or
+claims the lease once it has expired (R-PR3).
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ import logging
 import math
 import time
 import zipfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -52,11 +53,12 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
-from scadbuddy.bambuddy.models import KProfile
+from scadbuddy.bambuddy.models import KProfile, LocalPresetDetail
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, idempotent, record, stored
 from scadbuddy.filament.models import TypeKValue, TypePreset
 from scadbuddy.filament.profile_fill import fill_quietly
+from scadbuddy.filament.sb_presets import adopt_held
 from scadbuddy.filament.types import SpoolTypeStore, list_edit
 from scadbuddy.orders.attachments import blob_path, keep_file
 from scadbuddy.profile_fetch.wire import (
@@ -76,7 +78,6 @@ from scadbuddy.profile_fetch.workflow import (
     NO_WORKER,
     TOO_LONG,
 )
-from scadbuddy.slicing.held_presets import HeldPresetStore, refresh_held_presets
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -727,6 +728,9 @@ class _Ending:
     k_scope: dict[tuple[UUID, str], str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     error: str | None = None
+    #: Each bound preset's cleaned document, by its Bambuddy id: what the import made a
+    #: ScadBuddy preset of after its commit (`_adopt_made`, #7244).
+    documents: dict[int, tuple[str, bytes]] = field(default_factory=dict)
 
     def outcome(self) -> ImportOutcome:
         return ImportOutcome(
@@ -878,6 +882,7 @@ async def _import_once(
             return reply
 
     done = await asyncio.to_thread(finish)
+    await _adopt_made(state, ending)
     if first_presets == [True]:
         # A type's first presets fill its empty fields from their profile (#6714, R-6714-a);
         # after the commit, and a failure never fails the import.
@@ -890,6 +895,49 @@ async def _import_once(
             actor=row["started_by"],
         )
     return ImportOutcome.model_validate(done.body)
+
+
+class _MadePresets:
+    """The fetch's own documents as an import source (`sb_presets.PresetSource`): what it
+    sent Bambuddy, so making them ScadBuddy presets reads no Bambuddy (#7244)."""
+
+    def __init__(self, documents: dict[int, tuple[str, bytes]]) -> None:
+        self._details = {
+            bb_id: LocalPresetDetail(
+                id=bb_id,
+                name=name,
+                preset_type="filament",
+                source="3dfp",
+                setting=json.loads(body),
+            )
+            for bb_id, (name, body) in documents.items()
+        }
+
+    async def stamps(self) -> dict[int, str | None]:
+        return {bb_id: None for bb_id in self._details}
+
+    async def documents(self, ids: Collection[int]) -> dict[int, LocalPresetDetail]:
+        return {bb_id: self._details[bb_id] for bb_id in ids if bb_id in self._details}
+
+
+async def _adopt_made(state: AppState, ending: _Ending) -> None:
+    """The type's bindings to the presets this import made in Bambuddy name ScadBuddy
+    presets made from the same documents (`sb_presets.adopt_held`, ``3dfp`` by the run's
+    files), so the native slicer, which reads no Bambuddy local preset (#7244), slices
+    them. After the commit; a failure is logged and never fails the import, and the
+    bindings keep the Bambuddy ids until the presets import or the next API start adopts
+    them."""
+    if not ending.documents:
+        return
+    try:
+        await adopt_held(
+            state.settings_store.pool, state.store.blobs, _MadePresets(ending.documents)
+        )
+    except Exception as error:
+        logger.warning(
+            "could not make the fetched presets ScadBuddy presets",
+            extra={"error": type(error).__name__},
+        )
 
 
 @dataclass
@@ -1066,6 +1114,7 @@ async def _import(
                         f"Bambuddy kept its existing preset {f.name}; its content was not updated"
                     )
                 mapped.append(f)
+                ending.documents[(ours or again)[0]] = (f.name, docs[f.sha256])
                 ending.presets.append(
                     TypePreset(
                         type_id=row["type_id"],
@@ -1076,11 +1125,6 @@ async def _import(
                     )
                 )
             await _k_values(client, ending, row["type_id"], mapped, docs, printers)
-            if state.settings.spool_overlay_refresh_seconds:
-                try:
-                    await refresh_held_presets(HeldPresetStore(state.projection.pool), client)
-                except ApiError as error:
-                    ending.notes.append(f"the kept copy of the presets was not refreshed: {error}")
     except ApiError as error:
         if error.status >= status.HTTP_500_INTERNAL_SERVER_ERROR:
             raise

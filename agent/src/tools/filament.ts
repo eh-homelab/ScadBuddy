@@ -520,7 +520,8 @@ const tools: Tool[] = [
       "Start a fetch of a spool type's slicer presets from 3dfilamentprofiles.com by its `tdfp_id`: " +
       "ScadBuddy's profile-fetch worker exports one Bambu Studio preset per printer model ScadBuddy's printers " +
       'have and per nozzle in the `profile_fetch_nozzles` setting; ScadBuddy imports them into Bambuddy\'s ' +
-      "local presets and makes them the type's presets for those keys (its other presets stay), with K values " +
+      "local presets, makes each a ScadBuddy preset (`sb-<id>`) and makes those the type's presets for those keys " +
+      '(its other presets stay), with K values ' +
       'where a printer has an exact match, never over a K value a person, the fill or a printer calibration set. Answers at once with the run (`run.id`, `run.status` `running`) and ' +
       '`joined`: true when a fetch of the type was already running, which it joins instead of starting another. ' +
       'Follow it with filament_type_profile_fetch. 422 `no_tdfp_id` when the type has no `tdfp_id` ' +
@@ -693,7 +694,8 @@ const tools: Tool[] = [
     description:
       "Fill a spool type's empty print values from its slicer filament profile (#6714): with `type_id` one type, " +
       'without it every unarchived type. The profile is the type preset for the H2C 0.4 mm nozzle, else any 0.4 mm ' +
-      'one, else the first: a numeric id is a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
+      'one, else the first: `sb-<id>` is a ScadBuddy preset, any other a Bambu Studio preset; a numeric Bambuddy ' +
+      'local preset id is not read (import it first with filament_bambuddy_presets_import). It fills only ' +
       'empty fields (nozzle and bed temperature ranges from the H2C plates, density, drying temperature and hours ' +
       "from the AMS HT's idle drying values, above an AMS 2 Pro's 65 °C for some; a drying value the type's subtype or " +
       "material already sets is left empty, and only a refresh offers it; the diameter is never empty), never the cost (`cost_hint` is only a " +

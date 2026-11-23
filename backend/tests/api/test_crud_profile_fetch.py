@@ -120,10 +120,22 @@ class Fetch:
         with _state(self.client).settings_store.pool.connection() as conn:
             return list(conn.execute(sql, args).fetchall())
 
-    def presets(self) -> list[tuple[str, str, str, str | None]]:
+    def presets(self, raw: bool = False) -> list[tuple[str, str, str, str | None]]:
+        """The type's presets, each ``sb-`` ref as the Bambuddy id its ScadBuddy preset holds
+        (the import's adoption makes each bound preset one, #7244), unless ``raw``."""
         rows = _state(self.client).components.get(FILAMENT).types.presets(self.type_id)
+        held = {
+            f"sb-{row['id']}": str(row["bb_preset_id"])
+            for row in self.rows("SELECT id, bb_preset_id FROM filament_presets")
+            if row["bb_preset_id"] is not None
+        }
         return [
-            (p.printer_model, p.nozzle_diameter, p.slicer_filament, p.slicer_filament_name)
+            (
+                p.printer_model,
+                p.nozzle_diameter,
+                p.slicer_filament if raw else held.get(p.slicer_filament, p.slicer_filament),
+                p.slicer_filament_name,
+            )
             for p in rows
         ]
 
@@ -1091,38 +1103,36 @@ def test_import_needs_its_key(fetch: Fetch) -> None:
 
 
 @respx.mock
-def test_the_held_copy_is_refreshed_after_import(
+def test_the_import_makes_its_presets_scadbuddy_presets_reading_no_bambuddy(
     fetch: Fetch, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#7244: the native slicer reads no Bambuddy local preset, so once the import commits,
+    each preset it bound is a ScadBuddy preset made from the document it sent, with no
+    ``GET /local-presets/{id}``; no copy of Bambuddy's presets is kept."""
     from scadbuddy.filament.profile_fill import TypeFiller
 
     async def no_fill(self: Any, settings: Any, type_ids: Any, **kwargs: Any) -> list[Any]:
         return []
 
-    # The first presets also fill the type (one more local-preset read): not what this counts.
     monkeypatch.setattr(TypeFiller, "fill", no_fill)
-    state = _state(fetch.client)
-    state.settings = state.settings.model_copy(update={"spool_overlay_refresh_seconds": 300})
     bodies = put_all(fetch)
     bb_import(4)
     local_presets([name_of(b) for b in bodies])
     no_k_profiles()
-    details = respx.get(url__regex=rf"{re.escape(API)}/local-presets/(\d+)$").mock(
-        side_effect=lambda request: httpx.Response(
-            200,
-            json={
-                "id": int(request.url.path.rsplit("/", 1)[1]),
-                "name": "n",
-                "preset_type": "filament",
-                "source": "import",
-                "setting": {"a": "b"},
-            },
-        )
-    )
+    details = respx.get(url__regex=rf"{re.escape(API)}/local-presets/(\d+)$").respond(404)
     assert fetch.import_().status_code == 200
-    assert details.call_count == 4
-    held = fetch.rows("SELECT id FROM held_local_presets ORDER BY id")
-    assert [row["id"] for row in held] == [101, 102, 103, 104]
+    assert details.call_count == 0
+    assert all(p[2].startswith("sb-") for p in fetch.presets(raw=True))
+    made = fetch.rows(
+        "SELECT name, source, bb_preset_id, type_id, mirrored_sha256 = sha256 AS mirrored"
+        " FROM filament_presets ORDER BY bb_preset_id"
+    )
+    assert [(m["bb_preset_id"], m["source"], m["type_id"]) for m in made] == [
+        (101 + i, "3dfp", fetch.type_id) for i in range(4)
+    ]
+    assert sorted(m["name"] for m in made) == sorted(name_of(b) for b in bodies)
+    assert all(m["mirrored"] for m in made)
+    assert fetch.rows("SELECT id FROM held_local_presets") == []
 
 
 @respx.mock

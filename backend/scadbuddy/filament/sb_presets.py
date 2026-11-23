@@ -12,16 +12,21 @@ Bambuddy's ``updated_at`` moved (`refresh_bambuddy`).
 `adopt_held` turns each binding that still names a Bambuddy local preset into an
 ``sb-`` ref (Decision 6): to the ScadBuddy preset with that Bambuddy id, else to a new one
 made from Bambuddy's document. `import_presets` runs `refresh_bambuddy` and then
-`adopt_held`, and nothing else imports Bambuddy's presets (#7244, the owner's decision of
-2026-11-23). It runs in two places only:
+`adopt_held`, and nothing else imports Bambuddy's presets (#7244, the owner's decisions of
+2026-11-23: ScadBuddy owns its presets, and Bambuddy is at most a mirror target or the
+source of a one-time import). Every import reads Bambuddy itself (`LivePresets`: the
+list, then each preset it needs), never a copy: no copy of Bambuddy's local presets is
+kept, and a native slice never reads one. It runs in three places only:
 
 - the Schedule's pull (`spools/activities.py` `filament_pull_activity`), after the spools,
   only while ``filament_sync.presets`` pulls (``bb_to_sb`` or ``two_way``) and the links
-  are the configured Bambuddy's. It reads the kept copy of Bambuddy's local presets
-  (`slicing/held_presets.py`), which the same run refreshed just before;
+  are the configured Bambuddy's;
 - a person's or the agent's one-time import (``POST /filament/presets/bambuddy-import``),
-  whatever the direction is. It reads Bambuddy itself (`LivePresets`): the list, then
-  each preset it needs.
+  whatever the direction is;
+- the API's start (`adopt_at_start`): only `adopt_held`, only while a binding still names a
+  Bambuddy local id, whatever the direction is. It is how the bindings made before #7244
+  became ``sb-`` refs when the copy went; afterwards a binding that names a Bambuddy local
+  id is an error the print dialog shows (`bambuddy/resolver.py`).
 
 The bytes go to the blob store, which SQL cannot write, so the import is code that the
 deployed API runs.
@@ -45,10 +50,11 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
-from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.models import LocalPresetDetail
 from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.attachments import blob_path, keep_file
 from scadbuddy.slicing.own_presets import OwnRow, facts, sb_id, sb_ref
 from scadbuddy.store import BlobStore
@@ -68,8 +74,8 @@ BINDINGS: Final = ("filament_spool_type_presets", "filament_spool_presets")
 
 
 class PresetSource(Protocol):
-    """Where an import reads Bambuddy's local presets: the kept copy
-    (`slicing/held_presets.py` `HeldPresetStore`) or Bambuddy itself (`LivePresets`)."""
+    """Where an import reads Bambuddy's local presets (`LivePresets`; a test's is in
+    memory)."""
 
     async def stamps(self) -> dict[int, str | None]:
         """Each preset's ``updated_at``, by id."""
@@ -469,8 +475,8 @@ def _take_version(
 async def adopt_held(pool: ConnectionPool[Conn], blobs: BlobStore, held: PresetSource) -> int:
     """Every binding that names a Bambuddy local preset ``held`` holds as a filament
     preset names a ScadBuddy preset instead (Decision 6); how many presets it made. One
-    whose preset ``held`` lacks keeps its Bambuddy id, which the native slicer still
-    reads from the kept copy or from Bambuddy. A preset already made for that id is reused."""
+    whose preset ``held`` lacks keeps its Bambuddy id, which the native slicer refuses
+    (#7244). A preset already made for that id is reused."""
 
     def bound() -> tuple[set[int], dict[int, int]]:
         with pool.connection() as conn:
@@ -581,6 +587,71 @@ async def import_presets(
     if failed is not None:
         raise failed
     return PresetImport(**counts)
+
+
+async def import_from_bambuddy(
+    pool: ConnectionPool[Conn], blobs: BlobStore, settings: StoredSettings
+) -> PresetImport:
+    """`import_presets` from the configured Bambuddy, read now (`LivePresets`)."""
+    async with client_for(settings) as client:
+        return await import_presets(pool, blobs, LivePresets(client))
+
+
+def bound_bb_ids(pool: ConnectionPool[Conn]) -> set[int]:
+    """The Bambuddy local ids a spool or type binding still names."""
+    with pool.connection() as conn:
+        return _bound_bb_ids(conn)
+
+
+#: How long the start's adoption waits before it tries again after a failure.
+ADOPT_RETRY_S: Final = 300.0
+
+
+async def adopt_at_start(
+    pool: ConnectionPool[Conn],
+    blobs: Callable[[], BlobStore],
+    load: Callable[[], StoredSettings],
+    retry_s: float = ADOPT_RETRY_S,
+) -> None:
+    """The API's start step (`slicing/component.py`): while a binding names a Bambuddy local
+    id, `adopt_held` from the configured Bambuddy, whatever ``filament_sync.presets`` says
+    (#7244: the bindings made before ScadBuddy stopped reading Bambuddy's local presets
+    become ``sb-`` refs). Nothing bound, no Bambuddy call. A failed try is logged and tried
+    again every ``retry_s`` until one ends; ids Bambuddy no longer holds are logged and left,
+    each an error the print dialog shows. Never raises."""
+    while True:
+        try:
+            ids = await asyncio.to_thread(bound_bb_ids, pool)
+            if not ids:
+                return
+            settings = await asyncio.to_thread(load)
+            if not settings.bambuddy_url:
+                logger.warning(
+                    "bindings name Bambuddy local presets and no Bambuddy is configured;"
+                    " the native slicer refuses them",
+                    extra={"count": len(ids)},
+                )
+                return
+            async with client_for(settings) as client:
+                made = await adopt_held(pool, blobs(), LivePresets(client))
+            left = await asyncio.to_thread(bound_bb_ids, pool)
+            logger.info(
+                "adopted the Bambuddy local presets bindings named",
+                extra={"made": made, "left": len(left)},
+            )
+            if left:
+                logger.warning(
+                    "bindings still name Bambuddy local presets Bambuddy does not hold;"
+                    " the native slicer refuses them",
+                    extra={"bb_preset_ids": sorted(left)},
+                )
+            return
+        except Exception as error:
+            logger.warning(
+                "could not adopt the bound Bambuddy local presets; trying again later",
+                extra={"error": type(error).__name__},
+            )
+        await asyncio.sleep(retry_s)
 
 
 def bambuddy_refs_on(conn: Conn, refs: Collection[str]) -> dict[str, str | None]:

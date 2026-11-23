@@ -151,7 +151,7 @@ from scadbuddy.filament.profile_fill import (
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import failure_label, push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
-from scadbuddy.filament.sb_presets import LivePresets, PresetImport, import_presets
+from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
     OverrideKindError,
@@ -2333,8 +2333,8 @@ async def import_bambuddy(
 async def import_bambuddy_presets(
     state: StateDep, filament: FilamentDep, store: SettingsStoreDep
 ) -> PresetImport:
-    """The one-time import of #7244 (`filament/sb_presets.py` `import_presets`): it reads
-    Bambuddy itself (`LivePresets`), not the kept copy, which may be off or a tick old."""
+    """The one-time import of #7244 (`filament/sb_presets.py` `import_from_bambuddy`),
+    which reads Bambuddy now."""
     settings = await asyncio.to_thread(store.load)
     if not settings.bambuddy_url:
         raise not_configured("no Bambuddy URL is configured; set one in Settings")
@@ -2344,10 +2344,7 @@ async def import_bambuddy_presets(
             "the Bambuddy links belong to another Bambuddy; reset them first",
             code="instance_changed",
         )
-    async with client_for(settings) as client:
-        return await import_presets(
-            state.settings_store.pool, state.store.blobs, LivePresets(client)
-        )
+    return await import_from_bambuddy(state.settings_store.pool, state.store.blobs, settings)
 
 
 @router.get(

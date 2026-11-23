@@ -1303,11 +1303,12 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   goes through them too (`…/rack`; a LAN start's picks, a queue item's picks, a settled print's rows and a LAN
   start's settles take an `Idempotency-Key`), so the worker holds no rack pool. Through
   them too go the SB spool in each of a native run's trays and their presets, what a LAN
-  start uses of them, the kept copy of Bambuddy's local presets and a native slice's start,
+  start uses of them, ScadBuddy's own filament presets and a native slice's start,
   and the SB spools Bambuddy's path offers and maps a plan by (`…/filament/trays`,
   `…/filament/presets`, `…/filament/print-uses`, `…/filament/rows`, `…/filament/bb-to-sb`,
   area `filament`;
-  `…/held-presets`, `…/native-slices`; a start's uses and a run's settle take an
+  `…/own-presets`, `…/native-slices`; `…/held-presets` answers empty since #7244, for an
+  older worker during a roll; a start's uses and a run's settle take an
   `Idempotency-Key`).
   A LAN print reads a native slice's sliced 3MF by a URL the API mints for it
   (`…/transfer-urls`, #5298 Task 32): the internal blob route's, its token signed under
@@ -1326,13 +1327,9 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   strips print-host credential keys (`printhost_apikey`, `printhost_password`,
   `printhost_user`, and any key naming an API key, password, secret or token, at any
   depth) whenever it parses a preset, and never stores, forwards or writes them into a
-  slicer file (`core/credentials.py` `strip_credentials`). The API strips the kept
-  presets an older build stored at its start and after each refresh, with no Bambuddy call
-  (`slicing/held_presets.py` `strip_kept_logged`). One window remains: preset files that
-  older builds put in the content store keep the keys until the content sweep collects
-  them. The print worker, which holds
-  the Bambuddy key, can still read Bambuddy's local presets, including any such keys, in
-  the bytes Bambuddy sends. What protects them is the Bambuddy key's scope. Any other
+  slicer file (`core/credentials.py` `strip_credentials`). No copy of Bambuddy's local
+  presets is kept any more (#7244). One window remains: preset files that older builds put
+  in the content store keep the keys until the content sweep collects them. Any other
   key is 403
   `transfer-refused`, which the print reports as "The sliced file is no longer stored.
   Print again to slice it again.", without a retry. A blob store that fails the read is
@@ -2290,10 +2287,11 @@ a `filament_sync` with no data type set to `bb_to_sb` or `two_way` turns the pul
 any run whose printer's path is `bambuddy`. The
 dialog's filament step reads the loaded trays from the LAN report, each with the
 ScadBuddy spool it holds (found by its RFID tag or a person's tray link, #6262).
-The same refresh keeps a copy of Bambuddy's local presets (its OrcaSlicer imports,
-#4645), which the dialog offers and the native slicer slices from; one imported or
-edited in Bambuddy is there after the next refresh. Bambu Cloud user presets are not
-offered on a native run.
+The dialog offers, and the native slicer slices, Bambu Studio's presets and ScadBuddy's
+own filament presets (`sb-<id>`); it reads no Bambuddy local preset (#7244). Bambuddy's
+presets come into ScadBuddy's own through the same refresh while `filament_sync.presets`
+pulls, or once with "Import presets from Bambuddy now" (Settings → Printing → Filament).
+Bambu Cloud user presets are not offered on a native run.
 To go back, set `preferred_path` to `bambuddy` (or `slicer_backend`/`library_backend`
 back); a Bambuddy print is unchanged.
 
@@ -2488,8 +2486,8 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   answer keeps its values). It writes and removes only K values an earlier fetch set
   (`source` `profile_fetch`): a K value a person, the profile fill or a printer
   calibration set keeps its value and its source, and the run's notes name each one it
-  kept (#6857, plan Decision 127). It then refreshes the kept copy of the local presets (unless the
-  setting `spool_overlay_refresh_seconds` is 0; build Decision 18). The worker
+  kept (#6857, plan Decision 127). Once that commits, the bound presets become ScadBuddy
+  presets made from the documents it sent (#7244), with no read of Bambuddy. The worker
   never calls Bambuddy and never has a Bambuddy key. The nozzles are the remembered setting
   `profile_fetch_nozzles` (Settings → Printing → Filament; default 0.2, 0.4, 0.6, 0.8). The
   printer models are the models of ScadBuddy's printers.

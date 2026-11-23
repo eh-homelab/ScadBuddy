@@ -83,13 +83,23 @@ Filament presets are ScadBuddy's own (#7176, plan
 by the ref `sb-<id>` in `slicer_filament`. The native slicer reads them from ScadBuddy's
 store; Bambuddy knows each one only by its mirror's local preset id
 (`EffectivePreset.bambuddy_id`), which its slice path, the spool push and the AMS slot
-configure send. After each refresh of the kept presets, a binding that still names a
-Bambuddy local preset is moved to a ScadBuddy preset made from the kept copy, and a preset
-made in Bambuddy takes a new version when Bambuddy edits it
-(`backend/scadbuddy/filament/sb_presets.py`). Until the fetch writes ScadBuddy presets
-itself (#7176's second PR), a re-fetch still imports into Bambuddy: at a key whose `3dfp`
-preset was already adopted, the new Bambuddy id is adopted as a second, `bambuddy` preset
-(plan Decision 6).
+configure send. ScadBuddy owns the presets, and Bambuddy is at most a mirror target or
+the source of an import (#7244, the owner's decision of 2026-11-23): ScadBuddy keeps no
+copy of Bambuddy's local presets, and the native slicer, the print dialog and the profile
+fill read none. Bambuddy's presets come in three ways only, each reading `GET
+/local-presets` itself and writing only `filament_presets`: the scheduled pull's import
+while `filament_sync.presets` is `bb_to_sb` or `two_way` (a binding that names a Bambuddy
+local preset is moved to a ScadBuddy preset made from it, and a preset made in Bambuddy
+takes a new version when Bambuddy edits it); the one-time import, whatever the direction
+(`POST /filament/presets/bambuddy-import`, Settings → Printing → Filament's "Import presets
+from Bambuddy now", agent `filament_bambuddy_presets_import`); and the API's start, which
+adopts every binding that still names a Bambuddy local id (`adopt_at_start`). A binding
+left naming one is an error the print dialog shows. A 3DFP fetch turns its own bindings
+into ScadBuddy presets from the documents it sent (`profile_fetch.py` `_adopt_made`), with
+no read of Bambuddy (`backend/scadbuddy/filament/sb_presets.py`). Until the fetch writes
+ScadBuddy presets itself (#7176's second PR), a re-fetch still imports into Bambuddy: at a
+key whose `3dfp` preset was already adopted, the new Bambuddy id is adopted as a second,
+`bambuddy` preset (plan Decision 6).
 
 A printer's K-profiles (#7154, plan
 `docs/superpowers/plans/2026-11-23-printer-kprofiles.md`) are read from the printer through

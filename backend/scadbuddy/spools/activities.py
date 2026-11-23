@@ -1,13 +1,13 @@
 """The spool refresh's activities, on the ``library`` worker (`main._run_library_worker`):
 Bambuddy's spools pulled into ScadBuddy's own (`filament_pull_activity`, #6261; read on the
 print worker since #6772), then, while ``filament_sync.presets`` pulls, Bambuddy's filament
-presets into ScadBuddy's own (#7244). The kept presets' activity is
-`slicing/held_presets.py`'s.
+presets into ScadBuddy's own (#7244).
 
-The spool providers, their overlay and the trays it recorded are gone (#6262 Task 12).
-Their three activities stay registered for a run opened before ``spool-providers-gone``
+The spool providers, their overlay and the trays it recorded are gone (#6262 Task 12),
+and so is the kept copy of Bambuddy's local presets (#7244). Their activities stay
+registered for a run opened before ``spool-providers-gone``
 (`workflows/spool_refresh.py`), which still calls them on the new code: no providers, so
-no refresh, and no trays to record.
+no refresh, no trays to record, and no copy to keep.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from scadbuddy.workflows.spool_refresh import (
     FILAMENT_PULL_ACTIVITY,
     FILAMENT_PULL_TIMEOUT,
     FILAMENT_RFID_ACTIVITY,
+    HELD_ACTIVITY,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
     SEEN_ACTIVITY,
@@ -43,8 +44,14 @@ from scadbuddy.workflows.spool_refresh import (
 
 
 def spool_activities() -> list[Callable[..., Any]]:
-    """The retired activities, for runs opened before ``spool-providers-gone``. Each
-    answers with its old result type, so such a run replays and ends."""
+    """The retired activities, for runs opened before ``spool-providers-gone`` (and, for
+    the kept presets' step, before ``spool-refresh-held-gone``, #7244). Each answers with
+    its old result type, so such a run replays and ends."""
+
+    @activity.defn(name=HELD_ACTIVITY)
+    async def held_presets_refresh() -> str:
+        # spool-refresh-held-gone: no copy of Bambuddy's local presets is kept (#7244).
+        return "skipped"
 
     @activity.defn(name=LIST_ACTIVITY)
     async def spool_providers_list() -> list[str]:
@@ -61,7 +68,12 @@ def spool_activities() -> list[Callable[..., Any]]:
         # spool-providers-gone: no overlay reads what the trays show.
         return None
 
-    return [spool_providers_list, spool_provider_refresh, spool_trays_seen]
+    return [
+        held_presets_refresh,
+        spool_providers_list,
+        spool_provider_refresh,
+        spool_trays_seen,
+    ]
 
 
 #: What the presets import leaves of the pull activity's timeout (`FILAMENT_PULL_TIMEOUT`),

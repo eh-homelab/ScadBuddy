@@ -1316,7 +1316,7 @@ function fetchTargets(): S['ExportTarget'][] {
 
 /**
  * The mock has no worker: a running fetch ends `imported` on the next read of it, with
- * one preset per target key (a Bambuddy local preset id and a 3DFP-style name), as the
+ * one preset per target key (a ScadBuddy preset ref, `sb-<id>`, and a 3DFP-style name), as the
  * API's import writes them.
  */
 function finishFetch(run: S['ProfileFetch']): S['ProfileFetch'] {
@@ -1327,7 +1327,7 @@ function finishFetch(run: S['ProfileFetch']): S['ProfileFetch'] {
       type_id: run.type_id,
       printer_model: target.printer_model,
       nozzle_diameter: nozzle,
-      slicer_filament: String(9000 + t * 10 + n),
+      slicer_filament: `sb-${9000 + t * 10 + n}`,
       slicer_filament_name: `${type?.code ?? 'Filament'} @BBL ${target.printer_model} ${nozzle} nozzle`,
     })),
   )

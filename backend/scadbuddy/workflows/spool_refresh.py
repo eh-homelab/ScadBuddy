@@ -3,19 +3,22 @@
 ``SpoolRefresh`` runs on the ``library`` queue, served in the API process, every
 ``spool_overlay_refresh_seconds`` (the Schedule ``scadbuddy-spool-providers-<queue>``,
 overlap SKIP, and once at each boot; 0 deletes it; the names are older than what it
-does now). A run keeps Bambuddy's local presets (``held_presets_refresh``, #4645,
-`slicing/held_presets.py`), which a native run offers and slices from with no Bambuddy
-call (hot-path plan D5), then pulls Bambuddy's spools into ScadBuddy's own
+does now). A run pulls Bambuddy's spools into ScadBuddy's own
 (``filament_bambuddy_pull``, #6261, `filament/bambuddy_pull.py`); with no Bambuddy, or
-Bambuddy down, each step logs and returns. Since #6772 the pull's activity reads no
-Bambuddy: it starts ``FilamentBbPull`` on the ``bambuddy`` queue, whose activity on the
+Bambuddy down, it logs and returns. Since #6772 the pull's activity reads no Bambuddy for
+the spools: it starts ``FilamentBbPull`` on the ``bambuddy`` queue, whose activity on the
 print worker reads Bambuddy and sends the rows to the API's CRUD routes, and waits for it
-(`filament/bb_pull_apply.py` `execute_pull`). The activity's name, timeout and result did
-not change, so this workflow's commands did not. The kept presets are a read cache only:
-Bambuddy's filament presets enter ScadBuddy's own (`filament/sb_presets.py`
-`import_presets`) in the pull's activity, after the spools, and only while
-``filament_sync.presets`` is ``bb_to_sb`` or ``two_way`` (#7244; before it, the kept
-presets' activity imported them on every run, #7176). That moved no command either.
+(`filament/bb_pull_apply.py` `execute_pull`). Then, in the same activity and only while
+``filament_sync.presets`` is ``bb_to_sb`` or ``two_way``, Bambuddy's filament presets
+enter ScadBuddy's own (`filament/sb_presets.py` `import_presets`, #7244). The activity's
+name, timeout and result did not change, so this workflow's commands did not.
+
+Before ``spool-refresh-held-gone`` (`HELD_GONE_PATCH`, #7244) a run first kept a copy of
+Bambuddy's local presets (``held_presets_refresh``, #4645), which a native run sliced
+from, and since #7176 that step also imported them into ScadBuddy's own on every run,
+whatever the direction said. ScadBuddy owns its presets now, and a native run reads no
+Bambuddy local preset: a run opened before the patch replays that step, and its activity
+answers ``skipped`` (`spools/activities.py`).
 It is never started, signalled or awaited by
 the print dialog: the hot path never waits on Bambuddy. A step that fails is not retried
 within its run; the next tick is the retry, as it is for the sweeps.
@@ -61,6 +64,9 @@ SEEN_ACTIVITY = "spool_trays_seen"
 HELD_ACTIVITY = "held_presets_refresh"
 #: The `workflow.patched` id that adds `HELD_ACTIVITY` to a run.
 HELD_PATCH = "spool-refresh-held-presets"
+#: The `workflow.patched` id after which a run no longer calls `HELD_ACTIVITY`: the kept
+#: copy of Bambuddy's local presets is gone (#7244).
+HELD_GONE_PATCH = "spool-refresh-held-gone"
 FILAMENT_PULL_ACTIVITY = "filament_bambuddy_pull"
 #: The `workflow.patched` id that adds `FILAMENT_PULL_ACTIVITY` to a run.
 FILAMENT_PULL_PATCH = "filament-bb-pull"
@@ -80,7 +86,8 @@ LIST_TIMEOUT = timedelta(seconds=30)
 PROVIDER_TIMEOUT = timedelta(seconds=90)
 #: Every printer's latest report, then a write per tagged tray (now none).
 SEEN_TIMEOUT = timedelta(minutes=2)
-#: One list of Bambuddy's local presets, then a read of each one edited since.
+#: One list of Bambuddy's local presets, then a read of each one edited since (a run
+#: opened before `HELD_GONE_PATCH`).
 HELD_TIMEOUT = timedelta(minutes=2)
 #: The wait for ``FilamentBbPull`` (#6772): the print worker's list of Bambuddy's
 #: spools, then the API's transaction per spool; the run itself is bounded under this
@@ -122,7 +129,8 @@ class SpoolRefresh:
 
     async def _run_steps(self, gone: bool) -> dict[str, str]:
         if gone:
-            await self._held()
+            if not workflow.patched(HELD_GONE_PATCH):
+                await self._held()
             await self._pull()
             return {}
         names: list[str] = await workflow.execute_activity(
@@ -150,7 +158,7 @@ class SpoolRefresh:
             )
         except ActivityError:
             workflow.logger.warning("could not record what the printers' trays show")
-        if workflow.patched(HELD_PATCH):
+        if workflow.patched(HELD_PATCH) and not workflow.patched(HELD_GONE_PATCH):
             await self._held()
         if workflow.patched(FILAMENT_PULL_PATCH):
             await self._pull()

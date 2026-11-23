@@ -119,8 +119,8 @@ class LocalPreset(BambuddyModel):
     filament_density: str | None = None
     #: When Bambuddy last wrote the row, as it sends it: its model's ``updated_at`` is
     #: ``onupdate=func.now()`` (``backend/app/models/local_preset.py`` at
-    #: maziggy/bambuddy@98ecaf50, read 2026-11-01), so an edit moves it. What the kept
-    #: copy's refresh reads a preset again by (#4645).
+    #: maziggy/bambuddy@98ecaf50, read 2026-11-01), so an edit moves it. What the presets
+    #: import takes a new version of a preset by (`filament/sb_presets.py`, #7244).
     updated_at: str | None = None
 
     def ref(self) -> PresetRef:
