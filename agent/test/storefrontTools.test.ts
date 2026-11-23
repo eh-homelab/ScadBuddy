@@ -6,7 +6,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import type { components } from '../src/api/schema.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
-import { colourProblems, defaultsFor, draftMaterials, fileTitleColours, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
+import { colourProblems, defaultsFor, draftMaterials, fileTitleColours, isSupportMaterial, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #6131 (design 2026-11-13 §6) — the assistant's storefront tools: a draft (`write`) built
@@ -255,9 +255,9 @@ describe('storefront tools (#6131)', () => {
     })
 
     it('notes what publish would refuse: no filament a customer can pick, or a support part with no support filament', async () => {
-      const vector = fileVectors.find((one) => one.file.slots.some((slot) => /pva/i.test(slot.material ?? ''))) as FileVector
-      const support = vector.filaments.filter((filament) => /pva/i.test(filament.material))
-      const customer = vector.filaments.filter((filament) => !/pva/i.test(filament.material))
+      const vector = fileVectors.find((one) => one.file.slots.some((slot) => isSupportMaterial(slot.material))) as FileVector
+      const support = vector.filaments.filter((filament) => isSupportMaterial(filament.material))
+      const customer = vector.filaments.filter((filament) => !isSupportMaterial(filament.material))
       const draft = async (filaments: Filament[]) => {
         serveFile({ ...vector, filaments }, () => {})
         const result = firstText(await tool('storefront_listing_draft').execute({ library_file_id: vector.file.id }, ctx())) as Record<string, unknown>
