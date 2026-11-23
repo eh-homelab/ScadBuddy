@@ -18,7 +18,7 @@ type S = components['schemas']
 
 const BASE = '/api/v1/filament'
 
-const DEVICES: S['SpoolBuddyDevice'][] = [
+const SEED_DEVICES: S['SpoolBuddyDevice'][] = [
   {
     id: 1,
     device_id: 'sb-0001',
@@ -33,12 +33,20 @@ const DEVICES: S['SpoolBuddyDevice'][] = [
   { id: 2, device_id: 'sb-0002', hostname: 'spoolbuddy-shelf', has_nfc: false, nfc_ok: false, has_scale: false, scale_ok: false, online: true },
 ]
 
+let devices = structuredClone(SEED_DEVICES)
 let overrideMode = false
 let confirms = new Map<string, number>()
 
 export function reset() {
+  devices = structuredClone(SEED_DEVICES)
   overrideMode = false
   confirms = new Map()
+}
+
+/** #7155 — gives a device a pending command (`write_tag`, …), as Bambuddy's one slot holds it; `null` clears it. */
+export function setPendingCommand(deviceId: string, command: string | null) {
+  const device = devices.find((row) => row.device_id === deviceId)
+  if (device) device.pending_command = command
 }
 
 const status = (devices: S['SpoolBuddyDevice'][]): S['RfidStatus'] => ({
@@ -57,7 +65,7 @@ const conflict = (detail: string, code: string) =>
   )
 
 export const handlers = [
-  http.get(`${BASE}/rfid/status`, () => HttpResponse.json(status(DEVICES))),
+  http.get(`${BASE}/rfid/status`, () => HttpResponse.json(status(devices))),
   http.put(`${BASE}/rfid/override-mode`, async ({ request }) => {
     overrideMode = ((await request.json()) as S['RfidModeSet']).enabled
     return HttpResponse.json(status([]))
@@ -92,13 +100,18 @@ export const handlers = [
   // #7155 — the backend's checks (`filament/scale.py`): a listed device with a scale and no other command pending.
   http.post(`${BASE}/spoolbuddy/devices/:device/tare`, ({ params }) => {
     const id = String(params.device)
-    const device = DEVICES.find((row) => row.device_id === id)
+    const device = devices.find((row) => row.device_id === id)
     if (!device)
       return HttpResponse.json(
         { type: 'about:blank', title: 'Not Found', status: 404, detail: `Bambuddy lists no SpoolBuddy device ${id}`, code: 'no_device' },
         { status: 404, headers: { 'Content-Type': 'application/problem+json' } },
       )
     if (!device.has_scale) return conflict(`the SpoolBuddy device ${id} has no scale`, 'no_scale')
+    const pending = device.pending_command
+    if (pending && pending !== 'tare')
+      return conflict(`the SpoolBuddy device ${id} has the command ${pending} pending; a tare would replace it, so wait until it is done`, 'device_busy')
+    // Bambuddy's one slot now holds the tare, until the device's next heartbeat clears it.
+    device.pending_command = 'tare'
     return HttpResponse.json({ device_id: id, status: 'queued' } satisfies S['ScaleTareQueued'])
   }),
 ]

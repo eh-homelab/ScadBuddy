@@ -48,6 +48,9 @@ export function ScalePanel() {
     try {
       await tareScale(device.device_id)
       setQueued(device.hostname)
+      // Read the devices again: the tare is now the device's pending command, and another
+      // device may have taken a command meanwhile. The list stays on screen while it reads.
+      status.refresh()
     } catch (cause) {
       setError(message(cause))
     } finally {

@@ -461,7 +461,10 @@ describe('the spool page', () => {
     await user.click(screen.getByRole('button', { name: 'Save spool' }))
     await waitFor(async () => expect((await listSpools()).length).toBe(12))
     expect(posts).toHaveLength(1)
-    expect(await heading(20)).toBeInTheDocument()
+    // The page shows "Spool #20" as soon as the POST lands, then opens the spool's own address,
+    // which loads it again: a heading found in the first render can be gone by the next line.
+    // Query and assert in one step, so a found heading is always one still on the page.
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: /Spool #20\b/ })).toBeInTheDocument())
   })
 
   it('shows a server refusal and keeps the edits', async () => {

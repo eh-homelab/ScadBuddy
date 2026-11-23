@@ -56,6 +56,28 @@ describe('ScalePanel', () => {
     expect(posted).toEqual(['sb-1'])
   })
 
+  it('reads the devices again after a tare, so the queued tare and a new command elsewhere show', async () => {
+    let reads = 0
+    server.use(
+      http.get('*/api/v1/filament/rfid/status', () => {
+        reads++
+        const devices =
+          reads === 1
+            ? [device({}), device({ id: 2, device_id: 'sb-2', hostname: 'spoolbuddy-shelf' })]
+            : [device({ pending_command: 'tare' }), device({ id: 2, device_id: 'sb-2', hostname: 'spoolbuddy-shelf', pending_command: 'write_tag' })]
+        return HttpResponse.json({ override_mode: false, state: 'off', bambuddy_auto_add: null, saved_auto_add: null, detail: null, devices })
+      }),
+      http.post('*/api/v1/filament/spoolbuddy/devices/:device/tare', () => HttpResponse.json({ device_id: 'sb-1', status: 'queued' })),
+    )
+    const { user } = renderPage(<ScalePanel />)
+    await user.click(await screen.findByRole('button', { name: 'Tare scale spoolbuddy-bench' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Tare scale' }))
+    expect(await screen.findByText(/A tare is queued/)).toBeInTheDocument()
+    expect(screen.getByText(/A tag write is queued/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Tare scale spoolbuddy-shelf' })).toBeDisabled()
+    expect(reads).toBe(2)
+  })
+
   it('sends nothing when the person keeps the scale as it is', async () => {
     const posted: string[] = []
     serveDevices([device({})])
