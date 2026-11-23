@@ -31,21 +31,34 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders import attachments
 from scadbuddy.orders.integrations import (
     ArchiveFacts,
-    ArchiveMedia,
     MediaTooLargeError,
     NotLinkedError,
     OrderIntegrations,
     not_linked,
 )
 from scadbuddy.orders.lifecycle import Lifecycle
-from scadbuddy.orders.models import Actor, Attachment, AttachmentRole, Fulfilment
+from scadbuddy.orders.models import (
+    Actor,
+    ArchiveCopyMedia,
+    Attachment,
+    AttachmentRole,
+    Fulfilment,
+)
 from scadbuddy.orders.problems import PROBLEMS
-from scadbuddy.orders.store import OrderStore, fulfilment_subject, item_subject
+from scadbuddy.orders.store import (
+    ArchiveCopyExistsError,
+    OrderStore,
+    fulfilment_subject,
+    item_subject,
+)
 from scadbuddy.store import BlobStore
 
 logger = logging.getLogger(__name__)
 
-ROLES: dict[ArchiveMedia, AttachmentRole] = {"finished_photo": "finished", "timelapse": "timelapse"}
+ROLES: dict[ArchiveCopyMedia, AttachmentRole] = {
+    "finished_photo": "finished",
+    "timelapse": "timelapse",
+}
 
 
 class ArchiveOffer(BaseModel):
@@ -213,15 +226,17 @@ async def copy_in(
     item_id: str,
     fulfilment_id: str,
     archive_id: int,
-    what: ArchiveMedia,
+    what: ArchiveCopyMedia,
     name: str | None,
     by: Actor,
     limit: int,
 ) -> Attachment:
     """The archive's ``finish_`` photo (``name``, else its latest) or its timelapse as
     an attachment of the attempt (listed under its item), with the role ``finished`` or
-    ``timelapse``. The same bytes copied again under the same role are the attachment
-    already there."""
+    ``timelapse``, written by ``by``. The row names the archive and the medium, and its
+    audit line says ``source: archive`` (spec 2026-11-05 §4.2, §4.5). The same bytes
+    copied again under the same role are the attachment already there. A copy of the
+    same archive file that another copy recorded first is that copy's row (§4.6)."""
     await copy_check(store, integrations, order_id, item_id, fulfilment_id, archive_id)
     attempt = await asyncio.to_thread(attempt_of, store, order_id, item_id, fulfilment_id)
     try:
@@ -275,22 +290,37 @@ async def copy_in(
                 status.HTTP_409_CONFLICT,
                 "the copied file was swept before it was kept; copy it again",
             ) from None
-        return await asyncio.to_thread(
-            lambda: lifecycle.add_attachment(
-                order_id,
-                item_id,
-                by,
-                attachment_id=str(uuid.uuid4()),
-                kind=kind,
-                role=role,
-                filename=attachments.clean_filename(copied.filename),
-                media_type=media_type,
-                size_bytes=copied.size,
-                sha256=copied.sha256,
-                blob_key=key,
-                caption=f"Attempt {attempt.attempt}, Bambuddy archive {archive_id}",
-                fulfilment_id=attempt.id,
+        filename = attachments.clean_filename(copied.filename)
+        try:
+            return await asyncio.to_thread(
+                lambda: lifecycle.add_attachment(
+                    order_id,
+                    item_id,
+                    by,
+                    attachment_id=str(uuid.uuid4()),
+                    kind=kind,
+                    role=role,
+                    filename=filename,
+                    media_type=media_type,
+                    size_bytes=copied.size,
+                    sha256=copied.sha256,
+                    blob_key=key,
+                    caption=f"Attempt {attempt.attempt}, Bambuddy archive {archive_id}",
+                    fulfilment_id=attempt.id,
+                    archive_id=archive_id,
+                    archive_media=what,
+                    source="archive",
+                )
             )
-        )
+        except ArchiveCopyExistsError:
+            # The race is lost: the add wrote no row, hold or audit line.
+            rows = await asyncio.to_thread(
+                store.subject_attachments, fulfilment_subject(fulfilment_id)
+            )
+            return next(
+                a
+                for a in rows
+                if (a.archive_id, a.archive_media, a.filename) == (archive_id, what, filename)
+            )
     finally:
         await asyncio.to_thread(claims.release, held)
