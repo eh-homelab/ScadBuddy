@@ -173,7 +173,9 @@ D17, §9 phase 1b. Issue #7026; epic #6949.
   - `PATCH /entities/{ref}/properties` body `PropertyPatch` → `EntityPropertyList`; 404 as
     above; 422 `bad_property_value` (detail names the key and the reason).
   - `GET /entity-kinds/{kind}/properties` → `KindProperties {properties: dict[str, dict[str, PropertyValue]]}`
-    (every entity of the kind that has any); 422 `unknown_entity_kind`.
+    (every entity of the kind that has any, uncapped: the filament lists already load every
+    type and spool, hundreds in the shop, and this read is one row per key of those; the
+    route's description says so); 422 `unknown_entity_kind`.
   - `GET /entity-kinds/{kind}/property-schema` → `KindPropertySchema {kind, schema, keys_in_use: list[{key, count}]}`.
   - `PUT /entity-kinds/{kind}/property-schema` body `{schema: object}` → `KindPropertySchema`;
     422 `bad_property_schema`.
@@ -189,7 +191,10 @@ D17, §9 phase 1b. Issue #7026; epic #6949.
 - [ ] **Step 2: Run them to see them fail.**
   Run: `cd backend && uv run pytest tests/api/test_entity_properties.py -q` — FAIL (404 routes).
 
-- [ ] **Step 3: Implement the routes** in the style of `api/entity_links.py` (store calls in
+- [ ] **Step 3: Implement the routes** in the style of `api/entity_links.py`. A kind that
+  takes no properties (`print_archive`, or no such kind) gets a detail of its own, such as
+  "no entity kind 'print_archive' takes properties", not `problems.py` `unknown_kind`'s
+  text about files, which is false for a print archive (store calls in
   `asyncio.to_thread`, `summary` and `description` on each route naming the rules of Global
   Constraints, since the agent and the API diff read them). No `from __future__ import annotations`.
 

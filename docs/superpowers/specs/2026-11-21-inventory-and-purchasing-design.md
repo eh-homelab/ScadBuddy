@@ -175,7 +175,9 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
   type `mpn`, `gtin` (list: spool and refill), `asin` (list of `marketplace:ASIN`),
   `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool `lot_number`.
 - `source` is `manual` or the import that wrote the key (as for links): a person's write
-  makes it `manual`, and an import never replaces a manual value. Imports that fill
+  makes it `manual`, and an import never replaces a manual value. There is one row per
+  entity and key, never one per source: an import's write to a key whose row is `manual` is
+  skipped, not stored beside it. Imports that fill
   properties (invoice import, label photos, the 3DFP fetch, #7025) come after the first PR.
 - Search: the filament lists and the agent's type and spool search match property values,
   so a scanned GTIN or a lot number finds its type or spool.
@@ -461,8 +463,9 @@ ships first.
   shipping over the new lines; re-spreading over all lines is an explicit choice (§6.7).
 - D16. Only filament suppliers, offers and prices sync to Bambuddy (§6.5).
 - D17. Properties are rows of their own keyed by entity, not a jsonb column per owner
-  table, so one route family, panel and search serve every kind, and a person's value is
-  kept apart from an import's by key (§6.3a). Owner's rule, 2026-11-22: schemas never
+  table, so one route family, panel and search serve every kind, and a person's value
+  wins over an import's for its key: one row per key, which an import skips once it is
+  `manual` (§6.3a). Owner's rule, 2026-11-22: schemas never
   restrict keys.
 
 ## 9. Phases (each one or more PRs, each an issue under one new epic)
