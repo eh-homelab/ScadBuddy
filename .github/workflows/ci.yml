@@ -983,6 +983,8 @@ jobs:
           cache-from: type=gha,scope=playwright-mcp
 
       - name: Test the playwright-mcp image
+        # The job's default is agent/; the smoke script's path is from the repo root.
+        working-directory: .
         env:
           SMOKE_CONTAINER: scadbuddy-playwright-mcp-ci
         run: |
