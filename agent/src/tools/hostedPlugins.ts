@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
+import { BuiltInPluginError, PackageRefusedError } from '../plugins/packages/install.js'
 import type { PackageView } from '../plugins/packages/store.js'
 import { ok } from './call.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
@@ -22,12 +23,48 @@ import { defineTool, json, type Tool, type ToolContext, ToolError } from './regi
 
 type HostedPlugin = components['schemas']['HostedPlugin']
 
-/** The draft's paths: the backend checks them (hosted_plugins/rules.py); this only bounds the input. */
-const name = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/).describe("The hosted plugin's name, which is also its package's name")
+/**
+ * A hosted plugin's name, as the API takes it (backend hosted_plugins/rules.py `NAME_RE`, and
+ * no `--`). The API also refuses a reserved name; that refusal comes back from it.
+ */
+const name = z
+  .string()
+  .regex(/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/)
+  .refine((n) => !n.includes('--'), 'a name has no "--"')
+  .describe("The hosted plugin's name, which is also its package's name: 2-32 lower-case letters, digits and single hyphens")
+
+/** The top folders a draft may hold (backend hosted_plugins/rules.py `TOP_LEVEL`). */
+const TOP_LEVEL = ['skills', 'agents', 'commands']
+
+/**
+ * Why a draft path is refused, or undefined: the API's own rules (backend hosted_plugins/rules.py
+ * `check_path`). Checked here too, before the URL is built: a path of `.` or `..` is not
+ * percent-encoded, so `files/..` would resolve to the plugin's own route (`DELETE /{name}/`, then
+ * a 307 to `DELETE /{name}`), and the API's check would never run (#6938 review).
+ */
+export function draftPathProblem(path: string): string | undefined {
+  if (path === '') return 'the path is empty'
+  if (path.includes('\\')) return 'the path holds a backslash; separate folders with /'
+  // eslint-disable-next-line no-control-regex -- the API refuses control characters too
+  if (/[\x00-\x1f\x7f]/.test(path)) return 'the path holds a control character'
+  if (path.startsWith('/')) return "the path must be relative to the plugin's root"
+  const segments = path.split('/')
+  for (const segment of segments) {
+    if (segment === '') return 'the path has an empty segment'
+    if (segment.startsWith('.')) return `"${segment}" starts with "."; no ".", "..", hidden files or folders`
+  }
+  if (segments.length < 2 || !TOP_LEVEL.includes(segments[0] ?? '')) return 'a file must be under skills/, agents/ or commands/'
+  return undefined
+}
+
 const filePath = z
   .string()
   .min(1)
   .max(1024)
+  .superRefine((path, check) => {
+    const problem = draftPathProblem(path)
+    if (problem) check.addIssue({ code: 'custom', message: problem })
+  })
   .describe('The path in the draft, under skills/, agents/ or commands/ (for example skills/my-skill/SKILL.md)')
 const tag = z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)
 const category = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/)
@@ -270,10 +307,15 @@ export const hostedPluginTools: readonly Tool[] = [
       if (!needs.summary) return { input: args, summary: `Publish hosted plugin ${args.name} and offer it to the assistant` }
       const found = await readPlugin(args.name, ctx)
       const diff = await draftDiff(args.name, ctx)
+      const changes = diffLine(diff)
+      // A draft equal to the latest version publishes nothing: the run offers that version.
+      if (changes === 'no change' && found.latest_version !== null && found.latest_version !== undefined) {
+        return { input: args, summary: `Offer version ${found.latest_version} of hosted plugin ${args.name} to the assistant (the draft has no change)` }
+      }
       const next = (found.latest_version ?? 0) + 1
       return {
         input: args,
-        summary: `Publish hosted plugin ${args.name} as version ${next} (${diffLine(diff)}) and offer it to the assistant`,
+        summary: `Publish hosted plugin ${args.name} as version ${next} (${changes}) and offer it to the assistant`,
       }
     },
     handler: async ({ name: plugin }, ctx) => {
@@ -305,11 +347,15 @@ export const hostedPluginTools: readonly Tool[] = [
       } catch (err) {
         // The version stands; a call again publishes nothing and offers it (§6.3 step 5).
         const what = published === null ? 'the latest version is published, but' : `version ${published} is published, but`
-        throw new ToolError(
-          `${what} offering it to the assistant failed; call hosted_plugin_publish again, or use Offer in Settings → Tools & plugins → Hosted plugins`,
-          (err as { status?: number }).status,
-          (err as Error).message,
-        )
+        const status = (err as { status?: number }).status
+        // A refusal fails again on a retry, and each retry costs a person's approval.
+        const refusal =
+          err instanceof PackageRefusedError || err instanceof BuiltInPluginError || status === 400 || status === 409 || status === 422
+        const advice = refusal
+          ? 'the package was refused, so a call again fails the same way: fix the draft (or, for a name another package has, ' +
+            'tell the person) before you publish again'
+          : 'call hosted_plugin_publish again, or use Offer in Settings → Tools & plugins → Hosted plugins'
+        throw new ToolError(`${what} offering it to the assistant failed; ${advice}`, status, (err as Error).message)
       }
       return json({
         name: plugin,

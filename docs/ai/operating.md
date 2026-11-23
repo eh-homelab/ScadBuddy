@@ -1128,13 +1128,21 @@ the API; those routes are `api` routes, which take it.
 | `hosted_plugin_file_write`, `hosted_plugin_file_delete` | `write` | Writes one draft file as UTF-8 text (the route gets the raw bytes), or deletes one. Nothing loads from a draft. |
 | `hosted_plugin_publish` | `outward` | Publishes the draft as the next version, then offers that version to the package model (§6.3 step 5): an install when no package has the name, else a re-pin into the pending pin. |
 
+The file tools check each path with the API's own rules (`hosted_plugins/rules.py`
+`check_path`) before they build the URL, and send no request for a path they refuse. A path
+of `.` or `..` is not percent-encoded, so without this check `files/..` would resolve to
+`DELETE /{name}/`, which the API redirects (307) to `DELETE /{name}`, the whole plugin
+(#7104 tracks a check against redirects too).
+
 `hosted_plugin_publish` parks for a person's approval, which names the next version and
-the draft's changes. Once approved, the call publishes, then offers the version in the
+the draft's changes (or, for a draft equal to the latest version, the version it offers). Once approved, the call publishes, then offers the version in the
 agent's own process (`offerHosted` over `PackageInstaller`, `ToolServices.hostedPackages`),
 never through the UI-guarded package routes. A person still approves the version in
 Settings before it loads. When the draft equals the latest version, the call publishes
 nothing and offers that version only when no pin or pending pin names it, so a call again
-after a failed offer offers it. Deleting a plugin and moving a draft file have no tool:
+after a failed offer offers it. The error says to call again only for a failure that may
+pass; for a refusal (the package vetting, or a package of another kind under the name) it
+says to fix the draft first. Deleting a plugin and moving a draft file have no tool:
 they stay the Hosted plugins editor's.
 
 ### Status

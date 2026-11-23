@@ -4,7 +4,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import type { PackageView } from '../src/plugins/packages/store.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import type { HostedPackageOffers, Tool, ToolContext } from '../src/tools/registry.js'
+import { PackageRefusedError } from '../src/plugins/packages/install.js'
+import { type HostedPackageOffers, runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #6938 (spec 2026-11-21 §6.2, §6.3): the assistant's hosted plugin tools. Draft writes are
@@ -175,6 +176,71 @@ describe('hosted plugin tools (#6938)', () => {
     expect(body).toEqual({ category: null })
   })
 
+  it('refuses a path outside the draft’s folders in every file tool, and sends no request', async () => {
+    // `..` is not percent-encoded: `files/..` would resolve to DELETE /{name}/, which the API
+    // redirects (307) to DELETE /{name}, the whole plugin (#6938 review).
+    const sent: string[] = []
+    server.use(
+      http.all(`${BASE}/*`, ({ request }) => {
+        sent.push(`${request.method} ${request.url}`)
+        return HttpResponse.json({})
+      }),
+    )
+    const bad = ['..', '.', 'a/../b', 'skills/../..', '/skills/x', 'skills//x', 'skills\\x', 'skills/.hidden', '.claude-plugin/plugin.json', 'other/x', 'skills']
+    const calls: [string, Record<string, unknown>][] = [
+      ['hosted_plugin_file_read', {}],
+      ['hosted_plugin_file_write', { content: 'x' }],
+      ['hosted_plugin_file_delete', {}],
+    ]
+    for (const [name, extra] of calls) {
+      for (const path of bad) {
+        expect(() => tool(name).execute({ name: 'shop-notes', path, ...extra }, ctx()), `${name} ${path}`).toThrow()
+        const result = await runTool(tool(name), { name: 'shop-notes', path, ...extra }, ctx())
+        expect(result.isError, `${name} ${path}`).toBe(true)
+      }
+    }
+    expect(sent).toEqual([])
+  })
+
+  it('takes only a name the API takes', () => {
+    for (const bad of ['..', 'Shop', 'a', 'shop--notes', 'shop.notes', '-shop', 'shop-']) {
+      expect(() => tool('hosted_plugin_file_delete').execute({ name: bad, path: 'skills/x/SKILL.md' }, ctx()), bad).toThrow()
+    }
+  })
+
+  it('parks a publish through the approval gate, and sends no POST', async () => {
+    let posted = false
+    server.use(
+      http.get(`${BASE}/shop-notes`, () => HttpResponse.json(PLUGIN)),
+      http.get(`${BASE}/shop-notes/draft-diff`, () =>
+        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: ['skills/notes/SKILL.md'], manifest_changed: false }),
+      ),
+      http.post(`${BASE}/shop-notes/publish`, () => {
+        posted = true
+        return HttpResponse.json({})
+      }),
+    )
+    const { fake, calls } = offers(undefined)
+    const c = ctx(fake)
+    const result = firstText(await runTool(tool('hosted_plugin_publish'), { name: 'shop-notes' }, c)) as Record<string, unknown>
+    expect(result['status']).toBe('pending_approval')
+    expect(result['summary']).toBe('Publish hosted plugin shop-notes as version 2 (1 changed) and offer it to the assistant')
+    expect(await c.pending.list(c.principal)).toHaveLength(1)
+    expect(posted).toBe(false)
+    expect(calls).toEqual([])
+  })
+
+  it('words its approval as an offer of the latest version when the draft has no change', async () => {
+    server.use(
+      http.get(`${BASE}/shop-notes`, () => HttpResponse.json(PLUGIN)),
+      http.get(`${BASE}/shop-notes/draft-diff`, () =>
+        HttpResponse.json({ base_version: 1, added: [], removed: [], changed: [], manifest_changed: false }),
+      ),
+    )
+    const prepared = await tool('hosted_plugin_publish').prepareApproval({ name: 'shop-notes' }, ctx())
+    expect(prepared.summary).toBe('Offer version 1 of hosted plugin shop-notes to the assistant (the draft has no change)')
+  })
+
   it('words its approval with the next version and the draft’s changes', async () => {
     server.use(
       http.get(`${BASE}/shop-notes`, () => HttpResponse.json(PLUGIN)),
@@ -253,8 +319,21 @@ describe('hosted plugin tools (#6938)', () => {
       },
     }
     await expect(tool('hosted_plugin_publish').execute({ name: 'shop-notes' }, { ...ctx(fake), gate: 'workflow' })).rejects.toThrow(
-      /version 3 is published, but offering it .*failed.*the package is refused/,
+      /version 3 is published, but offering it .*failed; call hosted_plugin_publish again.*the package is refused/,
     )
+  })
+
+  it('tells the model to fix the draft, not to retry, when the package is refused', async () => {
+    server.use(http.post(`${BASE}/shop-notes/publish`, () => HttpResponse.json({ version: 3, zip_sha256: 'z', content_hash: 'h', files: {}, published_at: '', published_by: 'service:agent' })))
+    const fake: HostedPackageOffers = {
+      get: async () => undefined,
+      offer: async () => {
+        throw new PackageRefusedError(['skills/x/SKILL.md: no name'])
+      },
+    }
+    const run = tool('hosted_plugin_publish').execute({ name: 'shop-notes' }, { ...ctx(fake), gate: 'workflow' })
+    await expect(run).rejects.toThrow(/fix the draft/)
+    await expect(run).rejects.not.toThrow(/call hosted_plugin_publish again/)
   })
 
   it('refuses to publish where it cannot offer', async () => {
