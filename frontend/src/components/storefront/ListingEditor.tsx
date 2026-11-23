@@ -8,10 +8,13 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { colourProblems, defaultFits, effectiveMaterials, emptyDraft, fittedDefault, fixColour, isSupport, isSupportOnly, lockedValue, materialKey, MAX_TEXT_LENGTH, nearestFilaments, offerable, priceBookMaterials, pickableColours, refusalText, sameColour, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft, type ListingRefusal } from './listingDraft'
+import { colourProblems, defaultFits, effectiveMaterials, emptyDraft, fittedDefault, fixColour, isFileDraft, isSupport, isSupportOnly, lockedValue, materialKey, MAX_TEXT_LENGTH, nearestFilaments, offerable, priceBookMaterials, pickableColours, refusalText, sameColour, schemaBound, shownParams, switchSource, titleColours, withoutWords, type ListingDraft, type ListingRefusal } from './listingDraft'
 import { customerFilaments } from '../../storefront/params'
 import { MaterialOrder } from './MaterialOrder'
 import { ListingPictures, type LivePictures, type MediaState } from './ListingPictures'
+import { FileChoice, FileParts, FilePictures, FileStateNotes } from './FileSource'
+import type { ListedFile } from './listedFile'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { filamentLinks } from '../../lib/filamentLinks'
 
 /**
@@ -56,6 +59,16 @@ export interface ListingEditorProps {
   shopMaterials?: readonly string[]
   /** #6258 — what the last publish refused about the materials, said beside the control it concerns. */
   refusal?: ListingRefusal | null
+  /** #6710 — what the page read of a file listing's library file. */
+  file?: ListedFile
+  /** #6710 — the library that serves (`library_backend`), which a picked file is of; undefined until read, null when the settings could not be read. */
+  library?: 'bambuddy' | 'native' | null
+  /** #6710 — the saved listing's id, whose pinned copy shows its plate pictures; null for a new one. */
+  listingId?: string | null
+  /** #6710 §5.4 — a picture uploaded to the file listing (saved first when new); answers its id. */
+  onUploadPicture?: (file: File) => Promise<string | null>
+  /** #6710 §9.4 — "Keep the published version": the page saves the listing with `repin: false`. */
+  onKeepPublished?: () => void
 }
 
 /** Where the price book's filaments are added (Filament → Types). */
@@ -497,29 +510,109 @@ function ColourProblems({ draft, schema, filaments, onChange }: { draft: Listing
 }
 
 /**
- * The design line: the template and its version. A saved listing folds it to one line, with
- * "Change" opening both pickers; a new listing keeps the pickers open.
+ * #6710 §9.1 — the Source block, at the top because the source decides everything below it:
+ * a design (its template and version) or a library file. A new listing shows both choices
+ * and keeps the chosen one's pickers open; a saved one folds to one line, with "Change"
+ * opening both. Switching the source clears what the other source set (`switchSource`).
+ * What the library says of a published file's version, and what publish refused about the
+ * file, show here whether folded or not.
  */
-function DesignLine({ isNew = false, draft, onChange, models, versions }: Pick<ListingEditorProps, 'isNew' | 'draft' | 'onChange' | 'models' | 'versions'>) {
+function SourceBlock({
+  isNew = false,
+  draft,
+  onChange,
+  models,
+  versions,
+  file,
+  library,
+  listingId,
+  refusal,
+  onKeepPublished,
+}: Pick<ListingEditorProps, 'isNew' | 'draft' | 'onChange' | 'models' | 'versions' | 'file' | 'library' | 'listingId' | 'refusal' | 'onKeepPublished'>) {
   const id = useId()
   const [changing, setChanging] = useState(false)
+  const fileSource = isFileDraft(draft)
   const model = models.find((m) => m.slug === draft.slug)
   const version = versions?.find((v) => v.commit === draft.commit)
-  if (!isNew && !changing && model && draft.commit) {
-    return (
-      <div className="flex flex-wrap items-center gap-2 text-sm" data-testid="listing-design">
-        <span className="text-muted-foreground">Design</span>
-        <span className="font-medium">{model.name}</span>
-        <span className="text-muted-foreground">
-          version {version?.short ?? draft.commit.slice(0, 7)}
-          {version?.current ? ' (current)' : ''}
-        </span>
-        <Button variant="link" size="sm" className="h-auto p-0" onClick={() => setChanging(true)}>
-          Change
-        </Button>
-      </div>
-    )
-  }
+  const folded = !isNew && !changing && (fileSource ? Boolean(draft.library_file) : Boolean(model && draft.commit))
+  const refused = refusal?.kind === 'file' && refusal.name !== 'colours' ? refusal : null
+  const after = (
+    <>
+      {fileSource && <FileStateNotes draft={draft} file={file} onChange={onChange} onKeepPublished={onKeepPublished} />}
+      {refused && (
+        <p role="alert" className="text-xs text-destructive">
+          Not published: {refused.detail}.
+        </p>
+      )}
+    </>
+  )
+  return (
+    <section aria-label="Source" className="flex flex-col gap-3">
+      <h3 className="sr-only">Source</h3>
+      {folded ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm" data-testid={fileSource ? 'listing-source' : 'listing-design'}>
+          {fileSource ? (
+            <>
+              <span className="text-muted-foreground">Library file</span>
+              <span className="min-w-0 truncate font-medium">{draft.library_file?.filename}</span>
+            </>
+          ) : (
+            <>
+              <span className="text-muted-foreground">Design</span>
+              <span className="font-medium">{model?.name}</span>
+              <span className="text-muted-foreground">
+                version {version?.short ?? draft.commit.slice(0, 7)}
+                {version?.current ? ' (current)' : ''}
+              </span>
+            </>
+          )}
+          <Button variant="link" size="sm" className="h-auto p-0" onClick={() => setChanging(true)}>
+            Change
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3 rounded-md border p-3">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <span id={`${id}-sells`} className="text-sm font-semibold">
+              What this listing sells
+            </span>
+            {!isNew && (
+              <Button variant="link" size="sm" className="h-auto p-0" onClick={() => setChanging(false)}>
+                Done
+              </Button>
+            )}
+          </div>
+          <RadioGroup
+            aria-labelledby={`${id}-sells`}
+            className="flex flex-wrap gap-x-6 gap-y-2"
+            value={fileSource ? 'library_file' : 'template'}
+            onValueChange={(next) => {
+              if (next === (fileSource ? 'library_file' : 'template')) return
+              onChange(switchSource(draft, next === 'library_file' ? 'library_file' : 'template'))
+            }}
+          >
+            <label className="flex items-center gap-2 text-sm">
+              <RadioGroupItem value="template" aria-label="A design" />A design
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <RadioGroupItem value="library_file" aria-label="A library file" />A library file
+            </label>
+          </RadioGroup>
+          {fileSource ? (
+            <FileChoice draft={draft} file={file} library={library} listingId={listingId} onChange={onChange} />
+          ) : (
+            <DesignPickers draft={draft} onChange={onChange} models={models} versions={versions} />
+          )}
+        </div>
+      )}
+      {after}
+    </section>
+  )
+}
+
+/** The design's pickers: the template and its version. */
+function DesignPickers({ draft, onChange, models, versions }: Pick<ListingEditorProps, 'draft' | 'onChange' | 'models' | 'versions'>) {
+  const id = useId()
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       <div className="flex flex-col gap-1">
@@ -553,11 +646,6 @@ function DesignLine({ isNew = false, draft, onChange, models, versions }: Pick<L
           </SelectContent>
         </Select>
       </div>
-      {!isNew && changing && model && draft.commit && (
-        <Button variant="link" size="sm" className="h-auto justify-self-start p-0" onClick={() => setChanging(false)}>
-          Done
-        </Button>
-      )}
     </div>
   )
 }
@@ -734,6 +822,11 @@ function ColoursOnOffer({
           {unprintableText(refusal, schema)}
         </p>
       )}
+      {refusal?.kind === 'file' && refusal.name === 'colours' && (
+        <p role="alert" className="text-xs text-destructive">
+          Not published: {refusal.detail}.
+        </p>
+      )}
       {materials && outside.length > 0 && (
         <div className="flex flex-col gap-1.5 rounded-md border border-warn/50 bg-warn/5 p-2.5 text-xs" data-testid="materials-not-allowed">
           <p>
@@ -824,15 +917,50 @@ function ColoursOnOffer({
   )
 }
 
-export function ListingEditor({ isNew = false, draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded, coloursSettled = true, bookState = 'ready', schemaState = 'loading', shopMaterials, refusal = null }: ListingEditorProps) {
+export function ListingEditor({
+  isNew = false,
+  draft,
+  onChange,
+  models,
+  versions,
+  schema,
+  filaments,
+  media,
+  live = null,
+  mediaState = 'ready',
+  onPictureUploaded,
+  coloursSettled = true,
+  bookState = 'ready',
+  schemaState = 'loading',
+  shopMaterials,
+  refusal = null,
+  file,
+  library,
+  listingId,
+  onUploadPicture,
+  onKeepPublished,
+}: ListingEditorProps) {
   const id = useId()
-  const params = shownParams(schema)
-  const offersColour = params.some((param) => param.type === 'color' && draft.params[param.name])
+  const fileSource = isFileDraft(draft)
+  const params = fileSource ? [] : shownParams(schema)
+  // #6710: each part of a file takes a colour the customer picks.
+  const offersColour = fileSource || params.some((param) => param.type === 'color' && draft.params[param.name])
   const inTitle = titleColours(draft, schema, filaments)
   return (
     <div className="flex flex-col gap-5">
-      <DesignLine isNew={isNew} draft={draft} onChange={onChange} models={models} versions={versions} />
-      <ColourProblems draft={draft} schema={schema} filaments={filaments} onChange={onChange} />
+      <SourceBlock
+        isNew={isNew}
+        draft={draft}
+        onChange={onChange}
+        models={models}
+        versions={versions}
+        file={file}
+        library={library}
+        listingId={listingId}
+        refusal={refusal}
+        onKeepPublished={onKeepPublished}
+      />
+      {!fileSource && <ColourProblems draft={draft} schema={schema} filaments={filaments} onChange={onChange} />}
 
       <section className="flex flex-col gap-3" aria-label="Product">
         <h3 className="text-sm font-semibold">Product</h3>
@@ -852,17 +980,24 @@ export function ListingEditor({ isNew = false, draft, onChange, models, versions
           <Label htmlFor={`${id}-description`}>Description</Label>
           <Textarea id={`${id}-description`} value={draft.description} maxLength={5000} rows={3} onChange={(event) => onChange({ ...draft, description: event.target.value })} />
         </div>
-        <ListingPictures
-          slug={draft.slug}
-          media={media}
-          mediaState={mediaState}
-          chosen={draft.media_ids}
-          live={live}
-          onChange={(media_ids) => onChange({ ...draft, media_ids })}
-          onUploaded={(model, id) => onPictureUploaded?.(model, id)}
-        />
+        {fileSource ? (
+          <FilePictures draft={draft} file={file} listingId={listingId} live={live} onChange={(media_ids) => onChange({ ...draft, media_ids })} onUpload={onUploadPicture} />
+        ) : (
+          <ListingPictures
+            slug={draft.slug}
+            media={media}
+            mediaState={mediaState}
+            chosen={draft.media_ids}
+            live={live}
+            onChange={(media_ids) => onChange({ ...draft, media_ids })}
+            onUploaded={(model, id) => onPictureUploaded?.(model, id)}
+          />
+        )}
       </section>
 
+      {fileSource ? (
+        <FileParts draft={draft} file={file} filaments={filaments} />
+      ) : (
       <section className="flex flex-col gap-2" aria-label="Settings">
         <h3 className="text-sm font-semibold">Settings</h3>
         {!schema && draft.commit && schemaState === 'loading' && <p className="text-xs text-muted-foreground">Loading the design’s settings…</p>}
@@ -882,6 +1017,7 @@ export function ListingEditor({ isNew = false, draft, onChange, models, versions
           ))}
         </ul>
       </section>
+      )}
 
       <MaterialsAllowed draft={draft} shop={shopMaterials} filaments={filaments} refusal={refusal} onChange={onChange} />
       <ColoursOnOffer

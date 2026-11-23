@@ -298,6 +298,8 @@ async def _book_usage(
     carries ``read_to``, the newest row read, so the instance's usage mark moves only once
     the whole read is booked, in that body's transaction (R-7002-6). An empty read books
     nothing and sends nothing."""
+    # `read_and_pull` skips an empty read already; keep this guard anyway: `max` below raises
+    # ValueError on an empty list, and another caller may not check.
     if not usage:
         return
     bodies = usage_bodies(usage, archives, USAGE_BODY_ROWS)

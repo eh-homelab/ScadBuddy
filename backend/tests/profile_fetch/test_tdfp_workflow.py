@@ -5,30 +5,43 @@ sent again under its key answers the first one's outcome without running again."
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
 import pytest
 from temporalio import activity
+from temporalio import workflow as temporal_workflow
 from temporalio.client import Client
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from scadbuddy.filament import tdfp as tdfp_module
+from scadbuddy.filament.profile_fetch import FetchStarter
 from scadbuddy.filament.tdfp import TemporalTdfp
 from scadbuddy.profile_fetch import workflow
 from scadbuddy.profile_fetch.wire import (
     CREATE_ACTIVITY,
+    EXPORT_ACTIVITY,
     SEARCH_ACTIVITY,
     CreateAnswer,
     CreateAsk,
+    ExportReport,
+    FetchAsk,
+    SearchAnswer,
     SearchAsk,
 )
-from scadbuddy.profile_fetch.workflow import TdfpCreate, TdfpSearch
+from scadbuddy.profile_fetch.worker import temporal_workers
+from scadbuddy.profile_fetch.workflow import TdfpSearch
 from tests.profile_fetch.test_activities import SEARCH_ANSWER
+from tests.profile_fetch.test_workflow import REPORT
+from tests.profile_fetch.test_workflow import Fakes as FetchFakes
+from tests.profile_fetch.test_workflow import _ask as _fetch_ask
+from tests.profile_fetch.test_workflow import _result as _fetch_result
 from tests.support.temporal import temporal_client, terminate_open_workflows
 
 pytestmark = pytest.mark.requires_temporal
@@ -76,16 +89,34 @@ class Fakes:
         return [search, create]
 
 
-def _worker(client: Client, queue: str, fakes: Fakes) -> Worker:
-    return Worker(
-        client, task_queue=queue, workflows=[TdfpSearch, TdfpCreate], activities=fakes.activities()
-    )
+@asynccontextmanager
+async def _workers(
+    client: Client,
+    queue: str,
+    fakes: Fakes,
+    *,
+    fetch: list[Callable[..., Any]] | None = None,
+    **options: Any,
+) -> AsyncIterator[None]:
+    """The process's two workers (`worker.temporal_workers`), with ``fakes``' activities."""
+    search, create = fakes.activities()
+    async with AsyncExitStack() as running:
+        for each in temporal_workers(
+            client,
+            queue,
+            fetch=fetch if fetch is not None else FetchFakes().activities(),
+            create=create,
+            search=search,
+            **options,
+        ):
+            await running.enter_async_context(each)
+        yield
 
 
 async def test_a_search_answers_the_candidates(client: Client, queue: str) -> None:
     fakes = Fakes()
     try:
-        async with _worker(client, queue, fakes):
+        async with _workers(client, queue, fakes):
             outcome = await TemporalTdfp(client, queue).search(SearchAsk(brand="SUNLU"), wait=60)
     finally:
         await terminate_open_workflows(client, queue)
@@ -102,7 +133,7 @@ async def test_a_create_failed_before_its_save_runs_again_under_its_key(
     fakes = Fakes(lambda: errors.pop(0) if errors else None)
     tdfp = TemporalTdfp(client, queue)
     try:
-        async with _worker(client, queue, fakes):
+        async with _workers(client, queue, fakes):
             first = await tdfp.create(ASK, key="k-1", wait=60)
             assert not await tdfp.started(ASK, key="k-1")
             again = await tdfp.create(ASK, key="k-1", wait=60)
@@ -123,7 +154,7 @@ async def test_a_create_that_may_have_saved_is_kept_under_its_key(
     fakes = Fakes(lambda: ApplicationError("lost", type="step_failed", non_retryable=True))
     tdfp = TemporalTdfp(client, queue)
     try:
-        async with _worker(client, queue, fakes):
+        async with _workers(client, queue, fakes):
             first = await tdfp.create(ASK, key="k-3", wait=60)
             again = await tdfp.create(ASK, key="k-3", wait=60)
     finally:
@@ -171,7 +202,7 @@ async def test_a_create_sent_again_under_its_key_answers_the_first(
     fakes = Fakes()
     tdfp = TemporalTdfp(client, queue)
     try:
-        async with _worker(client, queue, fakes):
+        async with _workers(client, queue, fakes):
             first = await tdfp.create(ASK, key="k-2", wait=60)
             again = await tdfp.create(ASK, key="k-2", wait=60)
             other = await tdfp.create(ASK.model_copy(update={"colour": "Gold"}), key="k-2", wait=60)
@@ -203,5 +234,96 @@ async def test_a_search_no_worker_takes_fails_as_not_started(
     finally:
         await terminate_open_workflows(client, queue)
     assert outcome.kind == "not_started"
-    assert outcome.reason is not None and "busy" in outcome.reason
+    assert outcome.reason is not None and "busy with another search" in outcome.reason
     assert fakes.searches == []
+
+
+async def test_a_search_answers_while_a_preset_fetch_exports(
+    client: Client, queue: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7062: a search sent while a preset fetch's export holds the worker's one fetch slot
+    answers; it is not ``not_started`` ("busy with a preset fetch", the API's 503). Its
+    activity runs on its own queue and slot, in the same process (R-7062-1)."""
+    monkeypatch.setattr(workflow, "SEARCH_SCHEDULE_TO_START", timedelta(seconds=5))
+    exporting, release = asyncio.Event(), asyncio.Event()
+
+    @activity.defn(name=EXPORT_ACTIVITY)
+    async def export(ask: FetchAsk) -> ExportReport:
+        exporting.set()
+        await release.wait()
+        return REPORT
+
+    _, import_, failed = FetchFakes().activities()
+    fakes = Fakes()
+    ask = _fetch_ask()
+    try:
+        # Unsandboxed, so the workflow reads the patched wait.
+        async with _workers(
+            client,
+            queue,
+            fakes,
+            fetch=[export, import_, failed],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+        ):
+            await FetchStarter(client, queue).start(ask)
+            await asyncio.wait_for(exporting.wait(), 30)
+            try:
+                outcome = await TemporalTdfp(client, queue).search(
+                    SearchAsk(brand="SUNLU"), wait=60
+                )
+            finally:
+                release.set()
+            await _fetch_result(client, ask)
+    finally:
+        await terminate_open_workflows(client, queue)
+    assert (outcome.kind, outcome.reason) == (None, None)
+    assert outcome.search == SEARCH_ANSWER
+    assert fakes.searches == [SearchAsk(brand="SUNLU")]
+
+
+@temporal_workflow.defn(name="test_search_on_queue_7062")
+class _SearchOnQueue:
+    """A search's activity scheduled on the queue named, as an unpatched `TdfpSearch`
+    schedules it on the fetch queue."""
+
+    @temporal_workflow.run
+    async def run(self, queue: str) -> SearchAnswer:
+        answer: SearchAnswer = await temporal_workflow.execute_activity(
+            SEARCH_ACTIVITY,
+            SearchAsk(brand="SUNLU"),
+            task_queue=queue,
+            result_type=SearchAnswer,
+            schedule_to_close_timeout=timedelta(seconds=30),
+        )
+        return answer
+
+
+async def test_the_fetch_worker_runs_a_search_scheduled_on_its_queue(
+    client: Client, queue: str
+) -> None:
+    """R-7062-1: during a roll, a `TdfpSearch` that started before the patch schedules its
+    activity on the fetch queue; the fetch worker registers it, so it still runs."""
+    fakes = Fakes()
+    probe = f"{queue}-probe"
+    try:
+        async with (
+            _workers(client, queue, fakes),
+            Worker(
+                client,
+                task_queue=probe,
+                workflows=[_SearchOnQueue],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ),
+        ):
+            answer = await client.execute_workflow(
+                _SearchOnQueue.run,
+                queue,
+                id=f"search-on-queue-{uuid.uuid4().hex[:8]}",
+                task_queue=probe,
+                execution_timeout=timedelta(seconds=60),
+            )
+    finally:
+        await terminate_open_workflows(client, queue)
+        await terminate_open_workflows(client, probe)
+    assert answer == SEARCH_ANSWER
+    assert fakes.searches == [SearchAsk(brand="SUNLU")]

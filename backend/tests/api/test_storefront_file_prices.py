@@ -349,3 +349,70 @@ def test_an_add_with_values_is_outside_the_listing(
     r = crud.post("/draft/items", json=sent, key=uuid.uuid4().hex)
     found = problem_of(r, "input_outside_listing", 422)
     assert (found["name"], found["reason"]) == ("width", "unknown")
+
+
+def test_a_read_that_finds_no_room_costs_nothing(
+    crud: CrudCaller, listed: dict[str, Any], pla_red: str, pla_blue: str
+) -> None:
+    """#7075 review: a read that would claim a slice pays first, and a claim it then
+    loses (no room for another slice) gives the render back."""
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO storefront_slice_prices (price_key, model_sha256, status, claim_key)"
+            " VALUES (%s, %s, 'running', 'other')",
+            ("d" * 64, "e" * 64),
+        )
+    r = read(crud, listed, {0: pla_red, 1: pla_blue})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "pending"
+    assert counted(crud) == 0
+
+
+def test_a_slice_that_never_started_costs_nothing(
+    crud: CrudCaller,
+    listed: dict[str, Any],
+    pla_red: str,
+    pla_blue: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7075 review: a start that fails gives the claim back, and the render too."""
+    import scadbuddy.api.operations as api_operations
+
+    async def refused(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("the slicer refused")
+
+    monkeypatch.setattr(api_operations, "run_operation", refused)
+    r = read(crud, listed, {0: pla_red, 1: pla_blue})
+    assert r.status_code == 200, r.text
+    assert counted(crud) == 0
+
+
+def test_an_add_whose_listing_moved_meanwhile_is_409(
+    crud: CrudCaller,
+    listed: dict[str, Any],
+    keychain: NativeFile,
+    pla_red: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7075 review: the listing is checked again under the add's transaction, so a line
+    never holds a copy its listing no longer sells."""
+    from scadbuddy.orders.storefront import drafts, file_prices
+
+    checked = file_prices.checked_file_choice
+
+    async def then_moved(*args: Any, **kwargs: Any) -> Any:
+        found = await checked(*args, **kwargs)
+        # Another publish pinned other bytes meanwhile.
+        with _state(crud.api).projection.pool.connection() as conn:
+            conn.execute(
+                "UPDATE storefront_listings SET library_file = jsonb_set(library_file,"
+                " '{pinned}', to_jsonb(%s::text)) WHERE id = %s",
+                ("c" * 64, listed["id"]),
+            )
+        return found
+
+    monkeypatch.setattr(drafts, "checked_file_choice", then_moved)
+    problem_of(add(crud, listed, {0: pla_red, 1: pla_red}), "listing_changed", 409)
+    copy = f"listing-file-{keychain.sha256}"
+    assert [h for h in holders(crud.api, copy) if h[0] == "order_item"] == []
+    assert rows(crud, "SELECT count(*) AS n FROM order_items") == [{"n": 0}]
