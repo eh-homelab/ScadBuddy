@@ -15,7 +15,7 @@ from temporalio.client import Client, WorkflowUpdateStage
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from scadbuddy.workflows.handlers import handler_wait
-from tests.support.temporal import temporal_client
+from tests.support.temporal import temporal_available, temporal_client
 
 #: One dev server for the module's tests, on one loop.
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.asyncio(loop_scope="module")]
@@ -72,6 +72,9 @@ class _Waits:
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def client() -> AsyncIterator[Client]:
+    # A module fixture is set up before the function-scoped `requires_temporal` skip.
+    if not temporal_available():
+        pytest.skip("no Temporal")
     async with temporal_client() as connected:
         yield connected
 
@@ -116,5 +119,5 @@ async def test_a_cancel_of_the_waiting_task_with_the_condition_false_is_raised(
         await handle.cancel()
         await handle.signal(_Waits.release)
 
-        assert answer == "raised"
+        assert answer == "raised", "'never waited': the task never entered the wait"
         assert await handle.result() == "done"
