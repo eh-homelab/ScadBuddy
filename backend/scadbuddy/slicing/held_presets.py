@@ -22,6 +22,11 @@ forgets it at its start (`slicing/component.py`, #4645 review): a ``local`` pres
 then read from Bambuddy on every slice again, as before the copy, and a native run
 offers none.
 
+The copy is a read cache and nothing more (#7244): its refresh writes
+``held_local_presets`` only. ScadBuddy's own filament presets (`filament/sb_presets.py`)
+take what it holds only in the Schedule's pull, after the copy's refresh, while
+``filament_sync.presets`` pulls; a one-time import reads Bambuddy itself.
+
 A native slice flattens a kept document over the image's tree (`slicing/presets.py`),
 and its key carries the built file's digest, so an edit, once kept, slices again. A
 preset the copy lacks (imported since the last refresh) is not offered on a native run
@@ -40,7 +45,7 @@ import hashlib
 import json
 import logging
 import threading
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -273,30 +278,24 @@ async def refresh_held_presets(store: HeldPresetStore, client: BambuddyClient) -
 
 
 def held_presets_activity(
-    store: Callable[[], HeldPresetStore],
-    load: Callable[[], StoredSettings],
-    after: Callable[[HeldPresetStore], Awaitable[None]] | None = None,
+    store: Callable[[], HeldPresetStore], load: Callable[[], StoredSettings]
 ) -> Callable[[], Any]:
     """``held_presets_refresh``, on the ``library`` worker beside the spool refresh's
     other activities (`spools/activities.py`); ``store`` and ``load`` are asked at each
     run, as the app's state is set up after its worker's activities are listed. Raises
-    on a failed refresh, which the workflow logs; the next tick is the retry. ``after``
-    runs once the copy is current: ScadBuddy's own presets take what it read
-    (`filament/sb_presets.py` `sync_from_held`, #7176), in this activity, so the
-    Schedule's workflow commands do not change."""
+    on a failed refresh, which the workflow logs; the next tick is the retry. It writes
+    the kept copy only, never ScadBuddy's own presets: those take Bambuddy's only through
+    the pull, while ``filament_sync.presets`` pulls, or a one-time import
+    (`filament/sb_presets.py` `import_presets`, #7244)."""
 
     @activity.defn(name=HELD_ACTIVITY)
     async def held_presets_refresh() -> Outcome:
-        return await refresh_held(store(), load, after)
+        return await refresh_held(store(), load)
 
     return held_presets_refresh
 
 
-async def refresh_held(
-    store: HeldPresetStore,
-    load: Callable[[], StoredSettings],
-    after: Callable[[HeldPresetStore], Awaitable[None]] | None = None,
-) -> Outcome:
+async def refresh_held(store: HeldPresetStore, load: Callable[[], StoredSettings]) -> Outcome:
     settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:
         return "skipped"
@@ -305,6 +304,4 @@ async def refresh_held(
     # A row an older build's refresh kept with its keys during a roll, after this build's
     # strip at start passed it, or every row when that strip failed: stripped here too.
     await asyncio.to_thread(store.strip_kept, threading.Event())
-    if after is not None:
-        await after(store)
     return "refreshed"

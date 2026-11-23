@@ -1923,6 +1923,27 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_bambuddy_presets_import',
+    label: "Import Bambuddy's presets",
+    description:
+      "Bring Bambuddy's filament local presets into ScadBuddy's own presets once, whatever `filament_sync.presets` " +
+      "says (the spool refresh Schedule's pull does this only while it is `bb_to_sb` or `two_way`). ScadBuddy reads " +
+      "Bambuddy's list of local presets, then each preset it needs. A preset ScadBuddy took from Bambuddy earlier " +
+      "(`source` `bambuddy`) that Bambuddy edited since takes Bambuddy's document as a new version. Every spool or type " +
+      'preset that still names a Bambuddy local preset id names a ScadBuddy preset (`sb-<id>`) instead: the one already ' +
+      "made for that id, else a new one made from Bambuddy's document. Answers `{adopted, updated}`: how many presets " +
+      'it made and how many took a new version. 409 when no Bambuddy is configured, and 409 `instance_changed` while ' +
+      'the links belong to another Bambuddy (filament_sync_reset_links first). Writes ScadBuddy only, never Bambuddy.',
+    input: z.object({}),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/presets/bambuddy-import'],
+    summarize: () => "Import Bambuddy's filament presets",
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/presets/bambuddy-import'), "import Bambuddy's presets")),
+  }),
+
+  defineTool({
     name: 'filament_sync_ams_weights',
     label: 'Sync spool weights from the AMS',
     description:

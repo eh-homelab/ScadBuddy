@@ -13,6 +13,8 @@ and the NTAG confirm,
 `POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
 tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cancel
 (`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks.
+`POST /filament/presets/bambuddy-import` reads Bambuddy's local presets and writes
+ScadBuddy's own presets only (#7244).
 `POST /filament/sync/run` asks the ScadBuddy-to-Bambuddy sync for a full pass (#6265),
 which writes Bambuddy only for the data types set to push; `GET /filament/sync/status`
 reads how its passes went. `GET /filament/sync/reset-links` counts what a reset of the
@@ -149,6 +151,7 @@ from scadbuddy.filament.profile_fill import (
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import failure_label, push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
+from scadbuddy.filament.sb_presets import LivePresets, PresetImport, import_presets
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
     OverrideKindError,
@@ -193,7 +196,8 @@ from scadbuddy.workflows.commands import (
 #: themselves; the Bambuddy import pulls
 #: and the RFID scan writes nothing, so neither has anything to push (Decision 163);
 #: the printer labels (#6955) make only the printer and AMS places that capture makes
-#: too, un-nudged, and every labels-page load and agent read calls them.
+#: too, un-nudged, and every labels-page load and agent read calls them; the presets
+#: import (#7244) takes Bambuddy's presets, which Bambuddy already holds.
 NOT_NUDGED = frozenset(
     {
         "sync_ams_weights",
@@ -202,6 +206,7 @@ NOT_NUDGED = frozenset(
         "import_bambuddy",
         "scan_rfid_tag",
         "printer_labels",
+        "import_bambuddy_presets",
     }
 )
 
@@ -2304,6 +2309,45 @@ async def import_bambuddy(
     if outcome.report is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
     return outcome.report
+
+
+@router.post(
+    "/presets/bambuddy-import",
+    response_model=PresetImport,
+    summary="Import Bambuddy's presets now",
+    description=(
+        "Bring Bambuddy's filament local presets into ScadBuddy's own presets once, whatever "
+        "`filament_sync.presets` says (the Schedule's pull does the same only while it is "
+        "`bb_to_sb` or `two_way`). Reads Bambuddy now: its list of local presets, then each "
+        "preset it needs. A preset ScadBuddy took from Bambuddy (`source` `bambuddy`) whose "
+        "`updated_at` moved since takes Bambuddy's document as a new version (`updated`). "
+        "Every spool or type preset that still names a Bambuddy local preset id names a "
+        "ScadBuddy preset instead: the one already made for that id, else a new one made "
+        "from Bambuddy's document (`adopted`, how many were made). A preset gone from "
+        "Bambuddy is left as it is. Never writes to Bambuddy. 409 when no Bambuddy is "
+        "configured, and 409 with `code` `instance_changed` (reading nothing) while the "
+        "links belong to another Bambuddy, until `POST /filament/sync/reset-links`; "
+        "Bambuddy's own errors as they come."
+    ),
+)
+async def import_bambuddy_presets(
+    state: StateDep, filament: FilamentDep, store: SettingsStoreDep
+) -> PresetImport:
+    """The one-time import of #7244 (`filament/sb_presets.py` `import_presets`): it reads
+    Bambuddy itself (`LivePresets`), not the kept copy, which may be off or a tick old."""
+    settings = await asyncio.to_thread(store.load)
+    if not settings.bambuddy_url:
+        raise not_configured("no Bambuddy URL is configured; set one in Settings")
+    if await asyncio.to_thread(links_elsewhere, filament, instance_for(settings.bambuddy_url)):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the Bambuddy links belong to another Bambuddy; reset them first",
+            code="instance_changed",
+        )
+    async with client_for(settings) as client:
+        return await import_presets(
+            state.settings_store.pool, state.store.blobs, LivePresets(client)
+        )
 
 
 @router.get(

@@ -11,11 +11,20 @@ Bambuddy's ``updated_at`` moved (`refresh_bambuddy`).
 
 `adopt_held` turns each binding that still names a Bambuddy local preset into an
 ``sb-`` ref (Decision 6): to the ScadBuddy preset with that Bambuddy id, else to a new one
-made from the kept copy of Bambuddy's local presets (`slicing/held_presets.py`, whose
-refresh already reads ``GET /local-presets/{id}`` only when ``updated_at`` moved). Both
-run after that refresh, in its activity (`held_presets_refresh`), on the API's
-``library`` worker; the bytes go to the blob store, which SQL cannot write, so the move
-is code that the deployed refresh runs.
+made from Bambuddy's document. `import_presets` runs `refresh_bambuddy` and then
+`adopt_held`, and nothing else imports Bambuddy's presets (#7244, the owner's decision of
+2026-11-23). It runs in two places only:
+
+- the Schedule's pull (`spools/activities.py` `filament_pull_activity`), after the spools,
+  only while ``filament_sync.presets`` pulls (``bb_to_sb`` or ``two_way``) and the links
+  are the configured Bambuddy's. It reads the kept copy of Bambuddy's local presets
+  (`slicing/held_presets.py`), which the same run refreshed just before;
+- a person's or the agent's one-time import (``POST /filament/presets/bambuddy-import``),
+  whatever the direction is. It reads Bambuddy itself (`LivePresets`): the list, then
+  each preset it needs.
+
+The bytes go to the blob store, which SQL cannot write, so the import is code that the
+deployed API runs.
 """
 
 from __future__ import annotations
@@ -27,18 +36,20 @@ import json
 import logging
 from collections.abc import Callable, Collection
 from datetime import datetime
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, Protocol
 from uuid import UUID
 
+from fastapi import status
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
+from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import LocalPresetDetail
 from scadbuddy.core.credentials import strip_credentials
+from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.attachments import blob_path, keep_file
-from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.own_presets import OwnRow, facts, sb_id, sb_ref
 from scadbuddy.store import BlobStore
 
@@ -54,6 +65,46 @@ HOLDER: Final = "filament_preset"
 LOCK: Final = "scadbuddy:filament:presets"
 #: The binding tables, each with the column of its owner.
 BINDINGS: Final = ("filament_spool_type_presets", "filament_spool_presets")
+
+
+class PresetSource(Protocol):
+    """Where an import reads Bambuddy's local presets: the kept copy
+    (`slicing/held_presets.py` `HeldPresetStore`) or Bambuddy itself (`LivePresets`)."""
+
+    async def stamps(self) -> dict[int, str | None]:
+        """Each preset's ``updated_at``, by id."""
+        ...
+
+    async def documents(self, ids: Collection[int]) -> dict[int, LocalPresetDetail]:
+        """The presets of ``ids`` with their documents; an id it lacks is left out."""
+        ...
+
+
+class LivePresets:
+    """Bambuddy's filament local presets read now, for a one-time import: one list, then
+    ``GET /local-presets/{id}`` only for a listed id the import asks for. A preset gone
+    since the list is left out."""
+
+    def __init__(self, client: BambuddyClient) -> None:
+        self._client = client
+        self._listed: dict[int, str | None] | None = None
+
+    async def stamps(self) -> dict[int, str | None]:
+        if self._listed is None:
+            listing = await self._client.local_presets()
+            self._listed = {row.id: row.updated_at for row in listing.filament}
+        return dict(self._listed)
+
+    async def documents(self, ids: Collection[int]) -> dict[int, LocalPresetDetail]:
+        listed = await self.stamps()
+        found: dict[int, LocalPresetDetail] = {}
+        for preset_id in sorted(set(ids) & listed.keys()):
+            try:
+                found[preset_id] = await self._client.local_preset(preset_id)
+            except ApiError as error:
+                if error.status != status.HTTP_404_NOT_FOUND:
+                    raise
+        return found
 
 
 class FilamentPreset(BaseModel):
@@ -415,11 +466,11 @@ def _take_version(
         return version is not None
 
 
-async def adopt_held(pool: ConnectionPool[Conn], blobs: BlobStore, held: HeldPresetStore) -> int:
-    """Every binding that names a Bambuddy local preset the kept copy holds as a filament
+async def adopt_held(pool: ConnectionPool[Conn], blobs: BlobStore, held: PresetSource) -> int:
+    """Every binding that names a Bambuddy local preset ``held`` holds as a filament
     preset names a ScadBuddy preset instead (Decision 6); how many presets it made. One
-    whose preset the copy lacks keeps its Bambuddy id, which the native slicer still
-    reads from the copy or from Bambuddy. A preset already made for that id is reused."""
+    whose preset ``held`` lacks keeps its Bambuddy id, which the native slicer still
+    reads from the kept copy or from Bambuddy. A preset already made for that id is reused."""
 
     def bound() -> tuple[set[int], dict[int, int]]:
         with pool.connection() as conn:
@@ -462,11 +513,9 @@ async def adopt_held(pool: ConnectionPool[Conn], blobs: BlobStore, held: HeldPre
     return made
 
 
-async def refresh_bambuddy(
-    pool: ConnectionPool[Conn], blobs: BlobStore, held: HeldPresetStore
-) -> int:
-    """A new version of each ``bambuddy`` preset whose Bambuddy ``updated_at`` in the
-    kept copy moved since its document was taken (Decision 4); how many changed. A preset
+async def refresh_bambuddy(pool: ConnectionPool[Conn], blobs: BlobStore, held: PresetSource) -> int:
+    """A new version of each ``bambuddy`` preset whose Bambuddy ``updated_at`` in
+    ``held`` moved since its document was taken (Decision 4); how many changed. A preset
     gone from Bambuddy stays as it was: ScadBuddy holds it now."""
 
     def ours() -> list[dict[str, Any]]:
@@ -503,20 +552,35 @@ async def refresh_bambuddy(
     return changed
 
 
-async def sync_from_held(
-    pool: ConnectionPool[Conn], blobs: BlobStore, held: HeldPresetStore
-) -> None:
-    """`refresh_bambuddy`, then `adopt_held`: what the kept copy's refresh runs after it
-    (`slicing/held_presets.py` `refresh_held`). Each step fails alone, logged by type, so
-    a failure never fails the refresh."""
-    for step in (refresh_bambuddy, adopt_held):
+class PresetImport(BaseModel):
+    """What one import of Bambuddy's presets did (`import_presets`)."""
+
+    #: Bambuddy local presets made ScadBuddy presets (`adopt_held`).
+    adopted: int
+    #: ``bambuddy`` presets that took a new version (`refresh_bambuddy`).
+    updated: int
+
+
+async def import_presets(
+    pool: ConnectionPool[Conn], blobs: BlobStore, held: PresetSource
+) -> PresetImport:
+    """`refresh_bambuddy`, then `adopt_held`, from ``held`` (the module's docstring says
+    who calls it). Each step runs even when the other failed; a failure is logged by its
+    type and raised once both ran."""
+    counts: dict[str, int] = {"updated": 0, "adopted": 0}
+    failed: Exception | None = None
+    for name, step in (("updated", refresh_bambuddy), ("adopted", adopt_held)):
         try:
-            await step(pool, blobs, held)
+            counts[name] = await step(pool, blobs, held)
         except Exception as error:
             logger.warning(
-                "a ScadBuddy filament preset step failed; the next refresh retries",
+                "a step of the Bambuddy preset import failed",
                 extra={"step": step.__name__, "error": type(error).__name__},
             )
+            failed = failed or error
+    if failed is not None:
+        raise failed
+    return PresetImport(**counts)
 
 
 def bambuddy_refs_on(conn: Conn, refs: Collection[str]) -> dict[str, str | None]:

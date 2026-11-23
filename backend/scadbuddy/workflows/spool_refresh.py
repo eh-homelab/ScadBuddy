@@ -11,7 +11,12 @@ Bambuddy down, each step logs and returns. Since #6772 the pull's activity reads
 Bambuddy: it starts ``FilamentBbPull`` on the ``bambuddy`` queue, whose activity on the
 print worker reads Bambuddy and sends the rows to the API's CRUD routes, and waits for it
 (`filament/bb_pull_apply.py` `execute_pull`). The activity's name, timeout and result did
-not change, so this workflow's commands did not. It is never started, signalled or awaited by
+not change, so this workflow's commands did not. The kept presets are a read cache only:
+Bambuddy's filament presets enter ScadBuddy's own (`filament/sb_presets.py`
+`import_presets`) in the pull's activity, after the spools, and only while
+``filament_sync.presets`` is ``bb_to_sb`` or ``two_way`` (#7244; before it, the kept
+presets' activity imported them on every run, #7176). That moved no command either.
+It is never started, signalled or awaited by
 the print dialog: the hot path never waits on Bambuddy. A step that fails is not retried
 within its run; the next tick is the retry, as it is for the sweeps.
 

@@ -26,6 +26,10 @@ type S = components['schemas']
  * configured one; `loseSameBambuddy` makes it another before the reset (409 `proof_changed`), and
  * `{ unreadable: true }` a Bambuddy the dry run cannot read (`bambuddy_unreadable`). A reset
  * without `expect_kept` deletes, as the server's does.
+ *
+ * #7244 — `POST /api/v1/filament/presets/bambuddy-import`: 409 with no Bambuddy, 409
+ * `instance_changed` while the links are another Bambuddy's; else the first import adopts two
+ * presets and updates one, and every later one finds nothing new, as a second import does.
  */
 
 const BASE = '/api/v1/filament/sync'
@@ -59,6 +63,9 @@ let unreadable = false
 
 /** #6907 — the links left are only colours' links to Bambuddy's colour catalog. */
 let onlyColours = false
+
+/** #7244 — whether the presets import ran: the next one finds nothing new. */
+let presetsImported = false
 
 /**
  * #6905 — `GET /api/v1/filament/sync/passes`: the pass history, newest first. The seed holds
@@ -112,6 +119,7 @@ export function reset() {
   changedSincePull = false
   unreadable = false
   onlyColours = false
+  presetsImported = false
   passes = seedPasses()
 }
 
@@ -231,6 +239,14 @@ function status(): S['SyncStatus'] {
 const conflict = (detail: string, code: string) => problem(409, 'Conflict', detail, { code })
 
 export const handlers = [
+  http.post('/api/v1/filament/presets/bambuddy-import', () => {
+    if (!configured()) return conflict('no Bambuddy URL is configured; set one in Settings', 'no_bambuddy')
+    if (linksInstance() !== null && linksInstance() !== configured())
+      return conflict('the Bambuddy links belong to another Bambuddy; reset them first', 'instance_changed')
+    const done: S['PresetImport'] = presetsImported ? { adopted: 0, updated: 0 } : { adopted: 2, updated: 1 }
+    presetsImported = true
+    return HttpResponse.json(done)
+  }),
   http.get(`${BASE}/status`, () => {
     if (running !== null) {
       running -= 1

@@ -108,7 +108,7 @@ from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_load
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.print_uses import PoolPrintUses
-from scadbuddy.filament.sb_presets import sync_from_held
+from scadbuddy.filament.sb_presets import import_presets
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
 from scadbuddy.filament.sensors import PoolSensorNotifications
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
@@ -2014,11 +2014,18 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *spool_activities(),
         # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule:
         # read by the print worker, which sends the rows to the CRUD routes (#6772).
+        # Then, while `filament_sync.presets` pulls, Bambuddy's filament presets into
+        # ScadBuddy's own, from the copy the run's first step kept (#7244).
         filament_pull_activity(
             state.components.get(FILAMENT),
             lambda: state.settings_store.load(),
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
             partial(execute_pull, client, settings.temporal_task_queue_bambuddy),
+            lambda: import_presets(
+                state.settings_store.pool,
+                state.store.blobs,
+                HeldPresetStore(state.projection.pool),
+            ),
         ),
         # The printers' trays reconciled with the ledger, the watch's backstop (#6263).
         capture_backstop_activity(state.components.get(PRINTERS)),
@@ -2029,12 +2036,11 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             lambda: state.settings_store.load(),
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
         ),
-        # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
-        # Then ScadBuddy's own filament presets take what the copy read (#7176).
+        # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule:
+        # a read cache only, which writes no ScadBuddy preset (#7244).
         held_presets_activity(
             lambda: HeldPresetStore(state.projection.pool),
             lambda: state.settings_store.load(),
-            lambda held: sync_from_held(state.settings_store.pool, state.store.blobs, held),
         ),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,

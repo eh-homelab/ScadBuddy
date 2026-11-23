@@ -1,6 +1,8 @@
 """The spool refresh's activities, on the ``library`` worker (`main._run_library_worker`):
 Bambuddy's spools pulled into ScadBuddy's own (`filament_pull_activity`, #6261; read on the
-print worker since #6772). The kept presets' activity is `slicing/held_presets.py`'s.
+print worker since #6772), then, while ``filament_sync.presets`` pulls, Bambuddy's filament
+presets into ScadBuddy's own (#7244). The kept presets' activity is
+`slicing/held_presets.py`'s.
 
 The spool providers, their overlay and the trays it recorded are gone (#6262 Task 12).
 Their three activities stay registered for a run opened before ``spool-providers-gone``
@@ -11,6 +13,7 @@ no refresh, and no trays to record.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -25,11 +28,13 @@ from scadbuddy.filament.component import Filament
 from scadbuddy.filament.rfid_mode import BUSY, NO_BAMBUDDY, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
+from scadbuddy.filament.sb_presets import PresetImport
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.component import Printers
 from scadbuddy.workflows.spool_refresh import (
     CAPTURE_ACTIVITY,
     FILAMENT_PULL_ACTIVITY,
+    FILAMENT_PULL_TIMEOUT,
     FILAMENT_RFID_ACTIVITY,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
@@ -59,11 +64,17 @@ def spool_activities() -> list[Callable[..., Any]]:
     return [spool_providers_list, spool_provider_refresh, spool_trays_seen]
 
 
+#: What the presets import leaves of the pull activity's timeout (`FILAMENT_PULL_TIMEOUT`),
+#: so the activity answers before Temporal times it out.
+IMPORT_MARGIN_S = 15.0
+
+
 def filament_pull_activity(
     filament: Filament,
     load: Callable[[], StoredSettings],
     sync: Callable[[], FilamentSync],
     execute: Callable[[PullStart], Awaitable[PullOutcome]],
+    import_presets: Callable[[], Awaitable[PresetImport]] | None = None,
 ) -> Callable[[], Any]:
     """``filament_bambuddy_pull``: Bambuddy's spools into ScadBuddy's own. It runs on the
     ``library`` worker, in the API process, and reads no Bambuddy (#6772): it decides what
@@ -75,23 +86,59 @@ def filament_pull_activity(
     Bambuddy is configured and a Home Assistant sensor is set up, the worker reads the
     sensors' states, even when nothing pulls. It answers the worker's ``pulled``,
     ``skipped`` or ``failed``, and ``failed`` when the settings could not be read or the run
-    could not be started or ended (logged): it never raises, so the run never fails on it."""
+    could not be started or ended (logged): it never raises, so the run never fails on it.
+
+    Then, when the pull takes presets (``filament_sync.presets`` ``bb_to_sb`` or
+    ``two_way``, and the links are the configured Bambuddy's), ``import_presets`` brings
+    Bambuddy's filament presets into ScadBuddy's own (`filament/sb_presets.py`
+    `import_presets`, #7244), whatever the pull answered. It has what is left of the
+    activity's timeout, less `IMPORT_MARGIN_S`; one cut short keeps what it made, and the
+    next tick goes on. A failure is logged and changes nothing in the answer. With
+    ``presets`` ``off`` or ``sb_to_bb`` nothing is imported."""
 
     @activity.defn(name=FILAMENT_PULL_ACTIVITY)
     async def filament_bambuddy_pull() -> str:
+        deadline = time.monotonic() + FILAMENT_PULL_TIMEOUT.total_seconds() - IMPORT_MARGIN_S
         try:
             start = await pull_start(filament, load, sync)
             if start is None:
                 return "skipped"
-            outcome = await execute(start)
         except Exception as error:
             activity.logger.warning(
                 "could not pull Bambuddy's spools", extra={"error": type(error).__name__}
             )
             return "failed"
-        return outcome.outcome
+        try:
+            outcome = (await execute(start)).outcome
+        except Exception as error:
+            activity.logger.warning(
+                "could not pull Bambuddy's spools", extra={"error": type(error).__name__}
+            )
+            outcome = "failed"
+        if import_presets is not None and start.pulls is not None and start.pulls.presets:
+            await _import_presets(import_presets, deadline - time.monotonic())
+        return outcome
 
     return filament_bambuddy_pull
+
+
+async def _import_presets(run: Callable[[], Awaitable[PresetImport]], budget: float) -> None:
+    """The pull's presets import within ``budget`` seconds; never raises."""
+    if budget <= 0:
+        activity.logger.warning("no time was left to import Bambuddy's presets")
+        return
+    try:
+        done = await asyncio.wait_for(run(), budget)
+    except Exception as error:
+        activity.logger.warning(
+            "could not import Bambuddy's presets", extra={"error": type(error).__name__}
+        )
+        return
+    if done.adopted or done.updated:
+        activity.logger.info(
+            "imported Bambuddy's presets",
+            extra={"adopted": done.adopted, "updated": done.updated},
+        )
 
 
 def capture_backstop_activity(printers: Printers) -> Callable[[], Any]:
