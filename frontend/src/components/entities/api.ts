@@ -1,5 +1,6 @@
 import { API_BASE, request, uploadForm } from '../../api/client'
 import type { components } from '../../api/schema'
+import { propertyTexts } from '../../lib/filamentSearch'
 
 /**
  * #6950 — the files and links of any entity (`kind:ref`, such as `spool:<id>`):
@@ -75,4 +76,17 @@ export const entityApi = {
       (body) => body.properties,
     ),
   propertySchema: (kind: string) => request<KindPropertySchema>(`/entity-kinds/${encodeURIComponent(kind)}/property-schema`),
+}
+
+/**
+ * #7026 — every entity of `kind`'s property values as search text (`propertyTexts`), by ref. A
+ * failed read gives an empty map: the filament search still runs on everything else.
+ */
+export async function loadKindPropertyTexts(kind: string): Promise<Map<string, string[]>> {
+  try {
+    const found = await entityApi.kindProperties(kind)
+    return new Map(Object.entries(found).map(([ref, values]) => [ref, propertyTexts(values)]))
+  } catch {
+    return new Map()
+  }
 }

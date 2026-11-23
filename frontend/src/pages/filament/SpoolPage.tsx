@@ -1079,7 +1079,7 @@ export function SpoolPage() {
             </div>
           </Section>
 
-          <Section id="files-and-links" title="Files and links">
+          <Section id="files-and-links" title="Files, links and properties">
             {saved && !creating ? (
               <div className="grid gap-6 xl:grid-cols-2">
                 <AttachmentsPanel entity={`spool:${saved.id}`} />
@@ -1089,7 +1089,7 @@ export function SpoolPage() {
                 </div>
               </div>
             ) : (
-              <p className="text-[13px] text-muted-foreground">Save the spool first, then add its photos, receipts and links.</p>
+              <p className="text-[13px] text-muted-foreground">Save the spool first, then add its photos, receipts, links and properties.</p>
             )}
           </Section>
 

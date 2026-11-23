@@ -1,6 +1,5 @@
 import type { FilamentInventoryView, Spool, SpoolType, TagRow } from '../api/filament'
 import { listProducts, listSuppliers } from '../api/filamentPurchasing'
-import { entityApi, type PropertyValue } from '../components/entities/api'
 
 /**
  * #6894 — the filament text search: the Spools and Types tabs' `q=`, the quick find, and
@@ -13,7 +12,8 @@ import { entityApi, type PropertyValue } from '../components/entities/api'
  *   (brand, material, colour name, SKU, place…), or, from 3 characters, a colour whose hex
  *   contains it, with or without its `#` (`#FF6A13`, `ff6a13`).
  * - #7151: from 4 hex digits (`:` and `-` left out), a tag UID or tray UUID that holds it (`04:A1:B2`).
- * - A spool's or type's property values (#7026) are text fields too: a GTIN, an MPN, a lot.
+ * - In this search only, for now: a spool's or type's property values (#7026) are text fields
+ *   too (a GTIN, an MPN, a lot). The agent's copy does not match them yet; a later layer adds them.
  */
 export interface SearchToken {
   /** The token in lower case, without a leading `#`. */
@@ -79,21 +79,8 @@ export interface TypeExtras {
 }
 
 /** An entity's property values as search text: a string as it is, each list item, a number or boolean as text. */
-export function propertyTexts(values: Record<string, PropertyValue> | undefined): string[] {
+export function propertyTexts(values: Readonly<Record<string, string | number | boolean | readonly string[]>> | undefined): string[] {
   return Object.values(values ?? {}).flatMap((value) => (Array.isArray(value) ? value : [String(value)]))
-}
-
-/**
- * Every entity of `kind`'s property values as search text, by ref. A failed read gives an
- * empty map: the search still runs on everything else.
- */
-export async function loadKindPropertyTexts(kind: 'spool' | 'spool_type'): Promise<Map<string, string[]>> {
-  try {
-    const found = await entityApi.kindProperties(kind)
-    return new Map(Object.entries(found).map(([ref, values]) => [ref, propertyTexts(values)]))
-  } catch {
-    return new Map()
-  }
 }
 
 export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDoc {

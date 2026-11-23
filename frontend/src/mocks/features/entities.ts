@@ -112,6 +112,7 @@ export function seedEntityProperties(entity: string, values: Record<string, Prop
 const PROPERTY_TYPES: Record<string, (value: unknown) => boolean> = {
   string: (value) => typeof value === 'string',
   number: (value) => typeof value === 'number',
+  integer: (value) => Number.isInteger(value),
   boolean: (value) => typeof value === 'boolean',
   array: (value) => Array.isArray(value),
 }
@@ -123,12 +124,13 @@ function propertyRefusal(kind: string, key: string, value: unknown): string | nu
     (typeof value === 'string' && value.length <= 2000) ||
     (typeof value === 'number' && Number.isFinite(value)) ||
     typeof value === 'boolean' ||
-    (Array.isArray(value) && value.length <= 50 && value.every((item) => typeof item === 'string'))
-  if (!shaped) return 'a value is a string, a finite number, a boolean or a list of strings'
-  const known = (entityMock.schemas[kind]?.properties as Record<string, { type?: string }> | undefined)?.[key]
-  const type = known?.type
-  const check = type ? PROPERTY_TYPES[type] : undefined
-  if (check && !check(value)) return `must be ${type === 'array' ? 'an array' : `a ${type}`}`
+    (Array.isArray(value) && value.length <= 50 && value.every((item) => typeof item === 'string' && item.length <= 500))
+  if (!shaped) return 'a value is a string (up to 2000 characters), a finite number, a boolean or a list of up to 50 strings of up to 500 characters'
+  const known = (entityMock.schemas[kind]?.properties as Record<string, { type?: string | string[] }> | undefined)?.[key]
+  const types = known?.type === undefined ? [] : ([] as string[]).concat(known.type).filter((type) => PROPERTY_TYPES[type])
+  if (types.length && !types.some((type) => PROPERTY_TYPES[type]!(value))) {
+    return `must be ${types.map((type) => (type === 'array' || type === 'integer' ? `an ${type}` : `a ${type}`)).join(' or ')}`
+  }
   return null
 }
 

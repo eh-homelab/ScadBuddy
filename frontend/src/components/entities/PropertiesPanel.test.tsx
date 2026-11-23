@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
 import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
@@ -38,15 +38,101 @@ describe('PropertiesPanel (#7026)', () => {
     expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { td: 1.8 } }])
   })
 
-  it('adds a list, split at commas', async () => {
+  it('adds a list item by item, never split at commas', async () => {
     const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
     await screen.findByText('No properties yet.')
     await user.type(screen.getByLabelText('New property key'), 'asin')
     expect(screen.getByRole('combobox', { name: 'New property type' })).toHaveTextContent('List')
-    await user.type(screen.getByLabelText('New property value'), 'us:B0CXYZ1234, de:B0CXYZ9999')
+    await user.type(screen.getByLabelText('New property value, item 1'), 'us:B0CXYZ1234, de')
+    await user.click(screen.getByRole('button', { name: 'Add item' }))
+    await user.type(screen.getByLabelText('New property value, item 2'), 'de:B0CXYZ9999')
     await user.click(screen.getByRole('button', { name: 'Add property' }))
     await screen.findByRole('row', { name: /asin/ })
-    expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { asin: ['us:B0CXYZ1234', 'de:B0CXYZ9999'] } }])
+    expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { asin: ['us:B0CXYZ1234, de', 'de:B0CXYZ9999'] } }])
+  })
+
+  it('edits a list with a comma in an item and sends it back exactly', async () => {
+    seedEntityProperties(TYPE, { finish: ['Black, matte', 'x'] })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    const row = await screen.findByRole('row', { name: /finish/ })
+    await user.click(within(row).getByRole('button', { name: 'Edit finish' }))
+    expect(screen.getByLabelText('Value of finish, item 1')).toHaveValue('Black, matte')
+    const second = screen.getByLabelText('Value of finish, item 2')
+    await user.clear(second)
+    await user.type(second, 'y')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await screen.findByRole('button', { name: 'Edit finish' })
+    expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { finish: ['Black, matte', 'y'] } }])
+  })
+
+  it('sends the stored value unchanged on a rename, outer spaces and empty items kept', async () => {
+    seedEntityProperties(TYPE, { tags: [' a', ''], note: '  padded  ' })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    for (const [from, to, value] of [
+      ['tags', 'labels', [' a', '']],
+      ['note', 'remark', '  padded  '],
+    ] as const) {
+      const row = await screen.findByRole('row', { name: new RegExp(from) })
+      await user.click(within(row).getByRole('button', { name: `Edit ${from}` }))
+      const key = screen.getByLabelText(`Key of ${from}`)
+      await user.clear(key)
+      await user.type(key, to)
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+      await screen.findByRole('button', { name: `Edit ${to}` })
+      expect(entityMock.propertyPatches.at(-1)).toEqual({ entity: TYPE, set: { [from]: null, [to]: value } })
+    }
+  })
+
+  it('keeps a boolean and a number their types when edited in place', async () => {
+    seedEntityProperties(TYPE, { glossy: true, td: 1.8 })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(within(await screen.findByRole('row', { name: /glossy/ })).getByRole('button', { name: 'Edit glossy' }))
+    await choose(user, screen.getByRole('combobox', { name: 'Value of glossy' }), 'No')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await user.click(await screen.findByRole('button', { name: 'Edit td' }))
+    const value = screen.getByLabelText('Value of td')
+    await user.clear(value)
+    await user.type(value, '2.1')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await screen.findByRole('button', { name: 'Edit td' })
+    expect(entityMock.propertyPatches).toEqual([
+      { entity: TYPE, set: { glossy: false } },
+      { entity: TYPE, set: { td: 2.1 } },
+    ])
+  })
+
+  it('asks before a rename replaces a key the entity has', async () => {
+    seedEntityProperties(TYPE, { mpn: 'A', part: 'B' })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(within(await screen.findByRole('row', { name: /mpn/ })).getByRole('button', { name: 'Edit mpn' }))
+    const key = screen.getByLabelText('Key of mpn')
+    await user.clear(key)
+    await user.type(key, 'part')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(screen.getByRole('group', { name: 'Replace a property' })).toHaveTextContent('This replaces part’s value.')
+    expect(entityMock.propertyPatches).toEqual([])
+    await user.click(screen.getByRole('button', { name: 'Replace' }))
+    await waitFor(() => expect(screen.queryByRole('row', { name: /mpn/ })).toBeNull())
+    expect(screen.getByRole('row', { name: /part/ })).toHaveTextContent('A')
+    expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { mpn: null, part: 'A' } }])
+  })
+
+  it('asks before an add replaces a key the entity has, and keeps it on Keep it', async () => {
+    seedEntityProperties(TYPE, { mpn: 'A' })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await screen.findByRole('row', { name: /mpn/ })
+    await user.type(screen.getByLabelText('New property key'), 'mpn')
+    await user.type(screen.getByLabelText('New property value'), 'B')
+    await user.click(screen.getByRole('button', { name: 'Add property' }))
+    expect(screen.getByRole('group', { name: 'Replace a property' })).toHaveTextContent('This replaces mpn’s value.')
+    await user.click(screen.getByRole('button', { name: 'Keep it' }))
+    expect(screen.queryByRole('group', { name: 'Replace a property' })).toBeNull()
+    expect(entityMock.propertyPatches).toEqual([])
+
+    await user.click(screen.getByRole('button', { name: 'Add property' }))
+    await user.click(screen.getByRole('button', { name: 'Replace' }))
+    await waitFor(() => expect(screen.getByRole('row', { name: /mpn/ })).toHaveTextContent('B'))
+    expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { mpn: 'B' } }])
   })
 
   it('renames a key in one PATCH: the old key null, the new one the value', async () => {
