@@ -1528,6 +1528,31 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_spoolbuddy_tare',
+    label: 'Tare a SpoolBuddy scale',
+    description:
+      'Ask Bambuddy to tare the scale of the SpoolBuddy `device_id` (from filament_rfid_status; a device with ' +
+      '`has_scale`). The scale zeroes at the device\'s next check-in, so ask the user to take everything off it ' +
+      'first. Answers `status: queued`. 404 `no_device` when Bambuddy lists no such device; 409 `no_scale`, and ' +
+      '`device_busy` when another command (such as a queued NTAG write) is pending, which a tare would replace. ' +
+      'Only what the user says. Writes Bambuddy and moves a physical scale\'s zero; approved first.',
+    input: z.object({ device_id: DEVICE_ID.describe("A SpoolBuddy device's `device_id`") }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spoolbuddy/devices/{device_id}/tare'],
+    summarize: ({ device_id }) => `Tare the SpoolBuddy scale ${device_id}`,
+    handler: async ({ device_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/spoolbuddy/devices/{device_id}/tare', {
+            params: { path: { device_id } },
+          }),
+          `tare the SpoolBuddy scale ${device_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_spool_add_event',
     label: 'Record a weighing or a drying',
     description:

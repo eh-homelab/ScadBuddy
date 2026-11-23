@@ -244,6 +244,13 @@ export const confirmNtag = (spoolId: string) =>
 export const cancelNtag = (spoolId: string, deviceId: string) =>
   request<void>(`${BASE}/spools/${seg(spoolId)}/ntag/cancel`, json('POST', { device_id: deviceId }))
 
+/**
+ * #7155 — asks Bambuddy to tare the SpoolBuddy scale; it zeroes at the device's next check-in.
+ * 404 `no_device`, 409 `no_scale` or `device_busy` (another command, such as a tag write, is pending).
+ */
+export const tareScale = (deviceId: string) =>
+  request<Schemas['ScaleTareQueued']>(`${BASE}/spoolbuddy/devices/${seg(deviceId)}/tare`, { method: 'POST' })
+
 export const unbindTag = (tagId: string) => request<TagBinding>(`${BASE}/tags/${seg(tagId)}/binding`, { method: 'DELETE' })
 
 /** Replaces the spool's own presets; the answer is its effective set. */

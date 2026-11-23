@@ -12,7 +12,8 @@ and the NTAG confirm,
 `PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
 `POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
 tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cancel
-(`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks.
+(`filament/ntag.py`) and the scale's tare (`filament/scale.py`, #7155) act on a SpoolBuddy
+device only when the caller asks.
 `POST /filament/sync/run` asks the ScadBuddy-to-Bambuddy sync for a full pass (#6265),
 which writes Bambuddy only for the data types set to push; `GET /filament/sync/status`
 reads how its passes went. `GET /filament/sync/reset-links` counts what a reset of the
@@ -34,7 +35,7 @@ from functools import partial
 from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Body, Depends, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import AwareDatetime, BaseModel, ValidationError
 from temporalio.service import RPCError
@@ -61,7 +62,7 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
-from scadbuddy.filament import capture, ntag, rfid_mode, type_proposals
+from scadbuddy.filament import capture, ntag, rfid_mode, scale, type_proposals
 from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
@@ -193,6 +194,7 @@ NOT_NUDGED = frozenset(
         "import_bambuddy",
         "scan_rfid_tag",
         "printer_labels",
+        "tare_spoolbuddy_scale",
     }
 )
 
@@ -2560,3 +2562,29 @@ async def cancel_ntag(
     async with client_for(settings) as client:
         await ntag.cancel(filament, client, spool_id, body.device_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/spoolbuddy/devices/{device_id}/tare",
+    response_model=m.ScaleTareQueued,
+    summary="Tare a SpoolBuddy scale",
+    description=(
+        "Asks Bambuddy to queue a tare on the SpoolBuddy `device_id` (#7155). The scale zeroes "
+        "at the device's next heartbeat, so take everything off it first. Writes no ScadBuddy "
+        "row. 404 with `code` `no_device` when Bambuddy lists no such device; 409 with `code` "
+        "`no_scale` when it has no scale, and `device_busy` when another command (such as a "
+        "queued NTAG write) is pending, which a tare would replace. 409 when no Bambuddy is "
+        "configured or its key lacks the Manage Inventory scope."
+    ),
+)
+async def tare_spoolbuddy_scale(
+    store: SettingsStoreDep,
+    device_id: Annotated[str, Path(pattern=m.DEVICE_ID_PATTERN)],
+) -> m.ScaleTareQueued:
+    settings = await asyncio.to_thread(store.load)
+    try:
+        async with client_for(settings) as client:
+            return await scale.tare(client, device_id)
+    except scale.ScaleRefusedError as exc:
+        code = status.HTTP_404_NOT_FOUND if exc.code == "no_device" else status.HTTP_409_CONFLICT
+        raise ApiError(code, str(exc), code=exc.code) from None

@@ -285,6 +285,7 @@ Operation = Literal[
     "spoolbuddy.cancel_write",
     "spoolbuddy.devices",
     "spoolbuddy.scan",
+    "spoolbuddy.tare",
     "spoolbuddy.write_tag",
     "version",
     "virtual_printers.create",
@@ -2569,6 +2570,20 @@ class BambuddyClient:
             scope=Scope.MANAGE_INVENTORY,
             operation="spoolbuddy.cancel_write",
             what="cancel the pending tag write",
+        )
+
+    async def tare_scale(self, device_id: str) -> None:
+        """``POST /api/v1/spoolbuddy/devices/{device_id}/calibration/tare`` (Manage
+        Inventory; ``routes/spoolbuddy.py`` line 1305, v1.3.1; #7155): no body. Bambuddy
+        queues the tare as the device's one pending command, and the scale zeroes at the
+        device's next heartbeat. ScadBuddy never calls ``calibration/set-tare``, the
+        daemon's report of its raw offset (R-7155-2)."""
+        await self._send(
+            "POST",
+            f"/spoolbuddy/devices/{quote(device_id, safe='')}/calibration/tare",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spoolbuddy.tare",
+            what="tare the SpoolBuddy scale",
         )
 
     # --- projects ------------------------------------------------------------

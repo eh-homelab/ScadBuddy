@@ -1803,7 +1803,8 @@ class RfidReconcileReport(BaseModel):
 #: A SpoolBuddy device id as Bambuddy mints them (``sb-`` and the MAC, in ``DeviceResponse``
 #: of ``rfid-routes.json``; its write and scan bodies cap it at 50 characters). It becomes
 #: a path segment of a Bambuddy call, so nothing outside this set may pass.
-DeviceId = Annotated[str, Field(pattern=r"^[A-Za-z0-9._:-]{1,50}$")]
+DEVICE_ID_PATTERN = r"^[A-Za-z0-9._:-]{1,50}$"
+DeviceId = Annotated[str, Field(pattern=DEVICE_ID_PATTERN)]
 
 
 class SpoolRef(BaseModel):
@@ -1856,6 +1857,14 @@ class NtagQueued(BaseModel):
 
     status: Literal["queued"] = "queued"
     warnings: list[str] = Field(default_factory=list)
+
+
+class ScaleTareQueued(BaseModel):
+    """A tare Bambuddy has queued on a SpoolBuddy device (#7155). The scale zeroes at the
+    device's next heartbeat, not at this answer."""
+
+    device_id: str
+    status: Literal["queued"] = "queued"
 
 
 class NtagConfirm(BaseModel):

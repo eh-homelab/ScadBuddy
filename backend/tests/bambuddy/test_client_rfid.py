@@ -259,6 +259,54 @@ async def test_cancel_write_posts_to_the_device_path(bambuddy: BambuddyClient) -
     assert route.call_count == 1
 
 
+@respx.mock
+async def test_spoolbuddy_devices_read_the_scale_fields(bambuddy: BambuddyClient) -> None:
+    row = shaped(
+        "DeviceResponse",
+        id=1,
+        device_id="sb-1",
+        hostname="spoolbuddy",
+        has_scale=True,
+        scale_ok=True,
+        last_calibrated_at="2026-11-20T10:00:00",
+    )
+    respx.get(f"{API}/spoolbuddy/devices").mock(return_value=httpx.Response(200, json=[row]))
+
+    [device] = await bambuddy.spoolbuddy_devices()
+
+    assert (device.has_scale, device.scale_ok) == (True, True)
+    assert device.last_calibrated_at is not None
+    assert device.last_calibrated_at.tzinfo is not None
+
+
+@respx.mock
+async def test_tare_scale_posts_no_body_to_the_device_path(bambuddy: BambuddyClient) -> None:
+    # #7155 R-7155-1: the answer of `tare_scale` in Bambuddy's routes/spoolbuddy.py, v1.3.1.
+    route = respx.post(f"{API}/spoolbuddy/devices/a%2Fb/calibration/tare").mock(
+        return_value=httpx.Response(200, json={"status": "ok", "message": "Tare command queued"})
+    )
+
+    await bambuddy.tare_scale("a/b")
+
+    assert route.call_count == 1
+    assert route.calls.last.request.content == b""
+
+
+@respx.mock
+async def test_a_tare_refused_for_its_scope_names_manage_inventory(
+    bambuddy: BambuddyClient,
+) -> None:
+    respx.post(f"{API}/spoolbuddy/devices/sb-1/calibration/tare").mock(
+        return_value=httpx.Response(403, json={"detail": "Not enough permissions"})
+    )
+
+    with pytest.raises(ApiError) as caught:
+        await bambuddy.tare_scale("sb-1")
+
+    assert caught.value.type == SCOPE_PROBLEM
+    assert caught.value.extensions["required_scope"] == Scope.MANAGE_INVENTORY.value
+
+
 def test_every_operation_the_client_passes_is_a_declared_name() -> None:
     passed = set(re.findall(r'operation="([a-z_.]+)"', inspect.getsource(client_module)))
     declared = set(typing.get_args(Operation))
@@ -272,6 +320,7 @@ def test_every_operation_the_client_passes_is_a_declared_name() -> None:
         "spoolbuddy.devices",
         "spoolbuddy.write_tag",
         "spoolbuddy.cancel_write",
+        "spoolbuddy.tare",
     }
     assert new <= passed
     assert passed <= declared

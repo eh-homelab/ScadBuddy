@@ -1678,18 +1678,23 @@ class TagScan(BambuddyModel):
 class SpoolBuddyDevice(BambuddyModel):
     """A row of ``GET /api/v1/spoolbuddy/devices`` (``DeviceResponse`` in
     ``tests/bambuddy/recordings/openapi/rfid-routes.json``, v1.3.1): the fields ScadBuddy
-    shows. ``device_id`` is the string the write and cancel routes take."""
+    shows. ``device_id`` is the string the write, cancel and tare routes take. A device has
+    one ``pending_command`` (``write_tag``, ``tare``, …); ``last_calibrated_at`` is when the
+    daemon last reported a tare or a calibration factor (#7155)."""
 
     id: int
     device_id: str
     hostname: str
     has_nfc: bool = False
     nfc_ok: bool = False
+    has_scale: bool = False
+    scale_ok: bool = False
     online: bool = False
     last_seen: datetime | None = None
+    last_calibrated_at: datetime | None = None
     pending_command: str | None = None
 
-    @field_validator("last_seen")
+    @field_validator("last_seen", "last_calibrated_at")
     @classmethod
     def _seen_utc(cls, value: datetime | None) -> datetime | None:
         return as_utc(value)

@@ -7,9 +7,10 @@ const WRITTEN_UID = '04A1B2C3D4E5F6'
 type S = components['schemas']
 
 /**
- * #6264 — `/api/v1/filament/rfid/*` and `/api/v1/filament/spools/:id/ntag/*`
- * (`backend/scadbuddy/api/filament.py`): the RFID override mode, the reconcile, the SpoolBuddy
- * scan and the NTAG write, confirm and cancel. This module owns those routes (one route, one
+ * #6264 — `/api/v1/filament/rfid/*`, `/api/v1/filament/spools/:id/ntag/*` and (#7155)
+ * `/api/v1/filament/spoolbuddy/devices/:device/tare` (`backend/scadbuddy/api/filament.py`): the
+ * RFID override mode, the reconcile, the SpoolBuddy scan, the NTAG write, confirm and cancel, and
+ * the scale's tare. This module owns those routes (one route, one
  * feature module); the spool, tag and binding routes stay in `index.ts`. Its answers are the
  * happy path: a reader that sees a tag, a write that confirms on its second poll. A test
  * serves the other answers with `server.use`.
@@ -18,8 +19,18 @@ type S = components['schemas']
 const BASE = '/api/v1/filament'
 
 const DEVICES: S['SpoolBuddyDevice'][] = [
-  { id: 1, device_id: 'sb-0001', hostname: 'spoolbuddy-bench', has_nfc: true, nfc_ok: true, online: true },
-  { id: 2, device_id: 'sb-0002', hostname: 'spoolbuddy-shelf', has_nfc: false, nfc_ok: false, online: true },
+  {
+    id: 1,
+    device_id: 'sb-0001',
+    hostname: 'spoolbuddy-bench',
+    has_nfc: true,
+    nfc_ok: true,
+    has_scale: true,
+    scale_ok: true,
+    online: true,
+    last_calibrated_at: '2026-11-20T09:30:00Z',
+  },
+  { id: 2, device_id: 'sb-0002', hostname: 'spoolbuddy-shelf', has_nfc: false, nfc_ok: false, has_scale: false, scale_ok: false, online: true },
 ]
 
 let overrideMode = false
@@ -78,4 +89,16 @@ export const handlers = [
     return HttpResponse.json({ bound: true, tag_uid: WRITTEN_UID })
   }),
   http.post(`${BASE}/spools/:id/ntag/cancel`, () => new HttpResponse(null, { status: 204 })),
+  // #7155 — the backend's checks (`filament/scale.py`): a listed device with a scale and no other command pending.
+  http.post(`${BASE}/spoolbuddy/devices/:device/tare`, ({ params }) => {
+    const id = String(params.device)
+    const device = DEVICES.find((row) => row.device_id === id)
+    if (!device)
+      return HttpResponse.json(
+        { type: 'about:blank', title: 'Not Found', status: 404, detail: `Bambuddy lists no SpoolBuddy device ${id}`, code: 'no_device' },
+        { status: 404, headers: { 'Content-Type': 'application/problem+json' } },
+      )
+    if (!device.has_scale) return conflict(`the SpoolBuddy device ${id} has no scale`, 'no_scale')
+    return HttpResponse.json({ device_id: id, status: 'queued' } satisfies S['ScaleTareQueued'])
+  }),
 ]

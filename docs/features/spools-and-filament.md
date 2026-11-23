@@ -35,6 +35,14 @@ state.
 Tray changes and print ends are recorded when a printer report is written
 (`backend/scadbuddy/filament/capture.py`). They are not a workflow of their own.
 
+A SpoolBuddy scale is tared through Bambuddy (#7155): the spool page's "Scale" block
+(`frontend/src/components/filament/ScalePanel.tsx`) asks first, then
+`POST /filament/spoolbuddy/devices/{device_id}/tare` (`backend/scadbuddy/filament/scale.py`)
+asks Bambuddy to queue the tare. The scale zeroes at the device's next check-in. A device with
+another command pending (such as a queued NTAG write) is refused, because a tare would replace
+it. The agent's `filament_spoolbuddy_tare` is `outward`. The rulings are in
+`docs/superpowers/plans/2026-11-23-spoolbuddy-tare.md`.
+
 Fetching presets is the `ProfileFetch` workflow on the profile-fetch worker, and a 3DFP
 search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
 ([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).

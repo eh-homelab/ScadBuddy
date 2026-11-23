@@ -1504,6 +1504,73 @@ def test_a_device_id_that_is_not_one_path_segment_is_a_422(
     assert len(respx.calls) == 0
 
 
+TARE_DEVICES = "/api/v1/filament/spoolbuddy/devices"
+
+
+def _spoolbuddy(**values: object) -> respx.Route:
+    row: dict[str, object] = {
+        "id": 1,
+        "device_id": "sb-1",
+        "hostname": "spoolbuddy",
+        "has_scale": True,
+        "pending_command": None,
+        **values,
+    }
+    return respx.get(f"{API}/spoolbuddy/devices").mock(return_value=httpx.Response(200, json=[row]))
+
+
+@respx.mock
+def test_the_tare_route_queues_a_tare_through_bambuddy(
+    client: TestClient, filament_nudges: list[bool]
+) -> None:
+    configure(client)
+    _spoolbuddy()
+    tare = respx.post(f"{API}/spoolbuddy/devices/sb-1/calibration/tare").mock(
+        return_value=httpx.Response(200, json={"status": "ok", "message": "Tare command queued"})
+    )
+    filament_nudges.clear()
+
+    queued = client.post(f"{TARE_DEVICES}/sb-1/tare")
+
+    assert queued.status_code == 200, queued.text
+    assert queued.json() == {"device_id": "sb-1", "status": "queued"}
+    assert tare.call_count == 1
+    assert filament_nudges == []  # R-7155-5: it writes no ScadBuddy row
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("values", "status", "code"),
+    [
+        ({"device_id": "sb-2"}, 404, "no_device"),
+        ({"has_scale": False}, 409, "no_scale"),
+        ({"pending_command": "write_tag"}, 409, "device_busy"),
+    ],
+)
+def test_the_tare_route_refuses_what_bambuddy_would_take_wrongly(
+    client: TestClient, values: dict[str, object], status: int, code: str
+) -> None:
+    configure(client)
+    _spoolbuddy(**values)
+    tare = respx.post(f"{API}/spoolbuddy/devices/sb-1/calibration/tare")
+
+    refused = client.post(f"{TARE_DEVICES}/sb-1/tare")
+
+    assert refused.status_code == status, refused.text
+    assert refused.json()["code"] == code
+    assert tare.call_count == 0
+
+
+@respx.mock
+def test_a_tare_device_id_that_is_not_one_path_segment_is_a_422(client: TestClient) -> None:
+    configure(client)
+
+    for bad in ("a b", "a$b", "x" * 51):
+        refused = client.post(f"{TARE_DEVICES}/{bad}/tare")
+        assert refused.status_code == 422, (bad, refused.text)
+    assert len(respx.calls) == 0
+
+
 def test_a_patch_that_inverts_the_stored_band_is_refused(client: TestClient) -> None:
     made = client.post(SENSORS, json=_sensor_body(client, alert_above=60)).json()
     refused = client.patch(f"{SENSORS}/{made['id']}", json={"alert_below": 80})

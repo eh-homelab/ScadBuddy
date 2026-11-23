@@ -33,6 +33,7 @@ _EXPECTED_ROUTES = {
     ("POST", "/api/v1/spoolbuddy/nfc/write-tag"): Scope.MANAGE_INVENTORY,
     ("POST", "/api/v1/spoolbuddy/nfc/write-result"): Scope.MANAGE_INVENTORY,
     ("POST", "/api/v1/spoolbuddy/devices/{device_id}/cancel-write"): Scope.MANAGE_INVENTORY,
+    ("POST", "/api/v1/spoolbuddy/devices/{device_id}/calibration/tare"): Scope.MANAGE_INVENTORY,
     ("POST", "/api/v1/auth/ws-token"): Scope.READ_STATUS,
 }
 

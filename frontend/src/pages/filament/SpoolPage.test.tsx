@@ -48,6 +48,14 @@ describe('the spool page', () => {
     expect(screen.getByRole('combobox', { name: 'Go to section' })).toBeInTheDocument()
   })
 
+  it('offers the SpoolBuddy scale tare beside the tag panels (#7155)', async () => {
+    open(1)
+    await heading(1)
+    const identity = screen.getByRole('region', { name: 'Identity' })
+    expect(within(identity).getByRole('heading', { level: 3, name: 'Scale' })).toBeInTheDocument()
+    expect(await within(identity).findByRole('button', { name: 'Tare scale spoolbuddy-bench' })).toBeEnabled()
+  })
+
   it('resets an overridden colour with one PATCH of null, and the mark stays until the answer', async () => {
     await patchSpool(spoolId(3), { rgba: '#112233FF' })
     const edited = (await listSpoolEvents(spoolId(3))).filter((event) => event.kind === 'edited').length

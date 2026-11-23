@@ -418,7 +418,7 @@ Added for #6264 (Bambuddy 1.3.1):
 
 | File | Source |
 |---|---|
-| `openapi/rfid-routes.json` | `GET /openapi.json` of `https://bambuddy.internal.nullreference.io` on 2026-11-17 (200, `info.version` 1.3.1, no key): the RFID routes (link-tag, by-tag, spool PATCH, settings, configure, the `nfc/*` routes, cancel-write, devices, ws-token) and every schema they reference, copied unchanged. `routes`, `conflict_409`, `ws_events`, `data_origin_values` and the permissions are read from the Bambuddy source at tag `v1.3.1`, each with its file and line. `measured_2026-11-17` holds the read-only answers (auth status, the setting, the device list, by-tag 404 and 400, the WebSocket's first frames). Writes were never called; the 409 body and the write answers are from the source only. |
+| `openapi/rfid-routes.json` | `GET /openapi.json` of `https://bambuddy.internal.nullreference.io` on 2026-11-17 (200, `info.version` 1.3.1, no key): the RFID routes (link-tag, by-tag, spool PATCH, settings, configure, the `nfc/*` routes, cancel-write, devices, ws-token; and in `routes` only, from the source, the scale's `calibration/tare`, #7155) and every schema they reference, copied unchanged. `routes`, `conflict_409`, `ws_events`, `data_origin_values` and the permissions are read from the Bambuddy source at tag `v1.3.1`, each with its file and line. `measured_2026-11-17` holds the read-only answers (auth status, the setting, the device list, by-tag 404 and 400, the WebSocket's first frames). Writes were never called; the 409 body and the write answers are from the source only. |
 
 Added for #6265 (Bambuddy 1.3.1):
 

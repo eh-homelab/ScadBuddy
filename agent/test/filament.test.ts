@@ -955,6 +955,49 @@ describe('filament RFID tools (#6264)', () => {
   })
 })
 
+describe('filament_spoolbuddy_tare (#7155)', () => {
+  const DEVICES = `${BACKEND}/api/v1/filament/spoolbuddy/devices`
+
+  it('is outward and approved first (R-7155-5: it moves a physical scale\'s zero)', () => {
+    expect(tool('filament_spoolbuddy_tare').risk).toBe('outward')
+    expect(tool('filament_spoolbuddy_tare').gated).toBe(true)
+  })
+
+  it('refuses a device id that is not one path segment', () => {
+    const t = tool('filament_spoolbuddy_tare')
+    expect(() => t.parse({ device_id: '../x' })).toThrow()
+    expect(() => t.parse({ device_id: 'sb-1' })).not.toThrow()
+  })
+
+  it('posts the tare for the device and answers the queued tare', async () => {
+    const posted: string[] = []
+    server.use(
+      http.post(`${DEVICES}/:device/tare`, ({ params }) => {
+        posted.push(String(params.device))
+        return HttpResponse.json({ device_id: 'sb-1', status: 'queued' })
+      }),
+    )
+    const t = tool('filament_spoolbuddy_tare')
+    const result = await t.execute(t.parse({ device_id: 'sb-1' }), ctx('outward'))
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual({ device_id: 'sb-1', status: 'queued' })
+    expect(posted).toEqual(['sb-1'])
+  })
+
+  it('says why a busy device is refused', async () => {
+    server.use(
+      http.post(`${DEVICES}/:device/tare`, () =>
+        HttpResponse.json(
+          { title: 'Conflict', status: 409, detail: 'the command write_tag is pending', code: 'device_busy' },
+          { status: 409, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const t = tool('filament_spoolbuddy_tare')
+    await expect(t.execute(t.parse({ device_id: 'sb-1' }), ctx('outward'))).rejects.toThrow(/HTTP 409.*write_tag/)
+  })
+})
+
 const SYNC = `${BACKEND}/api/v1/filament/sync`
 
 describe('filament Bambuddy sync tools (#6265)', () => {

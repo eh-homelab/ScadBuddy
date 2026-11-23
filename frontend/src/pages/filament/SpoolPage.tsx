@@ -47,6 +47,7 @@ import { Section, SectionIndex } from '../../components/filament/SpoolSections'
 import { SpoolMetricsPanel } from '../../components/filament/SpoolMetricsPanel'
 import { SpoolTimeline } from '../../components/filament/SpoolTimeline'
 import { NtagPanel } from '../../components/filament/NtagPanel'
+import { ScalePanel } from '../../components/filament/ScalePanel'
 import { TagPanel } from '../../components/filament/TagPanel'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
 import { LinksPanel } from '../../components/entities/LinksPanel'
@@ -742,6 +743,8 @@ export function SpoolPage() {
                   <TagPanel spool={saved} onChanged={() => void reload(true).catch((cause) => setError(message(cause)))} />
                   <h3 className="mt-2 text-[13px] font-medium">Write a tag</h3>
                   <NtagPanel spool={saved} onBound={() => void reload(true).catch((cause) => setError(message(cause)))} />
+                  <h3 className="mt-2 text-[13px] font-medium">Scale</h3>
+                  <ScalePanel />
                 </>
               ) : (
                 <p className="text-[13px] text-muted-foreground">Save the spool first, then bind its tag.</p>

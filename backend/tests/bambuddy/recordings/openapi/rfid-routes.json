@@ -5338,6 +5338,25 @@
     },
     {
       "method": "POST",
+      "path": "/api/v1/spoolbuddy/devices/{device_id}/calibration/tare",
+      "operationId": "tare_scale_api_v1_spoolbuddy_devices__device_id__calibration_tare_post",
+      "parameters": [
+        {
+          "name": "device_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": null,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L1309",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory",
+      "answer_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L1305-L1319",
+      "x-added-note": "#7155: read from the source only, not from the live instance; the route takes no body and answers {\"status\": \"ok\", \"message\": \"Tare command queued\"}, or 404 \"Device not registered\"."
+    },
+    {
+      "method": "POST",
       "path": "/api/v1/auth/ws-token",
       "operationId": "mint_websocket_token_api_v1_auth_ws_token_post",
       "parameters": [],
