@@ -148,6 +148,65 @@ describe('the Types tab', () => {
       await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
       expect(await screen.findByRole('alert')).toHaveTextContent(/Zed stays in the catalog/)
     })
+
+    // #7159 — a row whose brand and colour a type has opens a choice instead of a duplicate.
+    describe('when a type of the brand and colour exists (#7159)', () => {
+      const patches: unknown[] = []
+      const watchPatches = () => {
+        patches.length = 0
+        server.events.on('request:start', ({ request }) => {
+          if (request.method === 'PATCH' && request.url.includes('/filament/types/')) void request.clone().json().then((body) => patches.push(body))
+        })
+      }
+
+      it('links the exact match, chosen first, and sets only its cost', async () => {
+        const row = await api.createFilament({ material: 'PLA', subtype: 'Silk', brand: 'elegoo', effect: 'silk', colour: '#d4af37', cost_per_kg: '22.5' })
+        const before = (await listTypes()).length
+        watchPatches()
+        const { user } = renderPage(<TypesTab />)
+        await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+        const dialog = await screen.findByRole('dialog', { name: 'This filament may already have a type' })
+        const gold = within(dialog).getByRole('radio', { name: /EL-PLA-SILK-GOLD/ })
+        expect(gold).toBeChecked()
+        expect(within(dialog).getByText(/PLA, Silk, 1000 g label, 1 spool$/)).toBeInTheDocument()
+        await user.click(within(dialog).getByRole('button', { name: 'Link EL-PLA-SILK-GOLD' }))
+        await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('link', { name: 'EL-PLA-SILK-GOLD' })
+        server.events.removeAllListeners()
+        expect(patches).toEqual([{ cost_per_kg: '22.5' }])
+        expect((await listTypes()).length).toBe(before)
+        expect((await listTypes()).find((type) => type.id === T.GOLD)).toMatchObject({ filament_id: row.id, subtype_id: ST.SILK, label_weight_g: 1000 })
+      })
+
+      it('offers a type of another subtype too, and says the link goes to its own book row', async () => {
+        const row = await api.createFilament({ material: 'PLA', brand: 'Elegoo', colour: '#D4AF37', cost_per_kg: '21' })
+        watchPatches()
+        const { user } = renderPage(<TypesTab />)
+        await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+        const dialog = await screen.findByRole('dialog', { name: 'This filament may already have a type' })
+        expect(within(dialog).getByRole('radio', { name: /EL-PLA-SILK-GOLD/ })).toBeChecked()
+        expect(within(dialog).getByText(/Its subtype and effect differ from this row/)).toBeInTheDocument()
+        await user.click(within(dialog).getByRole('button', { name: 'Link EL-PLA-SILK-GOLD' }))
+        expect(await screen.findByRole('status', { name: 'Type link' })).toHaveTextContent(/EL-PLA-SILK-GOLD now costs 21 per kg.*its own price book row/)
+        server.events.removeAllListeners()
+        expect(patches).toEqual([{ cost_per_kg: '21' }])
+        expect(within(screen.getByTestId(`filament-${row.id}`)).getByRole('button', { name: /Make a type/ })).toBeInTheDocument()
+      })
+
+      it('makes a new type anyway when asked, and nothing on Cancel', async () => {
+        const row = await api.createFilament({ material: 'PLA', brand: 'Elegoo', colour: '#D4AF37', cost_per_kg: '21' })
+        const before = (await listTypes()).length
+        const { user } = renderPage(<TypesTab />)
+        const make = await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ })
+        await user.click(make)
+        await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+        await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+        expect((await listTypes()).length).toBe(before)
+        await user.click(make)
+        await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Make a new type' }))
+        await waitFor(async () => expect((await listTypes()).length).toBe(before + 1))
+        expect((await listTypes()).find((type) => type.filament_id === row.id)).toMatchObject({ rgba: '#D4AF37FF', subtype_id: null })
+      })
+    })
   })
 
   it('fills every type from its slicer profile and reports each', async () => {

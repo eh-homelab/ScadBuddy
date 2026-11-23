@@ -277,7 +277,7 @@ export function TypesTab() {
       </section>
       <section aria-label="Price book" className="flex flex-col gap-2">
         <h2 className="text-sm font-semibold tracking-tight">Price book</h2>
-        <FilamentsEditor types={data?.types} onTypesChanged={() => void load()} />
+        <FilamentsEditor types={data?.types} names={data?.names} spoolsOf={data?.spoolsOf} onTypesChanged={() => void load()} />
       </section>
     </div>
   )
