@@ -69,7 +69,9 @@ class RoughEstimate(OrderEstimate):
 #: Where a storefront price comes from (#6153): a done slice (firm), a slice that still
 #: works it out, or none, and then the shop prices the line by hand. #6921: ``last`` is the
 #: last firm price of the visitor's choices, which the instant read gives when the shop's
-#: settings changed since: the page shows it marked as updating, and never as firm.
+#: settings changed since, and a file listing's last firm price of other colours, which its
+#: price read gives while the colours' own slice runs (#6710): the page shows it marked as
+#: updating, and never as firm.
 PriceSource = Literal["slice", "pending", "none", "last"]
 
 
@@ -78,17 +80,19 @@ class StoreEstimate(BaseModel):
     it is the price of a done slice through the back office's quote path, and it is
     firm. While the slice runs it is ``pending``, and the page reads it again after
     ``retry_after`` seconds. With no firm price it is ``none``, and the shop prices the
-    line by hand. With ``last`` (#6921, the instant read only) it is the variant's last
-    firm price, not today's: no cart line takes it. A volume estimate is never sent. The
-    edge sends a visitor only `storefront/routes.py` ``ESTIMATE_FIELDS``: never
-    `SHOP_ONLY_FIELDS`, a line, a cost or a rate."""
+    line by hand. With ``last`` (#6921, the instant read) it is the variant's last firm
+    price, not today's; from a file listing's price read (#6710) it is the listing's last
+    firm price of other colours, with ``retry_after``. No cart line takes it. A volume
+    estimate is never sent. The edge sends a visitor only `storefront/routes.py`
+    ``ESTIMATE_FIELDS``: never `SHOP_ONLY_FIELDS`, a line, a cost or a rate."""
 
     source: PriceSource
     #: The price of one, set only for ``slice`` and ``last``.
     price_minor: Money | None = None
     currency: str | None = None
     minor_exponent: int | None = None
-    #: The seconds to wait before a ``pending`` price is read again.
+    #: The seconds to wait before a ``pending`` price, or a file listing's ``last`` one, is
+    #: read again.
     retry_after: int | None = None
     #: The cached price's key (`orders/storefront/slice_price.py` `price_key`), so the
     #: server can look the price up. Never a visitor's.

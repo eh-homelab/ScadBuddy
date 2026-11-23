@@ -793,6 +793,15 @@ A file listing has no render, so its price is read by the listing and the colour
   visitor cannot keep the slicer busy by changing colours.
 - 409 `listing_changed` when `listing_updated_at` is not the listing's, as for a render.
 
+As built (PR 6): "always show a price". While the visitor's colours have no price yet
+(`slice_estimate` answers `pending`), the route answers `last`: the listing's last firm
+price of the file it sells now, of any colours (`SlicePrices.listing_last`, the newest
+`done` row with the listing's id and the pinned sha256, index
+`storefront_slice_prices_listing_last`), with the pending `retry_after`. The slice runs
+behind it as before, and a read again answers the colours' own price. A listing with no
+such row answers `pending`. `last` is never a cart line's price (`line_prices.py` reads
+`firm_price` only), as the template instant read's `last` (#6921) is not.
+
 ### 7.6 The cart and the checkout
 
 - `add_listing_item` (`drafts.py:401-471`) branches on `source`. For a file listing it
