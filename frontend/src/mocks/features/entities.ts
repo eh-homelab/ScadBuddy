@@ -125,7 +125,7 @@ const characters = (text: string) => [...text].length
 function propertyRefusal(kind: string, key: string, value: unknown): string | null {
   if (!PROPERTY_KEY.test(key)) return 'a key is `^[a-z][a-z0-9_]{0,63}$`'
   // Postgres's jsonb holds no U+0000, so the backend refuses it in any string.
-  if ([value].flat().some((text) => typeof text === 'string' && text.includes('\u0000'))) return 'a string holds no U+0000'
+  if ([value].flat().some((text) => typeof text === 'string' && text.includes('\u0000'))) return 'a string may not hold U+0000'
   const shaped =
     (typeof value === 'string' && characters(value) <= 2000) ||
     (typeof value === 'number' && Number.isFinite(value)) ||
