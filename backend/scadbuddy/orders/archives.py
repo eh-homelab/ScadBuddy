@@ -81,6 +81,12 @@ class ArchiveOffer(BaseModel):
     #: Whether the archive has a timelapse to copy (pulled off the printer first,
     #: ``POST /prints/{archive_id}/timelapse/pull``).
     timelapse: bool = False
+    #: The attachment the attempt, or its item, holds of this archive's finish photo,
+    #: if any: what is attached now, not what the import started by this read will
+    #: attach (spec 2026-11-05 §4.4).
+    finished_attachment_id: str | None = None
+    #: The same for the archive's timelapse.
+    timelapse_attachment_id: str | None = None
 
 
 class AttemptArchives(BaseModel):
@@ -314,16 +320,24 @@ async def attempt_archives(
     at once and never waits on a download (spec 2026-11-05 §4.1)."""
     attempt = await asyncio.to_thread(attempt_of, lifecycle.store, order_id, item_id, fulfilment_id)
     attempt, facts = await mirror_archives(lifecycle, integrations, attempt)
+    attached: dict[tuple[int, ArchiveCopyMedia], str] = {}
     if facts:
-        present = await asyncio.to_thread(
-            lifecycle.store.archive_media_present, attempt.id, item_id
+        attached = await asyncio.to_thread(
+            lifecycle.store.archive_media_attachments, attempt.id, item_id
         )
-        if any((f.archive_id, what) not in present for f in facts for what, _ in _wanted(f)):
+        if any((f.archive_id, what) not in attached for f in facts for what, _ in _wanted(f)):
             await start_media(starter, attempt.id, retries=False)
     return AttemptArchives(
         linked=integrations.linked,
         attempt=attempt,
-        archives=[ArchiveOffer(**f.model_dump()) for f in facts],
+        archives=[
+            ArchiveOffer(
+                **f.model_dump(),
+                finished_attachment_id=attached.get((f.archive_id, "finished_photo")),
+                timelapse_attachment_id=attached.get((f.archive_id, "timelapse")),
+            )
+            for f in facts
+        ],
     )
 
 

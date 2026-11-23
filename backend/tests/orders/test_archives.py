@@ -1030,3 +1030,50 @@ async def test_a_read_starts_one_step_only_for_an_offered_medium_not_attached(
         shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(fail=True)
     )
     assert [a.archive_id for a in read.archives] == [81]
+
+
+async def test_the_read_answers_the_ids_of_what_is_attached(shop: Shop, step: Step) -> None:
+    """Spec 2026-11-05 §4.4: the answer says what each archive has attached now, so the
+    page shows it after a reload and offers only what is missing."""
+    order, item, attempt = by_hand(shop)
+    seam = Archives(facts(81))
+
+    read = await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, Starts())
+    [offer] = read.archives
+    assert (offer.finished_attachment_id, offer.timelapse_attachment_id) == (None, None)
+
+    await step(seam, attempt.id)
+    read = await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, Starts())
+    ids = {a.archive_media: a.id for a in shop.rows.attachments(order.id)}
+    [offer] = read.archives
+    assert offer.finished_attachment_id == ids["finished_photo"]
+    assert offer.timelapse_attachment_id == ids["timelapse"]
+
+
+async def test_a_copy_on_the_item_from_before_5268_is_answered_as_attached(shop: Shop) -> None:
+    order, item, attempt = by_hand(shop)
+    sha = "e" * 64
+    kept = shop.lifecycle.add_attachment(
+        order.id,
+        item.id,
+        BY,
+        attachment_id=str(uuid.uuid4()),
+        kind="image",
+        role="finished",
+        filename="finish_old.jpg",
+        media_type="image/jpeg",
+        size_bytes=10,
+        sha256=sha,
+        blob_key="attachment-" + sha,
+        caption="Attempt 1, Bambuddy archive 81",
+        archive_id=81,
+        archive_media="finished_photo",
+    )
+
+    read = await attempt_archives(
+        shop.lifecycle, Archives(facts(81)), order.id, item.id, attempt.id, Starts()
+    )
+
+    [offer] = read.archives
+    assert offer.finished_attachment_id == kept.id
+    assert offer.timelapse_attachment_id is None
