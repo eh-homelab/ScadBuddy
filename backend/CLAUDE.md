@@ -2226,8 +2226,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   digest) and answers `restore` when it is gone or other bytes while the held copy is in the
   content store (else `library_file_gone`; there is no "changed" refusal), and the run
   (`operations.py` `item_print_run`, `restored_file`) first calls `held_print.py`
-  `restore_held`: the copy is found by sha256 in the library's top-level folder "Storefront",
-  or uploaded there (`NativeLibrary.upload`, Bambuddy's `send.upload_raw`), the item moved to
+  `restore_held`: under one advisory lock (`OrderStore.restore_lock`, so racing prints make
+  one folder and one copy), the copy is found by sha256 in the library's top-level folder
+  "Storefront", or uploaded there (`NativeLibrary.upload`, or Bambuddy's `send.upload_raw`
+  through `orders/bambuddy.py` `BambuddyShelf`), the item moved to
   the new id (`Lifecycle.move_library_file`, event `item.library_file_restored` naming both
   ids), and `library:<old>`'s remembered choices copied to an empty `library:<new>`
   (`SettingsStore.copy_library_choices`). The run's subject, `existing` and `start` take the

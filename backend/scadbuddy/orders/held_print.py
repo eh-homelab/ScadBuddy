@@ -6,8 +6,11 @@ that serves no longer has those bytes under the item's file id (the file deleted
 the other library, or changed), it answers ``restore``, and the print's run calls
 :func:`restore_held` before it starts: the copy goes into the library's top-level folder
 "Storefront" (made when missing), streamed from the content store with the upload the
-library page uses (``NativeLibrary.upload``, or Bambuddy's ``send.upload_raw``), and the
-item is pointed at the new file in one transaction with an order event naming both ids.
+library page uses (``NativeLibrary.upload``, or Bambuddy's ``send.upload_raw`` through
+``orders/bambuddy.py`` ``BambuddyShelf``), and the item is pointed at the new file in one
+transaction with an order event naming both ids. The folder's lookup, the find and the
+upload hold ``OrderStore.restore_lock``, so two prints racing to restore make one folder
+and one copy.
 The old file's remembered choices are copied to the new file when it has none.
 
 A retry of the same claim reuses the check's answer, so it calls :func:`restore_held`
@@ -28,6 +31,7 @@ from fastapi import status
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.models import Actor
+from scadbuddy.orders.projects import held_across_awaits
 from scadbuddy.orders.quote import library_file_gone
 
 if TYPE_CHECKING:
@@ -106,21 +110,24 @@ async def restore_held(
         stat = await content.stat(file.copy_key)
         if stat is None:
             raise library_file_gone(item.id, file)
-        folder = await shelf.storefront_folder()
-        found = await shelf.find(folder, file.sha256, stat.ref.size)
-        if found is not None:
-            new_id = found
-        else:
-            with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
-                async with aclosing(content.get(stat.ref)) as chunks:
-                    async for chunk in chunks:
-                        await asyncio.to_thread(spool.write, chunk)
-                await asyncio.to_thread(spool.seek, 0)
-                new_id = await shelf.upload(file.filename, spool, folder)
-            logger.info(
-                "a storefront item's held copy was put back into the library",
-                extra={"item_id": item.id, "from": checked_id, "library_file_id": new_id},
-            )
+        # One restore at a time: two prints racing would each make "Storefront" when it
+        # is missing, and each upload the bytes the other has not put there yet.
+        async with held_across_awaits(lifecycle.store.restore_lock()):
+            folder = await shelf.storefront_folder()
+            found = await shelf.find(folder, file.sha256, stat.ref.size)
+            if found is not None:
+                new_id = found
+            else:
+                with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
+                    async with aclosing(content.get(stat.ref)) as chunks:
+                        async for chunk in chunks:
+                            await asyncio.to_thread(spool.write, chunk)
+                    await asyncio.to_thread(spool.seek, 0)
+                    new_id = await shelf.upload(file.filename, spool, folder)
+                logger.info(
+                    "a storefront item's held copy was put back into the library",
+                    extra={"item_id": item.id, "from": checked_id, "library_file_id": new_id},
+                )
         moved = await asyncio.to_thread(
             lifecycle.move_library_file, order_id, item.id, by, checked_id, new_id
         )

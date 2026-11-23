@@ -982,7 +982,11 @@ move is `Lifecycle.move_library_file`, which also sets the item's library to the
 id is in, and writes the order event `item.library_file_restored` (`item_id`,
 `from_library_file_id`, `library_file_id`, `sha256`). The copy of the remembered choices is
 `SettingsStore.copy_library_choices`, one `INSERT … ON CONFLICT DO NOTHING`. A held copy lost
-between the check and the run is `library_file_gone` from the run.
+between the check and the run is `library_file_gone` from the run. The folder's lookup, the
+find and the upload run under one advisory lock (`OrderStore.restore_lock`), so two prints
+racing to restore make one "Storefront" folder and one copy. The Bambuddy side of the restore
+(`BambuddyShelf`, `served_shelf`) is in `orders/bambuddy.py`, the one file of `orders/` that
+reaches the Bambuddy client.
 
 The item's accepted quote stays: its bytes are the held copy's, which it priced
 (§7.3). The listing is not changed: it keeps its pin and its held copy.

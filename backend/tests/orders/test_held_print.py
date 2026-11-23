@@ -6,6 +6,7 @@ same claim uploads nothing, and the next print stands without a restore."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -316,6 +317,47 @@ async def test_a_retry_after_the_upload_finds_the_file_by_its_sha256(
     assert await restore(shop, order, item, content, shelf, Choices()) == uploaded
     assert shelf.uploads == 2
     assert uploaded != elsewhere
+
+
+class RacingShelf(CountingShelf):
+    """A shelf that yields between what it reads and what it writes, as Bambuddy's calls
+    do: the folder looked for, then made when it was not there; an upload that takes a
+    while. ``folder`` is the "Storefront" the library holds, shared by every restore."""
+
+    def __init__(self, native: NativeLibrary) -> None:
+        super().__init__(native)
+        self.folder: int | None = None
+        self.folders_made = 0
+
+    async def storefront_folder(self) -> int:
+        seen = self.folder
+        await asyncio.sleep(0.05)
+        if seen is not None:
+            return seen
+        self.folders_made += 1
+        self.folder = (await self.native.create_folder(STOREFRONT_FOLDER, None)).id
+        return self.folder
+
+    async def upload(self, filename: str, data: BinaryIO, folder_id: int) -> int:
+        await asyncio.sleep(0.05)
+        return await super().upload(filename, data, folder_id)
+
+
+async def test_racing_restores_make_one_folder_and_one_file(
+    shop: Shop, content: ContentStore, held: str, native: NativeLibrary
+) -> None:
+    """Two prints of items with the same pinned bytes (other claims, other
+    Idempotency-Keys) restore at once: one "Storefront" is made and one copy uploaded,
+    and both items move to it."""
+    first_order, first_item = storefront_item(shop, GONE_ID, "native")
+    second_order, second_item = storefront_item(shop, GONE_ID, "native")
+    shelf = RacingShelf(native)
+    first, second = await asyncio.gather(
+        restore(shop, first_order, first_item, content, shelf, Choices()),
+        restore(shop, second_order, second_item, content, shelf, Choices()),
+    )
+    assert first == second
+    assert (shelf.folders_made, shelf.uploads) == (1, 1)
 
 
 async def test_the_choices_are_copied_to_an_empty_scope_only(
