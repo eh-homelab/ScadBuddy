@@ -71,7 +71,8 @@ async function readEach<T>(ids: string[], read: (id: string) => Promise<T>, live
     }
   }
   await Promise.all(Array.from({ length: Math.min(READ_AT_ONCE, ids.length) }, worker))
-  return results
+  // A read stopped by `live()` leaves a hole: only what was read is returned.
+  return results.filter((result) => result !== undefined)
 }
 
 interface Loaded {
@@ -142,6 +143,8 @@ export function LabelsPage() {
     const empty = { labels: [], error: null, tooMany: false, failed: [], tooLong: [], noReport: [] }
     const draw = async (base: string | null, rows: { id: string; code: string; name: string }[], more: { noReport?: string[]; failed?: string[] } = {}) => {
       const origin = labelBase(base)
+      // The cap stops drawing only: in `?printers=` mode the labels request has already made
+      // the printers' places by now (`POST /filament/printer-labels` makes them, #6955).
       if (rows.length > MAX_LABELS) {
         if (live) setPlaces({ ...empty, key: placesKey, base: origin, tooMany: true })
         return
