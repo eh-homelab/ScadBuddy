@@ -30,10 +30,11 @@ import { ready, type RouteModule } from './module.js'
 // A marketplace feed of plugin packages (#6933, spec 2026-11-21 §6.4, plugins/feed.ts):
 //
 //   GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json
-//   GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{N}.zip
+//   GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{N}/{sha256}.zip
 //   GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/archives/{sha256}.zip
 //
-// (the last, #6936: a bytes pin's file, served from ScadBuddy's mirror as plugins/feed.ts
+// (the first, a hosted version's zip, named by its number and its zip's sha256, #6931 review
+// M2; the last, #6936: a bytes pin's file, served from ScadBuddy's mirror as plugins/feed.ts
 // `servedArchive` makes it, named by the served zip's sha256)
 // for Claude Code sessions outside ScadBuddy. Each request passes the gates /mcp passes, in the
 // same order and through the same code (mcp/http.ts): HTTPS and Origin (`mcpTransportProblem`),
@@ -77,7 +78,7 @@ declare module '../app.js' {
 }
 
 const BASE = '/api/v1/ai/plugin-feeds'
-const ZIP_FILE = /^([1-9][0-9]{0,8})\.zip$/
+const VERSION = /^[1-9][0-9]{0,8}$/
 const ARCHIVE_FILE = /^([0-9a-f]{64})\.zip$/
 const FEED_CACHE = 'private, max-age=60'
 const ZIP_CACHE = 'private, max-age=31536000, immutable'
@@ -168,19 +169,22 @@ export const route: RouteModule = {
       return c.json(marketplaceOf(read.feed, read.packages, origin, made), 200, { 'Cache-Control': FEED_CACHE })
     })
 
-    app.get(`${BASE}/:feed/plugins/:name/versions/:file`, async (c) => {
+    app.get(`${BASE}/:feed/plugins/:name/versions/:version/:file`, async (c) => {
       const stop = await gate(c)
       if (stop) return stop
       const slug = c.req.param('feed')
       const name = c.req.param('name')
-      const file = ZIP_FILE.exec(c.req.param('file'))
-      if (!FEED_SLUG.test(slug) || !PACKAGE_NAME.test(name) || !file) return missing(c)
-      const version = Number(file[1])
+      const file = ARCHIVE_FILE.exec(c.req.param('file'))
+      if (!FEED_SLUG.test(slug) || !PACKAGE_NAME.test(name) || !VERSION.test(c.req.param('version')) || !file) return missing(c)
+      const version = Number(c.req.param('version'))
       const read = await feeds!.read(slug, name)
       const row = read.feed ? read.packages.find((p) => p.name === name) : undefined
-      // Only whether and how it is listed matters here, not its URL.
+      // Only whether and how it is listed matters here, not its URL. The URL's sha256 must be
+      // the listed version's, so a URL of an earlier plugin of the same name is 404.
       const entry = row ? feedEntry(row, '', slug) : undefined
-      if (!entry?.listed || entry.kind !== 'hosted' || entry.version !== version) return missing(c)
+      if (!entry?.listed || entry.kind !== 'hosted' || entry.version !== version || row!.hosted!.zip_sha256 !== file[1]) {
+        return missing(c)
+      }
       const zip = await feeds!.zip(name, version)
       if (!zip) return missing(c)
       const sha256 = createHash('sha256').update(zip.bytes).digest('hex')

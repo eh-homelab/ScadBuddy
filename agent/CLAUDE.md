@@ -177,7 +177,7 @@ and its backend module:
   `plugin-feeds` and `hosted-plugins` (`src/plugins/feed.ts` `CrudPluginFeeds`, #6933): a
   marketplace feed's packages and a hosted version's zip, which `src/routes/pluginFeeds.ts`
   serves to outside Claude Code at `/api/v1/ai/plugin-feeds/{feed}/marketplace.json` and
-  `…/plugins/{name}/versions/{N}.zip` behind /mcp's gates and auth (`mcpAuthResolver`,
+  `…/plugins/{name}/versions/{N}/{zip_sha256}.zip` behind /mcp's gates and auth (`mcpAuthResolver`,
   `mcpTransportProblem`, `authenticate`), only approved pins, each zip URL on the origin the
   `marketplace.json` request came on (`effectiveRequest`; Claude Code sends the marketplace's
   `headers` only to that origin), a zip request reading only its own package;

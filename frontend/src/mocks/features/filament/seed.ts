@@ -379,6 +379,9 @@ function spool(number: number, values: Partial<SpoolRow>): SpoolRow {
     location_id: null,
     weight_locked: false,
     note: null,
+    data_origin: null,
+    added_full: null,
+    tag_encoded_at: null,
     grams_left: null,
     last_weighed_g: null,
     last_weighed_at: null,
@@ -400,13 +403,15 @@ function spools(): SpoolRow[] {
     spool(1, { type_id: T.JADE, grams_left: 640, location_id: L.SHELF_A, last_weighed_g: 640, last_weighed_at: '2026-11-14T18:00:00Z' }),
     spool(2, { type_id: T.ORANGE, created_at: '2026-11-01T09:00:00Z', grams_left: 820, location_id: L.DRY_BOX, last_weighed_g: 820, last_weighed_at: '2026-11-13T09:00:00Z', last_used_at: '2026-11-09T11:00:00Z', hours_outside_dry: 61.5, last_dried_at: '2026-11-12T09:00:00Z', last_dried_temp_c: 65, last_dried_hours: '8' }),
     spool(3, { type_id: T.PINK, grams_left: 930, location_id: L.SHELF_A }),
-    spool(4, { type_id: T.BLACK, grams_left: 120, location_id: L.AMS_A1, last_used_at: '2026-11-14T21:30:00Z' }),
+    // Bambuddy added it when its AMS read the tag (#7149: `data_origin`).
+    spool(4, { type_id: T.BLACK, grams_left: 120, location_id: L.AMS_A1, last_used_at: '2026-11-14T21:30:00Z', data_origin: 'rfid_auto', added_full: true }),
     spool(5, { type_id: T.POLY_CLEAR, grams_left: 700, location_id: L.DRY_BOX }),
     // Added by hand with only its material: it needs a type.
     spool(6, { material_id: M.PLA, colour_name: 'Teal', rgba: '#1B9AAAFF', label_weight_g: 1000, grams_left: 500 }),
     // Pulled from Bambuddy with no material, and no label weight: no grams arc.
     spool(7, { material_id: M.UNKNOWN, rgba: '#808080FF', grams_left: 300, note: 'Pulled from Bambuddy spool 41.' }),
-    spool(8, { type_id: T.INSIGNIA_CLEAR, grams_left: 400, location_id: L.AMS_A4 }),
+    // Its NTAG was written through SpoolBuddy (#7149).
+    spool(8, { type_id: T.INSIGNIA_CLEAR, grams_left: 400, location_id: L.AMS_A4, data_origin: 'opentag3d', tag_encoded_at: '2026-11-10T15:30:00Z' }),
     spool(9, { type_id: T.GOLD, grams_left: 1000 }),
     spool(10, { type_id: T.TPU_RED, grams_left: 250, low_stock_pct: 30 }),
     spool(11, { type_id: T.MISTLETOE, grams_left: 1000 }),

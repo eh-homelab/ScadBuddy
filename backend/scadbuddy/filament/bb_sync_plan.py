@@ -86,6 +86,10 @@ _NOT_ON_CREATE = frozenset({"last_dried_at"})
 #: ``inventory.py`` lines 1701-1716), so the lock always goes with it.
 _GOES_WITH = {"weight_used": "weight_locked"}
 
+#: The ``pushed_fields`` key of the newest SB consumed reset sent to Bambuddy (#7149
+#: R-7149-5): no Bambuddy field has this name.
+RESET_FIELD = "consumed_reset"
+
 #: The error label of a linked row whose new SB name an unlinked Bambuddy row holds
 #: (R-T4-8); Bambuddy would answer 409.
 NAME_TAKEN = "name_taken"
@@ -120,6 +124,10 @@ _SB_COLUMNS: dict[str, tuple[str, ...]] = {
     "filament_presets": ("presets",),
     "k_profiles": ("k_values",),
     "suppliers": ("type_id", "invoice_line_id"),
+    # #7149: the pull's newer-change rule for these; only ``data_origin`` is pushed.
+    "data_origin": ("data_origin",),
+    "added_full": ("added_full",),
+    "encode_time": ("tag_encoded_at",),
 }
 #: The fields whose change time is the newest event of these kinds (Decision 8).
 _EVENT_KINDS: dict[str, tuple[str, ...]] = {
@@ -279,9 +287,15 @@ class SpoolFacts:
     prices: Mapping[UUID, Any]
     #: The unarchived supplier of each spool's invoice.
     bought: Mapping[UUID, UUID]
+    #: The id of each linked spool's newest ``consumed_reset`` SB made (not the pull's,
+    #: source ``bb``) after its link, read while ``weights`` push (#7149 R-7149-5,
+    #: R-7149-11).
+    resets: Mapping[UUID, UUID] = field(default_factory=dict)
 
     @classmethod
-    def read(cls, conn: Conn, spool_ids: Iterable[UUID], sync: FilamentSync) -> SpoolFacts:
+    def read(
+        cls, conn: Conn, spool_ids: Iterable[UUID], sync: FilamentSync, *, resets: bool = True
+    ) -> SpoolFacts:
         ids = list(dict.fromkeys(spool_ids))
         spools = FilamentSpoolStore.read_many(conn, ids)
         found = list(spools)
@@ -353,7 +367,34 @@ class SpoolFacts:
                         (found,),
                     ).fetchall()
                 }
-        return cls(spools, codes, core_weights, places, presets, k_values, products, prices, bought)
+        newest_resets: dict[UUID, UUID] = {}
+        if resets and pushes(sync.weights) and found:
+            newest_resets = {
+                row["spool_id"]: row["id"]
+                for row in conn.execute(
+                    # R-7149-11: a reset older than the link is history Bambuddy never
+                    # shared, so it is never sent.
+                    "SELECT DISTINCT ON (e.spool_id) e.spool_id, e.id"
+                    " FROM filament_spool_events e"
+                    " JOIN filament_bb_links l ON l.spool_id = e.spool_id"
+                    " WHERE e.spool_id = ANY(%s) AND e.kind = 'consumed_reset'"
+                    " AND e.source IS DISTINCT FROM 'bb' AND e.at > l.linked_at"
+                    " ORDER BY e.spool_id, e.at DESC, e.seq DESC",
+                    (found,),
+                ).fetchall()
+            }
+        return cls(
+            spools,
+            codes,
+            core_weights,
+            places,
+            presets,
+            k_values,
+            products,
+            prices,
+            bought,
+            newest_resets,
+        )
 
 
 def desired_and_unmapped(
@@ -399,6 +440,9 @@ def desired_and_unmapped(
             "material_number": code,
             "archived_at": spool.archived_at,
         }
+        if spool.data_origin is not None:
+            # #7149 R-7149-1: SB never clears Bambuddy's origin.
+            out["data_origin"] = spool.data_origin
         if values.label_weight_g is not None:
             out["label_weight"] = values.label_weight_g
         pct = values.low_stock_pct
@@ -1304,6 +1348,21 @@ class _Planner:
                     cast("list[Any]", body_value(name, desired[name])),
                     {name: field_hash(compare[name])},
                 )
+        self.reset(sb_id, bb_id, pushed)
+
+    def reset(self, sb_id: UUID, bb_id: int, pushed: Mapping[str, str]) -> None:
+        """R-7149-5: Bambuddy's consumed-counter reset for the spool's newest SB reset,
+        once: its hash (of the event's id) goes in ``pushed_fields`` as `RESET_FIELD`.
+        Under ``weights`` only; the pull's ``bb`` resets are never sent back, and nor is
+        a reset made before the link (R-7149-11, `SpoolFacts.resets`)."""
+        if not pushes(self.sync.weights) or self.facts is None:
+            return
+        newest = self.facts.resets.get(sb_id)
+        if newest is None:
+            return
+        digest = field_hash(str(newest))
+        if pushed.get(RESET_FIELD) != digest:
+            self.add(3, "spool", sb_id, "reset_consumed", bb_id, {}, {RESET_FIELD: digest})
 
     def seed_spool(
         self,
@@ -1541,7 +1600,12 @@ _ADOPT_FIELDS = frozenset(
 
 
 def _adopt_form(bb: BbSpool) -> dict[str, Any]:
-    return {k: v for k, v in snapshot(bb).items() if k not in ("tag_uid", "tray_uuid")}
+    return {k: v for k, v in snapshot(bb).items() if k not in _NOT_SENT}
+
+
+#: The `snapshot` fields a create never sends (R-T5-6): the tags, and what Bambuddy takes no
+#: write of or SB pushes apart (#7149: ``added_full``, ``encode_time``, the baseline).
+_NOT_SENT = frozenset({"tag_uid", "tray_uuid", "added_full", "tag_encoded_at", "consumed_baseline"})
 
 
 def pendings(value: Any) -> Iterator[Pending]:

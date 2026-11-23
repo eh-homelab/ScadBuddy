@@ -348,6 +348,8 @@ async def _send(
                 return _row(await client.archive_spool(bb_id))
             case "restore":
                 return _row(await client.restore_spool(bb_id))
+            case "reset_consumed":
+                return _row(await client.reset_consumed_counter(bb_id))
             case "probe":
                 return _row(await client.spool_row(bb_id))
             case "k_profiles":

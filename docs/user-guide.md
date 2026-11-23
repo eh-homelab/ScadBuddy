@@ -732,14 +732,29 @@ changed. A card with more than eight tools has a **Filter**.
 [security.md](ai/security.md#plugin-packages)). ScadBuddy's own plugin is built in, with
 **Enable**/**Disable**.
 
-- **Plugin packages** (skills, agents and hooks). Give a **Git repository** or a
-  **Marketplace entry** and press **Fetch and review**. Nothing loads yet: the package
-  is pinned to the exact commit and content hash it fetched, and you tick that you
-  reviewed them and press **Approve this pin**, then **Enable**. Anything that would
-  start a process or run code inside the assistant is refused by the vetting rules and
-  listed; the only way past is to approve loading the package as it is, which runs its
-  code with the assistant service's own access. A newer commit is **Fetch re-pin**,
-  approved the same way.
+- **Plugin packages** (skills, agents and hooks). Give a **Git repository**, a
+  **Marketplace entry** (in a repository, or a `marketplace.json` URL), a zip
+  **archive** URL or an **npm** package, and press **Fetch and review**. Nothing loads
+  yet: the package is pinned to the exact commit (for an archive or npm package, the
+  file's SHA-256, of which ScadBuddy keeps its own copy) and the content hash it fetched,
+  and you tick that you reviewed them and press **Approve this pin**, then **Enable**.
+  Anything that would start a process or run code inside the assistant is refused by the
+  vetting rules and listed; the only way past is to approve loading the package as it
+  is, which runs its code with the assistant service's own access. A newer commit or
+  file is **Fetch re-pin**, approved the same way.
+- **Hosted plugins** (**Settings → Tools & plugins → Hosted plugins**). Write a plugin's
+  skills, agents and commands in ScadBuddy, as a draft of files (at most 499 files,
+  2 MiB a file and 20 MiB in all), and press **Publish**. Each publish is a numbered
+  version that never changes. It is offered to the assistant as a package (an install,
+  then a re-pin for each later version), and it loads only once you approve that
+  version, as above. The assistant can write a draft too; its publish asks you first,
+  and it publishes only the draft you approved.
+- **The plugin feed** (**Settings → MCP access → Plugin feed**). Claude Code sessions
+  outside ScadBuddy can install the approved packages you add to the feed, from its
+  `marketplace.json`, with the same access token (or OIDC sign-in) as `/mcp`. The feed
+  is on the LAN host only, as `/mcp` is. Copy the setup snippet the section shows into
+  the client's `~/.claude/settings.json`. Every client of the feed runs what it lists,
+  hooks and MCP servers included for a package you approved as it is.
 - **Remote MCP plugins**. Give a **Name**, the **MCP endpoint URL** and, if it needs
   one, an auth header, and press **Add endpoint**. It starts disabled: **Test
   connection** lists its tools as rows (see [Tool access](#tool-access)), each
