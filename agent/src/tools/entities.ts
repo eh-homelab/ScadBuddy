@@ -54,18 +54,30 @@ export const PROPERTY_RULES =
 const propertyKind = z.string().regex(/^[a-z_]{1,32}$/).describe('An entity kind: `spool_type`, `spool`, `printer`, `supplier`, ...')
 
 /**
- * Sets `set` on `ref` after its own write succeeded, and answers its properties. A refusal says
- * that `saved` (the type or spool) was saved and the properties were not, with the backend's reason.
+ * Sets `set` on `ref` and answers its properties. With `saved` (the type or spool whose own write
+ * succeeded first), a refusal says it was saved and the properties were not, with the backend's
+ * reason, and points at entity_property_set so a retry does not repeat that write.
  */
-export async function setPropertiesAfter(backend: BackendClient, ref: string, set: PropertySet, saved: string) {
+export async function setPropertiesAfter(backend: BackendClient, ref: string, set: PropertySet, saved?: string) {
   try {
     const { properties } = await ok(backend.PATCH('/api/v1/entities/{ref}/properties', { params: { path: { ref } }, body: { set } }), `set the properties of ${ref}`)
     return properties
   } catch (e) {
-    const lead = `${saved} was saved; its properties were not`
+    if (saved === undefined) throw e
+    const lead = `${saved} was saved; its properties were not (set them with entity_property_set on ${ref}, not this tool again)`
     if (e instanceof ToolError) throw new ToolError(`${lead}: ${e.summary}`, e.status, e.untrusted, e.problem)
     throw new ToolError(`${lead}: ${e instanceof Error ? e.message : String(e)}`)
   }
+}
+
+/** For an upsert's `summarize`: the properties it sets and removes, if any. */
+export function propertyChanges(set: PropertySet | undefined): string {
+  if (set === undefined) return ''
+  const keys = Object.keys(set)
+  const removed = keys.filter((key) => set[key] === null)
+  const setKeys = keys.filter((key) => set[key] !== null)
+  const parts = [setKeys.length ? `set ${setKeys.join(', ')}` : '', removed.length ? `remove ${removed.join(', ')}` : ''].filter(Boolean)
+  return `; properties: ${parts.join('; ')}`
 }
 
 /** The page of an entity that has one (the filament kinds); others have none. */
@@ -273,10 +285,10 @@ export const entityTools = [
     label: "Replace a kind's property schema",
     description:
       "Replace a kind's property schema whole (read it with entity_property_schema_get first and send it back changed). " +
-      'A JSON Schema (Draft 2020-12) object with `properties`, each a key and its subschema (`type`, `title`, `description`, ' +
-      '`enum`, bounds). It may not restrict which keys exist (`additionalProperties`, `required`, `propertyNames`) nor hold ' +
-      '`pattern`, `patternProperties`, `format: regex`, `$ref` or `$dynamicRef` anywhere: 422 `bad_property_schema`. ' +
-      'Writes ScadBuddy only.',
+      'A JSON Schema (Draft 2020-12) object of plain keywords only: at the top `type: "object"`, `properties`, ' +
+      '`additionalProperties: true`, `title`, `description`; per key a scalar `type` (or an `array` of strings), with ' +
+      '`title`, `description`, `default`, `examples`, `enum`, `const`, number and length bounds, `format` (not ' +
+      '`regex`) and `items`. Any other keyword is 422 `bad_property_schema`, naming it. Writes ScadBuddy only.',
     input: z.object({ kind: propertyKind, schema: z.record(z.string(), z.unknown()).describe('The whole schema') }),
     risk: 'write',
     routes: ['PUT /api/v1/entity-kinds/{kind}/property-schema'],

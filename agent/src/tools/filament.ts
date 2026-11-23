@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
 import { command } from './command.js'
-import { PROPERTY_RULES, propertySet, setPropertiesAfter } from './entities.js'
+import { PROPERTY_RULES, propertyChanges, propertySet, setPropertiesAfter } from './entities.js'
 import { linkingTools, type LinkKind } from './filamentLinks.js'
 import {
   catalogNames,
@@ -375,7 +375,8 @@ const tools: Tool[] = [
       "drying values, the default of a drying of its spools (filament_spool_add_event). 409 when an unarchived type has the " +
       'code; 422 when a minimum temperature is above its maximum. `properties` (#7026) are set on the type after it ' +
       'is saved, and the answer carries them; if they are refused, the error says the type was saved and they were ' +
-      `not. ${PROPERTY_RULES} Only what the user says. Writes ScadBuddy only.`,
+      `not. An edit with only \`properties\` leaves the type itself untouched. ${PROPERTY_RULES} Only what the user ` +
+      'says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
       fields: z
@@ -410,14 +411,24 @@ const tools: Tool[] = [
     }),
     risk: 'write',
     source: SOURCE,
-    routes: ['POST /api/v1/filament/types', 'PATCH /api/v1/filament/types/{type_id}', 'PATCH /api/v1/entities/{ref}/properties'],
-    summarize: ({ type_id, fields }) =>
-      type_id ? `Edit spool type ${type_id}` : `Add spool type ${String(fields['code'] ?? '')}`.trim(),
+    routes: [
+      'POST /api/v1/filament/types',
+      'PATCH /api/v1/filament/types/{type_id}',
+      'PATCH /api/v1/entities/{ref}/properties',
+      'GET /api/v1/filament/types/{type_id}',
+    ],
+    summarize: ({ type_id, fields, properties }) =>
+      (type_id ? `Edit spool type ${type_id}` : `Add spool type ${String(fields['code'] ?? '')}`.trim()) + propertyChanges(properties),
     handler: async ({ type_id, fields, archived, properties }, { backend }) => {
       let row
       if (type_id === undefined) {
         if (archived !== undefined) throw new ToolError('archived needs a type_id')
         row = await ok(backend.POST('/api/v1/filament/types', { body: fields as never }), 'add a spool type')
+      } else if (properties !== undefined && archived === undefined && Object.keys(fields).length === 0) {
+        // Properties only: no row PATCH, which would move the type's `updated_at` and so its sync time.
+        const set = await setPropertiesAfter(backend, `spool_type:${type_id}`, properties)
+        row = await ok(backend.GET('/api/v1/filament/types/{type_id}', { params: { path: { type_id } } }), `read spool type ${type_id}`)
+        return json({ ...row, properties: set })
       } else {
         row = await ok(
           backend.PATCH('/api/v1/filament/types/{type_id}', {
@@ -887,7 +898,8 @@ const tools: Tool[] = [
       'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
       'material. `properties` (#7026) are set on the spool, or on each spool made, after it is saved, and the answer carries them; if they ' +
-      `are refused, the error says the spool was saved and they were not. ${PROPERTY_RULES} Only what the user says. ` +
+      'are refused, the error says the spool was saved and they were not. An edit with only `properties` leaves ' +
+      `the spool itself untouched. ${PROPERTY_RULES} Only what the user says. ` +
       'Writes ScadBuddy only.',
     input: z.object({
       spool_id: z.string().uuid().optional().describe("A spool's `id`; omit to add"),
@@ -904,15 +916,23 @@ const tools: Tool[] = [
       'POST /api/v1/filament/spools/bulk',
       'GET /api/v1/filament/spools/{spool_id}/copy',
       'PATCH /api/v1/entities/{ref}/properties',
+      'GET /api/v1/filament/spools/{spool_id}',
     ],
-    summarize: ({ spool_id, quantity, copy_of }) =>
-      spool_id
+    summarize: ({ spool_id, quantity, copy_of, properties }) =>
+      (spool_id
         ? `Edit spool ${spool_id}`
-        : `Add ${quantity && quantity > 1 ? `${quantity} spools` : 'a spool'}${copy_of ? ` copied from ${copy_of}` : ''}`,
+        : `Add ${quantity && quantity > 1 ? `${quantity} spools` : 'a spool'}${copy_of ? ` copied from ${copy_of}` : ''}`) +
+      propertyChanges(properties),
     handler: async ({ spool_id, fields, quantity, copy_of, properties }, ctx) => {
       const { backend } = ctx
       if (spool_id !== undefined && (quantity !== undefined || copy_of !== undefined)) {
         throw new ToolError('`quantity` and `copy_of` are for adding a spool; leave out `spool_id`')
+      }
+      if (spool_id !== undefined && properties !== undefined && Object.keys(fields).length === 0) {
+        // Properties only: no row PATCH, as for a type (an empty one could still move the row's sync time).
+        const set = await setPropertiesAfter(backend, `spool:${spool_id}`, properties)
+        const row = await ok(backend.GET('/api/v1/filament/spools/{spool_id}', { params: { path: { spool_id } } }), `read spool ${spool_id}`)
+        return json({ ...row, properties: set })
       }
       const withProperties = async (row: { id: string }) =>
         properties === undefined

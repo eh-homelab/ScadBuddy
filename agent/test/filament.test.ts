@@ -244,6 +244,35 @@ describe('filament type tools', () => {
     expect(text).toContain(`spool type ${ROW} was saved`)
     expect(text).toContain('properties were not')
     expect(text).toContain('td: not a number')
+    expect(text).toContain(`entity_property_set on spool_type:${ROW}`)
+  })
+
+  it('sends no type PATCH for a properties-only edit, and both writes in order with fields (#7026)', async () => {
+    const calls: string[] = []
+    const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`
+    server.use(
+      http.patch(TYPE, async ({ request }) => {
+        calls.push(`PATCH type ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ id: ROW })
+      }),
+      http.get(TYPE, () => {
+        calls.push('GET type')
+        return HttpResponse.json({ id: ROW, code: 'PLA-RED' })
+      }),
+      http.patch(PROPS, async ({ request }) => {
+        calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ properties: [{ key: 'mpn', value: 'M1', source: 'manual' }] })
+      }),
+    )
+    const only = await runTool(tool('filament_type_upsert'), { type_id: ROW, properties: { mpn: 'M1' } }, ctx())
+    expect(firstText(only)).toMatchObject({ id: ROW, code: 'PLA-RED', properties: [{ key: 'mpn' }] })
+    expect(calls).toEqual(['PATCH props {"set":{"mpn":"M1"}}', 'GET type'])
+    calls.length = 0
+    await runTool(tool('filament_type_upsert'), { type_id: ROW, fields: { note: 'n' }, properties: { mpn: 'M1' } }, ctx())
+    expect(calls).toEqual(['PATCH type {"note":"n"}', 'PATCH props {"set":{"mpn":"M1"}}'])
+    expect(tool('filament_type_upsert').summarize({ type_id: ROW, properties: { mpn: 'M1', td: null } })).toBe(
+      `Edit spool type ${ROW}; properties: set mpn; remove td`,
+    )
   })
 
   it('replaces the presets and the K values', async () => {
@@ -639,6 +668,30 @@ describe('filament spool tools', () => {
     expect(refused.isError).toBe(true)
     expect(String(firstText(refused))).toContain(`spool ${ROW} was saved`)
     expect(String(firstText(refused))).toContain('lot_number: too long')
+  })
+
+  it('sends no spool PATCH for a properties-only edit (#7026)', async () => {
+    const calls: string[] = []
+    server.use(
+      http.patch(SPOOL, () => {
+        calls.push('PATCH spool')
+        return HttpResponse.json({ id: ROW })
+      }),
+      http.get(SPOOL, () => {
+        calls.push('GET spool')
+        return HttpResponse.json({ id: ROW, number: 4 })
+      }),
+      http.patch(`${BACKEND}/api/v1/entities/${encodeURIComponent(`spool:${ROW}`)}/properties`, async ({ request }) => {
+        calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ properties: [] })
+      }),
+    )
+    const only = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, properties: { lot_number: null } }, ctx())
+    expect(firstText(only)).toMatchObject({ id: ROW, number: 4, properties: [] })
+    expect(calls).toEqual(['PATCH props {"set":{"lot_number":null}}', 'GET spool'])
+    expect(tool('filament_spool_upsert').summarize({ spool_id: ROW, properties: { lot_number: null } })).toBe(
+      `Edit spool ${ROW}; properties: remove lot_number`,
+    )
   })
 
   it("replaces a spool's own presets and K values", async () => {
