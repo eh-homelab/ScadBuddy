@@ -164,8 +164,23 @@ Rulings from the review of PR #7041 at 5c03d8850 (its non-blocking findings):
   that went away while its step still waited for the lock (its activity cancelled or timed
   out) now runs nothing and leaves the browser open; before, the step ran on an already
   closed connection, was cancelled at once, and the browser the export used was closed.
-  A search that fails with a fresh-browser kind still closes the shared browser (DELETE
-  `/session`), and the export's next step signs in again; that is as before.
+  A search's failure or cancel never closes the shared browser (R-7062-3). A handler
+  cancelled after its turn took the lock, before it woke, gives the lock back.
+- **R-7062-3 (a search never closes the browser).** The browser service has one
+  `SiteHolder`, and `DELETE /session` drops it, whoever sends it. So the search's
+  `RemoteSite` is made with `closes_browser=False` (`worker.run`'s `search_sites`): when
+  `TdfpActivities` drops it (the search cancelled, or failed `browser` or `timeout`), it
+  closes only its own httpx client and sends no `DELETE /session`. On the service, a
+  search step cut mid-way (its worker went away) is cancelled, and the browser stays open
+  (`BrowserService._run` `cut_closes`, false for `/search`). An export, a My Spools add and a
+  create keep the old rule: cut mid-way, the service closes the browser. A browser that a
+  search left broken is reset only by the fetch's or the create's own failure: their
+  activities run on the fetch slot, one at a time, so when one of them fails `browser` or
+  `timeout` and drops its holder (`DELETE /session`), no export is running, and the next
+  step signs in again. Every step opens its own page path first, so a page a search left
+  mid-load does not carry over to the next step. A search that keeps failing `browser`
+  while the browser is broken answers 502 until a fetch or a create resets it, or the
+  browser service restarts.
 
 ## Timeouts
 

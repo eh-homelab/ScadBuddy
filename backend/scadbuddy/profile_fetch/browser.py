@@ -21,8 +21,9 @@ step runs at a time (a lock), on one signed-in browser (`steps.SiteHolder`); eac
 its own page path first, so a 3DFP search takes its turn between an export's steps (#7062,
 R-7062-2). When the worker goes away during a step (its activity was cancelled or timed
 out), the service cancels the step and closes the browser, since the page may be wedged
-mid-export; one that went away while its step still waited for its turn runs nothing and
-leaves the browser open.
+mid-export; for a search it cancels the step only, and the browser stays open for the export
+(R-7062-3). One that went away while its step still waited for its turn runs nothing and
+leaves the browser open. A search's worker never sends ``DELETE /session`` (R-7062-3).
 
 At start it serves, then signs in. A login refused on three tries (`LOGIN_RETRY_DELAYS`
 apart), or a browser that does not launch (Chromium's sandbox cannot start, plan
@@ -222,7 +223,8 @@ class BrowserService:
             ask = await asyncio.wait_for(reader.readexactly(int(length)), BODY_TIMEOUT)
         except TimeoutError:
             return
-        answer = await self._run(reader, step, ask)
+        # A search cut mid-way leaves the browser open: an export may be using it (R-7062-3).
+        answer = await self._run(reader, step, ask, cut_closes=path != SEARCH)
         if answer is not None:
             await _send(writer, *answer)
 
@@ -236,11 +238,15 @@ class BrowserService:
         reader: asyncio.StreamReader,
         step: Callable[[bytes], Awaitable[Answer]],
         ask: bytes,
+        *,
+        cut_closes: bool = True,
     ) -> Answer | None:
         """The step's answer, one step at a time; None when the worker went away during
-        it: the step is cancelled and the browser closed. A worker that went away while its
-        step waited for its turn (a search waits for the export's step in hand, R-7062-2)
-        gets None and runs nothing, and the browser stays open for the export."""
+        it: the step is cancelled, and with ``cut_closes`` the browser closed, since the page
+        may be wedged mid-export. A search's step is cut without closing it (R-7062-3): an
+        export may be using the browser, and its next step opens its own page path. A worker
+        that went away while its step waited for its turn (a search waits for the export's
+        step in hand, R-7062-2) gets None and runs nothing, and the browser stays open."""
         # The ask is read whole; the next read ends only when the worker goes away.
         watcher = asyncio.ensure_future(reader.read(1))
         turn = asyncio.ensure_future(self.lock.acquire())
@@ -249,13 +255,16 @@ class BrowserService:
         except BaseException:
             turn.cancel()
             watcher.cancel()
+            # Cancelled after the lock was taken but before this woke: give it back.
+            if turn.done() and not turn.cancelled():
+                self.lock.release()
             raise
         if not turn.done():
             turn.cancel()
             with suppress(asyncio.CancelledError):
                 await turn
-        if watcher.done() or not turn.done() or turn.cancelled():
-            if turn.done() and not turn.cancelled():
+        if watcher.done() or turn.cancelled():
+            if not turn.cancelled():
                 self.lock.release()
             watcher.cancel()
             return None
@@ -270,8 +279,11 @@ class BrowserService:
             running.cancel()
             with suppress(BaseException):
                 await running
-            await self._sites.drop()
-            logger.info("the worker went away during a step; the browser is closed")
+            if cut_closes:
+                await self._sites.drop()
+                logger.info("the worker went away during a step; the browser is closed")
+            else:
+                logger.info("the worker went away during a search; the browser stays open")
             return None
         finally:
             self.lock.release()

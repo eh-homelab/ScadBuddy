@@ -2530,7 +2530,9 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   browser types it; the worker refuses to start with it. The CRUD credential lives in the
   worker pod only; the browser service refuses to start with a proof, a Temporal or API
   address, or a mounted ServiceAccount token. When an export activity is cancelled, the
-  worker closes its connection, and the service cancels the step and closes the browser.
+  worker closes its connection, and the service cancels the step and closes the browser. A
+  cancelled or failed search cancels only its own step and never closes the browser,
+  which an export may be using (#7062, R-7062-3).
 - **No database and no key.** Both processes refuse to start when `SCADBUDDY_DATABASE_URL`,
   `PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` is set (#5295). The browser
   service also refuses a `DEBUG` that turns on a Playwright channel, because that log would

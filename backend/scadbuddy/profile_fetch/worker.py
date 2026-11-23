@@ -123,11 +123,18 @@ async def run(
     def browser_service() -> Site:
         return RemoteSite(settings.profile_fetch_browser_url, settings.browser_token)
 
+    def search_browser_service() -> Site:
+        return RemoteSite(
+            settings.profile_fetch_browser_url, settings.browser_token, closes_browser=False
+        )
+
     sites = SiteHolder(open_site or browser_service)
     activities = ProfileFetchActivities(crud, sites)
     tdfp = TdfpActivities(sites)
-    # A search's own RPC client, so its failure never closes the export's (R-7062-2).
-    search_sites = SiteHolder(open_site or browser_service)
+    # A search's own RPC client. Dropping it (a search cancelled, or failed `browser` or
+    # `timeout`) closes only its connection, never the service's browser, which an export
+    # may be using; only a fetch's or a create's own failure closes that (R-7062-3).
+    search_sites = SiteHolder(open_site or search_browser_service)
     searches = TdfpActivities(search_sites)
     health = (
         await asyncio.start_server(_healthz, "0.0.0.0", health_port)

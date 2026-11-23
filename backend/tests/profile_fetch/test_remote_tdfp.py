@@ -9,7 +9,10 @@ from typing import Any
 
 import httpx
 import pytest
+from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.profile_fetch.activities import SiteHolder, TdfpActivities
 from scadbuddy.profile_fetch.remote import RemoteSite
 from scadbuddy.profile_fetch.steps import SiteError
 from scadbuddy.profile_fetch.wire import CreateAnswer, CreateAsk, SearchAnswer, SearchAsk
@@ -201,6 +204,107 @@ async def test_a_search_given_up_before_its_turn_runs_nothing_and_keeps_the_brow
         await asyncio.wait_for(fetch.export(30173, "H2C", "0.6"), 5)
         assert site.steps == ["export", "export"]
         assert site.closed == 0
+
+
+def _searches(url: str) -> TdfpActivities:
+    """The worker's search activities, on a client that never closes the browser
+    (`worker.run`'s ``search_sites``, R-7062-3)."""
+    return TdfpActivities(SiteHolder(lambda: RemoteSite(url, TOKEN, closes_browser=False)))
+
+
+async def test_a_search_cancelled_while_an_export_step_runs_keeps_the_browser() -> None:
+    """R-7062-3: a search activity cancelled while it waits for the export's step closes
+    only its own connection. The service's browser is not dropped, and the export's next
+    step runs on the same browser."""
+    site = _HeldExport()
+    async with Service(site) as running, RemoteSite(running.url, TOKEN) as fetch:
+        await fetch.login()
+        exporting = asyncio.create_task(fetch.export(30173, "H2C", "0.4"))
+        await asyncio.wait_for(site.started.wait(), 5)
+        searches = _searches(running.url)
+        search = asyncio.create_task(
+            ActivityEnvironment().run(searches.search, SearchAsk(brand="SUNLU"))
+        )
+        await _until(lambda: running.service.lock._waiters)
+        search.cancel()
+        # The cancel ends at once: it sends no DELETE /session, which would wait behind the
+        # export's step and then close its browser.
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(search, 5)
+        finally:
+            site.release.set()
+        await asyncio.wait_for(exporting, 5)
+        await asyncio.wait_for(fetch.export(30173, "H2C", "0.6"), 5)
+        assert site.steps == ["export", "export"]
+        assert (site.opened, site.closed) == (1, 0)
+
+
+async def test_a_search_that_fails_fresh_keeps_the_exports_browser() -> None:
+    """R-7062-3: a search failing ``browser`` drops the search's own client only; the
+    export's next step reuses the signed-in browser."""
+    site = _HeldExport()
+    site.tdfp_error = SiteError("browser", "the page crashed")
+    async with Service(site) as running, RemoteSite(running.url, TOKEN) as fetch:
+        await fetch.login()
+        searches = _searches(running.url)
+        with pytest.raises(ApplicationError) as caught:
+            await ActivityEnvironment().run(searches.search, SearchAsk(brand="SUNLU"))
+        assert caught.value.type == "browser"
+        site.release.set()
+        await asyncio.wait_for(fetch.export(30173, "H2C", "0.4"), 5)
+        assert (site.opened, site.closed) == (1, 0)
+
+
+async def test_a_search_cut_mid_step_keeps_the_browser() -> None:
+    """R-7062-3: the service cancels a search whose worker went away during it, and keeps
+    the browser open (an export's step cut so closes it, as before)."""
+    started = asyncio.Event()
+
+    class Hanging(FakeSite):
+        async def search(self, ask: SearchAsk) -> SearchAnswer:
+            started.set()
+            await asyncio.sleep(60)
+            raise AssertionError("not cancelled")
+
+    site = Hanging()
+    async with Service(site) as running, RemoteSite(running.url, TOKEN) as fetch:
+        await fetch.login()
+        searching = RemoteSite(running.url, TOKEN, closes_browser=False)
+        await searching.__aenter__()
+        search = asyncio.create_task(searching.search(SearchAsk(brand="SUNLU")))
+        await asyncio.wait_for(started.wait(), 5)
+        search.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await search
+        await searching.__aexit__(None, None, None)
+        await _until(lambda: not running.service.lock.locked())
+        await asyncio.wait_for(fetch.export(30173, "H2C", "0.4"), 5)
+        assert (site.opened, site.closed) == (1, 0)
+
+
+async def test_a_call_cancelled_once_it_has_the_lock_gives_it_back() -> None:
+    """A handler cancelled after its turn took the lock, before it woke, releases the lock
+    and runs nothing."""
+    service = Service(FakeSite()).service
+    ran: list[bytes] = []
+
+    async def step(ask: bytes) -> Any:
+        ran.append(ask)
+
+    handler = asyncio.create_task(service._run(asyncio.StreamReader(), step, b"x"))
+    # The turn takes the free lock on its first step; the handler wakes a step later, so
+    # one loop pass at a time finds the moment between the two.
+    for _ in range(100):
+        if service.lock.locked():
+            break
+        await asyncio.sleep(0)
+    assert service.lock.locked() and not ran
+    handler.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handler
+    assert ran == []
+    assert not service.lock.locked()
 
 
 async def _until(ready: Any) -> None:
