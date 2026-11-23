@@ -638,6 +638,7 @@ describe('filament location tools', () => {
     ['filament_code_resolve', 'read'],
     ['filament_location_get', 'read'],
     ['filament_printer_labels', 'read'],
+    ['filament_label_templates', 'read'],
     ['filament_location_upsert', 'write'],
     ['filament_spool_move', 'write'],
   ])('%s is %s tier, never gated', (name, risk) => {
@@ -686,6 +687,12 @@ describe('filament location tools', () => {
     await runTool(tool('filament_printer_labels'), {}, ctx())
     await runTool(tool('filament_printer_labels'), { printer_ids: [ROW] }, ctx())
     expect(bodies).toEqual([{ printer_ids: null }, { printer_ids: [ROW] }])
+  })
+
+  it('lists the label templates', async () => {
+    const answer = { templates: [{ id: 'roll_50x25', name: 'Roll label 50 x 25 mm', width_mm: 50, height_mm: 25, sheet: null }], custom: { min_width_mm: 40 } }
+    server.use(http.get(`${BACKEND}/api/v1/filament/label-templates`, () => HttpResponse.json(answer)))
+    expect(firstText(await runTool(tool('filament_label_templates'), {}, ctx()))).toEqual(answer)
   })
 
   it('moves a spool, and takes one out of its place', async () => {

@@ -446,6 +446,12 @@ class FilamentSpoolStore:
         with self._pool.connection() as conn:
             return self._spool(conn, spool_id, defaults, self._clock())
 
+    def get_many(self, spool_ids: Sequence[UUID]) -> dict[UUID, m.Spool]:
+        """Each spool among ``spool_ids`` that exists, by id, in a fixed number of queries
+        (the labels PDF, #7157). As `read_many`, its hours outside dry storage are not read."""
+        with self._pool.connection() as conn:
+            return self.read_many(conn, spool_ids)
+
     def detail(self, spool_id: UUID) -> m.SpoolDetail | None:
         """The spool with its tags, effective presets and K values, the basis of its
         grams and whether it ever printed; ``None`` for no such spool."""

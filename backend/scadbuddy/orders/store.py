@@ -35,6 +35,7 @@ from scadbuddy.orders.models import (
     AddressInput,
     AddressSnapshot,
     Approval,
+    ArchiveCopyMedia,
     Attachment,
     AttachmentKind,
     AttachmentRole,
@@ -136,6 +137,11 @@ class RowNotOwnedError(LookupError):
         self.customer_id = customer_id
 
 
+class ArchiveCopyExistsError(ValueError):
+    """The subject has a copy of that archive's medium under that name already
+    (``entity_attachments_archive_copy``, #7231): a race lost to another copy."""
+
+
 class FilamentExistsError(ValueError):
     """A filament record with the same identity (material, subtype, brand and colour,
     upper-cased, #4250 Ruling 4, and alpha, #6261) is there already: the routes answer 409
@@ -201,7 +207,8 @@ _FULFILMENT = (
     "id, order_item_id, attempt, quantity, outcome, failure_reason, started_at, finished_at,"
     " notes, accepted_at, created_by, created_at, print_run_id, sliced_sha256, sliced_blob_key,"
     " printer, copies, print_request_id, printer_serial, printer_name, bambuddy_printer_id,"
-    " archive_ids, actual_seconds, actual_grams, purpose, revision_id"
+    " archive_ids, actual_seconds, actual_grams, purpose, revision_id, timelapse_scanned_at,"
+    " media_checked_at"
 )
 _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
@@ -250,7 +257,7 @@ _COST_ENTRY = (
 )
 _ATTACHMENT = (
     "id, order_id, subject, kind, role, filename, media_type, size_bytes, sha256, blob_key,"
-    " caption, created_at, created_by, attempt_item_id, fulfilment_id"
+    " caption, created_at, created_by, attempt_item_id, fulfilment_id, archive_id, archive_media"
 )
 
 #: The status timestamps `set_order_status` stamps (§3.2).
@@ -430,6 +437,8 @@ def _attachment_of(row: DictRow) -> tuple[Attachment, str]:
             caption=row["caption"],
             created_at=row["created_at"],
             created_by=row["created_by"],
+            archive_id=row["archive_id"],
+            archive_media=row["archive_media"],
         ),
         row["blob_key"],
     )
@@ -2453,6 +2462,23 @@ class OrderStore:
             raise LookupError(f"no fulfilment {fulfilment_id}")
         return Fulfilment.model_validate(row)
 
+    def stamp_media_checked(self, fulfilment_id: str, at: datetime) -> None:
+        """The media import read the attempt's archives at ``at`` (spec 2026-11-05 §4.6)."""
+        with self._write(None) as c:
+            c.execute(
+                "UPDATE order_item_fulfilments SET media_checked_at = %s WHERE id = %s",
+                (at, fulfilment_id),
+            )
+
+    def stamp_timelapse_scanned(self, fulfilment_id: str, at: datetime) -> None:
+        """The media import asked Bambuddy to scan the printer for the attempt's
+        timelapse at ``at`` (spec 2026-11-05 §4.3)."""
+        with self._write(None) as c:
+            c.execute(
+                "UPDATE order_item_fulfilments SET timelapse_scanned_at = %s WHERE id = %s",
+                (at, fulfilment_id),
+            )
+
     def unaccept_fulfilment(self, conn: Conn, fulfilment_id: str) -> Fulfilment:
         """An unfulfil (#4952): the attempt stays, no longer counted as made."""
         row = conn.execute(
@@ -3098,43 +3124,57 @@ class OrderStore:
         created_by: Actor,
         subject_item_id: str | None = None,
         fulfilment_id: str | None = None,
+        archive_id: int | None = None,
+        archive_media: ArchiveCopyMedia | None = None,
     ) -> Attachment:
         """The row and its hold on ``blob_key`` (Ruling 8), in one transaction: the
         blob was written and touched just before, so the blob sweep's grace keeps it
         until both are committed, and neither is ever there without the other.
         ``subject_item_id`` is the item of an attempt's or a revision's file (the
         ``attempt_item_id`` column); ``fulfilment_id`` the attempt a revision's test print
-        file belongs to."""
-        conn.execute(
-            "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
-            " ON CONFLICT DO NOTHING",
-            (blob_key, ATTACHMENT_HOLDER, attachment_id),
-        )
-        entity_id = self._entities.ensure(conn, EntityRef.parse(subject))
-        row = conn.execute(
-            "INSERT INTO entity_attachments (id, order_id, subject, entity_id, kind, role,"
-            " filename, media_type, size_bytes, sha256, blob_key, caption, created_by,"
-            " attempt_item_id, fulfilment_id)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-            f" RETURNING {_ATTACHMENT}",
-            (
-                attachment_id,
-                order_id,
-                subject,
-                entity_id,
-                kind,
-                role,
-                filename,
-                media_type,
-                size_bytes,
-                sha256,
-                blob_key,
-                caption,
-                Jsonb(created_by.model_dump(mode="json")),
-                subject_item_id,
-                fulfilment_id,
-            ),
-        ).fetchone()
+        file belongs to. ``archive_id`` and ``archive_media`` name the Bambuddy archive
+        copy it is (#7231): a second copy of one archive file on one subject is
+        :class:`ArchiveCopyExistsError`, and its savepoint takes back the row and the hold."""
+        try:
+            with conn.transaction():
+                conn.execute(
+                    "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+                    " ON CONFLICT DO NOTHING",
+                    (blob_key, ATTACHMENT_HOLDER, attachment_id),
+                )
+                entity_id = self._entities.ensure(conn, EntityRef.parse(subject))
+                row = conn.execute(
+                    "INSERT INTO entity_attachments (id, order_id, subject, entity_id, kind,"
+                    " role, filename, media_type, size_bytes, sha256, blob_key, caption,"
+                    " created_by, attempt_item_id, fulfilment_id, archive_id, archive_media)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+                    f" %s) RETURNING {_ATTACHMENT}",
+                    (
+                        attachment_id,
+                        order_id,
+                        subject,
+                        entity_id,
+                        kind,
+                        role,
+                        filename,
+                        media_type,
+                        size_bytes,
+                        sha256,
+                        blob_key,
+                        caption,
+                        Jsonb(created_by.model_dump(mode="json")),
+                        subject_item_id,
+                        fulfilment_id,
+                        archive_id,
+                        archive_media,
+                    ),
+                ).fetchone()
+        except errors.UniqueViolation as error:
+            if error.diag.constraint_name != "entity_attachments_archive_copy":
+                raise
+            raise ArchiveCopyExistsError(
+                f"{subject} has a copy of archive {archive_id}'s {archive_media} {filename!r}"
+            ) from None
         assert row is not None
         return _attachment_of(row)[0]
 
@@ -3171,6 +3211,19 @@ class OrderStore:
                 (subject,),
             ).fetchall()
         return [_attachment_of(r)[0] for r in rows]
+
+    def archive_media_present(
+        self, fulfilment_id: str, item_id: str, *, conn: Conn | None = None
+    ) -> set[tuple[int, ArchiveCopyMedia]]:
+        """Each ``(archive_id, archive_media)`` the attempt has a copy of, or its item has
+        (a copy from before #5268), whatever the file's name (spec 2026-11-05 §4.2)."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                "SELECT DISTINCT archive_id, archive_media FROM entity_attachments"
+                " WHERE subject IN (%s, %s) AND archive_id IS NOT NULL",
+                (fulfilment_subject(fulfilment_id), item_subject(item_id)),
+            ).fetchall()
+        return {(r["archive_id"], r["archive_media"]) for r in rows}
 
     def update_attachment(
         self,

@@ -1041,3 +1041,76 @@ def test_the_entities_migration_keeps_order_attachments_for_the_previous_build(
             "SELECT e.kind, e.ref FROM entity_attachments a JOIN entities e"
             " ON e.id = a.entity_id WHERE a.id = 'during'"
         ).fetchone() == ("order_item", "i9")
+
+
+@pytest.mark.requires_postgres
+def test_the_attempt_media_migration_backfills_the_archive_copies(pg_conninfo: str) -> None:
+    """#7231 (spec 2026-11-05 §4.2): a copy `copy_in` wrote gets its archive and medium
+    from its caption and its name, on an attempt and on an item (before #5268). A caption
+    a person edited, or a name of neither medium, stays null. Of two rows on one key only
+    the oldest is set, so the unique index can be built."""
+    attempt = "Attempt 1, Bambuddy archive"
+    rows = [
+        ("photo", "order_item_fulfilment:f", "finish_20261101.jpg", f"{attempt} 81", 5),
+        ("lapse", "order_item_fulfilment:f", "timelapse-81.mp4", f"{attempt} 81", 5),
+        ("item", "order_item:i", "finish_20261020.jpg", "Attempt 2, Bambuddy archive 70", 5),
+        ("edited", "order_item_fulfilment:f", "finish_20261102.jpg", "Front view", 5),
+        ("other", "order_item_fulfilment:f", "done.jpg", f"{attempt} 81", 5),
+        ("first", "order_item_fulfilment:f", "finish_20261103.jpg", f"{attempt} 82", 4),
+        ("second", "order_item_fulfilment:f", "finish_20261103.jpg", f"{attempt} 82", 3),
+    ]
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _index("attempt_media_provenance")])
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o', 'ORD-2026-1', 'c', 'USD', '{}')"
+        )
+        conn.execute(
+            "INSERT INTO entities (kind, ref) VALUES"
+            " ('order_item_fulfilment', 'f'), ('order_item', 'i')"
+        )
+        for row_id, subject, filename, caption, hours in rows:
+            conn.execute(
+                "INSERT INTO entity_attachments (id, order_id, subject, entity_id, kind,"
+                " filename, media_type, size_bytes, sha256, blob_key, caption, created_by,"
+                " created_at, attempt_item_id)"
+                " SELECT %s, 'o', %s, id, 'image', %s, 'image/jpeg', 1, repeat('a', 64),"
+                " 'attachment-a', %s, '{}', now() - make_interval(hours => %s),"
+                " CASE WHEN kind = 'order_item_fulfilment' THEN 'i' END"
+                " FROM entities WHERE kind || ':' || ref = %s",
+                (row_id, subject, filename, caption, hours, subject),
+            )
+        migrate(conn)
+        got = conn.execute(
+            "SELECT id, archive_id, archive_media FROM entity_attachments ORDER BY id"
+        ).fetchall()
+        assert got == [
+            ("edited", None, None),
+            ("first", 82, "finished_photo"),
+            ("item", 70, "finished_photo"),
+            ("lapse", 81, "timelapse"),
+            ("other", None, None),
+            ("photo", 81, "finished_photo"),
+            ("second", None, None),
+        ]
+        # Both set or both null, and only the two media.
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute("UPDATE entity_attachments SET archive_id = 9 WHERE id = 'edited'")
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(
+                "UPDATE entity_attachments SET archive_id = 9, archive_media = 'video'"
+                " WHERE id = 'edited'"
+            )
+        # One row per (subject, archive, medium, name).
+        with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
+            conn.execute(
+                "UPDATE entity_attachments SET archive_id = 82,"
+                " archive_media = 'finished_photo' WHERE id = 'second'"
+            )
+        assert (
+            conn.execute(
+                "SELECT timelapse_scanned_at, media_checked_at FROM order_item_fulfilments"
+            ).fetchall()
+            == []
+        )
