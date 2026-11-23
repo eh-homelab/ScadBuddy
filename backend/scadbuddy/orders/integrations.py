@@ -32,7 +32,8 @@ if TYPE_CHECKING:
 
 
 class LocalDensity(BaseModel):
-    """A Bambuddy local preset's name and ``filament_density``."""
+    """A Bambuddy local preset's, or a ScadBuddy preset's (#7176), name and
+    ``filament_density``."""
 
     name: str
     density_g_cm3: str
@@ -64,7 +65,8 @@ class SpoolGroup(BaseModel):
     #: ``None`` when no spool names one.
     slicer_filament: str | None = None
     #: The Bambuddy local preset ``slicer_filament`` names, when it is one with a density
-    #: (a preset the Bambuddy pull carried, #6262 Task 7 ruling R1).
+    #: (a preset the Bambuddy pull carried, #6262 Task 7 ruling R1), or the ScadBuddy
+    #: preset (``sb-<id>``, #7176) it names.
     local_preset: LocalDensity | None = None
     #: The newest spool's own effective density (its, else its type's, subtype's or
     #: material's), before every preset (Task 9 review ruling).

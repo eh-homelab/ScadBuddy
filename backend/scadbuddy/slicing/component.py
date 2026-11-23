@@ -16,6 +16,7 @@ from temporalio.client import Client
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.filament.sb_presets import FilamentPresetStore
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
 from scadbuddy.slicing.held_presets import HeldPresetStore, strip_kept_logged
@@ -47,9 +48,18 @@ class Slicing:
         return HeldPresetStore(self.core.projection.pool)
 
     @cached_property
+    def own(self) -> FilamentPresetStore:
+        """ScadBuddy's own filament presets (#7176); the blob store is asked at each read,
+        as it is set after the components are built."""
+        return FilamentPresetStore(self.core.settings_store.pool, lambda: self.core.store.blobs)
+
+    @cached_property
     def profiles(self) -> Profiles | None:
-        """The image's tree, with the kept copy of Bambuddy's local presets (#4645)."""
-        return Profiles.installed(self.core.settings.slicer_profiles_dir, held=self.held)
+        """The image's tree, with the kept copy of Bambuddy's local presets (#4645) and
+        ScadBuddy's own filament presets (#7176)."""
+        return Profiles.installed(
+            self.core.settings.slicer_profiles_dir, held=self.held, own=self.own
+        )
 
     @cached_property
     def starter(self) -> NativeSliceStarter | None:

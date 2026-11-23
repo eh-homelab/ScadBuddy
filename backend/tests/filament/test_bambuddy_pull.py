@@ -53,6 +53,7 @@ from scadbuddy.filament.models import (
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import SlotUse, record_uses, settle_uses
 from scadbuddy.filament.rfid_mode import RfidModeStore
+from scadbuddy.filament.sb_presets import create_on
 from scadbuddy.filament.sensors import SensorStore
 from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
@@ -355,6 +356,44 @@ def _own_presets(pool: PgPool, spool: UUID) -> list[tuple[str, str, str | None, 
                 (spool,),
             )
         ]
+
+
+def _sb_preset(pool: PgPool, bb_id: int, name: str) -> int:
+    """A ScadBuddy preset that is Bambuddy local preset ``bb_id`` (#7176); its document's
+    blob is not read here."""
+    with pool.connection() as conn, conn.transaction():
+        return create_on(
+            conn,
+            name=name,
+            source="bambuddy",
+            key=f"attachment-{bb_id:064d}",
+            sha256=f"{bb_id:064d}",
+            doc={"name": name},
+            made_by="test",
+            bb_preset_id=bb_id,
+        )
+
+
+def test_a_bambuddy_preset_scadbuddy_holds_is_pulled_as_its_sb_ref(pg_pool: PgPool) -> None:
+    """#7176 comment steps 1 and 4: the pull writes the ScadBuddy preset that has the
+    Bambuddy id Bambuddy sent; a row holding that ref holds what Bambuddy sent last, so a
+    later change in Bambuddy moves it; an id ScadBuddy does not hold yet is written as
+    it is, for the kept presets' refresh to adopt."""
+    f = _filament(pg_pool)
+    held = _sb_preset(pg_pool, 141, "SUNLU Silk")
+    pull(f, [bb(slicer_filament="141", slicer_filament_name="SUNLU Silk")], now=NOW)
+    (spool,) = f.spools.list()
+    assert _own_presets(pg_pool, spool.id) == [
+        (size, f"sb-{held}", "SUNLU Silk", True) for size in ("0.2", "0.4", "0.6", "0.8")
+    ]
+    pull(
+        f,
+        [bb(slicer_filament="142", slicer_filament_name="Other", updated_at=_bb_time(1))],
+        now=NOW,
+    )
+    assert _own_presets(pg_pool, spool.id) == [
+        (size, "142", "Other", True) for size in ("0.2", "0.4", "0.6", "0.8")
+    ]
 
 
 def test_a_bb_spools_preset_is_the_sb_spools_where_it_has_none(pg_pool: PgPool) -> None:

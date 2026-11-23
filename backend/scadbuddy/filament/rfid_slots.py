@@ -104,18 +104,27 @@ def slot_params(
     extruder: int | None,
 ) -> SlotConfigure | None:
     """What the slot is configured with: the spool's values and its type's preset for this
-    printer model and ``nozzle``. ``None`` when there is no such preset (the caller tells
-    that from the rest with `preset_for`), or the spool has no material or colour to send,
-    or no temperatures: the spool's own, else ``tray_temps`` (what the tray reports). The K
-    value is the one of this printer, ``extruder`` and nozzle; without one ``cali_idx`` is
-    ``-1`` and the K value is empty."""
+    printer model and ``nozzle``. ``None`` when there is no such preset, or it is a
+    ScadBuddy preset Bambuddy has no mirror of (#7176; the caller tells both from the rest),
+    or the spool has no material or colour to send, or no temperatures: the spool's own,
+    else ``tray_temps`` (what the tray reports). The K value is the one of this printer,
+    ``extruder`` and nozzle; without one ``cali_idx`` is ``-1`` and the K value is empty."""
     preset = preset_for(presets, printer_model, nozzle)
+    # Bambuddy knows a ScadBuddy preset by its mirror's id only (#7176).
+    ref = None if preset is None else preset.for_bambuddy()
     effective = spool.effective
     material = spool.names.material
     low, high = effective.nozzle_temp_min, effective.nozzle_temp_max
     if low is None or high is None:
         low, high = tray_temps if tray_temps else (None, None)
-    if preset is None or material is None or effective.rgba is None or low is None or high is None:
+    if (
+        preset is None
+        or ref is None
+        or material is None
+        or effective.rgba is None
+        or low is None
+        or high is None
+    ):
         return None
     k = next(
         (
@@ -128,7 +137,7 @@ def slot_params(
         None,
     )
     return SlotConfigure(
-        tray_info_idx=preset.slicer_filament,
+        tray_info_idx=ref,
         tray_type=material,
         tray_sub_brands=preset.slicer_filament_name or spool.names.subtype or material,
         tray_color=effective.rgba.lstrip("#").upper(),
@@ -286,7 +295,9 @@ async def reconcile_slots(
             if nozzle is None:
                 report.no_nozzle += 1
                 continue
-            if preset_for(presets, PRINTER_MODEL, nozzle) is None:
+            found = preset_for(presets, PRINTER_MODEL, nozzle)
+            if found is None or found.for_bambuddy() is None:
+                # A ScadBuddy preset with no mirror (#7176) is none Bambuddy can set.
                 report.no_preset += 1
                 continue
             params = slot_params(

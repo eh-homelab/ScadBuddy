@@ -265,7 +265,7 @@ export function materialNumbers(since: string, until: string): S['MaterialNumber
   }
 }
 
-/** `filament/cost_calc.py` `CostQuery`'s money: at least 0, at most four places and twelve digits. */
+/** `filament/cost_calc.py` `CostQuery`'s money: at least 0, at most eight whole digits and four places. */
 const MONEY = /^\d{1,8}(?:\.\d{1,4})?$/
 
 /** #7152 — `GET /filament/cost-per-kg`: `cost_calc.calculate` on decimal strings, never a float. */

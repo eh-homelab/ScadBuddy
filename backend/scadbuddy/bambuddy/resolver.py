@@ -42,6 +42,7 @@ from scadbuddy.bambuddy.models import (
     PresetRef,
     Tier,
 )
+from scadbuddy.slicing.own_presets import sb_id
 
 if TYPE_CHECKING:
     from scadbuddy.filament.models import EffectivePreset
@@ -410,15 +411,18 @@ def resolve(
                 else _type_preset(type_presets or (), size)
             )
             own = [] if own_preset is None else [own_preset.slicer_filament]
+            if not catalogue.is_native and own_preset is not None:
+                # Bambuddy knows a ScadBuddy preset (#7176) by its mirror's id only.
+                own = [ref for ref in [own_preset.for_bambuddy()] if ref]
             if catalogue.is_native:
                 # A spool's preset is a preset name, a Bambu Cloud setting_id, a BBL
-                # filament_id (as a tray's tray_info_idx is) or a Bambuddy local id,
-                # which the image lacks; native refs are preset names (#4349), or a kept
-                # local preset's own ref (#4645).
+                # filament_id (as a tray's tray_info_idx is), a Bambuddy local id, which
+                # the image lacks, or a ScadBuddy preset's `sb-` ref (#7176); native refs
+                # are preset names (#4349), or a kept or ScadBuddy preset's own ref (#4645).
                 mapped = {
                     preset_id: (
                         catalogue.native_ref(PresetRef(source="local", id=preset_id), "filament")
-                        if _is_local_id(preset_id)
+                        if _is_local_id(preset_id) or sb_id(preset_id) is not None
                         else catalogue.native_ref(
                             PresetRef(source="standard", id=preset_id), "filament"
                         )
@@ -428,7 +432,7 @@ def resolve(
                     for preset_id in own
                 }
                 if any(
-                    native is None and not _is_local_id(preset_id)
+                    native is None and not _is_local_id(preset_id) and sb_id(preset_id) is None
                     for preset_id, native in mapped.items()
                 ):
                     # Said, so a slot that falls back to a name is not a mystery; a
