@@ -1531,10 +1531,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   are Bambuddy's `print_attachments`, read in the same shape), `links.py` (`EntityLinkStore`
   over `entity_links`, http(s) URLs only), `sweep.py` (`sweep_orphan_entities`, the
   housekeeping step `ENTITY_ORPHANS_SWEEP`: an orphan's files and holds, then its row and
-  links; an order's kinds only once they hold no file), `operations.py` (the
+  links; an order's kinds only once they hold no file), `properties.py` (#7026,
+  `entity_properties`: a value is a string, a number, a boolean or a list of strings, at most
+  `MAX_KEYS` keys per entity; `entity_property_schemas` holds a kind's schema, an allowlisted
+  Draft 2020-12 subset that documents keys and never refuses one, each known key still taking some
+  value; a bad schema is 422 `bad_property_schema`, a bad value 422 `bad_property_value`; stored
+  values are not re-checked on a schema change), `operations.py` (the
   `entity_attachment_add` kind on the `library` queue), `activity.py`, `problems.py` and
   `component.py` (`ENTITIES`). Routes `api/entity_attachments.py` and `api/entity_links.py`
-  under `/entities/{kind}:{ref}`; the file and thumbnail GETs are scriptless
+  under `/entities/{kind}:{ref}`, and `api/entity_properties.py` (`/entities/{ref}/properties`,
+  `/entity-kinds/{kind}/properties` and `…/property-schema`); the file and thumbnail GETs are scriptless
   (`auth/routes.py` `SCRIPTLESS_GETS`). The migration `20261122T0426Z_entities.sql` keeps
   `order_attachments` as a view, with a trigger that fills `entity_id`, for the previous
   build's replicas during the roll; `20261123T0651Z_drop_order_attachments_view.sql` drops them (#6960).

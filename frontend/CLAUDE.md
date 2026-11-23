@@ -273,6 +273,8 @@ same way, `vite.config.ts`).
   `labelSheet.ts` `httpsOrigin`, `labelBase` and `locationPayload`: the QR is `<base>/x/L-<n>`, and a
   payload over 84 bytes is refused with an alert). Both place modes draw at most `MAX_LABELS` (100)
   labels, as spool labels do, and none past it (#7081).
+  The spool and type pages' section "Files, links and
+  properties" (anchor `#files-and-links`) is `components/entities/PropertiesPanel.tsx` (#7026); `lib/filamentSearch.ts` `propertyTexts` makes search match values.
   History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
   the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
   `charts/LineChart`) and metrics panel (`SpoolMetricsPanel`); the Metrics tab (`pages/filament/MetricsTab.tsx`:
