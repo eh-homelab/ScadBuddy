@@ -1,8 +1,8 @@
 """The entity registry (#6950, spec 6.1): which kinds exist, where their rows live, and
-the `entities` rows that files and links hang off.
+the `entities` rows that files, links and properties hang off.
 
-An entity row is made when the first file or link attaches, and only for an owner row
-that exists. The owner's table has no foreign key to it, so `orphans` finds the rows
+An entity row is made when the first file, link or property attaches, and only for an
+owner row that exists. The owner's table has no foreign key to it, so `orphans` finds the rows
 whose owner is gone."""
 
 from __future__ import annotations
@@ -88,8 +88,11 @@ def repoint_entity(conn: Conn, kind: str, gone: str, kept: str) -> None:
     both have keeps `kept`'s value). For a merge that
     deletes `gone`'s row and keeps `kept`'s (the printers' `PRINTER_REFERENCES`), in its
     transaction; without it the sweep would take them as an orphan's."""
+    # Locked in id order, as `apply` locks an entity, so a property write on `gone` cannot
+    # commit between the copy below and the delete, which cascades.
     rows = conn.execute(
-        "SELECT ref, id FROM entities WHERE kind = %s AND ref = ANY(%s)", (kind, [gone, kept])
+        "SELECT ref, id FROM entities WHERE kind = %s AND ref = ANY(%s) ORDER BY id FOR UPDATE",
+        (kind, [gone, kept]),
     ).fetchall()
     ids = {r["ref"]: r["id"] for r in rows}
     if gone not in ids:

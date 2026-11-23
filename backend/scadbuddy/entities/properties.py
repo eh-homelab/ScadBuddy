@@ -23,7 +23,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from scadbuddy.entities.refs import EntityRef
-from scadbuddy.entities.registry import EntityStore
+from scadbuddy.entities.registry import KINDS, EntityNotFound, EntityStore, UnknownEntityKind
 from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
@@ -325,13 +325,23 @@ class EntityPropertyStore:
         row is not there, `BadPropertyValue` for a bad key or value, or (key ``*``) for more
         than `MAX_KEYS` keys after it and more than before it (a printer merge may leave an
         entity past the limit; it can still remove and change keys). The entity's
-        properties after it, by key."""
+        properties after it, by key. A patch that only removes keys makes no entity row.
+        The kind's schema is read before the transaction, so a schema written meanwhile
+        types the next patch, not this one."""
         # Every value is checked before the entity's lock, so a check holds no lock.
         with self.pool.connection() as conn:
             schema = _schema_in(conn, ref.kind)
         _checked(patch, schema)
         with self.pool.connection() as conn, conn.transaction():
-            entity_id = self.entities.ensure(conn, ref)
+            if all(value is None for value in patch.set.values()):
+                found = self.entities.find(conn, ref)
+                if found is None:
+                    if not self.entities.exists(conn, ref):
+                        raise EntityNotFound(str(ref))
+                    return []
+                entity_id = found
+            else:
+                entity_id = self.entities.ensure(conn, ref)
             # One writer at a time per entity, so the key count holds.
             conn.execute("SELECT 1 FROM entities WHERE id = %s FOR UPDATE", (entity_id,))
             before = conn.execute(
@@ -380,7 +390,10 @@ class EntityPropertyStore:
             return _schema_in(conn, kind)
 
     def set_schema(self, kind: str, schema: dict[str, Any], by: Actor) -> dict[str, Any]:
-        """A person's write of the kind's schema; `BadPropertySchema` leaves the old one."""
+        """A person's write of the kind's schema; `BadPropertySchema` leaves the old one,
+        and `UnknownEntityKind` refuses a kind the registry does not have."""
+        if kind not in KINDS:
+            raise UnknownEntityKind(kind)
         check_schema(schema)
         with self.pool.connection() as conn:
             row = conn.execute(

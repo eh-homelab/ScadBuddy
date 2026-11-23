@@ -16,7 +16,7 @@ from scadbuddy.entities.properties import (
     check_schema,
 )
 from scadbuddy.entities.refs import EntityRef
-from scadbuddy.entities.registry import EntityNotFound, EntityStore
+from scadbuddy.entities.registry import EntityNotFound, EntityStore, UnknownEntityKind
 from tests.conftest import PgPool
 from tests.entities.test_sweep import BY
 
@@ -516,3 +516,24 @@ def test_set_schema_refuses_a_nul_anywhere(
         props.set_schema("spool_type", schema, BY)
 
     assert props.schema("spool_type") == before
+
+
+def test_a_patch_that_only_removes_makes_no_entity_row(
+    pg_pool: PgPool, props: EntityPropertyStore
+) -> None:
+    kind = _spool_type(pg_pool)
+
+    assert props.apply(kind, _patch({"td": None}), BY) == []
+
+    with pg_pool.connection() as conn:
+        assert EntityStore(pg_pool).find(conn, kind) is None
+    gone = EntityRef("spool_type", "00000000-0000-0000-0000-000000000000")
+    with pytest.raises(EntityNotFound):
+        props.apply(gone, _patch({"td": None}), BY)
+
+
+def test_set_schema_refuses_a_kind_the_registry_does_not_have(
+    props: EntityPropertyStore,
+) -> None:
+    with pytest.raises(UnknownEntityKind):
+        props.set_schema("not_a_kind", {"type": "object"}, BY)
