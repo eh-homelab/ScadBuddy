@@ -256,6 +256,9 @@ def _key(sub: dict[str, Any]) -> dict[str, Any]:
         _key({"type": "array", "items": {"type": "string", "minLength": 501}}),
         _key({"type": "array", "minItems": 3, "maxItems": 2}),
         _key({"type": "array", "minItems": 51}),
+        _key({"type": "number", "enum": ["a"]}),
+        _key({"type": "string", "const": 3}),
+        _key({"type": "number", "minimum": 5, "enum": [1, 2]}),
         {"type": "object", "$schema": "http://json-schema.org/draft-07/schema#"},
     ],
     ids=[
@@ -277,6 +280,9 @@ def _key(sub: dict[str, Any]) -> dict[str, Any]:
         "items_min_length_over_cap",
         "min_items_over_max_items",
         "min_items_over_cap",
+        "enum_off_type",
+        "const_off_type",
+        "enum_out_of_bounds",
         "draft_07",
     ],
 )

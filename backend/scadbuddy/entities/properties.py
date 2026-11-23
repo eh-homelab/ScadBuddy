@@ -228,10 +228,12 @@ def _check_key(sub: Any, where: str, item: bool) -> None:
             )
     if sub.get("format") == "regex":
         raise BadPropertySchema(f"format 'regex' is not allowed {where}")
-    if "enum" in sub and not any(_takes(v, item) for v in sub["enum"]):
-        raise BadPropertySchema(f"'enum' {where} holds no value a key can take")
-    if "const" in sub and not _takes(sub["const"], item):
-        raise BadPropertySchema(f"'const' {where} is no value a key can take")
+    if "enum" in sub or "const" in sub:
+        own = _validator(json.dumps(sub, sort_keys=True))
+        if "enum" in sub and not any(_takes(v, item) and own.is_valid(v) for v in sub["enum"]):
+            raise BadPropertySchema(f"'enum' {where} holds no value a key can take")
+        if "const" in sub and not (_takes(sub["const"], item) and own.is_valid(sub["const"])):
+            raise BadPropertySchema(f"'const' {where} is no value a key can take")
     _check_bounds(sub, where, MAX_LIST_ITEM if item else MAX_STRING)
     if "items" in sub:
         items_where = "in the items of " + where.removeprefix("in ")
