@@ -1575,7 +1575,8 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
         "`weighed` with `grams` (the filament left, without the empty spool) is a new "
         "reading: `grams_left` starts again from it. `dried` takes `temp_c` and `hours`; "
         "one left out is the spool's `drying_defaults` value (its type's, else its "
-        "subtype's, else its material's), and `null` records none. `consumed_reset` takes "
+        "subtype's, else its material's, else the setting `filament_drying_temp_c` or "
+        "`filament_drying_hours`), and `null` records none. `consumed_reset` takes "
         "nothing and starts the spool's consumed counter again (`consumed_g`); the grams "
         "left stay. On a spool linked to Bambuddy a `consumed_reset` whose `at` is not "
         "after the link is a 422 with `code` `reset_before_link` (#7149 R-7149-12): the sync "
@@ -2320,9 +2321,12 @@ async def import_bambuddy(
     response_model=m.RfidStatus,
     summary="Read the RFID override mode",
     description=(
-        "Whether the RFID override mode is on, and where Bambuddy's `auto_add_unknown_rfid` "
-        "stands: `applied` (mode on, Bambuddy's value is false), `pending` (a write has not "
-        "landed, or Bambuddy could not be reached; `detail` names the error), `blocked` "
+        "Whether the RFID override mode is on, whether the setting "
+        "`filament_auto_add_unknown_rfid` is on (`auto_add_unknown_rfid`; off holds Bambuddy's "
+        "value off as the mode does, #7156), and where Bambuddy's `auto_add_unknown_rfid` "
+        "stands: `applied` (the mode or the setting holds it, and Bambuddy's value is false), "
+        "`pending` (a write has not landed, or Bambuddy could not be reached; `detail` names "
+        "the error), `blocked` "
         "(Bambuddy refused the write because its auth is on) or `off`. Also lists the "
         "SpoolBuddy devices. Reads Bambuddy and writes nothing; when Bambuddy fails, "
         "`bambuddy_auto_add` is null and `devices` is empty."
@@ -2338,7 +2342,8 @@ async def get_rfid_status(filament: FilamentDep, store: SettingsStoreDep) -> m.R
     summary="Turn the RFID override mode on or off",
     description=(
         "While the mode is on, Bambuddy's auto-add of unknown RFID spools is turned off; "
-        "the value Bambuddy had is saved first and put back when the mode turns off. The "
+        "the value Bambuddy had is saved first and put back when the mode turns off, unless "
+        "the setting `filament_auto_add_unknown_rfid` is off and still holds it (#7156). The "
         "mode is written first, then Bambuddy is reconciled once, and the answer is the "
         "status. It is 200 even when Bambuddy refuses the write (`blocked`: its auth is "
         "on) or cannot be reached (`pending`); the mode then stays as asked and the "
@@ -2361,7 +2366,8 @@ async def set_rfid_override_mode(
     summary="Reconcile RFID with Bambuddy now",
     description=(
         "Runs once what the spool refresh Schedule runs: Bambuddy's `auto_add_unknown_rfid` "
-        "is brought to the override mode, then the queued tag changes are pushed (only with "
+        "is brought to the override mode and the setting `filament_auto_add_unknown_rfid`, "
+        "then the queued tag changes are pushed (only with "
         "`filament_sync.tags` `sb_to_bb` or `two_way`), then the AMS slot of each override tag is "
         "configured with its type's preset. Answers the mode's status and the tag push "
         "counts, and the override slots' counts (`slots` is null with no Bambuddy)."
