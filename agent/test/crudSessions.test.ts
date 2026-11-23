@@ -202,6 +202,23 @@ describe("a session's row through the CRUD routes", () => {
     await expect(store.insert(row)).rejects.toThrow('no CRUD route answered')
   })
 
+  it("sends a session's browser options only when given, and reads them back (#7027)", async () => {
+    const BROWSER = { user_agent: 'Mozilla/5.0 Test', viewport: { width: 1280, height: 800 }, locale: 'en-GB' }
+    const api = new FakeApi()
+      .answer('POST /sessions', { session: { ...WIRE_TURN_ROW, browser: BROWSER } })
+      .answer(`GET /sessions/${SESSION}`, { session: { ...WIRE_TURN_ROW, browser: BROWSER } })
+      .answer('POST /sessions/list', { sessions: [{ ...WIRE_ROW, browser: null }] })
+    const store = rows(api)
+    const row = { id: SESSION, origin: 'chat' as const, owner: TOKEN, title: 't', tags: [], scope: {}, parentId: null, runtime: 'unified' as const, maxTurns: 20, budgetUsd: 5 }
+    await store.insert({ ...row, browser: BROWSER })
+    await store.insert(row)
+    const [given, absent] = api.seen.map((s) => s.body as Record<string, unknown>)
+    expect(given?.browser).toEqual(BROWSER)
+    expect(absent).not.toHaveProperty('browser')
+    expect((await store.get(SESSION))?.browser).toEqual(BROWSER)
+    expect((await store.list(TOKEN, {}))[0]?.browser).toBeNull()
+  })
+
   it('sends every string well-formed: a lone surrogate goes as U+FFFD, as postgres.js wrote it', async () => {
     const api = new FakeApi().answer('POST /sessions', { session: WIRE_TURN_ROW }).answer('POST /sessions/list', { sessions: [] })
     const store = rows(api)

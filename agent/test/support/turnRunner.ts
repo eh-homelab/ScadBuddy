@@ -92,6 +92,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     title: 'test',
     tags: [],
     scope: {},
+    browser: null,
     parentId: null,
     mode: 'classic',
     runtime: null,

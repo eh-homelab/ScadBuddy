@@ -10,6 +10,9 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, withoutTemporal } from './support/agentSessions.js'
+import { CrudReadError } from '../src/api/crudRead.js'
+import type { NewSessionRow } from '../src/sessions/rows.js'
+import { PgSessionRows } from './support/sql/sessionRows.js'
 
 // /api/v1/ai/sessions (routes/sessions.ts) over a scripted runner: the routes'
 // own behaviour (guard, status codes, the SSE replay). The real SDK path is
@@ -109,6 +112,59 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
     // Without Temporal, a new session is refused, whatever mode it names (spec 2026-10-13 §10.1).
     withoutTemporal(m)
     expect((await start({ title: 'e', mode: 'classic' })).status).toBe(503)
+  })
+
+  it("keeps a new session's browser options, shows them, and a fork keeps its parent's (#7027)", async () => {
+    const BROWSER = { user_agent: 'Mozilla/5.0 Test', viewport: { width: 1280, height: 800 }, locale: 'en-GB' }
+    const start = (body: unknown) =>
+      app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify(body) })
+    const res = await start({ title: 'a', browser: BROWSER })
+    expect(res.status).toBe(201)
+    const { session } = (await res.json()) as { session: { id: string; browser: unknown } }
+    expect(session.browser).toEqual(BROWSER)
+    const one = (await (await app.request(`/api/v1/ai/sessions/${session.id}`, { headers: UI_READ })).json()) as { browser: unknown }
+    expect(one.browser).toEqual(BROWSER)
+    const plain = (await (await start({ title: 'b' })).json()) as { session: { browser: unknown } }
+    expect(plain.session.browser).toBeNull()
+    // The shape is checked here; the bounds are the API's.
+    expect((await start({ title: 'c', browser: { colour: 'red' } })).status).toBe(400)
+    expect((await start({ title: 'c', browser: { viewport: { width: '1280', height: 800 } } })).status).toBe(400)
+    // The scripted runner writes no SDK transcript; the fork needs one.
+    await m.store.append({ projectKey: 'p', sessionId: session.id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    const forked = await app.request(`/api/v1/ai/sessions/${session.id}/fork`, { method: 'POST', headers: JSON_UI, body: '{}' })
+    expect(forked.status).toBe(201)
+    expect(((await forked.json()) as { session: { browser: unknown } }).session.browser).toEqual(BROWSER)
+  })
+
+  it('answers 422 for browser options the API refused, naming the field (#7027)', async () => {
+    m.abortAll()
+    const { runner } = scriptedRunner(() => next)
+    class Refusing extends PgSessionRows {
+      override async insert(row: NewSessionRow) {
+        if (row.browser) {
+          throw new CrudReadError('the agent CRUD route a new session (HTTP 422)', 422, true, {
+            detail: 'the request did not match the expected shape',
+            fields: ['body.browser.user_agent'],
+          })
+        }
+        return super.insert(row)
+      }
+    }
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, rows: new Refusing(db.sql) })
+    app = createApp(deps())
+    await expect(m.start(browser, { origin: 'chat', browser: { user_agent: 'x' } })).rejects.toMatchObject({
+      code: 'invalid_browser',
+      status: 422,
+      message: expect.stringMatching(/browser\.user_agent.*the request did not match the expected shape/),
+    })
+    const res = await app.request('/api/v1/ai/sessions', {
+      method: 'POST',
+      headers: JSON_UI,
+      body: JSON.stringify({ title: 'a', browser: { user_agent: 'x' } }),
+    })
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { detail: string }).detail).toMatch(/browser\.user_agent/)
+    expect(await m.list(browser)).toHaveLength(0)
   })
 
   it('streams the event log as SSE from ?after= / Last-Event-ID', async () => {
