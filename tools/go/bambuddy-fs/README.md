@@ -160,7 +160,11 @@ Listings are cached for `--attr-ttl`. One request at a time lists a folder: look
 `readdir`s that need it meanwhile share that request and its answer. A listing older
 than `--attr-ttl` is served at once while one background refresh lists the folder again
 (span `listing.refresh`, counted in `bambuddy_fs.listing.refreshes` by result), so
-only a folder not yet listed waits. Every write through the mount (create, upload,
+only a folder not yet listed waits. A lookup of a name the old listing lacks waits for
+that refresh, so the kernel never caches "no such file" for a file added since. A write
+(create, `mkdir`, `rmdir`, rename, `unlink`) checks its names against a listing younger
+than `--attr-ttl`, waiting for the refresh in flight or a new one, so it never acts on a
+file renamed or added since. Every write through the mount (create, upload,
 `mkdir`, `rmdir`, rename, `unlink`) invalidates its folder, and the writer's next
 lookup waits for a listing asked for after the write. With `--attr-ttl 0`, every
 lookup and `readdir` waits for a listing.

@@ -117,20 +117,35 @@ type fetch struct {
 	serveLast bool
 }
 
+// staleness is how old a listing list may answer with.
+type staleness bool
+
+const (
+	// anyAge serves an expired listing at once, and refreshes it in the background:
+	// for lookups and readdirs.
+	anyAge staleness = true
+	// current waits for a listing younger than the TTL, which may be the request in
+	// flight: for the checks a write makes before it changes the library, which must
+	// not act on a listing from long ago.
+	current staleness = false
+)
+
 // list returns a folder's entries, from the cache while they are younger than the TTL.
 // One request at a time lists a folder; concurrent callers share it (#7285). With a
-// TTL above 0, an expired listing is served at once and refreshed in the background;
-// only a folder never listed, or one a write forgot, waits for its listing.
+// TTL above 0 and anyAge, an expired listing is served at once and refreshed in the
+// background; only a folder never listed, or one a write forgot, waits for its
+// listing. With current, an expired listing waits for the request in flight, or a new
+// one.
 //
 // While ScadBuddy cannot answer (unreachable, a timeout, a 5xx: a deploy takes
 // minutes), the folder's last listing is served whatever its age, so lookups,
 // listings, creates and renames go on and a save reaches the unsent queue; the first
 // such answer is logged, and the first listing after it. A folder never listed has
 // none to serve and answers the error.
-func (t *tree) list(ctx context.Context, folderID int) (listing, syscall.Errno) {
+func (t *tree) list(ctx context.Context, folderID int, a staleness) (listing, syscall.Errno) {
 	t.mu.Lock()
 	l, ok := t.listings[folderID]
-	if ok && t.servable(l) {
+	if ok && (t.fresh(l) || a == anyAge && t.servable(l)) {
 		if !t.fresh(l) && t.fetches[folderID] == nil {
 			t.startFetch(ctx, folderID, true)
 		}
@@ -184,8 +199,8 @@ func (t *tree) fetch(ctx context.Context, folderID int, f *fetch, r *telemetry.R
 	defer cancel()
 	got, err := t.lib.List(ctx, folderID, t.opts.All)
 	t.mu.Lock()
-	current := t.fetches[folderID] == f
-	if current {
+	isCurrent := t.fetches[folderID] == f
+	if isCurrent {
 		delete(t.fetches, folderID)
 	}
 	if err != nil {
@@ -196,7 +211,7 @@ func (t *tree) fetch(ctx context.Context, folderID int, f *fetch, r *telemetry.R
 			f.serveLast = true
 			first = !t.down
 			t.down = true
-		} else if had && current && r != nil {
+		} else if had && isCurrent && r != nil {
 			// A refresh refused (the folder is gone, say): the next use lists it again
 			// and answers the error.
 			last.at = time.Time{}
@@ -216,11 +231,14 @@ func (t *tree) fetch(ctx context.Context, folderID int, f *fetch, r *telemetry.R
 	}
 	folders, files := shownNames(got.Folders, got.Files, folderID)
 	f.l = listing{at: time.Now(), folders: folders, files: files}
-	if current {
+	// An answer no longer current may be from before ScadBuddy went down, and says
+	// nothing of now.
+	back := false
+	if isCurrent {
 		t.listings[folderID] = f.l
+		back = t.down
+		t.down = false
 	}
-	back := t.down
-	t.down = false
 	t.mu.Unlock()
 	if back {
 		slog.Info("ScadBuddy answers again; listings are fresh")
@@ -246,6 +264,13 @@ func (t *tree) fresh(l listing) bool {
 // expired but not forgotten. With a TTL of 0 every use lists the folder.
 func (t *tree) servable(l listing) bool {
 	return t.fresh(l) || (t.opts.TTL > 0 && !l.at.IsZero())
+}
+
+// isDown is whether listings are served stale because ScadBuddy is not answering.
+func (t *tree) isDown() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.down
 }
 
 // answersNow is whether list answers a folder from its listing without waiting.
@@ -275,8 +300,8 @@ type view struct {
 	queued map[string]*entry
 }
 
-func (t *tree) view(ctx context.Context, folderID int) (view, syscall.Errno) {
-	l, errno := t.list(ctx, folderID)
+func (t *tree) view(ctx context.Context, folderID int, a staleness) (view, syscall.Errno) {
+	l, errno := t.list(ctx, folderID, a)
 	if errno != 0 {
 		return view{}, errno
 	}
@@ -478,23 +503,43 @@ func (t *tree) statfs(out *fuse.StatfsOut) {
 func (d *dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (_ *fs.Inode, errno syscall.Errno) {
 	ctx, op := d.listing(ctx, "lookup")
 	defer func() { op.End(errno) }()
-	l, errno := d.tree.view(ctx, d.id)
+	l, errno := d.tree.view(ctx, d.id, anyAge)
 	if errno != 0 {
 		return nil, errno
 	}
+	if child := d.find(ctx, l, name, out); child != nil {
+		return child, 0
+	}
+	if d.tree.fresh(l.listing) || d.tree.isDown() {
+		return nil, syscall.ENOENT
+	}
+	// A miss in an expired listing waits for a current one: the kernel keeps an
+	// ENOENT as a negative entry, which would hide a file added since. While
+	// ScadBuddy is not answering, the last listing is the answer.
+	if l, errno = d.tree.view(ctx, d.id, current); errno != 0 {
+		return nil, errno
+	}
+	if child := d.find(ctx, l, name, out); child != nil {
+		return child, 0
+	}
+	return nil, syscall.ENOENT
+}
+
+// find returns the child called name in l, or nil.
+func (d *dir) find(ctx context.Context, l view, name string, out *fuse.EntryOut) *fs.Inode {
 	if f, ok := l.folders[name]; ok {
 		child := &dir{tree: d.tree, id: f.ID}
 		child.attr(&out.Attr)
-		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: dirIno(f.ID)}), 0
+		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: dirIno(f.ID)})
 	}
 	if f, ok := l.files[name]; ok {
 		child := &file{tree: d.tree, file: f}
 		child.attr(&out.Attr)
-		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: fileIno(f.ID)}), 0
+		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: fileIno(f.ID)})
 	}
 	if child, n := d.unsent(name); child != nil {
 		n.attr(&out.Attr)
-		return child, 0
+		return child
 	}
 	if e := l.queued[name]; e != nil {
 		if rec, ok := d.tree.unsent.record(e); ok {
@@ -504,10 +549,10 @@ func (d *dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (_ *f
 				n.bind(e)
 				n.attr(&out.Attr)
 			}
-			return child, 0
+			return child
 		}
 	}
-	return nil, syscall.ENOENT
+	return nil
 }
 
 // unsent returns the child called name if it is a file created here and not uploaded
@@ -526,7 +571,7 @@ func (d *dir) unsent(name string) (*fs.Inode, *file) {
 func (d *dir) Readdir(ctx context.Context) (_ fs.DirStream, errno syscall.Errno) {
 	ctx, op := d.listing(ctx, "readdir")
 	defer func() { op.End(errno) }()
-	l, errno := d.tree.view(ctx, d.id)
+	l, errno := d.tree.view(ctx, d.id, anyAge)
 	if errno != 0 {
 		return nil, errno
 	}

@@ -2,11 +2,13 @@ package fsys
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -60,7 +62,7 @@ func listAll(tr *tree, folderID, n int) <-chan []string {
 	out := make(chan []string, n)
 	for range n {
 		go func() {
-			l, errno := tr.list(context.Background(), folderID)
+			l, errno := tr.list(context.Background(), folderID, anyAge)
 			if errno != 0 {
 				out <- []string{errno.Error()}
 				return
@@ -104,7 +106,7 @@ func TestAStaleListingIsServedWhileOneRefreshRuns(t *testing.T) {
 	lib := newFakeLibrary()
 	lib.file(10, "a.3mf", 0, []byte("a"))
 	tr := newTree(t, lib, time.Minute)
-	if _, errno := tr.list(context.Background(), 0); errno != 0 {
+	if _, errno := tr.list(context.Background(), 0, anyAge); errno != 0 {
 		t.Fatal(errno)
 	}
 	age(tr, 0)
@@ -124,7 +126,7 @@ func TestAStaleListingIsServedWhileOneRefreshRuns(t *testing.T) {
 	}
 	eventually(t, "the refresh", func() bool { return lists(lib) == 2 })
 	for range 4 {
-		if _, errno := tr.list(context.Background(), 0); errno != 0 {
+		if _, errno := tr.list(context.Background(), 0, anyAge); errno != 0 {
 			t.Fatal(errno)
 		}
 	}
@@ -134,7 +136,7 @@ func TestAStaleListingIsServedWhileOneRefreshRuns(t *testing.T) {
 	}
 	release()
 	eventually(t, "the refreshed listing", func() bool {
-		l, errno := tr.list(context.Background(), 0)
+		l, errno := tr.list(context.Background(), 0, anyAge)
 		return errno == 0 && slices.Equal(fileNames(l), []string{"a.3mf", "b.3mf"})
 	})
 	if n := lists(lib); n != 2 {
@@ -159,7 +161,7 @@ func TestAForgottenListingIsNotServedStale(t *testing.T) {
 	lib := newFakeLibrary()
 	lib.file(10, "a.3mf", 0, []byte("a"))
 	tr := newTree(t, lib, time.Minute)
-	if _, errno := tr.list(context.Background(), 0); errno != 0 {
+	if _, errno := tr.list(context.Background(), 0, anyAge); errno != 0 {
 		t.Fatal(errno)
 	}
 	age(tr, 0)
@@ -173,13 +175,13 @@ func TestAForgottenListingIsNotServedStale(t *testing.T) {
 	})
 	defer close(gate)
 	// The refresh (list 2) reads the library before the write and answers after it.
-	if _, errno := tr.list(context.Background(), 0); errno != 0 {
+	if _, errno := tr.list(context.Background(), 0, anyAge); errno != 0 {
 		t.Fatal(errno)
 	}
 	eventually(t, "the refresh", func() bool { return lists(lib) == 2 })
 	lib.file(11, "b.3mf", 0, []byte("b"))
 	tr.forget(0)
-	l, errno := tr.list(context.Background(), 0)
+	l, errno := tr.list(context.Background(), 0, anyAge)
 	if errno != 0 || !slices.Equal(fileNames(l), []string{"a.3mf", "b.3mf"}) {
 		t.Fatalf("after the write: %v %v", fileNames(l), errno)
 	}
@@ -199,12 +201,12 @@ func TestTheLastListingIsServedWhileScadBuddyIsDown(t *testing.T) {
 	lib := newFakeLibrary()
 	lib.file(10, "a.3mf", 0, []byte("a"))
 	tr := newTree(t, lib, time.Minute)
-	if _, errno := tr.list(context.Background(), 0); errno != 0 {
+	if _, errno := tr.list(context.Background(), 0, anyAge); errno != 0 {
 		t.Fatal(errno)
 	}
 	age(tr, 0)
 	lib.setAllDown(true)
-	if l, errno := tr.list(context.Background(), 0); errno != 0 || !slices.Equal(fileNames(l), []string{"a.3mf"}) {
+	if l, errno := tr.list(context.Background(), 0, anyAge); errno != 0 || !slices.Equal(fileNames(l), []string{"a.3mf"}) {
 		t.Fatalf("stale while down: %v %v", fileNames(l), errno)
 	}
 	eventually(t, "the failed refresh", func() bool {
@@ -213,18 +215,18 @@ func TestTheLastListingIsServedWhileScadBuddyIsDown(t *testing.T) {
 		return tr.down && len(tr.fetches) == 0
 	})
 	tr.forget(0)
-	if l, errno := tr.list(context.Background(), 0); errno != 0 || !slices.Equal(fileNames(l), []string{"a.3mf"}) {
+	if l, errno := tr.list(context.Background(), 0, anyAge); errno != 0 || !slices.Equal(fileNames(l), []string{"a.3mf"}) {
 		t.Fatalf("forgotten while down: %v %v", fileNames(l), errno)
 	}
 	if n := strings.Count(log.String(), "ScadBuddy is not answering"); n != 1 {
 		t.Fatalf("logged %d times:\n%s", n, log)
 	}
-	if _, errno := tr.list(context.Background(), 4); errno == 0 {
+	if _, errno := tr.list(context.Background(), 4, anyAge); errno == 0 {
 		t.Fatal("a folder never listed answered while down")
 	}
 	lib.setAllDown(false)
 	tr.forget(0)
-	if _, errno := tr.list(context.Background(), 0); errno != 0 {
+	if _, errno := tr.list(context.Background(), 0, anyAge); errno != 0 {
 		t.Fatal(errno)
 	}
 	if !strings.Contains(log.String(), "ScadBuddy answers again") {
@@ -270,5 +272,113 @@ func TestWritesShowAtOnceUnderALongTTL(t *testing.T) {
 	}
 	if got := names(t, dir); len(got) != 0 {
 		t.Fatalf("after rmdir: %v", got)
+	}
+}
+
+// renameIn renames a file in the library, as the ScadBuddy UI does.
+func renameIn(lib *fakeLibrary, id int, name string) {
+	lib.locked(func() {
+		f := lib.files[id]
+		f.Name = name
+		lib.files[id] = f
+	})
+}
+
+func hasFile(lib *fakeLibrary, id int) (ok bool) {
+	lib.locked(func() { _, ok = lib.files[id] })
+	return ok
+}
+
+// The checks a write makes before it changes the library wait for a listing younger
+// than the TTL: an expired one may name a file renamed or added since.
+func TestWritesWaitForACurrentListing(t *testing.T) {
+	ctx := context.Background()
+	lib := newFakeLibrary()
+	lib.file(10, "a.3mf", 0, []byte("a"))
+	tr := newTree(t, lib, time.Hour)
+	root := &dir{tree: tr}
+	if _, errno := tr.list(ctx, 0, anyAge); errno != 0 {
+		t.Fatal(errno)
+	}
+
+	age(tr, 0)
+	renameIn(lib, 10, "b.3mf")
+	if errno := root.Unlink(ctx, "a.3mf"); errno != syscall.ENOENT {
+		t.Fatalf("unlink of a name renamed since: %v", errno)
+	}
+	if !hasFile(lib, 10) {
+		t.Fatal("unlink deleted the renamed file")
+	}
+
+	age(tr, 0)
+	lib.file(11, "x.3mf", 0, []byte("x"))
+	if errno := root.Rename(ctx, "b.3mf", root, "x.3mf", renameNoReplace); errno != syscall.EEXIST {
+		t.Fatalf("rename over a file added since: %v", errno)
+	}
+	age(tr, 0)
+	renameIn(lib, 10, "c.3mf")
+	if errno := root.Rename(ctx, "b.3mf", root, "d.3mf", 0); errno != syscall.ENOENT {
+		t.Fatalf("rename of a name renamed since: %v", errno)
+	}
+
+	age(tr, 0)
+	lib.file(12, "y.3mf", 0, []byte("y"))
+	if errno := root.free(ctx, root, "y.3mf"); errno != syscall.EEXIST {
+		t.Fatalf("create over a file added since: %v", errno)
+	}
+
+	age(tr, 0)
+	lib.folder(5, "Sub", 0)
+	if errno := root.Rmdir(ctx, "Sub"); errno != 0 {
+		t.Fatalf("rmdir of a folder added since: %v", errno)
+	}
+
+	// A write joins the refresh in flight rather than asking again.
+	age(tr, 0)
+	before := lists(lib) + 1
+	release := holdLists(lib, before)
+	defer release()
+	if _, errno := tr.list(ctx, 0, anyAge); errno != 0 {
+		t.Fatal(errno)
+	}
+	eventually(t, "the refresh", func() bool { return lists(lib) == before })
+	done := make(chan syscall.Errno, 1)
+	go func() { done <- root.free(ctx, root, "z.3mf") }()
+	select {
+	case errno := <-done:
+		t.Fatalf("answered from the expired listing: %v", errno)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	if errno := <-done; errno != 0 {
+		t.Fatal(errno)
+	}
+	if n := lists(lib); n != before {
+		t.Fatalf("listed %d times, not %d", n, before)
+	}
+}
+
+// Through the mount: a lookup that misses in an expired listing waits for a current
+// one, so the kernel keeps no negative entry for a file added since, and an unlink
+// never deletes a file renamed since under its old name.
+func TestAStaleListingThroughTheMount(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.file(10, "a.3mf", 0, []byte("a"))
+	mnt, root := mountRoot(t, lib, Options{TTL: time.Hour})
+	if got := names(t, mnt); !slices.Equal(got, []string{"a.3mf"}) {
+		t.Fatalf("listed: %v", got)
+	}
+	age(root.tree, 0)
+	lib.file(11, "b.3mf", 0, []byte("b"))
+	if _, err := os.Stat(filepath.Join(mnt, "b.3mf")); err != nil {
+		t.Fatalf("a file added since: %v", err)
+	}
+	age(root.tree, 0)
+	renameIn(lib, 10, "c.3mf")
+	if err := os.Remove(filepath.Join(mnt, "a.3mf")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unlink of a name renamed since: %v", err)
+	}
+	if !hasFile(lib, 10) {
+		t.Fatal("unlink deleted the renamed file")
 	}
 }
