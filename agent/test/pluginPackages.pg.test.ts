@@ -65,6 +65,34 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
   const install = async () => store.create(await installer.prepare(validateSource({ kind: 'git', url: GIT_URL })))
 
   describe('the store', () => {
+    // #6935: an archive or npm package is pinned to its file's sha256 (pin kind `bytes`).
+    it('stores, re-pins and approves a bytes pin by its sha256', async () => {
+      const B1 = 'c'.repeat(64)
+      const B2 = 'd'.repeat(64)
+      const prepared = await installer.prepare(validateSource({ kind: 'git', url: GIT_URL }))
+      const bytes = (sha: string, ref = '') => ({
+        ...prepared,
+        source: { kind: 'archive' as const, url: 'https://files.test/greeter.zip', ref },
+        fetchUrl: 'https://files.test/greeter.zip',
+        fetchPath: 'greeter-1.0',
+        commit: '',
+        bytesSha256: sha,
+      })
+      const made = await store.create(bytes(B1))
+      expect(made).toMatchObject({ pin_kind: 'bytes', commit_sha: null, bytes_sha256: B1, source: { kind: 'archive', plugin_path: 'greeter-1.0' } })
+      await expect(store.approve('greeter', B1, made.content_hash)).rejects.toMatchObject({ status: 409 })
+      expect((await store.approve('greeter', B1, made.content_hash, false, 'bytes')).approved).toBe(true)
+      await store.setEnabled('greeter', true)
+      expect((await store.enabledPins())[0]).toMatchObject({ commit: '', bytesSha256: B1, fetchPath: 'greeter-1.0' })
+      await expect(store.setPending('greeter', bytes(B1))).rejects.toMatchObject({ status: 409 })
+      const pending = await store.setPending('greeter', { ...bytes(B2), contentHash: `sha256:${'e'.repeat(64)}` })
+      expect(pending.pending).toMatchObject({ pin_kind: 'bytes', bytes_sha256: B2, commit_sha: null, ref: '' })
+      expect((await store.filesOf('greeter', true))?.pin).toMatchObject({ bytesSha256: B2 })
+      const approved = await store.approve('greeter', B2, `sha256:${'e'.repeat(64)}`, false, 'bytes')
+      expect(approved).toMatchObject({ bytes_sha256: B2, pending: null, enabled: true })
+      expect(await store.pinOf('greeter')).toMatchObject({ source: { kind: 'archive', url: 'https://files.test/greeter.zip', ref: '' } })
+    })
+
     it('stores an install unapproved and disabled; enabling needs the approval of exactly that pin', async () => {
       const installed = await install()
       expect(installed).toMatchObject({
@@ -76,13 +104,13 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
         pending: null,
       })
       await expect(store.setEnabled('greeter', true)).rejects.toMatchObject({ status: 409 })
-      await expect(store.approve('greeter', installed.commit_sha, `sha256:${'0'.repeat(64)}`)).rejects.toMatchObject({
+      await expect(store.approve('greeter', installed.commit_sha!, `sha256:${'0'.repeat(64)}`)).rejects.toMatchObject({
         status: 409,
       })
       await expect(store.approve('greeter', 'f'.repeat(40), installed.content_hash)).rejects.toMatchObject({ status: 409 })
       expect(await store.enabledPins()).toEqual([])
 
-      const approved = await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      const approved = await store.approve('greeter', installed.commit_sha!, installed.content_hash)
       expect(approved.approved).toBe(true)
       expect((await store.setEnabled('greeter', true)).enabled).toBe(true)
       expect(await store.enabledPins()).toEqual([
@@ -90,7 +118,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
           name: 'greeter',
           fetchUrl: GIT_URL,
           fetchPath: '',
-          commit: installed.commit_sha,
+          commit: installed.commit_sha!,
           contentHash: installed.content_hash,
           allowRefused: false,
         },
@@ -104,16 +132,16 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       const installed = await install()
       expect(installed).toMatchObject({ approved: false, allow_refused: false })
       expect(installed.review.refused).toEqual([expect.stringMatching(/Stop has a "command" hook/)])
-      await expect(store.approve('greeter', installed.commit_sha, installed.content_hash)).rejects.toMatchObject({
+      await expect(store.approve('greeter', installed.commit_sha!, installed.content_hash)).rejects.toMatchObject({
         status: 409,
         message: expect.stringMatching(/allow_refused/),
       })
-      const approved = await store.approve('greeter', installed.commit_sha, installed.content_hash, true)
+      const approved = await store.approve('greeter', installed.commit_sha!, installed.content_hash, true)
       expect(approved).toMatchObject({ approved: true, allow_refused: true })
       await store.setEnabled('greeter', true)
       expect((await store.enabledPins())[0]?.allowRefused).toBe(true)
       // Re-approving it without the flag is refused, not a silent downgrade.
-      await expect(store.approve('greeter', installed.commit_sha, installed.content_hash, false)).rejects.toMatchObject({
+      await expect(store.approve('greeter', installed.commit_sha!, installed.content_hash, false)).rejects.toMatchObject({
         status: 409,
       })
 
@@ -133,9 +161,9 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       const installed = await install()
       await db.sql`UPDATE ai_plugin_packages SET review = review - 'refused'`
       expect((await store.get('greeter'))?.review.refused).toEqual([])
-      expect((await store.approve('greeter', installed.commit_sha, installed.content_hash)).allow_refused).toBe(false)
+      expect((await store.approve('greeter', installed.commit_sha!, installed.content_hash)).allow_refused).toBe(false)
       // A clean pin re-approved with the flag stays without it: nothing was shown to allow.
-      expect((await store.approve('greeter', installed.commit_sha, installed.content_hash, true)).allow_refused).toBe(false)
+      expect((await store.approve('greeter', installed.commit_sha!, installed.content_hash, true)).allow_refused).toBe(false)
     })
 
     it('refuses a second install of the same name, and the table refuses an unapproved enable', async () => {
@@ -148,7 +176,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
 
     it('re-pins to a new commit as pending, with a diff; the old pin loads until the new one is approved', async () => {
       const installed = await install()
-      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      await store.approve('greeter', installed.commit_sha!, installed.content_hash)
       await store.setEnabled('greeter', true)
       const next = repos.greeter!.commitFiles({
         'skills/hello/SKILL.md': '---\ndescription: New.\n---\n\nHello again.\n',
@@ -167,7 +195,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
 
       // Re-pinning to what is already pinned is refused.
       await expect(
-        store.setPending('greeter', await installer.prepare({ ...current!.source, ref: installed.commit_sha })),
+        store.setPending('greeter', await installer.prepare({ ...current!.source, ref: installed.commit_sha! })),
       ).rejects.toMatchObject({ status: 409 })
 
       const promoted = await store.approve('greeter', next, pending.pending!.content_hash)
@@ -181,7 +209,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       repos.market = gitRepo({ '.claude-plugin/marketplace.json': market('https://git.test/greeter.git') })
       const source = validateSource({ kind: 'marketplace', url: 'https://git.test/market.git', entry: 'greeter', ref: 'main' })
       const installed = await store.create(await installer.prepare(source))
-      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      await store.approve('greeter', installed.commit_sha!, installed.content_hash)
       await store.setEnabled('greeter', true)
 
       // The entry moves to another repository, whose history the old one lacks.
@@ -235,12 +263,12 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       (await db.sql<{ source: string }[]>`SELECT source FROM ai_tool_listings`).map((r) => r.source).sort()
     const installApproved = async () => {
       const installed = await install()
-      return store.approve('greeter', installed.commit_sha, installed.content_hash)
+      return store.approve('greeter', installed.commit_sha!, installed.content_hash)
     }
     const repin = async (name = 'greeter') => {
       const current = await store.pinOf(name)
       const pending = await store.setPending(name, await installer.prepare({ ...current!.source, ref: 'main' }))
-      return store.approve(name, pending.pending!.commit_sha, pending.pending!.content_hash)
+      return store.approve(name, pending.pending!.commit_sha!, pending.pending!.content_hash)
     }
     const hookRow = (view: PackageView) => `hook:Stop:${view.review.hooks[0]!.id!}`
 
@@ -290,7 +318,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
         'skill:pkg': 'off',
         [`skill:${installed.commit_sha}-${'0123456789abcdef'}`]: 'off',
       })
-      await store.approve('solo', installed.commit_sha, installed.content_hash)
+      await store.approve('solo', installed.commit_sha!, installed.content_hash)
       expect(await accessRows()).toEqual(['package:solo skill:solo=off'])
     })
 
@@ -302,7 +330,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       expect(installed.review.refused).toEqual([expect.stringMatching(/MCP server "box" is a local \(stdio\) server$/)])
       await seed('package:greeter/mcp:box', { '*': 'off' })
       await seed('package:greeter/mcp:mem', { recall: 'read' })
-      await store.approve('greeter', installed.commit_sha, installed.content_hash, true)
+      await store.approve('greeter', installed.commit_sha!, installed.content_hash, true)
       expect(await accessRows()).toEqual(['package:greeter/mcp:box *=off', 'package:greeter/mcp:mem recall=read'])
 
       repos.greeter!.commitFiles({ '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/' } } }) })
@@ -397,7 +425,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
         SET pending_review = jsonb_set(pending_review, '{hooks}',
           (SELECT jsonb_agg(h - 'id') FROM jsonb_array_elements(pending_review -> 'hooks') AS h))`
       await seed('package:greeter', { 'skill:gone': 'off' })
-      await store.approve('greeter', pending.pending!.commit_sha, pending.pending!.content_hash)
+      await store.approve('greeter', pending.pending!.commit_sha!, pending.pending!.content_hash)
       // It cannot tell a kept hook from a lost one, nor name items as this code does: no item row goes.
       expect(await accessRows()).toEqual([`package:greeter ${hookRow(first)}=off`, 'package:greeter skill:gone=off'])
     })
@@ -408,7 +436,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
         'SKILL.md': '---\ndescription: Alone.\n---\n\nAlone.\n',
       })
       const installed = await store.create(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/solo.git' })))
-      await store.approve('solo', installed.commit_sha, installed.content_hash)
+      await store.approve('solo', installed.commit_sha!, installed.content_hash)
       await seed('package:solo', { 'skill:solo': 'off' })
       // The review as an older vet wrote it: the root skill named by its vet folder, no `described`.
       await db.sql`
@@ -436,7 +464,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       const installed = await install()
       expect(installed.review.local_servers).toEqual(['a\nb'])
       await seed('package:greeter/mcp:a\nb', { '*': 'off' })
-      await store.approve('greeter', installed.commit_sha, installed.content_hash, true)
+      await store.approve('greeter', installed.commit_sha!, installed.content_hash, true)
       expect(await accessRows()).toEqual(['package:greeter/mcp:a\nb *=off'])
     })
 
@@ -472,7 +500,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       expect(await accessRows()).not.toContain('package:greeter skill:gone=off')
       // And so does approving the current pin again.
       await seed('package:greeter', { 'skill:gone': 'off' })
-      await store.approve('greeter', view.commit_sha, view.content_hash)
+      await store.approve('greeter', view.commit_sha!, view.content_hash)
       expect(await accessRows()).not.toContain('package:greeter skill:gone=off')
     })
   })
@@ -510,7 +538,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       expect((await a.request('/api/v1/ai/plugin-packages/greeter', json('PATCH', { enabled: true }))).status).toBe(404)
       const approve = await a.request(
         '/api/v1/ai/plugin-packages/greeter/approve',
-        json('POST', { commit_sha: installed.commit_sha, content_hash: installed.content_hash }),
+        json('POST', { commit_sha: installed.commit_sha!, content_hash: installed.content_hash }),
       )
       expect(approve.status).toBe(200)
       expect((await a.request('/api/v1/ai/plugin-packages/greeter', json('PATCH', { enabled: true }))).status).toBe(404)
@@ -536,7 +564,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
 
     it("serves a pending re-pin's review stored without hook ids with the verified copy's ids (#4757)", async () => {
       const installed = await install()
-      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      await store.approve('greeter', installed.commit_sha!, installed.content_hash)
       repos.greeter!.commitFiles({
         'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Was the user waved at?' }] }] } }),
       })
@@ -618,7 +646,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
     it('never loads a package stored under a built-in\'s name, and lets DELETE remove it', async () => {
       // Stored before builtins.ts, when a reserved name was allowable.
       const installed = await install()
-      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      await store.approve('greeter', installed.commit_sha!, installed.content_hash)
       await store.setEnabled('greeter', true)
       await db.sql`UPDATE ai_plugin_packages SET name = 'scadbuddy' WHERE name = 'greeter'`
       const loaded = await loadPackagesForRun(store, installer)
@@ -746,7 +774,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       expect(res.status).toBe(201)
       const installed = (await res.json()) as PackageView
       expect(installed.review.refused).toEqual([expect.stringMatching(/Stop has a "command" hook/)])
-      const pin = { commit_sha: installed.commit_sha, content_hash: installed.content_hash }
+      const pin = { commit_sha: installed.commit_sha!, content_hash: installed.content_hash }
       const plain = await app().request('/api/v1/ai/plugin-packages/bad/approve', json('POST', pin))
       expect(plain.status).toBe(409)
       const allowed = await app().request(
@@ -772,7 +800,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
 
     it('answers 422 for a re-pin to a commit no approval can allow, and changes no access row', async () => {
       const installed = await install()
-      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      await store.approve('greeter', installed.commit_sha!, installed.content_hash)
       await db.sql`INSERT INTO ai_access (source, item, access, updated_by) VALUES ('package:greeter', 'skill:gone', 'off', 'test')`
       repos.greeter!.commitFiles({ 'agents/long.md': `---\nname: ${'a'.repeat(1025)}\ndescription: Long.\n---\n\nLong.\n` })
       const res = await app().request('/api/v1/ai/plugin-packages/greeter/repin', json('POST', { ref: 'main' }))
@@ -807,14 +835,14 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
 
     it('loads the enabled packages into each turn by path, and reports the ones it cannot load', async () => {
       const installed = await install()
-      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      await store.approve('greeter', installed.commit_sha!, installed.content_hash)
       await store.setEnabled('greeter', true)
       // A second, enabled package whose pin the repository cannot satisfy.
       repos.other = gitRepo({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify({ name: 'other' }) })
       const other = await store.create(
         await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/other.git' })),
       )
-      await store.approve('other', other.commit_sha, other.content_hash)
+      await store.approve('other', other.commit_sha!, other.content_hash)
       await store.setEnabled('other', true)
       await db.sql`UPDATE ai_plugin_packages SET fetch_url = 'https://git.test/gone.git' WHERE name = 'other'`
       rmSync(path.join(cacheRoot, 'other'), { recursive: true, force: true })
@@ -881,7 +909,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
         'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'id' }] }] } }),
       })
       const installed = await install()
-      await store.approve('greeter', installed.commit_sha, installed.content_hash, true)
+      await store.approve('greeter', installed.commit_sha!, installed.content_hash, true)
       await store.setEnabled('greeter', true)
       const scripted = scriptedRunner(() => ({ reply: 'hi' }))
       const runs: HarnessRun[] = []

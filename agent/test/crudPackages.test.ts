@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
+import { CrudPackageMirror } from '../src/plugins/packages/mirror.js'
 import { CrudPackageStore, type PreparedPackage } from '../src/plugins/packages/store.js'
 import type { PackageReview } from '../src/plugins/packages/vet.js'
 import { PluginError } from '../src/plugins/registry.js'
@@ -23,6 +25,9 @@ type Wire = Record<string, unknown>
 class FakeApi {
   seen: Seen[] = []
   rows = new Map<string, Wire>()
+  mirrors = new Map<string, Buffer>()
+  /** Which package each kept file was sent for: the only one the GET serves it to. */
+  mirrorNames = new Map<string, string>()
 
   readonly fetch: typeof fetch = (input, init) => {
     const url = new URL(String(input))
@@ -31,6 +36,22 @@ class FakeApi {
     const body = typeof raw === 'string' ? (JSON.parse(raw) as Record<string, unknown>) : undefined
     const path = url.pathname.slice(PREFIX.length)
     this.seen.push({ method, path: path + url.search, body })
+    const upload = /^\/package-mirrors\/([^/]+)$/.exec(path)
+    if (upload && method === 'POST') {
+      const bytes = Buffer.from(raw as Uint8Array)
+      const sha = createHash('sha256').update(bytes).digest('hex')
+      this.mirrors.set(sha, bytes)
+      this.mirrorNames.set(sha, decodeURIComponent(upload[1]!))
+      return Promise.resolve(this.#json({ bytes_sha256: sha }))
+    }
+    const mirror = /^\/package-mirrors\/([^/]+)\/([0-9a-f]{64})$/.exec(path)
+    if (mirror && method === 'GET') {
+      const kept = this.mirrors.get(mirror[2]!)
+      if (!kept || this.mirrorNames.get(mirror[2]!) !== decodeURIComponent(mirror[1]!)) {
+        return Promise.resolve(this.#problem(404, 'no mirror of the bytes is kept', 'mirror-not-found'))
+      }
+      return Promise.resolve(new Response(new Uint8Array(kept), { status: 200, headers: { 'x-scadbuddy-crud': '1' } }))
+    }
     return Promise.resolve(this.#route(method, path, url.searchParams, body ?? {}))
   }
 
@@ -51,6 +72,10 @@ class FakeApi {
       const name = b.name as string
       if (this.rows.has(name)) return this.#problem(409, `a plugin package named "${name}" is already installed; re-pin it instead`, 'package-exists')
       const row: Wire = {
+        pin_kind: 'commit',
+        commit_sha: null,
+        bytes_sha256: null,
+        version: null,
         ...b,
         approved_at: null,
         allow_refused: false,
@@ -58,7 +83,10 @@ class FakeApi {
         pending_ref: null,
         pending_fetch_url: null,
         pending_fetch_path: null,
+        pending_pin_kind: null,
         pending_commit_sha: null,
+        pending_bytes_sha256: null,
+        pending_version: null,
         pending_content_hash: null,
         pending_files: null,
         pending_review: null,
@@ -80,7 +108,9 @@ class FakeApi {
         pending_ref: b.ref,
         pending_fetch_url: b.fetch_url,
         pending_fetch_path: b.fetch_path,
-        pending_commit_sha: b.commit_sha,
+        pending_pin_kind: b.pin_kind ?? 'commit',
+        pending_commit_sha: b.commit_sha ?? null,
+        pending_bytes_sha256: b.bytes_sha256 ?? null,
         pending_content_hash: b.content_hash,
         pending_files: b.files,
         pending_review: b.review,
@@ -88,7 +118,9 @@ class FakeApi {
       return this.#json(row)
     }
     if (m[2] === 'approve') {
-      if (b.commit_sha !== row.commit_sha && b.commit_sha !== row.pending_commit_sha) {
+      const id = b.commit_sha ?? b.bytes_sha256
+      const matches = (prefix: string) => id === row[`${prefix}${b.bytes_sha256 !== undefined ? 'bytes_sha256' : 'commit_sha'}`]
+      if (!matches('') && !matches('pending_')) {
         return this.#problem(409, 'the commit and content hash do not match the pin under review; reload the review and approve what it shows', 'pin-mismatch')
       }
       row.approved_at = AT
@@ -190,5 +222,55 @@ describe('the plugin packages through CRUD routes (#5299 step 5)', () => {
     expect(await store.delete('greeter')).toBe(true)
     expect(await store.delete('greeter')).toBe(false)
     expect(await store.get('greeter')).toBeUndefined()
+  })
+})
+
+describe('bytes pins and their mirrors through CRUD routes (#6935)', () => {
+  const B1 = 'c'.repeat(64)
+
+  function bytesPrepared(): PreparedPackage {
+    return {
+      ...prepared('', H1),
+      source: { kind: 'archive', url: 'https://files.test/greeter.zip', ref: '' },
+      fetchUrl: 'https://files.test/greeter.zip',
+      fetchPath: 'greeter-1.0',
+      bytesSha256: B1,
+    }
+  }
+
+  it('sends a bytes pin by its sha256, and a commit pin as before', async () => {
+    const api = new FakeApi()
+    const store = new CrudPackageStore({ baseUrl: BASE, fetch: api.fetch })
+    await store.create(prepared(C1, H1, 'other'))
+    // An API pod from before #6935 takes a commit pin's body unchanged.
+    expect(api.seen.at(-1)?.body).not.toHaveProperty('pin_kind')
+    const made = await store.create(bytesPrepared())
+    expect(api.seen.at(-1)?.body).toMatchObject({ source_kind: 'archive', source_ref: '', pin_kind: 'bytes', bytes_sha256: B1, fetch_path: 'greeter-1.0' })
+    expect(api.seen.at(-1)?.body).not.toHaveProperty('commit_sha')
+    expect(made).toMatchObject({ pin_kind: 'bytes', bytes_sha256: B1, commit_sha: null, source: { kind: 'archive', plugin_path: 'greeter-1.0' } })
+    await store.approve('greeter', B1, H1, false, 'bytes')
+    expect(api.seen.at(-1)?.body).toEqual({ bytes_sha256: B1, content_hash: H1, allow_refused: false })
+    await store.setEnabled('greeter', true)
+    expect((await store.enabledPins()).find((p) => p.name === 'greeter')).toMatchObject({ commit: '', bytesSha256: B1, fetchPath: 'greeter-1.0' })
+    expect(await store.pinOf('greeter')).toMatchObject({ source: { kind: 'archive', url: 'https://files.test/greeter.zip', ref: '' } })
+  })
+
+  it('keeps a mirror for a package, reads it back by name and sha256, and refuses one that does not hash to it', async () => {
+    const api = new FakeApi()
+    const mirror = new CrudPackageMirror({ baseUrl: BASE, fetch: api.fetch })
+    const bytes = Buffer.from('an archive')
+    const sha = createHash('sha256').update(bytes).digest('hex')
+    await mirror.put('greeter', sha, bytes)
+    expect(api.seen.at(-1)).toMatchObject({ method: 'POST', path: '/package-mirrors/greeter' })
+    expect(await mirror.get('greeter', sha)).toEqual(bytes)
+    expect(api.seen.at(-1)).toMatchObject({ method: 'GET', path: `/package-mirrors/greeter/${sha}` })
+    await expect(mirror.get('other', sha)).rejects.toThrow(/no mirrored copy/)
+    await expect(mirror.get('greeter', B1)).rejects.toThrow(/no mirrored copy/)
+    api.mirrors.set(B1, Buffer.from('other bytes'))
+    api.mirrorNames.set(B1, 'greeter')
+    await expect(mirror.get('greeter', B1)).rejects.toThrow(/does not hash/)
+    // The API names the sha256 it kept; one other than the agent's is refused.
+    await expect(mirror.put('greeter', B1, bytes)).rejects.toThrow(/kept the bytes .* not /)
+    await expect(mirror.put('../x', sha, bytes)).rejects.toThrow()
   })
 })

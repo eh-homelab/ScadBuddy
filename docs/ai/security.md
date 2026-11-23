@@ -614,8 +614,11 @@ next section.
 ## Plugin packages
 
 Packages (#297) are Claude plugins that ScadBuddy fetches from a git URL or a marketplace
-entry. They are someone else's code from the network, so they get more checks than the
-harness's own rules above.
+entry, or (#6935) from any source Claude Code takes: an entry of a bare
+`marketplace.json` URL, an `archive` zip URL or an `npm` package
+([marketplace reference](https://code.claude.com/docs/en/plugins/marketplace-reference.md),
+"Plugin sources"). They are someone else's code from the network, so they get more
+checks than the harness's own rules above.
 
 **Skills and subagents are reachable (#896).** Since the harness loads ScadBuddy's own
 plugin, every turn has the `Skill` and `Agent` tools, so the model can run an enabled
@@ -644,8 +647,8 @@ The code is `askedBy()` in
 
 **Approval (spec §8.2).** Installing is an outward settings write. An install or re-pin
 only fetches, vets and stores the pin with its review. Nothing loads until the admin
-approves that exact `commit_sha` and `content_hash` through
-`POST /api/v1/ai/plugin-packages/:name/approve`. Enabling needs an approved pin (also a
+approves that exact `commit_sha` (or, for an archive or npm package, `bytes_sha256`) and
+`content_hash` through `POST /api/v1/ai/plugin-packages/:name/approve`. Enabling needs an approved pin (also a
 `CHECK` on `ai_plugin_packages`). A re-pin stays pending, and the old pin keeps loading,
 until the admin approves the new one after seeing its file diff. A re-pin fetched from
 another repository or path than the current pin (a marketplace entry that moved) is
@@ -661,10 +664,57 @@ package is also vetted again at every load, so rules that have tightened since a
 still apply. A process that writes the cache between the check and Claude Code's read is
 not caught; such a process already controls the pod.
 
+**Bytes pins (#6935, spec 2026-11-21 §6.6).** An archive or npm package has no commit,
+so it is pinned to the SHA-256 of the file fetched at install (`pin_kind` `bytes`,
+`bytes_sha256`). After the file passes the unpacking rules and the vetting, the agent
+keeps a copy in the blob store through the API's CRUD area `package-mirrors`
+([`agent/src/plugins/packages/mirror.ts`](../../agent/src/plugins/packages/mirror.ts),
+[`backend/scadbuddy/agent_data/package_mirrors.py`](../../backend/scadbuddy/agent_data/package_mirrors.py)).
+The agent sends the file for the package it installs (`POST …/package-mirrors/{name}`,
+answered with the SHA-256 the API kept it under), and the API holds the copy for that
+package (`blob_refs` holder `<name>/<sha256>`). The API stores a bytes pin only while
+that package holds the copy (409 `mirror-missing`), and serves the copy back
+(`GET …/package-mirrors/{name}/{sha256}`) only while that package's pin or pending re-pin
+names the SHA-256, so no other package and no released pin can read it. A cache
+miss unpacks the mirrored copy, checked against `bytes_sha256` and then against
+`content_hash`, and never fetches the upstream URL, so a file that upstream changed or
+deleted cannot replace what the admin approved. A re-pin fetches upstream again and is
+approved anew after its diff; an archive installed with its `sha256` has nothing to move
+to, so its re-pin is refused 409 `repin-fixed-sha256` before any fetch.
+
+**Unpacking** (`unpack.ts`). The archive is read entry by entry from memory, never by an
+unzip or tar binary. Zip and tar (plain or gzipped) only. Symbolic links, hard links,
+devices and FIFOs, absolute paths, backslashes, NULs, `..` segments, a path given twice,
+encrypted and zip64 entries, and an entry whose size or CRC-32 does not match are
+refused, and nothing of the archive is written. A tar name prefix is read only from a
+POSIX ustar header (magic `ustar\0`, version `00`); a GNU header keeps other fields there.
+The caps are those of a hosted plugin's draft (spec §6.2): 500 entries (directories
+count), 2 MiB per file and 20 MiB in all, checked before a byte is inflated.
+
+**Downloading** (`download.ts`, `npm.ts`). Every hop of a download, redirects included,
+is https, or plain http to a loopback host whose addresses are all loopback (spec §6.6
+says https only; loopback is for tests). Every hop goes through the egress check
+(`assertEndpointAllowed()`), and the connection is pinned
+to the addresses the check passed, so a name re-pointed after the check cannot reach a
+refused address. At most five redirects are followed. Claude Code's own limits
+([host-marketplace](https://code.claude.com/docs/en/plugins/host-marketplace.md), "Stay
+within the download limits for hosted files") are 256 MiB in 120 s for an archive and
+5 MiB in 10 s for a `marketplace.json`. ScadBuddy takes the `marketplace.json` limit, and
+caps an archive or tarball lower, at the unpacked cap plus 1 MiB (21 MiB, in 120 s;
+`ARCHIVE_MAX_BYTES`): a larger file cannot unpack within 20 MiB, so it is refused before
+the agent holds it. No credential is sent. An archive
+entry's `sha256` must match. An npm package is fetched at an exact version or a
+dist-tag (a range is refused), and its tarball must match the registry's
+`dist.integrity`, or its `dist.shasum` (SHA-1) when the document has no integrity; a
+version document with neither is refused. A tarball link on github.com, gist.github.com, gitlab.com (outside
+`/api/v4/`), bitbucket.org or git.sr.ht is refused, as Claude Code refuses it. Nothing in
+an npm package is installed or run.
+
 **Fetching** (`git.ts`):
 
 - The source URL must be https, or http to a loopback address. It may not carry
-  credentials, a query or `$` (`normaliseGitUrl()`, `source.ts`). It must pass the
+  credentials, a query or `$` (`normaliseGitUrl()`, `source.ts`). An archive, npm or bare
+  marketplace URL may carry a query, never credentials or a fragment (`normaliseUrl()`). It must pass the
   egress check (`assertEndpointAllowed()`: no link-local or cloud-metadata address)
   before git runs.
 - git gets an environment of its own: no database URL, no key path, no credential.

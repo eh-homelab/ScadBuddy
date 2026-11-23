@@ -16,7 +16,7 @@ import { INSTALL_KIND, REPIN_KIND } from '../plugins/packages/operations.js'
 import { UI_ACTOR } from '../audit/writes.js'
 import type { PackagePin, PackageRepo, PackageView } from '../plugins/packages/store.js'
 import type { PackageReview } from '../plugins/packages/vet.js'
-import { type PackageSource, validateRef, validateSource } from '../plugins/packages/source.js'
+import { type PackageSource, validateNpmVersion, validateRef, validateSource } from '../plugins/packages/source.js'
 import { PluginError } from '../plugins/registry.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
@@ -24,15 +24,19 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 
 // /api/v1/ai/plugin-packages (issue #297, "Installing a plugin"): Claude plugin
 // packages (skills, subagents, hooks, .mcp.json) from a git URL or a
-// marketplace entry, pinned to a commit in Postgres (plugins/packages/).
+// marketplace entry, pinned to a commit in Postgres (plugins/packages/); or (#6935) from
+// any source Claude Code takes, a bare marketplace.json URL's entry, an archive or an npm
+// package, pinned to the sha256 of the file fetched at install and mirrored.
 //
 //   GET    /api/v1/ai/plugin-packages                  list
 //   GET    /api/v1/ai/plugin-packages/:name            one, with its review and any pending re-pin + diff
 //   GET    /api/v1/ai/plugin-packages/:name/files      { files: [{ path, size }] } (?pending=true: the re-pin's)
 //   GET    /api/v1/ai/plugin-packages/:name/file       ?path=…[&pending=true][&full=true]: one file's content (files.ts)
 //   POST   /api/v1/ai/plugin-packages                  install: fetch, pin, vet → stored UNAPPROVED (201), a command
-//   POST   /api/v1/ai/plugin-packages/:name/approve    approve { commit_sha, content_hash, allow_refused? } as reviewed
-//   POST   /api/v1/ai/plugin-packages/:name/repin      fetch { ref } → pending pin + file diff, a command
+//   POST   /api/v1/ai/plugin-packages/:name/approve    approve { commit_sha | bytes_sha256, content_hash, allow_refused? } as reviewed
+//   POST   /api/v1/ai/plugin-packages/:name/repin      fetch { ref? } → pending pin + file diff, a command
+//                                                      (ref: a branch, tag or commit; an npm version or tag;
+//                                                      none for an archive, a tarball link or a bare marketplace URL)
 //   DELETE /api/v1/ai/plugin-packages/:name/pending    drop the pending re-pin
 //   DELETE /api/v1/ai/plugin-packages/:name            uninstall (and evict the cache)
 //
@@ -96,15 +100,43 @@ const Source = z.discriminatedUnion('kind', [
     ref: z.string().max(200).optional(),
     entry: z.string().max(64),
   }),
+  // https://code.claude.com/docs/en/plugins/marketplace-reference.md, "Plugin sources" (#6935).
+  z.strictObject({ kind: z.literal('marketplace-url'), url: z.string().max(2048), entry: z.string().max(64) }),
+  z.strictObject({ kind: z.literal('archive'), url: z.string().max(2048), sha256: z.string().max(80).optional() }),
+  z.strictObject({
+    kind: z.literal('npm'),
+    package: z.string().max(2048),
+    version: z.string().max(200).optional(),
+    registry: z.string().max(2048).optional(),
+  }),
 ])
 const InstallBody = z.strictObject({ source: Source })
-const ApproveBody = z.strictObject({
-  commit_sha: z.string().max(64),
-  content_hash: z.string().max(80),
-  /** Load the pin despite what its review's `refused` lists (store.ts). */
-  allow_refused: z.boolean().optional(),
-})
+const ApproveBody = z
+  .strictObject({
+    /** The pin the review showed: its commit, or for an archive or npm package its file's sha256 (#6935). */
+    commit_sha: z.string().max(64).optional(),
+    bytes_sha256: z.string().max(64).optional(),
+    content_hash: z.string().max(80),
+    /** Load the pin despite what its review's `refused` lists (store.ts). */
+    allow_refused: z.boolean().optional(),
+  })
+  .refine((b) => (b.commit_sha === undefined) !== (b.bytes_sha256 === undefined), {
+    message: 'name the pin by commit_sha or by bytes_sha256',
+  })
 const RepinBody = z.strictObject({ ref: z.string().max(200).optional() })
+
+/** A re-pin's ref: a git ref, or else an npm version or dist-tag; the first refusal when it is neither. */
+function repinRef(raw: string): string {
+  try {
+    return validateRef(raw)
+  } catch (err) {
+    try {
+      return validateNpmVersion(raw)
+    } catch {
+      throw err
+    }
+  }
+}
 
 async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T> | string> {
   try {
@@ -185,7 +217,8 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
       name: view.name,
       fetchUrl: pending.plugin_url,
       fetchPath: pending.plugin_path,
-      commit: pending.commit_sha,
+      commit: pending.commit_sha ?? '',
+      ...(pending.bytes_sha256 !== null ? { bytesSha256: pending.bytes_sha256 } : {}),
       contentHash: pending.content_hash,
     }
     try {
@@ -281,7 +314,8 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     const body = await parseBody(c, ApproveBody)
     if (typeof body === 'string') return c.json({ detail: body }, 400)
     try {
-      return c.json(await repo.approve(c.req.param('name'), body.commit_sha, body.content_hash, body.allow_refused ?? false))
+      const [pin, kind] = body.bytes_sha256 !== undefined ? [body.bytes_sha256, 'bytes' as const] : [body.commit_sha!, 'commit' as const]
+      return c.json(await repo.approve(c.req.param('name'), pin, body.content_hash, body.allow_refused ?? false, kind))
     } catch (err) {
       return refusal(c, err)
     }
@@ -296,7 +330,9 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (typeof body === 'string') return c.json({ detail: body }, 400)
     let ref: string | undefined
     try {
-      ref = body.ref === undefined ? undefined : validateRef(body.ref)
+      // A branch, tag or commit, or an npm version or dist-tag, checked here before anything
+      // crosses; the command's check holds it to the package's kind (source.ts `withRepinRef`).
+      ref = body.ref === undefined ? undefined : repinRef(body.ref)
     } catch (err) {
       return refusal(c, err)
     }

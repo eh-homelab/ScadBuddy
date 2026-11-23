@@ -2,6 +2,7 @@ import type { Sql, TransactionSql } from 'postgres'
 import { builtinItem, itemKindIn, skillItem, subagentItem } from '../../../src/access/items.js'
 import { packageSource } from '../../../src/access/model.js'
 import {
+  entryOf,
   filesOfRow,
   type PackagePin,
   type PackageRepo,
@@ -22,6 +23,15 @@ import { notifyWarmEvict } from './publisher.js'
 // Test-only: the package store over SQL, with the prune of stale access rows the API runs
 // (backend api/crud_agent_packages.py). The agent itself goes through the API
 // (src/plugins/packages/store.ts CrudPackageStore).
+
+/** The id of a prepared pin: its commit, or its file's sha256. */
+const preparedId = (p: PreparedPackage): string => p.bytesSha256 ?? p.commit
+const preparedKind = (p: PreparedPackage): 'commit' | 'bytes' => (p.bytesSha256 !== undefined ? 'bytes' : 'commit')
+/** The id of a row's pin, or with `pending`, of its re-pin. */
+const rowId = (row: PackageRow, pending = false): string | null =>
+  pending
+    ? (row.pending_pin_kind === 'bytes' ? row.pending_bytes_sha256 : row.pending_commit_sha)
+    : (row.pin_kind === 'bytes' ? row.bytes_sha256 : row.commit_sha)
 
 /** Where `package:<name>`'s servers' sources start: compared with `starts_with`, never `LIKE` (a name may hold `_`). */
 const serverPrefix = (name: string): string => `${packageSource(name)}/mcp:`
@@ -128,10 +138,11 @@ export class PackageStore implements PackageRepo {
     return this.sql.begin(async (tx) => {
       const rows = await tx<PackageRow[]>`
       INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref, marketplace_entry, fetch_url,
-                                      fetch_path, commit_sha, content_hash, files, review)
+                                      fetch_path, pin_kind, commit_sha, bytes_sha256, content_hash, files, review)
       VALUES (${p.review.name}, ${p.source.kind}, ${p.source.url}, ${p.source.ref},
-              ${p.source.kind === 'marketplace' ? p.source.entry : null}, ${p.fetchUrl}, ${p.fetchPath},
-              ${p.commit}, ${p.contentHash}, ${tx.json(p.files)}, ${tx.json(p.review)})
+              ${entryOf(p.source)}, ${p.fetchUrl}, ${p.fetchPath}, ${preparedKind(p)},
+              ${p.bytesSha256 === undefined ? p.commit : null}, ${p.bytesSha256 ?? null},
+              ${p.contentHash}, ${tx.json(p.files)}, ${tx.json(p.review)})
       ON CONFLICT (name) DO NOTHING
       RETURNING *`
       const row = rows[0]
@@ -154,17 +165,19 @@ export class PackageStore implements PackageRepo {
       const [current] = await tx<PackageRow[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name} FOR UPDATE`
       if (!current) throw new PluginError(`no plugin package named "${name}"`, 404)
       if (
-        current.commit_sha === p.commit &&
+        current.pin_kind === preparedKind(p) &&
+        rowId(current) === preparedId(p) &&
         current.content_hash === p.contentHash &&
         current.fetch_url === p.fetchUrl &&
         current.fetch_path === p.fetchPath
       ) {
-        throw new PluginError(`"${name}" is already pinned to ${p.commit}`, 409)
+        throw new PluginError(`"${name}" is already pinned to ${preparedId(p)}`, 409)
       }
       const [row] = await tx<PackageRow[]>`
         UPDATE ai_plugin_packages SET
           pending_ref = ${p.source.ref}, pending_fetch_url = ${p.fetchUrl}, pending_fetch_path = ${p.fetchPath},
-          pending_commit_sha = ${p.commit}, pending_content_hash = ${p.contentHash},
+          pending_pin_kind = ${preparedKind(p)}, pending_commit_sha = ${p.bytesSha256 === undefined ? p.commit : null},
+          pending_bytes_sha256 = ${p.bytesSha256 ?? null}, pending_version = NULL, pending_content_hash = ${p.contentHash},
           pending_files = ${tx.json(p.files)}, pending_review = ${tx.json(p.review)}, updated_at = now()
         WHERE name = ${name}
         RETURNING *`
@@ -178,8 +191,8 @@ export class PackageStore implements PackageRepo {
     return this.sql.begin(async (tx) => {
       const [row] = await tx<PackageRow[]>`
         UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,
-          pending_commit_sha = NULL, pending_content_hash = NULL,
-          pending_files = NULL, pending_review = NULL, updated_at = now()
+          pending_pin_kind = NULL, pending_commit_sha = NULL, pending_bytes_sha256 = NULL, pending_version = NULL,
+          pending_content_hash = NULL, pending_files = NULL, pending_review = NULL, updated_at = now()
         WHERE name = ${name}
         RETURNING *`
       if (!row) throw new PluginError(`no plugin package named "${name}"`, 404)
@@ -189,12 +202,13 @@ export class PackageStore implements PackageRepo {
     })
   }
 
-  async approve(name: string, commit: string, contentHash: string, allowRefused = false): Promise<PackageView> {
+  async approve(name: string, commit: string, contentHash: string, allowRefused = false, kind: 'commit' | 'bytes' = 'commit'): Promise<PackageView> {
     return this.sql.begin(async (tx) => {
       const [current] = await tx<PackageRow[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name} FOR UPDATE`
       if (!current) throw new PluginError(`no plugin package named "${name}"`, 404)
-      const isPending = current.pending_commit_sha === commit && current.pending_content_hash === contentHash
-      const isCurrent = current.commit_sha === commit && current.content_hash === contentHash
+      const isPending =
+        current.pending_pin_kind === kind && rowId(current, true) === commit && current.pending_content_hash === contentHash
+      const isCurrent = current.pin_kind === kind && rowId(current) === commit && current.content_hash === contentHash
       if (!isPending && !isCurrent) {
         throw new PluginError(
           'the commit and content hash do not match the pin under review; reload the review and approve what it shows',
@@ -220,9 +234,11 @@ export class PackageStore implements PackageRepo {
         const [row] = await tx<PackageRow[]>`
           UPDATE ai_plugin_packages SET
             enabled = enabled AND NOT ${moved}, source_ref = pending_ref, fetch_url = pending_fetch_url, fetch_path = pending_fetch_path,
-            commit_sha = pending_commit_sha, content_hash = pending_content_hash,
+            pin_kind = pending_pin_kind, commit_sha = pending_commit_sha, bytes_sha256 = pending_bytes_sha256,
+            version = pending_version, content_hash = pending_content_hash,
             files = pending_files, review = pending_review, approved_at = now(), allow_refused = ${allow},
-            pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,
+            pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL, pending_pin_kind = NULL,
+            pending_commit_sha = NULL, pending_bytes_sha256 = NULL, pending_version = NULL, pending_content_hash = NULL,
             pending_files = NULL, pending_review = NULL, updated_at = now()
           WHERE name = ${name}
           RETURNING *`

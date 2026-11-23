@@ -5,9 +5,9 @@ import { AGENT_CRUD, CRUD_READ_TIMEOUT_MS, CrudReadError, crudFetch } from './cr
 // api/crud_agent_stores.py, crud_agent_notify.py, crud_agent_access.py, crud_agent_plugins.py
 // and crud_agent_packages.py): activity kinds, browser origins, session tabs, tab owners, tab
 // images, pairings, MCP tokens, Web Push and notification channels (`notify`), tool access and
-// listings, upstream MCP sessions, remote plugins and their sign-ins, and plugin packages. Each
-// store keeps its interface; its `Crud…` class is that interface over the routes, one route per
-// method. The agent has no SQL path (#5299 step 12).
+// listings, upstream MCP sessions, remote plugins and their sign-ins, and plugin packages and
+// their mirrored files (#6935). Each store keeps its interface; its `Crud…` class is that
+// interface over the routes, one route per method. The agent has no SQL path (#5299 step 12).
 
 /** The areas of the small stores (backend api/crud_areas.py `CRUD_AREAS["agent"]`). */
 export const STORE_AREAS = [
@@ -21,6 +21,7 @@ export const STORE_AREAS = [
   'plugin-sessions',
   'plugins',
   'plugin-packages',
+  'package-mirrors',
   // The marketplace feeds' packages (#6933, plugins/feed.ts); a hosted version's zip is
   // `hosted-plugins`', which the backend lists with it.
   'plugin-feeds',

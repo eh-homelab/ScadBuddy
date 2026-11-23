@@ -1030,13 +1030,21 @@ budget is spent. Money is shown in cents, in the panel and in the agent's error 
 ## 9. Plugin packages (#297)
 
 A plugin package is a Claude plugin (skills, subagents, hooks, `.mcp.json`) fetched from
-a git repository, or from an entry of a marketplace repository, at a pinned commit. The
+a git repository, or from an entry of a marketplace repository, at a pinned commit. Since
+#6935 it may also come from any source Claude Code takes
+([marketplace reference](https://code.claude.com/docs/en/plugins/marketplace-reference.md),
+"Plugin sources"): an entry of a bare `marketplace.json` URL (which Claude Code downloads
+alone, so its entries cannot be relative paths,
+[host-marketplace](https://code.claude.com/docs/en/plugins/host-marketplace.md)), an
+`archive` zip URL, or an `npm` package. These are pinned to the SHA-256 of the file
+fetched at install, a *bytes pin*. The
 Agent SDK loads plugins by local path only: "To use a plugin distributed through a
 marketplace or remote repository, download it first and provide the local directory
 path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 
-- **Postgres is the record.** `ai_plugin_packages` holds the pin (commit SHA and content
-  hash) and everything the admin reviewed
+- **Postgres is the record.** `ai_plugin_packages` holds the pin (`pin_kind` `commit`
+  with the commit SHA, or `bytes` with `bytes_sha256`; and the content hash) and
+  everything the admin reviewed
   ([`agent/src/plugins/packages/store.ts`](../../agent/src/plugins/packages/store.ts)).
 - **Disk is a cache.** Packages are materialised under `<state dir>/plugins/<name>/<commit>-<hash prefix>`
   (`pluginCacheDir()` in [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)).
@@ -1045,15 +1053,24 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   not hash to the pin, the package is not loaded (`materialise()` in
   [`agent/src/plugins/packages/install.ts`](../../agent/src/plugins/packages/install.ts)).
   The cache can be the same `emptyDir` as the rest of the state directory.
+- **A bytes pin loads from its mirror.** The file of an archive or npm package is kept in
+  the blob store through the API's CRUD area `package-mirrors` (blob
+  `plugin-mirror-<sha256>`, held in `blob_refs` for the package it was sent for, holder
+  `<name>/<sha256>`, while that package's pin or pending re-pin names it; a hold no pin
+  names goes after a day). Its cache directory is
+  `<name>/b<first 40 of the sha256>-<hash prefix>`, and a cache miss unpacks the mirrored
+  copy, never the upstream URL. The area is one of `STORE_AREAS`, so the agent is not ready
+  (its data routes answer 503) until the API lists it.
 - **git in the image.** The `agent` stage installs `git` and `ca-certificates`
   ([`Dockerfile`](../../Dockerfile)). git runs with an environment built by
   [`agent/src/plugins/packages/git.ts`](../../agent/src/plugins/packages/git.ts), so it
   never sees the service's own environment. It passes through only the proxy and CA
   variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, their lower-case forms,
   `GIT_SSL_CAINFO`, `SSL_CERT_FILE` and `SSL_CERT_DIR`).
-- **Egress.** The pod needs outbound HTTPS to each git host it installs from. Fetches,
-  and every URL a package declares, go through the same egress check as the gateway
-  (see [security.md](security.md#plugin-packages)).
+- **Egress.** The pod needs outbound HTTPS to each git host, archive host and npm
+  registry it installs from. Fetches (each redirect hop of a download too), and every URL
+  a package declares, go through the same egress check as the gateway (see
+  [security.md](security.md#plugin-packages)).
 - **Built-in plugins.** The plugin in the image is listed first by
   `GET /api/v1/ai/plugin-packages`, with `built_in: true`
   ([`agent/src/plugins/packages/builtins.ts`](../../agent/src/plugins/packages/builtins.ts)):
@@ -1074,12 +1091,12 @@ other Settings writes
 
 | Route | What it does |
 |---|---|
-| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }` or `{ "kind": "marketplace", "url", "ref"?, "entry" }` | Fetches, pins the commit, vets, and stores the package **unapproved and disabled** (201), with what the rules refuse in `review.refused`. A package no approval can allow (its name, a path outside it, a symlink, an endpoint the egress check refuses) gets 422 with every problem. |
+| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }`, `{ "kind": "marketplace", "url", "ref"?, "entry" }`, `{ "kind": "marketplace-url", "url", "entry" }`, `{ "kind": "archive", "url", "sha256"? }` or `{ "kind": "npm", "package", "version"?, "registry"? }` | Fetches, pins the commit (or the file's SHA-256, which it mirrors first), vets, and stores the package **unapproved and disabled** (201), with what the rules refuse in `review.refused`. A marketplace entry may be a `github`, `url`, `git-subdir`, `archive` or `npm` source (a `command` source is refused; a relative path only from a marketplace repository). An npm `package` is a registry name (with `@version` or `version`: an exact version or a dist-tag; `latest` by default) or an https tarball link. A package no approval can allow (its name, a path outside it, a symlink, an endpoint the egress check refuses) gets 422 with every problem. |
 | `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
 | `GET /:name/files`, `GET /:name/file?path=` (each with `pending=true` for the re-pin's) | Every file of the pin with its size, and one file's content for Settings to show before approval (#1029). Only a path in the pin's own file list is read, from the cached copy that hashes to the pin (fetched again when it does not; never vetted for loading, so a refused package can be read). Text is cut at 64 KiB unless `full=true`; a file that is not UTF-8 is `binary` with no `content`. A built-in's files are read from the image. |
-| `POST /:name/approve` with `{ "commit_sha", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
+| `POST /:name/approve` with `{ "commit_sha" or "bytes_sha256", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
 | `PATCH /:name` | Gone (#4828). A package's switch is `PUT /api/v1/ai/capabilities/package:<name>` (#4757), which Settings uses; it enables an approved pin only, and the table enforces this with a `CHECK` too. |
-| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin. The current pin keeps loading until the pending one is approved. |
+| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin (for an npm package, `ref` is a version or dist-tag; an archive, a tarball link or a bare marketplace URL takes none and is fetched again; an archive installed with its `sha256` is refused 409 `repin-fixed-sha256`, since it could only find the same file). The current pin keeps loading until the pending one is approved. |
 | `DELETE /:name/pending`, `DELETE /:name` | Drop the pending re-pin; uninstall and evict the cache. |
 
 Plugins are never updated automatically (issue #297). At most two fetches run at a

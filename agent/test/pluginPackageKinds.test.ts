@@ -142,3 +142,22 @@ describe('cancellation', () => {
     ).rejects.toMatchObject({ name: 'AbortError' })
   })
 })
+
+describe('a re-pin that cannot move', () => {
+  it('refuses an archive installed with its sha256 with 409 repin-fixed-sha256, before any fetch', async () => {
+    const { installer, held } = heldInstaller()
+    const archive = { source: { kind: 'archive', url: 'https://files.test/p.zip', ref: `sha256:${'a'.repeat(64)}` } }
+    const repinOf = (pinned: unknown) =>
+      packageKinds({ packages: { ...packages, pinOf: async () => pinned } as unknown as PackageRepo, installer }).find(
+        (k) => k.name === REPIN_KIND,
+      )!
+    const refused = await repinOf(archive)
+      .check({ name: 'p' })
+      .catch((err: unknown) => err)
+    expect(refused).toBeInstanceOf(OperationRefusal)
+    expect((refused as OperationRefusal).problem).toMatchObject({ status: 409, extensions: { reason: 'repin-fixed-sha256' } })
+    expect(held).toHaveLength(0)
+    // One installed with no sha256 fetches its URL again.
+    expect(await status(repinOf({ source: { ...archive.source, ref: '' } }).check({ name: 'p' }))).toBe('ok')
+  })
+})

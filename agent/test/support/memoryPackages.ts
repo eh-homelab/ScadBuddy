@@ -31,7 +31,9 @@ export function packageView(name: string, over: Partial<PackageView> = {}, rev: 
   return {
     name,
     source: { kind: 'git', url: `https://git.example/${name}.git`, ref: 'main', path: '' },
+    pin_kind: 'commit',
     commit_sha: 'c'.repeat(40),
+    bytes_sha256: null,
     content_hash: `sha256:${name}`,
     review: packageReview({ name, ...rev }),
     approved: true,
@@ -63,7 +65,7 @@ export function memoryPackages(initial: PackageView[]) {
       name,
       fetchUrl: `https://git.example/${name}.git`,
       fetchPath: '',
-      commit: v.commit_sha,
+      commit: v.commit_sha ?? '',
       contentHash: v.content_hash,
       allowRefused: v.allow_refused,
       source: { kind: 'git', url: `https://git.example/${name}.git`, ref: 'main', path: '' },

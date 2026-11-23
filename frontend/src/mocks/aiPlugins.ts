@@ -174,14 +174,30 @@ resetAiPluginMocks()
 const detail = (status: number, text: string, extra: Record<string, unknown> = {}) =>
   HttpResponse.json({ detail: text, ...extra }, { status })
 
-function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry?: string): PluginPackage | string[] | undefined {
+/** The mock's one archive (#6935): the greeter as a zip, pinned to its file's sha256. */
+const ARCHIVE_URL = 'https://files.example/greeter-1.0.0.zip'
+const ARCHIVE_SHA = 'f'.repeat(64)
+
+function packageFor(url: string, ref: string, kind: PluginPackage['source']['kind'], entry?: string): PluginPackage | string[] | undefined {
+  if (kind === 'archive') {
+    if (url !== ARCHIVE_URL) return undefined
+    return {
+      ...(packageFor('https://git.example/greeter.git', 'HEAD', 'git') as PluginPackage),
+      source: { kind: 'archive', url, ref: ref.startsWith('sha256:') ? ref : '', plugin_path: 'greeter-1.0.0' },
+      pin_kind: 'bytes',
+      commit_sha: null,
+      bytes_sha256: ARCHIVE_SHA,
+    }
+  }
   const known = url === 'https://git.example/greeter.git' || (kind === 'marketplace' && url === 'https://git.example/market.git' && entry === 'greeter')
   if (url === 'https://git.example/reserved.git') return RESERVED_PROBLEMS
   if (url === 'https://git.example/shell.git') {
     return {
       name: 'shell',
       source: { kind: 'git', url, ref, path: '' },
+      pin_kind: 'commit',
       commit_sha: SHELL.commit,
+      bytes_sha256: null,
       content_hash: SHELL.hash,
       review: REVIEW_SHELL,
       approved: false,
@@ -202,7 +218,9 @@ function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry
       kind === 'git'
         ? { kind: 'git', url, ref, path: '' }
         : { kind: 'marketplace', url, ref, entry: entry ?? '', plugin_url: ref === 'moved' ? MOVED_URL : url, plugin_path: ref === 'moved' ? '' : 'plugins/greeter' },
+    pin_kind: 'commit',
     commit_sha: v.commit,
+    bytes_sha256: null,
     content_hash: v.hash,
     review: ref === 'v2' ? REVIEW_V2 : REVIEW_V1,
     approved: false,
@@ -430,8 +448,14 @@ export const aiPluginHandlers = [
   http.post(`${base}/plugin-packages`, async ({ request }) => {
     await delay(150)
     const { source } = (await request.json()) as {
-      source: { kind: 'git' | 'marketplace'; url: string; ref?: string; path?: string; entry?: string }
+      source: { kind: PluginPackage['source']['kind']; url?: string; ref?: string; path?: string; entry?: string; package?: string; sha256?: string }
     }
+    if (source.kind === 'npm') return detail(502, `npm registry: no package ${source.package ?? ''} in the demo`)
+    if (source.kind === 'archive' && source.sha256 !== undefined) {
+      if (source.sha256 !== ARCHIVE_SHA) return detail(422, `the archive's sha256 is ${ARCHIVE_SHA}, not ${source.sha256}`)
+      source.ref = `sha256:${source.sha256}`
+    }
+    source.url ??= ''
     if (!/^https?:\/\//.test(source.url)) return detail(400, 'source url must be https (or http to loopback)')
     if (source.url === 'https://git.example/scadbuddy.git' || source.entry === 'scadbuddy') {
       return detail(409, BUILT_IN_ANSWER, { built_in: true })
@@ -449,10 +473,12 @@ export const aiPluginHandlers = [
   http.post(`${base}/plugin-packages/:name/approve`, async ({ params, request }) => {
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
-    const body = (await request.json()) as { commit_sha: string; content_hash: string; allow_refused?: boolean }
-    const isPending = pkg.pending && body.commit_sha === pkg.pending.commit_sha && body.content_hash === pkg.pending.content_hash
+    const body = (await request.json()) as { commit_sha?: string; bytes_sha256?: string; content_hash: string; allow_refused?: boolean }
+    const names = (pin: { pin_kind: string; commit_sha: string | null; bytes_sha256: string | null }) =>
+      pin.pin_kind === 'bytes' ? body.bytes_sha256 === pin.bytes_sha256 : body.commit_sha === pin.commit_sha
+    const isPending = pkg.pending && names(pkg.pending) && body.content_hash === pkg.pending.content_hash
     const refused = (isPending ? pkg.pending!.review : pkg.review).refused ?? []
-    if (refused.length && !body.allow_refused && (isPending || body.commit_sha === pkg.commit_sha)) {
+    if (refused.length && !body.allow_refused && (isPending || names(pkg))) {
       return detail(409, `the review lists what the rules refuse (${refused.length}); approve with allow_refused to load the package as it is`)
     }
     const allow_refused = Boolean(body.allow_refused) && refused.length > 0
@@ -462,11 +488,15 @@ export const aiPluginHandlers = [
       const next: PluginPackage = {
         ...pkg,
         source:
-          pkg.source.kind === 'marketplace'
-            ? { ...pkg.source, ref: pkg.pending.ref, plugin_url: pkg.pending.plugin_url, plugin_path: pkg.pending.plugin_path }
-            : { ...pkg.source, ref: pkg.pending.ref, path: pkg.pending.plugin_path },
+          pkg.source.kind === 'git'
+            ? { ...pkg.source, ref: pkg.pending.ref, path: pkg.pending.plugin_path }
+            : pkg.source.kind === 'marketplace' || pkg.source.kind === 'marketplace-url'
+              ? { ...pkg.source, ref: pkg.pending.ref, plugin_url: pkg.pending.plugin_url, plugin_path: pkg.pending.plugin_path }
+              : { ...pkg.source, ref: pkg.pending.ref, plugin_path: pkg.pending.plugin_path },
         enabled: pkg.enabled && !moved,
+        pin_kind: pkg.pending.pin_kind,
         commit_sha: pkg.pending.commit_sha,
+        bytes_sha256: pkg.pending.bytes_sha256,
         content_hash: pkg.pending.content_hash,
         review: pkg.pending.review,
         approved: true,
@@ -477,7 +507,7 @@ export const aiPluginHandlers = [
       putPackage(pkg.name, next)
       return HttpResponse.json(next)
     }
-    if (body.commit_sha === pkg.commit_sha && body.content_hash === pkg.content_hash) {
+    if (names(pkg) && body.content_hash === pkg.content_hash) {
       const next = { ...pkg, approved: true, approved_at: pkg.approved_at ?? now(), allow_refused }
       putPackage(pkg.name, next)
       return HttpResponse.json(next)
@@ -490,9 +520,17 @@ export const aiPluginHandlers = [
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
     const { ref } = (await request.json()) as { ref?: string }
-    const found = packageFor(pkg.source.url, ref || pkg.source.ref, pkg.source.kind, pkg.source.kind === 'marketplace' ? pkg.source.entry : undefined)
+    if (pkg.source.kind === 'archive' && pkg.source.ref.startsWith('sha256:')) {
+      return detail(409, 'this archive was installed with its sha256, so a re-pin could only fetch the same file', {
+        reason: 'repin-fixed-sha256',
+      })
+    }
+    const entry = pkg.source.kind === 'marketplace' || pkg.source.kind === 'marketplace-url' ? pkg.source.entry : undefined
+    const found = packageFor(pkg.source.url, ref || pkg.source.ref, pkg.source.kind, entry)
     if (!found || Array.isArray(found)) return detail(502, 'git fetch failed')
-    if (found.commit_sha === pkg.commit_sha) return detail(409, `"${pkg.name}" is already pinned to ${pkg.commit_sha}`)
+    if (found.commit_sha === pkg.commit_sha && found.bytes_sha256 === pkg.bytes_sha256) {
+      return detail(409, `"${pkg.name}" is already pinned to ${pkg.bytes_sha256 ?? pkg.commit_sha}`)
+    }
     const removed = pkg.review.files.filter((f) => !found.review.files.includes(f))
     const added = found.review.files.filter((f) => !pkg.review.files.includes(f))
     const next: PluginPackage = {
@@ -501,7 +539,9 @@ export const aiPluginHandlers = [
         ref: found.source.ref,
         plugin_url: packageFetch(found).url,
         plugin_path: packageFetch(found).path,
+        pin_kind: found.pin_kind,
         commit_sha: found.commit_sha,
+        bytes_sha256: found.bytes_sha256,
         content_hash: found.content_hash,
         review: found.review,
         diff: { added, removed, changed: ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'skills/hello/SKILL.md'] },

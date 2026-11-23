@@ -2,15 +2,15 @@ import { EgressError } from '../../http/egress.js'
 import { type OperationKind, OperationRefusal, refusal } from '../../operations/kinds.js'
 import { PluginError } from '../registry.js'
 import { BuiltInPluginError, PackageRefusedError, type PackageInstaller } from './install.js'
-import { type PackageSource, validateRef, validateSource } from './source.js'
+import { type PackageSource, REPIN_FIXED, RepinFixedError, validateSource, withRepinRef } from './source.js'
 import type { PackageRepo } from './store.js'
 
 // Installing and re-pinning a plugin package as commands (spec 2026-10-01 §4.1, §4.3
-// `agent-tools`; §10 phase 4; #1055). Both are a git fetch, an effect outside the one
-// Postgres write that stores the pin, so each is an AgentOperation kind: the check
-// makes the refusals that need no fetch (a bad source or ref, an unknown package, the
-// concurrency cap the route had), the run fetches, vets and stores the pin, and stops
-// git when its activity is cancelled.
+// `agent-tools`; §10 phase 4; #1055). Both are a fetch (git, or HTTP for an archive or npm
+// package, #6935), an effect outside the one Postgres write that stores the pin, so each
+// is an AgentOperation kind: the check makes the refusals that need no fetch (a bad source
+// or ref, an unknown package, the concurrency cap the route had), the run fetches, vets
+// and stores the pin, and stops the fetch when its activity is cancelled.
 // The answers are the routes' own: 201/200 with the package, 400, 404, 409, 422 with
 // every problem, 429.
 
@@ -28,6 +28,7 @@ export type PackageKindDeps = {
 function asRefusal(err: unknown): unknown {
   if (err instanceof BuiltInPluginError) return refusal(409, err.message, { built_in: true })
   if (err instanceof PackageRefusedError) return refusal(422, 'the plugin package is refused', { problems: err.problems })
+  if (err instanceof RepinFixedError) return refusal(409, err.message, { reason: REPIN_FIXED })
   if (err instanceof PluginError) return refusal(err.status, err.message)
   if (err instanceof EgressError) return refusal(400, err.message)
   return err
@@ -102,7 +103,11 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
     }
   }
 
-  const installKey = (source: PackageSource) => `${source.url}#${source.kind === 'git' ? source.path : source.entry}`
+  const installKey = (source: PackageSource) => {
+    if (source.kind === 'git') return `${source.url}#${source.path}`
+    if (source.kind === 'marketplace' || source.kind === 'marketplace-url') return `${source.url}#${source.entry}`
+    return `${source.url}#${source.ref}`
+  }
 
   const install: OperationKind = {
     name: INSTALL_KIND,
@@ -134,9 +139,9 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
         const name = String(request.name)
         const current = await deps.packages.pinOf(name)
         if (!current) throw new OperationRefusal({ status: 404, title: 'Not Found', detail: `no plugin package named "${name}"` })
-        const ref = validateRef((request.ref as string | undefined) ?? current.source.ref)
+        const source = withRepinRef(current.source, request.ref as string | undefined)
         refuseWhenTaken(name)
-        return { source: { ...current.source, ref } }
+        return { source }
       }),
     run: (request, checked, signal) =>
       refusing(async () => {

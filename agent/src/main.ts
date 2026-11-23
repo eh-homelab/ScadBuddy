@@ -46,6 +46,7 @@ import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
 import { reviewsByHash } from './access/packageProvider.js'
 import { CrudPackageStore } from './plugins/packages/store.js'
+import { CrudPackageMirror } from './plugins/packages/mirror.js'
 import { CrudPluginFeeds } from './plugins/feed.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { CrudOAuthRows, PluginOAuth } from './plugins/oauthStore.js'
@@ -448,7 +449,10 @@ const stopWorkspaceSweep = !role.http
 // <state dir>/plugins are a cache, rebuilt from the pin and verified against its content hash
 // before each load (plugins/packages/). Each session turn loads the enabled ones (`packagePlugins` below).
 const pluginPackages = new CrudPackageStore(crudTarget)
-const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
+// An archive or npm package's file (#6935) is kept by the API (area `package-mirrors`, one of
+// `STORE_AREAS`, so the agent is not ready until the API lists it).
+const packageMirror = new CrudPackageMirror(crudTarget)
+const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths), mirror: () => packageMirror })
 // Settings → Tools & plugins (#4757): an older stored review's items read from the cached copy
 // (read only), once per content hash; and what a turn would make of the enabled packages.
 const verifiedPackageReview = reviewsByHash((pin) => verifiedReview(packageInstaller, pin))
