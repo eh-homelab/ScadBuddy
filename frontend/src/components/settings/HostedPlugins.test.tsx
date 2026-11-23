@@ -7,6 +7,7 @@ import { hostedPlugins } from '../../api/hostedPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { PACKAGES_HREF } from './HostedPluginEditor'
+import { SettingsDirtyProvider, useDirtySections, useLeaveHolds } from '../../pages/settings/dirty'
 import { HostedPluginsPanel } from './HostedPlugins'
 
 // Monaco needs layout and workers jsdom lacks (SourceEditor.test); a textarea stands in.
@@ -281,6 +282,39 @@ describe('HostedPluginsPanel', () => {
     await user.click(within(editor).getByRole('button', { name: 'Close' }))
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Hosted plugin wave-helper' })).not.toBeInTheDocument())
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('holds a leave of Settings while a file is unsaved, never as a dirty section (#7192)', async () => {
+    function Probe() {
+      const holds = useLeaveHolds()
+      const dirty = useDirtySections()
+      return <output aria-label="leave holds">{`${holds.join('|')};${dirty.join(',')}`}</output>
+    }
+    const { user } = renderPage(
+      <SettingsDirtyProvider>
+        <HostedPluginsPanel />
+        <Probe />
+      </SettingsDirtyProvider>,
+    )
+    const unload = () => {
+      const event = new Event('beforeunload', { cancelable: true })
+      window.dispatchEvent(event)
+      return event.defaultPrevented
+    }
+    const editor = await openPlugin(user, 'print-notes')
+    expect(screen.getByRole('status', { name: 'leave holds' })).toHaveTextContent(/^;$/)
+    expect(unload()).toBe(false)
+    await user.click(within(editor).getByRole('button', { name: 'skills/print-notes/SKILL.md' }))
+    await user.type(await within(editor).findByLabelText('Edit skills/print-notes/SKILL.md'), 'Keep it short.')
+    // Held by its own words; the dirty sections (the reload's, the agent's) stay empty.
+    expect(screen.getByRole('status', { name: 'leave holds' })).toHaveTextContent("print-notes's skills/print-notes/SKILL.md;")
+    expect(unload()).toBe(true)
+    // Closed without saving: the hold goes.
+    await user.click(within(editor).getByRole('button', { name: 'Close' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Close without saving?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Close without saving' }))
+    await waitFor(() => expect(screen.getByRole('status', { name: 'leave holds' })).toHaveTextContent(/^;$/))
+    expect(unload()).toBe(false)
   })
 
   it('replaces a file that is not text with an upload, after a confirm, and keeps its executable bit', async () => {
