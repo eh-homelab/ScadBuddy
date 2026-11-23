@@ -960,6 +960,13 @@ def test_the_compatibility_view_and_its_trigger_are_dropped(pg_conninfo: str) ->
         assert conn.execute(
             "SELECT to_regprocedure('entity_attachments_fill_entity()')"
         ).fetchone() == (None,)
+        # Nothing fills `entity_id` any more: a write that names none is refused.
+        with pytest.raises(psycopg.errors.NotNullViolation), conn.transaction():
+            conn.execute(
+                "INSERT INTO entity_attachments (id, subject, kind, filename, media_type,"
+                " size_bytes, sha256, blob_key, created_by) VALUES ('x', 'supplier:s', 'image',"
+                " 'a.png', 'image/png', 1, repeat('a', 64), 'attachment-x', '{}')"
+            )
 
 
 @pytest.mark.requires_postgres
@@ -983,7 +990,7 @@ def test_the_entities_migration_keeps_order_attachments_for_the_previous_build(
             " repeat('a', 64), 'attachment-a', '', '{}')"
         )
         conn.execute(old, ("before",))
-        # Only up to `entities`: a later migration drops the view (#6960, the test below).
+        # Only up to `entities`: a later migration drops the view (#6960, `test_the_compatibility_view_and_its_trigger_are_dropped`).
         assert (
             migrate(conn, MIGRATIONS[: _index("entities") + 1])[0]
             == MIGRATIONS[_index("entities")].id
