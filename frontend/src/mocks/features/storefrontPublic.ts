@@ -237,6 +237,8 @@ let serial = 0
 let variants = new Map<string, StoreVariant>()
 /** #6710: how often each file listing's choice of colours was priced. */
 let fileReads = new Map<string, number>()
+/** #6710 §7.5: the file listings that have a price of any colours: their `last` price. */
+let filePriced = new Set<string>()
 
 /** A file listing's plate (#6710 §8.2): a base and a clip, each mesh with its slot. */
 function fileGlb(): Uint8Array {
@@ -455,7 +457,8 @@ export const handlers = [
     return HttpResponse.arrayBuffer(fileGlb().slice().buffer as ArrayBuffer, { headers: { 'Content-Type': 'model/gltf-binary' } })
   }),
   // #6710 §7.5: a file listing's price. The first read of a choice of colours starts its
-  // slice (`pending`), the next answers the price, as the shop's slice price does.
+  // slice and answers the listing's `last` price (`pending` when it has none), the next
+  // answers the price, as the shop's slice price does.
   http.post(`${base}/listings/:id/price`, async ({ request, params }) => {
     const listing = allListings().find((l) => l.id === params.id && l.source === 'library_file')
     if (!listing) return refused(404, 'listing_not_found', 'There is no such listing.')
@@ -468,7 +471,11 @@ export const handlers = [
     const key = JSON.stringify([listing.id, body.colours])
     const reads = (fileReads.get(key) ?? 0) + 1
     fileReads.set(key, reads)
-    return HttpResponse.json(reads === 1 ? { ...PENDING_PRICE, retry_after: 0 } : FILE_ESTIMATE)
+    if (reads > 1) {
+      filePriced.add(listing.id)
+      return HttpResponse.json(FILE_ESTIMATE)
+    }
+    return HttpResponse.json(filePriced.has(listing.id) ? { ...FILE_ESTIMATE, source: 'last', retry_after: 0 } : { ...PENDING_PRICE, retry_after: 0 })
   }),
   http.post(`${base}/renders`, async ({ request }) => {
     const missing = keyMissing(request)
@@ -680,6 +687,7 @@ export function reset(): void {
   renders = new Map()
   variants = new Map()
   fileReads = new Map()
+  filePriced = new Set()
   serial = 0
   try {
     sessionStorage.removeItem(STORAGE_KEY)

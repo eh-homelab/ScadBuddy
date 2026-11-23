@@ -21,6 +21,12 @@ const RETRY_CAP_MS = 30_000
 /** Refusals a read again cannot pass: the visitor reads why, and the page stops reading. */
 const LIMITS = new Set(['render_limited', 'rate_limited'])
 
+/** No firm price: the shop prices the design by hand. */
+const BY_HAND: StoreEstimate = { source: 'none', price_minor: null, currency: null, minor_exponent: null, retry_after: null }
+
+/** The price while the shop works it out and no price is known. */
+const WORKING: StoreEstimate = { ...BY_HAND, source: 'pending' }
+
 /** A held plate preview as the viewer reads a done render: its mesh, and nothing else. */
 function plateJob(url: string): StoreRender {
   return { id: url, status: 'done', stage: null, plates: [], bbox_mm: null, colors: null, preview_url: url, error: null }
@@ -59,8 +65,10 @@ export function FileCustomize({
   })
   const [quantity, setQuantity] = useState(() => Math.min(loadChoices(initial.id)?.quantity ?? 1, MAX_QUANTITY))
   const [plate, setPlate] = useState(0)
-  /** The price on screen and the colours (`current`) it is the price of. */
-  const [priced, setPriced] = useState<{ key: string; estimate: StoreEstimate }>()
+  /** The price on screen and the colours (`current`) it is the price of. `heldFor` is the
+   * colours a read was refused for (`render_limited`, `rate_limited`): the price stays on
+   * screen for them, not marked as updating, since no update will come. */
+  const [priced, setPriced] = useState<{ key: string; estimate: StoreEstimate; heldFor?: string }>()
   /** The colours whose price the shop is working out (it answered `pending`). */
   const [pendingFor, setPendingFor] = useState<string>()
   const [priceError, setPriceError] = useState<string | null>(null)
@@ -123,17 +131,21 @@ export function FileCustomize({
         try {
           const answer = await store.price(listing.id, body)
           if (!live) return
-          if (answer.source !== 'pending') {
+          // `last` (#6710 §7.5) is the listing's last price while the shop works out the
+          // colours' own: it shows at once, marked as updating, and the page reads again.
+          const working = answer.source === 'pending' || (answer.source === 'last' && answer.retry_after != null)
+          if (!working) {
             setPendingFor(undefined)
             setPriced({ key, estimate: answer })
             return
           }
+          if (answer.source === 'last') setPriced({ key, estimate: answer })
           setPendingFor(key)
           if (await pause(answer.retry_after)) continue
           if (!live) return
           // Past the time limit the shop prices it by hand.
           setPendingFor(undefined)
-          setPriced({ key, estimate: { ...answer, source: 'none', retry_after: null } })
+          setPriced({ key, estimate: BY_HAND })
           return
         } catch (caught) {
           if (!live) return
@@ -141,8 +153,14 @@ export function FileCustomize({
           if (passing(caught) && !limited && (await pause(caught.retryAfter))) continue
           if (!live) return
           setPendingFor(undefined)
-          // The colours on screen have no price now: no other price stays as if it were updating.
-          setPriced((p) => (p && p.key !== key ? undefined : p))
+          setPriced((p) => {
+            if (!p) return p
+            // Always show a price: a refused read keeps the last one on screen, not marked as
+            // updating, since no update will come.
+            if (limited && hasNumber(p.estimate)) return { ...p, heldFor: key }
+            // The colours on screen have no price now: no other price stays as if it were updating.
+            return p.key !== key ? undefined : p
+          })
           if (changedListing(caught)) setStale(true)
           setPriceError(refusalText(caught, shown.current))
           return
@@ -259,12 +277,16 @@ export function FileCustomize({
         )}
         {priced && hasNumber(priced.estimate) ? (
           // The owner's rule: always show a price. The last one stays, marked as updating,
-          // until the colours on screen are priced.
-          <Estimate estimate={priced.estimate} updating={priced.key !== current || priced.estimate.source !== 'slice' || pendingFor === current} />
+          // until the colours on screen are priced, or not marked when their read was refused.
+          <Estimate
+            estimate={priced.estimate}
+            updating={priced.heldFor !== current && (priced.key !== current || priced.estimate.source !== 'slice' || pendingFor === current)}
+          />
         ) : priced && priced.key === current ? (
           <Estimate estimate={priced.estimate} />
         ) : (
-          pendingFor === current && <Estimate estimate={{ source: 'pending', price_minor: null, currency: null, minor_exponent: null, retry_after: null }} />
+          // From the change on, through the debounce, until the colours are priced.
+          !blocked && !priceError && <Estimate estimate={WORKING} />
         )}
         <div className="sf-order">
           <p className="sf-label" id="sf-quantity">

@@ -574,9 +574,14 @@ public list and listing take either. On the page (`frontend/src/storefront/pages
 it. The parts are colour parameters named `colours.<slot>` (`fileParts.ts` `partsView`), so
 `ListingView`, `colourPlan` and the clash text serve them unchanged; a pick of a colour that
 only another material offers moves each untouched part to the closest colour of that
-material, as for a template. The price read is debounced as a render is, keeps the last
-price on screen marked as updating until the new colours are priced, and stops at a
-`render_limited` or `rate_limited` refusal with its text. A plate chooser ("Plate 1", …)
+material, as for a template. The price read is debounced as a render is and follows the
+price key only (the listing's version and the colours), so a change that keeps the key reads
+nothing again. It keeps the last price on screen marked as updating until the new colours
+are priced; a `last` answer (§7.5) shows at once, marked as updating, and the page reads
+again after its `retry_after`. With no price known, "Working out the price…" shows from
+the change on, through the debounce. It stops at a `render_limited` or `rate_limited`
+refusal with its text, and keeps the last price on screen, not marked as updating, since
+no update will come. A plate chooser ("Plate 1", …)
 sits over the viewer when the file has more than one plate. The §11.1 "Public" tests are
 `tests/orders/storefront/test_public_files.py` and `tests/api/test_storefront_public_files.py`
 (the native-library client's fixtures would clash with `test_storefront_public.py`'s).

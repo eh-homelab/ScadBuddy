@@ -917,6 +917,35 @@ describe('CustomizePage of a file listing (#6710)', () => {
     expect(screen.queryByText('Working out the price…')).toBeNull()
   })
 
+  it("shows the listing's last price, marked as updating, for colours never priced (#6710 §7.5)", async () => {
+    const LAST = { source: 'last', price_minor: 650, currency: 'USD', minor_exponent: 2, retry_after: 0 }
+    let reads = 0
+    server.use(
+      http.post('/api/store/v1/listings/l4/price', () => {
+        reads += 1
+        return HttpResponse.json(reads < 3 ? LAST : { ...LAST, source: 'slice', price_minor: 700, retry_after: null })
+      }),
+    )
+    show(FILE_ID)
+    expect(await screen.findByText('$6.50 for one')).toBeInTheDocument()
+    expect(screen.getByText('Updating this price…')).toBeInTheDocument()
+    expect(screen.queryByText('Working out the price…')).toBeNull()
+    expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+    expect(screen.queryByText('Updating this price…')).toBeNull()
+    expect(reads).toBe(3)
+  })
+
+  it('keeps the last price on screen, not as updating, when a read is refused', async () => {
+    const { user } = show(FILE_ID)
+    await screen.findByText('$7.00 for one')
+    server.use(http.post('/api/store/v1/listings/l4/price', () => HttpResponse.json(LIMITED, { status: 429, headers: { 'Retry-After': '42' } })))
+    await user.click(screen.getByRole('button', { name: /Part 1/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.getByText('$7.00 for one')).toBeInTheDocument()
+    expect(screen.queryByText('Updating this price…')).toBeNull()
+  })
+
   it('reads no price again when the colour on screen is picked again', async () => {
     const sent = requests()
     const { user } = show(FILE_ID)
@@ -927,6 +956,17 @@ describe('CustomizePage of a file listing (#6710)', () => {
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(sent.filter(({ what }) => what === 'POST /api/store/v1/listings/l4/price')).toHaveLength(before)
     expect(screen.queryByText('Updating this price…')).toBeNull()
+  })
+
+  it('says the price is being worked out from the change on, when no price is known', async () => {
+    server.use(http.post('/api/store/v1/listings/l4/price', () => HttpResponse.json(NO_PRICE)))
+    const { user } = show(FILE_ID, FAST, 10_000)
+    await screen.findByText('We price this design by hand')
+    await user.click(screen.getByRole('button', { name: /Part 1/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
+    // The read waits out the debounce; the page says it is working the price out meanwhile.
+    expect(await screen.findByText('Working out the price…')).toBeInTheDocument()
+    expect(screen.queryByText('We price this design by hand')).toBeNull()
   })
 
   it('adds the colours to the order, with no values', async () => {

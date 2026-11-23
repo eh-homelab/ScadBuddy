@@ -11,9 +11,10 @@ import type { StoreEstimate } from '../api/client'
  * #6921: the owner's rule is "always show a price". With `updating`, the price on screen
  * is not yet the firm price of the choices on screen (a `last` price, or the price of the
  * choices before a change): it stays visible, marked as updating, until the render's
- * estimate answers. A `last` price is never shown as firm, whatever `updating` says.
+ * estimate answers. A `last` price is marked unless the page says no update will come
+ * (`updating` false: a file listing's read of the colours on screen was refused, #6710).
  */
-export function Estimate({ estimate, updating = false }: { estimate: StoreEstimate; updating?: boolean }) {
+export function Estimate({ estimate, updating = estimate.source === 'last' }: { estimate: StoreEstimate; updating?: boolean }) {
   if (estimate.source === 'pending') {
     return (
       <div className="sf-estimate" role="status">
@@ -31,7 +32,7 @@ export function Estimate({ estimate, updating = false }: { estimate: StoreEstima
     )
   }
   const price = formatMoney(estimate.price_minor ?? 0, estimate.currency ?? '', estimate.minor_exponent ?? 2)
-  if (updating || estimate.source === 'last') {
+  if (updating) {
     return (
       <div className="sf-estimate sf-estimate-updating" role="status" aria-busy="true">
         <p className="sf-estimate-price">{`${price} for one`}</p>
