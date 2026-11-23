@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - Table `filament_unknown_trays`: `id`, `printer_id` (FK `printers`, `ON DELETE CASCADE`), `ams_id`, `tray_id`, `tray_uuid`, `tag_uid`, `material`, `colour_rgba`, `remain_pct` (nullable), `first_seen_at`, `seen_at`; unique `(printer_id, ams_id, tray_id)`. A row exists only while the tray is loaded and unmatched.
-- Routes: `GET /api/v1/filament/unknown-trays`, `POST /api/v1/filament/unknown-trays/{id}/resolve`, and the worker's `GET /api/v1/internal/crud/print/filament/printers/{printer_id}/unknown-trays` (the spec's path without `/print`; every print-worker CRUD route lives under `crud_router("print")`, `crud/print.py` `BASE`).
+- Routes: `GET /api/v1/filament/unknown-trays`, `POST /api/v1/filament/unknown-trays/{id}/resolve`, and the worker's `GET /api/v1/internal/crud/print/filament/printers/{printer_id}/unknown-trays` (as the spec's D7; every print-worker CRUD route lives under `crud_router("print")`, `crud/print.py` `BASE`).
 - Problem codes: `tray_changed` (409), `code_unknown` (404, reused from `api/codes.py`), `spool_archived` (409), `no_ams_kind` (409), and the block's `unknown_spool_loaded` (422). Use these strings everywhere: backend, mocks, frontend, agent.
 - Block text, word for word: `"<printer name> has an unknown spool in <slot>: link it on the Filament page first."`; several slots join with `", "` and a final `" and "`. `<slot>` is `bambuddy/trays.py` `tray_label` ("AMS-A slot 2").
 - Needs-you title: `"Unknown spool in <printer name> <slot>"` ("Unknown spool in H2C AMS-A slot 2").
@@ -41,12 +41,14 @@
 
 ## Decisions the code forced (deviations from the spec's wording)
 
+D1 to D5 are the spec's D1 to D5 ("Decisions made while planning"), with the reasons the code gave. P1 is this plan's own.
+
 - **D1 `seen_at` is a version, not a heartbeat.** Capture runs only when the tray projection changes (`capture.trays_changed`), and a change in any tray of the printer runs it. If every run refreshed `seen_at`, a change in slot 1 would refuse a resolve of slot 2. The upsert moves `seen_at` only when the row's reported fields (`tray_uuid`, `tag_uid`, `material`, `colour_rgba`, `remain_pct`) change.
 - **D2 External holders (ams 255) never get a row.** `vt_tray` has no presence state; `_filled` is true whenever a `tray_type` is configured, so an empty external holder would block the printer for good. An RFID external tray is still auto-created. Decided 2026-11-23 (spec "Decisions made while planning").
 - **D3 `remain_pct` is stored but is NULL in practice.** `trays._remain` gives a remain only for a tray with RFID keys (#6263 preflight C4), and only untagged trays get rows. The prefill code exists; it fires only if `_remain` changes. Decided 2026-11-23 (spec "Decisions made while planning").
 - **D4 The label weight override applies only to a first weight.** The spec's rule makes `label_weight_g` the typed net weight when it differs from the type's. For a half-used spool that sets the label to the grams left and breaks every `remain_pct` reading. The override applies only when the spool has no event other than `created`, `edited`, `moved`, `tag_bound` and `tag_unbound` (no reading, use or load yet). The `weighed` reading is booked either way. Decided 2026-11-23 (spec "Decisions made while planning").
 - **D5 "The owner is told" of an RFID spool** = the list route also returns the spools capture made from tags in the last 24 h (`made_from_tags`), and the frontend toasts each new one once. The spec does not say how.
-- **D6 The rows' SQL lives in its own module** (`filament/unknown_tray_rows.py`) because `inventory.py` must clear a row inside `link_on`, and `unknown_trays.py` imports `inventory.py`.
+- **P1 The rows' SQL lives in its own module** (`filament/unknown_tray_rows.py`) because `inventory.py` must clear a row inside `link_on`, and `unknown_trays.py` imports `inventory.py`.
 
 ## Review Focus
 

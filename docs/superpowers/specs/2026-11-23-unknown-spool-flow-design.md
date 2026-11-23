@@ -167,6 +167,9 @@ For each tray with a holder, or not loaded: delete its row if one exists.
   with no type, and so does this (the type is set later, as for any untyped spool).
 - D7. The worker's CRUD path sits under `/print`, as every print-worker route does:
   `/api/v1/internal/crud/print/filament/printers/{id}/unknown-trays`.
+- D8. An RFID tray still gets a (blocking) row in two cases: when making or linking its
+  spool fails, and when no location kind is flagged `ams` (there is no place to put the
+  spool). Goal 2's "nothing is blocked" holds whenever the spool can be made and placed.
 - After deploy, every loaded untagged tray with no linked spool blocks its printer once
   capture or the backstop sees it. That is the intent.
 
