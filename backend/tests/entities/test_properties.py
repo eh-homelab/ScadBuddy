@@ -231,6 +231,82 @@ def test_set_schema_refuses_a_keyword_outside_the_subset(
     assert props.schema("spool_type") == before
 
 
+def _key(sub: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "object", "properties": {"k": sub}}
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        _key({"type": "array", "items": {"type": "number"}}),
+        _key({"type": "array", "items": {"type": "boolean"}}),
+        _key({"enum": [None, {"a": 1}, [1], 1e400]}),
+        _key({"enum": []}),
+        _key({"type": "array", "items": {"type": "string", "enum": [1, "x" * 501]}}),
+        _key({"const": None}),
+        _key({"const": {"a": 1}}),
+        _key({"const": [1]}),
+        _key({"type": "array", "items": {"type": "string", "const": 1}}),
+        _key({"type": "number", "minimum": 2, "maximum": 1}),
+        _key({"type": "number", "exclusiveMinimum": 1, "maximum": 1}),
+        _key({"type": "number", "minimum": 1, "exclusiveMaximum": 1}),
+        _key({"type": "number", "exclusiveMinimum": 1, "exclusiveMaximum": 1}),
+        _key({"type": "string", "minLength": 3, "maxLength": 2}),
+        _key({"type": "string", "minLength": 2001}),
+        _key({"type": "array", "items": {"type": "string", "minLength": 501}}),
+        _key({"type": "array", "minItems": 3, "maxItems": 2}),
+        _key({"type": "array", "minItems": 51}),
+        {"type": "object", "$schema": "http://json-schema.org/draft-07/schema#"},
+    ],
+    ids=[
+        "number_items",
+        "boolean_items",
+        "enum_no_value",
+        "enum_empty",
+        "items_enum_no_string",
+        "const_null",
+        "const_object",
+        "const_number_list",
+        "items_const_number",
+        "min_over_max",
+        "exclusive_min_at_max",
+        "min_at_exclusive_max",
+        "exclusive_min_at_exclusive_max",
+        "min_length_over_max_length",
+        "min_length_over_cap",
+        "items_min_length_over_cap",
+        "min_items_over_max_items",
+        "min_items_over_cap",
+        "draft_07",
+    ],
+)
+def test_set_schema_refuses_a_schema_that_leaves_a_key_no_value(
+    props: EntityPropertyStore, schema: dict[str, Any]
+) -> None:
+    before = props.schema("spool_type")
+
+    with pytest.raises(BadPropertySchema):
+        props.set_schema("spool_type", schema, BY)
+
+    assert props.schema("spool_type") == before
+
+
+def test_bounds_that_leave_a_value_are_accepted(props: EntityPropertyStore) -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "number", "minimum": 1, "maximum": 1},
+            "b": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+            "c": {"type": "string", "minLength": 2000, "maxLength": 2000},
+            "d": {"type": "array", "minItems": 50, "items": {"type": "string", "minLength": 500}},
+            "e": {"enum": [None, {"a": 1}, "x"], "const": "x"},
+            "f": {"type": "array", "items": {"type": "string", "enum": [1, "y"]}},
+        },
+    }
+
+    assert props.set_schema("spool_type", schema, BY) == schema
+
+
 def test_a_refusal_names_the_keyword_and_where_it_is(props: EntityPropertyStore) -> None:
     with pytest.raises(BadPropertySchema) as top:
         props.set_schema("spool_type", {"type": "object", "allOf": [{}]}, BY)
@@ -287,8 +363,8 @@ def test_every_allowed_keyword_is_accepted(props: EntityPropertyStore) -> None:
 def test_a_schema_documents_keys_named_like_keywords(
     pg_pool: PgPool, props: EntityPropertyStore
 ) -> None:
-    """Names under `properties` are not keywords, and `const`, `default`, `enum` and
-    `examples` hold data."""
+    """Names under `properties` are not keywords, and `default`, `enum` and `examples`
+    hold data, which is never walked (`const` must be a value a key takes)."""
     kind = _spool_type(pg_pool)
     schema = {
         "type": "object",
@@ -296,7 +372,7 @@ def test_a_schema_documents_keys_named_like_keywords(
             "pattern": {"type": "string", "default": {"pattern": "x", "$ref": "y"}},
             "$ref": {"type": "string", "enum": ["a", "b", {"allOf": [], "not": {}}]},
             "format": {"type": "string", "examples": [{"patternProperties": 1}]},
-            "patternProperties": {"type": "integer", "const": {"if": {"pattern": "x"}}},
+            "patternProperties": {"type": "integer", "const": 3},
         },
     }
 

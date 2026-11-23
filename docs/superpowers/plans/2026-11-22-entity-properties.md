@@ -31,9 +31,11 @@ D17, §9 phase 1b. Issue #7026; epic #6949.
   Top level: `type` (`"object"`), `properties`, `additionalProperties` (only `true`),
   `$schema`, `$comment`, `title`, `description`, `examples`. Each key's subschema (an
   object): a scalar or `array` `type` (a list may add `null`), annotations, `enum`, `const`,
-  number bounds, `minLength`/`maxLength`, `format` (not `regex`), `items` (scalar, no nested
-  `items`), `minItems`/`maxItems`/`uniqueItems`. A schema with any other keyword, or one
-  that is not a valid Draft 2020-12 schema, is 422 `bad_property_schema`.
+  number bounds, `minLength`/`maxLength`, `format` (an annotation, not `regex`), `items`
+  (type `string`, no nested `items`), `minItems`/`maxItems`/`uniqueItems`. `$schema` is
+  only the Draft 2020-12 URI. A schema with any other keyword, one that leaves a key no
+  value (an `enum` or `const` no key can hold, bounds that cross or pass the value caps),
+  or one that is not a valid Draft 2020-12 schema, is 422 `bad_property_schema`.
 - A known key (in the kind schema's `properties`) is validated against its subschema
   (Draft 2020-12); a mismatch is 422 `bad_property_value` naming the key.
 - `source`: `manual` for a person's or the agent's write. No import writes in this plan.
@@ -144,7 +146,8 @@ D17, §9 phase 1b. Issue #7026; epic #6949.
 - [ ] **Step 4: Implement `entities/properties.py`.** Value checks in Python (the shapes and
   limits of Global Constraints), then the kind schema's subschema for a known key with
   `jsonschema.Draft202012Validator`. Schema checks: `Draft202012Validator.check_schema`,
-  top-level `type == "object"`, none of the four restricting keywords. `apply` locks the
+  then the allowlist of Global Constraints (`TOP_KEYWORDS`, `KEY_KEYWORDS`,
+  `ITEM_KEYWORDS`); any other keyword is refused. `apply` locks the
   entity row (`SELECT … FOR UPDATE`, as `links.py` `_insert` does), runs every removal and
   upsert (`INSERT … ON CONFLICT (entity_id, key) DO UPDATE`, `source = 'manual'`), counts
   keys, and raises before commit on any failure. `of_kind` joins `entities` on `kind`.

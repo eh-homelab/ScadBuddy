@@ -171,10 +171,14 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
   `boolean`, `array`, or a list of them with `null`), the annotations (`title`,
   `description`, `$comment`, `default`, `examples`, `deprecated`, `readOnly`, `writeOnly`),
   `enum`, `const`, the number bounds (`minimum`, `maximum`, `exclusiveMinimum`,
-  `exclusiveMaximum`, `multipleOf`), `minLength`, `maxLength`, `format` (never `regex`),
-  `items` (a subschema of a scalar type, with no `items`), `minItems`, `maxItems`,
-  `uniqueItems`. The values of `enum`, `const`, `default` and `examples` are data. A schema
-  with any other keyword is refused.
+  `exclusiveMaximum`, `multipleOf`), `minLength`, `maxLength`, `format` (an annotation that
+  checks nothing; never `regex`), `items` (a subschema of type `string`, with no `items`),
+  `minItems`, `maxItems`, `uniqueItems`. `$schema`, when given, is the Draft 2020-12 URI.
+  The values of `enum`, `const`, `default` and `examples` are data, never walked as
+  keywords. A schema with any other keyword is refused, and so is one that leaves a key no
+  value: an `enum` with no member a key can hold, a `const` a key cannot hold (null, an
+  object), a lower bound past its upper bound, or a minimum length or count past the value
+  caps (2000 characters, 50 strings of 500).
 - Where the schema lives: for an entity kind registered in code (`spool`, `spool_type`, …),
   a row of `entity_property_schemas (kind, schema)`, seeded by migration and editable by a
   person. For an item (phase 2), its item kind's `attribute_schema`, which follows the same

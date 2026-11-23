@@ -79,8 +79,10 @@ KEY_KEYWORDS = frozenset(
 ITEM_KEYWORDS = KEY_KEYWORDS - {"items"}
 #: The types a known key's subschema may name; "null" only beside another, in a list.
 KEY_TYPES = frozenset({"string", "number", "integer", "boolean", "array"})
-#: The types an `items` subschema may name.
-ITEM_TYPES = KEY_TYPES - {"array"}
+#: The types an `items` subschema may name: a list holds strings only.
+ITEM_TYPES = frozenset({"string"})
+#: The only `$schema` a schema may name.
+DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
 
 PropertyValue = str | float | int | bool | list[str]
 
@@ -171,11 +173,15 @@ def _validator(canonical: str) -> Draft202012Validator:
 
 def check_schema(schema: dict[str, Any]) -> None:
     """`BadPropertySchema` unless `schema` is a valid Draft 2020-12 object schema in the
-    allowed subset, so it refuses no key and runs no regex. The top level uses only
-    `TOP_KEYWORDS`, with `additionalProperties` only true. Each key's subschema is an
-    object that uses only `KEY_KEYWORDS`, names only `KEY_TYPES` (or a list of them, with
-    "null"), and has no `format` "regex". Its `items` is such a subschema of `ITEM_TYPES`,
-    with no `items`. Any other keyword is refused."""
+    allowed subset, so it refuses no key, runs no regex and leaves every known key some
+    value it takes. The top level uses only `TOP_KEYWORDS`, with `additionalProperties`
+    only true and `$schema`, when given, `DRAFT_2020_12`. Each key's subschema is an object
+    that uses only `KEY_KEYWORDS` and names only `KEY_TYPES` (or a list of them, with
+    "null"). Its `items` uses only `ITEM_KEYWORDS` and names only `ITEM_TYPES`. In either,
+    `enum` holds a value the key takes, `const` is one, no lower bound passes its upper
+    bound, and no minimum length or count passes the value caps. `format` is an annotation
+    only (it checks nothing), but "regex" is refused all the same. Any other keyword is
+    refused."""
     if not isinstance(schema, dict):
         raise BadPropertySchema("a schema is a JSON object")
     try:
@@ -187,8 +193,10 @@ def check_schema(schema: dict[str, Any]) -> None:
         raise BadPropertySchema('a schema\'s "type" is "object"')
     if "additionalProperties" in schema and schema["additionalProperties"] is not True:
         raise BadPropertySchema('"additionalProperties" may only be true')
+    if "$schema" in schema and schema["$schema"] != DRAFT_2020_12:
+        raise BadPropertySchema(f'"$schema" may only be "{DRAFT_2020_12}"')
     for key, sub in schema.get("properties", {}).items():
-        _check_key(sub, f"in property '{key}'", KEY_KEYWORDS, KEY_TYPES)
+        _check_key(sub, f"in property '{key}'", item=False)
 
 
 def _only(node: dict[str, Any], allowed: frozenset[str], where: str) -> None:
@@ -197,12 +205,20 @@ def _only(node: dict[str, Any], allowed: frozenset[str], where: str) -> None:
             raise BadPropertySchema(f"keyword '{keyword}' is not allowed {where}")
 
 
-def _check_key(sub: Any, where: str, keywords: frozenset[str], types: frozenset[str]) -> None:
-    """`BadPropertySchema` unless the key's (or its items') subschema `sub` is an object
-    that uses only `keywords` and names only `types`."""
+def _takes(value: Any, item: bool) -> bool:
+    """Whether a key (or, with `item`, a list's string) can hold `value`."""
+    if item:
+        return isinstance(value, str) and len(value) <= MAX_LIST_ITEM
+    return value is not None and _shape_problem(value) is None
+
+
+def _check_key(sub: Any, where: str, item: bool) -> None:
+    """`BadPropertySchema` unless the key's (or, with `item`, its items') subschema `sub`
+    is in the subset and leaves some value."""
     if not isinstance(sub, dict):
         raise BadPropertySchema(f"the subschema {where} is a JSON object")
-    _only(sub, keywords, where)
+    _only(sub, ITEM_KEYWORDS if item else KEY_KEYWORDS, where)
+    types = ITEM_TYPES if item else KEY_TYPES
     if "type" in sub:
         named = sub["type"] if isinstance(sub["type"], list) else [sub["type"]]
         if not set(named) - {"null"} or not set(named) <= types | {"null"}:
@@ -212,9 +228,34 @@ def _check_key(sub: Any, where: str, keywords: frozenset[str], types: frozenset[
             )
     if sub.get("format") == "regex":
         raise BadPropertySchema(f"format 'regex' is not allowed {where}")
+    if "enum" in sub and not any(_takes(v, item) for v in sub["enum"]):
+        raise BadPropertySchema(f"'enum' {where} holds no value a key can take")
+    if "const" in sub and not _takes(sub["const"], item):
+        raise BadPropertySchema(f"'const' {where} is no value a key can take")
+    _check_bounds(sub, where, MAX_LIST_ITEM if item else MAX_STRING)
     if "items" in sub:
         items_where = "in the items of " + where.removeprefix("in ")
-        _check_key(sub["items"], items_where, ITEM_KEYWORDS, ITEM_TYPES)
+        _check_key(sub["items"], items_where, item=True)
+
+
+def _check_bounds(sub: dict[str, Any], where: str, max_string: int) -> None:
+    """`BadPropertySchema` when the bounds in `sub` leave no number, length or count."""
+    low, high = sub.get("minimum"), sub.get("maximum")
+    ex_low, ex_high = sub.get("exclusiveMinimum"), sub.get("exclusiveMaximum")
+    empty = (
+        (low is not None and high is not None and low > high)
+        or (ex_low is not None and high is not None and ex_low >= high)
+        or (low is not None and ex_high is not None and low >= ex_high)
+        or (ex_low is not None and ex_high is not None and ex_low >= ex_high)
+    )
+    if empty:
+        raise BadPropertySchema(f"the number bounds {where} leave no number")
+    if sub.get("minLength", 0) > min(sub.get("maxLength", max_string), max_string):
+        raise BadPropertySchema(
+            f"'minLength' {where} passes 'maxLength' or the cap of {max_string}"
+        )
+    if sub.get("minItems", 0) > min(sub.get("maxItems", MAX_LIST), MAX_LIST):
+        raise BadPropertySchema(f"'minItems' {where} passes 'maxItems' or the cap of {MAX_LIST}")
 
 
 def _of(row: dict[str, Any]) -> EntityProperty:
