@@ -384,6 +384,8 @@ def test_a_slice_that_never_started_costs_nothing(
     monkeypatch.setattr(api_operations, "run_operation", refused)
     r = read(crud, listed, {0: pla_red, 1: pla_blue})
     assert r.status_code == 200, r.text
+    # The claim went back (`_start` released it), and so did the render.
+    assert rows(crud, "SELECT count(*) AS n FROM storefront_slice_prices") == [{"n": 0}]
     assert counted(crud) == 0
 
 
