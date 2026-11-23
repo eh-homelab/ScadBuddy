@@ -120,17 +120,18 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
 ## Code
 
 - Routes:
-  - `backend/scadbuddy/api/filament.py:220` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
+  - `backend/scadbuddy/api/filament.py:239` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
   - `backend/scadbuddy/api/tray_spools.py:44` (a tray's spool link, and create from slot);
   - `backend/scadbuddy/api/filament_profiles.py:26`;
-  - `backend/scadbuddy/api/printer_kprofiles.py:42` (a printer's K-profiles, under `/printers/{id}/kprofiles`).
+  - `backend/scadbuddy/api/printer_kprofiles.py:42` (a printer's K-profiles, under `/printers/{id}/kprofiles`);
+  - `backend/scadbuddy/api/printer_slots.py:44` (a printer's AMS slots and AMS labels, under `/printers/{id}/ams` and `/printers/{id}/trays`).
 - UI:
   - the **Filament** nav item (`frontend/src/components/AppShell.tsx:111`);
-  - its routes (`frontend/src/App.tsx:119-135`);
-  - `frontend/src/pages/filament/FilamentPage.tsx:45`, `SpoolPage.tsx:408`;
+  - its routes (`frontend/src/App.tsx:121-138`);
+  - `frontend/src/pages/filament/FilamentPage.tsx:45`, `SpoolPage.tsx:418`;
   - `frontend/src/components/filament/`;
-  - Settings → Printing → Filament (`frontend/src/pages/settings/sections/filament.tsx:684`);
-  - the print dialog's picker (`frontend/src/components/FilamentPicker.tsx:358`);
+  - Settings → Printing → Filament (`frontend/src/pages/settings/sections/filament.tsx:911`);
+  - the print dialog's picker (`frontend/src/components/FilamentPicker.tsx:361`);
   - a printer's K-profiles on its card in Settings → Printers (`frontend/src/components/settings/PrinterKProfiles.tsx:83`).
 - Core: `backend/scadbuddy/filament/`:
   - the SB spools a print reads: `inventory.py` (`read_sb_spools` at `:957`, `reconcile_trays` at `:453`);

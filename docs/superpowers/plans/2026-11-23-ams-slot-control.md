@@ -126,6 +126,8 @@ Each is posted on #7153.
   row are in `api/filament.py` `NOT_NUDGED`; the label routes rename an SB place, so they
   nudge the sync as a location edit does. The rename of an AMS unit's place gets the test
   it lacked (backend and `LocationsTab.test.tsx`).
+- **R-7153-11 (a stopgap).** PR #7252 merges as a stopgap (owner, 2026-11-23): its writes
+  go through Bambuddy; the port to ScadBuddy's own MQTT path is #7276.
 
 ## Tasks
 
