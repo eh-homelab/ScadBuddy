@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { api } from '../../api/client'
 import type { LibrarySearch, LibrarySearchHit } from '../../api/types'
 import { useDebounced } from '../../lib/useDebounced'
@@ -15,18 +15,26 @@ const SHOWN = 8
  * #5544 — the Add Item dialog's "Library file" source: the library searched as the Library
  * page and the agent's `search_library` search it (`GET /print/library/search`, every
  * folder, unsliced 3MFs), then one file picked. The order item prints that file.
+ * #6710 §9.2 — the storefront's listing editor searches with `types` (3MF and STL), and
+ * each hit then says its type.
  */
 export function LibraryFilePicker({
   open,
   picked,
   disabled,
   onPick,
+  types,
+  label = 'Library file',
 }: {
   open: boolean
   picked: LibrarySearchHit | null
   disabled: boolean
   onPick: (file: LibrarySearchHit | null) => void
+  /** Only files of these types are listed (`GET /print/library/search` `types`). */
+  types?: readonly ('3mf' | 'stl')[]
+  label?: string
 }) {
+  const inputId = useId()
   const [query, setQuery] = useState('')
   const asked = useDebounced(query.trim(), SEARCH_DEBOUNCE_MS)
   const [found, setFound] = useState<{ query: string; result: LibrarySearch } | null>(null)
@@ -44,7 +52,7 @@ export function LibraryFilePicker({
     if (!open || picked || !asked) return
     const controller = new AbortController()
     api
-      .searchLibrary({ q: asked, all: false }, controller.signal)
+      .searchLibrary({ q: asked, all: false, types }, controller.signal)
       .then((result) => {
         setFound({ query: asked, result })
         setError(null)
@@ -54,6 +62,8 @@ export function LibraryFilePicker({
         setError({ query: asked, message: err instanceof Error ? err.message : String(err) })
       })
     return () => controller.abort()
+    // `types` is fixed per caller; a new array of the same types is no new search.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, picked, asked, attempt])
 
   if (picked) {
@@ -77,9 +87,9 @@ export function LibraryFilePicker({
   const failed = error !== null && error.query === asked ? error.message : null
   return (
     <div className="flex flex-col gap-1">
-      <Label htmlFor="add-item-library-search">Library file</Label>
+      <Label htmlFor={inputId}>{label}</Label>
       <Input
-        id="add-item-library-search"
+        id={inputId}
         type="search"
         placeholder="Search the library"
         autoComplete="off"
@@ -124,6 +134,7 @@ export function LibraryFilePicker({
                 <span className="font-medium break-all">{file.filename}</span>
                 <span className="text-xs text-muted-foreground">
                   {file.folder_path && file.folder_path.length > 0 ? file.folder_path.join(' / ') : 'Top level'}
+                  {types && `, ${file.file_type.toUpperCase()}`}
                 </span>
               </button>
             </li>

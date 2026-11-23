@@ -24,6 +24,42 @@ export interface ListingDraft {
    * (`storefront_materials`, #6258). The editor's "Materials allowed" sets them.
    */
   materials: string[]
+  /**
+   * #6710 — what the listing sells: a template's commit (`slug` and `commit`, the default),
+   * or a library file (`library_file`). Absent is a template, as before.
+   */
+  source?: 'template' | 'library_file'
+  /** #6710 — the file a `library_file` listing sells; null until one is picked. */
+  library_file?: DraftFile | null
+}
+
+/**
+ * #6710 §4.1 — the library file a draft sells. `pinned` is the sha256 of the version the
+ * listing sells (null before its first publish, and once another file is picked); the
+ * server sets it, so a save never sends it. `repin` asks the next publish to take the
+ * library's version ("Use the library's version").
+ */
+export interface DraftFile {
+  id: number
+  library: 'bambuddy' | 'native'
+  filename: string
+  repin: boolean
+  pinned: string | null
+}
+
+/** One part of a file a listing sells (`FileSlot`): read by publish, or from the file before it. */
+export interface DraftSlot {
+  /** From 0. */
+  slot: number
+  colour: string
+  material: string | null
+  used: boolean
+  support: boolean
+}
+
+/** Whether `draft` sells a library file (#6710). */
+export function isFileDraft(draft: ListingDraft): boolean {
+  return draft.source === 'library_file'
 }
 
 /** The schema's own hidden group: never shown to a customer, so never offered. */
@@ -37,8 +73,15 @@ export function emptyDraft(slug = '', commit = ''): ListingDraft {
 }
 
 export function draftOf(listing: StorefrontListing): ListingDraft {
+  const file = listing.library_file
   return {
-    // A file listing (#6710) has no template; the editor offers templates only for now.
+    // A file listing (#6710) has no template.
+    ...(listing.source === 'library_file'
+      ? {
+          source: 'library_file' as const,
+          library_file: file ? { id: file.id, library: file.library, filename: file.filename ?? '', repin: file.repin, pinned: file.pinned ?? null } : null,
+        }
+      : {}),
     slug: listing.slug ?? '',
     commit: listing.commit ?? '',
     title: listing.title,
@@ -103,6 +146,12 @@ export type ListingRefusal =
   | { kind: 'param'; code: 'default_invalid' | 'colour_unknown' | 'support_offered'; name: string; detail: string }
   /** 422 `listing_colour_unknown` naming no parameter: a filament on the listing is no longer in the price book. */
   | { kind: 'filament_unknown'; detail: string }
+  /**
+   * #6710 §9.6 — a refusal about a file listing: a `listing_file_*` code or
+   * `listing_source_invalid`, said in the Source block or under "Colours on offer", as
+   * `name` (the field) says.
+   */
+  | { kind: 'file'; code: string; name: string; detail: string }
 
 const PARAM_REFUSALS = ['default_invalid', 'colour_unknown', 'support_offered'] as const
 
@@ -121,6 +170,10 @@ export function listingRefusal(problem: { type?: string; detail?: string; title:
   const code = PARAM_REFUSALS.find((slug) => problem.type === `${STOREFRONT_PROBLEMS}listing_${slug}`)
   if (code !== undefined && typeof problem['name'] === 'string') return { kind: 'param', code, name: problem['name'], detail }
   if (code === 'colour_unknown') return { kind: 'filament_unknown', detail }
+  const slug = problem.type?.startsWith(STOREFRONT_PROBLEMS) ? problem.type.slice(STOREFRONT_PROBLEMS.length) : ''
+  if (slug.startsWith('listing_file_') || slug === 'listing_source_invalid') {
+    return { kind: 'file', code: slug, name: typeof problem['name'] === 'string' ? problem['name'] : '', detail }
+  }
   return null
 }
 
@@ -302,7 +355,10 @@ function wordPattern(word: string): RegExp {
  * filament's (`withoutSupport`), which no customer can choose.
  */
 export function titleColours(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): string[] {
-  const offered = Object.values(listingInput(draft, schema, filaments).params ?? {}).flatMap((bound) => (bound.kind === 'choice' ? bound.choices : []))
+  // #6710: a file listing's every part takes any colour on offer.
+  const offered = isFileDraft(draft)
+    ? pickableColours(draft, undefined, filaments)
+    : Object.values(listingInput(draft, schema, filaments).params ?? {}).flatMap((bound) => (bound.kind === 'choice' ? bound.choices : []))
   if (offered.length === 0) return []
   const names = filaments.flatMap((filament) =>
     draft.colours.includes(filament.id) && filament.colour_name && offered.some((colour) => sameColour(colour, filament.colour)) ? [filament.colour_name] : [],
@@ -460,6 +516,7 @@ export function isSupportOnly(filament: Filament, draft: ListingDraft, schema: C
  * is locked.
  */
 export function listingInput(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): StorefrontListingInput {
+  if (isFileDraft(draft)) return fileInput(draft)
   const { byName, params, fixed } = withoutSupport(draft, schema, filaments)
   // #6152: never the colour of a support material (`customerFilaments`), which publish
   // refuses on offer, even one the shop ticked by hand.
@@ -502,7 +559,83 @@ export function savedKey(body: StorefrontListingInput): string {
 
 /** The stored listing's body, as `savedKey` compares it. */
 export function storedKey(listing: StorefrontListing): string {
-  return canonical(draftOf(listing))
+  const draft = draftOf(listing)
+  return canonical(isFileDraft(draft) ? fileInput(draft) : draft)
+}
+
+/**
+ * #6710 §4.1 — a file listing's body: the file and the stored request (`repin`), never the
+ * pin (the server's) or a template's fields. A draft with no file picked yet sends none,
+ * which the server refuses as `listing_source_invalid`.
+ */
+function fileInput(draft: ListingDraft): StorefrontListingInput {
+  const file = draft.library_file
+  return {
+    source: 'library_file',
+    ...(file ? { library_file: { id: file.id, library: file.library, repin: file.repin } } : {}),
+    title: draft.title,
+    description: draft.description,
+    params: {},
+    fixed: {},
+    colours: draft.colours,
+    media_ids: draft.media_ids,
+    materials: draft.materials,
+  }
+}
+
+/**
+ * #6710 §9.1 — `draft` switched to sell `source`: what the other source set (a template's
+ * design, version and settings, or the file) and the pictures, whose ids name the other
+ * source's, are dropped; the title, the description, the colours and the materials stay.
+ */
+export function switchSource(draft: ListingDraft, source: 'template' | 'library_file'): ListingDraft {
+  const kept = { title: draft.title, description: draft.description, colours: draft.colours, materials: draft.materials }
+  return source === 'library_file' ? { ...emptyDraft(), ...kept, source, library_file: null } : { ...emptyDraft(), ...kept }
+}
+
+/** Whether `material` is a support material, which a customer never picks (`customerFilaments`). */
+export function isSupportMaterial(material: string | null | undefined): boolean {
+  return typeof material === 'string' && customerFilaments([{ material }]).length === 0
+}
+
+/**
+ * #6710 §9.3 — a file listing's title at first: the file's name without its ending, its
+ * underscores read as spaces, and without the names of the colours a customer can pick
+ * (the owner's rule: no colour in a title).
+ */
+export function fileTitle(filename: string, filaments: readonly Filament[]): string {
+  const name = filename.replace(/(\.gcode)?\.[a-z0-9]+$/i, '').replace(/_+/g, ' ')
+  const colours = customerFilaments(filaments).flatMap((filament) => (filament.colour_name ? [filament.colour_name] : []))
+  return withoutWords(name, colours).slice(0, 200) || name.slice(0, 200)
+}
+
+/**
+ * #6710 — the filaments a file listing offers at first: the priced customer filaments of the
+ * material whose colour one of the offered parts has (`offeredFilaments`), and, for each
+ * support part, the support filament publish would lock it to.
+ */
+export function fileColours(slots: readonly DraftSlot[], filaments: readonly Filament[]): string[] {
+  const offered = slots.filter((slot) => slot.used && !slot.support)
+  const customer = offeredFilaments(
+    offered.map((slot) => slot.colour),
+    customerFilaments(filaments),
+  )
+  const priced = filaments.filter((filament) => filament.density_g_cm3 != null && isSupportMaterial(filament.material))
+  const support = slots
+    .filter((slot) => slot.used && slot.support)
+    .flatMap((slot) => supportFilament(slot, priced.map((filament) => filament.id), priced) ?? [])
+  return [...new Set([...customer, ...support].map((filament) => filament.id))]
+}
+
+/**
+ * #6710 §5.1 row 8 — the support filament publish locks support part `slot` to: the first of
+ * the listing's support filaments (`colours`, in order) of the part's material, else its
+ * first support filament; undefined when the listing has none, which publish refuses.
+ */
+export function supportFilament(slot: DraftSlot, colours: readonly string[], filaments: readonly Filament[]): Filament | undefined {
+  const supports = colours.flatMap((id) => filaments.find((filament) => filament.id === id && isSupportMaterial(filament.material)) ?? [])
+  const same = supports.filter((filament) => slot.material !== null && materialKey(filament.material) === materialKey(slot.material))
+  return same[0] ?? supports[0]
 }
 
 /**

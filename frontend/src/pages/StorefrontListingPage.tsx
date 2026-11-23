@@ -109,6 +109,8 @@ function refusalAlert(refusal: ListingRefusal, schema: CustomizerSchema | undefi
   if (refusal.kind === 'material_not_allowed') return 'Not published: a colour on offer is of a material this listing does not allow. See “Materials allowed” below.'
   if (refusal.kind === 'locked_colours_unprintable') return 'Not published: no allowed material can print these colours. See “Colours on offer” below.'
   if (refusal.kind === 'filament_unknown') return 'Not published: a colour on offer is no longer in the price book. Untick it under “Colours on offer”, then publish again.'
+  // #6710 §9.6 — said in the Source block, or under the colours when it names them.
+  if (refusal.kind === 'file') return refusal.name === 'colours' ? 'Not published: the colours on offer need a change. See “Colours on offer” below.' : 'Not published: the file needs a change. See the note under “What this listing sells” below.'
   const param = schema?.parameters?.find((p) => p.name === refusal.name)
   return `Not published: “${param?.caption || refusal.name}” needs a change. See the note under it below.`
 }
@@ -211,7 +213,7 @@ export function StorefrontListingPage() {
       .then((listing) => {
         if (!live) return
         if (listing.source === 'library_file') {
-          // #6710: this editor makes templates; a save from it would make the listing one.
+          // #6710: this editor has no Source block yet (PR 5 part 2), so it does not open a file listing.
           setLoadError('This listing sells a library file, which this editor cannot open yet.')
           return
         }

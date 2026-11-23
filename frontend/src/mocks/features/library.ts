@@ -176,7 +176,7 @@ function folderPathOf(id: number | null | undefined): string[] {
 }
 
 /** The backend's `search_library` (#3630): every word in the name or the folder path. */
-function searchFiles(query: string, all: boolean): LibrarySearch {
+function searchFiles(query: string, all: boolean, types: readonly string[] = []): LibrarySearch {
   const words = (text: string) => text.toLowerCase().replace(/[\s_\-.()[\]]+/g, ' ').trim()
   const terms = words(query).split(' ').filter(Boolean)
   const matched = terms.length === 0
@@ -186,7 +186,8 @@ function searchFiles(query: string, all: boolean): LibrarySearch {
         const where = words(folderPathOf(file.folder_id).join(' '))
         return terms.every((term) => name.includes(term) || where.includes(term))
       })
-  const shown = matched.filter((file) => all || file.file_type?.toLowerCase() === '3mf')
+  // #6710 §9.2: with `types`, only those types are listed and `all` is ignored.
+  const shown = matched.filter((file) => (types.length > 0 ? types.includes(file.file_type?.toLowerCase() ?? '') : all || file.file_type?.toLowerCase() === '3mf'))
   const inName = (file: LibraryEntry) => terms.filter((term) => words(file.filename).includes(term)).length
   shown.sort((a, b) => inName(b) - inName(a) || a.filename.localeCompare(b.filename))
   return {
@@ -236,7 +237,7 @@ export const handlers = [
 
   http.get(`${base}/print/library/search`, ({ request }) => {
     const search = new URL(request.url).searchParams
-    return HttpResponse.json(searchFiles(search.get('q') ?? '', search.get('all') === 'true'))
+    return HttpResponse.json(searchFiles(search.get('q') ?? '', search.get('all') === 'true', search.getAll('types')))
   }),
 
   // #5321 — one file by id, whatever its type, with its folder's path. After `names` and

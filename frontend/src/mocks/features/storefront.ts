@@ -2,6 +2,8 @@ import { http, HttpResponse } from 'msw'
 import type { CustomizerSchema, ListingBound, StorefrontListing, StorefrontListingInput, StorefrontListingPage } from '../../api/types'
 import { mockModels, mockSettings, problem } from '../handlers'
 import * as orders from './orders/state'
+import { filamentOptions } from '../fixtures'
+import { libraryFiles, pngResponse } from './library'
 
 /**
  * #5282 (spec 2026-11-02 §5.3; backend `api/storefront.py`): the back office's storefront
@@ -140,12 +142,31 @@ function storedBounds(params: Record<string, ListingBound>): Record<string, List
   )
 }
 
-function fields(body: StorefrontListingInput) {
+/**
+ * #6710 §4.1 — the stored file of a save: the pin (never a body's) kept while the file is the
+ * same, else dropped with the request; `repin` written only when the body names it.
+ */
+function storedFile(body: StorefrontListingInput, found?: StorefrontListing): StorefrontListing['library_file'] {
+  const asked = body.library_file
+  if (!asked) return null
+  const before = found?.library_file
+  if (!before || before.id !== asked.id || before.library !== asked.library) {
+    return { id: asked.id, library: asked.library, repin: false, pinned: null, filename: null }
+  }
+  return { ...before, repin: asked.repin ?? before.repin }
+}
+
+/** The sha256 the mock's library states for a file: one per id. */
+export function mockFileSha(id: number): string {
+  return id.toString(16).padStart(64, '0')
+}
+
+function fields(body: StorefrontListingInput, found?: StorefrontListing) {
   return {
     source: body.source ?? 'template',
     slug: body.slug ?? null,
     commit: body.commit ?? null,
-    library_file: body.library_file ? { ...body.library_file, repin: body.library_file.repin ?? false } : null,
+    library_file: storedFile(body, found),
     title: body.title,
     description: body.description ?? '',
     params: storedBounds(body.params ?? {}),
@@ -242,6 +263,58 @@ function page(url: URL): StorefrontListingPage {
   }
 }
 
+/** How many pictures were uploaded to file listings: each upload's id is new. */
+let uploads = 0
+
+/**
+ * #6710 §5 — a file listing's publish: the file read (422 `listing_file_unknown` when the
+ * library has none of it), its version pinned and its parts read (the mock's slots are the
+ * print dialog's two; a support material is the shop's). With a pin and no request, the
+ * pinned version is published again whatever the library holds.
+ */
+function publishFile(found: StorefrontListing): Response {
+  const asked = found.library_file
+  const file = asked ? libraryFiles.find((row) => row.id === asked.id) : undefined
+  const reads = !asked?.pinned || asked.repin
+  if (!asked || (reads && !file)) return refused(422, 'listing_file_unknown', 'the file is not in the library that serves; pick another file', { name: 'library_file' })
+  const sha = reads ? mockFileSha(asked.id) : (asked.pinned as string)
+  const filename = reads ? (file?.filename ?? '') : (asked.filename ?? '')
+  const at = stamp()
+  const published: StorefrontListing = {
+    ...found,
+    library_file: { ...asked, pinned: sha, repin: false, filename },
+    published: true,
+    // As publish copies a file's pictures (§5.2 step 4): one image per id, its id as `media_id`.
+    media: publishedMedia(found),
+    published_at: at,
+    updated_at: at,
+    snapshot: {
+      kind: 'library_file',
+      file_id: asked.id,
+      library: asked.library,
+      filename,
+      file_type: filename.toLowerCase().endsWith('.stl') ? 'stl' : '3mf',
+      sha256: sha,
+      size: 64_000,
+      copy_key: `listing-file-${sha}`,
+      slots: (filamentOptions.slots ?? []).map((slot) => ({
+        slot: slot.slot_id - 1,
+        colour: slot.colour ?? '#808080',
+        material: slot.material ?? null,
+        used: true,
+        support: /support|pva|bvoh|hips/i.test(slot.material ?? ''),
+      })),
+      plates: [1],
+      preview_keys: [],
+      support: {},
+      remembered: null,
+    },
+  }
+  listings = listings.map((l) => (l.id === found.id ? published : l))
+  save()
+  return HttpResponse.json(published)
+}
+
 export const handlers = [
   http.get(base, ({ request }) => {
     const url = new URL(request.url)
@@ -302,7 +375,7 @@ export const handlers = [
     const found = listings.find((l) => l.id === id)
     if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
     if (found.updated_at !== updated_at) return refused(409, 'listing_changed', `listing '${id}' changed since it was read`)
-    const edited: StorefrontListing = { ...found, ...fields(body), ...UNPUBLISHED, updated_at: stamp() }
+    const edited: StorefrontListing = { ...found, ...fields(body, found), ...UNPUBLISHED, updated_at: stamp() }
     listings = listings.map((l) => (l.id === id ? edited : l))
     save()
     return HttpResponse.json(edited)
@@ -340,6 +413,7 @@ export const handlers = [
     if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
     const notAllowed = materialRefusal(found)
     if (notAllowed) return notAllowed
+    if (found.source === 'library_file') return publishFile(found)
     const at = stamp()
     const published: StorefrontListing = {
       ...found,
@@ -361,6 +435,24 @@ export const handlers = [
     listings = listings.map((l) => (l.id === id ? published : l))
     save()
     return HttpResponse.json(published)
+  }),
+
+  // #6710 §5.4 — an upload kept for a file listing, answered as its id.
+  http.post(`${base}/:id/pictures`, async ({ params }) => {
+    const id = String(params['id'])
+    const found = listings.find((l) => l.id === id)
+    if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    if (found.source !== 'library_file') return refused(422, 'listing_source_invalid', 'a template listing takes its pictures from its design', { name: 'media_ids' })
+    uploads += 1
+    return HttpResponse.json({ id: `upload:${uploads.toString(16).padStart(64, 'f')}` })
+  }),
+
+  // #6710 §9.3 — a plate's picture in the pinned copy: 404 with no pin.
+  http.get(`${base}/:id/plates/:plate`, ({ params }) => {
+    const found = listings.find((l) => l.id === String(params['id']))
+    // As `get_listing_plate`: a plain 404, no problem type, for a listing with no pin.
+    if (!found?.library_file?.pinned) return HttpResponse.json({ detail: `no picture of plate ${String(params['plate']).replace(/\.png$/, '')}` }, { status: 404 })
+    return pngResponse()
   }),
 
   // #6237 — each read moves a started run on by two combinations (a few at a time, #6299

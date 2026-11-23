@@ -1,8 +1,31 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import type { CustomizerSchema, Filament, MediaView } from '../../api/types'
+import type { CustomizerSchema, Filament, MediaView, StorefrontListing } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
-import { colourProblems, defaultFits, defaultsFor, emptyDraft, fittedDefault, fixColour, isSupport, listingInput, listingRefusal, nearestFilaments, previewListing, savedKey, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
+import {
+  colourProblems,
+  defaultFits,
+  defaultsFor,
+  draftOf,
+  emptyDraft,
+  fileColours,
+  fileTitle,
+  fittedDefault,
+  fixColour,
+  isSupport,
+  listingInput,
+  listingRefusal,
+  nearestFilaments,
+  previewListing,
+  savedKey,
+  sellMedia,
+  storedKey,
+  supportFilament,
+  switchSource,
+  titleColours,
+  withoutWords,
+  type ListingDraft,
+} from './listingDraft'
 
 function filament(id: string, colour: string, colour_name: string): Filament {
   return {
@@ -340,5 +363,117 @@ describe('savedKey (#6290): a null field is an absent one, and nothing else is',
     expect(body({ size: { kind: 'number', min: 6, max: 28, default: 14 } })).not.toBe(body({ size: { kind: 'number', min: 6, max: 28, default: null } }))
     expect(body({}, { thickness: 5.2 })).not.toBe(body({}, {}))
     expect(body({}, { thickness: 0 })).not.toBe(body({}, {}))
+  })
+})
+
+describe('a file listing’s draft (#6710 §9)', () => {
+  const PIN = 'a'.repeat(64)
+  const NATURAL = { ...filament('natural', '#F0EAD6', 'Natural'), material: 'PVA' }
+  const fileListing = (over: Partial<StorefrontListing> = {}): StorefrontListing =>
+    ({
+      id: 'l1',
+      source: 'library_file',
+      slug: null,
+      commit: null,
+      library_file: { id: 46, library: 'native', repin: false, pinned: PIN, filename: 'Keychain base.3mf' },
+      title: 'Keychain base',
+      description: '',
+      params: {},
+      fixed: {},
+      colours: ['blue'],
+      media_ids: ['plate:1'],
+      materials: [],
+      position: 0,
+      published: false,
+      snapshot: null,
+      media: [],
+      published_at: null,
+      created_at: '2026-11-21T00:00:00Z',
+      updated_at: '2026-11-21T00:00:00Z',
+      ...over,
+    }) as StorefrontListing
+
+  it('reads the file, its pin and its request from the stored listing', () => {
+    const draft = draftOf(fileListing())
+    expect(draft.source).toBe('library_file')
+    expect(draft.library_file).toEqual({ id: 46, library: 'native', repin: false, pinned: PIN, filename: 'Keychain base.3mf' })
+  })
+
+  it('saves the file and its request, never a template’s fields or the pin', () => {
+    const draft = draftOf(fileListing())
+    const body = listingInput({ ...draft, library_file: { ...draft.library_file!, repin: true } }, undefined, [BLUE])
+    expect(body).toEqual({
+      source: 'library_file',
+      library_file: { id: 46, library: 'native', repin: true },
+      title: 'Keychain base',
+      description: '',
+      params: {},
+      fixed: {},
+      colours: ['blue'],
+      media_ids: ['plate:1'],
+      materials: [],
+    })
+  })
+
+  it('reads a stored file listing as unchanged, and a request or another file as a change', () => {
+    const listing = fileListing()
+    const draft = draftOf(listing)
+    expect(savedKey(listingInput(draft, undefined, []))).toBe(storedKey(listing))
+    expect(savedKey(listingInput({ ...draft, library_file: { ...draft.library_file!, repin: true } }, undefined, []))).not.toBe(storedKey(listing))
+    expect(savedKey(listingInput({ ...draft, library_file: { ...draft.library_file!, id: 47, pinned: null } }, undefined, []))).not.toBe(storedKey(listing))
+  })
+
+  it('switches the source and keeps only the title, the description, the colours and the materials', () => {
+    const template: ListingDraft = {
+      ...emptyDraft('name-keychain', 'c'.repeat(40)),
+      title: 'Tag',
+      description: 'Nice',
+      params: { size: { kind: 'number', min: 1, max: 2 } },
+      fixed: { a: 1 },
+      colours: ['blue'],
+      media_ids: ['m1'],
+      materials: ['PLA'],
+    }
+    const file = switchSource(template, 'library_file')
+    expect(file).toEqual({ ...emptyDraft(), source: 'library_file', library_file: null, title: 'Tag', description: 'Nice', colours: ['blue'], materials: ['PLA'] })
+    expect(switchSource(file, 'template')).toEqual({ ...emptyDraft(), title: 'Tag', description: 'Nice', colours: ['blue'], materials: ['PLA'] })
+  })
+
+  it('titles a file by its name, less its ending and the colours a customer picks', () => {
+    expect(fileTitle('Keychain base.3mf', [BLUE])).toBe('Keychain base')
+    expect(fileTitle('owl_pencil_cup-Ocean.gcode.3mf', [BLUE])).toBe('owl pencil cup')
+    expect(fileTitle('Desiccant_Box.STL', [])).toBe('Desiccant Box')
+  })
+
+  it('warns of a colour on offer in a file listing’s title', () => {
+    const draft: ListingDraft = { ...switchSource(emptyDraft(), 'library_file'), title: 'Ocean cup', colours: ['blue'] }
+    expect(titleColours(draft, undefined, [BLUE])).toEqual(['Ocean'])
+  })
+
+  it('starts a file’s colours in the material nearest its own, with a support filament for a support part', () => {
+    const petg = { ...filament('petg', '#1b6ca8', 'Ocean'), material: 'PETG' }
+    const slots = [
+      { slot: 0, colour: '#1B6CA8', material: 'PLA', used: true, support: false },
+      { slot: 1, colour: '#FFFFFF', material: 'PVA', used: true, support: true },
+    ]
+    expect(fileColours(slots, [BLUE, CORAL, petg, NATURAL])).toEqual(['blue', 'coral', 'natural'])
+    expect(fileColours(slots.slice(0, 1), [BLUE, CORAL, petg, NATURAL])).toEqual(['blue', 'coral'])
+  })
+
+  it('names the support filament publish locks a support part to', () => {
+    const hips = { ...filament('hips', '#EEEEEE', 'White'), material: 'HIPS' }
+    const slot = { slot: 1, colour: '#FFFFFF', material: 'PVA', used: true, support: true }
+    expect(supportFilament(slot, ['blue', 'hips', 'natural'], [BLUE, hips, NATURAL])?.id).toBe('natural')
+    expect(supportFilament({ ...slot, material: 'BVOH' }, ['blue', 'hips', 'natural'], [BLUE, hips, NATURAL])?.id).toBe('hips')
+    expect(supportFilament(slot, ['blue'], [BLUE, NATURAL])).toBeUndefined()
+  })
+
+  it('reads each file refusal with the field it names (#6710 §9.6)', () => {
+    const at = (slug: string, extra: Record<string, unknown> = {}) =>
+      listingRefusal({ type: `https://scadbuddy.dev/problems/storefront/${slug}`, title: 'Unprocessable Content', detail: 'why', ...extra })
+    expect(at('listing_file_unknown', { name: 'library_file' })).toEqual({ kind: 'file', code: 'listing_file_unknown', name: 'library_file', detail: 'why' })
+    expect(at('listing_file_support_unset', { name: 'colours', slots: [1] })).toEqual({ kind: 'file', code: 'listing_file_support_unset', name: 'colours', detail: 'why' })
+    expect(at('listing_source_invalid', { name: 'media_ids' })).toEqual({ kind: 'file', code: 'listing_source_invalid', name: 'media_ids', detail: 'why' })
+    expect(at('listing_file_new_thing', { name: 'library_file' })).toEqual({ kind: 'file', code: 'listing_file_new_thing', name: 'library_file', detail: 'why' })
   })
 })
