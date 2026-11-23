@@ -3,7 +3,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { HEADER, contextOptionsFor, parseArgs, parseBrowserHeader } from './options.mjs';
+import {
+  HEADER,
+  contextOptionsFor,
+  isClientActivity,
+  isResponse,
+  parseArgs,
+  parseBrowserHeader,
+} from './options.mjs';
 
 const BASE = { userAgent: 'DEFAULT', viewport: { width: 1280, height: 720 } };
 
@@ -165,4 +172,19 @@ test('parseArgs throws on a flag with no value, a bad port or a bad size', () =>
   assert.throws(() => parseArgs(['--viewport-size', '1280']), /--viewport-size/);
   assert.throws(() => parseArgs(['--idle-timeout', '-1']), /--idle-timeout/);
   assert.throws(() => parseArgs(['stray']), /stray/);
+});
+
+test('a request or notification from the client is activity; an answer to a ping is not', () => {
+  assert.equal(isClientActivity({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: {} }), true);
+  assert.equal(isClientActivity({ jsonrpc: '2.0', method: 'notifications/initialized' }), true);
+  assert.equal(isClientActivity({ jsonrpc: '2.0', id: 0, result: {} }), false);
+  assert.equal(isClientActivity({ jsonrpc: '2.0', id: 0, error: { code: -1, message: 'x' } }), false);
+  assert.equal(isClientActivity(undefined), false);
+});
+
+test('a response the server sends answers a request; its ping and notifications do not', () => {
+  assert.equal(isResponse({ jsonrpc: '2.0', id: 3, result: { content: [] } }), true);
+  assert.equal(isResponse({ jsonrpc: '2.0', id: 3, error: { code: -1, message: 'x' } }), true);
+  assert.equal(isResponse({ jsonrpc: '2.0', id: 0, method: 'ping' }), false);
+  assert.equal(isResponse({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }), false);
 });

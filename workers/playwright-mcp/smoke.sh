@@ -3,8 +3,9 @@
 # root, /tmp writable, no capabilities) with the Deployment's args, then check over MCP
 # that each session's context takes the X-ScadBuddy-Browser header's options, that a
 # session without it, or with an invalid one, gets the server's --user-agent, that a
-# refused header is logged without its value, that a wrong Host is 403, and that a
-# client that goes away without a DELETE loses its session.
+# refused header is logged without its value, that a wrong Host is 403, that a
+# client that goes away without a DELETE loses its session, and that a connected client
+# that calls nothing for --idle-timeout loses only its context.
 #
 # Usage: workers/playwright-mcp/smoke.sh <image>
 # Env: SMOKE_CONTAINER (default scadbuddy-playwright-mcp-smoke), SMOKE_PORT (default 18931).
@@ -12,6 +13,7 @@ set -euo pipefail
 
 image="${1:?usage: smoke.sh <image>}"
 name="${SMOKE_CONTAINER:-scadbuddy-playwright-mcp-smoke}"
+idle="${name}-idle"
 port="${SMOKE_PORT:-18931}"
 base="http://127.0.0.1:${port}"
 tmp="$(mktemp -d)"
@@ -21,8 +23,10 @@ cleanup() {
   if [ "$rc" -ne 0 ]; then
     echo "container logs:"
     docker logs "$name" 2>&1 || true
+    echo "idle container logs:"
+    docker logs "$idle" 2>&1 || true
   fi
-  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker rm -f "$name" "$idle" >/dev/null 2>&1 || true
   rm -rf "$tmp"
   exit "$rc"
 }
@@ -136,5 +140,45 @@ done
 echo "a gone client's session closed: $closed"
 [ "$closed" = yes ] || fail "a client that went away kept its session"
 grep -qF 'did not answer a ping' <<<"$(docker logs "$name" 2>&1)" || fail "the closed session was not logged"
+
+# Idle: a connected client answers every 3 s ping, and that is not activity. With a short
+# --idle-timeout, a client that stays connected but calls nothing loses its context (a
+# new page, so window.name is empty again) and keeps its session and its options. The
+# client is the MCP SDK's, from the image's own playwright-core, run in a second
+# container of the image so it reaches the server at the Host it allows.
+docker rm -f "$idle" >/dev/null 2>&1 || true
+docker run -d --name "$idle" --read-only --tmpfs /tmp --cap-drop ALL \
+  --security-opt no-new-privileges -e HOME=/tmp "$image" \
+  --port 8931 --host 127.0.0.1 --isolated --output-dir /tmp/output \
+  --user-agent DEFAULT-UA --idle-timeout 4000 >/dev/null
+idle_out="$(docker exec "$idle" node -e '
+const { Client, StreamableHTTPClientTransport } = require("/opt/scadbuddy-playwright-mcp/node_modules/playwright-core/lib/utilsBundle");
+const text = (r) => r.content.map((c) => c.text).join("");
+const evaluate = (client, fn) => client.callTool({ name: "browser_evaluate", arguments: { function: fn } }).then(text);
+(async () => {
+  let client;
+  for (let i = 0; i < 30; i++) {
+    client = new Client({ name: "smoke", version: "1" });
+    const transport = new StreamableHTTPClientTransport(new URL("http://localhost:8931/mcp"), {
+      requestInit: { headers: { "X-ScadBuddy-Browser": "{\"user_agent\":\"SB-IDLE-UA\"}" } },
+    });
+    try { await client.connect(transport); break; } catch { client = undefined; await new Promise((f) => setTimeout(f, 1000)); }
+  }
+  if (!client) throw new Error("no connection");
+  await client.callTool({ name: "browser_navigate", arguments: { url: "about:blank" } });
+  console.log("before: " + await evaluate(client, "() => { window.name = \"kept\"; return window.name + \" \" + navigator.userAgent; }"));
+  await new Promise((f) => setTimeout(f, 10000));
+  await client.callTool({ name: "browser_navigate", arguments: { url: "about:blank" } });
+  console.log("after: " + await evaluate(client, "() => \"[\" + window.name + \"] \" + navigator.userAgent"));
+  await client.close();
+})().catch((e) => { console.log("error: " + e.message); process.exit(1); });
+' 2>&1)" || fail "the idle client failed: $idle_out"
+echo "$idle_out"
+grep -qF 'kept SB-IDLE-UA' <<<"$idle_out" || fail "the idle session did not start with its options"
+grep -qF '[] SB-IDLE-UA' <<<"$idle_out" || fail "a connected client that called nothing kept its context past --idle-timeout, or lost its options"
+idle_logs="$(docker logs "$idle" 2>&1)"
+grep -qF 'a session was idle: closing its browser context' <<<"$idle_logs" || fail "the idle close was not logged"
+if grep -qF 'did not answer a ping' <<<"$idle_logs"; then fail "the idle client's session was closed, not only its context"; fi
+docker rm -f "$idle" >/dev/null 2>&1 || true
 
 echo "playwright-mcp smoke: ok"

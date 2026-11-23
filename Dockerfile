@@ -377,12 +377,16 @@ CMD ["node", "dist/sandbox/main.js"]
 # the same version. The tag, its digest and package.json's `@playwright/mcp` move
 # together: the check below fails the build when the base image's /app/package.json
 # version is not the installed package's, or its Chromium is not the installed
-# playwright-core's revision. Same args as the CLI's Deployment (parseArgs in
-# options.mjs); options.test.mjs is copied so CI runs it in the image.
+# playwright-core's revision. Dependabot's docker update moves this FROM alone, so that
+# check fails its PR on purpose: whoever finishes the PR bumps
+# workers/playwright-mcp/package.json's `@playwright/mcp` to the same version and
+# regenerates its package-lock.json (`npm install --package-lock-only --ignore-scripts`)
+# in the same PR. Same args as the CLI's Deployment (parseArgs in options.mjs);
+# options.test.mjs is copied so CI runs it in the image.
 # DL3026: Microsoft publishes this image on mcr.microsoft.com, not Docker Hub or GHCR;
 # it is pinned here by digest, and CI's hosted runners pull it directly.
 # hadolint ignore=DL3026
-FROM mcr.microsoft.com/playwright/mcp:v0.0.85@sha256:cc70a6922ff856f3aba0fe97d0d94220dc9a7f367f6d332facc6d81d9a91e60e AS playwright-mcp
+FROM mcr.microsoft.com/playwright/mcp:v0.0.86@sha256:2dfc17e08e8db54678ec965ce9ffb4100be0aa68135774d761bac9035ceb6668 AS playwright-mcp
 
 # Root while installing, so node (1000) cannot change the server's files.
 USER 0

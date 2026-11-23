@@ -154,3 +154,20 @@ export function parseArgs(argv) {
   }
   return options;
 }
+
+/**
+ * Whether a JSON-RPC message from the client is its own request or notification (it
+ * has a `method`), not its answer to the server's ping. Only those restart a session's
+ * idle clock: a client that only answers the heartbeat is idle.
+ */
+export function isClientActivity(message) {
+  return typeof message === 'object' && message !== null && typeof message.method === 'string';
+}
+
+/**
+ * Whether a message the server sends answers a client's request (an `id` and no
+ * `method`), not the server's own ping or notification.
+ */
+export function isResponse(message) {
+  return typeof message === 'object' && message !== null && message.method === undefined && 'id' in message;
+}
