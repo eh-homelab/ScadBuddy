@@ -68,6 +68,25 @@ describe('the Spools tab search', () => {
     await waitFor(async () => expect(numbers(await table())).toEqual(['4', '8']))
   })
 
+  it("finds a spool by its open tag's UID or tray UUID, as a reader prints it (#7151)", async () => {
+    const { user } = render()
+    const box = screen.getByRole('searchbox', { name: 'Search spools' })
+    await table()
+    for (const [query, expected] of [
+      ['04:A1:B2', ['3']],
+      ['7f3e1c0a', ['4']],
+      ['a1b2c3d4', ['3', '4']],
+    ] as const) {
+      await user.clear(box)
+      await user.type(box, query)
+      await waitFor(async () => expect(numbers(await table()), query).toEqual(expected))
+    }
+    // A tag on no spool finds none.
+    await user.clear(box)
+    await user.type(box, '04ffee00')
+    expect(await screen.findByText(/No spool matches/)).toBeInTheDocument()
+  })
+
   it('says when nothing matches the search', async () => {
     render('/filament/spools?q=nothing-like-this')
     expect(await screen.findByText('No spool matches “nothing-like-this” with these filters.')).toBeInTheDocument()
