@@ -711,6 +711,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       '_list, _update, _file_read, _file_write, _file_delete and _publish) follow in #6938; until then the routes are ' +
       "Settings' and an access token's.",
   })),
+  {
+    operation: 'GET /api/v1/hosted-plugins/{name}/versions',
+    reason:
+      "A hosted plugin's published versions, newest first, for the Versions list in Settings → Tools & plugins → " +
+      'Hosted plugins (#6937). The spec gives the assistant no versions tool (2026-11-21 §6.2): an offer always ' +
+      "takes the plugin's latest_version (§6.3), which the plugin's own read answers.",
+  },
 ]
 
 /**

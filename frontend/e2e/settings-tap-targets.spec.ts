@@ -48,6 +48,14 @@ for (const [width, height] of [
         await packages.getByLabel('Repository URL').fill('https://git.example/greeter.git')
         await packages.getByRole('button', { name: 'Fetch and review' }).click()
         await expect(packages.getByRole('region', { name: 'Source greeter' })).toBeAttached()
+        // A hosted plugin open in its editor (#6937), a draft file open in it, so the file
+        // list, the file's actions, the Executable box, Publish and Offer are measured too.
+        const hosted = page.getByRole('region', { name: 'Your plugins' })
+        await hosted.getByRole('button', { name: 'Edit print-notes' }).click()
+        const editor = hosted.getByRole('region', { name: 'Hosted plugin print-notes' })
+        await editor.getByRole('button', { name: 'skills/print-notes/SKILL.md' }).click()
+        await expect(editor.getByRole('checkbox', { name: 'Executable' })).toBeVisible()
+        await expect(editor.getByRole('button', { name: 'Offer version 1' })).toBeVisible()
       }
       if (area !== 'system' && area !== 'tools') await expect(page.getByRole('region').locator('visible=true').first()).toBeVisible()
       // The shell keeps the other areas mounted but hidden, so only the visible folds open.

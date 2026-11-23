@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import type { PluginPackage } from '../../api/aiPlugins'
-import { asText, fileTree, languageOf, offerState, pathProblem, skillNameProblem } from './hostedDraft'
+import {
+  asText,
+  detailsProblem,
+  fileTree,
+  languageOf,
+  MAX_TAGS,
+  offerState,
+  parseTags,
+  pathProblem,
+  publishedByText,
+  skillNameProblem,
+} from './hostedDraft'
 
 describe('pathProblem', () => {
   it.each([
@@ -90,5 +101,26 @@ describe('offerState', () => {
       kind: 'name-taken',
       source: 'git',
     })
+  })
+})
+
+describe('the details and the publisher', () => {
+  it('splits tags and says why a category or a tag is refused', () => {
+    expect(parseTags(' notes, prints  notes,,')).toEqual(['notes', 'prints'])
+    expect(detailsProblem('', [])).toBeNull()
+    expect(detailsProblem('printing', ['notes', 'a-1'])).toBeNull()
+    expect(detailsProblem('Printing', [])).toMatch(/category/)
+    expect(detailsProblem('', ['-x'])).toBe('"-x" is not a tag. A tag is 1 to 32 lower-case letters, digits and hyphens.')
+    expect(detailsProblem('', Array.from({ length: MAX_TAGS + 1 }, (_, i) => `t${i}`))).toBe('A plugin has at most 20 tags.')
+  })
+
+  it('names who published a version, and shows an id it does not know as it is', () => {
+    const label = (p: string) => `label(${p})`
+    expect(publishedByText('user:https://id.example#alice', 'user:https://id.example#alice', label)).toBe('you')
+    expect(publishedByText('user:https://id.example#bob', 'user:https://id.example#alice', label)).toBe('user bob')
+    expect(publishedByText('service:agent', null, label)).toBe('the assistant')
+    expect(publishedByText('anonymous', null, label)).toBe('an anonymous caller')
+    expect(publishedByText('user:odd', null, label)).toBe('user:odd')
+    expect(publishedByText('token:7', null, label)).toBe('label(token:7)')
   })
 })

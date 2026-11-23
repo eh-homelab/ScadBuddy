@@ -1,7 +1,16 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useMemo, useState, type FormEvent } from 'react'
 import { aiPlugins, isBuiltIn, type PluginPackage } from '../../api/aiPlugins'
 import { hostedPlugins, type HostedPlugin } from '../../api/hostedPlugins'
 import { useAsync } from '../../lib/useAsync'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -25,6 +34,19 @@ export function HostedPluginsPanel() {
   const packages = useAsync(() => aiPlugins.listPackages(), [])
   usePackagesChanged('hosted', () => packages.refresh())
   const [selected, setSelected] = useState<string | null>(null)
+  /** The open editor's files with unsaved edits; a Close or another Edit asks first while any. */
+  const [unsaved, setUnsaved] = useState<string[]>([])
+  /** The plugin to open (null: none) once the person agrees to drop the unsaved edits. */
+  const [pending, setPending] = useState<{ next: string | null } | null>(null)
+  const onDirty = useCallback((paths: string[]) => setUnsaved(paths), [])
+  const choose = (next: string | null) => {
+    if (next === selected) return
+    if (unsaved.length > 0) {
+      setPending({ next })
+      return
+    }
+    setSelected(next)
+  }
   const plugins = useMemo(() => list.data ?? [], [list.data])
   const installed = useMemo(
     () => new Map((packages.data ?? []).filter((p): p is PluginPackage => !isBuiltIn(p)).map((p) => [p.name, p])),
@@ -62,7 +84,7 @@ export function HostedPluginsPanel() {
                 plugin={plugin}
                 pkg={packageOf(plugin.name)}
                 open={plugin.name === selected}
-                onOpen={() => setSelected(plugin.name === selected ? null : plugin.name)}
+                onOpen={() => choose(plugin.name === selected ? null : plugin.name)}
               />
             ))}
           </ul>
@@ -80,20 +102,46 @@ export function HostedPluginsPanel() {
               onPackage={replacePackage}
               onDeleted={(name) => {
                 setSelected(null)
+                setUnsaved([])
                 list.setData(plugins.filter((p) => p.name !== name))
                 packages.refresh()
               }}
-              onClose={() => setSelected(null)}
+              onClose={() => choose(null)}
+              onDirty={onDirty}
             />
           </div>
         )}
         <CreateForm
           onCreated={(plugin) => {
             replacePlugin(plugin)
-            setSelected(plugin.name)
+            choose(plugin.name)
           }}
         />
       </SettingBody>
+      <AlertDialog open={pending !== null} onOpenChange={(open) => !open && setPending(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Close without saving?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {`Unsaved edits in ${unsaved.join(', ')} will be lost.`} Save each file first to keep its edits.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay</AlertDialogCancel>
+            {/* A plain button: an AlertDialogAction would also close the dialog, which is Stay. */}
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setSelected(pending?.next ?? null)
+                setUnsaved([])
+                setPending(null)
+              }}
+            >
+              Close without saving
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </SettingCard>
   )
 }
@@ -105,6 +153,16 @@ function PluginRow({ plugin, pkg, open, onOpen }: { plugin: HostedPlugin; pkg: P
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium">{plugin.name}</p>
         {plugin.description && <p className="truncate text-xs text-muted-foreground">{plugin.description}</p>}
+        {(plugin.category || plugin.tags.length > 0) && (
+          <p className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+            {plugin.category && (
+              <Badge variant="secondary" aria-label={`Category ${plugin.category}`}>
+                {plugin.category}
+              </Badge>
+            )}
+            {plugin.tags.length > 0 && <span aria-label={`Tags ${plugin.tags.join(', ')}`}>{plugin.tags.map((t) => `#${t}`).join(' ')}</span>}
+          </p>
+        )}
       </div>
       <span className="text-xs text-muted-foreground">
         {plugin.latest_version === null ? 'Draft only' : `Version ${plugin.latest_version}`}

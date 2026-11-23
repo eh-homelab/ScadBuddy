@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { FileIcon, FolderIcon } from 'lucide-react'
+import { principalLabel } from '../../agent/chat/labels'
 import { USER_ONLY } from '../../agent/dom'
 import { aiPlugins, type PluginPackage } from '../../api/aiPlugins'
 import {
@@ -28,15 +29,20 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
+import { useAuthSession } from '../../lib/signIn'
 import { Spinner } from '../ui/spinner'
 import {
   asText,
   canBeExecutable,
+  detailsProblem,
   fileTree,
   formatBytes,
   newSkill,
+  offerResultText,
   offerState,
+  parseTags,
   pathProblem,
+  publishedByText,
   skillNameProblem,
   type OfferState,
   type TreeNode,
@@ -69,6 +75,16 @@ export interface HostedPluginEditorProps {
   onPackage: (pkg: PluginPackage) => void
   onDeleted: (name: string) => void
   onClose: () => void
+  /** The paths with unsaved edits, each time the set changes, so the list can warn before it closes the editor. */
+  onDirty?: (paths: string[]) => void
+}
+
+/** What the last Publish did: the version it made, and the offer that followed it (spec §6.3 step 5). */
+interface PublishResult {
+  version: number
+  /** What the offer did, or null when none ran (a package of another source has the name). */
+  offer: string | null
+  offerError: string | null
 }
 
 /**
@@ -76,11 +92,15 @@ export interface HostedPluginEditorProps {
  * tree with a Monaco editor, the draft against the latest version, Publish, the versions, and
  * the Offer that installs or re-pins the latest version as the assistant's package.
  *
+ * Publish offers the new version at once, through the agent's UI-guarded install (an install, or
+ * a re-pin of the installed package); the offer loads nothing until a person approves it in
+ * Packages. Offer stays for a version a failed offer left unoffered.
+ *
  * Draft writes are not outward (they change nothing that loads), so the in-page agent may make
  * them. Publish, Offer and Delete are user-only (`USER_ONLY`): the assistant publishes through
  * its own tool, whose pending action a person approves.
  */
-export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted, onClose }: HostedPluginEditorProps) {
+export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted, onClose, onDirty }: HostedPluginEditorProps) {
   const name = plugin.name
   const [files, setFiles] = useState<HostedPluginFiles | null>(null)
   const [diff, setDiff] = useState<HostedPluginDraftDiff | null>(null)
@@ -91,7 +111,8 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
   const [buffers, setBuffers] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [published, setPublished] = useState<number | null>(null)
+  const [published, setPublished] = useState<PublishResult | null>(null)
+  const [publishError, setPublishError] = useState<string | null>(null)
   const [problems, setProblems] = useState<string[]>([])
 
   const reloadDraft = useCallback(async () => {
@@ -137,6 +158,10 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
   }
 
   const dirty = Object.keys(buffers)
+  const dirtyKey = dirty.join('\n')
+  useEffect(() => {
+    onDirty?.(dirtyKey === '' ? [] : dirtyKey.split('\n'))
+  }, [dirtyKey, onDirty])
   const openText = open ? (buffers[open.path] ?? open.saved) : null
 
   function edit(path: string, text: string) {
@@ -220,20 +245,46 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
     })
   }
 
+  /** Publish, then offer the new version as spec §6.3 step 5 says; a failed offer leaves Offer for later. */
   async function publish() {
+    setBusy('publish')
     setProblems([])
-    await act('publish', async () => {
+    setPublishError(null)
+    setPublished(null)
+    try {
+      let version: HostedPluginVersion
       try {
-        const version = await hostedPlugins.publish(name)
-        setPublished(version.version)
-        setVersions((current) => [version, ...(current ?? [])])
-        onPlugin({ ...plugin, latest_version: version.version })
+        version = await hostedPlugins.publish(name)
+      } catch (caught) {
+        // A 422 `draft-invalid` is said once, as its list; any other refusal as its message.
+        const listed = draftProblems(caught)
+        setProblems(listed)
+        if (listed.length === 0) setPublishError(message(caught))
+        return
+      }
+      setVersions((current) => [version, ...(current ?? [])])
+      onPlugin({ ...plugin, latest_version: version.version })
+      const result: PublishResult = { version: version.version, offer: null, offerError: null }
+      // A package of another source has the name: the offer would be refused, and Assistant says why.
+      if (!pkg || pkg.source.kind === 'hosted') {
+        try {
+          const next = await aiPlugins.installPackage({ kind: 'hosted', name })
+          onPackage(next)
+          announcePackagesChanged('hosted')
+          result.offer = offerResultText(next)
+        } catch (caught) {
+          result.offerError = message(caught)
+        }
+      }
+      setPublished(result)
+      try {
         await reloadDraft()
       } catch (caught) {
-        setProblems(draftProblems(caught))
-        throw caught
+        setError(message(caught))
       }
-    })
+    } finally {
+      setBusy(null)
+    }
   }
 
   return (
@@ -248,10 +299,13 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
         </Button>
       </header>
 
-      <DescriptionForm plugin={plugin} onSaved={(next) => {
-        onPlugin(next)
-        void reloadDraft()
-      }} />
+      <DetailsForm
+        plugin={plugin}
+        onSaved={(next) => {
+          onPlugin(next)
+          void reloadDraft().catch((caught: unknown) => setError(message(caught)))
+        }}
+      />
 
       {loadError && (
         <p role="alert" className="text-xs text-warn">
@@ -271,7 +325,7 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
               <p className="px-1 text-xs text-muted-foreground">The draft is empty. Add a skill to start.</p>
             )}
             {files && files.files.length > 0 && (
-              <Tree
+              <FileList
                 nodes={fileTree(files.files.map((f) => f.path))}
                 executable={new Set(files.files.filter((f) => f.executable).map((f) => f.path))}
                 dirty={new Set(dirty)}
@@ -324,18 +378,40 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
             size="sm"
             disabled={busy !== null || dirty.length > 0 || !diff || nothingToPublish(diff)}
             aria-busy={busy === 'publish'}
+            aria-describedby="hosted-publish-help"
             onClick={() => void publish()}
             {...USER_ONLY}
           >
             {busy === 'publish' && <Spinner />}
             Publish version {(plugin.latest_version ?? 0) + 1}
           </Button>
-          {published !== null && (
-            <p role="status" className="text-xs text-ok">
-              Published version {published}.
-            </p>
-          )}
+          <p id="hosted-publish-help" className="text-[11px] text-muted-foreground">
+            Makes a version that never changes and offers it to the assistant. It loads nothing until you approve it in Packages.
+          </p>
         </div>
+        {published && (
+          <div role="status" className="space-y-0.5 text-xs">
+            <p className="text-ok">Published version {published.version}.</p>
+            {published.offer && (
+              <p>
+                {published.offer}{' '}
+                <Link to={PACKAGES_HREF} className="text-primary hover:underline">
+                  Review version {published.version} in Packages
+                </Link>
+              </p>
+            )}
+          </div>
+        )}
+        {published?.offerError && (
+          <p role="alert" className="text-xs text-warn">
+            Version {published.version} is published, but the offer failed: {published.offerError}. Offer it again under Assistant.
+          </p>
+        )}
+        {publishError && (
+          <p role="alert" className="text-xs text-warn">
+            {publishError}
+          </p>
+        )}
         {problems.length > 0 && (
           <div role="alert" className="text-xs text-warn">
             <p>The draft cannot be published until you fix these:</p>
@@ -376,7 +452,8 @@ function CapsLine({ files }: { files: HostedPluginFiles }) {
   )
 }
 
-function Tree({
+/** The draft's files as a nested list: a folder heads its files, and each file is a button that opens it. */
+function FileList({
   nodes,
   executable,
   dirty,
@@ -392,23 +469,23 @@ function Tree({
   depth?: number
 }) {
   return (
-    <ul role={depth === 0 ? 'tree' : 'group'} aria-label={depth === 0 ? 'Draft files' : undefined} className="text-xs">
+    <ul aria-label={depth === 0 ? 'Draft files' : undefined} className="text-xs">
       {nodes.map((node) =>
         node.kind === 'folder' ? (
-          <li key={node.path} role="treeitem" aria-expanded="true" aria-label={`${node.name}/`}>
+          <li key={node.path}>
             <div className="flex items-center gap-1 py-0.5 text-muted-foreground" style={{ paddingLeft: `${depth * 0.75}rem` }}>
               <FolderIcon aria-hidden="true" className="size-3.5" />
               {node.name}/
             </div>
-            <Tree nodes={node.children} executable={executable} dirty={dirty} selected={selected} onOpen={onOpen} depth={depth + 1} />
+            <FileList nodes={node.children} executable={executable} dirty={dirty} selected={selected} onOpen={onOpen} depth={depth + 1} />
           </li>
         ) : (
-          <li key={node.path} role="none">
+          <li key={node.path}>
             <button
               type="button"
-              role="treeitem"
-              aria-selected={selected === node.path}
+              aria-current={selected === node.path ? 'true' : undefined}
               aria-label={node.path}
+              aria-description={dirty.has(node.path) ? 'Unsaved' : undefined}
               onClick={() => onOpen(node.path)}
               className={cn(
                 'flex min-h-6 w-full min-w-0 items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none',
@@ -419,7 +496,7 @@ function Tree({
               <FileIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
               <span className="truncate">{node.name}</span>
               {executable.has(node.path) && <span className="sb-num text-[10px] text-muted-foreground">exec</span>}
-              {dirty.has(node.path) && <span title="Unsaved" aria-label="unsaved" className="ml-auto size-1.5 shrink-0 rounded-full bg-warn" />}
+              {dirty.has(node.path) && <span title="Unsaved" aria-hidden="true" className="ml-auto size-1.5 shrink-0 rounded-full bg-warn" />}
             </button>
           </li>
         ),
@@ -628,18 +705,47 @@ function FilePane({
   )
 }
 
-function DescriptionForm({ plugin, onSaved }: { plugin: HostedPlugin; onSaved: (plugin: HostedPlugin) => void }) {
+/** The plugin's description, category and tags (`PATCH`, spec 2026-11-21 §6.1, §6.2); only the changed fields are sent. */
+function DetailsForm({ plugin, onSaved }: { plugin: HostedPlugin; onSaved: (plugin: HostedPlugin) => void }) {
   const [text, setText] = useState(plugin.description)
+  const [category, setCategory] = useState(plugin.category ?? '')
+  const [tags, setTags] = useState(plugin.tags.join(', '))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  const nextTags = parseTags(tags)
+  const nextCategory = category.trim()
+  const changed = {
+    description: text !== plugin.description,
+    category: nextCategory !== (plugin.category ?? ''),
+    tags: nextTags.join(',') !== plugin.tags.join(','),
+  }
+  const touched = changed.description || changed.category || changed.tags
+  const edited = (set: (value: string) => void, value: string) => {
+    set(value)
+    setSaved(false)
+    setError(null)
+  }
   async function submit(event: FormEvent) {
     event.preventDefault()
+    const problem = detailsProblem(nextCategory, nextTags)
+    if (problem) {
+      setError(problem)
+      return
+    }
     setBusy(true)
     setError(null)
     setSaved(false)
     try {
-      onSaved(await hostedPlugins.update(plugin.name, { description: text }))
+      // An absent field stays, and a null category clears it.
+      const next = await hostedPlugins.update(plugin.name, {
+        ...(changed.description && { description: text }),
+        ...(changed.category && { category: nextCategory === '' ? null : nextCategory }),
+        ...(changed.tags && { tags: nextTags }),
+      })
+      setCategory(next.category ?? '')
+      setTags(next.tags.join(', '))
+      onSaved(next)
       setSaved(true)
     } catch (caught) {
       setError(message(caught))
@@ -648,29 +754,61 @@ function DescriptionForm({ plugin, onSaved }: { plugin: HostedPlugin; onSaved: (
     }
   }
   return (
-    <form className="space-y-1" onSubmit={(e) => void submit(e)}>
-      <Label htmlFor="hosted-description" className="text-sm">
-        Description
-      </Label>
-      <Textarea
-        id="hosted-description"
-        value={text}
-        maxLength={1024}
-        onChange={(e) => {
-          setText(e.target.value)
-          setSaved(false)
-        }}
-        className="min-h-12 text-sm"
-      />
+    <form aria-label="Details" className="space-y-2" onSubmit={(e) => void submit(e)}>
+      <div className="space-y-1">
+        <Label htmlFor="hosted-description" className="text-sm">
+          Description
+        </Label>
+        <Textarea
+          id="hosted-description"
+          value={text}
+          maxLength={1024}
+          onChange={(e) => edited(setText, e.target.value)}
+          aria-describedby="hosted-description-help"
+          className="min-h-12 text-sm"
+        />
+        <p id="hosted-description-help" className="text-[11px] text-muted-foreground">
+          It goes into plugin.json. The next version you publish carries it.
+        </p>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-[14rem_minmax(0,1fr)]">
+        <div className="space-y-1">
+          <Label htmlFor="hosted-category" className="text-xs">
+            Category
+          </Label>
+          <Input
+            id="hosted-category"
+            value={category}
+            placeholder="printing"
+            onChange={(e) => edited(setCategory, e.target.value)}
+            className="h-8 text-xs"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="hosted-tags" className="text-xs">
+            Tags
+          </Label>
+          <Input
+            id="hosted-tags"
+            value={tags}
+            placeholder="notes, prints"
+            onChange={(e) => edited(setTags, e.target.value)}
+            aria-describedby="hosted-tags-help"
+            className="h-8 text-xs"
+          />
+          <p id="hosted-tags-help" className="text-[11px] text-muted-foreground">
+            Separate the tags with commas. Use lower-case letters, digits and hyphens.
+          </p>
+        </div>
+      </div>
       <div className="flex flex-wrap items-center gap-3">
-        <Button type="submit" size="sm" variant="outline" disabled={busy || text === plugin.description} aria-busy={busy}>
+        <Button type="submit" size="sm" variant="outline" disabled={busy || !touched} aria-busy={busy}>
           {busy && <Spinner />}
-          Save description
+          Save details
         </Button>
-        <span className="text-[11px] text-muted-foreground">It goes into plugin.json; the next version you publish carries it.</span>
         {saved && (
           <span role="status" className="text-xs text-ok">
-            Description saved.
+            Details saved.
           </span>
         )}
       </div>
@@ -723,6 +861,7 @@ function DraftChanges({ diff }: { diff: HostedPluginDraftDiff | null }) {
 }
 
 function Versions({ versions }: { versions: HostedPluginVersion[] | null }) {
+  const me = useAuthSession()?.user?.principal
   return (
     <section aria-label="Versions" className="space-y-2">
       <h6 className="text-sm font-medium">Versions</h6>
@@ -738,7 +877,9 @@ function Versions({ versions }: { versions: HostedPluginVersion[] | null }) {
               <time dateTime={v.published_at} className="text-muted-foreground">
                 {new Date(v.published_at).toLocaleString()}
               </time>
-              <span className="text-muted-foreground">by {v.published_by}</span>
+              <span className="text-muted-foreground" title={v.published_by}>
+                by {publishedByText(v.published_by, me, principalLabel)}
+              </span>
               <span className="text-muted-foreground">{Object.keys(v.files).length} files</span>
               <span className="sb-num ml-auto text-muted-foreground" title={v.content_hash}>
                 {v.content_hash.replace(/^sha256:/, '').slice(0, 12)}
@@ -781,12 +922,7 @@ function OfferPanel({
       const next = await aiPlugins.installPackage({ kind: 'hosted', name: plugin.name })
       onPackage(next)
       announcePackagesChanged('hosted')
-      const version = next.pending?.version ?? next.version
-      setResult(
-        next.pending
-          ? `Offered version ${version} as a re-pin. Version ${next.version} loads until you approve it.`
-          : `Offered version ${version}. It is installed and waits for your approval.`,
-      )
+      setResult(offerResultText(next))
     } catch (caught) {
       setError(message(caught))
     } finally {

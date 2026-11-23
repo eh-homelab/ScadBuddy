@@ -365,8 +365,11 @@ same way, `vite.config.ts`).
   `HostedPluginEditor.tsx`; client `api/hostedPlugins.ts`, file bytes as the raw body through
   `client.ts` `requestRaw`). A draft file opens in Monaco (`HostedFileEditor.tsx`, a lazy chunk;
   unit tests mock it with a textarea). `hostedDraft.ts` checks paths first (the API's refusal is
-  shown as it is) and works out `offerState` from the package row. Offer is the agent's package
-  install with `{ kind: 'hosted', name }`; it and Publish and Delete are `USER_ONLY`. The two
+  shown as it is) and works out `offerState` from the package row. A Publish offers the new
+  version at once (spec §6.3 step 5): the agent's package install with `{ kind: 'hosted', name }`,
+  an unapproved install or a re-pin, never an approval. Offer runs the same install for a version
+  a failed offer left unoffered. Publish, Offer and Delete are `USER_ONLY`. Close, or Edit on
+  another plugin, asks before it drops unsaved files. The two
   package panels tell each other of a change (`packagesChanged.ts`). Mocks
   `src/mocks/features/hostedPlugins.ts` (seeds `print-notes`, version 1 never offered), which
   tell `mocks/aiPlugins.ts` what an Offer installs (`setHostedLookup`). e2e `e2e/hosted-plugins.spec.ts`.

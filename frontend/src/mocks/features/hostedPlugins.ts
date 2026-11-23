@@ -215,7 +215,7 @@ function publish(p: Plugin): HostedPluginVersion & { description: string } {
     content_hash: `sha256:${digest(encoder.encode(JSON.stringify(Object.keys(files))))}`,
     files,
     published_at: stamp(),
-    published_by: 'person:admin@example.com',
+    published_by: 'user:https://id.example.com#admin',
     description: p.description,
   }
   p.versions.push(version)

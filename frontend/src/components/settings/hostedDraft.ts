@@ -111,3 +111,47 @@ export function offerState(latest: number | null, pkg: PluginPackage | undefined
   if (pkg.version === latest) return pkg.approved ? { kind: 'offered', version: latest, enabled: pkg.enabled } : { kind: 'awaiting-approval', version: latest }
   return { kind: 'not-offered', version: latest, loaded: pkg.version }
 }
+
+/** What an offer did, from the package row the install answered (re-pin or install, spec §6.3 step 5). */
+export function offerResultText(pkg: PluginPackage): string {
+  return pkg.pending
+    ? `Offered version ${pkg.pending.version} as a re-pin. Version ${pkg.version} loads until you approve it.`
+    : `Offered version ${pkg.version}. It is installed and waits for your approval.`
+}
+
+const CATEGORY_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/
+/** The API's cap on a plugin's tags (`api/hosted_plugins.py` `HostedPluginCreate.tags`). */
+export const MAX_TAGS = 20
+
+/** The tags typed in one field, split at commas and blanks, each once, in order. */
+export function parseTags(text: string): string[] {
+  return [...new Set(text.split(/[\s,]+/).filter((t) => t !== ''))]
+}
+
+/** Why a category or a tag list cannot be saved, or null; the API checks again (`api/hosted_plugins.py`). */
+export function detailsProblem(category: string, tags: readonly string[]): string | null {
+  if (category !== '' && !CATEGORY_RE.test(category)) return 'A category is 1 to 64 lower-case letters, digits and hyphens.'
+  const bad = tags.find((t) => !TAG_RE.test(t))
+  if (bad !== undefined) return `"${bad}" is not a tag. A tag is 1 to 32 lower-case letters, digits and hyphens.`
+  if (tags.length > MAX_TAGS) return `A plugin has at most ${MAX_TAGS} tags.`
+  return null
+}
+
+/**
+ * Who published a version (`published_by`, backend `api/hosted_plugins.py` `_by`), as a person
+ * reads it: "you" for the signed-in person, the assistant for the agent's credential, a
+ * signed-in user by the subject of `user:<issuer>#<sub>`, and the other principals as
+ * `principalLabel` (`agent/chat/labels.ts`) names them. An id it does not know is shown as it is.
+ */
+export function publishedByText(by: string, me: string | null | undefined, label: (principal: string) => string): string {
+  if (me && by === me) return 'you'
+  if (by === 'service:agent') return 'the assistant'
+  if (by === 'anonymous') return 'an anonymous caller'
+  if (by.startsWith('user:')) {
+    const hash = by.lastIndexOf('#')
+    const subject = hash < 0 ? '' : by.slice(hash + 1)
+    return subject ? `user ${subject}` : by
+  }
+  return label(by)
+}
