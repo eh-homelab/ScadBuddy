@@ -52,7 +52,7 @@ from scadbuddy.workflows.flow_tools import FLOW_TOOLS
 from scadbuddy.workflows.flows_client import connect_flows, harness_plugins
 from scadbuddy.workflows.payload_codec import flows_converter
 from scadbuddy.workflows.project import ProjectWorkflow
-from scadbuddy.workflows.projects_worker import projects_runner, projects_worker
+from scadbuddy.workflows.projects_worker import projects_runner, projects_worker, warm_sandbox
 from tests.flows.flows_support import Flows, Keys, script
 
 HISTORIES = Path(__file__).parent.parent / "fixtures" / "project_workflow_histories"
@@ -74,6 +74,16 @@ NAMES = [
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
 
+@pytest.fixture(scope="module")
+def warmed() -> None:
+    """Warm as the `projects` worker does before it polls (#7066): the shared Code Mode
+    tool and both Monty pools. Cold, the first activation that made the tool (0.12 to
+    0.33 s) or took a pool's first step (0.55 s) ran into the replayer's 2 s deadlock
+    detector on a loaded runner."""
+    warm_sandbox()
+
+
+@pytest.mark.usefixtures("warmed")
 @pytest.mark.parametrize("name", NAMES)
 async def test_a_recorded_history_replays(name: str) -> None:
     path = HISTORIES / f"{name}.json"
