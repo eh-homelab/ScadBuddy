@@ -801,7 +801,7 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
   // The marketplace feed (#6933, routes/pluginFeeds.ts).
   ...[
     'GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json',
-    'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{file}',
+    'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{version}/{file}',
     'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/archives/{file}',
   ].map(
     (route) => ({
