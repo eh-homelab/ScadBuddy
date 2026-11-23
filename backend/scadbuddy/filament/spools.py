@@ -1182,8 +1182,10 @@ class FilamentSpoolStore:
             ):
                 return None
             if body.kind == "consumed_reset" and body.at is not None:
+                # FOR SHARE: the link checked stays as read until commit (no delete or relink).
                 link = conn.execute(
-                    "SELECT linked_at FROM filament_bb_links WHERE spool_id = %s", (spool_id,)
+                    "SELECT linked_at FROM filament_bb_links WHERE spool_id = %s FOR SHARE",
+                    (spool_id,),
                 ).fetchone()
                 if link is not None and body.at <= link["linked_at"]:
                     raise ResetBeforeLinkError(link["linked_at"])
