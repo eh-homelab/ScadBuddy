@@ -199,6 +199,22 @@ def test_set_record_replaces_record_and_manifest(rows: OutputRows) -> None:
     assert got.manifest == [{"part": "p"}]
 
 
+def test_attach_backfill_keeps_a_record_and_clears_the_backfill(rows: OutputRows) -> None:
+    rows.insert(make_row("o1"))
+    rows.set_backfill("o1", {"job_id": "j"})
+    rows.attach_backfill("o1", {"plate_key": "first"}, [{"part": "p"}])
+    got = rows.get("o1")
+    assert got is not None
+    assert got.record == {"plate_key": "first"}
+    assert got.manifest == [{"part": "p"}]
+    assert got.backfill is None
+    rows.attach_backfill("o1", {"plate_key": "second"}, [{"part": "q"}])
+    got = rows.get("o1")
+    assert got is not None
+    assert got.record == {"plate_key": "first"}
+    assert got.manifest == [{"part": "q"}]
+
+
 def test_copied_false_until_a_run_finishes_then_stays_true(rows: OutputRows) -> None:
     assert rows.copied() is False
     assert rows.last_run() is None

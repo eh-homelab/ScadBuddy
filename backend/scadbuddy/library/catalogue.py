@@ -2671,6 +2671,9 @@ class Catalogue:
 
     def delete(self, slug: str) -> None:
         self._require(slug)
+        # Its output rows first (spec §6.2): they are the outputs' record (#7255), so a
+        # failure fails the delete and leaves the model and its outputs whole for a retry.
+        self._forget_outputs(slug)
         # Renamed out of `models/` first, so the model leaves the catalogue in one
         # step: an `rmtree` that dies halfway could otherwise leave `model.scad`
         # behind and a half-deleted model listed. The tombstone lives under
@@ -2797,6 +2800,13 @@ class Catalogue:
             except OSError:
                 logger.exception("could not check a model for orphans", extra={"slug": slug})
                 continue
+            if path.parent == self.paths.outputs:
+                # The rows before the files: a failure keeps both for the next sweep.
+                try:
+                    self._forget_outputs(slug)
+                except Exception:
+                    logger.exception("could not drop a model's output rows", extra={"slug": slug})
+                    continue
             if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
                 if path.parent == self.paths.outputs:
@@ -2915,7 +2925,12 @@ class Catalogue:
             directory.mkdir()
         except FileExistsError:
             raise ModelExistsError(slug) from None
-        self._clear_derived(slug)
+        try:
+            self._clear_derived(slug)
+        except Exception:
+            # The earlier model's output rows stand: give the slug back for a retry.
+            directory.rmdir()
+            raise
         return directory
 
     def _clear_derived(self, slug: str) -> None:
@@ -2923,8 +2938,10 @@ class Catalogue:
 
         The orphan sweep usually removes these already. When it failed, they are
         still here, and without this the new model would inherit the old one's
-        outputs and cached schema.
+        outputs and cached schema. Its output rows go first and a failure raises
+        (spec §6.2): the new model must not inherit them.
         """
+        self._forget_outputs(slug)
         for path in (
             self.paths.model_schema_cache(slug),
             self.paths.model_revisions / slug,
@@ -2947,7 +2964,11 @@ class Catalogue:
         outputs are gone -- so a removed model leaves nothing behind in memory."""
         if self.outputs is not None:
             self.outputs.forget_plate_cover(slug)
-            # Their rows in the cross-model list go with them (#4777).
+
+    def _forget_outputs(self, slug: str) -> None:
+        """Drop the rows of ``slug``'s outputs and their rows in the cross-model list
+        (#4777, #7255), before their directory goes. Raises when the output rows stay."""
+        if self.outputs is not None:
             self.outputs.forget_indexed(slug)
 
     def sync_builtins(self, bundled: Path) -> str | None:

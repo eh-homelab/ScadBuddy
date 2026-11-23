@@ -379,6 +379,11 @@ class OutputStore:
                 return self.paths.output_dir(slug, output_id)
             if self.rows.copied():
                 raise OutputNotFoundError(output_id)
+        return self._files_dir(output_id)
+
+    def _files_dir(self, output_id: str) -> Path:
+        """The output's folder found from the files alone, for a caller that already
+        asked the rows and found none (`_row_of`), so they are not asked again."""
         known = self._dirs.get(output_id)
         if known is not None and (known / META_NAME).is_file():
             return known
@@ -410,7 +415,7 @@ class OutputStore:
         if row is not None:
             meta = row.meta
         else:
-            directory = self._find_dir(output_id)
+            directory = self._files_dir(output_id)
             meta = OutputMeta.model_validate_json(
                 (directory / META_NAME).read_text(encoding="utf-8")
             )
@@ -418,9 +423,10 @@ class OutputStore:
         return meta
 
     def name_and_slug(self, output_id: str) -> tuple[str | None, str]:
-        """The output's own name and its model, from ``meta.json`` alone: `get` without
-        the last-print read, for a caller that only labels it (#3856). One found gone
-        is not looked for again for `GONE_OUTPUT_SECONDS`, unless the store has rows."""
+        """The output's own name and its model, from its row (#7255), else its
+        ``meta.json``: `get` without the last-print read, for a caller that only labels
+        it (#3856). One found gone in the files is not looked for again for
+        `GONE_OUTPUT_SECONDS`; one found gone once a copy run finished costs one query."""
         row = self._row_of(output_id)
         if row is not None:
             return row.meta.name, row.slug
@@ -429,7 +435,7 @@ class OutputStore:
         if gone:
             raise OutputNotFoundError(output_id)
         try:
-            directory = self._find_dir(output_id)
+            directory = self._files_dir(output_id)
         except OutputNotFoundError:
             with self._gone_lock:
                 if len(self._gone) >= _GONE_OUTPUTS_KEPT:
@@ -474,7 +480,7 @@ class OutputStore:
         row = self._row_of(output_id)
         if row is not None:
             return dict(row.params)
-        text = _read_if_there(self._find_dir(output_id) / PARAMS_NAME)
+        text = _read_if_there(self._files_dir(output_id) / PARAMS_NAME)
         if text is None:
             return {}
         loaded: dict[str, ParamValue] = json.loads(text)
@@ -490,7 +496,7 @@ class OutputStore:
             if row.inputs is None:
                 return legacy_inputs(row.params if params is None else params)
             return dict(row.inputs)
-        path = self._find_dir(output_id) / INPUTS_NAME
+        path = self._files_dir(output_id) / INPUTS_NAME
         try:
             text = _read_if_there(path)
         except OSError:
@@ -739,7 +745,7 @@ class OutputStore:
         row = self._row_of(output_id)
         if row is not None:
             return [BomEntry.model_validate(e) for e in row.bom or []]
-        text = _read_if_there(self.directory(output_id) / BOM_NAME)
+        text = _read_if_there(self._files_dir(output_id) / BOM_NAME)
         if text is None:
             return []
         return [BomEntry.model_validate(e) for e in json.loads(text)]
@@ -750,7 +756,7 @@ class OutputStore:
             row = self._row_of(output_id)
             if row is not None:
                 return [ManifestObject.model_validate(m) for m in row.manifest or []]
-            text = _read_if_there(self.directory(output_id) / MANIFEST_NAME)
+            text = _read_if_there(self._files_dir(output_id) / MANIFEST_NAME)
         except OutputNotFoundError:
             return []
         if text is None:
@@ -764,7 +770,7 @@ class OutputStore:
             row = self._row_of(output_id)
             if row is not None:
                 return _ID_LIST.validate_python(row.arranged_from or [])
-            text = _read_if_there(self.directory(output_id) / ARRANGED_NAME)
+            text = _read_if_there(self._files_dir(output_id) / ARRANGED_NAME)
         except OutputNotFoundError:
             return []
         if text is None:
@@ -779,7 +785,7 @@ class OutputStore:
                 if row.backfill is None:
                     return None
                 return BackfillState.model_validate(row.backfill)
-            text = _read_if_there(self.directory(output_id) / BACKFILL_NAME)
+            text = _read_if_there(self._files_dir(output_id) / BACKFILL_NAME)
         except OutputNotFoundError:
             return None
         if text is None:  # none, or the attach just cleared it
@@ -838,21 +844,15 @@ class OutputStore:
         _replace(directory / MANIFEST_NAME, json.dumps(manifest))
         (directory / BACKFILL_NAME).unlink(missing_ok=True)
         if self.rows is not None:
-            row = self.rows.get(output_id)
-            if row is not None:
-                # The record it has stays, as the file's does.
-                record = row.record
-                if record is None:
-                    record = chosen.record.model_dump(mode="json")
-                self.rows.set_record(output_id, record, manifest)
-                self.rows.set_backfill(output_id, None)
+            # The record it has stays, as the file's does: one statement.
+            self.rows.attach_backfill(output_id, chosen.record.model_dump(mode="json"), manifest)
         self._changed(directory.parent.name)
 
     def record(self, output_id: str) -> OutputRecord | None:
         row = self._row_of(output_id)
         if row is not None:
             return None if row.record is None else OutputRecord.model_validate(row.record)
-        text = _read_if_there(self.directory(output_id) / RECORD_NAME)
+        text = _read_if_there(self._files_dir(output_id) / RECORD_NAME)
         if text is None:
             return None
         return OutputRecord.model_validate_json(text)
@@ -873,14 +873,14 @@ class OutputStore:
         return path
 
     def rename(self, output_id: str, name: str | None) -> OutputMeta:
-        """Give the output ``name``, or none (#2288). Only ``meta.json`` changes: the
-        3MF's provenance names the output by id, and a download is named at download.
+        """Give the output ``name``, or none (#2288). Only its meta changes, in
+        ``meta.json`` and then in its row (#7255): the 3MF's provenance names the output
+        by id, and a download is named at download.
 
-        A read-modify-write with no lock: nothing else rewrites ``meta.json`` once the
-        output is saved, except `mark_storefront` once at the API's start, for an output
-        saved before #6371. A second writer of it needs a lock here, or one rename loses."""
-        directory = self._find_dir(output_id)
-        meta = self._stored_meta(output_id, directory)
+        A read-modify-write with no lock: nothing else rewrites the meta once the output
+        is saved, except `mark_storefront` once at the API's start, for an output saved
+        before #6371. A second writer of it needs a lock here, or one rename loses."""
+        meta, directory = self._stored_meta(output_id)
         renamed = meta.model_copy(update={"name": name or None})
         _replace(
             directory / META_NAME, json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
@@ -893,23 +893,25 @@ class OutputStore:
         return self.get(output_id)
 
     def mark_storefront(self, output_id: str) -> OutputMeta:
-        """Mark an output saved before #6371 as the storefront slice run's: only its
-        ``meta.json`` changes. `OutputIndex.sync` calls it before it writes the row."""
-        directory = self._find_dir(output_id)
-        meta = self._stored_meta(output_id, directory)
+        """Mark an output saved before #6371 as the storefront slice run's: only its meta
+        changes, in ``meta.json`` and its row (#7255). `OutputIndex.sync` calls it before
+        it writes the index row."""
+        meta, directory = self._stored_meta(output_id)
         marked = meta.model_copy(update={"source": STOREFRONT})
         _replace(directory / META_NAME, json.dumps(marked.model_dump(mode="json"), indent=2) + "\n")
         if self.rows is not None:
             self.rows.update_meta(output_id, marked)
         return marked
 
-    def _stored_meta(self, output_id: str, directory: Path) -> OutputMeta:
-        """The output's meta as it is stored, with no last-print overlay: its row's, else
-        its ``meta.json``."""
+    def _stored_meta(self, output_id: str) -> tuple[OutputMeta, Path]:
+        """The output's meta as it is stored, with no last-print overlay (its row's, else
+        its ``meta.json``), and its folder."""
         row = self._row_of(output_id)
         if row is not None:
-            return row.meta
-        return OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+            return row.meta, self.paths.output_dir(row.slug, output_id)
+        directory = self._files_dir(output_id)
+        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+        return meta, directory
 
     def delete(self, output_id: str) -> None:
         directory = self._find_dir(output_id)
@@ -928,8 +930,12 @@ class OutputStore:
         """The model's outputs, oldest first, skipping any record that cannot be read.
 
         Unlike `list_for`, this feeds the catalogue listing, so one unreadable or
-        half-deleted output must cost only itself -- never the whole page.
+        half-deleted output must cost only itself -- never the whole page. Once a copy
+        run finished, the rows answer: one query, no glob (#7255).
         """
+        if self._copied():
+            assert self.rows is not None
+            return [row.meta for row in reversed(self.rows.for_slug(slug))]
         directory = self.paths.outputs / slug
         metas: list[OutputMeta] = []
         try:
@@ -1001,14 +1007,12 @@ class OutputStore:
             self._cover_epoch += 1
 
     def forget_indexed(self, slug: str) -> None:
-        """Drop the index rows of ``slug``'s outputs (#4777), once their directory is gone
-        with the model: best effort, as a page drops a row whose files it cannot read."""
+        """Drop the rows of ``slug``'s outputs with their model, before their directory
+        goes (spec §6.2). Their output rows are the record (#7255), so a failure to drop
+        them raises, and the caller keeps the directory for a retry. The index rows
+        (#4777) are best effort, as a page drops a row whose files it cannot read."""
         if self.rows is not None:
-            # The model's delete takes its output rows with it (spec §6.2).
-            try:
-                self.rows.delete_slug(slug)
-            except Exception:
-                logger.exception("could not drop a model's output rows", extra={"slug": slug})
+            self.rows.delete_slug(slug)
         if self.index is None:
             return
         try:

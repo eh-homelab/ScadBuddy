@@ -16,6 +16,7 @@ import psycopg
 import pytest
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.output_index import OutputIndex
 from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import (
@@ -30,7 +31,9 @@ from scadbuddy.library.outputs import (
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.arrange import finished_job
+from tests.support.media import MemoryMediaStore
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -262,3 +265,119 @@ async def test_plate_cover_output_from_rows(
         conn.execute("UPDATE outputs SET has_plate_cover = false")
     assert store.plate_cover_output(job.slug) is None
     assert not store.has_plate_cover(job.slug)
+
+
+def _catalogue(store: OutputStore) -> Catalogue:
+    return Catalogue(
+        store.paths, outputs=store, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+    )
+
+
+def _refuse(*_: object) -> None:
+    raise psycopg.OperationalError("the database went away")
+
+
+async def test_model_delete_fails_whole_when_its_output_rows_stay(
+    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, meta, job = saved
+    catalogue = _catalogue(store)
+    monkeypatch.setattr(rows_of(store), "delete_slug", _refuse)
+    with pytest.raises(psycopg.OperationalError):
+        catalogue.delete(job.slug)
+    # The model and its outputs stay whole, for a retry.
+    assert store.paths.model_source(job.slug).is_file()
+    assert store.directory(meta.id).is_dir()
+    assert rows_of(store).get(meta.id) is not None
+    monkeypatch.undo()
+    catalogue.delete(job.slug)
+    assert rows_of(store).get(meta.id) is None
+    assert not (store.paths.outputs / job.slug).exists()
+
+
+async def test_orphan_sweep_keeps_outputs_whose_rows_stay(
+    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, meta, job = saved
+    catalogue = _catalogue(store)
+    shutil.rmtree(store.paths.model_dir(job.slug))
+    monkeypatch.setattr(rows_of(store), "delete_slug", _refuse)
+    catalogue.sweep_orphans()
+    assert store.directory(meta.id).is_dir()
+    monkeypatch.undo()
+    catalogue.sweep_orphans()
+    assert rows_of(store).get(meta.id) is None
+    assert not (store.paths.outputs / job.slug).exists()
+
+
+async def test_a_reused_slug_is_refused_while_its_output_rows_stay(
+    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, meta, job = saved
+    catalogue = _catalogue(store)
+    shutil.rmtree(store.paths.model_dir(job.slug))
+    monkeypatch.setattr(rows_of(store), "delete_slug", _refuse)
+    with pytest.raises(psycopg.OperationalError):
+        catalogue.create(job.slug, "cube();\n", ModelMeta(name="Again"))
+    # The claim is given back, and the earlier model's outputs stay for a retry.
+    assert not store.paths.model_dir(job.slug).exists()
+    assert store.directory(meta.id).is_dir()
+
+
+async def test_rename_fails_when_its_row_write_fails(
+    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, meta, _ = saved
+    monkeypatch.setattr(rows_of(store), "update_meta", _refuse)
+    with pytest.raises(psycopg.OperationalError):
+        store.rename(meta.id, "second")
+    with pytest.raises(psycopg.OperationalError):
+        store.mark_storefront(meta.id)
+
+
+async def test_start_backfill_fails_when_its_row_write_fails(
+    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, meta, _ = saved
+    monkeypatch.setattr(rows_of(store), "set_backfill", _refuse)
+    with pytest.raises(psycopg.OperationalError):
+        store.start_backfill(meta.id, "rerender")
+    with pytest.raises(psycopg.OperationalError):
+        store.fail_backfill(meta.id, "rerender", "boom")
+
+
+async def test_lookups_after_a_row_miss_ask_the_rows_once(
+    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, meta, job = saved
+    rows = rows_of(store)
+    rows.delete(meta.id)
+
+    def no_second_ask(output_id: str) -> str | None:
+        raise AssertionError("asked the rows again after a miss")
+
+    monkeypatch.setattr(rows, "slug_of", no_second_ask)
+    assert store.get(meta.id).name == "first"
+    assert store.name_and_slug(meta.id) == ("first", job.slug)
+    assert store.params(meta.id) == job.params
+    assert store.record(meta.id) is not None
+    assert store.bom(meta.id)[0].piece == "wall"
+    assert store.manifest(meta.id)
+
+
+async def test_a_save_orders_by_the_rows_after_a_copy(
+    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, meta, job = saved
+    finish_copy(store)
+    real_glob = Path.glob
+
+    def no_meta_glob(self: Path, pattern: str) -> Iterator[Path]:
+        if pattern.endswith(META_NAME):
+            raise AssertionError(f"globbed {self} for {pattern}")
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", no_meta_glob)
+    later = store.create(job, name="second")
+    assert later.created_at > meta.created_at
+    assert [m.id for m in store.list_for(job.slug)] == [later.id, meta.id]

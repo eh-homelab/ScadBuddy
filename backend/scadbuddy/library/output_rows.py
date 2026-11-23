@@ -184,6 +184,16 @@ class OutputRows:
                 (_json(record), _json(manifest), output_id),
             )
 
+    def attach_backfill(self, output_id: str, record: dict[str, Any], manifest: list[Any]) -> None:
+        """A backfill's attach in one statement: the record it has stays, the manifest
+        is the re-render's, and the backfill is cleared."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE outputs SET record = COALESCE(record, %s), manifest = %s,"
+                " backfill = NULL WHERE output_id = %s",
+                (_json(record), _json(manifest), output_id),
+            )
+
     def delete(self, output_id: str) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM outputs WHERE output_id = %s", (output_id,))
