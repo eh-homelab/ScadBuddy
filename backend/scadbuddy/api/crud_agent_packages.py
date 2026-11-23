@@ -44,7 +44,9 @@ latest version's row (``plugin`` null when there is none), and
 Area ``plugin-feeds`` (#6933): ``GET …/plugin-feeds/{feed}`` the feed's name and owner and
 every package it lists (only the one ``?package=`` names, when given), each at its current
 pin with whether that pin is approved, and for a hosted package the version that pin is
-(``feed`` null for a slug no feed has).
+(``feed`` null for a slug no feed has). ``PUT`` and ``DELETE …/plugin-feeds/{feed}/packages/{name}``
+add a package to the feed and remove it (#6936); a feed or package that is not there is 404
+``feed-not-found`` or ``package-not-found``.
 
 A hosted package (#6934, ``source_kind`` ``hosted``) is pinned to a published version
 (``pin_kind`` ``version``): its install and re-pin are stored only when that version of the
@@ -110,6 +112,7 @@ PACKAGE_UNAPPROVED = "package-unapproved"
 MIRROR_MISSING = "mirror-missing"
 MIRROR_NOT_FOUND = "mirror-not-found"
 HOSTED_VERSION_NOT_FOUND = "hosted-version-not-found"
+FEED_NOT_FOUND = "feed-not-found"
 HOSTED_VERSION_MISMATCH = "hosted-version-mismatch"
 HOSTED_NAME_TAKEN = "hosted-name-taken"
 
@@ -885,8 +888,14 @@ class FeedPackage(BaseModel):
     fetch_path: str | None
     commit_sha: str | None
     content_hash: str
+    #: ``commit``, ``bytes`` or ``version``: what the feed lists the package by (#6936).
+    pin_kind: str
+    #: A bytes pin's file, which the agent serves from its mirror (#6936).
+    bytes_sha256: str | None
     #: Whether an admin approved the current pin; only an approved one is listed.
     approved: bool
+    #: Approved with its refused items allowed (hooks, MCP servers): every client runs them.
+    allow_refused: bool
     #: The approved review's manifest description.
     description: str | None
     #: For a ``hosted`` package, the version its pin is; null otherwise, or when none is.
@@ -901,6 +910,7 @@ class PluginFeedAnswer(BaseModel):
 
 _FEED_PACKAGES = """
 SELECT p.name, p.source_kind, p.fetch_url, p.fetch_path, p.commit_sha, p.content_hash,
+       p.pin_kind, p.bytes_sha256, p.allow_refused,
        p.approved_at IS NOT NULL AS approved, p.review->>'description' AS description,
        v.version AS hosted_version, v.zip_sha256 AS hosted_zip_sha256
   FROM ai_plugin_feed_packages fp
@@ -926,7 +936,10 @@ def _feed_package(p: Any) -> FeedPackage:
         fetch_path=p["fetch_path"],
         commit_sha=p["commit_sha"],
         content_hash=p["content_hash"],
+        pin_kind=p["pin_kind"],
+        bytes_sha256=p["bytes_sha256"],
         approved=p["approved"],
+        allow_refused=p["allow_refused"],
         description=p["description"],
         hosted=hosted,
     )
@@ -953,3 +966,54 @@ async def plugin_feed(
         )
 
     return await _in_tx(state, run)
+
+
+def _feed_id(conn: psycopg.Connection[Any], feed: str) -> int:
+    row = conn.execute("SELECT id FROM ai_plugin_feeds WHERE slug = %s", (feed,)).fetchone()
+    if row is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f'no plugin feed "{feed}"', reason=FEED_NOT_FOUND)
+    return int(row["id"])
+
+
+@router.put("/plugin-feeds/{feed}/packages/{name}", name="crud_agent_plugin_feed_add")
+async def plugin_feed_add(
+    feed: Annotated[str, Path(pattern=FEED_PATTERN)], name: Name, state: StateDep
+) -> Done:
+    """Lists the package ``name`` in the feed (#6936, spec §6.7); ``done`` is false when it
+    already was. The feed lists it only at an approved pin, which the agent checks."""
+
+    def run(conn: psycopg.Connection[Any]) -> bool:
+        feed_id = _feed_id(conn, feed)
+        if (
+            conn.execute(
+                "SELECT 1 FROM ai_plugin_packages WHERE name = %s FOR KEY SHARE", (name,)
+            ).fetchone()
+            is None
+        ):
+            raise _not_found(name)
+        added = conn.execute(
+            "INSERT INTO ai_plugin_feed_packages (feed_id, package_name) VALUES (%s, %s)"
+            " ON CONFLICT DO NOTHING",
+            (feed_id, name),
+        ).rowcount
+        return added == 1
+
+    return Done(done=await _in_tx(state, run))
+
+
+@router.delete("/plugin-feeds/{feed}/packages/{name}", name="crud_agent_plugin_feed_remove")
+async def plugin_feed_remove(
+    feed: Annotated[str, Path(pattern=FEED_PATTERN)], name: Name, state: StateDep
+) -> Done:
+    """Takes the package ``name`` out of the feed (#6936); ``done`` is false when it was not
+    in it."""
+
+    def run(conn: psycopg.Connection[Any]) -> bool:
+        feed_id = _feed_id(conn, feed)
+        removed = conn.execute(
+            "DELETE FROM ai_plugin_feed_packages WHERE feed_id = %s AND package_name = %s",
+            (feed_id, name),
+        ).rowcount
+        return removed == 1
+
+    return Done(done=await _in_tx(state, run))

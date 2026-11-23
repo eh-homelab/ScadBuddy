@@ -146,7 +146,7 @@ Fetches a new spool type's slicer presets per printer model and nozzle from
 ["Profile-fetch worker"](../../README.md#profile-fetch-worker-6625).
 
 - **Worker.** `python -m scadbuddy.profile_fetch` (`scadbuddy/profile_fetch/__main__.py:32`)
-  polls `profile-fetch` with the `ProfileFetch`, `TdfpSearch` and `TdfpCreate` workflows, one activity at a time, and `profile-fetch-search` for a search's activity alone, in a slot of its own (#7062, `scadbuddy/profile_fetch/worker.py:74-106`).
+  polls `profile-fetch` with the `ProfileFetch`, `TdfpSearch` and `TdfpCreate` workflows, one activity at a time, and `profile-fetch-search` for a search's activity alone, in a slot of its own (#7062, `scadbuddy/profile_fetch/worker.py:74-109`).
   It reads the API URL, a service proof and Temporal's address, reaches the API only as
   CRUD caller `profile-fetch` (area `runs`, `scadbuddy/api/crud_areas.py:250`), and calls the
   browser service over HTTP. It refuses a database secret, the KEK and the site login

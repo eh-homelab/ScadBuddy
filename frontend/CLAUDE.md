@@ -193,7 +193,7 @@ same way, `vite.config.ts`).
   declared slots); `FileSource.tsx` has the picked file, the §9.4 notes ("Use the library's
   version", "Keep the published version"), Parts (a support part read-only) and
   `FilePictures` (`plate:<n>`, `upload:<sha256>`; an upload saves a new listing first). The
-  page asks before a save drops a pin (another file picked). The Library page's file menu
+  page asks before a save drops a pin (another file picked, or a switch to a design). The Library page's file menu
   has "Sell on storefront…" (`?sell=library:<id>`). The changed-file note compares the
   library entry's `file_hash` (#7073) with the pin, and shows nothing when no hash is stated.
   Prepared colours (#6237): `components/storefront/PrepareColours.tsx`, under a published

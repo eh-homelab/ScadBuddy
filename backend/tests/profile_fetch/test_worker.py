@@ -112,9 +112,9 @@ def test_the_worker_opens_no_browser_at_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The worker signs in nowhere at start: once its areas are served it connects to
-    Temporal, and its site is the browser service's (`RemoteSite`), opened only by an
-    export (#6780). It holds two, the fetch's and the searches' (R-7062-1), each its own
-    client of the one service."""
+    Temporal, and its site is the browser service's (`RemoteSite`), opened only by a step
+    (#6780): an export or a create opens the fetch's holder, and a search opens the
+    searches' (R-7062-1). Each holder is its own client of the one service."""
     events: list[str] = []
     opened: list[object] = []
 
