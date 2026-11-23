@@ -2213,19 +2213,16 @@ export function PrintPicker({
                   {sliced && <SlicedSettings profile={sliced} />}
                   {trayTarget &&
                     trays.open
-                      // A native run's tray is a choice already: asked only with a record to link.
-                      .filter(
-                        (tray) =>
-                          !nativeRow ||
-                          (!claimed?.trays.includes(`${tray.ams_id}:${tray.tray_id}`) &&
-                            (tray.candidates ?? []).some((id) => openShelf.some((spool) => spool.spool_id === id))),
-                      )
+                      // A native run's tray is a choice already: asked until it is answered. With
+                      // no shelf record to link, it offers a new spool from the tray (R-7150-9).
+                      .filter((tray) => !nativeRow || !claimed?.trays.includes(`${tray.ams_id}:${tray.tray_id}`))
                       .map((tray) => (
                       <TrayQuestion
                         // Keyed by its target too: a Bambuddy printer's view whose registry
                         // row prints natively asks Bambuddy's question until the registry
-                        // read lands, and the native one must start over on the shelf.
-                        key={`${nativeRow ? 'native' : 'bambuddy'}:${tray.ams_id}:${tray.tray_id}`}
+                        // read lands, and the native one must start over on the shelf. The
+                        // printer is in it, so one printer's error and key are not the next one's.
+                        key={`${nativeRow ? `native:${nativeRow.id}` : `bambuddy:${printerId}`}:${tray.ams_id}:${tray.tray_id}`}
                         {...trayTarget}
                         tray={tray}
                         // A native question's candidates are the shelf's (#4506); Bambuddy's, the inventory's.

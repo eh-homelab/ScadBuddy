@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { linkingTools } from './filamentLinks.js'
-import { defineTool, json, type Tool } from './registry.js'
+import { defineTool, idempotencyKey, json, type Tool } from './registry.js'
 
 // Which SB spool is in a registry printer's tray, on the native print path (#3818 tier A,
 // #6262 Task 4): the manual link a person makes for an untagged tray. The spool moves to
@@ -52,6 +52,35 @@ const tools: Tool[] = [
             body,
           }),
           `link the spool in tray ${ams_id}/${tray_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'create_tray_spool',
+    label: 'Make a spool from a tray',
+    description:
+      'Create from slot (#7150): make a new ScadBuddy spool from what a LAN-linked printer last reported in a ' +
+      "tray (its material, matched by name or alias and added to the catalog when none has it, its RGBA colour, " +
+      "and a tagged tray's tag) and place it in the tray; the tray's previous spool moves to no place. The spool " +
+      'has no type, label weight or grams yet (it needs a type: filament_type_proposals). Only when the user asks ' +
+      'for a new spool record for a tray. A resend of the same call makes no second spool. 409 when the printer ' +
+      "has not reported that tray filled, or the tray's tag is already on a spool (that spool is the tray's: use " +
+      'it); 404 for an unknown printer. Writes ScadBuddy only; nothing reaches Bambuddy.',
+    input: z.object({ printer_id: printerId, ams_id: amsId, tray_id: trayId }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/printers/{printer_id}/trays/{ams_id}/{tray_id}/new-spool'],
+    summarize: ({ printer_id, ams_id, tray_id }) => `Make a spool from tray ${ams_id}/${tray_id} of printer ${printer_id}`,
+    handler: async ({ printer_id, ams_id, tray_id }, ctx) =>
+      json(
+        await ok(
+          ctx.backend.POST('/api/v1/printers/{printer_id}/trays/{ams_id}/{tray_id}/new-spool', {
+            params: { path: { printer_id, ams_id, tray_id } },
+            // One key per call: a resend after a lost answer answers the first spool.
+            headers: { 'Idempotency-Key': idempotencyKey(ctx) },
+          }),
+          `make a spool from tray ${ams_id}/${tray_id}`,
         ),
       ),
   }),

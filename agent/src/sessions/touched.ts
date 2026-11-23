@@ -726,6 +726,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // SB spool to the tray's place, a `moved` ledger event; nothing else changes).
   'link_tray_spool',
   'unlink_tray_spool',
+  // #7150: a spool made from a tray is an SB spool, which is no recorded kind either.
+  'create_tray_spool',
   // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',
