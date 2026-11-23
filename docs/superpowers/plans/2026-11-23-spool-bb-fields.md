@@ -64,7 +64,7 @@ Each ruling is also a comment on #7149.
 - **R-7149-5 — An SB reset reaches BB as its own write.** The sync plan adds the op
   `reset_consumed` (`POST /inventory/spools/{id}/reset-consumed-counter`, Manage
   Inventory) for a linked, unarchived spool whose newest SB reset (an event with a
-  source other than `bb`) has not been pushed. The hash of that event's id goes in
+  source other than `bb`, made after the link: R-7149-11) has not been pushed. The hash of that event's id goes in
   `filament_bb_links.pushed_fields.consumed_reset`, so each reset is sent once. It
   pushes under the `weights` data type. A new spool takes it on the pass after its create.
   SB never calls BB's bulk route: one write per spool keeps one result per write.
@@ -99,7 +99,15 @@ Each ruling is also a comment on #7149.
   (`inventory.py` L2747), as `data_origin_values` in
   `backend/tests/bambuddy/recordings/openapi/rfid-routes.json` records from BB v1.3.1. So
   a bind of a `bambu_mifare` tag sets `rfid_linked`, and any other kind `nfc_link`
-  (`rfid_push.link_origin`).
+  (`rfid_push.link_origin`). The kind is the tag's stored kind, which `bind_on` resolves.
+  The request's `kind` names only a new tag's kind (it defaults to `other`), so a bind of
+  a known Bambu tag by its UID alone still sets `rfid_linked` (review round 2 of #7181).
+- **R-7149-11 — SB sends only a reset made after the link.** The plan sends
+  `reset_consumed` only for an SB reset whose time is after the link's `linked_at`. A
+  reset older than the link is history BB never shared, so SB never sends it. That
+  covers a spool that the pull's import links after its reset, and a relink after
+  `POST /filament/sync/reset-links`. Without this rule, either link would zero BB's
+  counter at link time (review round 2 of #7181).
 - **Upgrade (review nit 2 of #7181).** A reading made before this change lacks the new
   snapshot keys. The pull fills each missing key with BB's value when it says nothing
   new: the baseline, a null, or a value SB holds already (`bambuddy_pull._seeded`). So

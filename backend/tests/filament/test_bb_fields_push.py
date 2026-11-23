@@ -12,6 +12,7 @@ from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger
 from scadbuddy.filament.bambuddy_pull import pull
 from scadbuddy.filament.bb_sync_plan import field_hash
+from scadbuddy.filament.bb_sync_results import reset_links
 from scadbuddy.filament.models import SpoolPatch
 from tests.conftest import PgPool
 from tests.filament.test_bb_sync_plan import (
@@ -28,6 +29,8 @@ from tests.filament.test_bb_sync_plan import (
 from tests.filament.test_bb_sync_results import _answer, _apply, _bb_now, _ok
 
 pytestmark = pytest.mark.requires_postgres
+
+TRAY = "0123456789ABCDEF0123456789ABCDEF"
 
 WEIGHTS = FilamentSync(
     spools="sb_to_bb",
@@ -114,10 +117,45 @@ def test_a_pushed_reset_hash_skips_the_write(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     spool = _spool(f, _type(f))
     row = _matching(pg_pool, spool, 50, WEIGHTS)
+    _link(pg_pool, spool, 50)
     _reset(pg_pool, spool)
     newest = [e for e in f.spools.events(spool) if e.kind == "consumed_reset"][-1]
-    _link(pg_pool, spool, 50, pushed={"consumed_reset": field_hash(str(newest.id))})
+    _link_pushed(pg_pool, spool, {"consumed_reset": field_hash(str(newest.id))})
     assert _plan(f, _snap([row]), WEIGHTS).writes == []
+
+
+def _resets(writes: Any) -> list[Any]:
+    return [w for w in writes if w.op == "reset_consumed"]
+
+
+def test_a_reset_before_the_pulls_link_is_never_sent(pg_pool: PgPool) -> None:
+    """R-7149-11: the pull links a spool SB reset before; Bambuddy never shared that
+    reset, so its counter is left alone."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    f.spools.bind_tag(spool, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    _reset(pg_pool, spool)
+    row = _matching(pg_pool, spool, 50, WEIGHTS) | {"tray_uuid": TRAY, "updated_at": _bb_now()}
+    report = pull(f, [_parse(row)], now=datetime.now(UTC))
+    assert report.linked_ids == [spool]
+    assert _resets(_plan(f, _snap([row]), WEIGHTS).writes) == []
+    _reset(pg_pool, spool)
+    assert len(_resets(_plan(f, _snap([row]), WEIGHTS).writes)) == 1
+
+
+def test_a_reset_before_a_relink_is_never_sent(pg_pool: PgPool) -> None:
+    """R-7149-11: after ``reset-links`` the new link is newer than the reset."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    row = _matching(pg_pool, spool, 50, WEIGHTS)
+    _link(pg_pool, spool, 50)
+    _reset(pg_pool, spool)
+    assert len(_resets(_plan(f, _snap([row]), WEIGHTS).writes)) == 1
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_sync_state SET instance = 'old'")
+    reset_links(f, "old", "new", None, expect_kept=False)
+    _link(pg_pool, spool, 50)
+    assert _resets(_plan(f, _snap([row]), WEIGHTS).writes) == []
 
 
 def _bb_change_then_unrelated_push(

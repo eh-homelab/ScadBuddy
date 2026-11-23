@@ -287,8 +287,9 @@ class SpoolFacts:
     prices: Mapping[UUID, Any]
     #: The unarchived supplier of each spool's invoice.
     bought: Mapping[UUID, UUID]
-    #: The id of each spool's newest ``consumed_reset`` SB made (not the pull's, source
-    #: ``bb``), read while ``weights`` push (#7149 R-7149-5).
+    #: The id of each linked spool's newest ``consumed_reset`` SB made (not the pull's,
+    #: source ``bb``) after its link, read while ``weights`` push (#7149 R-7149-5,
+    #: R-7149-11).
     resets: Mapping[UUID, UUID] = field(default_factory=dict)
 
     @classmethod
@@ -371,9 +372,14 @@ class SpoolFacts:
             newest_resets = {
                 row["spool_id"]: row["id"]
                 for row in conn.execute(
-                    "SELECT DISTINCT ON (spool_id) spool_id, id FROM filament_spool_events"
-                    " WHERE spool_id = ANY(%s) AND kind = 'consumed_reset'"
-                    " AND source IS DISTINCT FROM 'bb' ORDER BY spool_id, at DESC, seq DESC",
+                    # R-7149-11: a reset older than the link is history Bambuddy never
+                    # shared, so it is never sent.
+                    "SELECT DISTINCT ON (e.spool_id) e.spool_id, e.id"
+                    " FROM filament_spool_events e"
+                    " JOIN filament_bb_links l ON l.spool_id = e.spool_id"
+                    " WHERE e.spool_id = ANY(%s) AND e.kind = 'consumed_reset'"
+                    " AND e.source IS DISTINCT FROM 'bb' AND e.at > l.linked_at"
+                    " ORDER BY e.spool_id, e.at DESC, e.seq DESC",
                     (found,),
                 ).fetchall()
             }
@@ -1347,7 +1353,8 @@ class _Planner:
     def reset(self, sb_id: UUID, bb_id: int, pushed: Mapping[str, str]) -> None:
         """R-7149-5: Bambuddy's consumed-counter reset for the spool's newest SB reset,
         once: its hash (of the event's id) goes in ``pushed_fields`` as `RESET_FIELD`.
-        Under ``weights`` only; the pull's ``bb`` resets are never sent back."""
+        Under ``weights`` only; the pull's ``bb`` resets are never sent back, and nor is
+        a reset made before the link (R-7149-11, `SpoolFacts.resets`)."""
         if not pushes(self.sync.weights) or self.facts is None:
             return
         newest = self.facts.resets.get(sb_id)

@@ -145,7 +145,7 @@ from scadbuddy.filament.profile_fill import (
     fill_quietly,
 )
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
-from scadbuddy.filament.rfid_push import failure_label, link_origin, push_pending
+from scadbuddy.filament.rfid_push import failure_label, push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
@@ -1316,8 +1316,8 @@ async def bind_spool_tag(
                 kind=body.kind,
                 override=body.override,
                 actor=actor(caller),
-                # R-7149-10: a person's link, in Bambuddy's word for one of this kind.
-                origin=link_origin(body.kind),
+                # R-7149-10: the origin follows the tag's stored kind.
+                marks_origin=True,
             )
         )
     except _SPOOL_REFUSED as exc:

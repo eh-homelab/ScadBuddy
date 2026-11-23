@@ -27,7 +27,7 @@ from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
-from scadbuddy.filament.rfid_push import enqueue_tag
+from scadbuddy.filament.rfid_push import enqueue_tag, link_origin
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError, effective, overridden
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
@@ -878,7 +878,7 @@ class FilamentSpoolStore:
         kind: m.TagKind,
         override: bool = False,
         actor: str,
-        origin: str | None = None,
+        marks_origin: bool = False,
     ) -> m.TagBinding | None:
         """Put a tag on a spool; ``None`` for no such spool. The tag is found by its
         cleaned UID or tray UUID (`spools.models.clean_tag_uid`, `clean_tray_uuid`), and
@@ -891,8 +891,9 @@ class FilamentSpoolStore:
         ``bambu_mifare`` tag (`OverrideKindError`) and locks the spool's weight, with one
         ``edited`` event when it was unlocked. Every tag whose binding this changes is
         queued for Bambuddy (`filament/rfid_push.py`), whatever the sync setting says.
-        ``origin`` is the spool's ``data_origin`` once a new binding is made (#7149
-        R-7149-1: ``nfc_link`` for a person's bind), in one ``edited`` event.
+        With ``marks_origin`` (a person's bind) a new binding sets the spool's
+        ``data_origin`` from the tag's stored kind, not ``kind``, which names a new tag's
+        only (#7149 R-7149-10: `rfid_push.link_origin`), in one ``edited`` event.
 
         Locks, in this order: the tag, then the new and the old spool by id. Every writer of
         bindings takes the tag first, so two binds in opposite directions wait rather than
@@ -902,7 +903,7 @@ class FilamentSpoolStore:
             raise TagUnnamedError()
         try:
             with self._pool.connection() as conn, conn.transaction():
-                return self.bind_on(conn, spool_id, uid, tray, kind, override, actor, origin)
+                return self.bind_on(conn, spool_id, uid, tray, kind, override, actor, marks_origin)
         except _NoSpoolError:
             return None
 
@@ -915,7 +916,7 @@ class FilamentSpoolStore:
         kind: m.TagKind,
         override: bool | None,
         actor: str,
-        origin: str | None = None,
+        marks_origin: bool = False,
     ) -> m.TagBinding:
         """`bind_tag` on ``conn``'s transaction, its keys already cleaned; `_NoSpoolError`
         when the spool does not exist, and `OverrideKindError`, which the caller rolls back
@@ -990,8 +991,8 @@ class FilamentSpoolStore:
         )
         if override:
             FilamentSpoolStore._lock_weight(conn, spool_id, actor)
-        if origin is not None:
-            FilamentSpoolStore.set_origin(conn, spool_id, actor, data_origin=origin)
+        if marks_origin:
+            FilamentSpoolStore.set_origin(conn, spool_id, actor, data_origin=link_origin(tag_kind))
         enqueue_tag(conn, tag_id)
         return m.TagBinding.model_validate(row)
 
@@ -1143,9 +1144,9 @@ class FilamentSpoolStore:
     def add_event(
         self, spool_id: UUID, body: m.SpoolEventAdd, *, actor: str
     ) -> m.SpoolEvent | None:
-        """A person's weighing or drying; ``None`` for no such spool. A drying's
-        ``temp_c`` or ``hours`` left out (not sent) is the spool's drying default
-        (`_drying_defaults`, #6720)."""
+        """A person's weighing, drying or consumed reset (#7149 R-7149-4); ``None`` for
+        no such spool. A drying's ``temp_c`` or ``hours`` left out (not sent) is the
+        spool's drying default (`_drying_defaults`, #6720)."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
         with self._pool.connection() as conn, conn.transaction():
             if (

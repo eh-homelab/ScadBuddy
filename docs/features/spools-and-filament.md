@@ -81,8 +81,8 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   migration `20261123T0609Z_filament_spool_bb_fields.sql`):
   - `data_origin` says how the spool's data came in, in Bambuddy's words (`rfid_auto`,
     `rfid_linked`, `nfc_link`, `opentag3d`). It is read only. The pull takes Bambuddy's
-    value; a person's tag bind sets `rfid_linked` for a Bambu tag, else `nfc_link`; a
-    confirmed NTAG write sets `opentag3d`.
+    value; a person's tag bind sets `rfid_linked` when the tag's stored kind is a Bambu
+    tag, else `nfc_link`; a confirmed NTAG write sets `opentag3d`.
     The push sends it when SB has one, and the tag push sends it to `link-tag`.
   - `added_full` (a person edits it) and `tag_encoded_at` (Bambuddy's `encode_time`, set
     by a confirmed NTAG write) come from Bambuddy on the pull. Bambuddy takes no write of
@@ -95,8 +95,8 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
     with `POST /filament/spools/{id}/events` (`kind: consumed_reset`), or 1 to 500 spools
     with `POST /filament/spools/reset-consumed` (agent `filament_spool_add_event` and
     `filament_spools_reset_consumed`). Under `filament_sync.weights` the sync
-    resets Bambuddy's counter of a linked spool once per SB reset (op `reset_consumed`,
-    `POST /inventory/spools/{id}/reset-consumed-counter`), and the pull books a Bambuddy
+    resets Bambuddy's counter of a linked spool once per SB reset made after the link
+    (R-7149-11; op `reset_consumed`, `POST /inventory/spools/{id}/reset-consumed-counter`), and the pull books a Bambuddy
     reset (its `weight_used_baseline` moved) as a `consumed_reset` of source `bb`, which
     is never sent back. BB keeps no reset time, so that event is dated at the newest reading
     that still held the old baseline, or BB's `updated_at` when earlier (R-7149-9). No

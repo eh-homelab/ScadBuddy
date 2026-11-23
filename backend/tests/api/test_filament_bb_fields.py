@@ -50,6 +50,20 @@ def test_a_persons_bind_of_a_bambu_tag_marks_the_spool_rfid_linked(client: TestC
     assert client.get(one).json()["data_origin"] == "rfid_linked"
 
 
+def test_a_bind_of_a_known_bambu_tag_by_its_uid_marks_the_spool_rfid_linked(
+    client: TestClient,
+) -> None:
+    """R-7149-10: the origin follows the tag's stored kind, not the request's ``kind``,
+    which only names a new tag's (it defaults to ``other``)."""
+    first, second = _spool(client), _spool(client)
+    tag = {"tag_uid": "A1B2C3D5", "tray_uuid": "7F3E1C0A9B8D4E2F8A6B5C4D3E2F1A0C"}
+    bound = client.post(f"{SPOOLS}/{first['id']}/tags", json=tag | {"kind": "bambu_mifare"})
+    assert bound.status_code == 201, bound.text
+    moved = client.post(f"{SPOOLS}/{second['id']}/tags", json={"tag_uid": tag["tag_uid"]})
+    assert moved.status_code == 201, moved.text
+    assert client.get(f"{SPOOLS}/{second['id']}").json()["data_origin"] == "rfid_linked"
+
+
 def test_a_persons_tag_bind_marks_the_spool_nfc_link(client: TestClient) -> None:
     """R-7149-1: a hand link, in Bambuddy's word for it; a bind that changes nothing
     writes nothing."""
