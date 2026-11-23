@@ -44,8 +44,35 @@ const printCss = (layout: Layout) => `
   }
 }`
 
-/** How many spools the page reads at the same time. */
+/** How many spools or places the page reads at the same time. */
 const READ_AT_ONCE = 6
+
+/** The ids of a comma-separated parameter, trimmed, each once, in order. */
+function splitIds(raw: string): string[] {
+  return [...new Set(raw.split(',').map((id) => id.trim()).filter(Boolean))]
+}
+
+/**
+ * `read` of each id, at most `READ_AT_ONCE` in flight (up to 100 ids must not open 100
+ * requests together), in the order of `ids`; an id whose read failed stays as its id.
+ */
+async function readEach<T>(ids: string[], read: (id: string) => Promise<T>, live: () => boolean): Promise<(T | string)[]> {
+  const results: (T | string)[] = new Array(ids.length)
+  let next = 0
+  const worker = async () => {
+    while (live() && next < ids.length) {
+      const at = next++
+      const id = ids[at]!
+      try {
+        results[at] = await read(id)
+      } catch {
+        results[at] = id
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(READ_AT_ONCE, ids.length) }, worker))
+  return results
+}
 
 interface Loaded {
   key: string
@@ -66,6 +93,10 @@ interface LoadedPlaces {
   labels: PlaceLabel[]
   /** What could not be read, as the alert says it; no label is drawn then. */
   error: string | null
+  /** More than `MAX_LABELS` labels: none is drawn. */
+  tooMany: boolean
+  /** The `?locations=` ids that could not be read; the others are drawn. */
+  failed: string[]
   tooLong: string[]
   /** The printers with no report that lists their AMS units (`no_report`): their empty slots have no label yet. */
   noReport: string[]
@@ -93,78 +124,90 @@ async function settingsBase(): Promise<string | null> {
 export function LabelsPage() {
   const [params] = useSearchParams()
   const raw = params.get('ids') ?? ''
-  const ids = useMemo(() => [...new Set(raw.split(',').map((id) => id.trim()).filter(Boolean))], [raw])
+  const ids = useMemo(() => splitIds(raw), [raw])
   const tooMany = ids.length > MAX_LABELS
   const key = ids.join(',')
   const [layout, setLayout] = useState<Layout>(storedLayout)
   const [loaded, setLoaded] = useState<Loaded | null>(null)
-  // #6955 — `?printers=<id>,<id>|all` (every place of those printers) or `?locations=<id>` (one place).
+  // #6955 — `?printers=<id>,<id>|all` (every place of those printers) or `?locations=<id>,<id>` (those places).
+  // Both print at most `MAX_LABELS` labels, as spools do (#7081).
   const printersParam = params.get('printers')
-  const locationParam = params.get('locations')?.trim() || null
-  const placesKey = printersParam ? `printers:${printersParam}` : locationParam ? `locations:${locationParam}` : ''
+  const locationsParam = params.get('locations')?.trim() || null
+  const placesKey = printersParam ? `printers:${printersParam}` : locationsParam ? `locations:${locationsParam}` : ''
   const [places, setPlaces] = useState<LoadedPlaces | null>(null)
 
   useEffect(() => {
     if (!placesKey) return
     let live = true
-    const draw = async (base: string | null, rows: { id: string; code: string; name: string }[], noReport: string[] = []) => {
+    const empty = { labels: [], error: null, tooMany: false, failed: [], tooLong: [], noReport: [] }
+    const draw = async (base: string | null, rows: { id: string; code: string; name: string }[], more: { noReport?: string[]; failed?: string[] } = {}) => {
       const origin = labelBase(base)
+      if (rows.length > MAX_LABELS) {
+        if (live) setPlaces({ ...empty, key: placesKey, base: origin, tooMany: true })
+        return
+      }
       // A payload past 84 bytes would need a bigger QR code than the 19.8 mm box scans: no label for it.
       const fits = (row: { code: string }) => new TextEncoder().encode(locationPayload(origin, row.code)).length <= MAX_PAYLOAD_BYTES
       const tooLong = rows.filter((row) => !fits(row)).map((row) => row.code)
       const labels = await Promise.all(rows.filter(fits).map(async (row) => ({ ...row, svg: await qrSvg(locationPayload(origin, row.code)) })))
-      if (live) setPlaces({ key: placesKey, base: origin, labels, error: null, tooLong, noReport })
+      if (live) setPlaces({ ...empty, key: placesKey, base: origin, labels, tooLong, noReport: more.noReport ?? [], failed: more.failed ?? [] })
     }
     const fail = (error: string) => () => {
-      if (live) setPlaces({ key: placesKey, base: labelBase(null), labels: [], error, tooLong: [], noReport: [] })
+      if (live) setPlaces({ ...empty, key: placesKey, base: labelBase(null), error })
     }
     if (printersParam) {
-      const wanted = printersParam === 'all' ? null : [...new Set(printersParam.split(',').map((id) => id.trim()).filter(Boolean))]
+      const wanted = printersParam === 'all' ? null : splitIds(printersParam)
+      // Each printer has a label of its own, so more printers than the cap are refused before any place is made.
+      if (wanted && wanted.length > MAX_LABELS) {
+        setPlaces({ ...empty, key: placesKey, base: labelBase(null), tooMany: true })
+        return
+      }
       printerLabels(wanted)
         .then((answer) =>
           draw(
             answer.base_url,
             answer.labels.map((row) => ({ id: row.location_id, code: row.code, name: row.name })),
-            answer.no_report,
+            { noReport: answer.no_report },
           ),
         )
         .catch(fail('The printer labels could not be read'))
-    } else if (locationParam) {
+    } else if (locationsParam) {
+      const wanted = splitIds(locationsParam)
+      if (wanted.length > MAX_LABELS) {
+        setPlaces({ ...empty, key: placesKey, base: labelBase(null), tooMany: true })
+        return
+      }
       // A failed settings read is an error, never "unset": the page's own origin may be the wrong host for a label.
       const base = settingsBase().catch((cause: unknown) => {
         throw new SettingsReadError(cause)
       })
-      Promise.all([getLocation(locationParam), base])
-        .then(([place, origin]) => draw(origin, [{ id: place.id, code: place.code, name: place.name }]))
+      Promise.all([readEach(wanted, getLocation, () => live), base])
+        .then(([read, origin]) => {
+          const found = read.filter((r): r is Exclude<typeof r, string> => typeof r !== 'string')
+          return draw(
+            origin,
+            found.map((place) => ({ id: place.id, code: place.code, name: place.name })),
+            { failed: read.filter((r): r is string => typeof r === 'string') },
+          )
+        })
         .catch((cause: unknown) =>
-          fail(cause instanceof SettingsReadError ? 'The label address in Settings could not be read, so no label is drawn. Try again.' : `The label of ${locationParam} could not be read`)(),
+          fail(cause instanceof SettingsReadError ? 'The label address in Settings could not be read, so no label is drawn. Try again.' : 'The place labels could not be drawn')(),
         )
     }
     return () => {
       live = false
     }
-  }, [placesKey, printersParam, locationParam])
+  }, [placesKey, printersParam, locationsParam])
 
   useEffect(() => {
     const wanted = key.split(',').filter(Boolean)
     if (tooMany || wanted.length === 0 || placesKey) return
     let live = true
-    // At most `READ_AT_ONCE` reads in flight: up to 100 ids must not open 100 requests together.
-    const results: (Loaded['labels'][number] | string)[] = new Array(wanted.length)
-    let next = 0
-    const worker = async () => {
-      while (live && next < wanted.length) {
-        const at = next++
-        const id = wanted[at]!
-        try {
-          const spool = await getSpool(id)
-          results[at] = { spool, svg: await qrSvg(labelPayload(spool.id)) }
-        } catch {
-          results[at] = id
-        }
-      }
+    const read = async (id: string) => {
+      const spool = await getSpool(id)
+      return { spool, svg: await qrSvg(labelPayload(spool.id)) }
     }
-    void Promise.all(Array.from({ length: Math.min(READ_AT_ONCE, wanted.length) }, worker)).then(() => {
+    void readEach(wanted, read, () => live).then((results) => {
       if (!live) return
       setLoaded({
         key,
@@ -207,13 +250,15 @@ export function LabelsPage() {
             <p className="text-[13px] text-muted-foreground">
               {placeMode
                 ? readyPlaces
-                  ? placeLabels.length === 0 && readyPlaces.error === null && readyPlaces.tooLong.length === 0
-                    ? 'No printers.'
-                    : `${placeLabels.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`
+                  ? readyPlaces.tooMany
+                    ? ''
+                    : placeLabels.length === 0 && readyPlaces.error === null && readyPlaces.tooLong.length === 0 && readyPlaces.failed.length === 0
+                      ? 'No printers.'
+                      : `${placeLabels.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`
                   : 'Loading labels…'
                 : tooMany ? '' : ids.length === 0 ? 'No spools chosen.' : `${labels.length} of ${ids.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`}
             </p>
-            {readyPlaces && readyPlaces.error === null && <p className="text-[13px] text-muted-foreground">{`Labels open ${readyPlaces.base}`}</p>}
+            {readyPlaces && readyPlaces.error === null && !readyPlaces.tooMany && <p className="text-[13px] text-muted-foreground">{`Labels open ${readyPlaces.base}`}</p>}
           </div>
           <RadioGroup value={layout} onValueChange={choose} aria-label="Layout" className="flex w-auto items-center gap-4">
             <span className="flex items-center gap-1.5">
@@ -234,7 +279,7 @@ export function LabelsPage() {
           </Button>
         </header>
 
-        {tooMany && (
+        {(tooMany || readyPlaces?.tooMany) && (
           <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
             Print at most {MAX_LABELS} labels at a time
           </p>
@@ -242,6 +287,11 @@ export function LabelsPage() {
         {readyPlaces?.error && (
           <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
             {readyPlaces.error}
+          </p>
+        )}
+        {readyPlaces && readyPlaces.failed.length > 0 && (
+          <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
+            The {readyPlaces.failed.length === 1 ? 'label' : 'labels'} of {readyPlaces.failed.join(', ')} could not be read
           </p>
         )}
         {readyPlaces && readyPlaces.noReport.length > 0 && (
