@@ -3,7 +3,8 @@
 # root, /tmp writable, no capabilities) with the Deployment's args, then check over MCP
 # that each session's context takes the X-ScadBuddy-Browser header's options, that a
 # session without it, or with an invalid one, gets the server's --user-agent, that a
-# refused header is logged without its value, and that a wrong Host is 403.
+# refused header is logged without its value, that a wrong Host is 403, and that a
+# client that goes away without a DELETE loses its session.
 #
 # Usage: workers/playwright-mcp/smoke.sh <image>
 # Env: SMOKE_CONTAINER (default scadbuddy-playwright-mcp-smoke), SMOKE_PORT (default 18931).
@@ -118,5 +119,22 @@ status="$(curl --silent --output /dev/null --write-out '%{http_code}' -X DELETE 
 status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "mcp-session-id: $mobile" \
   -H 'content-type: application/json' --data '{}' "$base/mcp")"
 [ "$status" = 404 ] || fail "a closed session got $status, not 404"
+
+# A client that goes away without a DELETE is collected: once its GET stream is open, a
+# ping it does not answer closes its session, as the CLI's heartbeat does.
+gone="$(open_session)"
+curl --silent --output /dev/null --max-time 2 -H 'accept: text/event-stream' \
+  -H "mcp-session-id: $gone" "$base/mcp" || true
+closed=no
+for _ in $(seq 1 30); do
+  status="$(curl --silent --output /dev/null --write-out '%{http_code}' -H "mcp-session-id: $gone" \
+    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+    --data '{"jsonrpc":"2.0","id":9,"method":"ping"}' "$base/mcp")"
+  if [ "$status" = 404 ]; then closed=yes; break; fi
+  sleep 1
+done
+echo "a gone client's session closed: $closed"
+[ "$closed" = yes ] || fail "a client that went away kept its session"
+grep -qF 'did not answer a ping' <<<"$(docker logs "$name" 2>&1)" || fail "the closed session was not logged"
 
 echo "playwright-mcp smoke: ok"

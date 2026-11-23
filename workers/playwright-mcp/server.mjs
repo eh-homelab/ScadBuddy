@@ -28,6 +28,11 @@
 //   (tools/utils/mcp/http.ts) uses `StreamableHTTPServerTransport` from
 //   `playwright-core/lib/utilsBundle`, one per `mcp-session-id`, and answers 403 to a
 //   `Host` not in `--allowed-hosts` (default: localhost, 127.0.0.1 and [::1] at the port).
+// - The CLI's HTTP layer connects each session with `runHeartbeat` true: once the
+//   client's GET stream is open (and a tool was called), `startHeartbeat` pings every
+//   3 s and closes the server on no answer within PLAYWRIGHT_MCP_PING_TIMEOUT_MS (5000),
+//   which drops a client that went away without a DELETE. `createConnection` passes
+//   `runHeartbeat` false, so this file pings on its own, from the session's first GET.
 // - `--browser chromium` is `channel: 'chrome-for-testing'` (`resolveBrowserParam`),
 //   `--no-sandbox` is `chromiumSandbox: false`; the CLI closes an idle headless browser
 //   after one hour by default (`--idle-timeout`).
@@ -54,6 +59,14 @@ const { chromium } = require('playwright-core');
 const { StreamableHTTPServerTransport } = require('playwright-core/lib/utilsBundle');
 
 const LAUNCH_OPTIONS = { channel: 'chrome-for-testing', headless: true, chromiumSandbox: false };
+
+// The CLI's heartbeat (tools/utils/mcp/server.ts `startHeartbeat`): a ping every 3 s,
+// closed on no answer within PLAYWRIGHT_MCP_PING_TIMEOUT_MS (default 5000, 0 turns it off).
+const PING_EVERY = 3000;
+const PING_TIMEOUT = (() => {
+  const value = Number(process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS ?? 5000);
+  return Number.isFinite(value) ? value : 5000;
+})();
 
 const log = (message) => console.error(`[scadbuddy-playwright-mcp] ${message}`);
 
@@ -100,6 +113,9 @@ class Session {
     this.context = undefined;
     this.closed = false;
     this.idleTimer = undefined;
+    this.heartbeat = false;
+    this.server = undefined;
+    this.transport = undefined;
   }
 
   // The getter createConnection calls on the session's first tool call, and again after
@@ -119,17 +135,50 @@ class Session {
     return context;
   }
 
-  // Restarts the idle clock; when it runs out, the context closes and the next tool call
-  // gets a new one with the same options.
+  // Restarts the idle clock. When it runs out, a session whose client the heartbeat
+  // watches closes only its context (the next tool call gets a new one with the same
+  // options); a session with no heartbeat (its client never opened the GET stream, so
+  // a gone client cannot be told from a quiet one) closes whole.
   poke() {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
     if (!args.idleTimeout || this.closed) return;
     this.idleTimer = setTimeout(() => {
       this.idleTimer = undefined;
-      this.closeContext();
+      if (this.heartbeat) this.closeContext();
+      else void this.server?.close().catch(() => {});
     }, args.idleTimeout);
     this.idleTimer.unref();
+  }
+
+  // Once the client's GET stream is open, ping it as the CLI does: an answer that does
+  // not come closes the server, whose transport's onclose drops the session and its
+  // context. This collects a client that went away without a DELETE.
+  startHeartbeat() {
+    if (this.heartbeat || PING_TIMEOUT <= 0) return;
+    this.heartbeat = true;
+    const beat = () => {
+      if (this.closed) return;
+      let timer;
+      Promise.race([
+        this.server.ping(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('ping timeout')), PING_TIMEOUT);
+        }),
+      ]).then(
+        () => {
+          clearTimeout(timer);
+          setTimeout(beat, PING_EVERY).unref();
+        },
+        () => {
+          clearTimeout(timer);
+          if (!this.closed) log('a client did not answer a ping: closing its session');
+          void this.server.close().catch(() => {});
+        },
+      );
+    };
+    // The first ping waits a beat, so the GET stream it travels on is registered.
+    setTimeout(beat, PING_EVERY).unref();
   }
 
   closeContext() {
@@ -166,6 +215,7 @@ async function startSession(req, res) {
     sessionIdGenerator: () => randomUUID(),
     onsessioninitialized: (sessionId) => {
       sessions.set(sessionId, session);
+      session.poke();
     },
   });
   // server.connect chains its own onclose after this one.
@@ -174,6 +224,7 @@ async function startSession(req, res) {
     void session.close();
   };
   session.transport = transport;
+  session.server = server;
   await server.connect(transport);
   await transport.handleRequest(req, res);
   // Not an initialize request: the transport refused it and no session exists.
@@ -203,7 +254,9 @@ async function handle(req, res) {
     }
     session.poke();
     res.once('close', () => session.poke());
-    await session.transport.handleRequest(req, res);
+    const handled = session.transport.handleRequest(req, res);
+    if (req.method === 'GET') session.startHeartbeat();
+    await handled;
     return;
   }
   if (req.method === 'POST') {
@@ -234,11 +287,12 @@ httpServer.listen(args.port, args.host, () => {
   const bindHost = args.host;
   const host = !bindHost || bindHost === '0.0.0.0' || bindHost === '::' ? 'localhost'
     : net.isIPv6(bindHost) ? `[${bindHost}]` : bindHost;
+  const url = `http://${host}:${port}`;
   allowedHosts = args.allowedHosts ?? [
-    ...new Set([`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`, `${host}:${port}`.toLowerCase()]),
+    ...new Set([`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`, new URL(url).host]),
   ];
   allowAnyHost = allowedHosts.includes('*');
-  log(`listening on http://${host}:${port}/mcp`);
+  log(`listening on ${url}/mcp`);
 });
 
 let stopping = false;
