@@ -141,7 +141,7 @@ Follow exactly what commit `3576b1712` did for `profile-fetch` in each of these 
 
 - [ ] **Step 1: Failing tests**: `test_camera_cannot_read_codes` (a `camera` credential on `camera-relay/printers` → 403 `wrong_caller`); `test_relay_reads_codes`; `test_segments_409_when_not_leader`; `test_feed_change_emits_once` (same state twice → one `camera.feed`); `test_lease_answers_indexed_until`.
 - [ ] **Step 2: Run** `uv run pytest tests/api/test_crud_camera.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** both routers, the event, its realtime mapping and the areas entries (`"camera": ["printers"]`, `"camera-relay": ["printers"]`).
+- [ ] **Step 3: Implement** both routers, the event, its realtime mapping and the areas entries (`"camera": ["printers"]`, `"camera-relay": ["printers"]`; Task 5 adds `"changes"` to both, so a controller started against an older API waits in `wait_for_areas` instead of getting a 404).
 - [ ] **Step 4: Run** step 2 plus `uv run pytest tests/auth/test_routes.py -q`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(camera): CRUD routes for sources, segments, leases and feed state`.
 
@@ -157,7 +157,7 @@ Follow exactly what commit `3576b1712` did for `profile-fetch` in each of these 
 
 - [ ] **Step 1: Failing tests**: `test_camera_stream_filters_kinds` (emit `printer.report`, `printer.changed`, `job.done`: only `printer.changed` arrives); `test_camera_stream_replays_after_last_event_id` (filtered replay); `test_camera_stream_resync_on_bad_id`.
 - [ ] **Step 2: Run** `uv run pytest tests/api/test_crud_camera_changes.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** the extraction and filter; the agent route passes `keep=None` and behaves as before.
+- [ ] **Step 3: Implement** the extraction and filter; the agent route passes `keep=None` and behaves as before Add `"changes"` to both callers' areas in `crud_areas.py`.
 - [ ] **Step 4: Run** step 2 and `uv run pytest tests/api -k changes -q`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(camera): filtered change streams for the camera callers`.
 
@@ -173,7 +173,7 @@ Follow exactly what commit `3576b1712` did for `profile-fetch` in each of these 
   - `class ChangeFollower`: `__init__(client: CrudClient, path: str, on_change: Callable[[str], Awaitable[None]], on_resync: Callable[[], Awaitable[None]])`, `async run() -> None`. Parses SSE frames, reconnects with back-off 0.5 s doubling to 30 s with jitter, sends `Last-Event-ID`, treats 45 s of silence as dead, calls `on_resync` on `ready{resync|reconnect}` and `reconnected`, and `on_change(printer_id)` for each `printer.changed` or `camera.reconnect`.
   - `class MediaMtx`: `__init__(base_url: str = "http://127.0.0.1:9997")`; `async paths() -> dict[str, dict]`; `async put_path(name: str, conf: dict) -> None` (add, or replace when present); `async delete_path(name: str) -> None` (404 is fine). Uses `/v3/config/paths/*`.
   - `def init_span(path: Path) -> tuple[int, str]` — walks top-level MP4 boxes; returns the byte length of the leading `ftyp`+`moov` and the sha256 of those bytes; raises `ValueError` when the file does not start with `ftyp` then `moov`.
-  - `def segment_start(path: Path) -> datetime` — parses MediaMTX's `recordPath` name `%Y-%m-%d_%H-%M-%S-%f` as UTC.
+  - `def segment_start(path: Path) -> datetime` — parses MediaMTX's `recordPath` name `%Y-%m-%d_%H-%M-%S-%f` as UTC. MediaMTX names files in the container's local time, so the recorder image sets `TZ=UTC` (Task 10) and `RecorderSettings.check_environment` refuses a `TZ` other than `UTC` (test `test_recorder_refuses_non_utc_tz`).
 
 - [ ] **Step 1: Failing tests**: `test_recorder_refuses_database_url`; `test_follower_rereads_on_resync` (fake SSE server sends `ready {"resync": true}` then `change` for printer `p1`: `on_resync` once, `on_change("p1")` once); `test_follower_reconnects_with_last_event_id`; `test_put_path_replaces` (fake MediaMTX API via `httpx.MockTransport`); `test_init_span_of_fixture` on a 2-second fMP4 fixture made once with `ffmpeg -f lavfi -i testsrc=size=320x240:rate=10 -t 2 -c:v libx264 -g 10 -movflags +frag_keyframe+empty_moov` committed under `backend/tests/camera/fixtures/seg.mp4` (via LFS if over the repo's size rule; see `backend/CLAUDE.md` "LFS fixtures"); `test_init_span_rejects_non_mp4`; `test_segment_start_parses_name`.
 - [ ] **Step 2: Run** `uv run pytest tests/camera -k "settings or follow or mediamtx or mp4" -v`. Expected: FAIL.
@@ -237,7 +237,7 @@ Follow exactly what commit `3576b1712` did for `profile-fetch` in each of these 
 ### Task 10: Images, CI, metrics, dashboard and docs
 
 **Files:**
-- Modify: `Dockerfile` (stages `camera-relay` and `camera-recorder`: the profile-fetch stage pattern plus the pinned MediaMTX release binary checked by sha256 and `curl`; the recorder stage adds nothing else), `.github/workflows/build-image.yml` and `ci.yml` (build both, as `profile-fetch`), `.github/scripts/select-lanes.sh` (+ its test), `deploy/grafana/scadbuddy-printing.json` (a "Cameras" row: segments indexed per printer, upload lag, local backlog bytes, pull reconnects, leader per printer), `backend/CLAUDE.md` (layout: `camera/`), `docs/features/printer-cameras.md` (new feature page in the `docs/features/` format), `docs/architecture/processes.md`, `README.md` ("Deploying": the three env sets, the relay read secret, network policies), the spec §2 (resolution 1080p from the report, cited)
+- Modify: `Dockerfile` (stages `camera-relay` and `camera-recorder`: the profile-fetch stage pattern plus the pinned MediaMTX release binary checked by sha256, and `curl` in both stages for MediaMTX's hooks; the recorder stage also sets `ENV TZ=UTC`), `.github/workflows/build-image.yml` and `ci.yml` (build both, as `profile-fetch`), `.github/scripts/select-lanes.sh` (+ its test), `deploy/grafana/scadbuddy-printing.json` (a "Cameras" row: segments indexed per printer, upload lag, local backlog bytes, pull reconnects, leader per printer), `backend/CLAUDE.md` (layout: `camera/`), `docs/features/printer-cameras.md` (new feature page in the `docs/features/` format), `docs/architecture/processes.md`, `README.md` ("Deploying": the three env sets, the relay read secret, network policies), the spec §2 (phase 0's measurements, when they exist)
 - Test: `.github/scripts/select-lanes.test.sh`, `.github/scripts/lint-dashboard.sh`
 
 **Interfaces:**

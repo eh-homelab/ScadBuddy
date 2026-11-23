@@ -35,7 +35,9 @@ Why:
   (`/app/backend/tests/unit/services/test_virtual_printer.py:4409` in the Bambuddy image,
   read 2026-11-23).
 - The shop runs the H2C now and plans the H3C (inventory spec §3). Both are RTSPS models.
-- **Not measured yet:** the H2C stream's codec, resolution, frame rate, bitrate, keyframe
+- **Resolution: 1080p**, from the H2C's own LAN report (`ipcam.resolution`,
+  `.claude/skills/h2c-print-from-scadbuddy/evals/decode-mapping-from-printer-report/files/printer-report-boys1.json:952`).
+- **Not measured yet:** the H2C stream's codec, frame rate, bitrate, keyframe
   interval, whether it has audio, and how many RTSP clients the printer accepts at one time.
   The X1 family sends H.264; the H2C is expected to do the same. Phase 0 measures all of
   these with `ffprobe` and writes them here, with the date and the method.
@@ -124,8 +126,9 @@ printer ──1 RTSPS pull──▶ relay (scadbuddy-camera-relay, 1 replica)
     uploads them, indexes them (§6.3) and then deletes the local files.
   - The standby also records the stream from the relay (free inside the cluster; the
     printer does not see it) to its local disk, uploading nothing. It deletes each local
-    segment that ends before the index's last end, which each lease call answers, so it
-    keeps about one lease period of footage (60 seconds).
+    segment that ends before the index's last end, which each lease call answers. So it
+    keeps what the leader has not indexed yet: a few seconds while the leader is healthy
+    (its upload lag plus one renewal tick, 5 s), more while the leader is behind.
   - When the leader dies or is redeployed, its lease expires or is released. The standby
     takes the lease, reads the index's last segment end for the printer, and uploads from
     its buffer starting at the segment that contains that end (D14). So a recorder
@@ -141,7 +144,7 @@ printer ──1 RTSPS pull──▶ relay (scadbuddy-camera-relay, 1 replica)
 - **Live edge** (deployment `scadbuddy-camera-edge`). MediaMTX that reads each printer's
   stream from the relay and serves WebRTC and LL-HLS to viewers (§6.7). Many viewers, or a
   viewer on a bad link, never load the relay. Later restreaming (YouTube, OBS, G7)
-  attaches here. It holds only the relay credential.
+  attaches here. It holds only the relay read credential and `crud.camera`.
 - **API (CRUD service):** the segment index, the routes, the playlists, retention and the
   flows' records. It is the only process with SQL.
 - **Camera worker:** the recorders are also Temporal workers on a new `camera` queue. Its
@@ -427,8 +430,9 @@ keeps everything.
   API, not a config file on disk.
 - The relay's RTSP port needs a read credential (an in-cluster secret) and a network policy
   that admits only the recorders and the edge. MediaMTX's control and metrics ports listen
-  on localhost only in every part. The edge's WebRTC and HLS ports admit only the API's
-  proxy.
+  on localhost only in every part. The edge's HTTP port (WHEP signalling and LL-HLS)
+  admits only the API's proxy. Its WebRTC media port must be reachable from browsers;
+  how (UDP, or TCP through the cluster's ingress) is phase 3's measurement (§6.7).
 
 ### 6.9 Operation
 
