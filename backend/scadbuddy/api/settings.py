@@ -262,7 +262,7 @@ class SettingsView(BaseModel):
     print_auto_import_skip_lan_printers: list[str] = Field(default_factory=list)
     #: #6868: whether an empty spool adds its type to the shopping list.
     filament_shopping_auto_add_empty: bool = True
-    #: #7156: whether an RFID tag ScadBuddy does not know becomes a spool.
+    #: #7156: off holds Bambuddy's auto-add of unknown RFID spools off.
     filament_auto_add_unknown_rfid: bool = True
     #: #6905: days a Bambuddy sync pass's history row is kept; ``None``: 30.
     filament_sync_pass_ttl_days: int | None = None
@@ -663,6 +663,11 @@ async def put_settings(
     # Decision 153: a running workflow waits the interval its last pass read, for the
     # instance it was started for.
     timer_keys = {"spool_overlay_refresh_seconds", "bambuddy_url"} & touched
+    auto_add_touched = AUTO_ADD_SETTING in touched
+    if auto_add_touched:
+        auto_add_before = (await asyncio.to_thread(store.read, {AUTO_ADD_SETTING}))[
+            AUTO_ADD_SETTING
+        ]
     timer_before = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
     try:
         await asyncio.to_thread(store.save, patch)
@@ -696,9 +701,10 @@ async def put_settings(
         # next pass; switched off, it forgets the moment. It reads the committed switch
         # itself, under the lock a pass takes (#6011).
         await state.components.get(AUTO_IMPORTS).floor()
-    if AUTO_ADD_SETTING in touched:
-        # #7156 R-7156-4: Bambuddy's auto-add follows the setting at once, as the mode's
-        # PUT does; a failure never fails the save, and the spool refresh retries.
+    if auto_add_touched and snapshot.stored.filament_auto_add_unknown_rfid != auto_add_before:
+        # #7156 R-7156-4: Bambuddy's auto-add follows a changed setting at once, as the
+        # mode's PUT does; a save of the same value calls nothing and waits on no lock. A
+        # failure never fails the save, and the spool refresh retries.
         try:
             await reconcile_mode_now(filament.rfid, store.load, wait=RFID_MODE_LOCK_WAIT_SECONDS)
         except Exception as error:

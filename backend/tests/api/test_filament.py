@@ -1225,6 +1225,29 @@ def test_a_save_that_leaves_the_auto_add_setting_calls_no_bambuddy(client: TestC
 
 
 @respx.mock
+def test_a_save_of_the_auto_add_setting_unchanged_calls_no_bambuddy(client: TestClient) -> None:
+    """#7156 review: only a change reconciles, so a save of the same value never waits on the
+    mode's lock or calls Bambuddy."""
+    name = "filament_auto_add_unknown_rfid"
+    configure(client)
+    reads = respx.get(SETTINGS_URL).mock(
+        return_value=httpx.Response(200, json={"auto_add_unknown_rfid": False})
+    )
+    respx.patch(SETTINGS_URL).mock(return_value=httpx.Response(200, json={}))
+    assert client.put("/api/v1/settings", json={name: False}).status_code == 200
+    assert reads.call_count >= 1  # the change itself reconciled
+    calls = len(respx.calls)
+
+    assert client.put("/api/v1/settings", json={name: False}).status_code == 200
+    assert (
+        client.put("/api/v1/settings", json={name: False, "filament_low_stock_pct": 25}).status_code
+        == 200
+    )
+
+    assert len(respx.calls) == calls
+
+
+@respx.mock
 def test_a_blocked_write_is_still_a_200(client: TestClient) -> None:
     configure(client)
     _auto_add(True)

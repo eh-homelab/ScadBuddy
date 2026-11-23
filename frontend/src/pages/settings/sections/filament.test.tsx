@@ -698,7 +698,7 @@ describe('Filament (#6262)', () => {
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const filament = region('Filament')
-    const toggle = within(filament).getByRole('switch', { name: /Make a spool from a tag no spool holds/ })
+    const toggle = within(filament).getByRole('switch', { name: /Let Bambuddy add spools for unknown tags/ })
     expect(toggle).toBeChecked()
     expect(within(filament).getByText('Add spools for unknown RFID tags')).toBeInTheDocument()
     // The status line changes only once the save's own read of the RFID status has answered.
@@ -712,7 +712,7 @@ describe('Filament (#6262)', () => {
       const before = statusReads
       await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
       await waitFor(() => expect(mockSettings().filament_auto_add_unknown_rfid).toBe(false))
-      expect(within(filament).getByRole('switch', { name: /Make a spool from a tag no spool holds/ })).not.toBeChecked()
+      expect(within(filament).getByRole('switch', { name: /Let Bambuddy add spools for unknown tags/ })).not.toBeChecked()
       await waitFor(() => expect(statusReads).toBeGreaterThan(before))
     } finally {
       server.events.removeListener('response:mocked', onAnswer)

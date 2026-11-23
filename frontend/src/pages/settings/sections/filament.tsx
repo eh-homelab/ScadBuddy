@@ -786,9 +786,8 @@ function AutoShoppingRow({ form }: { form: BackendSettings }) {
 const AUTO_ADD_LABEL = 'Add spools for unknown RFID tags'
 
 /**
- * #7156 — whether an RFID tag ScadBuddy does not know becomes a spool with no person. A stored
- * choice, on by default, saved with "Save Filament". Off, ScadBuddy holds Bambuddy's own
- * auto-add off as well, beside the RFID override mode below.
+ * #7156 — a stored choice, on by default, saved with "Save Filament". On leaves Bambuddy's own
+ * auto-add of unknown RFID spools as it is; off holds it off, beside the RFID override mode below.
  */
 function AutoAddRfidRow({ form }: { form: BackendSettings }) {
   return (
@@ -799,7 +798,7 @@ function AutoAddRfidRow({ form }: { form: BackendSettings }) {
     >
       <SwitchField
         id="setting-filament_auto_add_unknown_rfid"
-        label="Make a spool from a tag no spool holds"
+        label="Let Bambuddy add spools for unknown tags"
         userOnly={false}
         checked={form.value('filament_auto_add_unknown_rfid') === 'true'}
         onCheckedChange={(checked) => form.setField('filament_auto_add_unknown_rfid', checked ? 'true' : 'false')}

@@ -24,16 +24,20 @@ overrides, never constants") and §11 ("Settings: … `auto_add_unknown_rfid`, �
 ## Rulings
 
 - **R-7156-1. SB gets its own setting `filament_auto_add_unknown_rfid`** (bool, on by default).
-  It says whether an RFID tag that SB does not know becomes a spool without a person. It
-  governs SB, not Bambuddy's own toggle: SB makes the decision and enforces it on both paths
-  that make such a spool (Bambuddy's auto-add with SB's pull, and #7143's capture). On is
-  today's behaviour and #7143's Goal 2, and the default Bambuddy ships.
+  It says whether SB lets a spool be made for an RFID tag it does not know, with no person. It
+  governs SB, not Bambuddy's own toggle: SB enforces it on both paths that can make such a
+  spool (Bambuddy's auto-add with SB's pull today, and #7143's capture once it is built). On
+  holds nothing: SB leaves Bambuddy's auto-add as it is, so Bambuddy may add the spool and the
+  pull brings it in, unless the RFID override mode holds it off. SB's own capture makes no
+  spool from a tag on main today (`filament/capture.py` `reconcile` ignores an unknown tag).
+  On is the default, as Bambuddy ships its own.
 - **R-7156-2. Off means no system makes a spool from an unknown tag.** SB holds Bambuddy's
   `auto_add_unknown_rfid` false through the override mode's state-based reconcile (one saved
   value, read first, written only on a difference, put back when nothing holds it). #7143's
   capture must read the same setting and, when it is off, treat an RFID tray as untagged (a
   "Needs you" row the owner links). This PR does not touch #7143's code or branch; #7143's
-  builder reads the rule here and on #7156. On, SB writes nothing to Bambuddy for this setting.
+  builder reads the rule here and on #7156. On, SB writes nothing to Bambuddy for this setting
+  and leaves Bambuddy's value as it is (R-7156-1).
 - **R-7156-3. The setting and the override mode are independent holds on one value.** Bambuddy's
   value is held false while `override_mode OR NOT filament_auto_add_unknown_rfid`. The saved
   value is kept until neither holds, then put back. Neither switch changes the other. The status
@@ -45,8 +49,8 @@ overrides, never constants") and §11 ("Settings: … `auto_add_unknown_rfid`, �
   `PUT /settings` that changes it runs the reconcile once (lock tried for 5 s, as the mode's
   PUT); a failure never fails the save, and the refresh Schedule retries.
 - **R-7156-5. Drying defaults are two live settings**, `filament_drying_temp_c` (°C, 1 to 150)
-  and `filament_drying_hours` (0.1 to 999). Both are empty by default: SB suggests no drying
-  for a spool that nothing in the catalog sets, because one global value is wrong for some
+  and `filament_drying_hours` (0.1 to 999.9, R-7156-7). Both are empty by default: SB suggests
+  no drying for a spool that nothing in the catalog sets, because one global value is wrong for some
   material (a TPU or PA dried at a PLA temperature), and a wrong suggestion can deform spools.
   They are the last level of the chain: spool, type, subtype, material, then the setting
   (`DryingDefaults.*_from` `setting`). Not a per-material map as Bambuddy's: SB's
@@ -57,6 +61,10 @@ overrides, never constants") and §11 ("Settings: … `auto_add_unknown_rfid`, �
   (`POST /filament/spools/{id}/events`), and the agent's `filament_spool_get` and its drying
   tool (they read the same answer). The profile fill (`filament/profile_fill.py`) writes types,
   not suggestions, and is unchanged.
+- **R-7156-7. One bound for the drying hours everywhere: 0.1 to 999.9.** The backend field is
+  `ge=Decimal("0.1"), le=Decimal("999.9")` (`core/settings.py`, `library/settings_store.py`), the
+  form's `values.ts` `DRYING` and the msw mock refuse the same values, and the mock names the side
+  a value is out on. Decided in the review of #7206.
 
 ## Tasks
 

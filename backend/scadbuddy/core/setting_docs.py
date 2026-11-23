@@ -446,10 +446,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "filament_auto_add_unknown_rfid": SettingDoc(
             "Add spools for unknown RFID tags",
-            "On, an AMS tray with an RFID tag that no spool holds gets a spool made from the"
-            " tag. Off, no spool is made: Bambuddy's own auto-add is held off too (the value it"
-            " had comes back when this is on again and the RFID override mode is off), and you"
-            " link the spool by hand.",
+            "On, ScadBuddy leaves Bambuddy's own auto-add of unknown RFID spools as it is:"
+            " Bambuddy may add a spool for an AMS tag it does not know, and the pull brings it"
+            " in, unless the RFID override mode holds Bambuddy's auto-add off. Off, ScadBuddy"
+            " holds Bambuddy's auto-add off, so no spool is made for an unknown tag and you add"
+            " or link it by hand. The value Bambuddy had comes back when this is on again and"
+            " the override mode is off.",
         ),
         "filament_label_base_url": SettingDoc(
             "Label address",

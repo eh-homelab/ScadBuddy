@@ -801,7 +801,9 @@ class Settings(BaseSettings):
     # drying a spool is offered when nothing in the catalog (spool, type, subtype,
     # material) sets one (`filament/spools.py` `_drying_defaults`). Unset offers none.
     filament_drying_temp_c: int | None = Field(default=None, ge=1, le=150)
-    filament_drying_hours: Decimal | None = Field(default=None, ge=Decimal("0.1"), lt=1000)
+    filament_drying_hours: Decimal | None = Field(
+        default=None, ge=Decimal("0.1"), le=Decimal("999.9")
+    )
     # SCADBUDDY_FILAMENT_LABEL_BASE_URL (#6955): the stable https origin a printed location
     # label's QR opens. Unset, `public_url` is used (`filament/labels.py` `label_base_url`).
     filament_label_base_url: str | None = Field(default=None, max_length=64)

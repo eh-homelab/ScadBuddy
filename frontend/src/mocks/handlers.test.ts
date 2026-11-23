@@ -1004,7 +1004,7 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
       return ((await answer.json()) as { errors: { msg: string }[] }).errors[0]?.msg
     }
     expect(await refusal('0')).toBe('Input should be greater than or equal to 0.1')
-    expect(await refusal('1000')).toBe('Input should be less than 1000')
+    expect(await refusal('1000')).toBe('Input should be less than or equal to 999.9')
     expect((await api.getSettings()).filament_drying_hours).toBeNull()
   })
 

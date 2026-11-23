@@ -88,7 +88,7 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   // #6625 — and the nozzles a 3DFP preset fetch exports.
   // #6868 — and whether an empty spool adds its type to the shopping list (stored only).
   // #6905 — and how long the sync's pass history is kept (stored only), beside that history.
-  // #7156 — and whether an unknown RFID tag becomes a spool (stored only).
+  // #7156 — and whether ScadBuddy holds Bambuddy's auto-add of unknown RFID spools off (stored only).
   filament: [
     'filament_sync',
     'profile_fetch_nozzles',

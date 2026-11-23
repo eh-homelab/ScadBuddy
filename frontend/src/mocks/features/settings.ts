@@ -296,8 +296,8 @@ function putSettings(body: Record<string, unknown>) {
     if (name === 'filament_drying_temp_c' && typeof value === 'number' && (value < 1 || value > 150)) {
       return refused(name, value < 1 ? 'Input should be greater than or equal to 1' : 'Input should be less than or equal to 150')
     }
-    if (name === 'filament_drying_hours' && typeof value === 'string' && !(Number(value) >= 0.1 && Number(value) < 1000)) {
-      return refused(name, Number(value) >= 1000 ? 'Input should be less than 1000' : 'Input should be greater than or equal to 0.1')
+    if (name === 'filament_drying_hours' && typeof value === 'string' && !(Number(value) >= 0.1 && Number(value) <= 999.9)) {
+      return refused(name, Number(value) > 999.9 ? 'Input should be less than or equal to 999.9' : 'Input should be greater than or equal to 0.1')
     }
     if (name === 'filament_default_cost_per_kg' && typeof value === 'string' && !/^\d+(\.\d+)?$/.test(value.trim())) {
       return refused(name, 'Input should be greater than or equal to 0')
