@@ -13,7 +13,7 @@ import base64
 import binascii
 import contextvars
 from collections.abc import Collection, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -367,6 +367,8 @@ ATTACHMENT_HOLDER = "attachment"
 PROJECT_LOCK_TIMEOUT_MS = 120_000
 #: As the row pool's (``orders/component.py`` ``CONNECT_TIMEOUT``).
 PROJECT_LOCK_CONNECT_TIMEOUT = 5
+#: The advisory lock key of :meth:`OrderStore.restore_lock`.
+RESTORE_LOCK_KEY = "storefront_held_restore"
 
 
 def item_subject(item_id: str) -> str:
@@ -1732,6 +1734,20 @@ class OrderStore:
         if row is None:
             raise LookupError(f"no library file item {item_id}")
         return _item_of(row)
+
+    def move_library_file(
+        self, conn: Conn, item_id: str, from_id: int, to_id: int, filename: str, library: str
+    ) -> OrderItem | None:
+        """A storefront item pointed at ``to_id`` of ``library``, named ``filename`` there
+        (#6710 §10.2), its held copy put back there; only while it still names
+        ``from_id``, else None."""
+        row = conn.execute(
+            "UPDATE order_items SET library_file_id = %s, library_filename = %s,"
+            " library_source = %s, updated_at = now() WHERE id = %s"
+            f" AND kind = 'library_file' AND library_file_id = %s RETURNING {_ITEM}",
+            (to_id, filename, library, item_id, from_id),
+        ).fetchone()
+        return None if row is None else _item_of(row)
 
     def set_design(
         self, conn: Conn, item_id: str, revision: Revision, *, output_id: str | None
@@ -3229,15 +3245,23 @@ class OrderStore:
 
     # -- Bambuddy projects (§8.1, #4253) ------------------------------------------------
 
-    @contextmanager
-    def project_lock(self, order_id: str) -> Iterator[None]:
+    def project_lock(self, order_id: str) -> AbstractContextManager[None]:
         """The order's project ensures, one at a time across replicas: a session advisory
         lock held while Bambuddy is asked, so an accept's and a print's ensure never make
         two projects for one subject. Waited for and held on a connection of its own,
         never the row pool's: ensures queued on the lock would otherwise take every
         pooled connection, and the holder's reads and writes, and every other orders
         request, would find none. Closing that connection ends the lock with it."""
-        key = "order_projects:" + order_id
+        return self._session_lock("order_projects:" + order_id)
+
+    def restore_lock(self) -> AbstractContextManager[None]:
+        """Storefront items' held-copy restores (#6710 §10.2), one at a time across
+        replicas, as :meth:`project_lock` holds its lock: two prints racing to restore
+        never make two "Storefront" folders, or upload the same bytes twice."""
+        return self._session_lock(RESTORE_LOCK_KEY)
+
+    @contextmanager
+    def _session_lock(self, key: str) -> Iterator[None]:
         conninfo = self._pool.conninfo
         with psycopg.connect(
             conninfo() if callable(conninfo) else conninfo,

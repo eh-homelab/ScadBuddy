@@ -1146,6 +1146,11 @@ The approved input also holds `draft`, the draft-diff's `draft_digest` (the draf
 its description and its latest version, `GET /api/v1/hosted-plugins/{name}/draft-diff`), and
 the publish sends it as `?expect_draft=`. A draft written after the approval is refused 409
 `draft-changed`, and nothing is published (#6931 review M3); the model then asks again.
+In a session on Temporal the call's run reads the draft's digest again, so a draft written
+after the approval hashes otherwise. The gate refuses that call `NotApproved` with the
+same advice (`movedSinceApproval`), and runs nothing (#7199). A flow's call that sends no
+`draft` binds the draft as the run page read it (`flowBinding`, backend
+`flows/print_binding.py`); the run sends that digest as `expect_draft` (#7199).
 Once approved, the call publishes, then offers the version in the
 agent's own process (`offerHosted` over `PackageInstaller`, `ToolServices.hostedPackages`),
 never through the UI-guarded package routes. A person still approves the version in

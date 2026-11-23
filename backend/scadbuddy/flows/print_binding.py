@@ -1,4 +1,5 @@
-"""A flow's `print_output` call names the registry printer that prints (#4445).
+"""A flow's `print_output` call names the registry printer that prints (#4445), and its
+`hosted_plugin_publish` call names the draft it publishes (#7199).
 
 The script may name a registry printer (`printer`) and leave out the Bambuddy printer
 it links (`printer_id`). The agent's `prepareApproval` (agent/src/tools/print.ts) adds
@@ -21,8 +22,19 @@ the row answers 404), so it never binds or runs it. A call that sends its own
 `UUID_FORM`); any other form is bound as sent, and the agent refuses it, since its
 arguments do not parse. Both sides hash the string as the script sent it, case and all.
 
+A flow's `hosted_plugin_publish` call (#7199) is bound the same way. The script names the
+hosted plugin (`name`) and leaves out the draft's digest (`draft`). The agent's
+`prepareApproval` (agent/src/tools/hostedPlugins.ts) adds the draft-diff's `draft_digest`,
+and its `flowBinding` adds it to a flow's call. This module adds the digest the draft has
+now (`DraftLookup`), so a person's approval binds that draft. The agent's gate reads the
+digest again when the call runs, and the publish sends it as `expect_draft`. A draft edited
+between the approval and the run gives another digest, so the agent refuses the call. A
+plugin that does not exist binds `draft: null` here only; the agent refuses that call when
+it runs. A call that sends its own `draft` is bound as sent. A `name` the agent's schema
+does not take (`rules.NAME_RE`, no `--`) is bound as sent too, and the agent refuses it.
+
 The run page gets the bound hash with the summary (`bound_hash`), and the person's
-decision sends it back: the approval binds only the pair the person was shown.
+decision sends it back: the approval binds only the call the person was shown.
 """
 
 from __future__ import annotations
@@ -35,12 +47,14 @@ from typing import Any
 
 import httpx
 
+from scadbuddy.hosted_plugins import rules
 from scadbuddy.printers.models import PrinterRow
 
 logger = logging.getLogger(__name__)
 
-#: The agent tool this binds.
+#: The agent tools this binds.
 PRINT_OUTPUT = "print_output"
+HOSTED_PLUGIN_PUBLISH = "hosted_plugin_publish"
 
 #: The uuid forms the agent's `z.string().uuid()` accepts (zod 4's RFC 9562 pattern,
 #: agent/node_modules/zod/v4/core/regexes.js `uuid`): hyphenated, either case, versions 1
@@ -52,6 +66,10 @@ UUID_FORM = re.compile(
 
 #: Reads a registry row by its id; None when the registry does not hold it.
 PrinterLookup = Callable[[str], Awaitable[PrinterRow | None]]
+
+#: Reads the draft digest of a hosted plugin by its name (the draft-diff's `draft_digest`,
+#: api/hosted_plugins.py `_draft_digest`); None when no hosted plugin has the name.
+DraftLookup = Callable[[str], Awaitable[str | None]]
 
 #: Whether a run on a registry row goes over the LAN, never through Bambuddy (the row's
 #: id in `print_run.lan_printers`, as the agent's `linkedNative` reads the choices'
@@ -76,20 +94,40 @@ def named_printer(tool: str | None, args: dict[str, Any]) -> str | None:
     return printer if UUID_FORM.fullmatch(printer) else None
 
 
+def named_draft(tool: str | None, args: dict[str, Any]) -> str | None:
+    """The hosted plugin a `hosted_plugin_publish` call names and whose draft it leaves to
+    the approval (it sends no `draft`), else None."""
+    name = args.get("name")
+    if tool != HOSTED_PLUGIN_PUBLISH or not isinstance(name, str) or "draft" in args:
+        return None
+    return name if rules.NAME_RE.fullmatch(name) and "--" not in name else None
+
+
+def binds(tool: str | None, args: dict[str, Any]) -> bool:
+    """Whether a call's approval binds more than its raw arguments (`bind_call`)."""
+    return named_printer(tool, args) is not None or named_draft(tool, args) is not None
+
+
 async def bind_call(
     tool: str | None,
     args: dict[str, Any],
     lookup: PrinterLookup,
     native: NativeCheck | None = None,
+    drafts: DraftLookup | None = None,
 ) -> BoundCall:
     """The call as its approval binds it: a `print_output` call that names a linked
-    registry printer and no `printer_id` gets the `printer_id` the row links now.
+    registry printer and no `printer_id` gets the `printer_id` the row links now, and a
+    `hosted_plugin_publish` call that sends no `draft` gets the draft's digest now
+    (`drafts`; without it, the call is bound with no line, so it cannot be approved).
 
     The line says "over the LAN" for a run that does not go through Bambuddy, as the
     agent's `prepareApproval` words it: a row that links no Bambuddy printer, or a linked
     one `native` says prints natively. "Bambuddy printer N" only when `native` says the
     run goes through Bambuddy; without `native`, or when it fails, the line names the
     printer alone, never a path it could not check."""
+    plugin = named_draft(tool, args)
+    if plugin is not None:
+        return await _bind_draft(plugin, args, drafts)
     printer = named_printer(tool, args)
     if printer is None:
         return BoundCall(args)
@@ -124,6 +162,19 @@ async def bind_call(
     return BoundCall({**args, "printer_id": linked}, summary)
 
 
+async def _bind_draft(plugin: str, args: dict[str, Any], drafts: DraftLookup | None) -> BoundCall:
+    """A publish of `plugin`'s draft, bound to its digest now."""
+    if drafts is None:
+        return BoundCall(args)
+    digest = await drafts(plugin)
+    if digest is None:
+        summary = f"Publishes hosted plugin {plugin}, which does not exist"
+    else:
+        short = digest.removeprefix("sha256:")[:12]
+        summary = f"Publishes the draft of hosted plugin {plugin} as it is now (draft {short})"
+    return BoundCall({**args, "draft": digest}, summary)
+
+
 async def _lan_of(row: PrinterRow, native: NativeCheck | None) -> bool | None:
     """Whether a run on a linked row goes over the LAN; None when it cannot be read."""
     if native is None:
@@ -155,3 +206,20 @@ def api_lookup(client: httpx.AsyncClient) -> PrinterLookup:
         return PrinterRow.model_validate(answer.json())
 
     return lookup
+
+
+def api_drafts(client: httpx.AsyncClient) -> DraftLookup:
+    """A draft lookup through the API's own `GET /api/v1/hosted-plugins/{name}/draft-diff`:
+    the projects worker reads it over HTTP, never from the database (#5295)."""
+
+    async def drafts(plugin: str) -> str | None:
+        answer = await client.get(f"/api/v1/hosted-plugins/{plugin}/draft-diff")
+        if answer.status_code == httpx.codes.NOT_FOUND:
+            return None
+        answer.raise_for_status()
+        digest = answer.json().get("draft_digest")
+        if not isinstance(digest, str):
+            raise ValueError("the draft-diff answered no draft_digest")
+        return digest
+
+    return drafts

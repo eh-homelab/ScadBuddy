@@ -64,13 +64,14 @@ import contextlib
 import hashlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Coroutine, Mapping
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import status
 
 from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.bambuddy.runs import PrintRun
@@ -113,6 +114,9 @@ from scadbuddy.workflows.commands import (
     DESCRIBE_SECONDS,
 )
 from scadbuddy.workflows.printing import CLIENT_ACCEPTING
+
+if TYPE_CHECKING:
+    from scadbuddy.store.content import ContentStore
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +165,20 @@ FOLLOW_MAX_WAIT_S = 30.0
 
 #: The prefix of an item print's ``request_id``, which keys its print run.
 REQUEST_ID_PREFIX = "order-item-print-"
+
+
+class ServedFiles(LibraryFiles, Protocol):
+    """What a library file item's print check reads of the library that serves
+    (``orders/bambuddy.py`` ``ServedLibrary``): besides ``LibraryFiles``, a file's row and
+    its bytes, so a storefront item's pinned sha256 is checked (#6710 §10.2)."""
+
+    async def file(self, file_id: int) -> LibraryFile | None:
+        """The file's row, or None when the library that serves does not have it."""
+        ...
+
+    def download(self, file_id: int) -> AsyncIterator[bytes]:
+        """The file's bytes."""
+        ...
 
 
 def print_request_id(item_id: str, idempotency_key: str) -> str:
@@ -234,9 +252,10 @@ async def print_check(
     order_id: str,
     item_id: str,
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None,
-    library: LibraryFiles | None = None,
+    library: ServedFiles | None = None,
     part_settings: dict[str, dict[str, Any]] | None = None,
     setup: Mapping[str, Any] | None = None,
+    content: ContentStore | None = None,
 ) -> dict[str, Any]:
     """§5.4's refusals, from the rows and the quote's file, writing nothing: 404 for an
     unknown order or item; 409 ``order_not_submitted`` for a storefront cart (#5282),
@@ -252,7 +271,11 @@ async def print_check(
     ``schema_of`` is the reference commit's schema, as the quote's ``output_matches``
     reads it. A library file item (#5544) is checked against its file in ``library``
     instead of an output: ``library_file_gone`` once it is not there; what the run needs
-    is then ``library_file_id`` in place of ``output_id``. ``part_settings`` are the
+    is then ``library_file_id`` in place of ``output_id``. A storefront item (#6710
+    §10.2, one with a pinned ``sha256``) stands when the file there has those bytes; else,
+    while its held copy is in ``content``, what the run needs carries ``restore``: the run
+    puts the copy back into the library first (``orders/held_print.py``). Only a missing
+    held copy is ``library_file_gone``. ``part_settings`` are the
     request's settings per slot (#5571, ``part_settings.dumped``): sent and not the
     quote's, they are ``requote_needed``; what the run needs then carries the quote's
     ``part_settings``, which a request that sends none prints with. ``setup`` is the
@@ -289,7 +312,7 @@ async def print_check(
     _same_part_settings(item, quote, part_settings)
     _same_setup(item, quote, setup)
     if reference is None:
-        return await _library_stands(library, blobs, item, quote, copies)
+        return await _library_stands(library, blobs, item, quote, copies, content)
     return await _stands(outputs, blobs, item, reference, quote, copies, schema_of)
 
 
@@ -573,22 +596,40 @@ async def _stands(
 
 
 async def _library_stands(
-    library: LibraryFiles | None,
+    library: ServedFiles | None,
     blobs: BlobStore,
     item: OrderItem,
     quote: Quote,
     copies: int,
+    content: ContentStore | None,
 ) -> dict[str, Any]:
     """A library file item's (#5544): its file still in the library that serves
-    (``library_file_gone``), and a slice quote's file as :func:`_stands` checks it."""
+    (``library_file_gone``), and a slice quote's file as :func:`_stands` checks it. A
+    storefront item's (#6710 §10.2): the file there with its pinned sha256, else its held
+    copy there (``restore``), else ``library_file_gone``."""
     file = item.library_file
     assert file is not None
     if library is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "this check cannot read the library")
-    if not await library.exists(file.id):
-        raise library_file_gone(item.id, file)
+    restore = False
+    if file.sha256 is None:
+        if not await library.exists(file.id):
+            raise library_file_gone(item.id, file)
+    else:
+        held = (
+            None if content is None or file.copy_key is None else await content.stat(file.copy_key)
+        )
+        size = None if held is None else held.ref.size
+        if not await _pinned_there(library, file.id, file.sha256, size):
+            if content is None:
+                raise ApiError(
+                    status.HTTP_503_SERVICE_UNAVAILABLE, "this check cannot read the held copy"
+                )
+            if held is None:
+                raise library_file_gone(item.id, file)
+            restore = True
     await _quoted_file_stands(blobs, item, quote)
-    return {
+    checked: dict[str, Any] = {
         "library_file_id": file.id,
         "copies": copies,
         "quote_id": quote.id,
@@ -597,6 +638,32 @@ async def _library_stands(
         "part_settings": quote.part_settings,
         "setup": quoted_setup(quote),
     }
+    if restore:
+        checked["restore"] = True
+    return checked
+
+
+async def _pinned_there(library: ServedFiles, file_id: int, sha256: str, size: int | None) -> bool:
+    """Whether the library that serves holds ``file_id`` with the bytes ``sha256`` names:
+    the hash its row states, or, for a Bambuddy file that states none, its download's. A
+    file whose stated size is not ``size`` (the held copy's, when known) is other bytes,
+    and is not downloaded."""
+    found = await library.file(file_id)
+    if found is None:
+        return False
+    if found.file_hash:
+        return found.file_hash.lower() == sha256
+    if size is not None and found.file_size is not None and found.file_size != size:
+        return False
+    digest = hashlib.sha256()
+    try:
+        async for chunk in library.download(file_id):
+            digest.update(chunk)
+    except ApiError as error:
+        if error.status == status.HTTP_404_NOT_FOUND:
+            return False
+        raise
+    return digest.hexdigest() == sha256
 
 
 async def _quoted_file_stands(blobs: BlobStore, item: OrderItem, quote: Quote) -> None:
