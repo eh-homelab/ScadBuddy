@@ -49,6 +49,8 @@ describe('the service credential on a call', () => {
       await expect(bare(`http://127.0.0.1:${port}/api/v1/internal/crud/agent/y/`, { method: 'DELETE' })).rejects.toThrow()
       expect(seen.slice(3)).toEqual(['DELETE /api/v1/internal/crud/agent/y/'])
       expect(authorizations[0]).toBe(`Bearer ${TOKEN}`)
+      // The hop outside the backend, and the redirect it followed, carry no token (#7194).
+      expect(authorizations.slice(1, 3)).toEqual([undefined, undefined])
       expect(authorizations[3]).toBeUndefined()
     } finally {
       await new Promise((resolve) => server.close(resolve))
