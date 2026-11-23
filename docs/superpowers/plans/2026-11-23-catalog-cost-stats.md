@@ -59,6 +59,12 @@ matches the substance the issue names, not BB's look.
   `filament_material_number_stats` (read). The calculator gets `filament_cost_per_kg` (read)
   too, so the agent works money out on the server's decimals and never in floats; to keep a
   result it sets the type's cost as before, at that tool's tier.
+- **R-7152-10. The case fold is Postgres's.** The key is `upper(code)` read from SQL, the fold
+  of the unique index `filament_spool_types_code`, never Python's `str.upper`: that one makes
+  `ß` into `SS`, so it joins `PLA-Weiß` and `PLA-WEISS`, which the index keeps apart as two
+  material numbers. `_read` selects `upper(t.code) AS code_key` and `material_numbers` keys on
+  it (test `test_material_numbers_fold_case_as_the_unique_index_does`). The msw mock still folds with
+  JS `toUpperCase`, which differs only for codes such as `ß`.
 
 ## Steps
 

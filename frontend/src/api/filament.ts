@@ -75,13 +75,14 @@ export type MaterialNumberStats = Schemas['MaterialNumberStats']
 export type MaterialNumberRow = Schemas['MaterialNumberRow']
 export type MaterialNumberQueryParams = Query<'get_material_number_stats_api_v1_filament_metrics_material_numbers_get'>
 export type CostCalculation = Schemas['CostCalculation']
-/** #7152 — money as exact decimal strings; `tax`, `shipping` and `quantity` may be left out. */
-export interface CostQueryParams {
+/**
+ * #7152 — the route's query, with money narrowed to exact decimal strings (the spec also
+ * allows a number, which would go through a float); `tax`, `shipping` and `quantity` may be left out.
+ */
+export type CostQueryParams = Omit<Query<'get_cost_per_kg_api_v1_filament_cost_per_kg_get'>, 'price' | 'tax' | 'shipping'> & {
   price: string
   tax?: string
   shipping?: string
-  quantity?: number
-  net_weight_g: number
 }
 export type FilamentInventoryView = Schemas['FilamentInventoryView']
 export type CsvRow = Schemas['CsvRow']

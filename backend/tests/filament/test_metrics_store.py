@@ -576,3 +576,21 @@ def test_material_numbers_list_only_stock_or_use(pg_pool: PgPool) -> None:
     FilamentSpoolStore(pg_pool).archive(gone, True, actor="ann")
     rows = _store(pg_pool).material_numbers(*WINDOW).rows
     assert [(r.key, r.spools, r.used_g) for r in rows] == [("PLA-USED", 0, 10.0)]
+
+
+def test_material_numbers_fold_case_as_the_unique_index_does(pg_pool: PgPool) -> None:
+    """R-7152-10: the key is Postgres's ``upper(code)``, the unique index's, not Python's
+    ``str.upper``, which makes ``ß`` into ``SS`` and so joins codes the index keeps apart."""
+    sharp = _type(pg_pool, "PLA-Weiß")
+    _spool(pg_pool, type_id=sharp, grams_left=100)
+    double = _type(pg_pool, "PLA-WEISS")
+    _spool(pg_pool, type_id=double, grams_left=200)
+    with pg_pool.connection() as conn:
+        found = conn.execute("SELECT upper('PLA-Weiß') AS k").fetchone()
+    assert found is not None
+    key = found["k"]
+    assert key != "PLA-WEISS"
+    rows = {r.key: r for r in _store(pg_pool).material_numbers(*WINDOW).rows}
+    assert rows.keys() == {key, "PLA-WEISS"}
+    assert [t.id for t in rows[key].types] == [sharp]
+    assert [t.id for t in rows["PLA-WEISS"].types] == [double]

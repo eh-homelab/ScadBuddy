@@ -53,14 +53,25 @@ export function CostCalculator({ labelWeight, onUseAsCost }: CostCalculatorProps
   const [busy, setBusy] = useState(false)
   const latest = useRef(0)
 
+  /** Forgets the result and any answer still out: it was for inputs no longer on screen. */
+  const drop = () => {
+    latest.current++
+    setResult(null)
+    setBusy(false)
+  }
+
   useEffect(() => {
-    if (!weightEdited) setFields((now) => ({ ...now, weight: labelWeight }))
+    if (weightEdited || fields.weight === labelWeight) return
+    setFields((now) => ({ ...now, weight: labelWeight }))
+    drop()
+    // `fields.weight` is read to skip a no-op; only a new label weight should run this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [labelWeight, weightEdited])
 
   const set = (key: keyof Fields, value: string) => {
     setFields((now) => ({ ...now, [key]: value }))
     if (key === 'weight') setWeightEdited(true)
-    setResult(null)
+    drop()
   }
 
   const work = async () => {

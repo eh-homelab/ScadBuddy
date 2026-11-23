@@ -1,4 +1,5 @@
-import { screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { costPerKg } from '../../mocks/features/filament/metrics'
 import { server } from '../../mocks/server'
@@ -58,6 +59,56 @@ describe('the cost calculator (#7152)', () => {
     await user.type(screen.getByLabelText(/^Price paid/), '99999999.9999')
     await user.click(screen.getByRole('button', { name: 'Work it out' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('more than a cost per kg can hold')
+  })
+
+  /** Holds every `GET /filament/cost-per-kg` until `release`, then answers it from the mock. */
+  function holdRequests() {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const seen: string[] = []
+    server.use(
+      http.get('/api/v1/filament/cost-per-kg', async ({ request }) => {
+        seen.push(request.url)
+        await held
+        return HttpResponse.json(costPerKg(new URL(request.url)))
+      }),
+    )
+    return { release, seen }
+  }
+
+  it('shows no answer for inputs that changed while it was out', async () => {
+    const hold = holdRequests()
+    const { user, use } = await open()
+    await user.type(screen.getByLabelText(/^Price paid/), '20')
+    await user.click(screen.getByRole('button', { name: 'Work it out' }))
+    await waitFor(() => expect(hold.seen).toHaveLength(1))
+    await user.type(screen.getByLabelText('Shipping'), '1')
+    expect(screen.getByRole('button', { name: 'Work it out' })).toBeEnabled()
+    hold.release()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByTestId('cost-per-kg')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Use as default cost' })).toBeNull()
+    expect(use).not.toHaveBeenCalled()
+  })
+
+  it("drops the result, and an answer still out, when the type's label weight changes", async () => {
+    const { user, rerender } = await open('1000')
+    const use = vi.fn()
+    await user.type(screen.getByLabelText(/^Price paid/), '20')
+    await user.click(screen.getByRole('button', { name: 'Work it out' }))
+    expect(await screen.findByTestId('cost-per-kg')).toHaveTextContent('$20')
+    rerender(<CostCalculator labelWeight="750" onUseAsCost={use} />)
+    await waitFor(() => expect(screen.getByLabelText('Net weight per spool (g)')).toHaveValue('750'))
+    expect(screen.queryByTestId('cost-per-kg')).toBeNull()
+
+    const hold = holdRequests()
+    await user.click(screen.getByRole('button', { name: 'Work it out' }))
+    await waitFor(() => expect(hold.seen).toHaveLength(1))
+    rerender(<CostCalculator labelWeight="500" onUseAsCost={use} />)
+    await waitFor(() => expect(screen.getByLabelText('Net weight per spool (g)')).toHaveValue('500'))
+    hold.release()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByTestId('cost-per-kg')).toBeNull()
   })
 
   it('drops the result when an input changes', async () => {

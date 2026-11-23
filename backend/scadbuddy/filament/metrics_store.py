@@ -285,7 +285,8 @@ class MetricsStore:
         by_key: dict[str | None, list[Any]] = {}
         for spool in read.spools:
             row = None if spool.type_id is None else read.types.get(spool.type_id)
-            key = None if row is None else row["code"].upper()
+            # Postgres's upper(), the unique index's fold, not str.upper (R-7152-10).
+            key = None if row is None else row["code_key"]
             found = by_key.setdefault(key, [0, 0.0, 0.0, 0.0, None, False])
             if spool.archived_at is None:
                 found[0] += 1
@@ -301,7 +302,7 @@ class MetricsStore:
                     found[5] = True
         codes: dict[str, list[Row]] = defaultdict(list)
         for row in read.types.values():
-            codes[row["code"].upper()].append(row)
+            codes[row["code_key"]].append(row)
         rows = []
         for key, (spools, grams, used, wasted, value, listed) in by_key.items():
             if not listed:
@@ -466,8 +467,9 @@ class MetricsStore:
             ).fetchall()
             events = ledger.plate_events(conn)
             types = conn.execute(
-                "SELECT t.id, t.code, t.lead_time_days, t.safety_margin_days, t.archived_at,"
-                " mat.name AS material FROM filament_spool_types t"
+                "SELECT t.id, t.code, upper(t.code) AS code_key, t.lead_time_days,"
+                " t.safety_margin_days, t.archived_at, mat.name AS material"
+                " FROM filament_spool_types t"
                 " LEFT JOIN filament_materials mat ON mat.id = t.material_id"
             ).fetchall()
             printers = conn.execute("SELECT id, name FROM printers").fetchall()
