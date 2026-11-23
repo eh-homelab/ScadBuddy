@@ -1,0 +1,13 @@
+{
+  "name": "scadbuddy-playwright-mcp",
+  "private": true,
+  "type": "module",
+  "description": "@playwright/mcp with each MCP session's browser context built from the X-ScadBuddy-Browser header (#7027)",
+  "license": "UNLICENSED",
+  "scripts": {
+    "test": "node --test options.test.mjs"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.85"
+  }
+}

@@ -969,9 +969,30 @@ jobs:
           echo "$after"
           jq -e '.stdout == "none\n"' <<<"$after" >/dev/null
 
+      # The agent's browser (#7027): @playwright/mcp with each MCP session's context built
+      # from the X-ScadBuddy-Browser header (workers/playwright-mcp). It reads the cache
+      # build-image.yml's `playwright-mcp` job writes, and writes none. Its unit tests run
+      # in the image, on the image's Node; the smoke runs it as its pod runs it.
+      - name: Build the playwright-mcp image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: playwright-mcp
+          load: true
+          tags: scadbuddy-playwright-mcp:ci
+          cache-from: type=gha,scope=playwright-mcp
+
+      - name: Test the playwright-mcp image
+        env:
+          SMOKE_CONTAINER: scadbuddy-playwright-mcp-ci
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint node scadbuddy-playwright-mcp:ci --test /opt/scadbuddy-playwright-mcp/options.test.mjs
+          workers/playwright-mcp/smoke.sh scadbuddy-playwright-mcp:ci
+
       - name: Tear down
         if: always()
-        run: docker rm -f scadbuddy-agent-ci scadbuddy-agent-ci-old-env scadbuddy-sandbox-ci || true
+        run: docker rm -f scadbuddy-agent-ci scadbuddy-agent-ci-old-env scadbuddy-sandbox-ci scadbuddy-playwright-mcp-ci || true
 
   agent-durable:
     name: Agent-durable lint, test, image

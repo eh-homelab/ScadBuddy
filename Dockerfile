@@ -369,6 +369,48 @@ EXPOSE 8090 3128
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/sandbox/main.js"]
 
+# ── playwright-mcp: the agent's browser, one context per MCP session (#7027) ───
+# Microsoft's @playwright/mcp image, with our server (workers/playwright-mcp/server.mjs)
+# in place of its cli.js: each MCP session's context takes its user agent, viewport and
+# locale from the X-ScadBuddy-Browser header. The base image has Chromium
+# (/ms-playwright) and the CLI, but no index.js, so the package is installed here at
+# the same version. The tag, its digest and package.json's `@playwright/mcp` move
+# together: the check below fails the build when the base image's /app/package.json
+# version is not the installed package's, or its Chromium is not the installed
+# playwright-core's revision. Same args as the CLI's Deployment (parseArgs in
+# options.mjs); options.test.mjs is copied so CI runs it in the image.
+# DL3026: Microsoft publishes this image on mcr.microsoft.com, not Docker Hub or GHCR;
+# it is pinned here by digest, and CI's hosted runners pull it directly.
+# hadolint ignore=DL3026
+FROM mcr.microsoft.com/playwright/mcp:v0.0.85@sha256:cc70a6922ff856f3aba0fe97d0d94220dc9a7f367f6d332facc6d81d9a91e60e AS playwright-mcp
+
+# Root while installing, so node (1000) cannot change the server's files.
+USER 0
+WORKDIR /opt/scadbuddy-playwright-mcp
+COPY workers/playwright-mcp/package.json workers/playwright-mcp/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && npm cache clean --force \
+    && node -e " \
+      const fs = require('fs'); \
+      const base = require('/app/package.json').version; \
+      const ours = require('@playwright/mcp/package.json').version; \
+      if (base !== ours) throw new Error('base image @playwright/mcp ' + base + ' != installed ' + ours); \
+      const browsers = require(require.resolve('playwright-core/package.json').replace('package.json', 'browsers.json')).browsers; \
+      const dir = '/ms-playwright/chromium-' + browsers.find((b) => b.name === 'chromium').revision; \
+      if (!fs.existsSync(dir)) throw new Error(dir + ' is not in the base image'); \
+      console.log('@playwright/mcp ' + ours + ', ' + dir); \
+    "
+COPY workers/playwright-mcp/options.mjs workers/playwright-mcp/server.mjs workers/playwright-mcp/options.test.mjs ./
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+# The base image's user `node`, by number so runAsNonRoot can check it.
+USER 1000:1000
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "node", "/opt/scadbuddy-playwright-mcp/server.mjs"]
+
 # ── agent-durable: ScadBuddy's Python agent parts (spec 2026-10-13 §14.4) ─────
 # Its Deployment of its own, trusted like `agent` (#1030). The Python turn is retired
 # (plan 2026-10-13 Step 8.1): the process serves /healthz and runs no worker until a
