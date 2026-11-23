@@ -1643,19 +1643,23 @@ const tools: Tool[] = [
       "`kind: consumed_reset` (no grams, temp_c or hours) starts the spool's used counter (`consumed_g`) again from 0 g; the " +
       'grams left stay. Only what the user says. Writes ScadBuddy only; a reset reaches Bambuddy at the next sync when weights ' +
       'sync to it. `reading_g` (a weighing only, instead of `grams`) is the scale reading with the spool: the filament ' +
-      "is the reading less the spool's empty weight, and the answer carries `insert_weight` (#7280). When the spool is new " +
-      "and unused and the reading is above its label weight, `insert_weight.offer` says what the insert's empty weight would " +
-      'become (`derived_g`, `new_empty_weight_g`, `current_empty_weight_g`, `current_basis`, `sample_count`). ' +
-      '`checked_by_default` is advice only: pass `accept_insert_weight: true` only when the user says to take it. ' +
-      'Makers overfill by about 10-30 g, so the estimate is slightly heavy. Accepting changes the insert in ScadBuddy only ' +
-      'and runs before the weighing, so the weighing uses the new empty weight; with no offer, it is refused and nothing is booked.',
+      "is the reading less the spool's empty weight, and the answer carries `insert_weight` (#7280). With `reading_g`, the " +
+      'tool first reads the offer. There is an offer when the spool is new and unused, the reading is above its label ' +
+      'weight, and the derived weight (reading less label weight) is at most the label weight. `insert_weight.offer` says ' +
+      "what the insert's empty weight would become (`derived_g`, `new_empty_weight_g`, `current_empty_weight_g`, " +
+      '`current_basis`, `sample_count`). When there is an offer and `accept_insert_weight` is left out, the tool books ' +
+      'nothing (`event: null`): tell the person the numbers and that makers overfill by about 10-30 g, so the estimate is ' +
+      'slightly heavy, then call again with the same `reading_g` and `accept_insert_weight` true or false. ' +
+      '`checked_by_default` is advice only: pass `true` only when the user says to take it. `true` changes the insert in ' +
+      'ScadBuddy only and runs before the weighing, so the weighing uses the new empty weight; `false` books with the ' +
+      'current empty weight. With no offer, the weighing is booked at once, and `true` is refused with nothing booked.',
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried', 'consumed_reset']),
       source: z.enum(['person', 'scale']).default('person'),
       grams: z.number().min(0).optional(),
       reading_g: z.number().positive().max(100000).optional().describe('Scale reading with the spool, in grams (weighed only)'),
-      accept_insert_weight: z.boolean().optional().describe("Take the offer's empty weight for the insert (needs reading_g)"),
+      accept_insert_weight: z.boolean().optional().describe("After an offer: true takes its empty weight for the insert, false declines it (needs reading_g)"),
       temp_c: z.number().int().min(0).nullable().optional().describe("Left out: the spool's drying default"),
       hours: z.string().nullable().optional().describe("A decimal, e.g. `8`; left out: the spool's drying default"),
       note: z.string().optional(),
@@ -1694,6 +1698,17 @@ const tools: Tool[] = [
         }),
         `check the insert weight of spool ${spool_id}`,
       )
+      if (check.offer && accept_insert_weight === undefined) {
+        return json({
+          event: null,
+          filament_g: null,
+          insert_weight: check,
+          insert_weight_accepted: null,
+          next:
+            'Nothing was booked. Tell the person the offer, then call again with the same reading_g and ' +
+            'accept_insert_weight true or false.',
+        })
+      }
       let filament_g = check.filament_g
       let accepted: components['schemas']['InsertWeightAccepted'] | null = null
       if (accept_insert_weight) {
@@ -1713,7 +1728,9 @@ const tools: Tool[] = [
           params: { path },
           body: { ...body, grams: filament_g },
         }),
-        `record on spool ${spool_id}`,
+        accepted
+          ? `record on spool ${spool_id} (the insert's empty weight was already set; a retry with the same reading is safe)`
+          : `record on spool ${spool_id}`,
       )
       return json({ event, filament_g, insert_weight: check, insert_weight_accepted: accepted })
     },

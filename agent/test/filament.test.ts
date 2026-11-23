@@ -630,18 +630,64 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     )
   }
 
-  it('reads the offer, books the check filament and does not accept', async () => {
+  it('with an offer and no decision, reads the offer and books nothing', async () => {
     const order: string[] = []
     const bodies: unknown[] = []
     mock(CHECK, order, bodies)
     const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 1150 }, ctx())
     expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 1150'])
+    expect(bodies).toEqual([])
+    const out = firstText(res) as Record<string, unknown>
+    expect(out.event).toBeNull()
+    expect(out.filament_g).toBeNull()
+    expect((out.insert_weight as { offer: unknown }).offer).toMatchObject(OFFER)
+    expect(out.insert_weight_accepted).toBeNull()
+    expect(JSON.stringify(out)).toContain('accept_insert_weight')
+  })
+
+  it('declines the offer and books the check filament', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(CHECK, order, bodies)
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: false },
+      ctx(),
+    )
+    expect(res.isError).toBeFalsy()
     expect(order).toEqual(['offer 1150', 'event'])
     expect(bodies).toEqual([{ kind: 'weighed', source: 'person', grams: 950 }])
     const out = firstText(res) as Record<string, unknown>
     expect(out.filament_g).toBe(950)
-    expect((out.insert_weight as { offer: unknown }).offer).toMatchObject(OFFER)
+    expect(out.event).toEqual({ kind: 'weighed' })
     expect(out.insert_weight_accepted).toBeNull()
+  })
+
+  it('with no offer, books the check filament at once', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock({ offer: null, reason: 'used', insert_type_id: ROW, empty_weight_g: 200, filament_g: 950 }, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 1150 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 1150', 'event'])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'person', grams: 950 }])
+    expect((firstText(res) as Record<string, unknown>).filament_g).toBe(950)
+  })
+
+  it('says a retry is safe when the booking fails after the accept', async () => {
+    const order: string[] = []
+    mock(CHECK, order, [])
+    server.use(http.post(`${SPOOL}/events`, () => HttpResponse.json({ detail: 'boom' }, { status: 500 })))
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true },
+      ctx(),
+    )
+    expect(res.isError).toBe(true)
+    const text = JSON.stringify(res)
+    expect(text).toContain("insert's empty weight was already set")
+    expect(text).toContain('retry with the same reading')
   })
 
   it('accepts before it books, with the accepted filament', async () => {

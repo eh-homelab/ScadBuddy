@@ -92,14 +92,18 @@ Sources, relative to the root of
 
 To weigh a spool with its scale reading, call `filament_spool_add_event` with `kind: weighed`
 and `reading_g`, not `grams`. The tool subtracts the empty weight of the spool's insert.
-The answer has `insert_weight`. When the spool is new and unused and the reading is above its
-label weight, `insert_weight.offer` shows what the insert's empty weight would become
-(`derived_g`, `new_empty_weight_g`, the current weight and its basis, `sample_count`).
-Tell the person these numbers. Tell them that makers overfill by about 10 to 30 g, so the
-estimate is slightly heavy, and that a later weighing of an empty spool replaces it.
-`checked_by_default` is only advice. Pass `accept_insert_weight: true` only when the person
-says to take it. With no offer, `accept_insert_weight` is refused and nothing is booked. The tool
-writes ScadBuddy only. Without `reading_g`, pass `grams` as before.
+With `reading_g`, the tool first reads the offer. There is an offer only when the spool is new
+and unused, the reading is above its label weight, and the derived weight (the reading less the
+label weight) is at most the label weight. `insert_weight.offer` shows what the insert's empty
+weight would become (`derived_g`, `new_empty_weight_g`, the current weight and its basis,
+`sample_count`). When there is an offer, the tool books nothing (`event: null`). Tell the person
+the numbers. Tell them that makers overfill by about 10 to 30 g, so the estimate is slightly
+heavy, and that a later weighing of an empty spool replaces it. Then call again with the same
+`reading_g` and `accept_insert_weight` true or false. `checked_by_default` is only advice. Pass
+`true` only when the person says to take it; `false` books the weighing with the current empty
+weight. With no offer, the tool books the weighing at once, and `accept_insert_weight: true` is
+refused with nothing booked. The tool writes ScadBuddy only. Without `reading_g`, pass `grams` as
+before.
 
 ## Import an invoice
 
