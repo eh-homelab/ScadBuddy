@@ -303,6 +303,29 @@ describe('HostedPluginsPanel', () => {
     })
   })
 
+  it('shows an uploaded replacement of the open text file, and a later save sends it, not the old text', async () => {
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await user.click(await within(editor).findByRole('button', { name: 'skills/print-notes/SKILL.md' }))
+    const old = await within(editor).findByLabelText('Edit skills/print-notes/SKILL.md')
+    const oldText = (old as HTMLTextAreaElement).value
+    expect(oldText).not.toBe('')
+
+    await user.type(within(editor).getByLabelText('New file'), 'skills/print-notes/SKILL.md')
+    await user.upload(within(editor).getByLabelText('Upload a file into the draft'), new File(['uploaded body'], 'x.md'))
+    await user.click(await screen.findByRole('button', { name: 'Replace file' }))
+    await waitFor(() =>
+      expect((within(editor).getByLabelText('Edit skills/print-notes/SKILL.md') as HTMLTextAreaElement).value).toBe('uploaded body'),
+    )
+
+    await user.type(within(editor).getByLabelText('Edit skills/print-notes/SKILL.md'), '!')
+    await user.keyboard('{Control>}s{/Control}')
+    await waitFor(async () => {
+      const read = await hostedPlugins.readFile('print-notes', 'skills/print-notes/SKILL.md')
+      expect(new TextDecoder().decode(read.bytes)).toBe('uploaded body!')
+    })
+  })
+
   it('sends one save for two quick Ctrl+S presses', async () => {
     let puts = 0
     server.use(

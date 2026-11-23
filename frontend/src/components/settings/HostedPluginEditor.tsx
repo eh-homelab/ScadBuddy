@@ -65,6 +65,8 @@ interface OpenFile {
   /** The saved text, or null for a file that is not UTF-8. */
   saved: string | null
   size: number
+  /** Counts loads of this path: an overwrite by upload reloads it, and the editor remounts on the new text. */
+  revision: number
 }
 
 export interface HostedPluginEditorProps {
@@ -153,7 +155,13 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
     const info = files?.files.find((f) => f.path === path)
     await act(`open:${path}`, async () => {
       const read = await hostedPlugins.readFile(name, path)
-      setOpen({ path, executable: read.executable, saved: asText(read.bytes), size: info?.size ?? read.bytes.length })
+      setOpen((current) => ({
+        path,
+        executable: read.executable,
+        saved: asText(read.bytes),
+        size: info?.size ?? read.bytes.length,
+        revision: current?.path === path ? current.revision + 1 : 0,
+      }))
     })
   }
 
@@ -173,8 +181,11 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
     })
   }
 
+  /** Set at once, where `busy` only changes on the next render: two Ctrl+S in one tick send one PUT. */
+  const savingRef = useRef(false)
+
   async function save(target: OpenFile, executable = target.executable) {
-    if (busy !== null) return
+    if (busy !== null || savingRef.current) return
     const text = buffers[target.path] ?? target.saved
     if (text === null) return
     const bytes = new TextEncoder().encode(text)
@@ -182,12 +193,15 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
       setError(`${target.path} is ${formatBytes(bytes.length)}; a file is at most ${formatBytes(files.max_file_bytes)}.`)
       return
     }
+    savingRef.current = true
     await act('save', async () => {
       const written = await hostedPlugins.writeFile(name, target.path, bytes, executable)
-      setOpen({ path: target.path, executable: written.executable, saved: text, size: written.size })
+      setOpen({ ...target, executable: written.executable, saved: text, size: written.size })
       setBuffers(({ [target.path]: _saved, ...rest }) => rest)
       setPublished(null)
       await reloadDraft()
+    }).finally(() => {
+      savingRef.current = false
     })
   }
 
@@ -343,7 +357,7 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
           <div className="min-w-0">
             {open ? (
               <FilePane
-                key={open.path}
+                key={`${open.path}#${open.revision}`}
                 plugin={name}
                 file={open}
                 text={openText}
