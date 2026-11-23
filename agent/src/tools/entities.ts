@@ -301,7 +301,7 @@ export const entityTools = [
       "Replace a kind's property schema whole (read it with entity_property_schema_get first and send it back changed). " +
       'A JSON Schema (Draft 2020-12) object of plain keywords only: at the top ' + SCHEMA_TOP_KEYWORDS.map(code).join(', ') +
       '; per key a `type` (a scalar or `array`, or a list of them with `"null"`) with ' + SCHEMA_KEY_KEYWORDS.map(code).join(', ') +
-      '; `format` is never `regex`; `items` (string-typed only, with the same keywords but `items`). Each key must still take some value. ' +
+      '; `format` is never `regex`; `items` (string-typed only, with the same keywords but `items`). An `enum` or `const` must fit its key, and no bound may cross its pair or a cap. ' +
       'Any other keyword is 422 `bad_property_schema`, naming it. Writes ' +
       'ScadBuddy only.',
     input: z.object({ kind: propertyKind, schema: z.record(z.string(), z.unknown()).describe('The whole schema') }),
