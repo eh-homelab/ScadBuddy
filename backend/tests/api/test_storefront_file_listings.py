@@ -525,13 +525,15 @@ def test_a_delete_drops_the_kept_copy(
     assert holders(client, f"listing-file-{keychain.sha256}") == []
 
 
-def test_a_file_listing_is_not_on_the_public_site(
+def test_only_a_template_listing_takes_a_render(
     client: TestClient, keychain: NativeFile, pla_red: str
 ) -> None:
-    """Until the customer page can show one (spec §12, PR 6)."""
+    """A file listing is on the public site (#6710 §12 PR 6), but a render, a variant and a
+    prepare run take a template listing only."""
     listing = publish(client, create(client, body(keychain, [pla_red]))["id"])
     listings = _state(client).components.get(ORDERS).listings
-    assert [found.id for found in listings.published(limit=10)] == []
+    assert [found.id for found in listings.published(limit=10)] == [listing["id"]]
     with pytest.raises(ApiError, match="no such listing"):
         published_listing(listings, listing["id"])
     assert published_listing(listings, listing["id"], source="library_file").id == listing["id"]
+    assert published_listing(listings, listing["id"], source=None).id == listing["id"]

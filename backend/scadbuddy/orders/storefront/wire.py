@@ -543,11 +543,27 @@ class PublicMedia(BaseModel):
     caption: str
 
 
+class PublicSlot(BaseModel):
+    """One part of a file listing a visitor colours (#6710 §6.1): an offered slot of the
+    file (used, and not support)."""
+
+    #: From 0, as ``ListingPriceBody.colours`` and ``AddListingItem.colours`` key it.
+    slot: int
+    #: "Part 1", "Part 2", … in slot order. The file's colour names nothing a customer reads.
+    label: str
+    #: The listing filament the part starts at (§6.2): the closest colour to the file's
+    #: own, in the first material that offers a colour. None when no colour is on offer
+    #: (the listing is then unavailable).
+    default: str | None
+
+
 class PublicListing(BaseModel):
     """A published listing as the public site shows it. Every text is the shop's, shown
     as text, never as HTML (spec §5.8)."""
 
     id: str
+    #: What the listing sells (#6710): a template's design, or a library file.
+    source: Literal["template", "library_file"] = "template"
     title: str
     description: str
     params: dict[str, PublicParam]
@@ -567,6 +583,13 @@ class PublicListing(BaseModel):
     #: False when no render of it can be made: no material is printable, or a colour
     #: parameter has no colour left (#6302 review). The card's ``available`` is the same.
     available: bool = True
+    #: A file listing's parts: one per offered slot, in slot order (never a support or
+    #: unused slot). Empty for a template.
+    slots: list[PublicSlot] = Field(default_factory=list)
+    #: A file listing's 3D previews, one per plate, as edge paths (never presigned: the
+    #: page fetches only from its own origin). Each mesh names its slot (`glb.SLOT_EXTRA`).
+    #: Empty for a template, and for a file publish read no mesh from.
+    previews: list[str] = Field(default_factory=list)
 
 
 class PublicListingCard(BaseModel):

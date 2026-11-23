@@ -31,7 +31,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -52,6 +52,7 @@ from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError, 
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.storefront.closest_colour import Swatch, closest_colour
 from scadbuddy.orders.storefront.inputs import (
     InputReason,
     customer_filaments,
@@ -89,6 +90,7 @@ from scadbuddy.orders.storefront.wire import (
     PublicMedia,
     PublicNumber,
     PublicParam,
+    PublicSlot,
     PublicText,
     Snapshot,
     TextBound,
@@ -101,7 +103,7 @@ from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.store.s3 import S3ContentBackend
-from scadbuddy.storefront.wire import LISTING_ID, STOREFRONT_PROBLEMS
+from scadbuddy.storefront.wire import LISTING_ID, STOREFRONT_PROBLEMS, listing_preview_path
 
 logger = logging.getLogger(__name__)
 
@@ -480,8 +482,7 @@ class ListingStore:
         after the listing at ``after`` (its position and id), whose title has ``query`` in
         it, any case (#6154). Keyset paging on ``storefront_listings_published_order``, so
         a later page costs what the first does."""
-        # A file listing is left out until the public page can show one (#6710 §12 PR 6).
-        where = ["published", "source = 'template'"]
+        where = ["published"]
         args: list[Any] = []
         if after is not None:
             where.append("(position, id) > (%s, %s)")
@@ -1461,6 +1462,45 @@ class _Offered:
     #: Whether a render can be made: a printable material (or no colour to print), and
     #: a colour left for every colour parameter (the page's `colourGone`).
     available: bool
+    #: A file listing's parts (#6710 §6.1); empty for a template.
+    slots: list[PublicSlot] = field(default_factory=list)
+
+
+def _offered_file(
+    listing: Listing,
+    snapshot: FileSnapshot,
+    filaments: Mapping[str, Filament],
+    shop_materials: Sequence[str],
+) -> _Offered:
+    """A file listing's materials, filaments and parts (#6710 §6.1, §6.2). Each offered
+    slot takes any colour of the print's one material (`file_prices.py` `file_choice`), so
+    a material is printable when the listing offers a customer filament of it, and the
+    listing is available when one is. Each part starts at the colour closest to the file's
+    own (`closest_colour.py`) among the first printable material's filaments."""
+    effective = effective_materials(listing, shop_materials)
+    offered = customer_filaments(listing, filaments, effective)
+    first = next(
+        (
+            [f for f in offered if material_key(f.material) == material_key(m)]
+            for m in effective
+            if any(material_key(f.material) == material_key(m) for f in offered)
+        ),
+        [],
+    )
+    candidates = [Swatch(hex=f.colour, name=f.colour_name, alpha=f.alpha) for f in first]
+    slots: list[PublicSlot] = []
+    for number, part in enumerate(snapshot.offered, start=1):
+        index = closest_colour(Swatch(hex=part.colour, name=None), candidates)
+        slots.append(
+            PublicSlot(
+                slot=part.slot,
+                label=f"Part {number}",
+                default=None if index is None else first[index].id,
+            )
+        )
+    return _Offered(
+        materials=effective, filaments=offered, params={}, available=bool(first), slots=slots
+    )
 
 
 def _offered(
@@ -1470,7 +1510,10 @@ def _offered(
     choices come from the printable materials only (#6302 review): the same filaments
     and live materials a render takes (`printable_materials` of `effective_materials`),
     so a visitor never sees a colour that can only clash, and a listing no render can
-    make reads as unavailable. The materials stay the effective list."""
+    make reads as unavailable. The materials stay the effective list. A file listing's are
+    `_offered_file`'s."""
+    if (file := listing.file_snapshot) is not None:
+        return _offered_file(listing, file, filaments, shop_materials)
     by_name = {p.name: p for p in listing.design[2].schema_.parameters}
     effective = effective_materials(listing, shop_materials)
     printable = printable_materials(listing, filaments, effective)
@@ -1530,8 +1573,15 @@ async def public_listing(
         url = await _media_url(content, listing.id, item.blob_key)
         if url is not None:
             media.append(PublicMedia(url=url, kind=item.kind, caption=item.caption))
+    file = listing.file_snapshot
+    previews = (
+        [listing_preview_path(listing.id, plate) for plate in file.plates[: len(file.preview_keys)]]
+        if file is not None
+        else []
+    )
     return PublicListing(
         id=listing.id,
+        source=listing.source,
         title=listing.title,
         description=listing.description,
         params=shown.params,
@@ -1553,6 +1603,8 @@ async def public_listing(
         available=shown.available,
         media=media,
         updated_at=listing.updated_at,
+        slots=shown.slots,
+        previews=previews,
     )
 
 
@@ -1560,19 +1612,18 @@ def published_listing(
     store: ListingStore,
     listing_id: str,
     *,
-    source: Literal["template", "library_file"] = "template",
+    source: Literal["template", "library_file"] | None = "template",
 ) -> Listing:
-    """The listing, when it is published and sells ``source``; 404 ``listing_not_found``
-    for an unpublished or unknown one alike, so a visitor cannot tell them apart, and for
-    an id that is not one, before any lookup. A template's render, its public page and
-    its prepare run take a template listing only (#6710: a file listing is not shown to a
-    customer until its page exists)."""
+    """The listing, when it is published and sells ``source`` (either, for None); 404
+    ``listing_not_found`` for an unpublished or unknown one alike, so a visitor cannot tell
+    them apart, and for an id that is not one, before any lookup. A template's render and
+    its prepare run take a template listing only; the public page takes either (#6710)."""
     listing = store.get(listing_id) if LISTING_ID.fullmatch(listing_id) else None
     if (
         listing is None
         or not listing.published
         or listing.snapshot is None
-        or listing.source != source
+        or (source is not None and listing.source != source)
     ):
         raise problem(status.HTTP_404_NOT_FOUND, "listing_not_found", "There is no such listing.")
     return listing

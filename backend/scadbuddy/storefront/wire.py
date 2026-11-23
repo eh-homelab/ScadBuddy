@@ -153,6 +153,12 @@ def order_preview_path(source_id: str) -> str:
     return f"/api/store/v1/order/sources/{source_id}/preview"
 
 
+def listing_preview_path(listing_id: str, plate: int) -> str:
+    """The edge's path of a file listing's held preview of ``plate`` (#6710 §6.3): any
+    visitor reads it, from the page's own origin."""
+    return f"/api/store/v1/listings/{listing_id}/preview/{plate}.glb"
+
+
 #: A render job's id (``uuid4().hex``). Both sides answer any other 404
 #: ``render_not_found`` before a lookup.
 JOB_ID: Final = re.compile(r"[0-9a-f]{32}")
