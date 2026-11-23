@@ -101,8 +101,11 @@ HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
 #: How long an import waits for the mirror of what it wrote (#7176); the next kept-preset
-#: refresh sends what is left.
-IMPORT_MIRROR_TIMEOUT: Final = 30.0
+#: refresh sends what is left. 120 s: Bambuddy's listing and three writes, each up to the
+#: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`). It leaves 7 of
+#: `profile_fetch/workflow.py` `IMPORT_REQUEST_TIMEOUT`'s 9 minutes to the K-table reads, 14
+#: of them at 30 s each.
+IMPORT_MIRROR_TIMEOUT: Final = 120.0
 #: How often a request that finds the run's import lease held looks again (R-PR3).
 LEASE_POLL_SECONDS: float = 2.0
 PROBLEMS: Final = "https://scadbuddy.dev/problems/profile-fetch/"

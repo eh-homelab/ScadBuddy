@@ -64,7 +64,7 @@ IMPORT_TIMEOUT: Final = timedelta(minutes=10)
 #: How long the import activity's one request waits for the API's answer (R-F2). The route
 #: makes the import's Bambuddy calls in that request: a K table per printer and nozzle,
 #: each up to the Bambuddy client's 30 s, then the mirror, bounded by
-#: `filament/profile_fetch.py` `IMPORT_MIRROR_TIMEOUT`. Under `IMPORT_TIMEOUT`, so the
+#: `filament/profile_fetch.py` `IMPORT_MIRROR_TIMEOUT` (120 s). Under `IMPORT_TIMEOUT`, so the
 #: attempt ends by its own read.
 IMPORT_REQUEST_TIMEOUT: Final = timedelta(minutes=9)
 IMPORT_RETRY: Final = RetryPolicy(
