@@ -177,7 +177,7 @@ export function seedHostedPackage(name: string, version: number, latest = versio
 }
 
 /** The agent's install of a hosted source: a re-pin of the installed hosted package to the latest version. */
-function offerHosted(name: string) {
+function offerHosted(name: string, status = 201) {
   const pkg = state.packages.get(name)
   const latest = hostedLatest.get(name)
   if (latest === undefined) return detail(404, `no hosted plugin named "${name}"`)
@@ -202,7 +202,7 @@ function offerHosted(name: string) {
     },
   }
   putPackage(name, next)
-  return HttpResponse.json(next, { status: 201 })
+  return HttpResponse.json(next, { status })
 }
 
 export function resetAiPluginMocks(): void {
@@ -590,7 +590,7 @@ export const aiPluginHandlers = [
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
     const { ref } = (await request.json()) as { ref?: string }
-    if (pkg.source.kind === 'hosted') return offerHosted(pkg.name)
+    if (pkg.source.kind === 'hosted') return offerHosted(pkg.name, 200)
     if (pkg.source.kind === 'archive' && pkg.source.ref.startsWith('sha256:')) {
       return detail(409, 'this archive was installed with its sha256, so a re-pin could only fetch the same file', {
         reason: 'repin-fixed-sha256',
