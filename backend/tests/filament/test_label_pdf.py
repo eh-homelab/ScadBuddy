@@ -120,6 +120,17 @@ def test_a_column_narrower_than_one_character_leaves_no_empty_line() -> None:
     assert lines[0] == "W" and "" not in lines
 
 
+@pytest.mark.parametrize("text", ["L-1234567", "#123456", "WWWW"])
+def test_the_big_text_is_measured_to_fill_the_narrowest_column(text: str) -> None:
+    # The narrowest custom label, 40 mm wide, leaves 13.5 mm of text column.
+    column = 40 - 2 * label_pdf.QUIET_MM - label_pdf.QR_MM - label_pdf.PAD_MM
+    size = label_pdf._big_size(text, 8, column)
+    drawn = label_pdf._width(text, label_pdf.BOLD, size)
+    # Inside the column, and as large as fits: no guessed width per character.
+    assert drawn <= column + 1e-6
+    assert size == 8 or drawn == pytest.approx(column, rel=1e-3)
+
+
 def test_text_outside_latin_1_prints_as_a_question_mark() -> None:
     odd = SpoolLabel(number=4, material="PLA", colour="翡翠", brand=None, qr="scadbuddy:spool:z")
     assert "(??)" in _streams(render_pdf([odd], BY_ID["roll_50x25"], "roll"))

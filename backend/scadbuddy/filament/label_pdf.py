@@ -156,9 +156,10 @@ def _draw_qr(canvas: Canvas, payload: str, x: float, y: float) -> None:
 
 
 def _big_size(text: str, cap: float, column: float) -> float:
-    """The number's or code's size: ``cap`` mm, smaller when it would overrun the column
-    (the browser's `Math.min(9, 22 / (0.62 * length))` for its 23.5 mm column)."""
-    return min(cap, (column - PAD_MM) / (0.62 * max(1, len(text))))
+    """The number's or code's size: ``cap`` mm, or the size at which its measured width in
+    bold fills the column, whichever is smaller. A width scales with the size."""
+    at_cap = _width(text, BOLD, cap)
+    return cap if at_cap <= column else cap * column / at_cap
 
 
 def _spool_lines(label: SpoolLabel, column: float) -> list[_Line]:

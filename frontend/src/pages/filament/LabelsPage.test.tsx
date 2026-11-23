@@ -220,6 +220,22 @@ describe('the label template (#7157)', () => {
     await user.click(screen.getByRole('button', { name: 'Download PDF' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('A place label needs an address')
   })
+
+  it('holds the PDF of place labels drawn at the page’s own address, and says why', async () => {
+    const noBase = () => HttpResponse.json({ filament_label_template: { template: 'roll_50x25', width_mm: null, height_mm: null }, filament_label_base_url: null, public_url: null })
+    server.use(http.get('*/api/v1/settings', noBase))
+    const { unmount } = renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    const button = screen.getByRole('button', { name: 'Download PDF' })
+    expect(button).toBeDisabled()
+    expect(button).toHaveAccessibleDescription('A PDF of place labels needs a label address. Set one in Settings, or an https public URL.')
+    unmount()
+    // Spool labels need no address: their PDF stays on offer.
+    serve()
+    renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download PDF' })).toBeEnabled())
+    expect(screen.queryByText(/needs a label address/)).toBeNull()
+  })
 })
 
 describe('the labels page', () => {
