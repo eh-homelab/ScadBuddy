@@ -23,8 +23,20 @@ are its facts table.
 
 ## Tracking
 
-Epic: TBD
-Stories: TBD
+Epic: [#7229](https://github.com/eh-homelab/ScadBuddy/issues/7229)
+
+Stories:
+
+| story | issue | title |
+|---|---|---|
+| 1 | [#7230](https://github.com/eh-homelab/ScadBuddy/issues/7230) | Spike: record Bambuddy's `timelapse/scan` replies |
+| 2 | [#7231](https://github.com/eh-homelab/ScadBuddy/issues/7231) | Migration and model |
+| 3 | [#7232](https://github.com/eh-homelab/ScadBuddy/issues/7232) | `copy_in` provenance, race, actor |
+| 4 | [#7233](https://github.com/eh-homelab/ScadBuddy/issues/7233) | `mirror_media`, the `AttemptMedia` workflow, the three triggers |
+| 5 | [#7234](https://github.com/eh-homelab/ScadBuddy/issues/7234) | The housekeeping sweep |
+| 6 | [#7235](https://github.com/eh-homelab/ScadBuddy/issues/7235) | Scan the printer, behind a setting |
+| 7 | [#7236](https://github.com/eh-homelab/ScadBuddy/issues/7236) | Read fields and the attempt row on page open |
+| 8 | [#7237](https://github.com/eh-homelab/ScadBuddy/issues/7237) | Agent text and docs |
 
 ## Global constraints
 
@@ -90,7 +102,7 @@ shows up as the `freshness` job's diff comment and regenerates the Go client.
 
 ---
 
-### Story 1: Spike — record Bambuddy's `timelapse/scan` replies
+### Story 1: Spike — record Bambuddy's `timelapse/scan` replies (#7230)
 
 **Goal:** Know what `POST /api/v1/archives/{id}/timelapse/scan` answers, whether its FTP
 pull is complete when it returns, and what it matches on (spec §4.3, F5).
@@ -125,7 +137,7 @@ the switch on (spec §8.1).
 
 **Lanes:** `backend`, `image` (recordings live under `backend/tests/`).
 
-### Story 2: Migration and model — archive provenance and attempt stamps
+### Story 2: Migration and model — archive provenance and attempt stamps (#7231)
 
 **Goal:** `entity_attachments` records which archive and medium a copy came from, a
 double insert is impossible, and the attempt can record its scan and its last check
@@ -171,7 +183,7 @@ Migration (one file):
 
 **Lanes:** `backend`, `image`.
 
-### Story 3: `copy_in` writes provenance, survives a race, names its actor
+### Story 3: `copy_in` writes provenance, survives a race, names its actor (#7232)
 
 **Goal:** Every copy, manual or automatic, records its archive and medium; a lost race
 answers with the winner's row; the actor is explicit; the audit line says `source`
@@ -199,7 +211,7 @@ answers with the winner's row; the actor is explicit; the audit line says `sourc
 
 **Lanes:** `backend`, `image`.
 
-### Story 4: `mirror_media`, the `AttemptMedia` workflow, and the three triggers
+### Story 4: `mirror_media`, the `AttemptMedia` workflow, and the three triggers (#7233)
 
 **Goal:** An attempt that names an archive imports its latest finish photo and its
 timelapse with no click, after a hand attempt, a heard outcome, or a read of its archives;
@@ -247,7 +259,7 @@ retried at +2 and +15 min (spec §4.1, §4.2, §4.6).
 
 **Lanes:** `backend`, `image`.
 
-### Story 5: The housekeeping sweep
+### Story 5: The housekeeping sweep (#7234)
 
 **Goal:** An attempt whose triggers were missed (Temporal down, a lost outcome, a timelapse
 pulled by hand days later) is still imported within the hour, for 14 days (spec §4.6).
@@ -276,7 +288,7 @@ pulled by hand days later) is still imported within the hour, for 14 days (spec 
 
 **Lanes:** `backend`, `image`.
 
-### Story 6: Scan the printer for a missing timelapse, behind a setting
+### Story 6: Scan the printer for a missing timelapse, behind a setting (#7235)
 
 **Waits for story 1.** Goal: a timelapse that is on the printer and not in Bambuddy is
 imported, at most once per attempt per day, never after 14 days, never with the switch off
@@ -313,7 +325,7 @@ owner has been asked (spec §8.1).
 
 **Lanes:** `backend`, `image`.
 
-### Story 7: The read tells the truth, and the row loads on page open
+### Story 7: The read tells the truth, and the row loads on page open (#7236)
 
 **Goal:** The order page shows, after a reload, what each attempt has attached; offers
 only what is missing; and says which of the three timelapse states applies (spec §4.4,
@@ -348,7 +360,7 @@ owner decision §8.2).
 
 **Lanes:** `backend`, `image`.
 
-### Story 8: Agent text and docs
+### Story 8: Agent text and docs (#7237)
 
 **Goal:** The agent and the docs describe the import (spec §4.7, §5 Docs).
 

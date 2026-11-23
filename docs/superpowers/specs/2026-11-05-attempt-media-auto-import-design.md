@@ -9,8 +9,20 @@
 
 ## Tracking
 
-Epic: TBD
-Stories: TBD
+Epic: [#7229](https://github.com/eh-homelab/ScadBuddy/issues/7229)
+
+Stories:
+
+| story | issue | title |
+|---|---|---|
+| 1 | [#7230](https://github.com/eh-homelab/ScadBuddy/issues/7230) | Spike: record Bambuddy's `timelapse/scan` replies |
+| 2 | [#7231](https://github.com/eh-homelab/ScadBuddy/issues/7231) | Migration and model |
+| 3 | [#7232](https://github.com/eh-homelab/ScadBuddy/issues/7232) | `copy_in` provenance, race, actor |
+| 4 | [#7233](https://github.com/eh-homelab/ScadBuddy/issues/7233) | `mirror_media`, the `AttemptMedia` workflow, the three triggers |
+| 5 | [#7234](https://github.com/eh-homelab/ScadBuddy/issues/7234) | The housekeeping sweep |
+| 6 | [#7235](https://github.com/eh-homelab/ScadBuddy/issues/7235) | Scan the printer, behind a setting |
+| 7 | [#7236](https://github.com/eh-homelab/ScadBuddy/issues/7236) | Read fields and the attempt row on page open |
+| 8 | [#7237](https://github.com/eh-homelab/ScadBuddy/issues/7237) | Agent text and docs |
 
 ## Reviewed against main (2026-11-23)
 
