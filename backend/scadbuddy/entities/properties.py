@@ -31,7 +31,17 @@ MAX_STRING = 2000
 MAX_LIST = 50
 MAX_LIST_ITEM = 500
 #: Top-level keywords that would refuse a key; a schema with any of them is refused.
-RESTRICTING = ("required", "propertyNames", "patternProperties")
+RESTRICTING = ("required", "propertyNames")
+_NO_REF = '"$ref" and "$dynamicRef" are not taken: each known key is checked on its own'
+_NO_REGEX = " is not taken: a regex could hang a write"
+#: Keywords refused at any depth. A regex in a stored schema can backtrack without end on
+#: a crafted value while a write runs.
+REFUSED_DEEP = {
+    "$ref": _NO_REF,
+    "$dynamicRef": _NO_REF,
+    "pattern": '"pattern"' + _NO_REGEX,
+    "patternProperties": '"patternProperties"' + _NO_REGEX,
+}
 
 PropertyValue = str | float | int | bool | list[str]
 
@@ -130,18 +140,29 @@ def check_schema(schema: dict[str, Any]) -> None:
     for key, sub in (schema.get("properties") or {}).items():
         if sub is False:
             raise BadPropertySchema(f'"{key}": a false subschema would refuse the key')
-    if _has_ref(schema):
-        raise BadPropertySchema(
-            '"$ref" and "$dynamicRef" are not taken: each known key is checked on its own'
-        )
+    reason = _refused_in(schema)
+    if reason is not None:
+        raise BadPropertySchema(reason)
 
 
-def _has_ref(node: Any) -> bool:
+def _refused_in(node: Any) -> str | None:
+    """The reason a keyword anywhere under `node` is refused, or None."""
     if isinstance(node, dict):
-        return any(k in ("$ref", "$dynamicRef") or _has_ref(v) for k, v in node.items())
-    if isinstance(node, list):
-        return any(_has_ref(v) for v in node)
-    return False
+        if node.get("format") == "regex":
+            return '"format": "regex"' + _NO_REGEX
+        children = list(node.items())
+        for k, v in children:
+            if k in REFUSED_DEEP:
+                return REFUSED_DEEP[k]
+            reason = _refused_in(v)
+            if reason is not None:
+                return reason
+    elif isinstance(node, list):
+        for v in node:
+            reason = _refused_in(v)
+            if reason is not None:
+                return reason
+    return None
 
 
 def _of(row: dict[str, Any]) -> EntityProperty:
@@ -189,11 +210,14 @@ class EntityPropertyStore:
         than `MAX_KEYS` keys after it and more than before it (a printer merge may leave an
         entity past the limit; it can still remove and change keys). The entity's
         properties after it, by key."""
+        # Every value is checked before the entity's lock, so a check holds no lock.
+        with self.pool.connection() as conn:
+            schema = _schema_in(conn, ref.kind)
+        _checked(patch, schema)
         with self.pool.connection() as conn, conn.transaction():
             entity_id = self.entities.ensure(conn, ref)
             # One writer at a time per entity, so the key count holds.
             conn.execute("SELECT 1 FROM entities WHERE id = %s FOR UPDATE", (entity_id,))
-            _checked(patch, _schema_in(conn, ref.kind))
             before = conn.execute(
                 "SELECT count(*) AS n FROM entity_properties WHERE entity_id = %s",
                 (entity_id,),

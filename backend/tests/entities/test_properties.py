@@ -170,6 +170,15 @@ def test_unknown_keys_pass_a_schema_and_known_keys_are_typed(
             "type": "object",
             "properties": {"gtin": {"type": "array", "items": {"$dynamicRef": "#x"}}},
         },
+        {
+            "type": "object",
+            "properties": {"mpn": {"type": "string", "pattern": "^(a+)+$"}},
+        },
+        {
+            "type": "object",
+            "properties": {"meta": {"type": "object", "patternProperties": {"^(a+)+$": {}}}},
+        },
+        {"type": "object", "properties": {"mpn": {"type": "string", "format": "regex"}}},
     ],
     ids=[
         "additional",
@@ -181,6 +190,9 @@ def test_unknown_keys_pass_a_schema_and_known_keys_are_typed(
         "false_subschema",
         "ref",
         "dynamic_ref",
+        "nested_pattern",
+        "nested_pattern_properties",
+        "format_regex",
     ],
 )
 def test_set_schema_refuses_a_restricting_schema(
