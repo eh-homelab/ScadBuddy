@@ -36,7 +36,10 @@ The service credential (`src/api/serviceCredential.ts`, wired in `main.ts`) is r
 for a 15-minute credential and renews it at half-life and after a 401; it reads no view (a 404
 is a failed exchange, #6501). A failed exchange is tried again after 5 s doubling to 60 s; a
 refused connection (`src/api/backendUp.ts` `backendNotUp`, #5868) is tried again at the next
-call and logged once as "waiting for the backend".
+call and logged once as "waiting for the backend". With no token held, a backend call
+(`withServiceCredential`, `serviceCredentialMiddleware`) waits for the next exchange when it ends
+within `CREDENTIAL_WAIT_MS` (15 s, counted from the first answer; #6647), so a call can take that
+much longer in a back-off; the call's own signal ends the wait.
 
 Readiness: `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start
 (back-off 1 s doubling to 30 s) until every wanted area is listed, and until then the agent is
