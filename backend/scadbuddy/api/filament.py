@@ -62,7 +62,7 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
-from scadbuddy.filament import capture, ntag, rfid_mode, type_proposals
+from scadbuddy.filament import capture, label_pdf, label_templates, ntag, rfid_mode, type_proposals
 from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
@@ -116,7 +116,14 @@ from scadbuddy.filament.csv_import import (
     import_on,
     import_rows,
 )
-from scadbuddy.filament.labels import label_base_url
+from scadbuddy.filament.label_templates import LabelTemplateChoice
+from scadbuddy.filament.labels import (
+    LabelNotFoundError,
+    LabelPayloadTooLongError,
+    NoLabelBaseError,
+    label_base_url,
+    pdf_labels,
+)
 from scadbuddy.filament.labels import printer_labels as label_logic
 from scadbuddy.filament.ledger import BadCursorError
 from scadbuddy.filament.locations import (
@@ -191,7 +198,8 @@ from scadbuddy.workflows.commands import (
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
 #: (Decision 17, R-T8-3); "Sync now" and the links' reset (#6773) nudge a full pass
 #: themselves; the Bambuddy import pulls
-#: and the RFID scan writes nothing, so neither has anything to push (Decision 163);
+#: and the RFID scan writes nothing, so neither has anything to push (Decision 163), nor
+#: has the labels PDF (#7157);
 #: the printer labels (#6955) make only the printer and AMS places that capture makes
 #: too, un-nudged, and every labels-page load and agent read calls them.
 NOT_NUDGED = frozenset(
@@ -202,6 +210,7 @@ NOT_NUDGED = frozenset(
         "import_bambuddy",
         "scan_rfid_tag",
         "printer_labels",
+        "render_labels_pdf",
     }
 )
 
@@ -2018,6 +2027,86 @@ async def printer_labels(
         raise _refused(exc) from None
     read = await asyncio.to_thread(store.read, {"filament_label_base_url", "public_url"})
     return m.PrinterLabels(base_url=label_base_url(read), labels=labels, no_report=no_report)
+
+
+@router.get(
+    "/label-templates",
+    response_model=m.LabelTemplates,
+    summary="The label templates",
+    description=(
+        "Each template a label can take (#7157): its `id`, `name`, label `width_mm` and "
+        "`height_mm`, and for a sheet of labels its `sheet` (`page` `a4` or `letter`, "
+        "`cols`, `rows`, `top_mm`, `left_mm`, `col_gap_mm`, `row_gap_mm`). `custom` takes "
+        "any size within its bounds, one label a page. The setting `filament_label_template` "
+        "holds the one chosen."
+    ),
+)
+async def list_label_templates() -> m.LabelTemplates:
+    return m.LabelTemplates(
+        templates=list(label_templates.TEMPLATES),
+        custom=m.CustomLabelBounds(
+            min_width_mm=label_templates.MIN_WIDTH_MM,
+            min_height_mm=label_templates.MIN_HEIGHT_MM,
+            max_width_mm=label_templates.MAX_LENGTH_MM,
+            max_height_mm=label_templates.MAX_LENGTH_MM,
+        ),
+    )
+
+
+@router.post(
+    "/labels",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}, "description": "The labels PDF."}},
+    summary="The labels PDF",
+    description=(
+        "A PDF of the labels of `spool_ids`, then `location_ids` (1 to 100 in all, in the "
+        "order sent; #7157), as Bambuddy's `POST /inventory/labels` gives. Each label "
+        "carries what the Labels page draws: a spool's number, material, colour name and "
+        "brand with the QR code `scadbuddy:spool:<id>`; a place's code and name with the QR "
+        "code of `<label address>/x/L-<n>`. `template` (else the setting "
+        "`filament_label_template`) sets the size; `layout` `roll` is one label a page and "
+        "`sheet` packs them on Letter paper, while a sheet template always prints on its "
+        "own grid. It reads ScadBuddy's own rows only and writes nothing. 404 for an "
+        "unknown spool or place, 409 `no_label_base` for a place label with no label "
+        "address and no public URL, 422 for a bad body or a place address too long for "
+        "its QR code."
+    ),
+)
+async def render_labels_pdf(
+    filament: FilamentDep, store: SettingsStoreDep, body: m.LabelsPdfRequest
+) -> Response:
+    read = await asyncio.to_thread(
+        store.read, {"filament_label_template", "filament_label_base_url", "public_url"}
+    )
+    choice = body.template or read.get("filament_label_template") or LabelTemplateChoice()
+    try:
+        labels = await asyncio.to_thread(
+            pdf_labels,
+            filament.spools,
+            filament.locations,
+            body.spool_ids,
+            body.location_ids,
+            label_base_url(read),
+        )
+    except LabelNotFoundError as exc:
+        raise ApiError(status.HTTP_404_NOT_FOUND, str(exc)) from None
+    except NoLabelBaseError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "A place label needs an address: set the label address in Settings, or the public URL.",
+            code="no_label_base",
+        ) from None
+    except LabelPayloadTooLongError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+    pdf = await asyncio.to_thread(label_pdf.render_pdf, labels, choice.resolved(), body.layout)
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'attachment; filename="labels.pdf"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.patch(

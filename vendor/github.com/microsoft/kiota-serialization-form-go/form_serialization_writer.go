@@ -18,7 +18,6 @@ import (
 // FormSerializationWriter implements SerializationWriter for URI form encoded.
 type FormSerializationWriter struct {
 	writer                     []string
-	depth                      int
 	onBeforeAssignFieldValues  absser.ParsableAction
 	onAfterAssignFieldValues   absser.ParsableAction
 	onStartObjectSerialization absser.ParsableWriter
@@ -50,15 +49,6 @@ func (w *FormSerializationWriter) writePropertySeparator() {
 		return
 	}
 	w.writer = append(w.writer, "&")
-}
-func (w *FormSerializationWriter) trimLastPropertySeparator() {
-	if w == nil {
-		return
-	}
-	lastIdx := len(w.writer) - 1
-	if lastIdx > -1 && w.writer[lastIdx] == "&" {
-		w.writer[lastIdx] = ""
-	}
 }
 
 // WriteStringValue writes a String value to underlying the byte array.
@@ -297,13 +287,6 @@ func (w *FormSerializationWriter) WriteObjectValue(key string, item absser.Parsa
 	if w == nil {
 		return errors.New("writer cannot be nil")
 	}
-	if w.depth > 0 {
-		return errors.New("nested objects serialization is not supported with FormSerializationWriter")
-	}
-	w.depth++
-	defer func() {
-		w.depth--
-	}()
 	var values []absser.Parsable
 	if !isNil(item) {
 		values = append(values, item)
@@ -316,9 +299,8 @@ func (w *FormSerializationWriter) WriteObjectValue(key string, item absser.Parsa
 	if len(values) == 0 {
 		return nil
 	}
-
 	if key != "" {
-		w.writePropertyName(key)
+		return errors.New("nested objects serialization is not supported with FormSerializationWriter")
 	}
 
 	for _, val := range values {
@@ -334,9 +316,6 @@ func (w *FormSerializationWriter) WriteObjectValue(key string, item absser.Parsa
 		abstractions.InvokeParsableAction(w.GetOnAfterObjectSerialization(), val)
 	}
 
-	if key != "" {
-		w.writePropertySeparator()
-	}
 	return nil
 }
 
@@ -472,8 +451,7 @@ func (w *FormSerializationWriter) GetSerializedContent() ([]byte, error) {
 	if w == nil {
 		return nil, errors.New("writer cannot be nil")
 	}
-	w.trimLastPropertySeparator()
-	resultStr := strings.Join(w.writer, "")
+	resultStr := strings.TrimSuffix(strings.Join(w.writer, ""), "&")
 	return []byte(resultStr), nil
 }
 
@@ -610,7 +588,6 @@ func (w *FormSerializationWriter) Close() error {
 		return nil
 	}
 	w.writer = make([]string, 0)
-	w.depth = 0
 	return nil
 }
 

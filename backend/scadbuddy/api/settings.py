@@ -57,6 +57,7 @@ from scadbuddy.core.settings import (
 )
 from scadbuddy.filament.bb_sync_models import pushes_anything
 from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.filament.rfid_mode import (
     AUTO_ADD_SETTING,
     RFID_MODE_LOCK_WAIT_SECONDS,
@@ -268,6 +269,8 @@ class SettingsView(BaseModel):
     filament_auto_add_unknown_rfid: bool = True
     #: #6905: days a Bambuddy sync pass's history row is kept; ``None``: 30.
     filament_sync_pass_ttl_days: int | None = None
+    #: #7157: the label template the Labels page and `POST /filament/labels` use.
+    filament_label_template: LabelTemplateChoice = Field(default_factory=LabelTemplateChoice)
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
@@ -548,6 +551,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         filament_preset_mirror=stored.filament_preset_mirror,
         filament_auto_add_unknown_rfid=stored.filament_auto_add_unknown_rfid,
         filament_sync_pass_ttl_days=stored.filament_sync_pass_ttl_days,
+        filament_label_template=stored.filament_label_template or LabelTemplateChoice(),
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,

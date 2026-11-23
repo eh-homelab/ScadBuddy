@@ -238,7 +238,9 @@ function putSettings(body: Record<string, unknown>) {
               name === 'filament_preset_mirror' ||
               name === 'filament_auto_add_unknown_rfid'
               ? (value ?? true)
-              : value
+              : name === 'filament_label_template'
+                ? (value ?? { template: 'roll_50x25', width_mm: null, height_mm: null })
+                : value
       continue
     }
     if (value === null && !NULLABLE.has(name)) {
