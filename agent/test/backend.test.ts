@@ -47,4 +47,22 @@ describe('backend client', () => {
       await new Promise((resolve) => server.close(resolve))
     }
   })
+
+  it("keeps a request's JSON body through the copy that refuses redirects (#7179)", async () => {
+    let received = ''
+    const server = createServer((req, res) => {
+      req.setEncoding('utf8')
+      req.on('data', (chunk: string) => (received += chunk))
+      req.on('end', () => res.writeHead(200, { 'content-type': 'application/json' }).end('{}'))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = server.address() as AddressInfo
+      const client = createBackendClient(`http://127.0.0.1:${port}`)
+      await client.POST('/api/v1/customers', { body: { display_name: 'C' } })
+      expect(JSON.parse(received)).toMatchObject({ display_name: 'C' })
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+    }
+  })
 })

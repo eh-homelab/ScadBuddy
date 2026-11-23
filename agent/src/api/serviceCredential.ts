@@ -243,18 +243,23 @@ function abortOf(signal: AbortSignal | undefined): { promise: Promise<undefined>
  * `fetchImpl` with the bearer added to requests under `baseUrl` (the backend) only, so a
  * presigned transfer URL elsewhere never sees it. A 401 drops that token, so the next
  * request carries a fresh one; the refused request is not sent again (a write might run twice).
+ * A request to the backend follows no redirect (#7180).
  */
 export function withServiceCredential(fetchImpl: typeof fetch, credential: CredentialSource, baseUrl: string): typeof fetch {
   const base = baseUrl.replace(/\/+$/, '') + '/'
   return async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     if (!url.startsWith(base)) return fetchImpl(input, init)
+    // A backend call follows no redirect (#7180, as `createBackendClient`, #7104): the API's
+    // trailing-slash 307 would send the same method and credential to another route. A presigned
+    // transfer URL elsewhere (above) keeps following them: S3 can answer 307 for its region.
+    const backendInit: RequestInit = { ...init, redirect: 'error' }
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
     const token = await (credential.untilCurrent?.(signal ?? undefined) ?? credential.current())
-    if (token === undefined) return fetchImpl(input, init)
+    if (token === undefined) return fetchImpl(input, backendInit)
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
     if (!headers.has('authorization')) headers.set('authorization', `Bearer ${token}`)
-    const response = await fetchImpl(input, { ...init, headers })
+    const response = await fetchImpl(input, { ...backendInit, headers })
     if (response.status === 401 && headers.get('authorization') === `Bearer ${token}`) credential.invalidate(token)
     return response
   }

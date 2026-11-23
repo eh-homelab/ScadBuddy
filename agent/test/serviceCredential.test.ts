@@ -1,3 +1,5 @@
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { describe, expect, it, vi } from 'vitest'
 import { CREDENTIAL_WAIT_MS, type CredentialSource, ExchangeCredential, serviceCredentialMiddleware, withServiceCredential } from '../src/api/serviceCredential.js'
 
@@ -21,6 +23,27 @@ describe('the service credential on a call', () => {
     await wrapped('http://backend:8080/api/v1/internal/workspace-blobs/uploads', { method: 'POST' })
     await wrapped('https://bucket.s3.example/blob?X-Amz-Signature=x', { method: 'PUT' })
     expect(seen).toEqual([`Bearer ${TOKEN}`, null])
+  })
+
+  it('follows no redirect on a backend call, and still follows one elsewhere (#7180)', async () => {
+    const seen: string[] = []
+    const server = createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`)
+      // As FastAPI answers a path with a trailing slash, and as S3 can answer for its region.
+      if (req.url?.endsWith('/')) res.writeHead(307, { location: req.url.slice(0, -1) }).end()
+      else if (req.url === '/bucket/old') res.writeHead(307, { location: '/bucket/new' }).end()
+      else res.writeHead(200).end('{}')
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = server.address() as AddressInfo
+      const wrapped = withServiceCredential(globalThis.fetch, fixed, `http://127.0.0.1:${port}/api`)
+      await expect(wrapped(`http://127.0.0.1:${port}/api/v1/internal/crud/agent/x/`, { method: 'DELETE' })).rejects.toThrow()
+      expect((await wrapped(`http://127.0.0.1:${port}/bucket/old`)).status).toBe(200)
+      expect(seen).toEqual(['DELETE /api/v1/internal/crud/agent/x/', 'GET /bucket/old', 'GET /bucket/new'])
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+    }
   })
 
   it('puts it on the request', async () => {
