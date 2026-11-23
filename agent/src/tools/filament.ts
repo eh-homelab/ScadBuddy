@@ -826,8 +826,9 @@ const tools: Tool[] = [
       '`unit_cost`; `null` if none), `type_suppliers` (the unarchived products of its type from unarchived suppliers, each with its ' +
       'newest price and price per kg), and `drying_defaults`: the `temp_c` and `hours` a drying records when it leaves them out ' +
       "(filament_spool_add_event), each from the spool's own `drying_temp_c`/`drying_hours`, else its type's, else its " +
-      "subtype's, else its material's, with `temp_from` and `hours_from` naming the level (`spool`, `type`, `subtype`, " +
-      '`material`; `null` when none sets it).',
+      "subtype's, else its material's, else the Settings default (`filament_drying_temp_c`, `filament_drying_hours`), " +
+      'with `temp_from` and `hours_from` naming the level (`spool`, `type`, `subtype`, `material`, `setting`; `null` when ' +
+      'none sets it).',
     input: z.object({ spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list") }),
     risk: 'read',
     source: SOURCE,
@@ -1340,8 +1341,9 @@ const tools: Tool[] = [
     name: 'filament_rfid_status',
     label: 'Read the RFID override mode',
     description:
-      "Whether the RFID override mode is on and where Bambuddy's auto-add of unknown RFID spools stands: " +
-      '`applied` (mode on, Bambuddy\'s value is false), `pending` (a write has not landed or Bambuddy is down; ' +
+      "Whether the RFID override mode is on, whether the setting `filament_auto_add_unknown_rfid` is on (off holds " +
+      "Bambuddy's auto-add off too), and where Bambuddy's auto-add of unknown RFID spools stands: " +
+      '`applied` (the mode or the setting holds it, and Bambuddy\'s value is false), `pending` (a write has not landed or Bambuddy is down; ' +
       '`detail` names the error), `blocked` (Bambuddy refused the write because its auth is on) or `off`. ' +
       'Lists the SpoolBuddy devices. Reads Bambuddy; writes nothing.',
     input: z.object({}),
@@ -1637,9 +1639,10 @@ const tools: Tool[] = [
       'Record on a spool a weighing (`kind: weighed`, `grams` = the filament left, without the empty spool; ' +
       '`grams_left` starts again from it) or a drying (`kind: dried`, `temp_c`, `hours`). A drying that leaves ' +
       "out `temp_c` or `hours` records the spool's `drying_defaults` (filament_spool_get: its own drying values, else its " +
-      "type's, else its subtype's, else its material's); `null` records none. `kind: consumed_reset` (no grams, " +
-      "temp_c or hours) starts the spool's used counter (`consumed_g`) again from 0 g; the grams left stay. " +
-      'Only what the user says. Writes ScadBuddy only; a reset reaches Bambuddy at the next sync when weights sync to it.',
+      "type's, else its subtype's, else its material's, else the Settings default); `null` records none. " +
+      "`kind: consumed_reset` (no grams, temp_c or hours) starts the spool's used counter (`consumed_g`) again from 0 g; the " +
+      'grams left stay. Only what the user says. Writes ScadBuddy only; a reset reaches Bambuddy at the next sync when weights ' +
+      'sync to it.',
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried', 'consumed_reset']),
