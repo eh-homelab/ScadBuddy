@@ -34,6 +34,8 @@ export function packageView(name: string, over: Partial<PackageView> = {}, rev: 
     pin_kind: 'commit',
     commit_sha: 'c'.repeat(40),
     bytes_sha256: null,
+    version: null,
+    not_offered: null,
     content_hash: `sha256:${name}`,
     review: packageReview({ name, ...rev }),
     approved: true,

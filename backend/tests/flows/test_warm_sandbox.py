@@ -90,3 +90,4 @@ def test_one_flow_tool_serves_every_run_of_a_schema() -> None:
     assert run_flow_tool() is run_flow_tool()
     assert run_flow_tool(schema) is run_flow_tool(reordered)
     assert run_flow_tool(schema) is not run_flow_tool()
+    assert run_flow_tool(schema) is not run_flow_tool({"type": "object"})

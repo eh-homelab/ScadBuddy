@@ -464,9 +464,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   feed's packages are `ai_plugin_feed_packages` (#6933; a package's delete removes its rows),
   read by the agent through area `plugin-feeds` (`GET …/agent/plugin-feeds/{feed}`, the same
   module: each package at its current pin, whether it is approved, and a hosted one's version
-  by its content hash, the newest one with that hash; `?package=` reads one package); the
-  agent serves the feed itself. Test
-  `tests/api/test_crud_agent_plugin_feeds.py`.
+  as its pin names it (`version`), listed only while that version's content hash is the
+  pin's; `?package=` reads one package); the agent serves the feed itself. Test
+  `tests/api/test_crud_agent_plugin_feeds.py`. A hosted package (#6934) is
+  `source_kind` `hosted`, `pin_kind` `version`: its install and re-pin are stored only when
+  that version of the hosted plugin has the content hash sent (409
+  `hosted-version-mismatch`), a package of another kind cannot take a hosted plugin's name
+  (409 `hosted-name-taken`; both checks and the hosted create take
+  `hosted_plugins/store.py` `lock_name`), and each row answered carries
+  `hosted_latest_version`.
 - The agent's tool-call gate (#5299 step 10): `api/crud_agent_gate.py` (area `gate`) over
   `agent_data/gate.py`, the agent's `gate/store.ts` writers statement for statement, each one
   transaction: an entry opened (the Reset's cancels first, in their own), resolved, or decided
@@ -1021,7 +1027,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and `…/failed`). The public routes are `POST` and `GET /filament/types/{id}/profile-fetch`
   (`api/filament.py`). Invoice confirm starts a fetch for each new type with a `tdfp_id`.
   3DFP search and add (#7025, plan `docs/superpowers/plans/2026-11-22-3dfp-search-add.md`):
-  the workflows `TdfpSearch` and `TdfpCreate` on the same queue (`workflow.py`), their
+  the workflows `TdfpSearch` and `TdfpCreate` on the same queue (`workflow.py`; a search's activity
+  runs on `search_queue`, a second worker in the same process, `worker.temporal_workers`, #7062), their
   activities `TdfpActivities` (no CRUD call: the API awaits the outcome, `filament/tdfp.py`
   `TemporalTdfp`), the browser service's ``POST /search`` and ``/create`` (JSON answers the
   worker validates), `site.py` `search` and `create`, and `duplicates.py` (the likely-duplicate
@@ -2204,11 +2211,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   counted as a read) takes `ListingPriceBody` (a listing colour per offered slot, one
   material, `file_choice`; a support slot takes the snapshot's lock) and answers
   `slice_estimate` of `held_file.py` `priced_file(snapshot)`; a read that would claim a new
-  slice first takes one render of the visitor's rates (`RenderLimits.admit_slice`, a row
-  whose `job_id` is `slice:<key>`, so never render concurrency), refunded when it claims
-  none. The cart add makes a `library_file` item with those colours and
-  `LibraryFileRef.sha256` and `copy_key` (columns `library_sha256`, `library_copy_key`),
-  holding the copy under (`order_item`, item id) in the add's transaction (dropped with a
+  slice first takes one render of the visitor's rates (`RenderLimits.admit_slice`, a
+  `storefront_renders` row of `kind` `slice` with no job, which render concurrency never
+  counts), refunded when it claims none or its start gives the claim back. The cart add
+  makes a `library_file` item with those colours and `LibraryFileRef.sha256` and
+  `copy_key` (columns `library_sha256`, `library_copy_key`), holding the copy under
+  (`order_item`, item id) in the add's transaction, only while the listing still pins
+  that sha256 under a share lock, else 409 `listing_changed` (dropped with a
   draft item or a draft); `price_of` reads it by the same `priced_file` while the listing
   is still that file at that sha256, so the read, the add and the checkout make one key.
   The print still reads the live file until #6710 PR 4. The variant is sliced with the

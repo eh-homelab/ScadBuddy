@@ -11,6 +11,12 @@ import { backendNotUp } from './backendUp.js'
 /** Where the agent's credential comes from: the exchange (`ExchangeCredential`); tests give a fixed one. */
 export type CredentialSource = {
   current(): Promise<string | undefined>
+  /**
+   * `current()`, but with no token held it first waits, within a bound, for the next exchange
+   * (#6647), so a call made in a back-off does not go out without a credential. It ends with no
+   * token as soon as `signal` (the call's own) aborts.
+   */
+  untilCurrent?(signal?: AbortSignal): Promise<string | undefined>
   /** The backend answered 401 to `token`. */
   invalidate(token: string): void
 }
@@ -37,6 +43,13 @@ export const EXCHANGE_RETRY_MAX_MS = 60_000
 /** A 401 exchanges again at once, but never sooner than this after the last exchange. */
 export const REEXCHANGE_MIN_MS = 10_000
 const EXCHANGE_TIMEOUT_MS = 10_000
+/**
+ * How long a backend call waits for the next exchange when no token is held (#6647). At pod start
+ * the first exchange can fail while the API comes up; a call made in that back-off went out with no
+ * credential and got 401. The bound counts the exchange after the wait (up to EXCHANGE_TIMEOUT_MS):
+ * a wait that could end past it is not taken, and the call goes out as before.
+ */
+export const CREDENTIAL_WAIT_MS = 15_000
 const TOKEN_RE = /^sbsvc_[0-9a-f]{16}\.[A-Za-z0-9_-]{43}$/
 
 export type ExchangeOptions = {
@@ -48,6 +61,7 @@ export type ExchangeOptions = {
   readProof?: (path: string) => Promise<string>
   now?: () => number
   log?: (message: string) => void
+  sleep?: (ms: number) => Promise<void>
 }
 
 export class ExchangeCredential implements CredentialSource {
@@ -67,6 +81,7 @@ export class ExchangeCredential implements CredentialSource {
   private readonly readProof: (path: string) => Promise<string>
   private readonly now: () => number
   private readonly log: (message: string) => void
+  private readonly sleep: (ms: number) => Promise<void>
 
   constructor(options: ExchangeOptions) {
     this.options = options
@@ -75,6 +90,8 @@ export class ExchangeCredential implements CredentialSource {
     this.readProof = options.readProof ?? ((path) => readFile(path, 'utf8'))
     this.now = options.now ?? Date.now
     this.log = options.log ?? ((message) => console.error(message))
+    // Not unref'd: a one-shot process (forget-subject.ts) must wait too, and the wait is bounded.
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
   }
 
   async current(): Promise<string | undefined> {
@@ -87,6 +104,27 @@ export class ExchangeCredential implements CredentialSource {
     }
     if (this.token !== undefined && this.now() < this.expiresAt) return this.token
     return undefined
+  }
+
+  async untilCurrent(signal?: AbortSignal): Promise<string | undefined> {
+    // The bound starts once the first answer is in: a call made while an exchange is in flight
+    // (up to EXCHANGE_TIMEOUT_MS, which it waited for before #6647 too) still waits for the retry.
+    let deadline: number | undefined
+    const aborted = abortOf(signal)
+    try {
+      for (;;) {
+        const token = await Promise.race([this.current(), aborted.promise])
+        if (token !== undefined || signal?.aborted) return token
+        deadline ??= this.now() + CREDENTIAL_WAIT_MS
+        // A backend not up yet sets no back-off (nextTry is due): the call would be refused too.
+        const wait = this.nextTry - this.now()
+        if (wait <= 0 || this.now() + wait + EXCHANGE_TIMEOUT_MS > deadline) return undefined
+        await Promise.race([this.sleep(wait), aborted.promise])
+        if (signal?.aborted) return undefined
+      }
+    } finally {
+      aborted.dispose()
+    }
   }
 
   invalidate(token: string): void {
@@ -171,6 +209,18 @@ export class ExchangeCredential implements CredentialSource {
   }
 }
 
+/** Resolves (with no token) when `signal` aborts; never without one. */
+function abortOf(signal: AbortSignal | undefined): { promise: Promise<undefined>; dispose: () => void } {
+  if (!signal) return { promise: new Promise(() => {}), dispose: () => undefined }
+  let onAbort = (): void => undefined
+  const promise = new Promise<undefined>((resolve) => {
+    onAbort = () => resolve(undefined)
+    if (signal.aborted) resolve(undefined)
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
+  return { promise, dispose: () => signal.removeEventListener('abort', onAbort) }
+}
+
 /**
  * `fetchImpl` with the bearer added to requests under `baseUrl` (the backend) only, so a
  * presigned transfer URL elsewhere never sees it. A 401 drops that token, so the next
@@ -181,7 +231,8 @@ export function withServiceCredential(fetchImpl: typeof fetch, credential: Crede
   return async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     if (!url.startsWith(base)) return fetchImpl(input, init)
-    const token = await credential.current()
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+    const token = await (credential.untilCurrent?.(signal ?? undefined) ?? credential.current())
     if (token === undefined) return fetchImpl(input, init)
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
     if (!headers.has('authorization')) headers.set('authorization', `Bearer ${token}`)
@@ -191,11 +242,14 @@ export function withServiceCredential(fetchImpl: typeof fetch, credential: Crede
   }
 }
 
-/** `Authorization: Bearer <token>` on every backend call, when there is one; a 401 drops it. */
+/**
+ * `Authorization: Bearer <token>` on every backend call, when there is one (after the bounded wait
+ * of `untilCurrent`, which the request's signal ends); a 401 drops it.
+ */
 export function serviceCredentialMiddleware(credential: CredentialSource): Middleware {
   return {
     async onRequest({ request }) {
-      const token = await credential.current()
+      const token = await (credential.untilCurrent?.(request.signal) ?? credential.current())
       if (token !== undefined && !request.headers.has('authorization')) {
         request.headers.set('authorization', `Bearer ${token}`)
       }

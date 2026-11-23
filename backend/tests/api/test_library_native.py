@@ -306,12 +306,11 @@ def test_an_entry_names_its_live_output(
     assert one["folder_path"] == []
 
 
-def test_a_native_entry_carries_its_sha256_in_lowercase(
+def test_a_native_entry_carries_its_sha256(
     native_client: TestClient, in_folder: NativeFile
 ) -> None:
     """#7073: the listing, the search and the file read alone all state the row's
-    sha256, lowercase, whatever case the row holds."""
-    assert in_folder.sha256 == in_folder.sha256.lower()
+    sha256 (lowercase hex, as the native library stores it)."""
     listed = native_client.get("/api/v1/print/library", params={"folder_id": in_folder.folder_id})
     assert listed.json()["files"][0]["file_hash"] == in_folder.sha256
     hits = native_client.get("/api/v1/print/library/search", params={"q": "bracket"}).json()

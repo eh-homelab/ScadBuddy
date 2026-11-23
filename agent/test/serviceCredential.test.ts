@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { type CredentialSource, ExchangeCredential, serviceCredentialMiddleware, withServiceCredential } from '../src/api/serviceCredential.js'
+import { describe, expect, it, vi } from 'vitest'
+import { CREDENTIAL_WAIT_MS, type CredentialSource, ExchangeCredential, serviceCredentialMiddleware, withServiceCredential } from '../src/api/serviceCredential.js'
 
 // #4975 phase 4: the agent's service credential on its calls to the backend. It reads no view
 // (#5299 step 12): the credential is only ever exchanged for the proof (below).
@@ -274,5 +274,166 @@ describe('ExchangeCredential', () => {
     clock.now = 10_000
     const again = (await middleware.onRequest!({ request: new Request('http://backend/api/v1/models') } as never)) as Request
     expect(again.headers.get('authorization')).not.toBe(first)
+  })
+
+  // #6647: at pod start the first exchange failed (the API not answering yet), and the calls made in
+  // its back-off went out with no credential and got 401.
+  function firstExchangeFails(first: { status: number; retryAfter?: string }, sleep?: (ms: number) => Promise<void>) {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const slept: number[] = []
+    let exchanges = 0
+    const credential = new ExchangeCredential({
+      backendUrl: 'http://backend:8080/',
+      proofFile: '/var/run/scadbuddy/token',
+      proof: 'k8s',
+      fetchImpl: ((input: string | URL | Request, init?: RequestInit) => {
+        exchanges += 1
+        if (exchanges === 1) {
+          return Promise.resolve(
+            new Response('{}', { status: first.status, headers: first.retryAfter ? { 'retry-after': first.retryAfter } : {} }),
+          )
+        }
+        return backend.fetchImpl(input, init)
+      }) as typeof fetch,
+      readProof: async () => 'jwt-1',
+      now: () => clock.now,
+      log: () => undefined,
+      sleep:
+        sleep ??
+        (async (ms) => {
+          slept.push(ms)
+          clock.now += ms
+        }),
+    })
+    const seen: (string | null)[] = []
+    // The backend refuses a CRUD call that has no credential.
+    const inner = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get('authorization')
+      seen.push(authorization)
+      return new Response('{}', { status: authorization === null ? 401 : 200 })
+    }) as typeof fetch
+    return { credential, clock, slept, seen, inner }
+  }
+
+  it('a call made in the first back-off waits for the next exchange and carries its token (#6647)', async () => {
+    const { credential, slept, seen, inner } = firstExchangeFails({ status: 503 })
+    expect(await credential.current()).toBeUndefined()
+    const wrapped = withServiceCredential(inner, credential, 'http://backend:8080/')
+    const response = await wrapped('http://backend:8080/api/v1/internal/crud/agent/events/head')
+    expect(response.status).toBe(200)
+    expect(seen).toEqual([expect.stringMatching(/^Bearer sbsvc_/)])
+    expect(slept).toEqual([5_000])
+  })
+
+  it("the client's middleware waits for the next exchange too (#6647)", async () => {
+    const { credential, slept } = firstExchangeFails({ status: 503 })
+    expect(await credential.current()).toBeUndefined()
+    const middleware = serviceCredentialMiddleware(credential)
+    const request = (await middleware.onRequest!({ request: new Request('http://backend/api/v1/models') } as never)) as Request
+    expect(request.headers.get('authorization')).toMatch(/^Bearer sbsvc_/)
+    expect(slept).toEqual([5_000])
+  })
+
+  it('does not wait past the bound: the call goes out as before (#6647)', async () => {
+    const { credential, slept, seen, inner } = firstExchangeFails({ status: 429, retryAfter: String(CREDENTIAL_WAIT_MS / 1000 + 1) })
+    const wrapped = withServiceCredential(inner, credential, 'http://backend:8080/')
+    expect((await wrapped('http://backend:8080/api/v1/internal/crud/agent/events/head')).status).toBe(401)
+    expect(seen).toEqual([null])
+    expect(slept).toEqual([])
+  })
+
+  it("ends the wait when the call's own signal aborts, not at the next exchange (#7099 review)", async () => {
+    // A sleep that never ends: only the abort can end the wait.
+    const { credential, seen } = firstExchangeFails({ status: 503 }, () => new Promise(() => {}))
+    expect(await credential.current()).toBeUndefined()
+    const inner = (async (_input: string | URL | Request, init?: RequestInit) => {
+      init?.signal?.throwIfAborted()
+      seen.push(new Headers(init?.headers).get('authorization'))
+      return new Response('{}')
+    }) as typeof fetch
+    const wrapped = withServiceCredential(inner, credential, 'http://backend:8080/')
+    const started = Date.now()
+    const call = wrapped('http://backend:8080/api/v1/internal/crud/agent/events/head', { signal: AbortSignal.timeout(50) })
+    await expect(call).rejects.toMatchObject({ name: 'TimeoutError' })
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(seen).toEqual([])
+
+    const controller = new AbortController()
+    const middleware = serviceCredentialMiddleware(credential)
+    const pending = middleware.onRequest!({ request: new Request('http://backend/api/v1/models', { signal: controller.signal }) } as never)
+    controller.abort()
+    const request = (await pending) as Request
+    expect(request.headers.get('authorization')).toBeNull()
+  })
+
+  it('a call made during a slow first exchange still waits for the retry (#7099 review)', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const slept: number[] = []
+    let exchanges = 0
+    const credential = new ExchangeCredential({
+      backendUrl: 'http://backend:8080/',
+      proofFile: '/var/run/scadbuddy/token',
+      proof: 'k8s',
+      fetchImpl: ((input: string | URL | Request, init?: RequestInit) => {
+        exchanges += 1
+        if (exchanges === 1) {
+          // The first exchange takes its whole 10 s timeout, then fails.
+          clock.now += 10_000
+          return Promise.reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' }))
+        }
+        return backend.fetchImpl(input, init)
+      }) as typeof fetch,
+      readProof: async () => 'jwt-1',
+      now: () => clock.now,
+      log: () => undefined,
+      sleep: async (ms) => {
+        slept.push(ms)
+        clock.now += ms
+      },
+    })
+    expect(await credential.untilCurrent()).toMatch(/^sbsvc_/)
+    expect(slept).toEqual([5_000])
+  })
+
+  it('the default wait keeps a one-shot process alive (#7099 review)', async () => {
+    const credential = new ExchangeCredential({ backendUrl: 'http://backend:8080/', proofFile: '/x', proof: 'k8s' })
+    const spy = vi.spyOn(globalThis, 'setTimeout')
+    try {
+      void (credential as unknown as { sleep: (ms: number) => Promise<void> }).sleep(1)
+      const timer = spy.mock.results.at(-1)?.value as NodeJS.Timeout
+      expect(timer.hasRef()).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('counts the exchange after the wait in the bound (#7099 review)', async () => {
+    // A next exchange due in 6 s, plus its own 10 s timeout, could end past the 15 s bound.
+    const { credential, slept } = firstExchangeFails({ status: 429, retryAfter: '6' })
+    expect(await credential.untilCurrent()).toBeUndefined()
+    expect(slept).toEqual([])
+  })
+
+  it('does not wait for a backend that is not up: that call is refused too (#6647)', async () => {
+    let calls = 0
+    const credential = new ExchangeCredential({
+      backendUrl: 'http://backend:8080/',
+      proofFile: '/var/run/scadbuddy/token',
+      proof: 'k8s',
+      fetchImpl: (() => {
+        calls += 1
+        return Promise.reject(
+          new TypeError('fetch failed', { cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8080'), { code: 'ECONNREFUSED' }) }),
+        )
+      }) as typeof fetch,
+      readProof: async () => 'jwt-1',
+      now: () => 0,
+      log: () => undefined,
+      sleep: () => Promise.reject(new Error('no wait expected')),
+    })
+    expect(await credential.untilCurrent()).toBeUndefined()
+    expect(calls).toBe(1)
   })
 })

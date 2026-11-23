@@ -927,7 +927,13 @@ class LibraryListRow(BambuddyModel):
     per_print: bool = False
     #: ScadBuddy's own library only (#7073): the row's ``sha256``. Bambuddy's listing
     #: states no hash; its ``GET /library/files/{id}`` does (`LibraryFile.file_hash`).
+    #: Lowercase hex, the case a listing's pinned sha256 has.
     file_hash: str | None = None
+
+    @field_validator("file_hash")
+    @classmethod
+    def _lowercase_hash(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
 
 
 class LibraryPlate(BambuddyModel):

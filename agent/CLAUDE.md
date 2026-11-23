@@ -36,7 +36,10 @@ The service credential (`src/api/serviceCredential.ts`, wired in `main.ts`) is r
 for a 15-minute credential and renews it at half-life and after a 401; it reads no view (a 404
 is a failed exchange, #6501). A failed exchange is tried again after 5 s doubling to 60 s; a
 refused connection (`src/api/backendUp.ts` `backendNotUp`, #5868) is tried again at the next
-call and logged once as "waiting for the backend".
+call and logged once as "waiting for the backend". With no token held, a backend call
+(`withServiceCredential`, `serviceCredentialMiddleware`) waits for the next exchange when it ends
+within `CREDENTIAL_WAIT_MS` (15 s, counted from the first answer; #6647), so a call can take that
+much longer in a back-off; the call's own signal ends the wait.
 
 Readiness: `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start
 (back-off 1 s doubling to 30 s) until every wanted area is listed, and until then the agent is
@@ -566,10 +569,18 @@ opens every one and seals it again byte for byte).
     API's area `package-mirrors` (`mirror.ts`), never upstream. Downloads go through
     the egress check at every hop (`download.ts`), archives are unpacked by
     `unpack.ts` (no links, devices or paths out). Install stores the pin unapproved;
-    approving needs the exact commit (or `bytes_sha256`) and hash. `vet.ts` adds rules
+    approving needs the exact commit (or `bytes_sha256`, or `version`) and hash. `vet.ts` adds rules
     on top of `harness/plugins.ts`. Tests use local git repos (`test/support/gitRepo.ts`),
     and archives built byte by byte (`test/support/archives.ts`) on a local HTTP server
-    (`test/pluginPackagesBytes.test.ts`). Their MCP servers' http ones go
+    (`test/pluginPackagesBytes.test.ts`). A hosted plugin (#6934, source `{ kind: 'hosted',
+    name }`, `pin_kind` `version`) is read over the API's area `hosted-plugins`
+    (`hosted.ts` `CrudHostedPlugins`): its zip checked against the version's sha256 and its
+    files against the content hash, then vetted; an install of a hosted source re-pins the
+    installed hosted package instead (`operations.ts` `offerHosted`), and its view's
+    `not_offered` names a published version no pin names (`test/pluginPackagesHosted.test.ts`). The
+    assistant's `hosted_plugin_*` tools (#6938, `src/tools/hostedPlugins.ts`) write a draft over the
+    API's `api` routes; `hosted_plugin_publish` (`outward`) publishes, then offers in-process through
+    `ToolServices.hostedPackages` (`offerHosted`), never the UI-guarded routes. A package's http MCP servers go
     through the forwarder (`plugins/packages/mcp.ts`), and on Temporal each call is a
     `turn:<server>__<tool>` ToolCall.
   - Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every session offers `Read`,

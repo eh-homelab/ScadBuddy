@@ -47,6 +47,7 @@ import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview,
 import { reviewsByHash } from './access/packageProvider.js'
 import { CrudPackageStore } from './plugins/packages/store.js'
 import { CrudPackageMirror } from './plugins/packages/mirror.js'
+import { CrudHostedPlugins } from './plugins/packages/hosted.js'
 import { CrudPluginFeeds } from './plugins/feed.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { CrudOAuthRows, PluginOAuth } from './plugins/oauthStore.js'
@@ -134,7 +135,7 @@ import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
 import { CrudOperations, OperationStore } from './operations/store.js'
 import { activityKindsOf, crudUpsertActivityKinds } from './activity/kinds.js'
-import { packageKinds } from './plugins/packages/operations.js'
+import { offerHosted, packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
@@ -452,11 +453,25 @@ const pluginPackages = new CrudPackageStore(crudTarget)
 // An archive or npm package's file (#6935) is kept by the API (area `package-mirrors`, one of
 // `STORE_AREAS`, so the agent is not ready until the API lists it).
 const packageMirror = new CrudPackageMirror(crudTarget)
-const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths), mirror: () => packageMirror })
+// A hosted plugin's versions (#6934) are read from the API too (area `hosted-plugins`, one of
+// `STORE_AREAS`).
+const hostedPlugins = new CrudHostedPlugins(crudTarget)
+const packageInstaller = new PackageInstaller({
+  fetcher: new GitFetcher(),
+  cacheRoot: pluginCacheDir(paths),
+  mirror: () => packageMirror,
+  hosted: () => hostedPlugins,
+})
 // Settings → Tools & plugins (#4757): an older stored review's items read from the cached copy
 // (read only), once per content hash; and what a turn would make of the enabled packages.
 const verifiedPackageReview = reviewsByHash((pin) => verifiedReview(packageInstaller, pin))
 const packagesLoadCheck = packageLoadCheck(pluginPackages, packageInstaller)
+// hosted_plugin_publish's offer (#6938, spec 2026-11-21 §6.2): in-process, never through the
+// UI-guarded package routes. Every path shares toolServices (an in-process turn, /mcp, a ToolCall).
+toolServices.hostedPackages = {
+  get: (name) => pluginPackages.get(name),
+  offer: (name, signal) => offerHosted(pluginPackages, packageInstaller, name, signal),
+}
 // The cache is this pod's scratch, empty after every deploy: filled at start, so a
 // turn does not wait on a whole repository's fetch (#4217).
 void untilAreas()

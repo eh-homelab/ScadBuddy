@@ -141,7 +141,7 @@ describe('sources', () => {
       url: 'https://registry.npmjs.org/@acme%2fp',
       ref: '1.2.3',
     })
-    expect(validateSource({ kind: 'npm', package: 'https://gitlab.com/api/v4/projects/1/packages/npm/p/-/p-1.0.0.tgz' }).ref).toBe('')
+    expect((validateSource({ kind: 'npm', package: 'https://gitlab.com/api/v4/projects/1/packages/npm/p/-/p-1.0.0.tgz' }) as { ref: string }).ref).toBe('')
     for (const bad of [
       { kind: 'npm', package: 'git+https://github.com/o/r.git' },
       { kind: 'npm', package: 'file:../p' },
@@ -167,15 +167,15 @@ describe('sources', () => {
     ] as const) {
       expect(() => validateSource(bad), JSON.stringify(bad)).toThrow(/https/)
     }
-    expect(validateSource({ kind: 'archive', url: 'http://127.0.0.1:8080/p.zip' }).url).toBe('http://127.0.0.1:8080/p.zip')
-    expect(validateSource({ kind: 'archive', url: 'http://localhost/p.zip' }).url).toBe('http://localhost/p.zip')
+    expect((validateSource({ kind: 'archive', url: 'http://127.0.0.1:8080/p.zip' }) as { url: string }).url).toBe('http://127.0.0.1:8080/p.zip')
+    expect((validateSource({ kind: 'archive', url: 'http://localhost/p.zip' }) as { url: string }).url).toBe('http://localhost/p.zip')
     expect(() =>
       marketplaceTarget({ plugins: [{ name: 'p', source: { source: 'archive', url: 'http://files.test/p.zip' } }] }, 'p', 'https://plugins.test/m.json'),
     ).toThrow(/https/)
   })
 
   it('re-pins an npm package to a version, and refuses a ref for an archive', () => {
-    expect(withRepinRef({ kind: 'npm', url: 'https://registry.npmjs.org/p', ref: '1.0.0' }, '1.1.0').ref).toBe('1.1.0')
+    expect((withRepinRef({ kind: 'npm', url: 'https://registry.npmjs.org/p', ref: '1.0.0' }, '1.1.0') as { ref: string }).ref).toBe('1.1.0')
     expect(() => withRepinRef({ kind: 'archive', url: 'https://files.test/p.zip', ref: '' }, 'main')).toThrow(/no ref/)
     // An archive installed with its sha256 can only find the same file again.
     const fixed = { kind: 'archive' as const, url: 'https://files.test/p.zip', ref: `sha256:${'a'.repeat(64)}` }

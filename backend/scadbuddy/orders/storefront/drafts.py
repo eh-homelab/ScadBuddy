@@ -414,6 +414,24 @@ async def _render_colours(
     return found if found is not None else await variant_colours(state, variant)
 
 
+def _still_pinned(conn: Any, listing_id: str, sha256: str | None) -> None:
+    """409 ``listing_changed`` unless the published listing still pins ``sha256``, read
+    under a share lock in the add's transaction (#7075 review): a publish of other bytes
+    since the check drops the old copy's hold, and a line must never hold a copy its
+    listing no longer sells."""
+    row = conn.execute(
+        "SELECT 1 FROM storefront_listings WHERE id = %s AND published"
+        " AND library_file->>'pinned' = %s FOR SHARE",
+        (listing_id, sha256),
+    ).fetchone()
+    if row is None:
+        raise problem(
+            status.HTTP_409_CONFLICT,
+            "listing_changed",
+            "This listing has changed. Load it again.",
+        )
+
+
 def _sells_file(orders: OrdersComponent, listing_id: str) -> bool:
     """Whether ``listing_id`` names a listing of a library file (#6710). Blocking."""
     found = orders.listings.get(listing_id) if LISTING_ID.fullmatch(listing_id) else None
@@ -506,6 +524,8 @@ async def add_listing_item(
                 raise draft_full()
             if variant is not None:
                 LinePrices.record(conn, items[0].id, variant, price)
+            if isinstance(entry, NewLibraryItem):
+                _still_pinned(conn, listing.id, entry.file.sha256)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
             changes.append((order, items))

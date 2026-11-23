@@ -113,7 +113,12 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
   })
+  // Every manager a test made: its pending re-sends are cleared after the test (#7103). An
+  // unref'd re-send that outlived its test could run as the file tears Temporal down, and its
+  // call's retry on the closed channel threw outside any promise.
+  const managers: SessionManager[] = []
   afterEach(async () => {
+    for (const m of managers.splice(0)) m.durableTurns?.close()
     await drop()
   })
 
@@ -137,6 +142,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       ...(options.resendAfterMs ? { resendAfterMs: options.resendAfterMs } : {}),
       ...(options.describe ? { describe: options.describe } : {}),
     })
+    managers.push(m)
     return m
   }
 
@@ -360,6 +366,40 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       }
     }, 30_000)
   }
+
+  it('sends nothing again once closed, as the process stops (#7103)', async () => {
+    const queue = `durable-resend-${randomUUID()}`
+    const m = await durableManager({ sendTimeoutMs: 500, sessionQueue: queue, resendAfterMs: 1_000, describe: async () => 'between_turns' })
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart')
+    try {
+      // No worker polls `queue`: the send waits out its deadline, so a re-send is due in 1 s.
+      await m.send(session.id, browser, 'hello')
+      m.durableTurns!.close()
+      await new Promise((r) => setTimeout(r, 2_000))
+      expect(spy).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
+
+  it('arms no re-send for a send still in flight when closed (#7105 review)', async () => {
+    const queue = `durable-resend-${randomUUID()}`
+    const m = await durableManager({ sendTimeoutMs: 500, sessionQueue: queue, resendAfterMs: 200, describe: async () => 'between_turns' })
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart')
+    try {
+      const sending = m.send(session.id, browser, 'hello')
+      // Closed while the send waits out its deadline: its unknown outcome comes after the close.
+      await expect.poll(() => spy.mock.calls.length, { timeout: 10_000 }).toBe(1)
+      m.durableTurns!.close()
+      await sending
+      await new Promise((r) => setTimeout(r, 1_500))
+      expect(spy).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
 
   /** A session whose run was told to end while a turn ran, so it stays open, and whose row is idle again. */
   async function endingRun(m: SessionManager): Promise<{ sessionId: string; runId: string }> {

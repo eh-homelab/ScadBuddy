@@ -567,7 +567,7 @@ const tools: Tool[] = [
       'colour (`query`); the `material` ranks the candidates (its matches first, then the type\'s) and filters ' +
       'nothing, so check each candidate\'s brand, material and type before you take its id. The site misses some ' +
       'brands: no candidate is not proof that 3DFP lacks the filament. Use it in place of a web search for 3DFP ' +
-      'ids. 503 `no_worker` or `not_started` when the worker is not running or is busy with a preset fetch (try ' +
+      'ids. 503 `no_worker` or `not_started` when the worker is not running or is busy with other searches (try ' +
       'again later), 502 when the site failed. Reads only.',
     input: z.object({
       brand: z.string().min(1).max(200).describe('The brand as 3DFP files it, e.g. `SUNLU`'),
