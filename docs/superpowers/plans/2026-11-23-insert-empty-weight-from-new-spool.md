@@ -42,7 +42,7 @@ React + vitest + msw (frontend).
 - **R-7280-6** The UI says that makers overfill by about 10-30 g, so the estimate comes out
   slightly heavy, and that a later weighing of an empty spool replaces it. No empty-spool
   weighing flow exists today, so `weighed_empty` is only a value of the column here; recording it
-  is a follow-up issue.
+  is a follow-up issue (#7300).
 - **R-7280-7** The spool's weighing itself is recorded exactly as today
   (`POST /filament/spools/{id}/events` is unchanged).
 - **R-7280-8** Every new tool or parameter follows the one access model (#2171): the offer read is
@@ -303,6 +303,6 @@ Decisions this plan adds (D-n):
 
 ### Task 4: Follow-up, PR (controller)
 
-- [ ] File a follow-up issue: record an empty-spool weighing (a used-up spool) that sets the
+- [x] File a follow-up issue (#7300): record an empty-spool weighing (a used-up spool) that sets the
   insert's weight with basis `weighed_empty` (R-7280-6), Part of #6260, referencing #7280.
 - [ ] Final whole-branch review, push, PR, auto-merge, rulings comment on #7280.
