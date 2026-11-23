@@ -14,6 +14,8 @@ type LibraryFileEntry struct {
 	additionalData map[string]any
 	// The created_at property
 	created_at LibraryFileEntry_LibraryFileEntry_created_atable
+	// The file_hash property
+	file_hash LibraryFileEntry_LibraryFileEntry_file_hashable
 	// The file_size property
 	file_size LibraryFileEntry_LibraryFileEntry_file_sizeable
 	// The file_type property
@@ -126,6 +128,92 @@ func (m *LibraryFileEntry_LibraryFileEntry_created_at) SetDateTimeOffset(value *
 // SetLibraryFileEntryCreatedAtMember1 sets the LibraryFileEntry_created_atMember1 property value. Composed type representation for type LibraryFileEntry_created_atMember1able
 func (m *LibraryFileEntry_LibraryFileEntry_created_at) SetLibraryFileEntryCreatedAtMember1(value LibraryFileEntry_created_atMember1able) {
 	m.libraryFileEntry_created_atMember1 = value
+}
+
+// LibraryFileEntry_LibraryFileEntry_file_hash composed type wrapper for classes LibraryFileEntry_file_hashMember1able, string
+type LibraryFileEntry_LibraryFileEntry_file_hash struct {
+	// Composed type representation for type LibraryFileEntry_file_hashMember1able
+	libraryFileEntry_file_hashMember1 LibraryFileEntry_file_hashMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewLibraryFileEntry_LibraryFileEntry_file_hash instantiates a new LibraryFileEntry_LibraryFileEntry_file_hash and sets the default values.
+func NewLibraryFileEntry_LibraryFileEntry_file_hash() *LibraryFileEntry_LibraryFileEntry_file_hash {
+	m := &LibraryFileEntry_LibraryFileEntry_file_hash{}
+	return m
+}
+
+// CreateLibraryFileEntry_LibraryFileEntry_file_hashFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateLibraryFileEntry_LibraryFileEntry_file_hashFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewLibraryFileEntry_LibraryFileEntry_file_hash()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreateLibraryFileEntry_file_hashMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(LibraryFileEntry_file_hashMember1able); ok {
+				result.SetLibraryFileEntryFileHashMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *LibraryFileEntry_LibraryFileEntry_file_hash) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *LibraryFileEntry_LibraryFileEntry_file_hash) GetIsComposedType() bool {
+	return true
+}
+
+// GetLibraryFileEntryFileHashMember1 gets the LibraryFileEntry_file_hashMember1 property value. Composed type representation for type LibraryFileEntry_file_hashMember1able
+// returns a LibraryFileEntry_file_hashMember1able when successful
+func (m *LibraryFileEntry_LibraryFileEntry_file_hash) GetLibraryFileEntryFileHashMember1() LibraryFileEntry_file_hashMember1able {
+	return m.libraryFileEntry_file_hashMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *LibraryFileEntry_LibraryFileEntry_file_hash) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *LibraryFileEntry_LibraryFileEntry_file_hash) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetLibraryFileEntryFileHashMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetLibraryFileEntryFileHashMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetLibraryFileEntryFileHashMember1 sets the LibraryFileEntry_file_hashMember1 property value. Composed type representation for type LibraryFileEntry_file_hashMember1able
+func (m *LibraryFileEntry_LibraryFileEntry_file_hash) SetLibraryFileEntryFileHashMember1(value LibraryFileEntry_file_hashMember1able) {
+	m.libraryFileEntry_file_hashMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *LibraryFileEntry_LibraryFileEntry_file_hash) SetString(value *string) {
+	m.string = value
 }
 
 // LibraryFileEntry_LibraryFileEntry_file_size composed type wrapper for classes int32, LibraryFileEntry_file_sizeMember1able
@@ -394,6 +482,14 @@ type LibraryFileEntry_LibraryFileEntry_created_atable interface {
 	SetLibraryFileEntryCreatedAtMember1(value LibraryFileEntry_created_atMember1able)
 }
 
+type LibraryFileEntry_LibraryFileEntry_file_hashable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetLibraryFileEntryFileHashMember1() LibraryFileEntry_file_hashMember1able
+	GetString() *string
+	SetLibraryFileEntryFileHashMember1(value LibraryFileEntry_file_hashMember1able)
+	SetString(value *string)
+}
+
 type LibraryFileEntry_LibraryFileEntry_file_sizeable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetInteger() *int32
@@ -464,6 +560,16 @@ func (m *LibraryFileEntry) GetFieldDeserializers() map[string]func(i878a80d2330e
 		}
 		if val != nil {
 			m.SetCreatedAt(val.(LibraryFileEntry_LibraryFileEntry_created_atable))
+		}
+		return nil
+	}
+	res["file_hash"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateLibraryFileEntry_LibraryFileEntry_file_hashFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetFileHash(val.(LibraryFileEntry_LibraryFileEntry_file_hashable))
 		}
 		return nil
 	}
@@ -606,6 +712,12 @@ func (m *LibraryFileEntry) GetFieldDeserializers() map[string]func(i878a80d2330e
 	return res
 }
 
+// GetFileHash gets the file_hash property value. The file_hash property
+// returns a LibraryFileEntry_LibraryFileEntry_file_hashable when successful
+func (m *LibraryFileEntry) GetFileHash() LibraryFileEntry_LibraryFileEntry_file_hashable {
+	return m.file_hash
+}
+
 // GetFilename gets the filename property value. The filename property
 // returns a *string when successful
 func (m *LibraryFileEntry) GetFilename() *string {
@@ -694,6 +806,12 @@ func (m *LibraryFileEntry) Serialize(writer i878a80d2330e89d26896388a3f487eef27b
 	}
 	{
 		err := writer.WriteStringValue("filename", m.GetFilename())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("file_hash", m.GetFileHash())
 		if err != nil {
 			return err
 		}
@@ -789,6 +907,11 @@ func (m *LibraryFileEntry) SetCreatedAt(value LibraryFileEntry_LibraryFileEntry_
 	m.created_at = value
 }
 
+// SetFileHash sets the file_hash property value. The file_hash property
+func (m *LibraryFileEntry) SetFileHash(value LibraryFileEntry_LibraryFileEntry_file_hashable) {
+	m.file_hash = value
+}
+
 // SetFilename sets the filename property value. The filename property
 func (m *LibraryFileEntry) SetFilename(value *string) {
 	m.filename = value
@@ -858,6 +981,7 @@ type LibraryFileEntryable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetCreatedAt() LibraryFileEntry_LibraryFileEntry_created_atable
+	GetFileHash() LibraryFileEntry_LibraryFileEntry_file_hashable
 	GetFilename() *string
 	GetFileSize() LibraryFileEntry_LibraryFileEntry_file_sizeable
 	GetFileType() *string
@@ -872,6 +996,7 @@ type LibraryFileEntryable interface {
 	GetPrintCount() *int32
 	GetSliced() *bool
 	SetCreatedAt(value LibraryFileEntry_LibraryFileEntry_created_atable)
+	SetFileHash(value LibraryFileEntry_LibraryFileEntry_file_hashable)
 	SetFilename(value *string)
 	SetFileSize(value LibraryFileEntry_LibraryFileEntry_file_sizeable)
 	SetFileType(value *string)

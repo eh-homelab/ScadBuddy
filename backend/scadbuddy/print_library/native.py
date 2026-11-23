@@ -188,6 +188,7 @@ class NativeLibrary:
                 created_at=_naive_utc(f.created_at),
                 is_external=False,
                 per_print=f.print_subject is not None,
+                file_hash=f.sha256,
             )
             for f in files
         ]

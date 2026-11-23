@@ -52,6 +52,19 @@ def test_every_word_matches_the_name_or_the_folder_whatever_the_case_or_separato
     assert (found.total, found.hidden) == (1, 1)
 
 
+def test_a_hit_states_its_row_s_file_hash_in_lowercase() -> None:
+    """#7073: a row's ``file_hash`` (the native library's sha256) is lowercased, so it
+    compares with a listing's pinned sha256; a row with none states none."""
+    stated = LibraryListRow(
+        id=20, filename="hashed.3mf", file_type="3mf", folder_id=None, file_hash="CD" * 32
+    )
+    rows = [stated, row(21, "hashed-too.3mf", None)]
+
+    found = search_library(FOLDERS, rows, "hashed", show_all=False)
+
+    assert {hit.id: hit.file_hash for hit in found.files} == {20: "cd" * 32, 21: None}
+
+
 def test_a_file_is_found_by_the_folders_it_is_in() -> None:
     found = search_library(FOLDERS, ROWS, "name keychains", show_all=False)
 

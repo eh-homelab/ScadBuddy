@@ -55,6 +55,11 @@ class LibraryEntry(BaseModel):
     #: A print run's per-print copy or slice in ScadBuddy's own library (#6394): never a
     #: target of Import print, as its sweep trashes it.
     per_print: bool = False
+    #: The file's SHA-256 as its library states it, lowercase hex (#7073): ScadBuddy's own
+    #: library's ``sha256``, or Bambuddy's ``file_hash``. Bambuddy's listing states none,
+    #: so on Bambuddy only the file read alone (``GET /print/library/{id}``) carries it.
+    #: ``None`` when the library states none.
+    file_hash: str | None = None
 
 
 class LibraryListing(BaseModel):
@@ -80,7 +85,13 @@ def _entry(row: LibraryListRow) -> LibraryEntry:
         created_at=_utc(row.created_at) if row.created_at is not None else None,
         is_external=row.is_external,
         per_print=row.per_print,
+        file_hash=lower_hash(row.file_hash),
     )
+
+
+def lower_hash(digest: str | None) -> str | None:
+    """A library's stated hash as lowercase hex, the case a listing's pinned sha256 has."""
+    return digest.lower() if digest is not None else None
 
 
 def _utc(when: datetime) -> datetime:
