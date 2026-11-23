@@ -441,10 +441,11 @@ export class PackageInstaller {
       const { root, dir } = await this.unpacked(bytes, path.join(tmp, 'unpacked'))
       const pkg = path.join(tmp, 'pkg')
       await rename(dir, pkg)
-      const { tree, review } = await this.vetTree(await this.hashed(pkg), pkg, source.name)
+      const tree = await this.hashed(pkg)
       if (tree.hash !== latest.content_hash) {
         throw new PluginError(`the files of ${source.name} version ${latest.version} hash to ${tree.hash}, not its ${latest.content_hash}`, 502)
       }
+      const { review } = await this.vetTree(tree, pkg, source.name)
       if (review.name !== source.name) {
         throw new PackageRefusedError([`the hosted plugin's manifest names "${review.name}", not "${source.name}"`])
       }

@@ -25,13 +25,17 @@ import { notifyWarmEvict } from './publisher.js'
 // (src/plugins/packages/store.ts CrudPackageStore).
 
 /** The id of a prepared pin: its commit, or its file's sha256. */
-const preparedId = (p: PreparedPackage): string => p.bytesSha256 ?? p.commit
-const preparedKind = (p: PreparedPackage): 'commit' | 'bytes' => (p.bytesSha256 !== undefined ? 'bytes' : 'commit')
+const preparedId = (p: PreparedPackage): string =>
+  p.version !== undefined ? String(p.version) : (p.bytesSha256 ?? p.commit)
+const preparedKind = (p: PreparedPackage): 'commit' | 'bytes' | 'version' =>
+  p.version !== undefined ? 'version' : p.bytesSha256 !== undefined ? 'bytes' : 'commit'
 /** The id of a row's pin, or with `pending`, of its re-pin. */
 const rowId = (row: PackageRow, pending = false): string | null =>
   pending
-    ? (row.pending_pin_kind === 'bytes' ? row.pending_bytes_sha256 : row.pending_commit_sha)
-    : (row.pin_kind === 'bytes' ? row.bytes_sha256 : row.commit_sha)
+    ? (row.pending_pin_kind === 'version'
+        ? String(row.pending_version)
+        : row.pending_pin_kind === 'bytes' ? row.pending_bytes_sha256 : row.pending_commit_sha)
+    : (row.pin_kind === 'version' ? String(row.version) : row.pin_kind === 'bytes' ? row.bytes_sha256 : row.commit_sha)
 
 /** Where `package:<name>`'s servers' sources start: compared with `starts_with`, never `LIKE` (a name may hold `_`). */
 const serverPrefix = (name: string): string => `${packageSource(name)}/mcp:`
@@ -138,10 +142,10 @@ export class PackageStore implements PackageRepo {
     return this.sql.begin(async (tx) => {
       const rows = await tx<PackageRow[]>`
       INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref, marketplace_entry, fetch_url,
-                                      fetch_path, pin_kind, commit_sha, bytes_sha256, content_hash, files, review)
+                                      fetch_path, pin_kind, commit_sha, bytes_sha256, version, content_hash, files, review)
       VALUES (${p.review.name}, ${p.source.kind}, ${sourceColumns(p.source).url}, ${sourceColumns(p.source).ref},
               ${entryOf(p.source)}, ${p.fetchUrl}, ${p.fetchPath}, ${preparedKind(p)},
-              ${p.bytesSha256 === undefined ? p.commit : null}, ${p.bytesSha256 ?? null},
+              ${preparedKind(p) === 'commit' ? p.commit : null}, ${p.bytesSha256 ?? null}, ${p.version ?? null},
               ${p.contentHash}, ${tx.json(p.files)}, ${tx.json(p.review)})
       ON CONFLICT (name) DO NOTHING
       RETURNING *`
@@ -176,8 +180,8 @@ export class PackageStore implements PackageRepo {
       const [row] = await tx<PackageRow[]>`
         UPDATE ai_plugin_packages SET
           pending_ref = ${sourceColumns(p.source).ref}, pending_fetch_url = ${p.fetchUrl}, pending_fetch_path = ${p.fetchPath},
-          pending_pin_kind = ${preparedKind(p)}, pending_commit_sha = ${p.bytesSha256 === undefined ? p.commit : null},
-          pending_bytes_sha256 = ${p.bytesSha256 ?? null}, pending_version = NULL, pending_content_hash = ${p.contentHash},
+          pending_pin_kind = ${preparedKind(p)}, pending_commit_sha = ${preparedKind(p) === 'commit' ? p.commit : null},
+          pending_bytes_sha256 = ${p.bytesSha256 ?? null}, pending_version = ${p.version ?? null}, pending_content_hash = ${p.contentHash},
           pending_files = ${tx.json(p.files)}, pending_review = ${tx.json(p.review)}, updated_at = now()
         WHERE name = ${name}
         RETURNING *`
@@ -202,7 +206,7 @@ export class PackageStore implements PackageRepo {
     })
   }
 
-  async approve(name: string, commit: string, contentHash: string, allowRefused = false, kind: 'commit' | 'bytes' = 'commit'): Promise<PackageView> {
+  async approve(name: string, commit: string, contentHash: string, allowRefused = false, kind: 'commit' | 'bytes' | 'version' = 'commit'): Promise<PackageView> {
     return this.sql.begin(async (tx) => {
       const [current] = await tx<PackageRow[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name} FOR UPDATE`
       if (!current) throw new PluginError(`no plugin package named "${name}"`, 404)

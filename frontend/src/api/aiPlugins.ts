@@ -220,7 +220,10 @@ export type PinId = { commit_sha: string } | { bytes_sha256: string } | { versio
 
 /** The pin (or with `pending`, the re-pin) as approval names it. */
 export function pinId(pin: { pin_kind: PinKind; commit_sha: string | null; bytes_sha256: string | null; version: number | null }): PinId {
-  if (pin.pin_kind === 'version') return { version: pin.version ?? 0 }
+  if (pin.pin_kind === 'version') {
+    if (pin.version === null) throw new Error('a version pin has no version')
+    return { version: pin.version }
+  }
   return pin.pin_kind === 'bytes' ? { bytes_sha256: pin.bytes_sha256 ?? '' } : { commit_sha: pin.commit_sha ?? '' }
 }
 

@@ -8,9 +8,10 @@ import { PACKAGE_NAME_RE } from './store.js'
 // §6.3 step 5 and §6.5), over the API's CRUD area `hosted-plugins` (backend
 // api/crud_agent_packages.py): `GET …/hosted-plugins/{name}` the plugin and its latest
 // version's row, `GET …/hosted-plugins/{name}/versions/{N}.zip` that version's zip, as
-// published. A version is never changed, so its zip is the pin's bytes: the installer
-// checks the zip against the row's `zip_sha256` and the unpacked files against its
-// `content_hash`, then vets them, at install and at every cache miss.
+// published. A version is never changed, so its zip is the pin's bytes. At install, the
+// installer checks the zip against the row's `zip_sha256`. It checks the unpacked files
+// against the row's `content_hash` and vets them. At every cache miss, the pin has no
+// `zip_sha256`: the installer checks the files against the pin's content hash and vets them.
 
 /** A published version: the pin is (`version`, `content_hash`). */
 export type HostedVersion = { version: number; zip_sha256: string; content_hash: string }

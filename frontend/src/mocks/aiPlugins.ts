@@ -181,6 +181,7 @@ function offerHosted(name: string) {
   const pkg = state.packages.get(name)
   const latest = hostedLatest.get(name)
   if (latest === undefined) return detail(404, `no hosted plugin named "${name}"`)
+  // The mock seeds only known names; the real agent installs any published hosted plugin.
   if (!pkg) return detail(502, 'the demo installs a hosted plugin only once it is seeded')
   if (pkg.source.kind !== 'hosted') return detail(409, `a plugin package named "${name}" is installed from a ${pkg.source.kind} source, not this hosted plugin`)
   if (pkg.version === latest) return detail(409, `"${name}" is already pinned to ${latest}`)
@@ -589,7 +590,7 @@ export const aiPluginHandlers = [
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
     const { ref } = (await request.json()) as { ref?: string }
-    if (pkg.source.kind === 'hosted') return detail(409, `"${pkg.name}" is already pinned to its latest version`)
+    if (pkg.source.kind === 'hosted') return offerHosted(pkg.name)
     if (pkg.source.kind === 'archive' && pkg.source.ref.startsWith('sha256:')) {
       return detail(409, 'this archive was installed with its sha256, so a re-pin could only fetch the same file', {
         reason: 'repin-fixed-sha256',
