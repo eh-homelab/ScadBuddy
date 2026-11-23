@@ -17,9 +17,10 @@ ruling):
 1. The newest spool's own effective density (the spool's, else its type's, subtype's
    or material's, `filament/types.py` `effective`) that is set.
 2. Its preset id: the newest spool's effective preset that names one. That preset's
-   ``filament_density``: Bambuddy's local preset when the id names one (read only while
-   Bambuddy is linked), else the Bambu Studio vendor preset with that ``filament_id`` or
-   ``setting_id`` in the image's tree (``slicing/profiles.py``, Bambu Studio
+   ``filament_density``: ScadBuddy's own preset when the id is ``sb-<id>`` (#7176, the
+   document `filament/sb_presets.py` keeps), Bambuddy's local preset when the id names
+   one (read only while Bambuddy is linked), else the Bambu Studio vendor preset with
+   that ``filament_id`` or ``setting_id`` in the image's tree (``slicing/profiles.py``, Bambu Studio
    v02.08.02.61).
 3. The preset id (``tray_info_idx``) of the tray a registry printer's latest report
    holds the newest held spool in, read the same way.
@@ -56,6 +57,7 @@ from pydantic import BaseModel
 
 from scadbuddy.orders.integrations import LocalDensity, SpoolGroup
 from scadbuddy.orders.models import Filament
+from scadbuddy.slicing.own_presets import sb_id
 from scadbuddy.slicing.profiles import Profiles
 
 #: ``filaments.density_g_cm3``'s ``numeric(6,3)``.
@@ -228,14 +230,16 @@ def resolve(group: SpoolGroup, table: DensityTable | None) -> ProfileDensity | N
 def _preset_density(
     preset_id: str | None, local: LocalDensity | None, table: DensityTable | None, where: str
 ) -> ProfileDensity | None:
-    """The density preset ``preset_id`` gives: its Bambuddy local preset ``local``, else
-    the vendor preset in ``table``; ``where`` names the id's source in the profile."""
+    """The density preset ``preset_id`` gives: its ScadBuddy or Bambuddy local preset
+    ``local``, else the vendor preset in ``table``; ``where`` names the id's source in
+    the profile."""
     if not preset_id:
         return None
     if local is not None:
+        kind = "ScadBuddy preset" if sb_id(preset_id) is not None else "Bambuddy local preset"
         return ProfileDensity(
             density_g_cm3=local.density_g_cm3,
-            profile=f"Bambuddy local preset {local.name} ({where} {preset_id})",
+            profile=f"{kind} {local.name} ({where} {preset_id})",
         )
     found = None if table is None else table.for_preset(preset_id)
     if found is None:

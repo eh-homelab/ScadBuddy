@@ -20,6 +20,7 @@ from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import PoolPrintUses, print_use_hook
 from scadbuddy.filament.profile_fill import TypeFiller
 from scadbuddy.filament.rfid_mode import RfidModeStore
+from scadbuddy.filament.sb_presets import FilamentPresetStore
 from scadbuddy.filament.sensors import SensorStore
 from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
@@ -52,11 +53,13 @@ class Filament:
     assignments: AssignmentsCache = field(default_factory=AssignmentsCache)
     #: The image's slicer profiles a type is filled from (#6714); ``None`` without them.
     profile_table: Callable[[], DensityTable | None] = lambda: None
+    #: ScadBuddy's own filament presets (#7176); ``None`` in a test that builds no store.
+    own_presets: FilamentPresetStore | None = None
 
     @property
     def filler(self) -> TypeFiller:
         """Fills spool types from their slicer profiles (#6714)."""
-        return TypeFiller(self.types, self.profile_table)
+        return TypeFiller(self.types, self.profile_table, self.own_presets)
 
     @property
     def reads(self) -> PoolSbSpoolReads:
@@ -137,6 +140,7 @@ def _build(core: Core, components: Components) -> Filament:
         shopping=ShoppingStore(pool),
         metrics=MetricsStore(pool, spools, metrics_settings),
         profile_table=lambda: density_table(core.settings.slicer_profiles_dir),
+        own_presets=FilamentPresetStore(pool, lambda: core.store.blobs),
     )
 
 

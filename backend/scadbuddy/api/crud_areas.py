@@ -173,6 +173,8 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: Its ``keys`` area is ``…/agent/keys/input-hash``, the approvals' input-hash key, and
 #: ``…/agent/fetch-grants``, a one-off fetch's grant minted here, so the agent mounts no KEK
 #: (#5299 step 12, `api/crud_agent_keys.py`).
+#: The print ``own-presets`` area is ``…/print/own-presets`` and its
+#: ``/documents``: ScadBuddy's own filament presets a native run reads (#7176).
 #: The profile-fetch ``runs`` area is ``…/profile-fetch/runs/{id}/files/{sha256}``,
 #: ``…/import`` and ``…/failed``: a fetch's preset files, their import into Bambuddy as the
 #: type's presets, and its failure (#6625, `api/crud_profile_fetch.py`).
@@ -200,6 +202,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "filament-sync",
         "filament-pull",
         "sensor-notify",
+        "own-presets",
     ],
     "storefront": [
         "listings",

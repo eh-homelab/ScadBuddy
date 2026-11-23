@@ -356,9 +356,10 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   flowBinding?: (args: z.infer<z.ZodObject<S>>, resolved: z.infer<z.ZodObject<S>>) => Record<string, unknown>
   /**
    * What the model is told when a gated call is refused because what it names resolved to
-   * other input than the call was given, and no approval matches that input (#7199): what
-   * `prepareApproval` resolves changed since a person approved the call. It says why, and that
-   * a call again asks for a new approval. Without it, a generic line (`movedSinceApproval`).
+   * other input than the call was given, and no approval matches that input (#7199). The gate
+   * cannot tell whether an approval was ever given (#7211), so this is advice for both cases:
+   * if a person approved the call, what it names changed since, and a call again asks for a
+   * new approval. Without it, a generic line (`movedSinceApproval`).
    */
   movedSinceApproval?: string
   /**
@@ -482,7 +483,7 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
     resolvesApproval: spec.prepareApproval !== undefined,
     movedSinceApproval:
       spec.movedSinceApproval ??
-      `what this call names resolved to other input than an approval was given for, so no approval matches it now. Call ${spec.name} again to ask for a new approval`,
+      `if a person approved this call, what it names changed since. Call ${spec.name} again to ask for a new approval`,
     async prepareApproval(args, ctx, needs = { summary: true }) {
       const parsed = spec.input.parse(args)
       if (!spec.prepareApproval) return { input: parsed, summary: this.summarize(args), binds: {} }

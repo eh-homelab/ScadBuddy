@@ -155,6 +155,20 @@ class TypeRowsDuplicateError(ValueError):
         super().__init__("two rows name the same printer and nozzle")
 
 
+class PresetUnknownError(ValueError):
+    """A preset row names a ScadBuddy preset (``sb-<id>``, #7176) that does not exist."""
+
+    def __init__(self) -> None:
+        super().__init__("a preset row names a ScadBuddy preset (sb-<id>) that does not exist")
+
+
+def names_preset(error: errors.ForeignKeyViolation) -> bool:
+    """Whether ``error`` is a preset row's ``preset_id`` foreign key (the migration
+    ``20261123T0711Z_filament_presets.sql``), not another of its keys."""
+    constraint = error.diag.constraint_name or ""
+    return constraint.endswith("_preset_id_fkey")
+
+
 def effective(
     spool_row: Row | None,
     type_row: Row | None,
@@ -332,6 +346,10 @@ class SpoolTypeStore:
                         )
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
+        except errors.ForeignKeyViolation as error:
+            if not names_preset(error):
+                raise
+            raise PresetUnknownError() from None
         return self.presets(type_id)
 
     def set_k_values(self, type_id: UUID, rows: _KValues, *, actor: str) -> _KValues | None:
