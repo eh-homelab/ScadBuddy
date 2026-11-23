@@ -8,19 +8,23 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
+import psycopg
 import pytest
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.models import FolderCreate, LibraryFile
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.orders import store as order_store
 from scadbuddy.orders.bambuddy import BambuddyShelf, served_shelf
 from scadbuddy.orders.held_print import (
     STOREFRONT_FOLDER,
@@ -29,6 +33,7 @@ from scadbuddy.orders.held_print import (
     Shelved,
     restore_held,
 )
+from scadbuddy.orders.lifecycle import LifecycleError
 from scadbuddy.orders.models import LibraryFileRef, Order, OrderItem
 from scadbuddy.orders.printing import print_check
 from scadbuddy.orders.problems import PROBLEMS
@@ -391,7 +396,9 @@ async def test_racing_restores_make_one_folder_and_one_file(
 
 async def test_the_native_find_takes_a_hash_in_either_case() -> None:
     """As the print's check and Bambuddy's shelf compare a stated hash."""
-    rows = [SimpleNamespace(id=7, filename="bracket.3mf", file_hash=SHA256.upper())]
+    rows = [
+        SimpleNamespace(id=7, filename="bracket.3mf", file_hash=SHA256.upper(), per_print=False)
+    ]
 
     class Listing:
         async def library_listing(self, *, folder_id: int) -> list[SimpleNamespace]:
@@ -436,6 +443,109 @@ async def test_a_held_copy_lost_before_the_restore_is_library_file_gone(
         await restore(shop, order, item, content, CountingShelf(native), Choices())
     refused_gone(refused)
     assert shop.get_item(item).library_file == item.library_file
+
+
+async def test_a_restored_file_deleted_before_the_retry_is_restored_again(
+    shop: Shop, content: ContentStore, held: str, native: NativeLibrary
+) -> None:
+    """A retry of the claim finds the item moved, but the file it moved to deleted since:
+    the held copy still stands, so it is put back again (§10.2), never the print's own
+    404 for a file that is gone."""
+    order, item = storefront_item(shop, GONE_ID, "native")
+    shelf = CountingShelf(native)
+    first = await restore(shop, order, item, content, shelf, Choices())
+    await native.trash([first])
+    second = await restore(shop, order, item, content, shelf, Choices())
+    assert second != first
+    assert shelf.uploads == 2
+    moved = shop.get_item(item).library_file
+    assert moved is not None
+    assert moved.id == second
+    restored = [
+        e.detail for e in shop.rows.events(order.id) if e.kind == "item.library_file_restored"
+    ]
+    assert [(d["from_library_file_id"], d["library_file_id"]) for d in restored] == [
+        (GONE_ID, first),
+        (first, second),
+    ]
+
+
+async def test_a_restored_file_deleted_with_its_held_copy_is_library_file_gone(
+    shop: Shop, content: ContentStore, held: str, native: NativeLibrary
+) -> None:
+    order, item = storefront_item(shop, GONE_ID, "native")
+    shelf = CountingShelf(native)
+    first = await restore(shop, order, item, content, shelf, Choices())
+    await native.trash([first])
+    await content.delete(COPY_KEY)
+    with pytest.raises(ApiError) as refused:
+        await restore(shop, order, item, content, shelf, Choices())
+    refused_gone(refused)
+    assert shop.get_item(item).library_file is not None
+
+
+async def test_a_per_print_copy_in_storefront_is_not_taken(
+    shop: Shop, content: ContentStore, held: str, native: NativeLibrary
+) -> None:
+    """A run's per-print copy of the same bytes in "Storefront" is the sweep's to trash:
+    the restore uploads a file of its own."""
+    order, item = storefront_item(shop, GONE_ID, "native")
+    folder = await native.template_folder(STOREFRONT_FOLDER)
+    copy = await native.upload("bracket.3mf", _file(PINNED), folder.id, print_subject="library:1")
+    shelf = CountingShelf(native)
+    new_id = await restore(shop, order, item, content, shelf, Choices())
+    assert shelf.uploads == 1
+    assert new_id != copy.id
+
+
+async def test_a_restore_then_a_claim_refused_on_hold_keeps_the_restored_file(
+    shop: Shop, content: ContentStore, held: str, native: NativeLibrary, tmp_path: Path
+) -> None:
+    """As the module says: the restore runs before the claim, so the order on hold refuses
+    the claim and the item stays on the restored file; once released, the next print
+    restores nothing."""
+    order, item = storefront_item(shop, GONE_ID, "native")
+    shop.lifecycle.hold(order.id, BY)
+    new_id = await restore(shop, order, item, content, CountingShelf(native), Choices())
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.claim_print(
+            order.id, item.id, BY, request_id="r", sliced_sha256=None, sliced_blob_key=None
+        )
+    assert refused.value.slug == "order_on_hold"
+    moved = shop.get_item(item)
+    assert moved.library_file is not None
+    assert moved.library_file.id == new_id
+    shop.lifecycle.release(order.id, BY)
+    made = await native.library_file(new_id)
+    served = Served({new_id: (PINNED, made.file_hash)})
+    assert "restore" not in await check(shop, order, moved, served, content, tmp_path)
+
+
+async def test_a_restore_lock_waited_for_too_long_is_a_503_tried_again(
+    shop: Shop,
+    content: ContentStore,
+    held: str,
+    native: NativeLibrary,
+    pool: PgPool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another restore holds the lock past the wait (a slow upload to Bambuddy): the
+    restore is the transient 503 the operation tries again, as the item's project's is."""
+    order, item = storefront_item(shop, GONE_ID, "native")
+    monkeypatch.setattr(order_store, "PROJECT_LOCK_TIMEOUT_MS", 100)
+    conninfo = pool.conninfo
+    with psycopg.connect(conninfo() if callable(conninfo) else conninfo, autocommit=True) as other:
+        other.execute(
+            "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (order_store.RESTORE_LOCK_KEY,)
+        )
+        with pytest.raises(ApiError) as refused:
+            await restore(shop, order, item, content, CountingShelf(native), Choices())
+    assert (refused.value.status, refused.value.type) == (503, UNAVAILABLE_PROBLEM)
+    assert shop.get_item(item).library_file == item.library_file
+
+
+def _file(payload: bytes) -> io.BytesIO:
+    return io.BytesIO(payload)
 
 
 async def _chunks(payload: bytes) -> AsyncIterator[bytes]:
