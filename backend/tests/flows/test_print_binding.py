@@ -292,6 +292,21 @@ async def test_the_api_drafts_read_the_digest_and_say_none_for_a_404() -> None:
         assert await drafts("shop-notes") is None
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [httpx.Response(200, json={"name": "shop-notes"}), httpx.Response(200, text="<html>")],
+    ids=["no-digest", "no-json"],
+)
+async def test_the_api_drafts_fail_as_an_http_error_on_a_bad_answer(answer: httpx.Response) -> None:
+    """#7211: `flow_decide` shapes only an `httpx.HTTPError` as "could not read"; a draft-diff
+    answer with no digest, or no JSON, must be one too, never an unshaped 500."""
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: answer), base_url="http://api.example"
+    ) as client:
+        with pytest.raises(httpx.HTTPError):
+            await api_drafts(client)("shop-notes")
+
+
 async def test_the_api_drafts_raise_when_the_api_fails() -> None:
     def answer(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"detail": "away"})
