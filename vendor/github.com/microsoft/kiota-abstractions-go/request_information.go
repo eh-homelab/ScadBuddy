@@ -518,6 +518,16 @@ func (request *RequestInformation) SetContentFromScalar(ctx context.Context, req
 		err = writer.WriteInt64Value("", i64v)
 	} else if i64v, ok := item.(int64); ok {
 		err = writer.WriteInt64Value("", &i64v)
+	} else if iv, ok := item.(*int); ok {
+		if iv != nil {
+			v64 := int64(*iv)
+			err = writer.WriteInt64Value("", &v64)
+		} else {
+			err = writer.WriteInt64Value("", nil)
+		}
+	} else if iv, ok := item.(int); ok {
+		v64 := int64(iv)
+		err = writer.WriteInt64Value("", &v64)
 	} else if f32v, ok := item.(*float32); ok {
 		err = writer.WriteFloat32Value("", f32v)
 	} else if f32v, ok := item.(float32); ok {
@@ -625,6 +635,14 @@ func (request *RequestInformation) SetContentFromScalarCollection(ctx context.Co
 				}
 			}
 			err = writer.WriteCollectionOfInt64Values("", i64c)
+		} else if _, ok := value.(int); ok {
+			ic := make([]int64, len(items))
+			for i, v := range items {
+				if iv, ok := v.(int); ok {
+					ic[i] = int64(iv)
+				}
+			}
+			err = writer.WriteCollectionOfInt64Values("", ic)
 		} else if _, ok := value.(float32); ok {
 			f32c := make([]float32, len(items))
 			for i, v := range items {
@@ -736,19 +754,10 @@ func (request *RequestInformation) AddQueryParameters(source any) {
 			request.QueryParametersAny = make(map[string]any)
 		}
 		valueOfValue := reflect.ValueOf(value)
-		str, ok := value.(*string)
-		if ok && str != nil {
-			request.QueryParameters[fieldName] = *str
-		}
-		bl, ok := value.(*bool)
-		if ok && bl != nil {
-			request.QueryParameters[fieldName] = strconv.FormatBool(*bl)
-		}
-		it, ok := value.(*int32)
-		if ok && it != nil {
+		if formatted, ok := formatScalarQueryParameter(value); ok {
 			// rendered into the deprecated QueryParameters map only; QueryParametersAny is
-			// documented to stay empty for it, so don't let it reach normalizeParameters
-			request.QueryParameters[fieldName] = strconv.FormatInt(int64(*it), 10)
+			// documented to stay empty for string, bool, and int32
+			request.QueryParameters[fieldName] = formatted
 			continue
 		}
 		strArr, ok := value.([]string)
@@ -779,7 +788,7 @@ func (request *RequestInformation) AddQueryParameters(source any) {
 // enum -> string (name)
 // []enum -> []string (containing names)
 // []non_interface -> []any (like []int64 -> []any)
-// *numeric -> numeric (like *int64 -> int64)
+// numeric / *numeric -> numeric (like int64 / *int64 -> int64)
 func (request *RequestInformation) normalizeParameters(valueOfValue reflect.Value, value any, returnNilIfNotNormalizable bool) any {
 	if valueOfValue.Kind() == reflect.Slice && valueOfValue.Len() > 0 {
 		//type assertions to "enums" don't work if you don't know the enum type in advance, we need to use reflection
@@ -800,13 +809,8 @@ func (request *RequestInformation) normalizeParameters(valueOfValue reflect.Valu
 		}
 	} else if enum, ok := value.(kiotaEnum); ok {
 		return enum.String()
-	} else if valueOfValue.Kind() == reflect.Pointer && !valueOfValue.IsNil() {
-		switch elem := valueOfValue.Elem(); elem.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-			reflect.Float32, reflect.Float64:
-			return elem.Interface()
-		}
+	} else if numeric, ok := extractNumericValue(valueOfValue); ok {
+		return numeric
 	}
 
 	if returnNilIfNotNormalizable {
@@ -818,4 +822,50 @@ func (request *RequestInformation) normalizeParameters(valueOfValue reflect.Valu
 
 type kiotaEnum interface {
 	String() string
+}
+
+// formatScalarQueryParameter formats string, bool, and int32 query parameters
+// (both direct values and non-nil pointers) for RequestInformation.QueryParameters,
+// keeping QueryParametersAny empty for those types.
+func formatScalarQueryParameter(value any) (string, bool) {
+	switch v := value.(type) {
+	case *string:
+		if v != nil {
+			return *v, true
+		}
+	case string:
+		return v, true
+	case *bool:
+		if v != nil {
+			return strconv.FormatBool(*v), true
+		}
+	case bool:
+		return strconv.FormatBool(v), true
+	case *int32:
+		if v != nil {
+			return strconv.FormatInt(int64(*v), 10), true
+		}
+	case int32:
+		return strconv.FormatInt(int64(v), 10), true
+	}
+	return "", false
+}
+
+// extractNumericValue unwraps pointer and direct integer or floating-point values
+// so normalizeParameters preserves them for URI template expansion.
+func extractNumericValue(v reflect.Value) (any, bool) {
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil, false
+		}
+		v = v.Elem()
+	}
+	switch v.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return v.Interface(), true
+	default:
+		return nil, false
+	}
 }

@@ -2,14 +2,22 @@
 package textserialization
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
+	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	absser "github.com/microsoft/kiota-abstractions-go/serialization"
+)
+
+var (
+	minInt64Rat = new(big.Rat).SetInt64(math.MinInt64)
+	maxInt64Rat = new(big.Rat).SetInt64(math.MaxInt64)
 )
 
 // TextParseNode is a ParseNode implementation for text.
@@ -19,14 +27,17 @@ type TextParseNode struct {
 	onAfterAssignFieldValues  absser.ParsableAction
 }
 
-// NewTextParseNode creates a new TextParseNode.
+// NewTextParseNode creates a new TextParseNode. If present, a leading UTF-8 byte order mark (BOM)
+// is stripped prior to initializing the node.
 func NewTextParseNode(content []byte) (*TextParseNode, error) {
+	content = bytes.TrimPrefix(content, []byte("\xef\xbb\xbf"))
 	if len(content) == 0 {
 		return nil, errors.New("content is empty")
 	}
 	value, err := loadTextTree(content)
 	return value, err
 }
+
 // loadTextTree initializes a TextParseNode, stripping enclosing double quotes when the content
 // is wrapped with matching quotes and has length of at least 2.
 func loadTextTree(content []byte) (*TextParseNode, error) {
@@ -41,26 +52,41 @@ func loadTextTree(content []byte) (*TextParseNode, error) {
 
 // GetChildNode returns a new parse node for the given identifier.
 func (n *TextParseNode) GetChildNode(index string) (absser.ParseNode, error) {
+	if n == nil {
+		return nil, nil
+	}
 	return nil, NoStructuredDataError
 }
 
 // GetObjectValue returns the Parsable value from the node.
 func (n *TextParseNode) GetObjectValue(ctor absser.ParsableFactory) (absser.Parsable, error) {
+	if n == nil {
+		return nil, nil
+	}
 	return nil, NoStructuredDataError
 }
 
 // GetCollectionOfObjectValues returns the collection of Parsable values from the node.
 func (n *TextParseNode) GetCollectionOfObjectValues(ctor absser.ParsableFactory) ([]absser.Parsable, error) {
+	if n == nil {
+		return nil, nil
+	}
 	return nil, NoStructuredDataError
 }
 
 // GetCollectionOfPrimitiveValues returns the collection of primitive values from the node.
 func (n *TextParseNode) GetCollectionOfPrimitiveValues(targetType string) ([]interface{}, error) {
+	if n == nil {
+		return nil, nil
+	}
 	return nil, NoStructuredDataError
 }
 
 // GetCollectionOfEnumValues returns the collection of Enum values from the node.
 func (n *TextParseNode) GetCollectionOfEnumValues(parser absser.EnumFactory) ([]interface{}, error) {
+	if n == nil {
+		return nil, nil
+	}
 	return nil, NoStructuredDataError
 }
 
@@ -73,46 +99,70 @@ func (n *TextParseNode) GetStringValue() (*string, error) {
 	return &val, nil
 }
 
-// GetBoolValue returns a Bool value from the nodes.
+// GetBoolValue returns a Bool value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed. Quoted values are preserved as-is and rejected as invalid syntax.
 func (n *TextParseNode) GetBoolValue() (*bool, error) {
 	if n == nil {
 		return nil, nil
 	}
-	val, err := strconv.ParseBool(n.value)
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	val, err := strconv.ParseBool(trimmed)
 	if err != nil {
 		return nil, err
 	}
 	return &val, nil
 }
 
-// GetInt8Value returns a int8 value from the nodes.
+// GetInt8Value returns a int8 value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed.
 func (n *TextParseNode) GetInt8Value() (*int8, error) {
 	if n == nil {
 		return nil, nil
 	}
-	val, err := strconv.ParseInt(n.value, 0, 8)
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	if parsed, err := strconv.ParseInt(trimmed, 10, 8); err == nil {
+		cast := int8(parsed)
+		return &cast, nil
+	} else if !errors.Is(err, strconv.ErrSyntax) && !strings.ContainsAny(trimmed, ".eE") {
+		return nil, err
+	}
+	v, err := n.GetFloat64Value()
 	if err != nil {
 		return nil, err
 	}
-	cast := int8(val)
+	if v == nil {
+		return nil, nil
+	}
+	if !(*v >= -128 && *v <= 127) {
+		return nil, strconv.ErrRange
+	}
+	cast := int8(*v)
 	return &cast, nil
 }
 
-// GetByteValue returns a Byte value from the nodes.
+// GetByteValue returns a Byte value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed.
 func (n *TextParseNode) GetByteValue() (*byte, error) {
 	if n == nil {
 		return nil, nil
 	}
-	val, err := strconv.ParseUint(strings.TrimPrefix(n.value, "+"), 0, 8)
-	if err != nil {
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	cleaned := strings.TrimPrefix(trimmed, "+")
+	if parsed, err := strconv.ParseUint(cleaned, 10, 8); err == nil {
+		cast := byte(parsed)
+		return &cast, nil
+	} else if !errors.Is(err, strconv.ErrSyntax) && !strings.ContainsAny(cleaned, ".eE") {
 		return nil, err
 	}
-	cast := byte(val)
-	return &cast, nil
-}
-
-// GetFloat32Value returns a Float32 value from the nodes.
-func (n *TextParseNode) GetFloat32Value() (*float32, error) {
 	v, err := n.GetFloat64Value()
 	if err != nil {
 		return nil, err
@@ -120,32 +170,62 @@ func (n *TextParseNode) GetFloat32Value() (*float32, error) {
 	if v == nil {
 		return nil, nil
 	}
-	cast := float32(*v)
+	if !(*v >= 0 && *v <= 255) {
+		return nil, strconv.ErrRange
+	}
+	cast := byte(*v)
 	return &cast, nil
 }
 
-// GetFloat64Value returns a Float64 value from the nodes.
+// GetFloat32Value returns a Float32 value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed.
+func (n *TextParseNode) GetFloat32Value() (*float32, error) {
+	if n == nil {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	val, err := strconv.ParseFloat(trimmed, 32)
+	if err != nil {
+		return nil, err
+	}
+	cast := float32(val)
+	return &cast, nil
+}
+
+// GetFloat64Value returns a Float64 value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed.
 func (n *TextParseNode) GetFloat64Value() (*float64, error) {
 	if n == nil {
 		return nil, nil
 	}
-	val, err := strconv.ParseFloat(n.value, 0)
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	val, err := strconv.ParseFloat(trimmed, 64)
 	if err != nil {
 		return nil, err
 	}
-	cast := float64(val)
-	return &cast, nil
+	return &val, nil
 }
 
-// GetInt32Value returns a Int32 value from the nodes.
+// GetInt32Value returns a Int32 value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed.
 func (n *TextParseNode) GetInt32Value() (*int32, error) {
 	if n == nil {
 		return nil, nil
 	}
-	if parsed, err := strconv.ParseInt(n.value, 10, 32); err == nil {
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	if parsed, err := strconv.ParseInt(trimmed, 10, 32); err == nil {
 		cast := int32(parsed)
 		return &cast, nil
-	} else if !errors.Is(err, strconv.ErrSyntax) && !strings.ContainsAny(n.value, ".eE") {
+	} else if !errors.Is(err, strconv.ErrSyntax) && !strings.ContainsAny(trimmed, ".eE") {
 		return nil, err
 	}
 	v, err := n.GetFloat64Value()
@@ -154,119 +234,154 @@ func (n *TextParseNode) GetInt32Value() (*int32, error) {
 	}
 	if v == nil {
 		return nil, nil
+	}
+	if !(*v >= -2147483648 && *v <= 2147483647) {
+		return nil, strconv.ErrRange
 	}
 	cast := int32(*v)
 	return &cast, nil
 }
 
-// GetInt64Value returns a Int64 value from the nodes.
+// GetInt64Value returns a Int64 value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed.
 func (n *TextParseNode) GetInt64Value() (*int64, error) {
 	if n == nil {
 		return nil, nil
 	}
-	if parsed, err := strconv.ParseInt(n.value, 10, 64); err == nil {
-		return &parsed, nil
-	} else if !errors.Is(err, strconv.ErrSyntax) && !strings.ContainsAny(n.value, ".eE") {
-		return nil, err
-	}
-	v, err := n.GetFloat64Value()
-	if err != nil {
-		return nil, err
-	}
-	if v == nil {
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
 		return nil, nil
 	}
-	cast := int64(*v)
+	if parsed, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		return &parsed, nil
+	} else if !errors.Is(err, strconv.ErrSyntax) && !strings.ContainsAny(trimmed, ".eE") {
+		return nil, err
+	}
+	if _, err := strconv.ParseFloat(trimmed, 64); err != nil && errors.Is(err, strconv.ErrSyntax) {
+		return nil, err
+	}
+	rat, ok := new(big.Rat).SetString(trimmed)
+	if !ok {
+		return nil, strconv.ErrSyntax
+	}
+	if rat.Cmp(minInt64Rat) < 0 || rat.Cmp(maxInt64Rat) > 0 {
+		return nil, strconv.ErrRange
+	}
+	var intVal big.Int
+	intVal.Quo(rat.Num(), rat.Denom())
+	cast := intVal.Int64()
 	return &cast, nil
 }
 
-// GetTimeValue returns a Time value from the nodes.
+// GetTimeValue returns a Time value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed.
 func (n *TextParseNode) GetTimeValue() (*time.Time, error) {
-	v, err := n.GetStringValue()
+	if n == nil {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, trimmed)
 	if err != nil {
 		return nil, err
 	}
-	if v == nil {
-		return nil, nil
-	}
-	parsed, err := time.Parse(time.RFC3339, *v)
-	return &parsed, err
+	return &parsed, nil
 }
 
-// GetISODurationValue returns a ISODuration value from the nodes.
+// GetISODurationValue returns a ISODuration value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed. Quoted values are preserved as-is and rejected as invalid syntax.
 func (n *TextParseNode) GetISODurationValue() (*absser.ISODuration, error) {
-	v, err := n.GetStringValue()
-	if err != nil {
-		return nil, err
-	}
-	if v == nil {
+	if n == nil {
 		return nil, nil
 	}
-	return absser.ParseISODuration(*v)
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	return absser.ParseISODuration(trimmed)
 }
 
-// GetTimeOnlyValue returns a TimeOnly value from the nodes.
+// GetTimeOnlyValue returns a TimeOnly value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed. Quoted values are preserved as-is and rejected as invalid syntax.
 func (n *TextParseNode) GetTimeOnlyValue() (*absser.TimeOnly, error) {
-	v, err := n.GetStringValue()
-	if err != nil {
-		return nil, err
-	}
-	if v == nil {
+	if n == nil {
 		return nil, nil
 	}
-	return absser.ParseTimeOnly(*v)
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	return absser.ParseTimeOnly(trimmed)
 }
 
-// GetDateOnlyValue returns a DateOnly value from the nodes.
+// GetDateOnlyValue returns a DateOnly value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed. Quoted values are preserved as-is and rejected as invalid syntax.
 func (n *TextParseNode) GetDateOnlyValue() (*absser.DateOnly, error) {
-	v, err := n.GetStringValue()
-	if err != nil {
-		return nil, err
-	}
-	if v == nil {
+	if n == nil {
 		return nil, nil
 	}
-	return absser.ParseDateOnly(*v)
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	return absser.ParseDateOnly(trimmed)
 }
 
-// GetUUIDValue returns a UUID value from the nodes.
+// GetUUIDValue returns a UUID value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed.
 func (n *TextParseNode) GetUUIDValue() (*uuid.UUID, error) {
-	v, err := n.GetStringValue()
+	if n == nil {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	parsed, err := uuid.Parse(trimmed)
 	if err != nil {
 		return nil, err
 	}
-	if v == nil {
-		return nil, nil
-	}
-	parsed, err := uuid.Parse(*v)
-	return &parsed, err
+	return &parsed, nil
 }
 
-// GetEnumValue returns a Enum value from the nodes.
+// GetEnumValue returns a Enum value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed. Quoted values are preserved as-is and rejected as invalid syntax.
 func (n *TextParseNode) GetEnumValue(parser absser.EnumFactory) (interface{}, error) {
 	if parser == nil {
 		return nil, errors.New("parser is nil")
 	}
-	s, err := n.GetStringValue()
-	if err != nil {
-		return nil, err
-	}
-	if s == nil {
+	if n == nil {
 		return nil, nil
 	}
-	return parser(*s)
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	return parser(trimmed)
 }
 
-// GetByteArrayValue returns a ByteArray value from the nodes.
+// GetByteArrayValue returns a ByteArray value from the nodes. Leading and trailing whitespace
+// and newlines are trimmed. Quoted values are preserved as-is and rejected as invalid syntax.
 func (n *TextParseNode) GetByteArrayValue() ([]byte, error) {
-	s, err := n.GetStringValue()
-	if err != nil {
-		return nil, err
-	}
-	if s == nil {
+	if n == nil {
 		return nil, nil
 	}
-	return base64.StdEncoding.DecodeString(*s)
+	trimmed := strings.TrimSpace(n.value)
+	if trimmed == "" {
+		return nil, nil
+	}
+	if data, err := base64.StdEncoding.DecodeString(trimmed); err == nil {
+		return data, nil
+	}
+	if data, err := base64.RawStdEncoding.DecodeString(trimmed); err == nil {
+		return data, nil
+	}
+	if data, err := base64.URLEncoding.DecodeString(trimmed); err == nil {
+		return data, nil
+	}
+	return base64.RawURLEncoding.DecodeString(trimmed)
 }
 
 // GetRawValue returns a ByteArray value from the nodes.
