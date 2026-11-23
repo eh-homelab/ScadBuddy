@@ -10,9 +10,9 @@ photo and its timelapse as attachments, with no click, imported once, by every t
 Temporal workflow per attempt, `AttemptMedia` on the `library` queue (the API's worker),
 runs the step `mirror_attempt` now, at +2 min and at +15 min. Three triggers start it (a
 hand attempt, a heard print outcome, the archives read); a housekeeping sweep catches the
-rest. A new seam call asks Bambuddy to scan the printer for a missing timelapse, behind a
-setting. The order page loads each attempt's archive row on open and renders from the
-answer.
+rest. The import copies only what Bambuddy's archive already has; ScadBuddy never asks
+Bambuddy to scan the printer (spec §9). The order page loads each attempt's archive row
+on open and renders from the answer.
 
 **Tech Stack:** Python 3.12, FastAPI, psycopg 3, Postgres 18, Temporal (library worker,
 housekeeping), React + TypeScript, TypeScript agent tools.
@@ -34,7 +34,7 @@ Stories:
 | 3 | [#7232](https://github.com/eh-homelab/ScadBuddy/issues/7232) | `copy_in` provenance, race, actor |
 | 4 | [#7233](https://github.com/eh-homelab/ScadBuddy/issues/7233) | `mirror_media`, the `AttemptMedia` workflow, the three triggers |
 | 5 | [#7234](https://github.com/eh-homelab/ScadBuddy/issues/7234) | The housekeeping sweep |
-| 6 | [#7235](https://github.com/eh-homelab/ScadBuddy/issues/7235) | Scan the printer, behind a setting |
+| 6 | [#7235](https://github.com/eh-homelab/ScadBuddy/issues/7235) | Scan the printer, behind a setting (dropped) |
 | 7 | [#7236](https://github.com/eh-homelab/ScadBuddy/issues/7236) | Read fields and the attempt row on page open |
 | 8 | [#7237](https://github.com/eh-homelab/ScadBuddy/issues/7237) | Agent text and docs |
 
@@ -77,23 +77,18 @@ Stories:
 3. A timelapse over `media_upload_max_bytes` does not stop the finish photo. (Story 4.)
 4. `POST …/fulfilments` never waits on a download; with Temporal down it still answers 201.
    (Story 4.)
-5. The scan runs at most once per attempt per day, never after 14 days, and never with
-   `orders_import_timelapse` off. (Story 6.)
 
 ## Order and dependencies
 
 ```
-1 spike ───────────────────────────────┐
-2 migration ─► 3 copy_in ─► 4 workflow ─┼─► 6 scan + setting
-                             │          │
-                             ├─► 5 sweep│
-                             └─► 7 read fields + frontend ─► 8 agent + docs
+1 spike (done)
+2 migration ─► 3 copy_in ─► 4 workflow ─┬─► 5 sweep
+                                        └─► 7 read fields + frontend ─► 8 agent + docs
+6 scan + setting (dropped)
 ```
 
-Story 1 needs the live Bambuddy and can run at any time. If it is not done, story 6 waits
-and stories 2–5, 7 and 8 proceed: the import then copies only what Bambuddy already has,
-and the page shows "waiting for Bambuddy to process the timelapse" until a scan exists.
-Story 8's text describes the scan only once story 6 has merged.
+Story 1 is done; its findings led to the drop of story 6 (spec §4.3a, §9). Stories 2–5,
+7 and 8 build the import of what Bambuddy's archive already has.
 
 CI lanes (`.github/scripts/select-lanes.sh`): a change under `backend/` selects
 `backend` and `image`; under `frontend/`, `image`; under `agent/`, `agent_durable`. The
@@ -103,6 +98,8 @@ shows up as the `freshness` job's diff comment and regenerates the Go client.
 ---
 
 ### Story 1: Spike — record Bambuddy's `timelapse/scan` replies (#7230)
+
+**Done.** PR #7238 is closed without merge. Its findings live in spec §4.3a.
 
 **Goal:** Know what `POST /api/v1/archives/{id}/timelapse/scan` answers, whether its FTP
 pull is complete when it returns, and what it matches on (spec §4.3, F5).
@@ -140,18 +137,21 @@ the switch on (spec §8.1).
 ### Story 2: Migration and model — archive provenance and attempt stamps (#7231)
 
 **Goal:** `entity_attachments` records which archive and medium a copy came from, a
-double insert is impossible, and the attempt can record its scan and its last check
-(spec §4.2, §4.3, §4.6).
+double insert is impossible, and the attempt can record its last check (spec §4.2,
+§4.6).
+
+PR #7241 added `timelapse_scanned_at` and `stamp_timelapse_scanned` before the drop; a
+follow-up commit on that PR removes them.
 
 **Files:**
 - Create: `backend/scadbuddy/migrations/<ts>_attempt_media_provenance.sql`
 - Modify: `backend/scadbuddy/orders/models.py` (`Attachment.archive_id`,
   `.archive_media: Literal["finished_photo", "timelapse"] | None`;
-  `Fulfilment.timelapse_scanned_at`, `.media_checked_at`)
+  `Fulfilment.media_checked_at`)
 - Modify: `backend/scadbuddy/orders/store.py` (`_ATTACHMENT`, `_FULFILMENT`,
   `insert_attachment` takes and writes both columns and raises `ArchiveCopyExists` on the
   unique index; `archive_media_present(fulfilment_id, item_id) -> set[tuple[int, str]]`;
-  `stamp_media_checked`, `stamp_timelapse_scanned`)
+  `stamp_media_checked`)
 - Test: `backend/tests/test_pg_migrations.py`, `backend/tests/orders/test_attempt_files.py`
 
 Migration (one file):
@@ -164,8 +164,7 @@ Migration (one file):
   row (`created_at, id`) per `(subject, archive_id, archive_media, filename)`.
 - `CREATE UNIQUE INDEX entity_attachments_archive_copy ON entity_attachments (subject,
   archive_id, archive_media, filename) WHERE archive_id IS NOT NULL`.
-- `ALTER TABLE order_item_fulfilments ADD COLUMN timelapse_scanned_at timestamptz, ADD
-  COLUMN media_checked_at timestamptz`.
+- `ALTER TABLE order_item_fulfilments ADD COLUMN media_checked_at timestamptz`.
 
 **Steps:**
 - [ ] Failing test in `test_pg_migrations.py`: seed rows as `copy_in` wrote them (an
@@ -288,58 +287,27 @@ pulled by hand days later) is still imported within the hour, for 14 days (spec 
 
 **Lanes:** `backend`, `image`.
 
-### Story 6: Scan the printer for a missing timelapse, behind a setting (#7235)
+### Story 6: Scan the printer for a missing timelapse, behind a setting (#7235) — dropped 2026-11-23
 
-**Waits for story 1.** Goal: a timelapse that is on the printer and not in Bambuddy is
-imported, at most once per attempt per day, never after 14 days, never with the switch off
-(spec §4.3).
-
-**Files:**
-- Modify: `backend/scadbuddy/bambuddy/client.py` (`scan_timelapse(archive_id)`, operation
-  `archives.timelapse.scan` added to the closed `Operation` set, `Scope.MANAGE_ARCHIVES`,
-  the reply model from story 1's recordings)
-- Modify: `backend/scadbuddy/orders/integrations.py` (`scan_timelapse` on
-  `OrderIntegrations` and `NotLinked`), `backend/scadbuddy/orders/bambuddy.py`
-- Modify: `backend/scadbuddy/orders/archives.py` (`mirror_media` scans when
-  `facts.timelapse` is false, the setting is on, the attempt is 14 days old or less and
-  `timelapse_scanned_at` is null or a day old; stamps it; the scan is synchronous (spec §4.3a), so an `attached` reply is followed by an archive read in the same step
-  )
-- Modify: `backend/scadbuddy/core/settings.py` (`orders_import_timelapse: bool = False` until the owner decides, spec §9;
-  apply mode `live`), `backend/scadbuddy/core/setting_docs.py` (label and help)
-- Modify: `frontend/src/pages/settings/fields.ts`, `frontend/src/pages/settings/sections/orders.tsx`
-  (the switch); `frontend/src/mocks/fixtures.ts`
-- Test: `backend/tests/bambuddy/` (the client against the recordings),
-  `backend/tests/orders/test_archives.py`, `frontend/src/pages/settings/sections/orders.test.tsx`
-
-**Steps:**
-- [ ] Failing tests: the client parses both recorded replies and maps the scope refusal;
-  a step with no timelapse scans once and stamps; a second step the same day does not
-  scan; a 15-day-old attempt does not scan; the switch off never scans; a refused scan is
-  logged once and the photo still imports.
-- [ ] Load `frontend-design`; failing test for the switch in Settings → Orders.
-- [ ] Implement; run the backend tests above and `cd frontend && pnpm exec vitest run src/pages/settings/sections/orders.test.tsx`
-  (after `pnpm gen:api`).
-
-**Acceptance:** the tests pass; if story 1 found a loose match, the default is off and the
-owner has been asked (spec §8.1).
-
-**Lanes:** `backend`, `image`.
+Dropped by the owner's direction to distance ScadBuddy from Bambuddy. ScadBuddy never
+calls `timelapse/scan`: it is a new Bambuddy dependency, a match deletes the video from
+the printer's card, and it can attach another print's video. See spec §9.
 
 ### Story 7: The read tells the truth, and the row loads on page open (#7236)
 
 **Goal:** The order page shows, after a reload, what each attempt has attached; offers
-only what is missing; and says which of the three timelapse states applies (spec §4.4,
+only what is missing; and says which of the two timelapse states applies (spec §4.4,
 owner decision §8.2).
 
 **Files:**
 - Modify: `backend/scadbuddy/orders/archives.py` (`ArchiveOffer.finished_attachment_id`,
-  `.timelapse_attachment_id`; `AttemptArchives.import_timelapse`)
+  `.timelapse_attachment_id`)
 - Modify: `frontend/src/components/orders/ArchiveCopies.tsx` (load on mount for an attempt
   with archives or a finished run; render from the answer; the **From Bambuddy…** button
   goes; re-read every 10 s, at most six times, while a medium is offered and not attached;
-  the states: "Timelapse attached", "waiting for Bambuddy to process the timelapse" (no
-  scan yet), "no timelapse on this print" (scanned, none), "no timelapse in Bambuddy; pull
-  it from the print's page" (setting off))
+  the states: "Timelapse attached"; "waiting for Bambuddy to process the timelapse" (the
+  archive's `completed_at` is null or less than 1 hour ago); "no timelapse in Bambuddy
+  for this print" (`completed_at` 1 hour ago or more), spec §4.4)
 - Modify: `frontend/src/components/orders/FulfilmentForm.tsx` (remount the row after a
   hand attempt is recorded)
 - Modify: `frontend/src/mocks/features/orders/` (the new fields)
@@ -348,8 +316,7 @@ owner decision §8.2).
 
 **Steps:**
 - [ ] Load the `frontend-design` skill.
-- [ ] Failing backend test: the answer carries the ids of the attached rows and the
-  setting.
+- [ ] Failing backend test: the answer carries the ids of the attached rows.
 - [ ] Failing frontend tests: loads on mount with no click; "attached" after a reload; the
   copy button shows only for a missing medium; each timelapse state; the re-read stops
   after six reads (fake timers).
@@ -366,14 +333,14 @@ owner decision §8.2).
 
 **Files:**
 - Modify: `agent/src/tools/orders.ts` (`order_item_fulfil`: the import starts after the
-  record and `order_attempt_archives` shows it; `order_attempt_archives`: the two ids, the
-  scan state, and that a read starts an import; `order_attempt_copy`: for a chosen `name`
+  record and `order_attempt_archives` shows it; `order_attempt_archives`: the two ids and that a
+  read starts an import; `order_attempt_copy`: for a chosen `name`
   and the fallback)
 - Modify: `docs/superpowers/specs/2026-10-18-orders-design.md` §6.2, §8.2 ("imported; the
   copy route remains for a chosen photo and as the fallback"; the hand trigger of #6134),
-  Ruling 7 (the scan), Ruling 12 (automatic writes name the attempt's creator)
+  Ruling 12 (automatic writes name the attempt's creator)
 - Modify: `backend/CLAUDE.md` orders section (the triggers, `AttemptMedia`, the columns,
-  the switch, the trap that `GET …/archives` starts an import)
+  the trap that `GET …/archives` starts an import)
 - Modify: `docs/features/orders-and-quotes.md` (one line on attempt media)
 - Test: `agent/test/` tool text tests if a snapshot covers these tools (grep the tool names)
 

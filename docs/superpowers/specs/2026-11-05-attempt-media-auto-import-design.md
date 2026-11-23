@@ -20,7 +20,7 @@ Stories:
 | 3 | [#7232](https://github.com/eh-homelab/ScadBuddy/issues/7232) | `copy_in` provenance, race, actor |
 | 4 | [#7233](https://github.com/eh-homelab/ScadBuddy/issues/7233) | `mirror_media`, the `AttemptMedia` workflow, the three triggers |
 | 5 | [#7234](https://github.com/eh-homelab/ScadBuddy/issues/7234) | The housekeeping sweep |
-| 6 | [#7235](https://github.com/eh-homelab/ScadBuddy/issues/7235) | Scan the printer, behind a setting |
+| 6 | [#7235](https://github.com/eh-homelab/ScadBuddy/issues/7235) | Scan the printer, behind a setting (dropped, §9) |
 | 7 | [#7236](https://github.com/eh-homelab/ScadBuddy/issues/7236) | Read fields and the attempt row on page open |
 | 8 | [#7237](https://github.com/eh-homelab/ScadBuddy/issues/7237) | Agent text and docs |
 
@@ -50,10 +50,14 @@ The draft was written on 2026-11-05. Main moved since. This review read the code
   timelapse pull still needs a print link (F11). §4.3.
 - **Bambuddy's queue can record a timelapse** (#5565 for #5352). §2 and F4.
 - **`timelapse/scan` is still not wrapped and has no recorded reply** (F5).
+- **The timelapse scan is dropped** (owner's direction, 2026-11-23: ScadBuddy distances
+  itself from Bambuddy). ScadBuddy never calls `timelapse/scan`. It imports only a
+  timelapse that Bambuddy's archive already has. The spike's findings (§4.3a) stay as
+  the evidence. §4.3, §4.4, §8.1, §9.
 - **A pre-existing bug in the copy route** (F14): `ArchiveCopy.what` accepts `"file"` since
   #5679. The import's story narrows it.
 - **#4721** is mostly shipped; §4.8 says how it relates.
-- Every file:line reference was checked again. The owner's decisions (§8) are unchanged.
+- Every file:line reference was checked again. The owner's decisions (§8) are unchanged, except §8.1, which the owner superseded on 2026-11-23 (§9).
 
 ## 1. Intent
 
@@ -141,7 +145,7 @@ commit). F11 to F14 are new in the review.
 | F8 | Every replica hears every bus event (the API runs three: eh-homelab/clusters `applications/scadbuddy/scadbuddy.yaml:120`, `replicas: 3`, read on clusters main `802ddba9` on 2026-11-23). `follow_print` writes under the order's lock and only what is still open. `mirror_run` is logged, never raised. `copy_in`'s dedupe is a read then an insert in separate transactions, and `entity_attachments` has no unique index, so two replicas can both insert. | `orders/printing.py:709-757`, `orders/archives.py:142-150,260-294` |
 | F9 | `media_upload_max_bytes` defaults to 1 GiB; a timelapse past it is an edge case here, not the common one. | `core/config.py:113`, `core/settings.py:184` |
 | F10 | `archive_facts()` keeps Bambuddy's `photos` order. Print history's `ArchiveDetail.finish_photo` takes the **first** `finish_`; `copy_in` defaults to the **last**. The names carry a timestamp (`finish_YYYYMMDD_HHMMSS_<hash>.jpg`). | `orders/bambuddy.py:94`, `bambuddy/models.py:440-443`, `orders/archives.py:236` |
-| F11 | The media proxy's reads accept an archive that an order attempt claims (#6406: `require_known_archive`, `PrintLinkStore.known` reads `order_item_fulfilments.archive_ids`). The print detail and the manual timelapse pull do **not**: they need a print link (`_require_print`). So an attempt's archive that only the attempt names (for example one the agent named) has no ScadBuddy pull path; the scan is its only one. | `api/prints.py:90-97`, `bambuddy/print_links.py:568-574`, `api/print_history.py:1218-1225,1453,1706` |
+| F11 | The media proxy's reads accept an archive that an order attempt claims (#6406: `require_known_archive`, `PrintLinkStore.known` reads `order_item_fulfilments.archive_ids`). The print detail and the manual timelapse pull do **not**: they need a print link (`_require_print`). So an attempt's archive that only the attempt names (for example one the agent named) has no ScadBuddy pull path; such an archive gets its timelapse only if Bambuddy has one. | `api/prints.py:90-97`, `bambuddy/print_links.py:568-574`, `api/print_history.py:1218-1225,1453,1706` |
 | F12 | Periodic work runs as housekeeping sweeps on Temporal Schedules on the `library` queue, in the API process: the sweeps' Schedule (`asset_sweep_interval`, default 86400 s) and `PRUNE_SWEEPS` on a 300 s Schedule. "A new periodic pass is an activity in its `SWEEPS`, never a loop in the API." A new sweep goes behind its own `workflow.patched`. A per-object watcher is a workflow on the same queue: `StagedFile`, id `staged-file:<upload id>`, started with `USE_EXISTING` / `ALLOW_DUPLICATE`, AUTO_UPGRADE through `VersionedStagedFile` in `main.LIBRARY_WORKFLOWS`. | `backend/CLAUDE.md` "Housekeeping", `core/config.py:89`, `workflows/housekeeping.py:155-335`, `workflows/staged_file.py`, `orders/storefront/staged_files.py:95-136`, `main.py:1894` |
 | F13 | `order_item.changed` fires once per status change of the item (`order_status_changes`), never for an attachment. The admin order page subscribes to no order event; only the customer's `OrderPage.tsx` and the flow triggers read order events. So a page learns of an import only by reading again. | `backend/CLAUDE.md` flow triggers "Order events", `frontend/src/components/orders/` (no subscriber) |
 | F14 | `ArchiveCopy.what` is `ArchiveMedia`, which gained `"file"` for past-print quotes (#5679). `copy_in` maps only `finished_photo` and `timelapse` to a role (`ROLES`), so `POST …/copy` with `what: "file"` downloads the archive's 3MF under the timelapse's name and then fails on `ROLES["file"]`. The agent's tool allows only the two media. | `orders/integrations.py:181`, `api/orders.py:3134-3150`, `orders/archives.py:48,239-257`, `agent/src/tools/orders.ts:2308-2322` |
@@ -173,7 +177,7 @@ sweep (§4.6) catches the attempt.
 |---|---|---|
 | hand attempt with `archive_id` (`record_fulfilment`, `update_fulfilment` routes) | `_with_archive_facts` copies the facts in the request, the read timed at 5 s (F1); media wait for a click | after `_with_archive_facts`, the route starts `AttemptMedia` (retries on, §4.6). The request never waits on a download. The agent's `order_item_fulfil` is a separate TypeScript process that only POSTs the route (`agent/src/tools/orders.ts:2130-2150`); it changes its text, nothing else |
 | `print.outcome` heard | `mirror_run` → `mirror_archives` | `mirror_run` → `mirror_archives`, then starts `AttemptMedia` (retries on). Every replica hears the outcome (F8); the workflow id makes it one run |
-| `GET …/archives` | `attempt_archives` → `mirror_archives` | `attempt_archives` → `mirror_archives`, then starts `AttemptMedia` (one step, no retries) **only** when a medium is missing that the facts offer or a scan may find (§4.3), and answers with what is attached now (§4.4). The read never waits on a download or a printer scan |
+| `GET …/archives` | `attempt_archives` → `mirror_archives` | `attempt_archives` → `mirror_archives`, then starts `AttemptMedia` (one step, no retries) **only** when a medium is missing that the facts offer, and answers with what is attached now (§4.4). The read never waits on a download |
 
 ### 4.2 What "missing" means, without downloading
 
@@ -213,56 +217,37 @@ not revisit a photo it has imported when a newer `finish_` lands.
 
 ### 4.3 The timelapse that is not there yet
 
-`facts.timelapse` is false for three different reasons, and the import treats them
-differently:
+`facts.timelapse` is false for three different reasons. The import handles only the
+first:
 
 1. **The archive is too fresh.** Bambuddy processes the timelapse after `completed`.
    Nothing to do now; the next step imports it.
 2. **It is on the printer, not in Bambuddy.** The print was queued with timelapse on but
-   Bambuddy did not fetch it (#5323 and #5565 turn the flag on). Bambuddy 1.3.2 scans
-   by itself when a print ends with timelapse on (§4.3a), so this case is now rarer
-   than the draft assumed; it remains for a print whose auto-scan missed. The import
-   asks Bambuddy to **scan**
-   (`timelapse/scan`, F5, wrapped as a new seam method `scan_timelapse(archive_id) ->
-   bool`), once per archive per step, and imports what the scan attached. Bambuddy's
-   "only after the user explicitly selects" is a policy about *its* UI; the user has
-   asked for the opposite here and the scan is scoped to the one archive that is this
-   attempt's print. For an archive with no print link the scan is the only path: the
-   manual pull needs a link (F11).
-3. **The printer never recorded one.** The scan finds nothing; the UI says so
-   ("no timelapse on this print") instead of telling the person to pull one.
+   Bambuddy did not fetch it (#5323 and #5565 turn the flag on). ScadBuddy does not
+   handle this case. Bambuddy scans the printer by itself when a print ends with
+   timelapse on (§4.3a). If that scan misses, a person pulls the video by hand in
+   Bambuddy, or from the print's page in ScadBuddy where the archive has a print link
+   (F11). The next step then imports it.
+3. **The printer never recorded one.** Nothing to import.
 
-The scan needs only the API key's Manage Archives scope (`Scope.MANAGE_ARCHIVES`, as
-`select_timelapse`; read from Bambuddy 1.3.2's source by the spike, #7238). Without it the scan is refused and logged once, and
-case 2 degrades to case 3's message plus the existing pull-by-hand route. The scan is
-behind a setting, `orders_import_timelapse` (default **off** until the owner decides, §4.3a and §9; the draft had on), so a Bambuddy whose
-printer FTP is slow or metered can keep the manual path. **The scan is the one thing in
-this design that reaches the printer**; that is why it is the one switch.
-
-What `timelapse/scan` answers, whether its FTP pull is complete when it returns, and
-what it matches on are **not recorded anywhere in this repo** (F5). The first task of
-the build is a spike: call it on one archive of a finished print with a timelapse on
-the printer and one without, and vendor both replies as fixtures. Until that reply is
-known, the import treats the scan as fire-and-forget: it asks, then re-reads the
-archive on the next step. If the scan turns out to match loosely (a wrong print's
-file attached as this attempt's, §2's anti-goal), the switch defaults to **off** and
-the design's timelapse half stays manual; that is a decision to bring back, not to
-make in the plan.
+The import cannot tell case 2 from case 3, and it does not try. The UI says "no
+timelapse in Bambuddy for this print" for both, once the archive is no longer fresh
+(§4.4).
 
 ### 4.3a What the spike measured (#7230, PR #7238, 2026-11-23)
 
-Measured on prod's Bambuddy 1.3.2 (auth off) with two scan calls; the replies are
-vendored as `backend/tests/bambuddy/recordings/timelapse-scan-none.json` and
-`timelapse-scan-exists.json`, and the PR's README section cites the Bambuddy source
-lines.
+These findings led to the drop of the scan (§9). Measured on prod's Bambuddy 1.3.2
+(auth off) with two scan calls. PR #7238 vendored the replies as
+`backend/tests/bambuddy/recordings/timelapse-scan-none.json` and
+`timelapse-scan-exists.json`, and its README section cites the Bambuddy source lines.
+That PR is closed without merge; this section keeps its findings.
 
 - **Replies.** Always 200 with a `status`: `not_found` (with `available_files`, the
   card's unclaimed videos; archive 282, 0.82 s), `exists` (a timelapse is already
   attached; archive 283, 0.17 s, no printer contact), `attached` (with `filename`;
   from the source only, see below). An unknown archive is 404.
-- **Synchronous.** The route downloads and attaches before it replies, so the
-  fire-and-forget re-read above is not needed: an `attached` reply means the next
-  archive read has the timelapse.
+- **Synchronous.** The route downloads and attaches before it replies: an
+  `attached` reply means the next archive read has the timelapse.
 - **A match deletes the printer's copy** of the video (`delete_archived_timelapse`).
   The spike therefore did not call the scan on the one archive that would have
   matched; there is no `attached` recording.
@@ -277,35 +262,30 @@ lines.
   H2C's is off by about 1 h 20 min). A wrong match also deletes that video from the
   card.
 
-By the rule above and §8.1, this is a loose match: `orders_import_timelapse` ships
-**off** until the owner decides (§9). Story 6 (#7235) builds the scan and the setting
-with that default.
-
-A scan is tried at most **once per attempt per day**, recorded as
-`timelapse_scanned_at` on the attempt (`order_item_fulfilments`), and never once the
-attempt is older than 14 days: a print that never recorded a timelapse must not cost
-an FTP listing on every trigger forever.
-
 ### 4.4 The read tells the truth
 
 `ArchiveOffer` (one archive of the `GET …/archives` answer, `AttemptArchives.archives[]`)
 gains `finished_attachment_id` and `timelapse_attachment_id` (nullable): what is attached
-now, from the new columns. The attempt (`Fulfilment`) carries `timelapse_scanned_at`.
-`AttemptArchives` gains `import_timelapse: bool` (the setting), so the page can tell
-"waiting" from "off". The read starts the import and answers at once (§4.1), so the answer
+now, from the new columns. The read starts the import and answers at once (§4.1), so the answer
 is "what is attached now", and the next read shows what the import did.
 
 **The row loads on page open** (owner's decision, 2026-11-05): `ArchiveCopies.tsx`
 calls `attemptArchives` when it mounts for an attempt that names an archive or a
 run, and the **From Bambuddy…** button goes. It renders from the answer instead of
 its page-local `Set` (F6): "Finish photo attached" / "Timelapse attached" are facts
-after a reload, the copy buttons show only for what is still missing, and the "pull it
-from the print's page first" text becomes "no timelapse on this print" once a scan
-has been tried and "waiting for Bambuddy to process the timelapse" before (with the
-setting off: "no timelapse in Bambuddy; pull it from the print's page"). The cost,
-accepted: one Bambuddy archive read per attempt per order page open (14 on
-ORD-2026-3), each of which may start an import; the scan cap in §4.3 keeps the
-printer out of that loop.
+after a reload, and the copy buttons show only for what is still missing. The "pull it
+from the print's page first" text becomes one of two timelapse states, by the
+archive's `completed_at` (already in `ArchiveOffer`; no new field):
+
+- **"waiting for Bambuddy to process the timelapse"**: `completed_at` is null or less
+  than 1 hour ago. Bambuddy writes the timelapse minutes after `completed` (§4.6); by
+  that hour the workflow has stepped at +15 min and the sweep has checked once more.
+- **"no timelapse in Bambuddy for this print"**: `completed_at` is 1 hour ago or more.
+  This covers §4.3's cases 2 and 3. The sweep still checks for 14 days, so a timelapse
+  pulled later is imported and the row then says "Timelapse attached".
+
+The cost, accepted: one Bambuddy archive read per attempt per order page open (14 on
+ORD-2026-3), each of which may start an import. No read reaches the printer.
 
 No event tells the page that an import attached a file (F13). So the row **reads again**
 while the answer offers a medium that is not attached yet: every 10 s, at most six times
@@ -332,9 +312,8 @@ which says whose bytes they are.) My call; §7 lists it.
 - Each medium is its own try. A timelapse past `media_upload_max_bytes` logs a warning
   with the size and the limit and does not stop the finish photo. The manual button for
   it stays and 413s, as today.
-- Any other failure (Bambuddy down, archive gone, a scan refused) is logged and left
-  for the next step. No row records a failed try except `timelapse_scanned_at` (§4.3)
-  and `media_checked_at` (below).
+- Any other failure (Bambuddy down, archive gone) is logged and left for the next
+  step. No row records a failed try except `media_checked_at` (below).
 - **The retry is scheduled, not clicked.** The finish photo is written seconds after
   `completed` and the timelapse minutes after, so the `print.outcome` trigger alone
   misses both often. `AttemptMedia` started by an outcome or a hand attempt steps now,
@@ -362,8 +341,7 @@ which says whose bytes they are.) My call; §7 lists it.
 - `order_item_fulfil` with `archive_id` returns after starting the import, not after it;
   the tool's text says the finish photo and timelapse are being imported and that
   `order_attempt_archives` shows them once attached.
-- `order_attempt_archives` reports the two attachment ids and the scan state per
-  archive (§4.4), so an agent verifying an order can read "attached" without listing
+- `order_attempt_archives` reports the two attachment ids per archive (§4.4), so an agent verifying an order can read "attached" without listing
   attachments. It stays `risk: 'read'`, as it already writes facts today; its text says
   that a read starts the import.
 - `order_attempt_copy` stays, for a chosen `name` and for the fallback.
@@ -383,20 +361,16 @@ files; the grouping only shows them. #4721 can be narrowed to the grouping, or c
 Backend
 - `scadbuddy/migrations/<ts>_attempt_media_provenance.sql` (one new file, named by UTC
   timestamp): the two `entity_attachments` columns and their checks, the backfill, the
-  partial unique index (§4.2), and `order_item_fulfilments.timelapse_scanned_at` and
-  `.media_checked_at`.
+  partial unique index (§4.2), and `order_item_fulfilments.media_checked_at`.
 - `orders/models.py`: `Attachment.archive_id`, `.archive_media`;
-  `Fulfilment.timelapse_scanned_at`, `.media_checked_at`.
+  `Fulfilment.media_checked_at`.
 - `orders/store.py`: write/read the columns (`_ATTACHMENT`, `_FULFILMENT`,
   `insert_attachment` raises a typed conflict on the unique index); `archive_media_of(attempt)` (what
   is present, attempt and item); `attempts_missing_media(since, checked_before)` for the
-  sweep; `stamp_media_checked`, `stamp_timelapse_scanned`.
-- `orders/integrations.py`: `scan_timelapse(archive_id) -> bool` on the protocol and on
-  `NotLinked`; `orders/bambuddy.py` and `bambuddy/client.py` (`scan_timelapse`, operation
-  `archives.timelapse.scan`, `Scope.MANAGE_ARCHIVES`).
+  sweep; `stamp_media_checked`.
 - `orders/archives.py`: `mirror_media`, `mirror_attempt`; `copy_in` writes the columns,
   takes `created_by` explicitly, and maps the insert conflict to the winner's row;
-  `ArchiveOffer` gains the two ids; `AttemptArchives` gains `import_timelapse`;
+  `ArchiveOffer` gains the two ids;
   `attempt_archives` and `mirror_run` start `AttemptMedia`.
 - `orders/lifecycle.py` `add_attachment`: accept `archive_id`, `archive_media` and
   `source`; the audit line carries `source`.
@@ -408,53 +382,45 @@ Backend
   behind `ATTEMPT_MEDIA_PATCH`, with a replay history.
 - `api/orders.py`: `_with_archive_facts` starts `AttemptMedia` after the facts;
   `ArchiveCopy.what` narrows to `finished_photo | timelapse` (F14).
-- `core/settings.py`, `core/setting_docs.py`: `orders_import_timelapse` (bool, default
-  true, `live`).
-- A spike first: Bambuddy `timelapse/scan` called live, its replies vendored as
-  fixtures (§4.3).
+- No new setting and no new Bambuddy call. The spike (§4.3a) called `timelapse/scan`
+  live; its findings led to the drop (§9).
 
 Frontend
-- `ArchiveCopies.tsx`: loads on mount, renders from the answer's attachment ids and scan
-  state, re-reads while a medium is pending, new copy; the **From Bambuddy…** button goes.
+- `ArchiveCopies.tsx`: loads on mount, renders from the answer's attachment ids and
+  `completed_at`, re-reads while a medium is pending, new copy; the **From Bambuddy…** button goes.
 - `FulfilmentForm.tsx`: the row remounts after a hand attempt with an archive is recorded.
-- Settings → Orders: the switch (`pages/settings/fields.ts`, `sections/orders.tsx`).
 - Mocks (`src/mocks/features/orders/`): the new answer fields.
 
 Tests
-- `backend/tests/orders/test_archives.py`: the `Archives` fake grows `scan` (returns
-  whether a timelapse appeared) and a too-large medium; cases: a hand attempt imports
-  both; a heard outcome imports both; a late timelapse is imported on the next step,
-  after a scan; a scan that finds nothing stamps `timelapse_scanned_at`; nothing is
-  downloaded for a medium already recorded (the fake counts downloads); a too-large
-  timelapse does not stop the photo; without Bambuddy nothing is asked; the switch off
-  means no scan; a race between two inserts gives one row.
+- `backend/tests/orders/test_archives.py`: the `Archives` fake grows a too-large medium;
+  cases: a hand attempt imports both; a heard outcome imports both; a late timelapse is
+  imported on the next step; nothing is downloaded for a medium already recorded (the
+  fake counts downloads); a too-large timelapse does not stop the photo; without
+  Bambuddy nothing is asked; a race between two inserts gives one row.
 - `backend/tests/test_pg_migrations.py`: the backfill, including two rows on one key.
 - A workflow test for `AttemptMedia` (timers, early end, id reuse) and a replay test for
   the housekeeping patch.
-- `frontend`: `ArchiveCopies.test.tsx` for the three timelapse states, the load on mount
+- `frontend`: `ArchiveCopies.test.tsx` for the two timelapse states, the load on mount
   and the bounded re-read.
 
 Docs
 - Spec 2026-10-18 §6.2 and §8.2: "offered as one-click copies" becomes "imported;
-  the copy route remains for a chosen photo and as the fallback". Ruling 7 (one seam)
-  gains the scan. Ruling 12 gains the §4.5 convention for automatic writes.
-- `backend/CLAUDE.md` orders section: the triggers, the workflow, the columns, the
-  switch, and the trap that `GET …/archives` is a write (it starts an import): a reader
+  the copy route remains for a chosen photo and as the fallback". Ruling 12 gains the §4.5 convention for automatic writes.
+- `backend/CLAUDE.md` orders section: the triggers, the workflow, the columns, and the trap that `GET …/archives` is a write (it starts an import): a reader
   expecting a pure read will be surprised by a 300 MB pull.
 - `docs/features/orders-and-quotes.md`: one line on attempt media.
 
 ## 6. Left to the builder
 
-- The exact wording of the three timelapse states.
+- The exact wording of the two timelapse states.
 - The re-read's interval and count in `ArchiveCopies.tsx`, within §4.4's bounds.
 
 ## 7. Calls I made (check these while reading)
 
 1. **Latest finish photo only** (last by name), one per archive, never revisited once
    imported.
-2. **Scan the printer for the timelapse** when Bambuddy lacks one, behind a default-on
-   setting, scoped to the attempt's archive, at most once per attempt per day and not
-   after 14 days; a spike vendors the scan's reply before anything is built on it.
+2. **No printer scan.** The import copies only a timelapse that Bambuddy's archive
+   has. (Was: scan the printer behind a setting; dropped 2026-11-23, §9.)
 3. **`created_by` is the attempt's creator**; no system actor. Audit says
    `source: archive`.
 4. **Two columns on `entity_attachments`** (`archive_id`, `archive_media`) plus a
@@ -462,7 +428,7 @@ Docs
    imported" is a row read and not a download, a replica race is a duplicate download,
    never a duplicate row, and a second chosen photo is still allowed.
 5. **The read starts and answers.** `GET …/fulfilments/{f}/archives` never waits on
-   a download or a printer scan.
+   a download.
 6. **One `AttemptMedia` workflow per attempt** steps now, at +2 and at +15 min; a
    housekeeping sweep every 300 s, throttled to once an hour per attempt by
    `media_checked_at`, over the last 14 days, is the retry. Not the page open. (Review
@@ -472,15 +438,25 @@ Docs
 
 ## 8. Decided by the owner (2026-11-05)
 
-1. **Scan the printer automatically: yes.** Default on, scoped to the attempt's one
+1. ~~**Scan the printer automatically: yes.** Default on, scoped to the attempt's one
    archive, capped as §4.3 says; the spike still records the scan's reply first, and
-   a loose match comes back as a question before the switch ships on.
+   a loose match comes back as a question before the switch ships on.~~
+   Superseded 2026-11-23 by the owner's direction to distance ScadBuddy from Bambuddy
+   (§9).
 2. **Load the archive row on page open: yes.** The **From Bambuddy…** button goes;
    the row shows what is attached and offers only what is missing (§4.4).
 
-## 9. Waiting for the owner
+## 9. Decided 2026-11-23: no scan
 
-1. **Turn the timelapse scan on?** The spike (§4.3a) found that the scan can attach
-   another print's video and deletes the video it attaches from the printer's card.
-   Bambuddy also scans by itself at print end. Until the owner says yes,
-   `orders_import_timelapse` defaults to **off** and the finish photo half ships alone.
+The owner's direction of 2026-11-23: ScadBuddy distances itself from Bambuddy. It owns
+its records and adds no new read of, or dependency on, Bambuddy. So ScadBuddy never
+calls `timelapse/scan`. The spike (§4.3a) gives the reasons:
+
+- it is a new Bambuddy dependency;
+- a match deletes the video from the printer's card;
+- it can attach another print's video (clock-based rules; the H2C's clock is off by
+  about 1 h 20 min);
+- Bambuddy already scans by itself at print end.
+
+The import of the finish photo and of a timelapse that Bambuddy's archive already has
+stays: it is ScadBuddy's own copy of the record.
