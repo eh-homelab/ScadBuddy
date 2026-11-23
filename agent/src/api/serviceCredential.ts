@@ -61,7 +61,8 @@ export type ExchangeOptions = {
   readProof?: (path: string) => Promise<string>
   now?: () => number
   log?: (message: string) => void
-  sleep?: (ms: number) => Promise<void>
+  /** Waits `ms`, or less when `signal` aborts. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
 }
 
 export class ExchangeCredential implements CredentialSource {
@@ -81,7 +82,7 @@ export class ExchangeCredential implements CredentialSource {
   private readonly readProof: (path: string) => Promise<string>
   private readonly now: () => number
   private readonly log: (message: string) => void
-  private readonly sleep: (ms: number) => Promise<void>
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>
 
   constructor(options: ExchangeOptions) {
     this.options = options
@@ -91,7 +92,7 @@ export class ExchangeCredential implements CredentialSource {
     this.now = options.now ?? Date.now
     this.log = options.log ?? ((message) => console.error(message))
     // Not unref'd: a one-shot process (forget-subject.ts) must wait too, and the wait is bounded.
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+    this.sleep = options.sleep ?? sleepUnlessAborted
   }
 
   async current(): Promise<string | undefined> {
@@ -119,7 +120,7 @@ export class ExchangeCredential implements CredentialSource {
         // A backend not up yet sets no back-off (nextTry is due): the call would be refused too.
         const wait = this.nextTry - this.now()
         if (wait <= 0 || this.now() + wait + EXCHANGE_TIMEOUT_MS > deadline) return undefined
-        await Promise.race([this.sleep(wait), aborted.promise])
+        await Promise.race([this.sleep(wait, signal), aborted.promise])
         if (signal?.aborted) return undefined
       }
     } finally {
@@ -207,6 +208,23 @@ export class ExchangeCredential implements CredentialSource {
     }
     this.failed(`HTTP ${response.status}`)
   }
+}
+
+/**
+ * Resolves after `ms`, or at once when `signal` aborts, and then clears its timer (#7144): the timer
+ * is ref'd, so a one-shot process does not stay alive for a wait whose call has settled.
+ */
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    if (signal?.aborted) done()
+    else signal?.addEventListener('abort', done, { once: true })
+  })
 }
 
 /** Resolves (with no token) when `signal` aborts; never without one. */
