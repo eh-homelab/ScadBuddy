@@ -125,7 +125,7 @@ describe('registry', () => {
           'notifications',
         ],
       ],
-      ['tools', ['builtin', 'packages', 'remote']],
+      ['tools', ['builtin', 'packages', 'hosted-plugins', 'remote']],
       ['mcp', ['mcp-auth-mode', 'mcp-access-tokens', 'mcp-oidc', 'mcp-connect', 'mcp-plugin-feed']],
       ['audits', ['audit-log']],
       ['system', ['diagnostics', 'sign-in', 'signed-in-sessions', 'access-tokens', 'service-credentials', 'payments', 'storefront-mail', 'administration', 'about']],

@@ -458,7 +458,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   agent-schema tables `ai_hosted_plugins`, `ai_hosted_plugin_files` (the draft) and
   `ai_hosted_plugin_versions` (never updated; a trigger refuses it), and `ai_plugin_feeds`.
   The bytes are blobs `attachment-<sha256>` held in `blob_refs` by holder `hosted_plugin`.
-  Routes `api/hosted_plugins.py` (`/hosted-plugins`, `api` class) and the agent's area
+  Routes `api/hosted_plugins.py` (`/hosted-plugins`, `api` class; `GET /{name}/versions` lists
+  the versions newest first for Settings' editor, #6937) and the agent's area
   `hosted-plugins` in `api/crud_agent_packages.py` (a plugin's latest version, a version's
   zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`. A marketplace
   feed's packages are `ai_plugin_feed_packages` (#6933; a package's delete removes its rows),
