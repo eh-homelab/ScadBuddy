@@ -59,8 +59,10 @@ class Served:
     async def file(self, file_id: int) -> LibraryFile | None:
         if file_id not in self.files:
             return None
-        _, stated = self.files[file_id]
-        return LibraryFile(id=file_id, filename="bracket.3mf", file_hash=stated)
+        payload, stated = self.files[file_id]
+        return LibraryFile(
+            id=file_id, filename="bracket.3mf", file_hash=stated, file_size=len(payload)
+        )
 
     async def download(self, file_id: int) -> AsyncGenerator[bytes]:
         self.downloads.append(file_id)
@@ -151,6 +153,21 @@ async def test_a_bambuddy_file_stating_no_hash_is_read_for_its_sha256(
     assert same.downloads == [89]
     other = Served({89: (b"other bytes", None)})
     assert (await check(shop, order, item, other, content, tmp_path))["restore"] is True
+
+
+async def test_a_file_of_another_size_is_not_downloaded(
+    shop: Shop, content: ContentStore, held: str, tmp_path: Path
+) -> None:
+    """A Bambuddy file that states no hash, and whose size is not the held copy's, is
+    other bytes: the check answers ``restore`` without reading it."""
+    order, item = storefront_item(shop)
+    other = Served({89: (PINNED + b" and more", None)})
+    assert (await check(shop, order, item, other, content, tmp_path))["restore"] is True
+    assert other.downloads == []
+    # The same size is no proof: those bytes are read.
+    same_size = Served({89: (bytes(len(PINNED)), None)})
+    assert (await check(shop, order, item, same_size, content, tmp_path))["restore"] is True
+    assert same_size.downloads == [89]
 
 
 async def test_a_gone_or_changed_file_answers_restore_never_changed(

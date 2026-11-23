@@ -986,7 +986,8 @@ between the check and the run is `library_file_gone` from the run. The folder's 
 find and the upload run under one advisory lock (`OrderStore.restore_lock`), so two prints
 racing to restore make one "Storefront" folder and one copy. The Bambuddy side of the restore
 (`BambuddyShelf`, `served_shelf`) is in `orders/bambuddy.py`, the one file of `orders/` that
-reaches the Bambuddy client.
+reaches the Bambuddy client. The check reads a Bambuddy file that states no hash only when its
+stated size is the held copy's; another size is other bytes.
 
 The item's accepted quote stays: its bytes are the held copy's, which it priced
 (§7.3). The listing is not changed: it keeps its pin and its held copy.

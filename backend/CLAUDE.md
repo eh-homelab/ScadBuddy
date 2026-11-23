@@ -2223,7 +2223,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   is still that file at that sha256, so the read, the add and the checkout make one key.
   The print prints the held copy (#6710 §10.2, PR 4): `printing.py` `_library_stands` checks
   a storefront item's file by its pinned sha256 (the stated `file_hash`, else a download's
-  digest) and answers `restore` when it is gone or other bytes while the held copy is in the
+  digest, skipped when the stated size is not the held copy's) and answers `restore` when it is gone or other bytes while the held copy is in the
   content store (else `library_file_gone`; there is no "changed" refusal), and the run
   (`operations.py` `item_print_run`, `restored_file`) first calls `held_print.py`
   `restore_held`: under one advisory lock (`OrderStore.restore_lock`, so racing prints make

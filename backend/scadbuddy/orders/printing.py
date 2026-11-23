@@ -615,14 +615,19 @@ async def _library_stands(
     if file.sha256 is None:
         if not await library.exists(file.id):
             raise library_file_gone(item.id, file)
-    elif not await _pinned_there(library, file.id, file.sha256):
-        if content is None:
-            raise ApiError(
-                status.HTTP_503_SERVICE_UNAVAILABLE, "this check cannot read the held copy"
-            )
-        if file.copy_key is None or await content.stat(file.copy_key) is None:
-            raise library_file_gone(item.id, file)
-        restore = True
+    else:
+        held = (
+            None if content is None or file.copy_key is None else await content.stat(file.copy_key)
+        )
+        size = None if held is None else held.ref.size
+        if not await _pinned_there(library, file.id, file.sha256, size):
+            if content is None:
+                raise ApiError(
+                    status.HTTP_503_SERVICE_UNAVAILABLE, "this check cannot read the held copy"
+                )
+            if held is None:
+                raise library_file_gone(item.id, file)
+            restore = True
     await _quoted_file_stands(blobs, item, quote)
     checked: dict[str, Any] = {
         "library_file_id": file.id,
@@ -638,14 +643,18 @@ async def _library_stands(
     return checked
 
 
-async def _pinned_there(library: ServedFiles, file_id: int, sha256: str) -> bool:
+async def _pinned_there(library: ServedFiles, file_id: int, sha256: str, size: int | None) -> bool:
     """Whether the library that serves holds ``file_id`` with the bytes ``sha256`` names:
-    the hash its row states, or, for a Bambuddy file that states none, its download's."""
+    the hash its row states, or, for a Bambuddy file that states none, its download's. A
+    file whose stated size is not ``size`` (the held copy's, when known) is other bytes,
+    and is not downloaded."""
     found = await library.file(file_id)
     if found is None:
         return False
     if found.file_hash:
         return found.file_hash.lower() == sha256
+    if size is not None and found.file_size is not None and found.file_size != size:
+        return False
     digest = hashlib.sha256()
     try:
         async for chunk in library.download(file_id):
