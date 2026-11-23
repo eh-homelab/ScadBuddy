@@ -90,7 +90,8 @@ export class ExchangeCredential implements CredentialSource {
     this.readProof = options.readProof ?? ((path) => readFile(path, 'utf8'))
     this.now = options.now ?? Date.now
     this.log = options.log ?? ((message) => console.error(message))
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()))
+    // Not unref'd: a one-shot process (forget-subject.ts) must wait too, and the wait is bounded.
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
   }
 
   async current(): Promise<string | undefined> {
@@ -106,12 +107,15 @@ export class ExchangeCredential implements CredentialSource {
   }
 
   async untilCurrent(signal?: AbortSignal): Promise<string | undefined> {
-    const deadline = this.now() + CREDENTIAL_WAIT_MS
+    // The bound starts once the first answer is in: a call made while an exchange is in flight
+    // (up to EXCHANGE_TIMEOUT_MS, which it waited for before #6647 too) still waits for the retry.
+    let deadline: number | undefined
     const aborted = abortOf(signal)
     try {
       for (;;) {
         const token = await Promise.race([this.current(), aborted.promise])
         if (token !== undefined || signal?.aborted) return token
+        deadline ??= this.now() + CREDENTIAL_WAIT_MS
         // A backend not up yet sets no back-off (nextTry is due): the call would be refused too.
         const wait = this.nextTry - this.now()
         if (wait <= 0 || this.now() + wait + EXCHANGE_TIMEOUT_MS > deadline) return undefined

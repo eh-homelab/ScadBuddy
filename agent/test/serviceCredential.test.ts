@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { CREDENTIAL_WAIT_MS, type CredentialSource, ExchangeCredential, serviceCredentialMiddleware, withServiceCredential } from '../src/api/serviceCredential.js'
 
 // #4975 phase 4: the agent's service credential on its calls to the backend. It reads no view
@@ -365,6 +365,48 @@ describe('ExchangeCredential', () => {
     controller.abort()
     const request = (await pending) as Request
     expect(request.headers.get('authorization')).toBeNull()
+  })
+
+  it('a call made during a slow first exchange still waits for the retry (#7099 review)', async () => {
+    const backend = fakeBackend()
+    const clock = { now: 0 }
+    const slept: number[] = []
+    let exchanges = 0
+    const credential = new ExchangeCredential({
+      backendUrl: 'http://backend:8080/',
+      proofFile: '/var/run/scadbuddy/token',
+      proof: 'k8s',
+      fetchImpl: ((input: string | URL | Request, init?: RequestInit) => {
+        exchanges += 1
+        if (exchanges === 1) {
+          // The first exchange takes its whole 10 s timeout, then fails.
+          clock.now += 10_000
+          return Promise.reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' }))
+        }
+        return backend.fetchImpl(input, init)
+      }) as typeof fetch,
+      readProof: async () => 'jwt-1',
+      now: () => clock.now,
+      log: () => undefined,
+      sleep: async (ms) => {
+        slept.push(ms)
+        clock.now += ms
+      },
+    })
+    expect(await credential.untilCurrent()).toMatch(/^sbsvc_/)
+    expect(slept).toEqual([5_000])
+  })
+
+  it('the default wait keeps a one-shot process alive (#7099 review)', async () => {
+    const credential = new ExchangeCredential({ backendUrl: 'http://backend:8080/', proofFile: '/x', proof: 'k8s' })
+    const spy = vi.spyOn(globalThis, 'setTimeout')
+    try {
+      void (credential as unknown as { sleep: (ms: number) => Promise<void> }).sleep(1)
+      const timer = spy.mock.results.at(-1)?.value as NodeJS.Timeout
+      expect(timer.hasRef()).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('counts the exchange after the wait in the bound (#7099 review)', async () => {
