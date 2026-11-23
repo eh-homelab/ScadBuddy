@@ -94,6 +94,7 @@ const EVENT_KINDS = [
   'archived',
   'restored',
   'synced_from_bb',
+  'consumed_reset',
 ] as const
 
 /** A calendar day, as the metrics routes' `date` query takes it. */
@@ -1583,15 +1584,17 @@ const tools: Tool[] = [
 
   defineTool({
     name: 'filament_spool_add_event',
-    label: 'Record a weighing or a drying',
+    label: 'Record a weighing, drying or counter reset',
     description:
       'Record on a spool a weighing (`kind: weighed`, `grams` = the filament left, without the empty spool; ' +
       '`grams_left` starts again from it) or a drying (`kind: dried`, `temp_c`, `hours`). A drying that leaves ' +
       "out `temp_c` or `hours` records the spool's `drying_defaults` (filament_spool_get: its own drying values, else its " +
-      "type's, else its subtype's, else its material's); `null` records none. Only what the user says. Writes ScadBuddy only.",
+      "type's, else its subtype's, else its material's); `null` records none. `kind: consumed_reset` (no grams, " +
+      "temp_c or hours) starts the spool's used counter (`consumed_g`) again from 0 g; the grams left stay. " +
+      'Only what the user says. Writes ScadBuddy only; a reset reaches Bambuddy at the next sync when weights sync to it.',
     input: z.object({
       spool_id: z.string().uuid(),
-      kind: z.enum(['weighed', 'dried']),
+      kind: z.enum(['weighed', 'dried', 'consumed_reset']),
       source: z.enum(['person', 'scale']).default('person'),
       grams: z.number().min(0).optional(),
       temp_c: z.number().int().min(0).nullable().optional().describe("Left out: the spool's drying default"),
@@ -1602,7 +1605,11 @@ const tools: Tool[] = [
     source: SOURCE,
     routes: ['POST /api/v1/filament/spools/{spool_id}/events'],
     summarize: ({ spool_id, kind, grams }) =>
-      kind === 'weighed' ? `Record ${grams ?? '?'} g on spool ${spool_id}` : `Record a drying of spool ${spool_id}`,
+      kind === 'weighed'
+        ? `Record ${grams ?? '?'} g on spool ${spool_id}`
+        : kind === 'consumed_reset'
+          ? `Reset the used counter of spool ${spool_id}`
+          : `Record a drying of spool ${spool_id}`,
     handler: async ({ spool_id, ...body }, { backend }) =>
       json(
         await ok(
@@ -1613,6 +1620,22 @@ const tools: Tool[] = [
           `record on spool ${spool_id}`,
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'filament_spools_reset_consumed',
+    label: 'Reset the used counter of spools',
+    description:
+      'Start the used counter (`consumed_g`) of 1 to 500 spools again from 0 g, as Bambuddy\'s "reset consumed" does (#7149). ' +
+      'The grams left, the lifetime use and the cost stay. Answers `reset` (how many) and `not_found` (ids with no spool). ' +
+      'Writes ScadBuddy; a linked spool has its Bambuddy counter reset at the next sync when weights sync to Bambuddy.',
+    input: z.object({ spool_ids: z.array(z.string().uuid()).min(1).max(500) }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/reset-consumed'],
+    summarize: ({ spool_ids }) => `Reset the used counter of ${spool_ids.length} ${spool_ids.length === 1 ? 'spool' : 'spools'}`,
+    handler: async (body, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/spools/reset-consumed', { body }), 'reset the used counters')),
   }),
 
   defineTool({

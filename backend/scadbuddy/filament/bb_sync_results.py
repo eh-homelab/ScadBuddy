@@ -92,14 +92,14 @@ ACTOR = "system:bambuddy-sync"
 #: ``PUT`` also answers 404 for a supplier Bambuddy does not know (`sync-routes.json`
 #: ``write_semantics.replace_all_lists``), so its 404 keeps the link: a spool that is
 #: really gone is missing from the next complete listing, and its probe drops it.
-_GONE_ON_404 = frozenset({"update", "archive", "restore", "probe"})
+_GONE_ON_404 = frozenset({"update", "archive", "restore", "probe", "reset_consumed"})
 #: The writes Bambuddy answers with the spool's whole row (``SpoolResponse`` in
 #: `sync-routes.json`; a spool's probe is ``GET spool_row``, another row's probe answers
 #: that row, #6688). A list ``PUT`` answers its list.
-_FULL_ROW = frozenset({"create", "update", "archive", "restore", "probe"})
+_FULL_ROW = frozenset({"create", "update", "archive", "restore", "probe", "reset_consumed"})
 #: The spool writes that change Bambuddy's row, and so book Decision 9's event and move
 #: the link's ``bb_updated_at``.
-_ECHOED = frozenset({"create", "update", "archive", "restore"})
+_ECHOED = frozenset({"create", "update", "archive", "restore", "reset_consumed"})
 #: The field each list ``PUT`` answers (the preset list: none a spool row carries).
 _LIST_FIELDS: dict[str, str | None] = {
     "k_profiles": "k_profiles",
@@ -452,8 +452,16 @@ def _spool(
         elif field == "k_profiles" and isinstance(rows, list):
             k_rows = json_form(rows)
     sb = _spool_compare(conn, write.sb_id, reads.bb_refs(conn), reads.spool_facts(conn))
+    # R-7149-8: the baseline in a reset's answer is SB's own doing; every other
+    # pull-only field keeps what the pull last saw, so an echo hides no Bambuddy change.
     merged = _merge(
-        item["bb_seen"], seen, write, lambda n, _v: n in sb and bb_form(n, seen, k_rows) == sb[n]
+        item["bb_seen"],
+        seen,
+        write,
+        lambda n, _v: (
+            (write.op == "reset_consumed" and n == "weight_used_baseline")
+            or (n in sb and bb_form(n, seen, k_rows) == sb[n])
+        ),
     )
     k = item["bb_k_profiles"]
     if k_rows is not None and (

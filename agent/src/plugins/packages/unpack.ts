@@ -21,8 +21,9 @@ import { crc32, gunzipSync, inflateRawSync } from 'node:zlib'
 //     taken as the name, the name prefix (bytes 345..500) only in a POSIX ustar header
 //     (magic `ustar\0`, version `00`: a GNU header keeps other fields there), sizes in
 //     octal only;
-//   - the caps of a hosted plugin's draft (spec §6.2): `UNPACK_MAX_FILES` entries
-//     (directories count, so an archive cannot make one directory per header),
+//   - the package caps (spec §6.2): `UNPACK_MAX_FILES` entries (directories count, so an
+//     archive cannot make one directory per header; a hosted draft holds one file fewer, for
+//     the plugin.json that publish adds),
 //     `UNPACK_MAX_FILE_BYTES` per file and `UNPACK_MAX_TOTAL_BYTES` in all, checked
 //     before a byte is inflated, so a zip bomb never grows past them.
 //
