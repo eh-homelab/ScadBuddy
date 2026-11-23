@@ -296,6 +296,28 @@ describe('the prices panel', () => {
     expect(writes).toEqual([`PATCH /api/v1/filament/types/${T.JADE}`])
   })
 
+  it("fills the cost field from the calculator, the label weight as the net weight, and sends nothing until Save (#7152)", async () => {
+    const writes: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method !== 'GET') writes.push(`${request.method} ${new URL(request.url).pathname}`)
+    })
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Work out the cost per kg' }))
+    const calculator = screen.getByRole('region', { name: 'Cost calculator' })
+    expect(within(calculator).getByLabelText('Net weight per spool (g)')).toHaveValue('1000')
+    await user.type(within(calculator).getByLabelText(/^Price paid/), '21.99')
+    await user.type(within(calculator).getByLabelText('Tax'), '1.76')
+    await user.click(within(calculator).getByRole('button', { name: 'Work it out' }))
+    await user.click(await within(calculator).findByRole('button', { name: 'Use as default cost' }))
+    expect(screen.getByLabelText('Cost per kg')).toHaveValue('23.7500')
+    expect(screen.getByRole('status')).toHaveTextContent('Save the type to keep it')
+    expect(writes).toEqual([])
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    await waitFor(async () => expect((await getType(T.JADE)).cost_per_kg).toMatch(/^23\.75/))
+    expect(writes).toEqual([`PATCH /api/v1/filament/types/${T.JADE}`])
+  })
+
   it('offers no Add price for a product of an archived supplier', async () => {
     await patchSupplier(SUPPLIER.BAMBU, { archived: true })
     render(`/filament/types/${T.JADE}`)

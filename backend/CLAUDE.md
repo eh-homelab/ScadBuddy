@@ -959,7 +959,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `metrics_export.py` (the Prometheus gauges from one snapshot, at most every 60 s per process;
   labels are catalog names, 20 values at most, the rest `other`, null `none`, so a rename starts
   a new series). Routes: `GET /filament/spools/{id}/history`, `/filament/forecast`,
-  `/filament/metrics` and `/filament/metrics/purchasing` (ranges over 1096 days are a 422).
+  `/filament/metrics`, `/filament/metrics/purchasing` and `/filament/metrics/material-numbers` (#7152, by type code, case folded; ranges over 1096 days are a 422); `GET /filament/cost-per-kg` (#7152, `filament/cost_calc.py`) is the cost calculator, a read in the shop's currency.
   Purchasing (#6266, spec §5.8; plan `docs/superpowers/plans/2026-11-17-filament-suppliers.md`,
   which holds the decisions): `suppliers.py` (`SuppliersStore`: suppliers, products by
   `upper(sku)`, price points; a price point is the price of one pack, tax in, shipping out, and

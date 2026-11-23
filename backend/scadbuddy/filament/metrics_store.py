@@ -43,6 +43,7 @@ _NONE_LABEL = {
     "supplier": "No supplier",
     "location": "No location",
     "printer": "No printer",
+    "material_number": "No material number",
 }
 _WASTE: tuple[mm.WasteDimension, ...] = ("material", "type", "printer")
 
@@ -274,6 +275,63 @@ class MetricsStore:
             ),
         )
 
+    def material_numbers(self, since: date, until: date) -> mm.MaterialNumberStats:
+        """Stock now and the plates that ended from ``since`` to ``until`` (UTC days, both
+        included) by material number: the spool's type's code, case folded, archived types
+        of the code in it (#7152, R-7152-5 to R-7152-8). A key is listed when it has a spool
+        in stock or a plate in the range."""
+        settings = self._settings()
+        read = self._read()
+        by_key: dict[str | None, list[Any]] = {}
+        for spool in read.spools:
+            row = None if spool.type_id is None else read.types.get(spool.type_id)
+            # Postgres's upper(), the unique index's fold, not str.upper (R-7152-10).
+            key = None if row is None else row["code_key"]
+            found = by_key.setdefault(key, [0, 0.0, 0.0, 0.0, None, False])
+            if spool.archived_at is None:
+                found[0] += 1
+                found[1] += spool.grams_left or 0.0
+                found[5] = True
+                value = _value(spool, settings.default_cost_per_kg)
+                if value is not None:
+                    found[4] = (found[4] or Decimal(0)) + value
+            for plate in read.plates.get(spool.id, []):
+                if since <= plate.at.astimezone(UTC).date() <= until:
+                    found[2] += plate.grams
+                    found[3] += plate.grams if plate.outcome in ("failed", "cancelled") else 0.0
+                    found[5] = True
+        codes: dict[str, list[Row]] = defaultdict(list)
+        for row in read.types.values():
+            codes[row["code_key"]].append(row)
+        rows = []
+        for key, (spools, grams, used, wasted, value, listed) in by_key.items():
+            if not listed:
+                continue
+            types = codes.get(key, []) if key is not None else []
+            rows.append(
+                mm.MaterialNumberRow(
+                    key=key,
+                    label=_NONE_LABEL["material_number"] if key is None else _code_label(types),
+                    types=[
+                        mm.MaterialNumberType(
+                            id=t["id"], code=t["code"], archived=t["archived_at"] is not None
+                        )
+                        for t in sorted(types, key=lambda t: (t["code"], str(t["id"])))
+                    ],
+                    spools=spools,
+                    grams_left=grams,
+                    used_g=used,
+                    wasted_g=wasted,
+                    value=_money(value),
+                )
+            )
+        return mm.MaterialNumberStats(
+            currency=settings.currency,
+            since=since,
+            until=until,
+            rows=sorted(rows, key=lambda r: (r.key is None, -r.grams_left, r.label.upper())),
+        )
+
     def purchasing(self, since: date, until: date) -> mm.PurchasingMetrics:
         """The price per kg of each type at each supplier, one series per currency, and
         the confirmed invoices' totals per supplier, month and currency, from ``since`` to
@@ -409,8 +467,9 @@ class MetricsStore:
             ).fetchall()
             events = ledger.plate_events(conn)
             types = conn.execute(
-                "SELECT t.id, t.code, t.lead_time_days, t.safety_margin_days, t.archived_at,"
-                " mat.name AS material FROM filament_spool_types t"
+                "SELECT t.id, t.code, upper(t.code) AS code_key, t.lead_time_days,"
+                " t.safety_margin_days, t.archived_at, mat.name AS material"
+                " FROM filament_spool_types t"
                 " LEFT JOIN filament_materials mat ON mat.id = t.material_id"
             ).fetchall()
             printers = conn.execute("SELECT id, name FROM printers").fetchall()
@@ -456,6 +515,14 @@ def _key(read: _Read, spool: m.Spool, dimension: str) -> tuple[str | None, str]:
     if key is None:
         return None, _NONE_LABEL[dimension]
     return str(key), label or str(key)
+
+
+def _code_label(types: list[Row]) -> str:
+    """A material number's label: its live type's code, else the newest archived one's."""
+    live = [t for t in types if t["archived_at"] is None]
+    if live:
+        return str(live[0]["code"])
+    return str(max(types, key=lambda t: (t["archived_at"], str(t["id"])))["code"])
 
 
 def _printer(read: _Read, printer_id: UUID | None) -> tuple[str | None, str]:
