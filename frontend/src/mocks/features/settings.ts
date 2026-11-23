@@ -297,7 +297,7 @@ function putSettings(body: Record<string, unknown>) {
       return refused(name, value < 1 ? 'Input should be greater than or equal to 1' : 'Input should be less than or equal to 150')
     }
     if (name === 'filament_drying_hours' && typeof value === 'string' && !(Number(value) >= 0.1 && Number(value) < 1000)) {
-      return refused(name, 'Input should be greater than or equal to 0.1')
+      return refused(name, Number(value) >= 1000 ? 'Input should be less than 1000' : 'Input should be greater than or equal to 0.1')
     }
     if (name === 'filament_default_cost_per_kg' && typeof value === 'string' && !/^\d+(\.\d+)?$/.test(value.trim())) {
       return refused(name, 'Input should be greater than or equal to 0')
