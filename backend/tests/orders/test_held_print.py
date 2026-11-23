@@ -14,11 +14,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, BinaryIO, cast
 
+import httpx
 import pytest
 
-from scadbuddy.bambuddy.models import LibraryFile
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.models import FolderCreate, LibraryFile
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
-from scadbuddy.orders.held_print import STOREFRONT_FOLDER, NativeShelf, restore_held
+from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.orders.bambuddy import BambuddyShelf, served_shelf
+from scadbuddy.orders.held_print import STOREFRONT_FOLDER, NativeShelf, Shelf, restore_held
 from scadbuddy.orders.models import LibraryFileRef, Order, OrderItem
 from scadbuddy.orders.printing import print_check
 from scadbuddy.orders.problems import PROBLEMS
@@ -33,6 +38,7 @@ from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop
 from tests.orders.test_quote import FakeOutputs
+from tests.support.fake_bambuddy_library import build_app
 from tests.support.store import local_content
 
 pytestmark = pytest.mark.requires_postgres
@@ -263,7 +269,7 @@ async def restore(
     order: Order,
     item: OrderItem,
     content: ContentStore,
-    shelf: NativeShelf,
+    shelf: Shelf,
     choices: Choices,
     checked_id: int = GONE_ID,
 ) -> int:
@@ -414,3 +420,125 @@ async def test_a_held_copy_lost_before_the_restore_is_library_file_gone(
 
 def _spooled(payload: bytes) -> BinaryIO:
     return io.BytesIO(payload)
+
+
+# -- the restore into Bambuddy's library ------------------------------------------------------
+
+API = "/api/v1"
+
+
+class Recorded(httpx.ASGITransport):
+    """The fake Bambuddy library's transport, keeping each request's method and path."""
+
+    def __init__(self) -> None:
+        super().__init__(app=build_app())
+        self.asked: list[tuple[str, str]] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.asked.append((request.method, request.url.path))
+        return await super().handle_async_request(request)
+
+    def count(self, method: str, path: str) -> int:
+        return sum(1 for asked in self.asked if asked == (method, API + path))
+
+
+class NoUploads:
+    """``upload_raw``'s unrecorded-upload check asks which ids an output records: none."""
+
+    async def recorded(self, ids: Any) -> set[int]:
+        return set()
+
+
+@pytest.fixture
+def recorded() -> Recorded:
+    return Recorded()
+
+
+@pytest.fixture
+async def bambuddy(recorded: Recorded) -> AsyncIterator[BambuddyClient]:
+    async with httpx.AsyncClient(transport=recorded) as http:
+        yield BambuddyClient(BambuddyConfig(base_url="http://fake"), http=http)
+
+
+def bambuddy_shelf(client: BambuddyClient) -> BambuddyShelf:
+    return BambuddyShelf(client, cast(BambuddyUploadStore, NoUploads()))
+
+
+async def test_bambuddys_storefront_folder_is_made_once(
+    bambuddy: BambuddyClient, recorded: Recorded
+) -> None:
+    shelf = bambuddy_shelf(bambuddy)
+    nested = await bambuddy.create_folder(FolderCreate(name="Parent"))
+    # A "Storefront" that is not top-level is not taken.
+    await bambuddy.create_folder(FolderCreate(name=STOREFRONT_FOLDER, parent_id=nested.id))
+    made = await shelf.storefront_folder()
+    assert await shelf.storefront_folder() == made
+    tops = [f for f in await bambuddy.folders() if f.parent_id is None]
+    assert sorted(f.name for f in tops) == ["Parent", STOREFRONT_FOLDER]
+    assert recorded.count("POST", "/library/folders/") == 3
+
+
+async def test_bambuddys_find_matches_the_hash_and_skips_another_size(
+    bambuddy: BambuddyClient, recorded: Recorded
+) -> None:
+    shelf = bambuddy_shelf(bambuddy)
+    folder = await shelf.storefront_folder()
+    longer = await shelf.upload("other.3mf", _spooled(PINNED + b"!"), folder)
+    same_size = await shelf.upload("same.3mf", _spooled(bytes(len(PINNED))), folder)
+    assert await shelf.find(folder, SHA256, len(PINNED)) is None
+    pinned = await shelf.upload("bracket.3mf", _spooled(PINNED), folder)
+    recorded.asked.clear()
+    assert await shelf.find(folder, SHA256, len(PINNED)) == pinned
+    # Only the files of the copy's size have their hash read.
+    assert recorded.count("GET", f"/library/files/{longer}") == 0
+    assert recorded.count("GET", f"/library/files/{same_size}") == 1
+    assert pinned not in (longer, same_size)
+    found = await bambuddy.library_file(pinned)
+    assert (found.filename, found.folder_id, found.file_hash) == ("bracket.3mf", folder, SHA256)
+
+
+async def test_a_restore_into_bambuddy_uploads_once(
+    shop: Shop,
+    content: ContentStore,
+    held: str,
+    bambuddy: BambuddyClient,
+    recorded: Recorded,
+) -> None:
+    """The item's file 89 is gone from Bambuddy: the copy goes into "Storefront" there,
+    the item moves to it, and a retry of the claim, or another item's restore of the same
+    bytes, uploads nothing."""
+    order, item = storefront_item(shop)
+    shelf = bambuddy_shelf(bambuddy)
+    new_id = await restore(shop, order, item, content, shelf, Choices(), checked_id=89)
+    moved = shop.get_item(item).library_file
+    assert moved is not None
+    assert (moved.id, moved.library) == (new_id, "bambuddy")
+    found = await bambuddy.library_file(new_id)
+    [folder] = [f for f in await bambuddy.folders() if f.name == STOREFRONT_FOLDER]
+    assert (found.folder_id, found.file_hash) == (folder.id, SHA256)
+    assert await restore(shop, order, item, content, shelf, Choices(), checked_id=89) == new_id
+    other_order, other_item = storefront_item(shop)
+    again = await restore(shop, other_order, other_item, content, shelf, Choices(), checked_id=89)
+    assert again == new_id
+    assert recorded.count("POST", "/library/files") == 1
+    assert recorded.count("POST", "/library/folders/") == 1
+
+
+class Stored:
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    def load(self) -> StoredSettings:
+        return StoredSettings(bambuddy_url=self.url)
+
+
+async def test_the_shelf_is_the_library_that_serves(native: NativeLibrary) -> None:
+    settings = cast(SettingsStore, Stored("http://bambuddy.test"))
+    uploads = cast(BambuddyUploadStore, NoUploads())
+    async with served_shelf(settings, native, uploads) as shelf:
+        assert isinstance(shelf, NativeShelf)
+        assert shelf.native is native
+    async with served_shelf(settings, None, uploads) as shelf:
+        assert isinstance(shelf, BambuddyShelf)
+        assert shelf.client.config.base_url == "http://bambuddy.test"
+        assert shelf.uploads is uploads
