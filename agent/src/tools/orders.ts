@@ -831,7 +831,7 @@ export const orderTools: Tool[] = [
         if (typeof body.display_name !== 'string') throw new ToolError('a new customer needs a display_name')
         return json(
           await ok(
-            backend.POST('/api/v1/customers', { body: { ...body, display_name: body.display_name } as never }),
+            backend.POST('/api/v1/customers', { body: { ...body, display_name: body.display_name } }),
             'create a customer',
           ),
         )
@@ -840,7 +840,7 @@ export const orderTools: Tool[] = [
       let customer: unknown
       if (Object.keys(body).length > 0) {
         customer = await ok(
-          backend.PATCH('/api/v1/customers/{customer_id}', { params: { path }, body: body as never }),
+          backend.PATCH('/api/v1/customers/{customer_id}', { params: { path }, body }),
           `edit customer ${customer_id}`,
         )
       }
@@ -1706,7 +1706,7 @@ export const orderTools: Tool[] = [
       const edits = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
       let order: unknown
       if (Object.keys(edits).length > 0) {
-        order = await ok(backend.PATCH('/api/v1/orders/{order_id}', { params: { path }, body: edits as never }), `edit order ${order_id}`)
+        order = await ok(backend.PATCH('/api/v1/orders/{order_id}', { params: { path }, body: edits }), `edit order ${order_id}`)
       }
       if (hold !== undefined) {
         order = await ok(
@@ -1763,14 +1763,14 @@ export const orderTools: Tool[] = [
           ? await ok(
               backend.POST('/api/v1/orders/{order_id}/items', {
                 params: { path: { order_id } },
-                body: recorded(body) as never,
+                body: recorded(body),
               }),
               `add an item to order ${order_id}`,
             )
           : await ok(
               backend.POST('/api/v1/orders/{order_id}/items/batch', {
                 params: { path: { order_id } },
-                body: { items: items.map(recorded) } as never,
+                body: { items: items.map(recorded) },
               }),
               `add ${items.length} items to order ${order_id}`,
             ),
@@ -1796,14 +1796,14 @@ export const orderTools: Tool[] = [
           ? await ok(
               backend.POST('/api/v1/orders/{order_id}/items/after-acceptance', {
                 params: { path: { order_id } },
-                body: body as never,
+                body,
               }),
               `add an item to accepted order ${order_id}`,
             )
           : await ok(
               backend.POST('/api/v1/orders/{order_id}/items/after-acceptance/batch', {
                 params: { path: { order_id } },
-                body: { items } as never,
+                body: { items },
               }),
               `add ${items.length} items to accepted order ${order_id}`,
             ),
@@ -1981,7 +1981,7 @@ export const orderTools: Tool[] = [
       if (body.quantity !== undefined || body.unit_price_minor !== undefined) body.accept = false
       return json(
         await ok(
-          backend.PATCH('/api/v1/orders/{order_id}/items/{item_id}', { params: { path }, body: body as never }),
+          backend.PATCH('/api/v1/orders/{order_id}/items/{item_id}', { params: { path }, body }),
           `edit item ${item_id}`,
         ),
       )
@@ -2071,14 +2071,14 @@ export const orderTools: Tool[] = [
       const quote =
         manual !== undefined
           ? await ok(
-              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', { params: { path }, body: manual as never }),
+              ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes', { params: { path }, body: manual }),
               `quote item ${item_id}`,
             )
           : archive !== undefined
             ? await ok(
                 ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/quotes/archive', {
                   params: { path },
-                  body: archive as never,
+                  body: archive,
                 }),
                 `quote item ${item_id} from a past print`,
               )
@@ -2724,7 +2724,7 @@ export const orderTools: Tool[] = [
         const given = Object.fromEntries(Object.entries(policy ?? {}).filter(([, v]) => v !== undefined))
         answer.book = await ok(
           backend.PUT('/api/v1/orders/price-book', {
-            body: { ...current.policy, ...given, ...(rough_estimate_factor === undefined ? {} : { rough_estimate_factor }) } as never,
+            body: { ...current.policy, ...given, ...(rough_estimate_factor === undefined ? {} : { rough_estimate_factor }) },
           }),
           'set the pricing policy',
         )
@@ -2741,7 +2741,7 @@ export const orderTools: Tool[] = [
           const path = { filament_id }
           if (Object.keys(body).length > 0) {
             answer.filament = await ok(
-              backend.PATCH('/api/v1/orders/price-book/filaments/{filament_id}', { params: { path }, body: body as never }),
+              backend.PATCH('/api/v1/orders/price-book/filaments/{filament_id}', { params: { path }, body }),
               `edit filament ${filament_id}`,
             )
           }
@@ -2994,7 +2994,7 @@ export const orderTools: Tool[] = [
         await ok(
           backend.PATCH('/api/v1/printers/{printer_id}/machine-rate/events/{event_id}', {
             params: { path: { printer_id: printer, event_id } },
-            body: body as components['schemas']['MachineRateEventPatch'],
+            body,
           }),
           `correct event ${event_id} on printer ${printer}`,
         ),
