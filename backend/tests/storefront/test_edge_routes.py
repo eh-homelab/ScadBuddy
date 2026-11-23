@@ -2153,3 +2153,62 @@ def test_a_variant_key_that_is_not_one_never_reaches_the_crud_side(
     r = edge.get(f"/api/store/v1/variants/{key}/preview.glb")
     assert r.status_code == 404
     assert len(crud_mock.calls) == before
+
+
+# -- the price of a file listing's colours (#6710) ----------------------------------------
+
+PRICE = f"/api/v1/internal/crud/storefront/listings/{LISTING_ID}/price"
+
+
+def test_a_file_listings_price_is_relayed_with_the_public_fields_only(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """The edge sends the colours on as they came, with the verified visitor and the
+    browser's address and no ``Idempotency-Key``, and answers `ESTIMATE_FIELDS` only."""
+    public = {
+        "source": "slice",
+        "price_minor": 700,
+        "currency": "USD",
+        "minor_exponent": 2,
+        "retry_after": None,
+    }
+    route = crud_mock.post(PRICE).respond(
+        200, json={**public, "price_key": "a" * 64, "grams": {"0": "1"}}, headers=CRUD
+    )
+    raw = json.dumps({"listing_updated_at": "2026-11-22T00:00:00Z", "colours": {"0": "f-1"}})
+    r = edge.post(
+        f"/api/store/v1/listings/{LISTING_ID}/price",
+        content=raw,
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == public
+    sent = route.calls.last.request
+    assert sent.content == raw.encode()
+    assert len(sent.headers[VISITOR_HEADER]) == 43 and sent.headers[CLIENT_HEADER] == CLIENT[0]
+    assert "idempotency-key" not in sent.headers
+
+
+def test_a_price_of_an_id_that_is_not_one_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    before = len(crud_mock.calls)
+    r = edge.post(
+        "/api/store/v1/listings/not-an-id/price",
+        content="{}",
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 404
+    assert len(crud_mock.calls) == before
+
+
+def test_a_file_listings_price_is_counted_as_a_read() -> None:
+    """The page reads the price again while the slice runs: counted as a read."""
+    path = f"/api/store/v1/listings/{LISTING_ID}/price"
+    app = FastAPI(routes=[Route(path, _ok, methods=["POST"])])
+    app.add_middleware(RequestLimit, prefix="/api/store/v1", trusted=(), clock=Clock())
+    client = TestClient(app, client=CLIENT)
+    codes = [client.post(path).status_code for _ in range(WRITE_LIMIT + 1)]
+    assert codes == [200] * (WRITE_LIMIT + 1)

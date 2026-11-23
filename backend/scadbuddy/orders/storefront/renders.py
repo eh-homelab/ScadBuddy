@@ -44,7 +44,8 @@ import json
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -155,7 +156,7 @@ def store_render(job: Job, *, ready: bool = True) -> StoreRender:
     )
 
 
-def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
+def price_book(orders: OrdersComponent) -> dict[str, Filament]:
     return {f.id: f for f in orders.store.filaments()}
 
 
@@ -247,7 +248,7 @@ async def shown_render(state: AppState, job: Job) -> StoreRender:
     return store_render(job, ready=ready)
 
 
-def _limited(error: RenderLimited) -> ApiError:
+def limited(error: RenderLimited) -> ApiError:
     """429 ``render_limited``, with the limit and the seconds to wait."""
     return problem(
         status.HTTP_429_TOO_MANY_REQUESTS,
@@ -378,9 +379,9 @@ async def checked_choice(
             "listing_changed",
             "This listing has changed. Load it again.",
         )
-    filaments = await asyncio.to_thread(_filaments, orders)
+    filaments = await asyncio.to_thread(price_book, orders)
     materials = effective_materials(listing, shop_materials)
-    try:
+    with listing_refusals():
         values = listing_values(listing, body.values, filaments, materials)
         choice = resolve_choice(
             listing, values, body.values.keys(), filaments, materials, slots=body.colours
@@ -404,6 +405,17 @@ async def checked_choice(
                 resolved = listing_reference(listing, choice.values, chosen, filaments=filaments)
         # A print never mixes materials (#6152, always on since #6258).
         check_one_material(resolved.colours, choice, filaments)
+    return listing, resolved, choice
+
+
+@contextmanager
+def listing_refusals() -> Iterator[None]:
+    """The visitor's refusals of a listing's choices, as problems: 409
+    ``listing_unavailable`` (`LockedColoursClashError`), 422 ``listing_colours_clash``
+    (with ``parts``) and 422 ``input_outside_listing`` (with ``name`` and ``reason``). A
+    template's render and a file listing's price and add (#6710) refuse alike."""
+    try:
+        yield
     except LockedColoursClashError:
         # No material can print it (published before publish checked, or broken since):
         # no visitor's colour can fix it, so the refusal names none (#6302 review).
@@ -428,7 +440,6 @@ async def checked_choice(
             name=error.name,
             reason=error.reason,
         ) from None
-    return listing, resolved, choice
 
 
 def _is_colour(listing: Listing, name: str) -> bool:
@@ -513,7 +524,7 @@ async def start_render(
     try:
         recorded = await asyncio.to_thread(record)
     except RenderLimited as error:
-        raise _limited(error) from None
+        raise limited(error) from None
     row: int = recorded.body["row"]
     counted: bool = recorded.body["counted"]
     if not fresh:
@@ -577,7 +588,7 @@ async def start_render(
             await asyncio.to_thread(limits.count, row, visitor.id, client, settings=runtime)
         except RenderLimited as error:
             await _withdraw_limited(state, limits, job, row, key)
-            raise _limited(error) from None
+            raise limited(error) from None
     await asyncio.to_thread(limits.attach, row, job.id)
     shown = await shown_render(state, job)
     return shown.model_copy(update={"values": _colour_values(listing, choice)})
@@ -699,7 +710,7 @@ async def variant_of(
     render (`_filament_for`, from ``colours`` and ``material``), or None when a slot's
     colour has no listing filament. The estimate and a cart line's add both read it."""
     assert job.result is not None
-    filaments = await asyncio.to_thread(_filaments, _orders(state))
+    filaments = await asyncio.to_thread(price_book, _orders(state))
     by_colour = _filament_for(listing, filaments, colours, list(job.result.colors), material)
     slots = [by_colour.get(colour.casefold()) for colour in job.result.colors]
     digest = await asyncio.to_thread(model_digest, job.id, state.paths.root / job.result.model_3mf)

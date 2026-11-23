@@ -24,7 +24,8 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: storefront ``order`` area is ``…/storefront/order/*``, the customer's order page (#5283).
 #: The storefront ``variants`` area is ``…/storefront/listings/{id}/variant`` and
 #: ``…/storefront/variants/{key}/preview.glb``, the instant read of a visitor's choices
-#: (#6921).
+#: (#6921). The storefront ``file-prices`` area is ``…/storefront/listings/{id}/price``,
+#: the price of a visitor's colours on a file listing (#6710).
 #: The agent's ``workspace-blob-refs`` area is ``…/agent/workspace-blob-refs`` and its
 #: ``/release`` (#5299), the holds of its workspace files' blobs. Its ``events`` area is
 #: ``…/agent/events`` and ``…/events/head``, the event log's gap and head; its ``flows``
@@ -209,6 +210,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "order",
         "models",
         "variants",
+        "file-prices",
     ],
     "agent": [
         "order-costs",

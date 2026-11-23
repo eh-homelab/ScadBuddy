@@ -652,6 +652,19 @@ class StoreRender(BaseModel):
     values: dict[str, ParamValue] | None = None
 
 
+class ListingPriceBody(BaseModel):
+    """``POST …/storefront/listings/{id}/price`` (#6710 §7.5): the colours a visitor picked
+    for a file listing's parts, and the listing as the page read it. The CRUD side checks
+    each colour against the listing (`file_prices.py` `file_choice`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The listing's ``updated_at`` as the page read it: another is 409 ``listing_changed``.
+    listing_updated_at: datetime
+    #: The listing filament the visitor chose for each offered slot of the file, from 0.
+    colours: dict[ColourSlotIndex, str] = Field(default_factory=dict, max_length=64)
+
+
 # -- the visitor's draft (Task 8) ------------------------------------------------------
 
 

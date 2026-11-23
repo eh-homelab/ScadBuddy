@@ -54,6 +54,7 @@ from scadbuddy.storefront.wire import (
 #: customer's order page (#5283).
 #: ``models`` is a customer's own models (#6133): upload slots, the request, the CSP origin.
 #: ``variants`` is the instant read of a visitor's choices and its cached preview (#6921).
+#: ``file-prices`` is the price of a visitor's colours on a file listing (#6710).
 EDGE_AREAS: Final[frozenset[str]] = frozenset(
     {
         "listings",
@@ -66,6 +67,7 @@ EDGE_AREAS: Final[frozenset[str]] = frozenset(
         "order",
         "models",
         "variants",
+        "file-prices",
     }
 )
 #: The site key's read: the page's CSP waits on it, so it gives up fast and the edge
@@ -256,6 +258,21 @@ class StorefrontCrud:
         return await self._call(
             "POST",
             f"/listings/{listing_id}/variant",
+            visitor_id=visitor_id,
+            client=client,
+            content=body,
+        )
+
+    async def listing_price(
+        self, listing_id: str, body: bytes, *, visitor_id: str, client: str
+    ) -> Any:
+        """``POST …/storefront/listings/{id}/price`` (#6710): the visitor's colours on a
+        file listing as they came, unread; the answer is their price. A read: it takes no
+        ``Idempotency-Key``. ``listing_id`` must be a listing id (`storefront/routes.py`
+        checks it)."""
+        return await self._call(
+            "POST",
+            f"/listings/{listing_id}/price",
             visitor_id=visitor_id,
             client=client,
             content=body,

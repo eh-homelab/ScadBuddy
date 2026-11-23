@@ -2165,7 +2165,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   slicer as slot ids from 1, each in its filament's colour (`SliceVariant.slot_colours`).
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
-  the listing's pin; its price read and cart come in a later PR (spec 2026-11-21 §12). The variant is sliced with the
+  the listing's pin. Its price read and cart line are `file_prices.py` (#6710 §7.5, §7.6):
+  `POST …/listings/{id}/price` (area `file-prices`; edge `/api/store/v1/listings/{id}/price`,
+  counted as a read) takes `ListingPriceBody` (a listing colour per offered slot, one
+  material, `file_choice`; a support slot takes the snapshot's lock) and answers
+  `slice_estimate` of `held_file.py` `priced_file(snapshot)`; a read that would claim a new
+  slice first takes one render of the visitor's rates (`RenderLimits.admit_slice`, a row
+  whose `job_id` is `slice:<key>`, so never render concurrency), refunded when it claims
+  none. The cart add makes a `library_file` item with those colours and
+  `LibraryFileRef.sha256` and `copy_key` (columns `library_sha256`, `library_copy_key`),
+  holding the copy under (`order_item`, item id) in the add's transaction (dropped with a
+  draft item or a draft); `price_of` reads it by the same `priced_file` while the listing
+  is still that file at that sha256, so the read, the add and the checkout make one key.
+  The print still reads the live file until #6710 PR 4. The variant is sliced with the
   choices and presets a back-office quote of a spool of the same filament type on the same
   printer gets (#6574, `test_slice_parity.py`). The shop slice profile gives only the
   printer and a filament type per material (`slice_profile.py`, a

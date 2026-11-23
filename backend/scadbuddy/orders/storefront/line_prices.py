@@ -15,6 +15,11 @@ from when it was added: the listing, the 3MF's sha256 and the filament of each s
 render job is pruned after a day, and a cart lives for weeks. It keeps the price the
 visitor saw too, so the checkout tells the customer of a price that changed, came or went
 (`Repriced.told`).
+
+A line of a file listing (#6710 §7.6) is a ``library_file`` item: its variant is the
+listing's pinned sha256 (the held copy's, which the slice reads) and the filament of each
+used slot of the file, and its key is made from the listing's snapshot as the price read
+makes it (`held_file.py` `priced_file`).
 """
 
 from __future__ import annotations
@@ -28,8 +33,9 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 from pydantic import BaseModel
 
 from scadbuddy.orders.lifecycle import FirmLine
-from scadbuddy.orders.models import Filament, OrderItem, Reference
+from scadbuddy.orders.models import Filament, LibraryFileRef, OrderItem, Reference
 from scadbuddy.orders.pricing import Plate, PlateFilament
+from scadbuddy.orders.storefront.held_file import priced_file
 from scadbuddy.orders.storefront.limits import RenderLimits
 from scadbuddy.orders.storefront.renders import fetch_files, output_of, variant_of
 from scadbuddy.orders.storefront.slice_price import PriceRow, firm_price
@@ -48,8 +54,9 @@ _COLUMNS: Final = (
 @dataclass(frozen=True)
 class Variant:
     """What a line's price key is made from, besides the shop's settings: the listing it
-    was added from, the sha256 of its render's 3MF, and the price-book filament id of
-    each slot of the render (from 0)."""
+    was added from, the sha256 of its render's 3MF (of a file listing's pinned copy,
+    #6710), and the price-book filament id of each slot of the render (each used slot of
+    the file)."""
 
     listing_id: str
     model_sha256: str
@@ -186,19 +193,32 @@ async def _priced_variant(
     return Variant(listing.id, row.model_sha256, tuple(row.slot_filaments))
 
 
-async def price_of(state: AppState, reference: Reference, variant: Variant) -> PriceRow | None:
-    """The firm price of the variant of a line whose design is ``reference``, now
+async def price_of(
+    state: AppState, subject: Reference | LibraryFileRef, variant: Variant
+) -> PriceRow | None:
+    """The firm price of the variant of a line whose design is ``subject``, now
     (`firm_price`), or None. None too when the listing it was added from is gone or
     unpublished, or now shows another design (its slug or commit moved, so the line's
-    design is not the listing's), or a slot's filament is gone or archived."""
+    design is not the listing's), or a slot's filament is gone or archived. A line of a
+    file listing (#6710 §7.6, ``subject`` its library file) is priced while its listing is
+    still a file listing of that file pinned at the line's sha256, by the listing's own
+    snapshot (`priced_file`), as its price read keys it."""
     orders = _orders(state)
     listing = await asyncio.to_thread(orders.listings.get, variant.listing_id)
-    if (
-        listing is None
-        or not listing.published
-        or listing.snapshot is None
-        or (listing.slug, listing.commit) != (reference.slug, reference.commit)
-    ):
+    if listing is None or not listing.published or listing.snapshot is None:
+        return None
+    file = None
+    if isinstance(subject, LibraryFileRef):
+        snapshot = listing.file_snapshot
+        if (
+            snapshot is None
+            or (snapshot.file_id, snapshot.library) != (subject.id, subject.library)
+            or snapshot.sha256 != variant.model_sha256
+            or snapshot.sha256 != subject.sha256
+        ):
+            return None
+        file = priced_file(snapshot)
+    elif (listing.slug, listing.commit) != (subject.slug, subject.commit):
         return None
     records = [
         await asyncio.to_thread(orders.store.filament, filament_id)
@@ -207,8 +227,11 @@ async def price_of(state: AppState, reference: Reference, variant: Variant) -> P
     filaments: list[Filament] = [r for r in records if r is not None and r.archived_at is None]
     if len(filaments) != len(records):
         return None
+    if file is not None:
+        return await firm_price(state, library_file=file, filaments=filaments)
+    assert isinstance(subject, Reference)
     return await firm_price(
-        state, reference=reference, model_sha256=variant.model_sha256, filaments=filaments
+        state, reference=subject, model_sha256=variant.model_sha256, filaments=filaments
     )
 
 
@@ -232,9 +255,9 @@ class Repriced:
 
 async def reprice(state: AppState, items: Sequence[OrderItem]) -> Repriced:
     """Each listing line of the cart priced again at checkout (#6153): the price its
-    key has now (`price_of`). A price unlike the one the line recorded is written, so
-    the page shows it next. Lines with no row (a request, or a line added with no
-    variant) have no firm price."""
+    key has now (`price_of`), a file listing's line (#6710) as a model line. A price
+    unlike the one the line recorded is written, so the page shows it next. Lines with
+    no row (a request, or a line added with no variant) have no firm price."""
     if not items:
         return Repriced()
     prices = LinePrices(state.projection.pool)
@@ -242,9 +265,10 @@ async def reprice(state: AppState, items: Sequence[OrderItem]) -> Repriced:
     found = Repriced()
     for item in items:
         line = lines.get(item.id)
-        if line is None or item.status == "cancelled" or item.reference is None:
+        subject = item.reference or item.library_file
+        if line is None or item.status == "cancelled" or subject is None:
             continue
-        now = await price_of(state, item.reference, line.variant)
+        now = await price_of(state, subject, line.variant)
         if _shown(now) != (line.price_key, line.unit_price_minor, line.currency):
             await asyncio.to_thread(prices.set_price, item.id, now)
         shown = _shown(now)[1:]

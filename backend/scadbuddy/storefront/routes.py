@@ -233,6 +233,22 @@ async def variant(
     }
 
 
+@visitor_router.post("/listings/{listing_id}/price")
+async def listing_price(
+    listing_id: str, request: Request, crud: Crud, visitor_id: Visitor, client: Client
+) -> Any:
+    """The price of the visitor's colours on a file listing (#6710 §7.5), sent on as it
+    came. A read (no ``Idempotency-Key``), counted as one (`ratelimit.py`); the answer keeps
+    `ESTIMATE_FIELDS` only."""
+    if LISTING_ID.fullmatch(listing_id) is None:
+        raise ApiError(
+            404, "There is no such listing.", type_=f"{STOREFRONT_PROBLEMS}listing_not_found"
+        )
+    body = await _body(request, "price_body_invalid")
+    answer = await crud.listing_price(listing_id, body, visitor_id=visitor_id, client=client)
+    return {k: v for k, v in answer.items() if k in ESTIMATE_FIELDS}
+
+
 @visitor_router.get("/variants/{variant_key}/preview.glb")
 async def variant_preview(
     variant_key: str, crud: Crud, visitor_id: Visitor, client: Client

@@ -31,6 +31,7 @@ from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.orders.models import ItemLibrary
 
 if TYPE_CHECKING:
+    from scadbuddy.orders.storefront.wire import FileSnapshot
     from scadbuddy.store.content import ContentStore
 
 
@@ -55,6 +56,28 @@ class PricedFile(BaseModel):
     #: ``FileSnapshot.remembered``: the remembered choices of ``library:<id>`` when the
     #: listing was published, for a scope that holds none now (decision 4).
     remembered: ModelPrintChoices | None = None
+
+
+def priced_file(snapshot: FileSnapshot) -> PricedFile:
+    """The file a published file listing's price names (#6710 §7.1), from its snapshot
+    alone: the price read, the cart add and the checkout all build it here, so one
+    listing's variant has one price key."""
+    return PricedFile(
+        id=snapshot.file_id,
+        library=snapshot.library,
+        filename=snapshot.filename,
+        sha256=snapshot.sha256,
+        copy_key=snapshot.copy_key,
+        file_type=snapshot.file_type,
+        size=snapshot.size,
+        plates=list(snapshot.plates),
+        used=[slot.slot for slot in snapshot.slots if slot.used],
+        remembered=(
+            None
+            if snapshot.remembered is None
+            else ModelPrintChoices.model_validate(snapshot.remembered)
+        ),
+    )
 
 
 #: The one text for a held copy gone from the store: the price's failure
