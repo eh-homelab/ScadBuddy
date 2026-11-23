@@ -702,6 +702,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "A rename in the Hosted plugins editor's file tree. The spec gives the assistant no move tool (2026-11-21 §6.2): " +
       'it writes the new path with hosted_plugin_file_write and deletes the old one with hosted_plugin_file_delete.',
   },
+  {
+    operation: 'GET /api/v1/hosted-plugins/{name}/versions',
+    reason:
+      "A hosted plugin's published versions, newest first, for the Versions list in Settings → Tools & plugins → " +
+      'Hosted plugins (#6937). The spec gives the assistant no versions tool (2026-11-21 §6.2): an offer always ' +
+      "takes the plugin's latest_version (§6.3), which the plugin's own read answers.",
+  },
 ]
 
 /**

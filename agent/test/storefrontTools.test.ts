@@ -6,7 +6,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import type { components } from '../src/api/schema.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
-import { colourProblems, defaultsFor, draftMaterials, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
+import { colourProblems, defaultsFor, draftMaterials, fileTitleColours, isSupportMaterial, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #6131 (design 2026-11-13 §6) — the assistant's storefront tools: a draft (`write`) built
@@ -61,6 +61,8 @@ interface FileVector {
   }
   filaments: Filament[]
   expected: Record<string, unknown>
+  /** Titles and the colour names in each that a customer can pick (`titleColours` of the new draft). */
+  titles: { title: string; colours: string[] }[]
 }
 
 const shared = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (Vector | FileVector)[]
@@ -245,7 +247,29 @@ describe('storefront tools (#6131)', () => {
         // The assistant allows the materials it offers, support left out, as for a design (#6302 review).
         expect(materials, vector.name).toEqual(['PLA'])
         expect(result, vector.name).toMatchObject({ listing_id: LISTING, published: false, colour_problems: [], page: `/storefront/listings/${LISTING}` })
+        // The page's "Leave … out of the title" warning names the same colours this copy takes out.
+        for (const { title, colours } of vector.titles) {
+          expect(fileTitleColours(title, vector.expected['colours'] as string[], vector.filaments), `${vector.name}: ${title}`).toEqual(colours)
+        }
       }
+    })
+
+    it('notes what publish would refuse: no filament a customer can pick, or a support part with no support filament', async () => {
+      const vector = fileVectors.find((one) => one.file.slots.some((slot) => isSupportMaterial(slot.material))) as FileVector
+      const support = vector.filaments.filter((filament) => isSupportMaterial(filament.material))
+      const customer = vector.filaments.filter((filament) => !isSupportMaterial(filament.material))
+      const draft = async (filaments: Filament[]) => {
+        serveFile({ ...vector, filaments }, () => {})
+        const result = firstText(await tool('storefront_listing_draft').execute({ library_file_id: vector.file.id }, ctx())) as Record<string, unknown>
+        return result['notes']
+      }
+      expect(await draft(support)).toEqual([
+        'The price book has no priced filament a customer can pick: publish refuses the listing until one is added and ticked on the page.',
+      ])
+      expect(await draft(customer)).toEqual([
+        'The file has a support part and the price book has no priced support filament: publish refuses it (listing_file_support_unset) until one is added and ticked on the page.',
+      ])
+      expect(await draft(vector.filaments)).toEqual([])
     })
 
     it('takes a colour on offer out of a title it is given', async () => {
@@ -288,6 +312,15 @@ describe('colourProblems (#6144)', () => {
     expect(colourProblems(listing, owl.schema, owl.filaments)).toEqual([])
     const unlisted = { ...listing, params: { ...listing.params, body: { kind: 'choice' as const, choices: [], default: '#FF0000' } } }
     expect(colourProblems(unlisted, owl.schema, owl.filaments)).toEqual([{ name: 'body', label: 'Body', colour: '#FF0000' }])
+  })
+})
+
+describe('isSupportMaterial (#6710, #7189 review)', () => {
+  it('reads a support material as the backend and the page do (`SUPPORT_MATERIAL`), case aside', () => {
+    for (const material of ['PVA', 'BVOH', 'HIPS', 'PLA Support', 'support-w', 'pva']) expect(isSupportMaterial(material), material).toBe(true)
+    for (const material of ['PLA', 'PETG', 'ABS', 'TPU', '']) expect(isSupportMaterial(material), material).toBe(false)
+    expect(isSupportMaterial(null)).toBe(false)
+    expect(isSupportMaterial(undefined)).toBe(false)
   })
 })
 

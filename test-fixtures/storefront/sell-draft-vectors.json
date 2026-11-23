@@ -258,6 +258,38 @@
       "fixed": {},
       "colours": ["f-navy", "f-white", "f-black", "f-pva"],
       "media_ids": ["plate:1", "plate:3"]
-    }
+    },
+    "titles": [
+      { "title": "Pencil cup – Navy", "colours": ["Navy"] },
+      { "title": "Natural pencil cup", "colours": [] }
+    ]
+  },
+  {
+    "name": "a library file whose support filament shares a customer colour's hex: the support part takes it, and its name is a colour on offer in a title too, as the editor's titleColours reads a file draft",
+    "file": {
+      "id": 7,
+      "library": "bambuddy",
+      "filename": "Bracket.stl",
+      "slots": [
+        { "slot_id": 1, "colour": "#ffffff", "material": "PLA" },
+        { "slot_id": 2, "colour": "#FFFFFF", "material": "PVA" }
+      ],
+      "plates": [{ "index": 1, "has_thumbnail": true }]
+    },
+    "filaments": [
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" },
+      { "id": "f-snow", "material": "PVA", "subtype": null, "brand": null, "colour_name": "Snow", "colour": "#FFFFFF", "cost_per_kg": "60", "density_g_cm3": "1.23", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "expected": {
+      "source": "library_file",
+      "library_file": { "id": 7, "library": "bambuddy", "repin": false },
+      "title": "Bracket",
+      "description": "",
+      "params": {},
+      "fixed": {},
+      "colours": ["f-white", "f-snow"],
+      "media_ids": ["plate:1"]
+    },
+    "titles": [{ "title": "Bracket – White Snow", "colours": ["White", "Snow"] }]
   }
 ]

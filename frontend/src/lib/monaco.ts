@@ -21,6 +21,9 @@ import 'monaco-editor/editor/contrib/suggest/browser/suggestController.js'
 // #2487 — a flow's script. Registers the id only; the tokenizer is its own small chunk,
 // loaded when a Python model first opens.
 import 'monaco-editor/languages/definitions/python/register.js'
+// #6937 — a hosted plugin's skills, agents and commands, and a skill's scripts.
+import 'monaco-editor/languages/definitions/markdown/register.js'
+import 'monaco-editor/languages/definitions/shell/register.js'
 
 import { registerOpenscad } from './openscadLanguage'
 
