@@ -10,12 +10,14 @@ binding."""
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from uuid import UUID
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import TagScan
 from scadbuddy.filament import models as m
 from scadbuddy.filament.component import Filament
+from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 #: Bambuddy's ``data_origin`` for a tag it wrote itself (``data_origin_values`` in
@@ -150,6 +152,19 @@ def _baseline(store: Filament, spool_id: UUID) -> tuple[bool, str | None]:
     return (row is not None, None if row is None else row["baseline_uid"])
 
 
+def _written(store: Filament, spool_id: UUID, encoded_at: datetime | None, actor: str) -> None:
+    """#7149 R-7149-1, R-7149-3: the spool's tag was written by OpenTag3D, when Bambuddy's
+    record says (its ``encode_time``), else now."""
+    with store.spools.transaction() as conn:
+        FilamentSpoolStore.set_origin(
+            conn,
+            spool_id,
+            actor,
+            data_origin=OPENTAG_ORIGIN,
+            tag_encoded_at=encoded_at or datetime.now(UTC),
+        )
+
+
 def _clear_baseline(store: Filament, spool_id: UUID) -> None:
     with store.spools.transaction() as conn:
         conn.execute("DELETE FROM filament_ntag_writes WHERE spool_id = %s", (spool_id,))
@@ -186,7 +201,8 @@ async def confirm(
     store: Filament, client: BambuddyClient, spool_id: UUID, *, actor: str
 ) -> m.NtagConfirm:
     """Bind the tag Bambuddy wrote on the spool's record: a ``tag_uid`` set, written by
-    OpenTag3D (``data_origin``) and not the one the record held when `write` queued. With
+    OpenTag3D (``data_origin``) and not the one the record held when `write` queued. The
+    spool then keeps that origin and the record's ``encode_time`` (`_written`, #7149). With
     no queued write, or otherwise, change nothing."""
     bb_spool_id, _ = await asyncio.to_thread(_linked, store, spool_id)
     if bb_spool_id is None:
@@ -202,6 +218,7 @@ async def confirm(
         lambda: store.spools.bind_tag(spool_id, tag_uid=uid, kind="ntag_opentag", actor=actor)
     )
     if bound is not None:
+        await asyncio.to_thread(_written, store, spool_id, record.encode_time, actor)
         await asyncio.to_thread(_clear_baseline, store, spool_id)
     return m.NtagConfirm(bound=bound is not None, tag_uid=uid if bound is not None else None)
 

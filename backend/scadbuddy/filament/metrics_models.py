@@ -53,6 +53,11 @@ class SpoolMetrics(BaseModel):
     """One spool's use, cost and forecast."""
 
     used_g: float
+    #: The grams of the plates after the newest ``consumed_reset`` event, all of them with
+    #: none (#7149 R-7149-4): the counter a person resets, as Bambuddy's "Total consumed".
+    consumed_g: float = 0.0
+    #: When that reset was; ``None`` with no reset.
+    consumed_since: datetime | None = None
     prints: int
     grams_per_print: float | None
     #: Grams of ``failed`` and ``cancelled`` plates (plan Decision 7).

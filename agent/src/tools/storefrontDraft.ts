@@ -18,7 +18,7 @@ type Value = boolean | number | string
 const HIDDEN_GROUP = 'Hidden'
 /** The longest text a customer may type (`orders/storefront/wire.py` `MAX_TEXT_LENGTH`). */
 const MAX_TEXT_LENGTH = 200
-/** A support material (`orders/storefront/wire.py` `SUPPORT_MATERIAL`, `frontend/src/storefront/params.ts`): change all together. */
+/** A support material (`orders/storefront/wire.py` `SUPPORT_MATERIAL`, `frontend/src/storefront/params.ts`): change all together; all three are tested against `test-fixtures/storefront/support-materials.json`. */
 const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 
 export interface ListingDefaults {

@@ -758,6 +758,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_spool_bind_tag',
   'filament_tag_unbind',
   'filament_spool_add_event',
+  // #7149: a used-counter reset is a ledger event of each spool.
+  'filament_spools_reset_consumed',
   'filament_location_upsert',
   'filament_spool_move',
   'filament_bambuddy_import',

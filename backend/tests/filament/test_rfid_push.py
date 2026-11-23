@@ -170,6 +170,24 @@ async def test_a_bound_tag_is_linked_once(pg_pool: PgPool, client: BambuddyClien
 
 
 @respx.mock
+async def test_the_link_sends_the_spools_origin(pg_pool: PgPool, client: BambuddyClient) -> None:
+    """#7149 R-7149-1: the spool's kept origin, not a fixed ``nfc_link``."""
+    f = _filament(pg_pool)
+    spool = _spool(f, pg_pool, 11)
+    _bind(f, spool, uid=UID)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET data_origin = 'opentag3d' WHERE id = %s", (spool,))
+    _by_tag(None)
+    link = respx.patch(f"{API}/inventory/spools/11/link-tag").mock(
+        return_value=httpx.Response(200, json=_bb(11, tag_uid=UID))
+    )
+
+    await drain_tags(f, client)
+
+    assert json.loads(link.calls.last.request.content)["data_origin"] == "opentag3d"
+
+
+@respx.mock
 async def test_a_409_moves_the_tag(pg_pool: PgPool, client: BambuddyClient) -> None:
     f = _filament(pg_pool)
     _bind(f, _spool(f, pg_pool, 11), tray=TRAY)

@@ -13,6 +13,7 @@ from scadbuddy.entities.registry import (
     EntityNotFound,
     EntityStore,
     UnknownEntityKind,
+    repoint_entity,
 )
 from scadbuddy.render.pg_store import MIGRATIONS, migrate
 from tests.conftest import PgPool
@@ -135,3 +136,53 @@ def test_the_migration_backfills_an_entity_for_each_attachment_subject(pg_connin
             ("order_item:item1", "order_item", "item1"),
         ]
         assert conn.execute("SELECT count(*) FROM entities").fetchone() == (2,)
+
+
+def _file_on(pool: PgPool, file_id: str, ref: str) -> str:
+    """A file on the entity `printer:<ref>`, which this makes; returns the entity's id."""
+    with pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO entities (kind, ref) VALUES ('printer', %s)"
+            " ON CONFLICT (kind, ref) DO UPDATE SET ref = EXCLUDED.ref RETURNING id",
+            (ref,),
+        ).fetchone()
+        assert row is not None
+        conn.execute(
+            "INSERT INTO entity_attachments (id, subject, entity_id, kind, filename, media_type,"
+            " size_bytes, sha256, blob_key, created_by) VALUES (%s, %s, %s, 'image', 'a.png',"
+            " 'image/png', 1, repeat('a', 64), %s, '{}')",
+            (file_id, f"printer:{ref}", row["id"], f"attachment-{file_id}"),
+        )
+    return str(row["id"])
+
+
+def _files(pool: PgPool) -> list[tuple[str, str, str, str]]:
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT a.id, a.subject, a.entity_id::text AS entity_id, e.ref"
+            " FROM entity_attachments a JOIN entities e ON e.id = a.entity_id ORDER BY a.id"
+        ).fetchall()
+    return [(r["id"], r["subject"], r["entity_id"], r["ref"]) for r in rows]
+
+
+def test_a_repoint_onto_a_new_ref_keeps_each_files_entity(pg_pool: PgPool) -> None:
+    """#7193: with no entity for `kept`, the repoint renames `gone`'s entity and moves each
+    file's `subject` alone. No trigger fills `entity_id` since #6960, so the file must keep
+    the same entity, now named `kept`."""
+    entity = _file_on(pg_pool, "f1", "p1")
+    with pg_pool.connection() as conn:
+        repoint_entity(conn, "printer", "p1", "p2")
+    assert _files(pg_pool) == [("f1", "printer:p2", entity, "p2")]
+
+
+def test_a_repoint_onto_an_existing_ref_moves_each_file_to_its_entity(pg_pool: PgPool) -> None:
+    """#7193: with an entity for `kept`, the files move to it and `gone`'s entity goes."""
+    _file_on(pg_pool, "f1", "p1")
+    kept = _file_on(pg_pool, "f2", "p2")
+    with pg_pool.connection() as conn:
+        repoint_entity(conn, "printer", "p1", "p2")
+    assert _files(pg_pool) == [
+        ("f1", "printer:p2", kept, "p2"),
+        ("f2", "printer:p2", kept, "p2"),
+    ]
+    assert _entity_rows(pg_pool) == 1

@@ -445,6 +445,23 @@ describe('filament spool tools', () => {
     expect(tool(name).gated).toBe(false)
   })
 
+  it('resets the used counter of spools with one POST (#7149)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOLS}/reset-consumed`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ reset: 1, not_found: [] })
+      }),
+    )
+    const result = await runTool(tool('filament_spools_reset_consumed'), { spool_ids: [ROW] }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([{ spool_ids: [ROW] }])
+    expect(firstText(result)).toEqual({ reset: 1, not_found: [] })
+    expect(() => tool('filament_spools_reset_consumed').parse({ spool_ids: [] })).toThrow()
+    expect(tool('filament_spools_reset_consumed').risk).toBe('write')
+    expect(tool('filament_spool_add_event').parse({ spool_id: ROW, kind: 'consumed_reset' }).kind).toBe('consumed_reset')
+  })
+
   it('lists the spools that need a type, reads one and its ledger', async () => {
     server.use(
       http.get(SPOOLS, ({ request }) => {

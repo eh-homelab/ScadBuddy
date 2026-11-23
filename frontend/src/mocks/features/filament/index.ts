@@ -163,7 +163,7 @@ const FIELDS = {
   preset: ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name'],
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
   typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'tdfp_id', 'note'],
-  spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left'],
+  spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left', 'added_full'],
   move: ['location_id'],
   csvImport: ['rows', 'dry_run'],
   proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
@@ -795,6 +795,9 @@ function newSpool(body: Record<string, unknown>): SpoolRow {
     location_id: null,
     weight_locked: false,
     note: null,
+    data_origin: null,
+    added_full: null,
+    tag_encoded_at: null,
     grams_left: null,
     last_weighed_g: null,
     last_weighed_at: null,
@@ -1126,6 +1129,9 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
   const nowMs = Date.now()
   const plates = platesOf(events)
   const used = plates.reduce((sum, plate) => sum + plate.grams, 0)
+  // #7149: the consumed counter counts the plates after the newest reset (`metrics.spool_metrics`).
+  const since = [...events].reverse().find((event) => event.kind === 'consumed_reset')?.at ?? null
+  const consumed = plates.filter((plate) => since == null || plate.at > since).reduce((sum, plate) => sum + plate.grams, 0)
   const wasted = plates.filter((plate) => plate.outcome === 'failed' || plate.outcome === 'cancelled').reduce((sum, plate) => sum + plate.grams, 0)
   const burn = burnOf(plates, windowDays, row.created_at, nowMs)
   const left = row.grams_left
@@ -1151,6 +1157,8 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
     series,
     metrics: {
       used_g: used,
+      consumed_g: consumed,
+      consumed_since: since,
       prints: plates.length,
       grams_per_print: plates.length > 0 ? used / plates.length : null,
       wasted_g: wasted,
@@ -2040,6 +2048,11 @@ export const handlers = [
     // Decision 3: a bind with `override` locks the spool's weight; nothing unlocks it but a person.
     if (binding.override) row.weight_locked = true
     addEvent(row.id, 'tag_bound', { data: { tag_id: tag.id } })
+    // #7149 R-7149-1: a person's bind is a hand link, Bambuddy's `nfc_link`.
+    if (row.data_origin !== 'nfc_link') {
+      addEvent(row.id, 'edited', { data: { changes: { data_origin: [row.data_origin ?? null, 'nfc_link'] } } })
+      row.data_origin = 'nfc_link'
+    }
     return HttpResponse.json(binding, { status: 201 })
   }),
   http.delete(`${BASE}/tags/:id/binding`, ({ params }) => {
@@ -2109,8 +2122,13 @@ export const handlers = [
     if (extra) return extra
     const body = normalised(raw as S['SpoolEventAdd'])
     if (body.kind === 'weighed' && body.grams == null) return problem(422, 'body: Value error, a weighing needs grams')
+    if (body.kind === 'consumed_reset' && (body.grams != null || body.temp_c != null || body.hours != null)) {
+      return problem(422, 'body: Value error, a consumed reset has no grams, temp_c or hours')
+    }
     const row = state.spools[at]!
     const when = body.at ?? now()
+    // #7149 R-7149-4: no grams; the grams left stay.
+    if (body.kind === 'consumed_reset') return HttpResponse.json(addEvent(row.id, 'consumed_reset', { at: when, source: 'person' }), { status: 201 })
     if (body.kind === 'weighed') {
       state.spools[at] = { ...row, grams_left: body.grams ?? null, last_weighed_g: body.grams ?? null, last_weighed_at: when }
       return HttpResponse.json(

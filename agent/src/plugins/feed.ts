@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { CrudReadError } from '../api/crudRead.js'
 import { crudCall, type CrudTarget, crudOf, segment } from '../api/crudStores.js'
+import { HOSTED_ZIP_TIMEOUT_MS } from './packages/hosted.js'
 import { archiveFormat, entryPath, readArchive } from './packages/unpack.js'
 import { storedZip } from './packages/zip.js'
 
@@ -15,7 +16,9 @@ import { storedZip } from './packages/zip.js'
 //
 // - a hosted package (`source_kind` `hosted`, #6934) as an `archive` of the version its pin
 //   is, served by this agent under the feed's own URL (the origin the feed was asked on), with
-//   the zip's sha256;
+//   the zip's sha256, which also names the URL (`…/versions/{N}/{sha256}.zip`): a hosted plugin
+//   deleted and made again numbers its versions from 1 again, so the number alone would let an
+//   immutable URL serve other bytes (#6931 review M2);
 // - a commit pin (a git URL, or a git entry of a marketplace repository or of a bare
 //   `marketplace.json` URL) as a `url` source, or a `git-subdir` source when the plugin is a
 //   folder of its repository, with `sha` set to the pinned commit. Claude Code's `sha` takes a
@@ -118,7 +121,10 @@ export class CrudPluginFeeds implements PluginFeedReader {
   async zip(name: string, version: number): Promise<FeedZip | undefined> {
     const path = `/hosted-plugins/${segment(name, PACKAGE_NAME, 'a package name')}/versions/${version}.zip`
     try {
-      const response = await crudCall(this.#target.fetch ?? globalThis.fetch, this.#target.baseUrl, 'a hosted plugin zip read', path)
+      // The installer's deadline for the same route (packages/hosted.ts), not the CRUD default for rows.
+      const response = await crudCall(this.#target.fetch ?? globalThis.fetch, this.#target.baseUrl, 'a hosted plugin zip read', path, {
+        timeoutMs: HOSTED_ZIP_TIMEOUT_MS,
+      })
       return { bytes: new Uint8Array(await response.arrayBuffer()) }
     } catch (err) {
       if (err instanceof CrudReadError && err.fromRoute && err.status === 404) return undefined
@@ -202,13 +208,14 @@ export function marketplaceUrl(origin: string, feed: string): string {
 
 /**
  * A hosted version's zip, as the feed lists it, on `origin`: the origin the `marketplace.json`
- * request came on. Claude Code sends a marketplace's `headers` only to the marketplace URL's own
+ * request came on, named by its version and its zip's sha256 (an immutable URL never serves
+ * other bytes, even after the plugin is deleted and made again). Claude Code sends a marketplace's `headers` only to the marketplace URL's own
  * origin (scheme, host and port), so a zip on another host (the SSO host SCADBUDDY_PUBLIC_URL
  * names in prod) would get no token
  * ([Authenticate archive downloads](https://code.claude.com/docs/en/plugins/host-marketplace.md#authenticate-archive-downloads)).
  */
-export function zipUrl(origin: string, feed: string, name: string, version: number): string {
-  return `${feedBase(origin, feed)}/plugins/${encodeURIComponent(name)}/versions/${version}.zip`
+export function zipUrl(origin: string, feed: string, name: string, version: number, zipSha256: string): string {
+  return `${feedBase(origin, feed)}/plugins/${encodeURIComponent(name)}/versions/${version}/${zipSha256}.zip`
 }
 
 /**
@@ -250,7 +257,7 @@ export function feedEntry(row: FeedPackageRow, origin: string, feed: string, arc
         name: row.name,
         ...described,
         version: `${version}.0.0`,
-        source: { source: 'archive', url: zipUrl(origin, feed, row.name, version), sha256: zip_sha256 },
+        source: { source: 'archive', url: zipUrl(origin, feed, row.name, version, zip_sha256), sha256: zip_sha256 },
       },
     }
   }

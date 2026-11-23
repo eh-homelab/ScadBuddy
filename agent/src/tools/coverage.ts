@@ -662,6 +662,22 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The Prints page's live camera view (#981): an MJPEG stream that never ends, for an <img>. An agent " +
       'reads the camera a frame at a time through get_printer_camera.',
   },
+  ...(
+    [
+      'GET /api/v1/printers/{printer_id}/kprofiles',
+      'POST /api/v1/printers/{printer_id}/kprofiles',
+      'POST /api/v1/printers/{printer_id}/kprofiles/batch',
+      'POST /api/v1/printers/{printer_id}/kprofiles/delete',
+      'GET /api/v1/printers/{printer_id}/kprofiles/notes',
+      'PUT /api/v1/printers/{printer_id}/kprofiles/notes',
+      'DELETE /api/v1/printers/{printer_id}/kprofiles/notes/{setting_id}',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "A printer's K-profiles through Bambuddy (#7154), on Settings > Printers. The tools follow in #7162 " +
+      '(plan 2026-11-23-printer-kprofiles R-7154-10).',
+  })),
   {
     operation: 'PUT /api/v1/printers/{printer_id}/lan',
     reason:
@@ -801,7 +817,7 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
   // The marketplace feed (#6933, routes/pluginFeeds.ts).
   ...[
     'GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json',
-    'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{file}',
+    'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{version}/{file}',
     'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/archives/{file}',
   ].map(
     (route) => ({

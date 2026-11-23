@@ -315,10 +315,13 @@ describe('colourProblems (#6144)', () => {
   })
 })
 
-describe('isSupportMaterial (#6710, #7189 review)', () => {
-  it('reads a support material as the backend and the page do (`SUPPORT_MATERIAL`), case aside', () => {
-    for (const material of ['PVA', 'BVOH', 'HIPS', 'PLA Support', 'support-w', 'pva']) expect(isSupportMaterial(material), material).toBe(true)
-    for (const material of ['PLA', 'PETG', 'ABS', 'TPU', '']) expect(isSupportMaterial(material), material).toBe(false)
+describe('isSupportMaterial (#6710, #7189 and #7195 reviews)', () => {
+  it('reads a support material as the backend and the page do: the shared vectors', () => {
+    // `test-fixtures/storefront/support-materials.json`, which the backend's
+    // `tests/orders/storefront/test_support_material.py` and the page's `listingDraft.test.ts` read too.
+    const cases = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/storefront/support-materials.json`, 'utf8')) as { support: string[]; customer: string[] }
+    for (const material of cases.support) expect(isSupportMaterial(material), material).toBe(true)
+    for (const material of cases.customer) expect(isSupportMaterial(material), material).toBe(false)
     expect(isSupportMaterial(null)).toBe(false)
     expect(isSupportMaterial(undefined)).toBe(false)
   })
