@@ -3,7 +3,28 @@ import { type OperationKind, OperationRefusal, refusal } from '../../operations/
 import { PluginError } from '../registry.js'
 import { BuiltInPluginError, PackageRefusedError, type PackageInstaller } from './install.js'
 import { type PackageSource, REPIN_FIXED, RepinFixedError, validateSource, withRepinRef } from './source.js'
-import type { PackageRepo } from './store.js'
+import type { PackageRepo, PackageView } from './store.js'
+
+/**
+ * A hosted plugin's latest version offered to the package model: installed when no package
+ * has its name (stored unapproved), re-pinned into `pending_*` when the hosted package is
+ * installed, chosen by whether the row exists, never by a version number (spec §6.3 step 5).
+ * A package of another kind under the name is refused 409.
+ */
+export async function offerHosted(
+  packages: Pick<PackageRepo, 'get' | 'create' | 'setPending'>,
+  installer: Pick<PackageInstaller, 'prepare'>,
+  name: string,
+  signal?: AbortSignal,
+): Promise<PackageView> {
+  const source: PackageSource = { kind: 'hosted', name }
+  const current = await packages.get(name)
+  if (current && current.source.kind !== 'hosted') {
+    throw new PluginError(`a plugin package named "${name}" is installed from a ${current.source.kind} source, not this hosted plugin`, 409)
+  }
+  const prepared = await installer.prepare(source, signal)
+  return current ? packages.setPending(name, prepared) : packages.create(prepared)
+}
 
 // Installing and re-pinning a plugin package as commands (spec 2026-10-01 §4.1, §4.3
 // `agent-tools`; §10 phase 4; #1055). Both are a fetch (git, or HTTP for an archive or npm
@@ -13,6 +34,12 @@ import type { PackageRepo } from './store.js'
 // and stores the pin, and stops the fetch when its activity is cancelled.
 // The answers are the routes' own: 201/200 with the package, 400, 404, 409, 422 with
 // every problem, 429.
+//
+// A hosted source (#6934, spec 2026-11-21 §6.3 step 5) is OFFERED: its latest version is
+// installed when no package has its name, and re-pinned into `pending_*` when the hosted
+// package is installed (`offerHosted`), so the UI's Offer and the publish tool's in-process
+// call are one command whichever it turns out to be. Either way nothing is approved: the
+// admin approves the exact (version, content hash).
 
 export const INSTALL_KIND = 'plugin_package_install'
 export const REPIN_KIND = 'plugin_package_repin'
@@ -104,6 +131,8 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
   }
 
   const installKey = (source: PackageSource) => {
+    // A hosted package's install and re-pin share the package's name: one fetch at a time.
+    if (source.kind === 'hosted') return source.name
     if (source.kind === 'git') return `${source.url}#${source.path}`
     if (source.kind === 'marketplace' || source.kind === 'marketplace-url') return `${source.url}#${source.entry}`
     return `${source.url}#${source.ref}`
@@ -112,7 +141,10 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
   const install: OperationKind = {
     name: INSTALL_KIND,
     label: 'Install plugin package',
-    subject: (request) => hostOf((request.source as { url?: unknown } | undefined)?.url),
+    subject: (request) => {
+      const source = request.source as { kind?: unknown; url?: unknown; name?: unknown } | undefined
+      return source?.kind === 'hosted' ? String(source.name) : hostOf(source?.url)
+    },
     check: (request) =>
       refusing(async () => {
         const source = validateSource(request.source as Parameters<typeof validateSource>[0])
@@ -123,7 +155,9 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
       refusing(async () => {
         const { source } = checked as { source: PackageSource }
         return withFetch(installKey(source), signal, async () =>
-          deps.packages.create(await deps.installer.prepare(source, signal)),
+          source.kind === 'hosted'
+            ? offerHosted(deps.packages, deps.installer, source.name, signal)
+            : deps.packages.create(await deps.installer.prepare(source, signal)),
         )
       }),
     runAttempts: 1,

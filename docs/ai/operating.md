@@ -1043,7 +1043,8 @@ marketplace or remote repository, download it first and provide the local direct
 path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 
 - **Postgres is the record.** `ai_plugin_packages` holds the pin (`pin_kind` `commit`
-  with the commit SHA, or `bytes` with `bytes_sha256`; and the content hash) and
+  with the commit SHA, `bytes` with `bytes_sha256`, or `version` with a hosted plugin's
+  `version`; and the content hash) and
   everything the admin reviewed
   ([`agent/src/plugins/packages/store.ts`](../../agent/src/plugins/packages/store.ts)).
 - **Disk is a cache.** Packages are materialised under `<state dir>/plugins/<name>/<commit>-<hash prefix>`
@@ -1061,6 +1062,15 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   `<name>/b<first 40 of the sha256>-<hash prefix>`, and a cache miss unpacks the mirrored
   copy, never the upstream URL. The area is one of `STORE_AREAS`, so the agent is not ready
   (its data routes answer 503) until the API lists it.
+- **A hosted plugin loads from its version** (#6934, spec 2026-11-21 §6.5). A `hosted`
+  source is a plugin published under Settings → Tools & plugins → Hosted plugins. It is
+  always installed at its latest published version, read with its zip through the API's
+  CRUD area `hosted-plugins` (`agent/src/plugins/packages/hosted.ts`), never over the
+  network. The zip must hash to the version's `zip_sha256`, its files to the version's
+  `content_hash`, and it is vetted as every package is. The API stores the pin only when
+  that version has that content hash (409 `hosted-version-mismatch`). Its cache directory is
+  `<name>/v<version>-<hash prefix>`, and a cache miss reads that version's zip again. A
+  package of another kind cannot take a hosted plugin's name (409 `hosted-name-taken`).
 - **git in the image.** The `agent` stage installs `git` and `ca-certificates`
   ([`Dockerfile`](../../Dockerfile)). git runs with an environment built by
   [`agent/src/plugins/packages/git.ts`](../../agent/src/plugins/packages/git.ts), so it
@@ -1091,12 +1101,12 @@ other Settings writes
 
 | Route | What it does |
 |---|---|
-| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }`, `{ "kind": "marketplace", "url", "ref"?, "entry" }`, `{ "kind": "marketplace-url", "url", "entry" }`, `{ "kind": "archive", "url", "sha256"? }` or `{ "kind": "npm", "package", "version"?, "registry"? }` | Fetches, pins the commit (or the file's SHA-256, which it mirrors first), vets, and stores the package **unapproved and disabled** (201), with what the rules refuse in `review.refused`. A marketplace entry may be a `github`, `url`, `git-subdir`, `archive` or `npm` source (a `command` source is refused; a relative path only from a marketplace repository). An npm `package` is a registry name (with `@version` or `version`: an exact version or a dist-tag; `latest` by default) or an https tarball link. A package no approval can allow (its name, a path outside it, a symlink, an endpoint the egress check refuses) gets 422 with every problem. |
+| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }`, `{ "kind": "marketplace", "url", "ref"?, "entry" }`, `{ "kind": "marketplace-url", "url", "entry" }`, `{ "kind": "archive", "url", "sha256"? }` `{ "kind": "npm", "package", "version"?, "registry"? }` or `{ "kind": "hosted", "name" }` | Fetches, pins the commit (or the file's SHA-256, which it mirrors first, or a hosted plugin's latest version), vets, and stores the package **unapproved and disabled** (201), with what the rules refuse in `review.refused`. A `hosted` source *offers* the latest version: when the hosted package is installed, it is re-pinned into a pending pin instead (still answered 201). A hosted package's view has `not_offered`, the latest version when neither its pin nor its pending pin is that version. A marketplace entry may be a `github`, `url`, `git-subdir`, `archive` or `npm` source (a `command` source is refused; a relative path only from a marketplace repository). An npm `package` is a registry name (with `@version` or `version`: an exact version or a dist-tag; `latest` by default) or an https tarball link. A package no approval can allow (its name, a path outside it, a symlink, an endpoint the egress check refuses) gets 422 with every problem. |
 | `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
 | `GET /:name/files`, `GET /:name/file?path=` (each with `pending=true` for the re-pin's) | Every file of the pin with its size, and one file's content for Settings to show before approval (#1029). Only a path in the pin's own file list is read, from the cached copy that hashes to the pin (fetched again when it does not; never vetted for loading, so a refused package can be read). Text is cut at 64 KiB unless `full=true`; a file that is not UTF-8 is `binary` with no `content`. A built-in's files are read from the image. |
-| `POST /:name/approve` with `{ "commit_sha" or "bytes_sha256", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
+| `POST /:name/approve` with `{ "commit_sha", "bytes_sha256" or "version", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
 | `PATCH /:name` | Gone (#4828). A package's switch is `PUT /api/v1/ai/capabilities/package:<name>` (#4757), which Settings uses; it enables an approved pin only, and the table enforces this with a `CHECK` too. |
-| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin (for an npm package, `ref` is a version or dist-tag; an archive, a tarball link or a bare marketplace URL takes none and is fetched again; an archive installed with its `sha256` is refused 409 `repin-fixed-sha256`, since it could only find the same file). The current pin keeps loading until the pending one is approved. |
+| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin (for an npm package, `ref` is a version or dist-tag; an archive, a tarball link or a bare marketplace URL takes none and is fetched again; a hosted plugin takes none and is re-pinned to its latest version; an archive installed with its `sha256` is refused 409 `repin-fixed-sha256`, since it could only find the same file). The current pin keeps loading until the pending one is approved. |
 | `DELETE /:name/pending`, `DELETE /:name` | Drop the pending re-pin; uninstall and evict the cache. |
 
 Plugins are never updated automatically (issue #297). At most two fetches run at a

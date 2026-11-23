@@ -47,6 +47,7 @@ import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview,
 import { reviewsByHash } from './access/packageProvider.js'
 import { CrudPackageStore } from './plugins/packages/store.js'
 import { CrudPackageMirror } from './plugins/packages/mirror.js'
+import { CrudHostedPlugins } from './plugins/packages/hosted.js'
 import { CrudPluginFeeds } from './plugins/feed.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { CrudOAuthRows, PluginOAuth } from './plugins/oauthStore.js'
@@ -452,7 +453,15 @@ const pluginPackages = new CrudPackageStore(crudTarget)
 // An archive or npm package's file (#6935) is kept by the API (area `package-mirrors`, one of
 // `STORE_AREAS`, so the agent is not ready until the API lists it).
 const packageMirror = new CrudPackageMirror(crudTarget)
-const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths), mirror: () => packageMirror })
+// A hosted plugin's versions (#6934) are read from the API too (area `hosted-plugins`, one of
+// `STORE_AREAS`).
+const hostedPlugins = new CrudHostedPlugins(crudTarget)
+const packageInstaller = new PackageInstaller({
+  fetcher: new GitFetcher(),
+  cacheRoot: pluginCacheDir(paths),
+  mirror: () => packageMirror,
+  hosted: () => hostedPlugins,
+})
 // Settings → Tools & plugins (#4757): an older stored review's items read from the cached copy
 // (read only), once per content hash; and what a turn would make of the enabled packages.
 const verifiedPackageReview = reviewsByHash((pin) => verifiedReview(packageInstaller, pin))

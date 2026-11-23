@@ -566,10 +566,15 @@ opens every one and seals it again byte for byte).
     API's area `package-mirrors` (`mirror.ts`), never upstream. Downloads go through
     the egress check at every hop (`download.ts`), archives are unpacked by
     `unpack.ts` (no links, devices or paths out). Install stores the pin unapproved;
-    approving needs the exact commit (or `bytes_sha256`) and hash. `vet.ts` adds rules
+    approving needs the exact commit (or `bytes_sha256`, or `version`) and hash. `vet.ts` adds rules
     on top of `harness/plugins.ts`. Tests use local git repos (`test/support/gitRepo.ts`),
     and archives built byte by byte (`test/support/archives.ts`) on a local HTTP server
-    (`test/pluginPackagesBytes.test.ts`). Their MCP servers' http ones go
+    (`test/pluginPackagesBytes.test.ts`). A hosted plugin (#6934, source `{ kind: 'hosted',
+    name }`, `pin_kind` `version`) is read over the API's area `hosted-plugins`
+    (`hosted.ts` `CrudHostedPlugins`): its zip checked against the version's sha256 and its
+    files against the content hash, then vetted; an install of a hosted source re-pins the
+    installed hosted package instead (`operations.ts` `offerHosted`), and its view's
+    `not_offered` names a published version no pin names (`test/pluginPackagesHosted.test.ts`). A package's http MCP servers go
     through the forwarder (`plugins/packages/mcp.ts`), and on Temporal each call is a
     `turn:<server>__<tool>` ToolCall.
   - Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every session offers `Read`,

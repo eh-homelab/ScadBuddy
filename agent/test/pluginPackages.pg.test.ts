@@ -9,7 +9,7 @@ import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import { loadPackagesForRun, PackageInstaller, verifiedReview } from '../src/plugins/packages/install.js'
-import { validateSource } from '../src/plugins/packages/source.js'
+import { validateSource, withRepinRef } from '../src/plugins/packages/source.js'
 import { packageKinds } from '../src/plugins/packages/operations.js'
 import type { PackageView } from '../src/plugins/packages/store.js'
 import { PackageStore } from './support/sql/packages.js'
@@ -148,7 +148,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       // A clean re-pin: approved without the flag, and the allowance does not carry over.
       const next = repo.commitFiles({ 'hooks/hooks.json': null })
       const current = await store.pinOf('greeter')
-      const pending = await store.setPending('greeter', await installer.prepare({ ...current!.source, ref: 'main' }))
+      const pending = await store.setPending('greeter', await installer.prepare(withRepinRef(current!.source, 'main')))
       expect(pending.pending?.review.refused).toEqual([])
       const promoted = await store.approve('greeter', next, pending.pending!.content_hash, true)
       expect(promoted).toMatchObject({ commit_sha: next, allow_refused: false, enabled: true })
@@ -184,7 +184,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
         'README.md': null,
       })
       const current = await store.pinOf('greeter')
-      const pending = await store.setPending('greeter', await installer.prepare({ ...current!.source, ref: 'main' }))
+      const pending = await store.setPending('greeter', await installer.prepare(withRepinRef(current!.source, 'main')))
       expect(pending.pending).toMatchObject({
         ref: 'main',
         commit_sha: next,
@@ -195,7 +195,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
 
       // Re-pinning to what is already pinned is refused.
       await expect(
-        store.setPending('greeter', await installer.prepare({ ...current!.source, ref: installed.commit_sha! })),
+        store.setPending('greeter', await installer.prepare(withRepinRef(current!.source, installed.commit_sha!))),
       ).rejects.toMatchObject({ status: 409 })
 
       const promoted = await store.approve('greeter', next, pending.pending!.content_hash)
@@ -267,7 +267,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
     }
     const repin = async (name = 'greeter') => {
       const current = await store.pinOf(name)
-      const pending = await store.setPending(name, await installer.prepare({ ...current!.source, ref: 'main' }))
+      const pending = await store.setPending(name, await installer.prepare(withRepinRef(current!.source, 'main')))
       return store.approve(name, pending.pending!.commit_sha!, pending.pending!.content_hash)
     }
     const hookRow = (view: PackageView) => `hook:Stop:${view.review.hooks[0]!.id!}`
@@ -344,7 +344,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       const before = await accessRows()
       repos.greeter!.commitFiles({ 'agents/long.md': `---\nname: ${'a'.repeat(1025)}\ndescription: Long.\n---\n\nLong.\n` })
       const current = await store.pinOf('greeter')
-      await expect(installer.prepare({ ...current!.source, ref: 'main' })).rejects.toThrow(/longer than 1024/)
+      await expect(installer.prepare(withRepinRef(current!.source, 'main'))).rejects.toThrow(/longer than 1024/)
       expect(await accessRows()).toEqual(before)
     })
 
@@ -418,7 +418,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
         'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Was the user waved at?' }] }] } }),
       })
       const current = await store.pinOf('greeter')
-      const pending = await store.setPending('greeter', await installer.prepare({ ...current!.source, ref: 'main' }))
+      const pending = await store.setPending('greeter', await installer.prepare(withRepinRef(current!.source, 'main')))
       // As an older replica stores it: no hook has an id.
       await db.sql`
         UPDATE ai_plugin_packages
@@ -493,7 +493,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       // setPending and discardPending prune on the current review too.
       await seed('package:greeter', { 'skill:gone': 'off' })
       repos.greeter!.commitFiles({ 'README.md': 'v2\n' })
-      await store.setPending('greeter', await installer.prepare({ ...(await store.pinOf('greeter'))!.source, ref: 'main' }))
+      await store.setPending('greeter', await installer.prepare(withRepinRef((await store.pinOf('greeter'))!.source, 'main')))
       expect(await accessRows()).not.toContain('package:greeter skill:gone=off')
       await seed('package:greeter', { 'skill:gone': 'off' })
       await store.discardPending('greeter')
@@ -569,7 +569,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
         'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Was the user waved at?' }] }] } }),
       })
       const current = await store.pinOf('greeter')
-      await store.setPending('greeter', await installer.prepare({ ...current!.source, ref: 'main' }))
+      await store.setPending('greeter', await installer.prepare(withRepinRef(current!.source, 'main')))
       const [row] = await db.sql<{ id: string }[]>`SELECT pending_review -> 'hooks' -> 0 ->> 'id' AS id FROM ai_plugin_packages`
       const id = row!.id
       expect(id).toMatch(/^[0-9a-f]{16}$/)

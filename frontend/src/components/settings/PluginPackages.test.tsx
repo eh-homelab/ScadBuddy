@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { aiPlugins } from '../../api/aiPlugins'
 import { aiCapabilities } from '../../api/capabilities'
-import { BUILT_IN_ANSWER, seedStoredPackage, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
+import { BUILT_IN_ANSWER, seedHostedPackage, seedStoredPackage, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
 import { GREETER_SKILL, LONG_CHANGELOG, PREVIEW_CHARS } from '../../mocks/features/pluginPackageFiles'
 import { setPackageProblem } from '../../mocks/features/capabilities'
 import { server } from '../../mocks/server'
@@ -323,6 +323,28 @@ describe('PluginPackagesPanel', () => {
     await install(user, 'https://git.example/greeter.git')
     expect(await screen.findByRole('listitem', { name: 'Plugin package greeter' })).toBeInTheDocument()
     expect(screen.getAllByRole('listitem', { name: /^Plugin package / })).toHaveLength(1)
+  })
+
+  it('marks a published hosted version not offered, offers it as a re-pin, and approves it by version (#6934)', async () => {
+    seedHostedPackage('greeter', 1, 2)
+    const { user } = renderPage(<PluginPackagesPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    expect(within(card).getByText('Hosted plugin greeter')).toBeInTheDocument()
+    expect(within(card).getByText('Version 2 not offered')).toBeInTheDocument()
+    expect(within(card).queryByRole('button', { name: 'Fetch re-pin' })).not.toBeInTheDocument()
+
+    await user.click(within(card).getByRole('button', { name: 'Offer version 2' }))
+    const pending = await within(card).findByLabelText('Pending re-pin')
+    expect(pending).toHaveTextContent('Re-pin at version 2. The current pin keeps loading until you approve this one.')
+    expect(within(card).queryByText('Version 2 not offered')).not.toBeInTheDocument()
+
+    await user.click(within(pending).getByRole('button', { name: 'Approve re-pin…' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByTestId('approve-commit')).toHaveTextContent('2')
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(within(dialog).getByRole('button', { name: 'Approve this pin' }))
+    await waitFor(() => expect(within(card).queryByLabelText('Pending re-pin')).not.toBeInTheDocument())
+    expect(within(card).getByText('Publish a new version in Hosted plugins to re-pin it.')).toBeInTheDocument()
   })
 
   it('keeps a package stored under a built-in name marked not loaded, saying why, and removable', async () => {
