@@ -57,11 +57,12 @@ from scadbuddy.orders.bambuddy import (
     ServedLibrary,
     download_sliced,
     quote_preview_job,
+    served_shelf,
     start_library_quote_preview,
     start_quote_preview,
 )
 from scadbuddy.orders.component import ORDERS
-from scadbuddy.orders.held_print import restore_held, served_shelf
+from scadbuddy.orders.held_print import restore_held
 from scadbuddy.orders.lifecycle import (
     QUOTE_TIMEOUT,
     SETTLED,

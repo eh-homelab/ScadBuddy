@@ -15,18 +15,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import AsyncGenerator, Sequence
-from contextlib import aclosing
+import shutil
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from contextlib import aclosing, asynccontextmanager
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from pydantic import ValidationError
 
-from scadbuddy.bambuddy.client import Operation, client_for, maybe_client
+from scadbuddy.bambuddy.client import BambuddyClient, Operation, client_for, maybe_client
 from scadbuddy.bambuddy.costs import archive_cost
 from scadbuddy.bambuddy.models import (
     FINISH_PHOTO_PREFIX,
     ArchiveDetail,
+    FolderCreate,
     LibraryFile,
     LocalPreset,
     PrinterMaintenanceOverview,
@@ -37,11 +39,13 @@ from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_previe
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import LibrarySource, PrintSource
 from scadbuddy.bambuddy.projects import FolderlessProjects, ProjectRequest, ensure_project
+from scadbuddy.bambuddy.send import Sink, upload_raw
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.bambuddy_pull import read_assignments
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.orders.density import density_text
+from scadbuddy.orders.held_print import STOREFRONT_FOLDER, NativeShelf, Shelf
 from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
@@ -57,8 +61,12 @@ from scadbuddy.print_library.reads import NativeCopies, NativeReads, reads_for, 
 
 if TYPE_CHECKING:
     from scadbuddy.orders.storefront.held_file import HeldFile
+    from scadbuddy.print_library.native import NativeLibrary
 
 logger = logging.getLogger(__name__)
+
+#: How a held copy is sent to Bambuddy, as the library page's upload sends a file.
+UPLOAD_MEDIA_TYPE = "application/octet-stream"
 
 
 def _local_densities(presets: list[LocalPreset]) -> dict[str, LocalDensity]:
@@ -401,3 +409,63 @@ class ServedLibrary:
         except ApiError:
             return {}
         return {slot.slot_id: slot.color for slot in needs.filaments if slot.color}
+
+
+class BambuddyShelf:
+    """``orders/held_print.py`` ``Shelf`` over Bambuddy's library (#6710 §10.2). Its
+    listing states no hash, so a file of the copy's size has its ``file_hash`` read
+    (``GET /library/files/{id}``)."""
+
+    def __init__(self, client: BambuddyClient, uploads: BambuddyUploadStore) -> None:
+        self.client = client
+        self.uploads = uploads
+
+    async def storefront_folder(self) -> int:
+        tops = [f for f in await self.client.folders() if f.parent_id is None]
+        named = sorted(f.id for f in tops if f.name == STOREFRONT_FOLDER)
+        if named:
+            return named[0]
+        made = await self.client.create_folder(FolderCreate(name=STOREFRONT_FOLDER))
+        return made.id
+
+    async def find(self, folder_id: int, sha256: str, size: int) -> int | None:
+        for row in sorted(await self.client.library_files(folder_id), key=lambda r: r.id):
+            if row.file_size is not None and row.file_size != size:
+                continue
+            try:
+                found = await self.client.library_file(row.id)
+            except ApiError as error:
+                if error.status == 404:
+                    continue
+                raise
+            if (found.file_hash or "").lower() == sha256:
+                return found.id
+        return None
+
+    async def upload(self, filename: str, data: BinaryIO, folder_id: int) -> int:
+        async def write(sink: Sink) -> None:
+            await asyncio.to_thread(shutil.copyfileobj, data, sink)
+
+        made = await upload_raw(
+            self.client,
+            self.uploads,
+            folder_id,
+            filename=filename,
+            media_type=UPLOAD_MEDIA_TYPE,
+            write=write,
+        )
+        return made.id
+
+
+@asynccontextmanager
+async def served_shelf(
+    settings: SettingsStore, native: NativeLibrary | None, uploads: BambuddyUploadStore
+) -> AsyncIterator[Shelf]:
+    """``orders/held_print.py``'s shelf of the library that serves: ``native`` when it
+    serves, else Bambuddy's."""
+    if native is not None:
+        yield NativeShelf(native)
+        return
+    stored = await asyncio.to_thread(settings.load)
+    async with client_for(stored) as client:
+        yield BambuddyShelf(client, uploads)
