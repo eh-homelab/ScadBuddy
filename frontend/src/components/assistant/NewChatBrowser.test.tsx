@@ -94,6 +94,35 @@ describe("a new chat's browser options", () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
   })
 
+  it('sends nothing when Browser, a preset or Image is clicked after the message is typed', async () => {
+    const { user, box } = await openComposer()
+    await user.type(box, 'hello')
+    await user.click(browserToggle())
+    await user.click(within(settings()).getByRole('button', { name: 'Phone' }))
+    await user.click(within(settings()).getByRole('button', { name: 'Desktop (default)' }))
+    await user.click(screen.getByRole('button', { name: 'Image' }))
+    expect(sentMessages()).toHaveLength(0)
+    expect(box).toHaveValue('hello')
+  })
+
+  it('holds the send while the width or height is not a whole number', async () => {
+    const { user, box } = await openComposer()
+    await user.click(browserToggle())
+    await user.type(within(settings()).getByRole('spinbutton', { name: 'Width' }), '390.5')
+    await user.type(within(settings()).getByRole('spinbutton', { name: 'Height' }), '844')
+    expect(within(settings()).getByText('Width and height are whole numbers of pixels.')).toBeInTheDocument()
+    await user.type(box, 'hello')
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+  })
+
+  it('puts the settings after Send in the tab order', async () => {
+    const { user } = await openComposer()
+    await user.click(browserToggle())
+    const send = screen.getByRole('button', { name: 'Send' })
+    const agentField = within(settings()).getByRole('textbox', { name: 'User agent' })
+    expect(send.compareDocumentPosition(agentField) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   it('starts empty again for the next new chat', async () => {
     const { user, box } = await openComposer()
     await user.click(browserToggle())

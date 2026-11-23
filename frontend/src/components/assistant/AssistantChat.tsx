@@ -59,7 +59,7 @@ import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
 import { Tip } from './Tip'
 import { browserOptions, browserProblem, EMPTY_BROWSER, type BrowserDraft } from '../../agent/chat/browserDraft'
-import { NewChatBrowser } from './NewChatBrowser'
+import { NewChatBrowserPanel, NewChatBrowserToggle } from './NewChatBrowser'
 
 function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -252,8 +252,12 @@ export function AssistantChat({
   // #7027 — a new chat's browser options, sent with its first message. Kept through a refused
   // start (the agent's `invalid_browser` notice), so they can be fixed; cleared once a chat is on screen.
   const [newChatBrowser, setNewChatBrowser] = useState<BrowserDraft>(EMPTY_BROWSER)
+  const [browserOpen, setBrowserOpen] = useState(false)
+  const browserPanelId = useId()
   useEffect(() => {
-    if (state.activeId) setNewChatBrowser(EMPTY_BROWSER)
+    if (!state.activeId) return
+    setNewChatBrowser(EMPTY_BROWSER)
+    setBrowserOpen(false)
   }, [state.activeId])
   const holdSend = state.awaitingStart || (busy && (!active || queueFull)) || (!active && browserProblem(newChatBrowser) !== null)
   const streaming = active?.items.some((i) => i.kind === 'assistant' && !i.done) ?? false
@@ -1026,6 +1030,7 @@ export function AssistantChat({
                 <AttachedThumb blob={a.image.preview.blob} alt={a.name} />
                 <Tip content={`Remove ${a.name}`}>
                   <Button
+                    type="button"
                     variant="secondary"
                     size="icon-xs"
                     aria-label={`Remove ${a.name}`}
@@ -1046,6 +1051,7 @@ export function AssistantChat({
             </p>
             {owned && (
               <Button
+                type="button"
                 size="sm"
                 variant="outline"
                 data-agent-user-only=""
@@ -1113,7 +1119,7 @@ export function AssistantChat({
           <div className="mr-auto flex items-center gap-2">
             <SpeakRepliesToggle />
             {speech.speaking && (
-              <Button size="sm" variant="ghost" onClick={speech.stop}>
+              <Button type="button" size="sm" variant="ghost" onClick={speech.stop}>
                 Stop speaking
               </Button>
             )}
@@ -1128,7 +1134,13 @@ export function AssistantChat({
             </span>
           )}
           {!active && (
-            <NewChatBrowser value={newChatBrowser} onChange={setNewChatBrowser} disabled={!canSend || state.awaitingStart} />
+            <NewChatBrowserToggle
+              value={newChatBrowser}
+              open={browserOpen}
+              onOpenChange={setBrowserOpen}
+              panelId={browserPanelId}
+              disabled={!canSend || state.awaitingStart}
+            />
           )}
           <input
             ref={filePicker}
@@ -1149,6 +1161,7 @@ export function AssistantChat({
             content={`Attach images (PNG, JPEG, GIF or WebP; up to ${IMAGES_MAX}). You can also paste or drop them here.`}
           >
             <Button
+              type="button"
               size="sm"
               variant="ghost"
               disabled={!canSend || attached.length >= IMAGES_MAX}
@@ -1163,6 +1176,14 @@ export function AssistantChat({
             {busy && !holdSend ? 'Queue' : 'Send'}
           </Button>
         </div>
+        {!active && browserOpen && (
+          <NewChatBrowserPanel
+            id={browserPanelId}
+            value={newChatBrowser}
+            onChange={setNewChatBrowser}
+            disabled={!canSend || state.awaitingStart}
+          />
+        )}
         <VoiceDisclosure id={voiceNoteId} />
       </form>
     </div>

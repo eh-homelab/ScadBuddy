@@ -33,9 +33,19 @@ export function browserOptions(d: BrowserDraft): SessionBrowserInput | undefined
   return Object.keys(out).length ? out : undefined
 }
 
-/** A draft the agent could not take as a viewport: one side set without the other. */
+/**
+ * A draft the agent's schema could not take as a viewport (a shape, not a bound): one side set
+ * without the other, or a side that is not a whole number. The agent refuses either as a
+ * malformed frame, not as `invalid_browser`, so the panel holds it.
+ */
 export function browserProblem(d: BrowserDraft): string | null {
-  return !d.width.trim() !== !d.height.trim() ? 'Set both width and height, or neither.' : null
+  const width = d.width.trim()
+  const height = d.height.trim()
+  if (!width !== !height) return 'Set both width and height, or neither.'
+  if (width && !(Number.isInteger(Number(width)) && Number.isInteger(Number(height)))) {
+    return 'Width and height are whole numbers of pixels.'
+  }
+  return null
 }
 
 export type BrowserPreset = 'desktop' | 'phone' | null
