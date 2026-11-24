@@ -186,7 +186,7 @@ export function BulkEditDialog({ open, ids, types, onClose, onDone }: Props) {
       const done = await bulkUpdateSpools(ids, patch)
       const gone = done.not_found.length ? ` ${spools(done.not_found.length)} no longer ${done.not_found.length === 1 ? 'exists' : 'exist'}.` : ''
       const same = done.unchanged.length ? ` ${spools(done.unchanged.length)} already had these values.` : ''
-      onDone(`${done.changed.length ? `Changed ${spools(done.changed.length)}.` : 'Changed no spool.'}${same}${gone}`)
+      onDone(`${done.changed.length ? `Changed ${spools(done.changed.length)}.` : 'No spool changed.'}${same}${gone}`)
       onClose()
     } catch (cause) {
       setError(`Nothing changed. ${cause instanceof ApiError ? cause.detail : 'The request failed. Try again.'}`)

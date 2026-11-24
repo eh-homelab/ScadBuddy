@@ -75,6 +75,20 @@ describe('the bulk bar', () => {
     expect(bodies).toEqual([{ spool_ids: ['s1', 's2'], patch: { note: 'June order', low_stock_pct: 15, cost_per_kg: null } }])
   })
 
+  it('says plainly that no spool changed when every one already had the values (#7322)', async () => {
+    server.use(
+      http.post('/api/v1/filament/spools/bulk-update', () => HttpResponse.json({ changed: [], unchanged: ['s1', 's2'], not_found: [] })),
+    )
+    const onDone = vi.fn()
+    const { user } = renderPage(<BulkBar selected={two} places={[]} types={[]} onDone={onDone} onClear={() => {}} />)
+    await user.click(screen.getByRole('button', { name: 'Edit fields' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit 2 spools' })
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Change Note' }))
+    await user.type(within(dialog).getByRole('textbox', { name: 'Note' }), 'same')
+    await user.click(within(dialog).getByRole('button', { name: 'Change 2 spools' }))
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith('No spool changed. 2 spools already had these values.'))
+  })
+
   it('words the Type pick\'s clear choice as "No type" and shows each subtype\'s material (#7322)', async () => {
     server.use(
       http.get('/api/v1/filament/catalog/materials', () => HttpResponse.json([{ id: 'm1', name: 'PLA' }, { id: 'm2', name: 'PETG' }])),

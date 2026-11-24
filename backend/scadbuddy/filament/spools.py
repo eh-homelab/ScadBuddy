@@ -839,7 +839,8 @@ class FilamentSpoolStore:
         invoice_line_id: UUID | None = None,
     ) -> bool | None:
         """`update_on`'s body: ``None`` for no such spool, else whether a column changed
-        (an archive or restore is not counted)."""
+        (an archive or restore is not counted). An ``invoice_line_id`` that differs counts
+        as changed; the bulk edit never passes one."""
         sent = [n for n in _WRITABLE if n in patch.model_fields_set]
         if patch.archived:
             # The tag before the spool, as every writer of bindings takes them.
