@@ -138,8 +138,8 @@ files, then the row in one transaction; when the row fails, the save fails and i
 is removed (`OutputStore._insert_row`). Its last print stays in `output_last_prints`.
 
 Each API start copies the folders to rows once (`scadbuddy/library/output_copy.py`
-`copy_outputs`, one replica at a time under an advisory lock; a run that does not get the
-lock does nothing). The housekeeping sweep `housekeeping_copy_outputs` copies them again
+`copy_outputs`, one replica at a time under an advisory lock, held on a connection of its
+own; a run that does not get the lock does nothing). The housekeeping sweep `housekeeping_copy_outputs` copies them again
 on each run of the sweeps' Schedule (`workflows/housekeeping.py` `OUTPUT_COPY_SWEEP`, every
 `asset_sweep_interval`; with the sweeps off, `asset_sweep_interval` 0, only the start
 copies). Each run is a row of `output_copy_runs`.
@@ -168,7 +168,9 @@ reconciles:
   list; a side file that cannot be read is left out of its row and named on `damaged`.
 - Pods on an older build save and delete outputs in the files only, during a roll-out
   and after a rollback. The next housekeeping sweep gives their saves rows and drops the
-  rows of their deletes.
+  rows of their deletes. Until then, such a save is a 404 on the newer pods once a copy
+  run has finished (`OutputRows.copied` stays true in each process); README, "Saved
+  outputs during a roll-out".
 
 After a roll-out, confirm that every pod runs the new image (`kubectl -n bambuddy get
 pods -o jsonpath` on the images), then read `GET /api/v1/outputs/copy-status`. Check that

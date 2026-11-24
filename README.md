@@ -467,8 +467,9 @@ on shutdown.
     `orders/storefront/listings.py`, in the gauges as `scadbuddy-storefront-publish`), a library copy's target locks (`print_library/copy_store.py`),
     the Bambuddy catalogue refresh and upload claims, the store's folder lock, the
     output backfill's claim, the service credential rotation and the flow keys. The copy
-    of the saved outputs to rows (#7255) takes its connections from the main pool: one
-    that holds its advisory lock for the whole run, and one more for each statement. So
+    of the saved outputs to rows (#7255) holds its advisory lock for the whole run (up to
+    15 minutes) on a connection of its own (`scadbuddy-output-copy`), not on a pool's;
+    each of its statements takes a connection of the main pool. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main
     pool one more) and closes a connection left idle for a minute, one a minute
     (psycopg_pool's `max_idle`). The `LISTEN` connection and `scadbuddy-preview-follows`
@@ -1088,6 +1089,14 @@ flow trigger fires and a store migration wait until you do. clusters' PostSync p
 hook (`temporal-promote-workers.yaml`) would also try to make the old revision current
 and fail that sync: take `scadbuddy-library` out of its list for such a rollback. Rolling back to any build
 from #4090 on needs nothing: its pods make their own build current.
+
+**Saved outputs during a roll-out (#7255).** An API pod of a build before #7255 saves
+an output in the files only. Once a copy run has finished, the newer pods look outputs
+up in the `outputs` rows only, so such an output is a 404 on them until the next copy
+writes its row: the next housekeeping sweep (every `asset_sweep_interval`), or the next
+API start. A rollback to such a build makes the same window. To end it sooner, restart
+one API pod once the roll-out is done: its start runs the copy. Then check
+`GET /api/v1/outputs/copy-status` ([Saved outputs](docs/architecture/data.md#saved-outputs)).
 
 ### Render worker (#424)
 
