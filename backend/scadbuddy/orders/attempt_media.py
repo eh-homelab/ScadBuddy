@@ -5,11 +5,13 @@
 its watchers: a run still going is joined, and a run that ended is started again. A
 start with ``retries`` is a signal-with-start, so a run it joins steps again too. A
 start is one Temporal call and never waits on Bambuddy. `start_media` logs a failed start
-and never raises it, so a route that starts the import still answers with Temporal down.
+and never raises it, so a route that starts the import still answers with Temporal down;
+a start slower than ``START_TIMEOUT`` is given up and logged the same way.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Protocol
 
@@ -24,6 +26,10 @@ from scadbuddy.workflows.attempt_media import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Seconds a route waits on Temporal for a start before it gives up (#7281 review), as
+#: ``ARCHIVE_READ_TIMEOUT`` bounds the archive read.
+START_TIMEOUT = 5.0
 
 
 class MediaStarter(Protocol):
@@ -51,9 +57,10 @@ class TemporalMediaStarter:
 
 
 async def start_media(starter: MediaStarter, fulfilment_id: str, *, retries: bool) -> None:
-    """Start the attempt's import; a failure is logged, never raised."""
+    """Start the attempt's import; a failure, or a start slower than ``START_TIMEOUT``,
+    is logged, never raised."""
     try:
-        await starter.start(fulfilment_id, retries=retries)
+        await asyncio.wait_for(starter.start(fulfilment_id, retries=retries), START_TIMEOUT)
     except Exception:
         logger.warning(
             "could not start the media import of attempt %s", fulfilment_id, exc_info=True

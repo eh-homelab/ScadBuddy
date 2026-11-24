@@ -1,8 +1,8 @@
 """The entity registry (#6950, spec 6.1): which kinds exist, where their rows live, and
-the `entities` rows that files and links hang off.
+the `entities` rows that files, links and properties hang off.
 
-An entity row is made when the first file or link attaches, and only for an owner row
-that exists. The owner's table has no foreign key to it, so `orphans` finds the rows
+An entity row is made when the first file, link or property attaches, and only for an
+owner row that exists. The owner's table has no foreign key to it, so `orphans` finds the rows
 whose owner is gone."""
 
 from __future__ import annotations
@@ -84,11 +84,15 @@ def _ref_as_id(kind: EntityKind) -> str:
 
 
 def repoint_entity(conn: Conn, kind: str, gone: str, kept: str) -> None:
-    """Make `kind:kept` own what `kind:gone` owned: its files and links. For a merge that
+    """Make `kind:kept` own what `kind:gone` owned: its files, links and properties (a key
+    both have keeps `kept`'s value). For a merge that
     deletes `gone`'s row and keeps `kept`'s (the printers' `PRINTER_REFERENCES`), in its
     transaction; without it the sweep would take them as an orphan's."""
+    # Locked in id order, as `apply` locks an entity, so a property write on `gone` cannot
+    # commit between the copy below and the delete, which cascades.
     rows = conn.execute(
-        "SELECT ref, id FROM entities WHERE kind = %s AND ref = ANY(%s)", (kind, [gone, kept])
+        "SELECT ref, id FROM entities WHERE kind = %s AND ref = ANY(%s) ORDER BY id FOR UPDATE",
+        (kind, [gone, kept]),
     ).fetchall()
     ids = {r["ref"]: r["id"] for r in rows}
     if gone not in ids:
@@ -106,6 +110,12 @@ def repoint_entity(conn: Conn, kind: str, gone: str, kept: str) -> None:
     )
     conn.execute(
         "UPDATE entity_links SET entity_id = %s WHERE entity_id = %s", (ids[kept], ids[gone])
+    )
+    conn.execute(
+        "INSERT INTO entity_properties (entity_id, key, value, source, updated_at, updated_by)"
+        " SELECT %s, key, value, source, updated_at, updated_by FROM entity_properties"
+        " WHERE entity_id = %s ON CONFLICT (entity_id, key) DO NOTHING",
+        (ids[kept], ids[gone]),
     )
     conn.execute("DELETE FROM entities WHERE id = %s", (ids[gone],))
 
