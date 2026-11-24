@@ -91,10 +91,11 @@ ScadBuddy's own filament presets (area ``own-presets``, #7176) are
 `filament/sb_presets.py` `FilamentPresetStore`'s reads, for `RemoteFilamentPresets`:
 ``…/own-presets`` and ``…/own-presets/documents``.
 
-The kept presets and a native slice's start (Q30, area ``spools``, #5298 Task 31) are
-`HeldPresetStore`'s and `NativeSliceStore`'s, for `RemoteHeldPresets` and
-`RemoteNativeSlices`: the kept presets (reads) and ``…/native-slices/start`` (under the
-lock on its workflow id, whole in one transaction here, plan D6; natural). The spool
+A native slice's start (Q30, area ``spools``, #5298 Task 31) is `NativeSliceStore`'s, for
+`RemoteNativeSlices`: ``…/native-slices/start`` (under the lock on its workflow id, whole
+in one transaction here, plan D6; natural). The kept copy of Bambuddy's local presets went
+in #7244: its two reads, ``…/held-presets`` and ``…/held-presets/documents``, answer empty
+for a print worker of an older build during a roll, until the table is dropped. The spool
 overlay's routes (``…/spools/overlay``, ``…/spools/records``,
 ``…/spools/refreshes/{provider}/failed``) went with the overlay in #6262 Task 12, and the
 shelf's and the uses routes in Task 11: a print worker from before Task 6 that calls one
@@ -2209,32 +2210,18 @@ async def end_sensor_notification(
 
 
 @router.get("/held-presets", name="crud_print_held_presets")
-async def held_presets(slicing: SlicingDep) -> list[HeldPresetRow]:
-    rows = await slicing.held.rows()
-    return [HeldPresetRow(preset=row.preset, sha256=row.sha256) for row in rows]
+async def held_presets() -> list[HeldPresetRow]:
+    """Empty: no copy of Bambuddy's local presets is kept (#7244). Only a print worker of
+    an older build calls it, during a roll."""
+    return []
 
 
 @router.get("/held-presets/documents", name="crud_print_held_preset_documents")
 async def held_preset_documents(
-    slicing: SlicingDep, id: Annotated[list[int], Query(default_factory=list)]
+    id: Annotated[list[int], Query(default_factory=list)],
 ) -> dict[int, LocalPresetDetail]:
-    """The kept local presets' documents, each with every print-host credential key
-    removed (`core/credentials.py` `strip_credentials`: ``printhost_apikey``,
-    ``printhost_password``, ``printhost_user``, and any key naming an API key, password,
-    secret or token, at any depth). ScadBuddy strips these keys whenever it parses a
-    preset, and never stores, forwards or writes them into a slicer file; no slice reads
-    them. The API strips the kept presets an older build stored at its start and
-    after each refresh
-    (`slicing/held_presets.py` `strip_kept_logged`). One window remains: preset files
-    that older builds put in the content store keep the keys until the content sweep
-    collects them. The print worker, which holds the Bambuddy key, can still read Bambuddy's local
-    presets, including any such keys, in the bytes Bambuddy sends. What protects them is
-    the Bambuddy key's scope."""
-    documents = await slicing.held.documents(id)
-    return {
-        found: doc.model_copy(update={"setting": strip_credentials(doc.setting)})
-        for found, doc in documents.items()
-    }
+    """Empty, as ``…/held-presets`` (#7244)."""
+    return {}
 
 
 @router.get("/own-presets", name="crud_print_own_presets")

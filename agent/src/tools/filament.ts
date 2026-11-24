@@ -697,7 +697,8 @@ const tools: Tool[] = [
     description:
       "Fill a spool type's empty print values from its slicer filament profile (#6714): with `type_id` one type, " +
       'without it every unarchived type. The profile is the type preset for the H2C 0.4 mm nozzle, else any 0.4 mm ' +
-      'one, else the first: `sb-<id>` is a ScadBuddy preset, a numeric id a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
+      'one, else the first: `sb-<id>` is a ScadBuddy preset, any other a Bambu Studio preset; a numeric Bambuddy ' +
+      'local preset id is not read (import it first with filament_bambuddy_presets_import). It fills only ' +
       'empty fields (nozzle and bed temperature ranges from the H2C plates, density, drying temperature and hours ' +
       "from the AMS HT's idle drying values, above an AMS 2 Pro's 65 °C for some; a drying value the type's subtype or " +
       "material already sets is left empty, and only a refresh offers it; the diameter is never empty), never the cost (`cost_hint` is only a " +
@@ -2007,6 +2008,28 @@ const tools: Tool[] = [
     summarize: () => "Import Bambuddy's spools",
     handler: async (_input, { backend }) =>
       json(await ok(backend.POST('/api/v1/filament/bambuddy/import'), "import Bambuddy's spools")),
+  }),
+
+  defineTool({
+    name: 'filament_bambuddy_presets_import',
+    label: "Import Bambuddy's presets",
+    description:
+      "Bring Bambuddy's filament local presets into ScadBuddy's own presets once, whatever `filament_sync.presets` " +
+      "says (the spool refresh Schedule's pull does this only while it is `bb_to_sb` or `two_way`). ScadBuddy reads " +
+      "Bambuddy's list of local presets, then each preset it needs. A preset ScadBuddy took from Bambuddy earlier " +
+      "(`source` `bambuddy`) that Bambuddy edited since takes Bambuddy's document as a new version. Every spool or type " +
+      'preset that still names a Bambuddy local preset id names a ScadBuddy preset (`sb-<id>`) instead: the one already ' +
+      "made for that id, else a new one made from Bambuddy's document. Answers `{adopted, updated, unresolved}`: how many " +
+      'presets it made, how many took a new version, and how many Bambuddy ids bindings still name (Bambuddy no longer ' +
+      'holds them, or they are not filament presets; those spools and types need a ScadBuddy preset). 409 when no Bambuddy is configured, and 409 `instance_changed` while ' +
+      'the links belong to another Bambuddy (filament_sync_reset_links first). Writes ScadBuddy only, never Bambuddy.',
+    input: z.object({}),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/presets/bambuddy-import'],
+    summarize: () => "Import Bambuddy's filament presets",
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/presets/bambuddy-import'), "import Bambuddy's presets")),
   }),
 
   defineTool({

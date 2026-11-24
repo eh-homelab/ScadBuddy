@@ -53,12 +53,11 @@ API's (the rack usage route).
 #7176): the rows and documents a native run reads, from `filament/sb_presets.py`
 `FilamentPresetStore` on the API.
 
-`RemoteHeldPresets` and `RemoteNativeSlices` are `slicing/held_presets.py`
-`HeldPresetStore` and `slicing/store.py` `NativeSliceStore` (Q30, #5298 Task 31) for the
-methods the print worker calls: the kept presets a native run reads (``rows``,
-``documents``) and a native slice's ``start``. Neither holds a pool, and neither is called
-in the printer watch. A start is one transaction under the slice key's lock, so it is one
-route run whole on the API (plan D6), and natural (the key's newest row). The spool
+`RemoteNativeSlices` is `slicing/store.py` `NativeSliceStore` (Q30, #5298 Task 31) for
+the method the print worker calls: a native slice's ``start``. It holds no pool, and is not
+called in the printer watch. No copy of Bambuddy's local presets is read (#7244). A start
+is one transaction under the slice key's lock, so it is one route run whole on the API
+(plan D6), and natural (the key's newest row). The spool
 overlay's `RemoteSpoolStore` went with the overlay (#6262 Task 12).
 
 `RemoteFilamentTrays` and `RemotePrintUses` (area ``filament``, #6262 Task 6) are a native
@@ -132,7 +131,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.copy_leases import CopyLease, LeaseLostError, hold_lease
-from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail, SpoolAssignment
+from scadbuddy.bambuddy.models import SpoolAssignment
 from scadbuddy.bambuddy.print_links import (
     LinkedPrint,
     PrintLink,
@@ -220,7 +219,6 @@ from scadbuddy.printers.store import (
 )
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
-from scadbuddy.slicing.held_presets import HeldPresetStore, HeldRow
 from scadbuddy.slicing.own_presets import OwnRow
 from scadbuddy.slicing.store import NativeSlice, NativeSliceStore, SliceSubjectError
 from scadbuddy.spools.models import SeenTray
@@ -1656,46 +1654,6 @@ class RemotePrintUses:
         return bool(response.json()["settled"])
 
 
-#: The `HeldPresetStore` methods only the API calls: the copy's refresh, on the
-#: ``library`` worker (`slicing/held_presets.py` `refresh_held_presets`), its clear at
-#: the API's start (`slicing/component.py`), and the strip of credential keys at that
-#: start and after each refresh (`strip_kept`).
-HELD_PRESETS_API_ONLY = ("stamps", "forget_unlisted", "keep", "clear", "strip_kept")
-
-
-class RemoteHeldPresets(HeldPresetStore):
-    """`slicing/held_presets.py` `HeldPresetStore` (Q30) over ``…/print/held-presets``
-    (area ``spools``): the kept copy a native run's catalogue and presets read. Reads
-    only. Async, as the SQL store is. No pool."""
-
-    def __init__(self, client: CrudClient) -> None:
-        self._client = client
-
-    async def rows(self) -> list[HeldRow]:
-        body = (await self._client.request("GET", f"{BASE}/held-presets")).json()
-        return [
-            HeldRow(preset=LocalPreset.model_validate(row["preset"]), sha256=row["sha256"])
-            for row in body
-        ]
-
-    async def documents(self, ids: Collection[int]) -> dict[int, LocalPresetDetail]:
-        unique = sorted(set(ids))
-        if not unique:
-            return {}
-        url = f"{BASE}/held-presets/documents?{urlencode({'id': unique}, doseq=True)}"
-        body = (await self._client.request("GET", url)).json()
-        # The route already strips them; an older API's answer is stripped here.
-        return {
-            int(found): LocalPresetDetail.model_validate(
-                {**doc, "setting": strip_credentials(doc.get("setting") or {})}
-            )
-            for found, doc in body.items()
-        }
-
-
-_refuse(RemoteHeldPresets, "HeldPresetStore", HELD_PRESETS_API_ONLY)
-
-
 #: The most ids one ``…/print/own-presets/documents`` request names, so its URL stays
 #: short; `RemoteFilamentPresets.documents` sends more in batches.
 OWN_PRESET_DOCUMENTS_MAX = 200
@@ -1732,7 +1690,7 @@ class RemoteFilamentPresets:
             batch = unique[start : start + OWN_PRESET_DOCUMENTS_MAX]
             url = f"{BASE}/own-presets/documents?{urlencode({'id': batch}, doseq=True)}"
             body = (await self._client.request("GET", url)).json()
-            # The route already strips them; stripped here too, as the kept presets are.
+            # The route already strips them; stripped here too, against an older API.
             out |= {int(found): strip_credentials(doc) for found, doc in body.items()}
         return out
 
