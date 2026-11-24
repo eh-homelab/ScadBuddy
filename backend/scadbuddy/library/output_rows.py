@@ -57,11 +57,18 @@ def staged_thumbnail_key(output_id: str, sha256: str) -> str:
     return f"output-{output_id}-thumbnail-{sha256}"
 
 
-def plate_cover_key(output_id: str) -> str:
-    """The blob key of the output's plate cover: the 3MF's ``plate_1.png``, put once on
-    its first read (`OutputRows.keep_plate_cover`) and held by the output like its other
-    blobs, so a model delete releases it with them."""
-    return f"output-{output_id}-plate_cover"
+def plate_cover_prefix(output_id: str) -> str:
+    """What every key of the output's plate cover starts with (`plate_cover_key`)."""
+    return f"output-{output_id}-plate_cover-"
+
+
+def plate_cover_key(output_id: str, sha256: str) -> str:
+    """The blob key of the output's plate cover of ``sha256``: the 3MF's ``plate_1.png``,
+    put once on its first read (`OutputRows.keep_plate_cover`) and held by the output
+    like its other blobs, so a model delete releases it with them. The key names the
+    cover's own sha256, so a reader of an old model that puts its cover late never
+    changes the bytes of the key that the row names."""
+    return f"{plate_cover_prefix(output_id)}{sha256}"
 
 
 def thumbnail_lock_key(output_id: str) -> str:
@@ -472,10 +479,9 @@ def _write_one(
     keys = [key for key in (blobs.model, blobs.preview, thumbnail) if key is not None]
     keys += [item.blob_key for item in blobs.files]
     # The plate cover's hold stays: `drop_derived` releases it when the model key moved.
-    kept = [*keys, plate_cover_key(write.output_id)]
     conn.execute(
-        f"{_RELEASE_BYTES} AND NOT key = ANY(%s)",
-        (OUTPUT_HOLDER, [write.output_id], kept),
+        f"{_RELEASE_BYTES} AND NOT key = ANY(%s) AND NOT starts_with(key, %s)",
+        (OUTPUT_HOLDER, [write.output_id], keys, plate_cover_prefix(write.output_id)),
     )
     _hold_keys(conn, write.output_id, keys)
     return True
@@ -743,9 +749,11 @@ class OutputRows:
         """Keep the output's plate cover (`output_derived` kind ``plate_cover``, plate 0),
         read from the model of ``model_sha`` (``None``: the file): ``key``, a blob already
         put under `plate_cover_key`, held by the output in the same transaction; ``None``
-        when the 3MF has no cover. Nothing is written when the row is gone, or when the
-        model key names other bytes now; the blob is then held by nothing, so the sweep
-        removes it."""
+        when the 3MF has no cover. The output's holds of other cover keys are released
+        in the same transaction, so the sweep removes the replaced cover after its grace
+        (a reader that read its key before this commit can still read it). Nothing is
+        written when the row is gone, or when the model key names other bytes now; the
+        blob is then held by nothing, so the sweep removes it."""
         with self._pool.connection() as conn, conn.transaction():
             _lock_for_derive(conn, [output_id])
             found = conn.execute(
@@ -759,6 +767,11 @@ class OutputRows:
                 " VALUES (%s, 'plate_cover', 0, %s, %s) ON CONFLICT (output_id, kind, plate)"
                 " DO UPDATE SET version = EXCLUDED.version, data = EXCLUDED.data",
                 (output_id, version, Jsonb({"key": key})),
+            )
+            conn.execute(
+                "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s"
+                " AND starts_with(key, %s) AND key IS DISTINCT FROM %s",
+                (OUTPUT_HOLDER, output_id, plate_cover_prefix(output_id), key),
             )
             if key is not None:
                 _hold_keys(conn, output_id, [key])
@@ -775,8 +788,9 @@ class OutputRows:
             ).fetchone()
             conn.execute("DELETE FROM output_derived WHERE output_id = %s", (output_id,))
             conn.execute(
-                "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s AND key = %s",
-                (OUTPUT_HOLDER, output_id, plate_cover_key(output_id)),
+                "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s"
+                " AND starts_with(key, %s)",
+                (OUTPUT_HOLDER, output_id, plate_cover_prefix(output_id)),
             )
 
     def blob_shas(self, output_ids: Sequence[str]) -> dict[tuple[str, Role], str]:

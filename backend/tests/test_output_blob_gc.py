@@ -17,7 +17,7 @@ from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_rows import (
     OUTPUT_HOLDER,
     OutputRows,
-    plate_cover_key,
+    plate_cover_prefix,
 )
 from scadbuddy.library.outputs import (
     META_NAME,
@@ -138,7 +138,7 @@ async def test_deleted_output_blobs_go_after_grace(
 ) -> None:
     store, meta = await _saved(tmp_path, projection, content, monkeypatch)
     keys = _keys(pool, meta.id)
-    assert plate_cover_key(meta.id) in keys
+    assert any(key.startswith(plate_cover_prefix(meta.id)) for key in keys)
     assert any(key.startswith(f"output-{meta.id}-thumbnail-") for key in keys)
     assert {f"output-{meta.id}-model", f"output-{meta.id}-file-0"} <= keys.keys()
     store.delete(meta.id)
@@ -164,7 +164,7 @@ async def test_live_output_blobs_survive_sweep(
 ) -> None:
     store, meta = await _saved(tmp_path, projection, content, monkeypatch)
     held = _holds(pool, meta.id)
-    assert plate_cover_key(meta.id) in held
+    assert any(key.startswith(plate_cover_prefix(meta.id)) for key in held)
     await sweep_content(content, BlobRefs(pool), grace=0)
     # Every held key stays, with its bytes; only the staged thumbnail key (held by
     # nothing) goes, and the role key that shares its object keeps the bytes.

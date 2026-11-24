@@ -95,9 +95,7 @@ def test_copy_status_reports_byte_run_and_pending(client: TestClient) -> None:
     """#7256: the last byte copy run, and how many rows the files still hold the bytes
     of now."""
     rows = _rows(client)
-    rows.finish_run(
-        rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[]
-    )
+    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
     for output_id in ("a" * 32, "b" * 32):
         rows.insert(_row(output_id))
     rows.write_bytes([ByteWrite("a" * 32, OutputBlobs(), "stamp", [])])
@@ -153,9 +151,7 @@ def test_copy_status_reports_byte_run_and_pending(client: TestClient) -> None:
 
 def test_copy_status_bytes_null_before_any_byte_run(client: TestClient) -> None:
     rows = _rows(client)
-    rows.finish_run(
-        rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[]
-    )
+    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
     rows.insert(_row("a" * 32))
     body = client.get("/api/v1/outputs/copy-status").json()
     assert body["bytes"] is None

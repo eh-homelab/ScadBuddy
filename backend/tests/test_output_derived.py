@@ -5,6 +5,7 @@ of a model with no picture of its own is read out of the output's model blob."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import shutil
 import zipfile
@@ -40,6 +41,7 @@ from tests.support.store import local_content, store_pool
 pytestmark = pytest.mark.requires_postgres
 
 COVER_PNG = b"\x89PNG\r\n\x1a\nplate cover"
+COVER_SHA = hashlib.sha256(COVER_PNG).hexdigest()
 
 
 @pytest.fixture
@@ -307,7 +309,7 @@ async def test_plate_cover_is_kept_as_a_blob(
     asked = _model_reads(store, monkeypatch)
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
     assert asked == ["model"]
-    key = plate_cover_key(meta.id)
+    key = plate_cover_key(meta.id, COVER_SHA)
     assert store.rows is not None
     assert store.rows.derived(meta.id, "plate_cover", 0) == ("1", {"key": key})
     with pool.connection() as conn:
@@ -340,8 +342,63 @@ async def test_lost_plate_cover_blob_is_derived_again(
     store, meta = await _covered(tmp_path, projection, content)
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
     with pool.connection() as conn:
-        conn.execute("DELETE FROM store_blobs WHERE key = %s", (plate_cover_key(meta.id),))
+        conn.execute(
+            "DELETE FROM store_blobs WHERE key = %s", (plate_cover_key(meta.id, COVER_SHA),)
+        )
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
+
+
+def _cover_holds(pool: Pool, output_id: str) -> list[str]:
+    """The output's holds of plate cover keys."""
+    with pool.connection() as conn:
+        found = conn.execute(
+            "SELECT key FROM blob_refs WHERE holder_kind = %s AND holder_id = %s"
+            " AND key LIKE '%%plate_cover%%' ORDER BY key",
+            (OUTPUT_HOLDER, output_id),
+        ).fetchall()
+    return [str(row["key"]) for row in found]
+
+
+@pytest.mark.parametrize("old_first", [True, False])
+async def test_plate_cover_of_the_old_model_never_replaces_the_kept_one(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool, old_first: bool
+) -> None:
+    """#7256 Task 9 fix concern 2b: a reader of the old model that keeps its cover after a
+    reader of the new model, or before it, never leaves the old cover's bytes under the
+    key the row names. Each cover has a key of its own (its sha256)."""
+    store, meta = await _covered(tmp_path, projection, content)
+    assert store.rows is not None and store.bytes is not None
+    new_sha = store.model_sha(meta.id)
+    assert new_sha is not None
+    old = (b"\x89PNG\r\n\x1a\nthe old model's cover", "0" * 64)
+    keeps = [old, (COVER_PNG, new_sha)]
+    for png, model_sha in keeps if old_first else reversed(keeps):
+        await store._keep_plate_cover(meta.slug, meta.id, png, model_sha)
+    kept = store.rows.derived(meta.id, "plate_cover", 0)
+    assert kept is not None
+    key = kept[1]["key"]
+    assert await store.bytes.read(key) == COVER_PNG
+    assert _cover_holds(pool, meta.id) == [key]
+    assert await store.read_plate_cover(meta.slug) == COVER_PNG
+
+
+async def test_a_new_plate_cover_releases_the_replaced_one(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
+) -> None:
+    """A cover kept again with other bytes names its own key; the output no longer holds
+    the replaced key, so the sweep removes it."""
+    store, meta = await _covered(tmp_path, projection, content)
+    assert store.rows is not None
+    model_sha = store.model_sha(meta.id)
+    await store._keep_plate_cover(meta.slug, meta.id, b"first cover", model_sha)
+    first = _cover_holds(pool, meta.id)
+    await store._keep_plate_cover(meta.slug, meta.id, COVER_PNG, model_sha)
+    second = _cover_holds(pool, meta.id)
+    assert len(first) == 1 and len(second) == 1 and first != second
+    assert store.rows.derived(meta.id, "plate_cover", 0) == ("1", {"key": second[0]})
+    await store._keep_plate_cover(meta.slug, meta.id, None, model_sha)
+    assert _cover_holds(pool, meta.id) == []
+    assert store.rows.derived(meta.id, "plate_cover", 0) == ("1", {"key": None})
 
 
 def _client_error(status: int, code: str | None = None) -> ClientError:
@@ -439,7 +496,7 @@ async def test_kept_plate_cover_refused_read_is_no_cover(
     (as the derive path does), logs one warning and keeps nothing new, never a 500."""
     store, meta = await _covered(tmp_path, projection, content)
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
-    kept = ("1", {"key": plate_cover_key(meta.id)})
+    kept = ("1", {"key": plate_cover_key(meta.id, COVER_SHA)})
     assert store.rows is not None
     assert store.rows.derived(meta.id, "plate_cover", 0) == kept
     real = content.get

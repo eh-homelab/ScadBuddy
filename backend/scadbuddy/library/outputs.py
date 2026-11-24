@@ -1867,7 +1867,7 @@ class OutputStore:
         try:
             key: str | None = None
             if png is not None:
-                key = plate_cover_key(output_id)
+                key = plate_cover_key(output_id, hashlib.sha256(png).hexdigest())
                 await self.bytes.put(key, png, slug=slug)
             await asyncio.to_thread(
                 rows.keep_plate_cover, output_id, PLATE_COVER_VERSION, key, model_sha=model_sha

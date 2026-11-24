@@ -49,6 +49,9 @@ from tests.support.store import local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
 
+#: A plate cover key's sha256 (`plate_cover_key`): any name serves these tests.
+COVER_SHA = "c" * 64
+
 
 @pytest.fixture
 def projection(pg_conninfo: str) -> Iterator[JobProjection]:
@@ -472,7 +475,7 @@ async def test_byte_copy_drops_derived_rows_when_the_model_moves(
     output_id = tree.id("plain")
     model_sha = (await _ref(content, output_blob_key(output_id, "model"))).sha256
     tree.rows.write_derived(output_id, "plate_names", 0, "1", {"1": "old"}, model_sha=model_sha)
-    cover = plate_cover_key(output_id)
+    cover = plate_cover_key(output_id, COVER_SHA)
     tree.store.bytes = OutputBytes(content)
     await tree.store.bytes.put(cover, b"old cover", slug=tree.metas["plain"].slug)
     tree.rows.keep_plate_cover(output_id, "1", cover, model_sha=model_sha)
@@ -500,7 +503,7 @@ async def _derived_from_the_model(tree: Tree, content: ContentStore, output_id: 
     sha256."""
     model_sha = (await _ref(content, output_blob_key(output_id, "model"))).sha256
     tree.rows.write_derived(output_id, "plate_names", 0, "1", {"1": "old"}, model_sha=model_sha)
-    cover = plate_cover_key(output_id)
+    cover = plate_cover_key(output_id, COVER_SHA)
     await OutputBytes(content).put(cover, b"old cover", slug=tree.store.get(output_id).slug)
     tree.rows.keep_plate_cover(output_id, "1", cover, model_sha=model_sha)
     return model_sha
@@ -536,7 +539,7 @@ async def test_byte_copy_drops_derived_rows_when_a_live_writer_skips_the_batch(
     assert result is not None and result.copied == 0
     assert tree.rows.derived(output_id, "plate_names", 0) is None
     assert tree.rows.derived(output_id, "plate_cover", 0) is None
-    assert plate_cover_key(output_id) not in _holds(pool, output_id)
+    assert plate_cover_key(output_id, COVER_SHA) not in _holds(pool, output_id)
     monkeypatch.setattr(OutputRows, "write_byte_copy", write_byte_copy)
     result = await _run(tree, content, projection)
     assert result is not None and result.copied == 1
@@ -554,7 +557,7 @@ async def test_derive_of_the_old_model_writes_nothing_after_the_model_moved(
     _change_model(tree, "plain")
     await _run(tree, content, projection)
     rows = tree.rows
-    cover = plate_cover_key(output_id)
+    cover = plate_cover_key(output_id, COVER_SHA)
     rows.write_derived(output_id, "plate_names", 0, "1", {"1": "stale"}, model_sha=old_sha)
     rows.write_derived_many("asset_ids", 0, "1", [(output_id, ["stale"], old_sha)])
     rows.keep_plate_cover(output_id, "1", cover, model_sha=old_sha)
@@ -585,7 +588,7 @@ async def test_byte_copy_first_copy_keeps_derived_rows_and_cover_hold(
     output_id = tree.id("plain")
     tree.rows.write_derived(output_id, "plate_names", 0, "1", {"1": "plate"}, model_sha=None)
     tree.rows.write_derived_many("asset_ids", 0, "1", [(output_id, ["a1"], None)])
-    cover = plate_cover_key(output_id)
+    cover = plate_cover_key(output_id, COVER_SHA)
     blobs = OutputBytes(content)
     await blobs.put(cover, b"cover", slug=tree.metas["plain"].slug)
     tree.rows.keep_plate_cover(output_id, "1", cover, model_sha=None)
