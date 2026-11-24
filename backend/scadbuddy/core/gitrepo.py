@@ -224,9 +224,10 @@ class RepoHold(Protocol):
     #: The HEAD the last writer recorded, or None before any did.
     expected: str | None
 
-    def record(self, change: HeadChange) -> None:
+    def record(self, change: HeadChange, also: Callable[[Any], None] | None = None) -> None:
         """Record ``change.commit`` as HEAD, and announce it, before the lock is
-        released."""
+        released. ``also`` runs in the same transaction, on its connection, after the
+        HEAD and before the announcement; when it fails, nothing is recorded."""
 
 
 class RepoCoordinator(Protocol):
@@ -786,18 +787,29 @@ class GitRepo:
                 logger.exception("could not list what a commit touched", extra={"commit": created})
                 change = HeadChange(created)
             try:
-                self._hold.record(change)
+                self._hold.record(change, self._also_record(change))
             except GitError:
                 logger.exception(
                     "a commit landed, but its HEAD could not be recorded for the other replicas",
                     extra={"commit": created},
                 )
+        else:
+            self._landed_alone(created)
         return created
 
     def _change_of(self, commit: str) -> HeadChange:
         """What the other replicas are told of ``commit`` (#2507). Here, only that it
         is HEAD; a repository whose readers cache per entry names what it touched."""
         return HeadChange(commit)
+
+    def _also_record(self, change: HeadChange) -> Callable[[Any], None] | None:
+        """What else to write in the transaction that records ``change`` (#7317).
+        Here, nothing."""
+        return None
+
+    def _landed_alone(self, commit: str) -> None:
+        """Told of ``commit`` under the write lock when no coordinator records HEAD
+        (#7317: tests, one process). Here, nothing."""
 
     def _stage(self, targets: list[str]) -> None:
         """``git add -A`` over the paths an action touched.

@@ -240,7 +240,7 @@ class _Unrecordable:
 
     expected: str | None = None
 
-    def record(self, change: HeadChange) -> None:
+    def record(self, change: HeadChange, also: Callable[[Any], None] | None = None) -> None:
         raise RepoLockError(f"could not record {change.commit[:7]} as the models HEAD")
 
 

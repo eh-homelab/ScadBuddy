@@ -28,8 +28,9 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from typing import Any
 
 import psycopg
 from psycopg import sql
@@ -94,11 +95,13 @@ class _PgHold:
         self._label = label
         self._channel = channel
 
-    def record(self, change: HeadChange) -> None:
+    def record(self, change: HeadChange, also: Callable[[Any], None] | None = None) -> None:
         commit = change.commit
         try:
             # One transaction: the NOTIFY is delivered when the row commits, never
-            # without it, and before the lock is released.
+            # without it, and before the lock is released. `also` (a models commit's
+            # template rows, #7317) commits with them, so a replica that hears the
+            # NOTIFY reads rows that already show the commit.
             with self._conn.transaction():
                 self._conn.execute(
                     sql.SQL(
@@ -107,6 +110,8 @@ class _PgHold:
                     ).format(sql.Identifier(self._table)),
                     (commit,),
                 )
+                if also is not None:
+                    also(self._conn)
                 if self._channel is not None:
                     self._conn.execute(
                         "SELECT pg_notify(%s, %s)", (self._channel, encode_change(change))
