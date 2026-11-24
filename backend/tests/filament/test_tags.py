@@ -424,3 +424,48 @@ def test_the_job_id_goes_with_agent_write_only() -> None:
         TagBackupIn(uid="04AA", records=[], reason="agent_write")
     with pytest.raises(ValueError):
         TagBackupIn(uid="04AA", records=[], reason="restore", job_id=uuid4())
+
+
+def test_backups_come_in_pages(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    made = [_backup(store) for _ in range(5)]
+    newest_first = [b.id for b in reversed(made)]
+    first = tags.backups(store, made[0].tag_id, limit=2)
+    assert first is not None and [b.id for b in first] == newest_first[:2]
+    second = tags.backups(store, made[0].tag_id, limit=2, before=first[-1].id)
+    assert second is not None and [b.id for b in second] == newest_first[2:4]
+    rest = tags.backups(store, made[0].tag_id, before=second[-1].id)
+    assert rest is not None and [b.id for b in rest] == newest_first[4:]
+    assert tags.backups(store, made[0].tag_id, before=uuid4()) == []
+
+
+def test_backups_cannot_be_truncated(pg_pool: PgPool) -> None:
+    _backup(FilamentSpoolStore(pg_pool))
+    with pg_pool.connection() as conn, pytest.raises(psycopg.errors.RaiseException):
+        conn.execute("TRUNCATE filament_tag_backups")
+
+
+def test_deleting_a_spool_keeps_the_backups(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    made = _backup(store)
+    tags.read(
+        store,
+        TagRead(source="phone", uid="04AA"),
+        actor="ann",
+        bind_spool_id=spool,
+        defaults=DEFAULTS,
+    )
+    assert store.delete(spool) is True
+    found = tags.backups(store, made.tag_id)
+    assert found is not None and [b.id for b in found] == [made.id]
+
+
+def test_a_backup_over_one_tags_bytes_is_refused() -> None:
+    full = NdefRecord(record_type="mime", data_hex="00" * 888)
+    TagBackupIn(uid="04AA", records=[full], reason="spool_write")
+    with pytest.raises(ValueError):
+        TagBackupIn(uid="04AA", records=[full, REC], reason="spool_write")
+    half = NdefRecord(record_type="mime", data_hex="00" * 500)
+    with pytest.raises(ValueError):
+        TagBackupIn(uid="04AA", records=[half, half], reason="spool_write")

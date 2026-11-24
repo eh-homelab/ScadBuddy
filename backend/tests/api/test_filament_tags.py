@@ -94,3 +94,28 @@ def test_an_agent_write_backup_needs_a_job_id(client: TestClient) -> None:
         json={"uid": "04aa", "records": [], "reason": "agent_write", "job_id": str(uuid4())},
     )
     assert ok.status_code == 201, ok.text
+
+
+def test_a_backup_over_888_bytes_is_422(client: TestClient) -> None:
+    half = {"record_type": "mime", "data_hex": "00" * 500}
+    got = client.post(BACKUPS, json={"uid": "04aa", "records": [half, half], "reason": "restore"})
+    assert got.status_code == 422
+
+
+def test_backups_are_paged_by_limit_and_before(client: TestClient) -> None:
+    ids = [
+        client.post(BACKUPS, json={"uid": "04bb", "records": [], "reason": "spool_write"}).json()[
+            "backup_id"
+        ]
+        for _ in range(3)
+    ]
+    tag = client.post(READS, json={"uid": "04bb", "records": []}).json()["tag"]
+    path = f"/api/v1/filament/tags/{tag['id']}/backups"
+    assert [r["id"] for r in client.get(path).json()] == ids[::-1]
+    page = client.get(path, params={"limit": 1}).json()
+    assert [r["id"] for r in page] == [ids[2]]
+    older = client.get(path, params={"limit": 5, "before": ids[1]}).json()
+    assert [r["id"] for r in older] == [ids[0]]
+    assert client.get(path, params={"limit": 0}).status_code == 422
+    assert client.get(path, params={"limit": 201}).status_code == 422
+    assert client.get(path, params={"limit": 200}).status_code == 200

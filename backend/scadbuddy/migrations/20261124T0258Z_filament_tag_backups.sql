@@ -19,3 +19,5 @@ BEGIN
 END $$;
 CREATE TRIGGER filament_tag_backups_keep BEFORE UPDATE OR DELETE ON filament_tag_backups
     FOR EACH ROW EXECUTE FUNCTION filament_tag_backups_keep();
+CREATE TRIGGER filament_tag_backups_keep_truncate BEFORE TRUNCATE ON filament_tag_backups
+    FOR EACH STATEMENT EXECUTE FUNCTION filament_tag_backups_keep();

@@ -85,6 +85,7 @@
 - **R15. The OpenTag3D mapping** is the table in Task 2. A required field with no value is written as 0 and named in `warnings`, and the page shows the warnings before the write.
 - **R16. An OpenTag3D tag whose major version is not 2** decodes to `format`, `version` and an "older major version" or "newer major version" warning only, and gives no draft; a 1.x tag has its own layout (`spec_v1.json`, which the reference reader loads).
 - **R17. An OpenTag3D write splits a material too long for its 5 bytes**, when the subtype is empty, at its first `-` into `material` and `material_mod` (`PETG-CF` is `PETG` and `CF`), and names in `warnings` any string field it still cuts.
+- **R18. A tag's backups are paged**: `GET /tags/{tag_id}/backups` takes `limit` (default 50, 1 to 200) and `before` (a backup id; the page holds the rows older than it), newest first by `at DESC, id DESC`; the agent tool `filament_tag_backups` takes both.
 
 ## Review Focus
 
@@ -477,12 +478,12 @@ Expected: PASS.
   - `BACKUP_TTL: Final = timedelta(minutes=10)` (R5).
   - `NoUidError(ValueError)` (`code = "no_uid"`).
   - `back_up(spools: FilamentSpoolStore, body: TagBackupIn, *, actor: str) -> TagBackup`. In one transaction it calls `seen_on(conn, TagRead(source="phone", uid=body.uid, records=tuple(body.records)))` (or `source="agent"` for `agent_write`), then inserts the row. A UID that cleans to `None` raises `NoUidError`.
-  - `backups(spools: FilamentSpoolStore, tag_id: UUID) -> list[TagBackup] | None`, newest first. It answers `None` for no such tag.
+  - `backups(spools: FilamentSpoolStore, tag_id: UUID, *, limit: int = 50, before: UUID | None = None) -> list[TagBackup] | None`, newest first, paged (R18). It answers `None` for no such tag.
   - `valid_backup(conn: Conn, backup_id: UUID, uid: str, reason: BackupReason, *, job_id: UUID | None = None) -> TagBackup`. It raises `BackupMismatchError(ValueError)` (`code = "backup_mismatch"`) unless the backup exists, `clean_tag_uid(uid)` equals its `uid`, `now() - at <= BACKUP_TTL`, `reason` matches, and (for `agent_write`) `job_id` matches.
 - Produces (routes):
   - `POST /api/v1/filament/tags/backups`, body `TagBackupIn`, answer 201 `{"backup_id": UUID}` (`model TagBackupMade`). It answers 422 `no_uid`, and 409 on a key clash. An `agent_write` with no `job_id` is 422 (model validator). Task 8 adds the job check.
-  - `GET /api/v1/filament/tags/{tag_id}/backups`, answer `list[TagBackup]`, 404 for no such tag.
-- Produces (agent): tool `filament_tag_backups` (`risk: 'read'`, input `{ tag_id: uuid }`, route `GET /api/v1/filament/tags/{tag_id}/backups`, `source: 'NDEF records read from a physical tag, which anyone holding the tag could have written'` for the untrusted-data envelope, `tools/registry.ts:379`).
+  - `GET /api/v1/filament/tags/{tag_id}/backups?limit=&before=`, answer `list[TagBackup]`, paged (R18), 404 for no such tag.
+- Produces (agent): tool `filament_tag_backups` (`risk: 'read'`, input `{ tag_id: uuid, limit?: 1..200 (default 50), before?: uuid }`, route `GET /api/v1/filament/tags/{tag_id}/backups`, `source: 'NDEF records read from a physical tag, which anyone holding the tag could have written'` for the untrusted-data envelope, `tools/registry.ts:379`).
 
 - [ ] **Step 1: Write the migration** `<ts>_filament_tag_backups.sql`:
 

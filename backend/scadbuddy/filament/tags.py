@@ -265,6 +265,9 @@ def back_up(spools: FilamentSpoolStore, body: m.TagBackupIn, *, actor: str) -> m
     uid = clean_tag_uid(body.uid)
     if uid is None:
         raise NoUidError()
+    # `seen_on` finds or makes the tag row the backup points at, and marks it seen with the
+    # pre-write records: they are what the reader saw just now, from the phone, or from the
+    # agent's job for an `agent_write`.
     source: m.TagSource = "agent" if body.reason == "agent_write" else "phone"
     with spools.transaction() as conn:
         tag_id, _ = seen_on(conn, TagRead(source=source, uid=uid, records=tuple(body.records)))
@@ -284,15 +287,20 @@ def back_up(spools: FilamentSpoolStore, body: m.TagBackupIn, *, actor: str) -> m
     return _backup_of(row)
 
 
-def backups(spools: FilamentSpoolStore, tag_id: UUID) -> list[m.TagBackup] | None:
-    """A tag's backups, newest first; ``None`` for no such tag."""
+def backups(
+    spools: FilamentSpoolStore, tag_id: UUID, *, limit: int = 50, before: UUID | None = None
+) -> list[m.TagBackup] | None:
+    """Up to ``limit`` of a tag's backups, newest first, those older than backup ``before``
+    when it is given (R18); ``None`` for no such tag."""
     with spools.transaction() as conn:
         if conn.execute("SELECT 1 FROM filament_tags WHERE id = %s", (tag_id,)).fetchone() is None:
             return None
         rows = conn.execute(
             f"SELECT {_BACKUP_COLUMNS} FROM filament_tag_backups WHERE tag_id = %s"
-            " ORDER BY at DESC, id DESC",
-            (tag_id,),
+            " AND (%s::uuid IS NULL OR (at, id) < (SELECT at, id FROM filament_tag_backups AS b"
+            "  WHERE b.id = %s AND b.tag_id = %s))"
+            " ORDER BY at DESC, id DESC LIMIT %s",
+            (tag_id, before, before, tag_id, limit),
         ).fetchall()
     return [_backup_of(r) for r in rows]
 

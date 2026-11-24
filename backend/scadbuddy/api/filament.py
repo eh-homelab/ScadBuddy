@@ -1802,12 +1802,20 @@ async def back_up_tag(
     response_model=list[m.TagBackup],
     summary="List a tag's backups",
     description=(
-        "What the tag held before each write, newest first. Rows are never changed or deleted. "
-        "404 for no such tag."
+        "What the tag held before each write, newest first, a page of `limit` (default 50, at "
+        "most 200). `before` is a backup's id: the page holds the backups older than it. Rows "
+        "are never changed or deleted. 404 for no such tag."
     ),
 )
-async def list_tag_backups(filament: FilamentDep, tag_id: UUID) -> list[m.TagBackup]:
-    found = await asyncio.to_thread(tags.backups, filament.spools, tag_id)
+async def list_tag_backups(
+    filament: FilamentDep,
+    tag_id: UUID,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: UUID | None = None,
+) -> list[m.TagBackup]:
+    found = await asyncio.to_thread(
+        lambda: tags.backups(filament.spools, tag_id, limit=limit, before=before)
+    )
     if found is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no tag {tag_id}")
     return found

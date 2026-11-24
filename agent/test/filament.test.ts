@@ -448,10 +448,19 @@ describe('filament spool tools', () => {
 
   it('lists the backups of a tag from its path (#7273)', async () => {
     const backups = [{ id: ROW, tag_id: ROW, uid: '04AA', records: [], reason: 'spool_write' }]
-    server.use(http.get(`${BACKEND}/api/v1/filament/tags/${ROW}/backups`, () => HttpResponse.json(backups)))
+    const queries: string[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/filament/tags/${ROW}/backups`, ({ request }) => {
+        queries.push(new URL(request.url).search)
+        return HttpResponse.json(backups)
+      }),
+    )
     const result = await runTool(tool('filament_tag_backups'), { tag_id: ROW }, ctx())
     expect(result.isError).toBeFalsy()
     expect(firstText(result)).toEqual(backups)
+    await runTool(tool('filament_tag_backups'), { tag_id: ROW, limit: 2, before: ROW }, ctx())
+    expect(queries).toEqual(['?limit=50', `?limit=2&before=${ROW}`])
+    expect(() => tool('filament_tag_backups').parse({ tag_id: ROW, limit: 201 })).toThrow()
     expect(() => tool('filament_tag_backups').parse({ tag_id: 'x' })).toThrow()
   })
 

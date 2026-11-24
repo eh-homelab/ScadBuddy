@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Any, ClassVar, Final, Literal
+from typing import Annotated, Any, ClassVar, Final, Literal, Self
 from uuid import UUID
 
 from pydantic import (
@@ -1854,31 +1854,35 @@ class NdefRecord(_In):
         return value.lower()
 
 
-class TagReadIn(_In):
-    """What a phone reads from a tag: its UID and its NDEF records."""
+class _FitsOneTag(_In):
+    """A body whose NDEF ``records`` must fit one tag."""
 
-    uid: Annotated[str, Field(max_length=64)] | None = None
-    tag_type: Annotated[str, Field(max_length=32)] | None = None
     records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
-    #: Bind the tag to this spool as part of the read.
-    bind_spool_id: UUID | None = None
 
     @model_validator(mode="after")
-    def _fits(self) -> TagReadIn:
+    def _fits(self) -> Self:
         if sum(len(r.data_hex) // 2 for r in self.records) > MAX_RECORD_BYTES:
             raise ValueError(f"the records hold more than {MAX_RECORD_BYTES} bytes")
         return self
 
 
+class TagReadIn(_FitsOneTag):
+    """What a phone reads from a tag: its UID and its NDEF records."""
+
+    uid: Annotated[str, Field(max_length=64)] | None = None
+    tag_type: Annotated[str, Field(max_length=32)] | None = None
+    #: Bind the tag to this spool as part of the read.
+    bind_spool_id: UUID | None = None
+
+
 BackupReason = Literal["spool_write", "agent_write", "restore"]
 
 
-class TagBackupIn(_In):
+class TagBackupIn(_FitsOneTag):
     """What a tag held just before a write (#7273 G7). An empty ``uid`` is allowed here so
     that it reaches the store and answers 422 ``no_uid``, as ``"::"`` does."""
 
     uid: Annotated[str, Field(max_length=64)]
-    records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
     reason: BackupReason
     job_id: UUID | None = None
 
