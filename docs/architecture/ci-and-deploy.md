@@ -47,7 +47,7 @@ sequenceDiagram
     BI-->>DM: workflow_run completed (main only)
     DM->>GHCR: digest of scadbuddy:sha-<7>
     DM->>DR: digest, version, revision
-    DR->>GHCR: agent, agent-durable, slicer, sandbox, profile-fetch digests
+    DR->>GHCR: agent, agent-durable, slicer, sandbox, profile-fetch, playwright-mcp digests
     DR->>CL: PR on deploy/scadbuddy, image@sha256 pins, auto-merge armed
     CL->>Argo: merge (after clusters' own checks)
     Argo->>Argo: sync the scadbuddy Application
@@ -68,7 +68,8 @@ sequenceDiagram
    rewrites each image line to `image@sha256:digest`, plus the version, revision and
    source annotations (`:666-672`), in the API manifest (required) and, where they exist,
    the render, print, projects, storefront, intake, agent-worker, agent-durable, slicer,
-   sandbox and profile-fetch manifests (`:116-158`, `:924-1030`). Where clusters keeps a
+   sandbox, profile-fetch and playwright-mcp manifests (`:116-158`, `:924-1030`; the
+   playwright-mcp pin in `applications/scadbuddy/playwright-mcp.yaml` since #7546). Where clusters keeps a
    copy of `deploy/grafana`, it replaces that copy with the files at the deployed revision
    and writes the revision into its `.revision` file (`:818-831`, `:997`). It fails on any `ghcr.io/eh-homelab/scadbuddy*` reference
    it did not pin (`:1044-1071`), then opens or replaces the PR on the fixed branch
