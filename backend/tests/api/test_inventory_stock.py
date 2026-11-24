@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.api.test_inventory import API, _code, _item
+from tests.api.test_inventory import API, ENTITY_PROBLEMS, _code, _item
 from tests.api.test_settings_runtime import _state
 from tests.support.operations import press
 
@@ -137,14 +137,13 @@ def test_stock_refusals(client: TestClient) -> None:
         404,
         "location_not_found",
     )
-    _code(
-        _post(client, f"/items/{bolt['id']}/use", {"qty": "1", "lot_id": str(uuid.uuid4())}),
-        404,
-        "lot_not_found",
-    )
+    stray = _post(client, f"/items/{bolt['id']}/use", {"qty": "1", "lot_id": str(uuid.uuid4())})
+    _code(stray, 404, "lot_not_found")
+    assert stray.json()["detail"].startswith("no lot: ")
     _code(_post(client, f"/items/{uuid.uuid4()}/lots", {"qty": "1"}), 404, "item_not_found")
     missing = uuid.uuid4()
     _code(client.get(f"{API}/lots/{missing}"), 404, "lot_not_found")
+    assert client.get(f"{API}/lots/{missing}").json()["detail"] == f"no lot {str(missing)!r}"
     _code(
         client.patch(f"{API}/lots/{missing}", json={"note": "x"}, headers=press()),
         404,
@@ -172,3 +171,130 @@ def test_stock_refusals(client: TestClient) -> None:
             "UPDATE stock_units SET installed_in_unit_id = %s WHERE id = %s", (first, second)
         )
     _code(_post(client, f"/units/{second}/status", {"status": "sold"}), 409, "unit_installed")
+
+
+def _supplier_ref(client: TestClient) -> str:
+    with _state(client).refs.pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO filament_suppliers (name) VALUES (%s) RETURNING id",
+            (f"Bolt Depot {uuid.uuid4()}",),
+        ).fetchone()
+    assert row is not None
+    return f"supplier:{row['id']}"
+
+
+def test_use_and_status_name_an_entity(client: TestClient) -> None:
+    ref = _supplier_ref(client)
+    bolt = _item(client)
+    _receive(client, bolt["id"])
+    used = _post(client, f"/items/{bolt['id']}/use", {"qty": "1", "entity": ref})
+    assert used.status_code == 200, used.text
+    assert used.json()["moves"][0]["entity_id"] is not None
+
+    nozzle = _item(client, "nozzle", name=f"0.2 {uuid.uuid4().hex[:6]}")
+    unit = _post(client, f"/items/{nozzle['id']}/units", {"count": 1}).json()["units"][0]["id"]
+    status = _post(client, f"/units/{unit}/status", {"status": "sold", "entity": ref})
+    assert status.status_code == 200, status.text
+    moves = client.get(f"{API}/moves", params={"unit_id": unit}).json()["moves"]
+    assert moves[0]["entity_id"] == used.json()["moves"][0]["entity_id"]
+
+    _code(
+        _post(client, f"/items/{bolt['id']}/use", {"qty": "1", "entity": "nope"}),
+        422,
+        "bad_entity_ref",
+        ENTITY_PROBLEMS,
+    )
+    _code(
+        _post(client, f"/units/{unit}/status", {"status": "in_stock", "entity": "nope"}),
+        422,
+        "bad_entity_ref",
+        ENTITY_PROBLEMS,
+    )
+    for entity in ("order:\x00", "supplier:\x00"):
+        used_on = _post(client, f"/items/{bolt['id']}/use", {"qty": "1", "entity": entity})
+        assert used_on.status_code == 422, used_on.text
+        went = _post(client, f"/units/{unit}/status", {"status": "in_stock", "entity": entity})
+        assert went.status_code == 422, went.text
+    gone = f"supplier:{uuid.uuid4()}"
+    _code(
+        _post(client, f"/items/{bolt['id']}/use", {"qty": "1", "entity": gone}),
+        404,
+        "entity_not_found",
+        ENTITY_PROBLEMS,
+    )
+    _code(
+        _post(client, f"/units/{unit}/status", {"status": "in_stock", "entity": gone}),
+        404,
+        "entity_not_found",
+        ENTITY_PROBLEMS,
+    )
+    long = _post(
+        client, f"/items/{bolt['id']}/use", {"qty": "1", "entity": "supplier:" + "x" * 200}
+    )
+    assert long.status_code == 422, long.text
+
+
+def test_stock_texts_with_a_nul_are_refused(client: TestClient) -> None:
+    bolt = _item(client)
+    lot = _receive(client, bolt["id"])
+    for path, body in (
+        (f"/items/{bolt['id']}/lots", {"qty": "1", "note": "\x00"}),
+        (f"/items/{bolt['id']}/use", {"qty": "1", "reason": "\x00"}),
+        (f"/items/{bolt['id']}/count", {"on_hand": "1", "note": "a\x00"}),
+        (f"/lots/{lot['id']}/adjust", {"on_hand": "1", "note": "a\x00"}),
+    ):
+        got = _post(client, path, body)
+        assert got.status_code == 422, (path, got.text)
+    patched = client.patch(f"{API}/lots/{lot['id']}", json={"note": "\x00"}, headers=press())
+    assert patched.status_code == 422, patched.text
+    nozzle = _item(client, "nozzle", name=f"0.8 {uuid.uuid4().hex[:6]}")
+    for units in ({"count": 1, "name": "\x00"}, {"count": 1, "serials": ["S\x00"]}):
+        got = _post(client, f"/items/{nozzle['id']}/units", units)
+        assert got.status_code == 422, got.text
+    unit = _post(client, f"/items/{nozzle['id']}/units", {"count": 1}).json()["units"][0]["id"]
+    for body in ({"name": "\x00"}, {"serial": "\x00"}):
+        got = client.patch(f"{API}/units/{unit}", json=body, headers=press())
+        assert got.status_code == 422, got.text
+    status = _post(client, f"/units/{unit}/status", {"status": "sold", "note": "\x00"})
+    assert status.status_code == 422, status.text
+    moves = client.get(f"{API}/moves", params={"order_item_id": "a\x00"})
+    assert moves.status_code == 422, moves.text
+
+
+def test_an_amount_past_the_column_is_bad_quantity(client: TestClient) -> None:
+    bolt = _item(client)
+    huge = "10000000000000"
+    _code(
+        _post(client, f"/items/{bolt['id']}/lots", {"qty": huge, "unit_cost_minor": huge}),
+        422,
+        "bad_quantity",
+    )
+    lot = _receive(client, bolt["id"], qty=huge)
+    _code(
+        client.patch(f"{API}/lots/{lot['id']}", json={"unit_cost_minor": huge}, headers=press()),
+        422,
+        "bad_quantity",
+    )
+    most = "99999999999999"
+    short = _item(client)
+    assert _post(client, f"/items/{short['id']}/use", {"qty": most}).status_code == 200
+    _code(
+        _post(client, f"/items/{short['id']}/count", {"on_hand": most, "note": "found"}),
+        422,
+        "bad_quantity",
+    )
+    nozzle = _item(client, "nozzle", name=f"1.0 {uuid.uuid4().hex[:6]}")
+    ok = _post(client, f"/items/{nozzle['id']}/units", {"count": 1, "cost_minor": huge})
+    assert ok.status_code == 201, ok.text
+
+
+def test_missing_units_and_move_limits(client: TestClient) -> None:
+    _code(
+        client.patch(f"{API}/units/{uuid.uuid4()}", json={"name": "x"}, headers=press()),
+        404,
+        "unit_not_found",
+    )
+    for limit in (0, 1001):
+        got = client.get(f"{API}/moves", params={"limit": limit})
+        assert got.status_code == 422, got.text
+    assert client.get(f"{API}/moves", params={"limit": 1000}).status_code == 200

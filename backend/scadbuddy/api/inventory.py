@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.api.entity_properties import KeyInUse
 from scadbuddy.inventory.component import InventoryDep
 from scadbuddy.inventory.models import (
+    KIND_ID,
     InventoryItemPatch,
     Item,
     ItemInput,
@@ -45,7 +46,9 @@ from scadbuddy.orders.actor import current_actor
 
 router = APIRouter(tags=["inventory"])
 
-KindId = Annotated[str, Path(description="An item kind's id, such as `hardware`")]
+KindId = Annotated[str, Path(pattern=KIND_ID, description="An item kind's id, such as `hardware`")]
+#: A query text with no NUL byte, which Postgres `text` refuses (R-P2-16).
+NO_NUL = r"^[^\x00]*$"
 
 
 async def run[T](call: Callable[..., T], *args: Any) -> T:
@@ -171,16 +174,10 @@ async def restore_kind(kind_id: KindId, inventory: InventoryDep) -> ItemKind:
     responses=codes((404, "`kind_not_found`")),
 )
 async def get_kind_schema(kind_id: KindId, inventory: InventoryDep) -> KindSchema:
-    kind = await run(inventory.kinds.get, kind_id)
-    if kind is None:
+    found = await run(inventory.kinds.schema_of, kind_id)
+    if found is None:
         raise kind_not_found(kind_id)
-
-    def merged() -> dict[str, Any]:
-        with inventory.opened().connection() as conn:
-            return inventory.kinds.merged_schema(conn, kind_id)
-
-    schema = await run(merged)
-    keys = await run(inventory.kinds.keys_in_use, kind_id)
+    kind, schema, keys = found
     return KindSchema(
         kind_id=kind_id,
         schema=schema,
@@ -207,17 +204,18 @@ class ItemList(BaseModel):
         "unless `descendants` is false; `q` matches the name, the manufacturer or any "
         "property value, in any case; `low` keeps those at or below their `low_stock`; "
         "`compatible` those that name the printer model code; `archived` adds archived "
-        "items."
+        "items. Up to `limit` (1 to 5000, 1000 when absent)."
     ),
 )
 async def list_items(
     inventory: InventoryDep,
-    kind: Annotated[str | None, Query(max_length=40)] = None,
+    kind: Annotated[str | None, Query(pattern=KIND_ID)] = None,
     descendants: bool = True,
-    q: Annotated[str | None, Query(max_length=200)] = None,
+    q: Annotated[str | None, Query(max_length=200, pattern=NO_NUL)] = None,
     low: bool = False,
     archived: bool = False,
-    compatible: Annotated[str | None, Query(max_length=100)] = None,
+    compatible: Annotated[str | None, Query(max_length=100, pattern=NO_NUL)] = None,
+    limit: Annotated[int, Query(ge=1, le=5000)] = 1000,
 ) -> ItemList:
     def listed() -> list[Item]:
         return inventory.items.list(
@@ -227,6 +225,7 @@ async def list_items(
             low=low,
             include_archived=archived,
             compatible=compatible,
+            limit=limit,
         )
 
     return ItemList(items=await run(listed))

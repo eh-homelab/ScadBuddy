@@ -34,7 +34,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
-from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.refs import BadEntityRef, EntityRef
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.inventory.items import FilamentItemRefused, ItemNotFound
 from scadbuddy.inventory.models import (
@@ -83,7 +83,9 @@ class ItemNotCounted(ValueError):  # noqa: N818
 
 
 class BadQuantity(ValueError):  # noqa: N818
-    """Not above 0, more than six decimal places, or a fraction of an `each` item."""
+    """A quantity or a cost out of range: below 0 (or 0 where a move needs one), more than
+    six decimal places, a fraction of an `each` item, or past what `numeric(20,6)` holds
+    (a quantity, a lot's stock, or a move's amount)."""
 
 
 class UnitInstalled(ValueError):  # noqa: N818
@@ -95,6 +97,8 @@ class SerialExists(ValueError):  # noqa: N818
 
 
 _SIX = Decimal("0.000001")
+#: `numeric(20,6)` holds an absolute value below this.
+_LIMIT = Decimal(10) ** 14
 #: The kinds of move "Re-cost past uses" re-snapshots (the plan's Task 4).
 _RECOST_KINDS = ("use", "return", "adjust")
 #: A unit's move when it leaves `in_stock` for this status.
@@ -105,6 +109,18 @@ def _six(value: Decimal) -> Decimal:
     """Six places, half away from zero, as Postgres `round` (the `stock_moves_amount`
     CHECK)."""
     return value.quantize(_SIX, rounding=ROUND_HALF_UP)
+
+
+def _amount(qty: Decimal, unit_cost: Decimal) -> Decimal:
+    """`round(qty * unit_cost, 6)` (the `stock_moves_amount` CHECK), with `qty` and the
+    amount inside `numeric(20,6)`; else `BadQuantity`."""
+    exact = qty * unit_cost
+    if abs(qty) >= _LIMIT or abs(exact) >= _LIMIT:
+        raise BadQuantity(str(exact))
+    amount = _six(exact)
+    if abs(amount) >= _LIMIT:
+        raise BadQuantity(str(amount))
+    return amount
 
 
 def _whole(uom: str, qty: Decimal) -> None:
@@ -360,32 +376,20 @@ class StockStore:
         """The lot's cost now, known. No move changes (D14); `recost_lot` re-snapshots.
         `cost_currency` and `foreign_unit_cost_minor` stay: what it was bought in and at
         (R-P2-12)."""
-        if unit_cost_minor < 0 or unit_cost_minor != _six(unit_cost_minor):
-            raise BadQuantity(str(unit_cost_minor))
         with self.pool.connection() as conn, conn.transaction():
-            lot = self._lock_lot(conn, lot_id)
-            conn.execute(
-                "UPDATE stock_lots SET unit_cost_minor = %s, cost_unknown = false WHERE id = %s",
-                (unit_cost_minor, lot["id"]),
-            )
+            _set_cost(conn, self._lock_lot(conn, lot_id), unit_cost_minor)
             return _lot(conn, lot_id)
 
-    def update_lot(self, lot_id: UUID, patch: LotPatch, by: Actor) -> Lot:
+    def update_lot(self, lot_id: UUID, patch: LotPatch) -> Lot:
         """The fields `patch` names, in one transaction: a cost as `set_lot_cost` sets it
         (no past move changes, D14), the location (null clears it) and the note.
         `LotNotFound`, `LocationNotFound` or `BadQuantity`."""
         fields = patch.model_dump(exclude_unset=True)
         cost = fields.get("unit_cost_minor")
-        if cost is not None and cost != _six(cost):
-            raise BadQuantity(str(cost))
         with self.pool.connection() as conn, conn.transaction():
-            self._lock_lot(conn, lot_id)
+            lot = self._lock_lot(conn, lot_id)
             if cost is not None:
-                conn.execute(
-                    "UPDATE stock_lots SET unit_cost_minor = %s, cost_unknown = false"
-                    " WHERE id = %s",
-                    (cost, lot_id),
-                )
+                _set_cost(conn, lot, cost)
             if "location_id" in fields:
                 try:
                     conn.execute(
@@ -409,6 +413,12 @@ class StockStore:
         transaction writes meanwhile on another lot does not count as a change."""
         lot = self._lock_lot(conn, lot_id)
         cost, unknown = lot["unit_cost_minor"], lot["cost_unknown"]
+        largest = conn.execute(
+            "SELECT max(abs(qty)) AS qty FROM stock_moves WHERE lot_id = %s AND kind = ANY(%s)",
+            (lot_id, list(_RECOST_KINDS)),
+        ).fetchone()
+        if largest is not None and largest["qty"] is not None:
+            _amount(largest["qty"], cost)
         touched = [
             r["order_item_id"]
             for r in conn.execute(
@@ -635,7 +645,7 @@ class StockStore:
         assert row is not None
         return Unit.model_validate(dict(row))
 
-    def update_unit(self, unit_id: UUID, patch: UnitPatch, by: Actor) -> Unit:
+    def update_unit(self, unit_id: UUID, patch: UnitPatch) -> Unit:
         """The fields `patch` names, in one transaction: the name, the serial (null or
         blank clears it) and the location (null clears it). No move. `UnitNotFound`,
         `SerialExists` or `LocationNotFound`."""
@@ -670,9 +680,13 @@ class StockStore:
     # -- helpers -------------------------------------------------------------------------
 
     def _entity(self, conn: Conn, text: str | None) -> UUID | None:
-        """The registry row of `kind:ref`, made on first use; `BadEntityRef`,
-        `UnknownEntityKind` or `EntityNotFound`."""
-        return None if text is None else self.entities.ensure(conn, EntityRef.parse(text))
+        """The registry row of `kind:ref`, made on first use; `BadEntityRef` (a NUL byte
+        too, which Postgres `text` refuses), `UnknownEntityKind` or `EntityNotFound`."""
+        if text is None:
+            return None
+        if "\x00" in text:
+            raise BadEntityRef(text)
+        return self.entities.ensure(conn, EntityRef.parse(text))
 
     @staticmethod
     def _lock_lot(conn: Conn, lot_id: UUID) -> dict[str, Any]:
@@ -787,7 +801,7 @@ def _move(
             kind,
             qty,
             unit_cost,
-            _six(qty * unit_cost),
+            _amount(qty, unit_cost),
             cost_unknown,
             needs_review,
             reverses,
@@ -800,8 +814,27 @@ def _move(
     ).fetchone()
     assert row is not None
     if lot_id is not None:
-        conn.execute("UPDATE stock_lots SET on_hand = on_hand + %s WHERE id = %s", (qty, lot_id))
+        moved = conn.execute(
+            "UPDATE stock_lots SET on_hand = on_hand + %s WHERE id = %s"
+            " AND abs(on_hand + %s) < %s RETURNING id",
+            (qty, lot_id, qty, _LIMIT),
+        ).fetchone()
+        if moved is None:
+            raise BadQuantity(str(qty))
     return Move.model_validate(dict(row))
+
+
+def _set_cost(conn: Conn, lot: dict[str, Any], unit_cost_minor: Decimal) -> None:
+    """The locked lot's cost now, known. `BadQuantity` for a cost below 0, with more than
+    six places, or at which the lot's stock (received or on hand) is worth more than an
+    amount holds."""
+    if unit_cost_minor < 0 or unit_cost_minor != _six(unit_cost_minor):
+        raise BadQuantity(str(unit_cost_minor))
+    _amount(max(abs(lot["on_hand"]), lot["received_qty"]), unit_cost_minor)
+    conn.execute(
+        "UPDATE stock_lots SET unit_cost_minor = %s, cost_unknown = false WHERE id = %s",
+        (unit_cost_minor, lot["id"]),
+    )
 
 
 def _lot(conn: Conn, lot_id: UUID) -> Lot:

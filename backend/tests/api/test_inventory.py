@@ -82,11 +82,12 @@ def test_a_kind_round_trips(client: TestClient) -> None:
     assert body["keys_in_use"] == []
 
     item = _item(client, child["id"])
-    client.patch(
+    props = client.patch(
         f"/api/v1/entities/item:{item['id']}/properties",
         json={"set": {"mpn": "X1", "colour": "red"}},
         headers=press(),
     )
+    assert props.status_code == 200, props.text
     keys = client.get(f"{API}/kinds/{parent['id']}/schema").json()["keys_in_use"]
     assert keys == [{"key": "colour", "count": 1}, {"key": "mpn", "count": 1}]
 
@@ -214,6 +215,124 @@ def test_item_refusals(client: TestClient) -> None:
     )
     _code(unknown, 404, "kind_not_found")
 
+    other = _item(client)
+    renamed = client.patch(
+        f"{API}/items/{other['id']}", json={"name": item["name"].lower()}, headers=press()
+    )
+    _code(renamed, 409, "item_exists")
+
+
+def test_restoring_an_item_is_refused_under_an_archived_kind_or_a_taken_name(
+    client: TestClient,
+) -> None:
+    kind = _kind(client)
+    item = _item(client, kind["id"])
+    client.post(f"{API}/items/{item['id']}/archive", headers=press())
+    client.post(f"{API}/kinds/{kind['id']}/archive", headers=press())
+    _code(client.post(f"{API}/items/{item['id']}/restore", headers=press()), 409, "kind_archived")
+    client.post(f"{API}/kinds/{kind['id']}/restore", headers=press())
+    _item(client, kind["id"], name=item["name"])
+    _code(client.post(f"{API}/items/{item['id']}/restore", headers=press()), 409, "item_exists")
+
+
+def test_the_item_list_filters_low_and_compatible_and_takes_a_limit(client: TestClient) -> None:
+    kind = _kind(client)
+    model = f"X{uuid.uuid4().hex[:6]}"
+    low = _item(client, kind["id"], name="a low", low_stock="2", compatible_with=[model])
+    _item(client, kind["id"], name="b stocked")
+
+    def ids(**params: Any) -> list[str]:
+        got = client.get(f"{API}/items", params={"kind": kind["id"], **params})
+        assert got.status_code == 200, got.text
+        return [i["id"] for i in got.json()["items"]]
+
+    assert ids(low=True) == [low["id"]]
+    assert ids(compatible=model) == [low["id"]]
+    assert ids(compatible="nope") == []
+    assert ids(limit=1) == [low["id"]]
+    assert len(ids(limit=5000)) == 2
+    for limit in (0, 5001):
+        bad = client.get(f"{API}/items", params={"limit": limit})
+        assert bad.status_code == 422, bad.text
+
+
+def test_an_items_figures_are_normalized(client: TestClient) -> None:
+    item = _item(client, low_stock="4.5", life_hours="100")
+    assert (item["low_stock"], item["life_hours"], item["on_hand"]) == ("4.5", "100", "0")
+    assert item["stock_value_minor"] == "0"
+
+
+def test_nul_bytes_are_refused_in_paths_queries_and_bodies(client: TestClient) -> None:
+    for got in (
+        client.get(f"{API}/kinds/a%00b/schema"),
+        client.patch(f"{API}/kinds/a%00b", json={}, headers=press()),
+        client.post(f"{API}/kinds/a%00b/archive", headers=press()),
+        client.get(f"{API}/items", params={"kind": "a\x00b"}),
+        client.get(f"{API}/items", params={"q": "a\x00b"}),
+        client.get(f"{API}/items", params={"compatible": "a\x00b"}),
+    ):
+        assert got.status_code == 422, got.text
+    kind = _kind(client)
+    for field, value in (
+        ("name", "M3\x00"),
+        ("manufacturer", "Ruthex\x00"),
+        ("note", "\x00"),
+        ("compatible_with", ["X1\x00"]),
+        ("source", "csv\x00"),
+        ("source_ref", "r\x00"),
+    ):
+        made = client.post(
+            f"{API}/items", json={"kind_id": kind["id"], "name": "N", field: value}, headers=press()
+        )
+        assert made.status_code == 422, (field, made.text)
+    named = client.post(
+        f"{API}/kinds",
+        json={"id": _kind_id(), "name": "K\x00", "tracking": "lot"},
+        headers=press(),
+    )
+    assert named.status_code == 422, named.text
+    item = _item(client, kind["id"])
+    patched = client.patch(f"{API}/items/{item['id']}", json={"note": "\x00"}, headers=press())
+    assert patched.status_code == 422, patched.text
+    supplier = _supplier(client)
+    for field, value in (("sku", "S\x00"), ("pack_uom", "box\x00"), ("note", "\x00")):
+        offer = client.post(
+            f"{API}/offers",
+            json={"supplier_id": supplier, "item_id": item["id"], "sku": "S1", field: value},
+            headers=press(),
+        )
+        assert offer.status_code == 422, (field, offer.text)
+
+
+def test_item_and_offer_texts_and_life_months_are_capped(client: TestClient) -> None:
+    kind = _kind(client)
+    for field, value in (
+        ("life_months", 10**10),
+        ("life_months", 1201),
+        ("manufacturer", "m" * 201),
+        ("compatible_with", ["c" * 101]),
+        ("compatible_with", [f"c{n}" for n in range(101)]),
+        ("source", "s" * 101),
+        ("source_ref", "r" * 201),
+    ):
+        made = client.post(
+            f"{API}/items", json={"kind_id": kind["id"], "name": "N", field: value}, headers=press()
+        )
+        assert made.status_code == 422, (field, made.text)
+    item = _item(client, kind["id"], life_months=1200)
+    patched = client.patch(
+        f"{API}/items/{item['id']}", json={"life_months": 10**10}, headers=press()
+    )
+    assert patched.status_code == 422, patched.text
+    supplier = _supplier(client)
+    for field, value in (("pack_uom", "u" * 101), ("note", "n" * 4001)):
+        offer = client.post(
+            f"{API}/offers",
+            json={"supplier_id": supplier, "item_id": item["id"], "sku": "S1", field: value},
+            headers=press(),
+        )
+        assert offer.status_code == 422, (field, offer.text)
+
 
 # -- offers ------------------------------------------------------------------------------
 
@@ -273,7 +392,10 @@ def test_offer_refusals(client: TestClient) -> None:
     )
     nowhere = {**body, "supplier_id": str(uuid.uuid4())}
     _code(client.post(f"{API}/offers", json=nowhere, headers=press()), 404, "supplier_not_found")
-    _code(client.get(f"{API}/suppliers/{uuid.uuid4()}/offers"), 404, "supplier_not_found")
+    unknown = uuid.uuid4()
+    listed = client.get(f"{API}/suppliers/{unknown}/offers")
+    _code(listed, 404, "supplier_not_found")
+    assert listed.json()["detail"] == f"no supplier {str(unknown)!r}"
     no_item = {**body, "item_id": str(uuid.uuid4())}
     _code(client.post(f"{API}/offers", json=no_item, headers=press()), 404, "item_not_found")
     _code(client.get(f"{API}/items/{uuid.uuid4()}/offers"), 404, "item_not_found")
@@ -282,6 +404,23 @@ def test_offer_refusals(client: TestClient) -> None:
     _code(client.get(f"{API}/offers/{missing}/prices"), 404, "offer_not_found")
     price = client.post(f"{API}/offers/{missing}/prices", json={"price": "1"}, headers=press())
     _code(price, 404, "offer_not_found")
+
+    other = client.post(f"{API}/offers", json={**body, "sku": "NUT-4"}, headers=press())
+    clash = client.patch(
+        f"{API}/offers/{other.json()['id']}", json={"sku": "nut-3"}, headers=press()
+    )
+    _code(clash, 409, "offer_exists")
+
+    with _state(client).refs.pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO items (kind_id, name) VALUES ('filament', %s) RETURNING id",
+            (f"PLA {uuid.uuid4().hex[:6]}",),
+        ).fetchone()
+    assert row is not None
+    filament = client.post(
+        f"{API}/offers", json={**body, "item_id": str(row["id"])}, headers=press()
+    )
+    _code(filament, 409, "filament_item_refused")
 
 
 # -- an item's properties ----------------------------------------------------------------

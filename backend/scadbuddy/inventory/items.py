@@ -101,11 +101,12 @@ class ItemStore:
         low: bool = False,
         include_archived: bool = False,
         compatible: str | None = None,
+        limit: int = 1000,
     ) -> builtins.list[Item]:
         """Items by name. `kind` with its descendants unless `descendants` is false; `q`
         matches the name, the manufacturer or any property value, in any case; `low` only
         those at or below their `low_stock`; `compatible` those that name the printer
-        model code."""
+        model code. Up to `limit` of them."""
         where: builtins.list[str] = []
         params: builtins.list[Any] = []
         if not include_archived:
@@ -140,8 +141,8 @@ class ItemStore:
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         with self.pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT s.* FROM ({_ITEMS}) s{clause} ORDER BY lower(s.name), s.id",
-                params,
+                f"SELECT s.* FROM ({_ITEMS}) s{clause} ORDER BY lower(s.name), s.id LIMIT %s",
+                [*params, limit],
             ).fetchall()
             paths = self._paths(conn)
         return [self._of(r, paths) for r in rows]

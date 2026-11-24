@@ -19,7 +19,7 @@ from uuid import UUID
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel
 
-from scadbuddy.api.inventory import codes, run
+from scadbuddy.api.inventory import NO_NUL, codes, run
 from scadbuddy.inventory.component import InventoryDep
 from scadbuddy.inventory.models import (
     AdjustInput,
@@ -127,7 +127,7 @@ async def get_lot(lot_id: UUID, inventory: InventoryDep) -> Lot:
     ),
 )
 async def patch_lot(lot_id: UUID, body: LotPatch, inventory: InventoryDep) -> Lot:
-    return await run(inventory.stock.update_lot, lot_id, body, current_actor())
+    return await run(inventory.stock.update_lot, lot_id, body)
 
 
 @router.post(
@@ -250,7 +250,7 @@ async def get_unit(unit_id: UUID, inventory: InventoryDep) -> Unit:
     ),
 )
 async def patch_unit(unit_id: UUID, body: UnitPatch, inventory: InventoryDep) -> Unit:
-    return await run(inventory.stock.update_unit, unit_id, body, current_actor())
+    return await run(inventory.stock.update_unit, unit_id, body)
 
 
 @router.post(
@@ -292,7 +292,7 @@ async def list_moves(
     item_id: UUID | None = None,
     lot_id: UUID | None = None,
     unit_id: UUID | None = None,
-    order_item_id: Annotated[str | None, Query(max_length=100)] = None,
+    order_item_id: Annotated[str | None, Query(max_length=100, pattern=NO_NUL)] = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
 ) -> MoveList:
     def listed() -> list[Move]:
