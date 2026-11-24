@@ -131,6 +131,8 @@ export async function pendingInput(
   const withRuns = browser && filter.runs === true && filter.sessionId === undefined
   const [approvals, { questions: answers, summariesTruncated }, durable, own] = await Promise.all([
     // Each list is capped, so one session's read asks for that session's rows only.
+    // Both approvals lists check the principal's access (and its grant) themselves, on purpose:
+    // that is the service's own guard, and `grant` here only shapes the projection's filter.
     filter.sessionId === undefined
       ? sessions.approvals.listVisiblePending(principal)
       : sessions.approvals.list(principal, { sessionId: filter.sessionId, pending: true }),
