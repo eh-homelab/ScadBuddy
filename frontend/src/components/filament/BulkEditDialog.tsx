@@ -148,7 +148,9 @@ export function BulkEditDialog({ open, ids, types, onClose, onDone }: Props) {
       const subtypes = lists[kinds.indexOf('subtypes')]
       if (subtypes?.status === 'fulfilled') {
         found.subtypes = subtypes.value.map((row) => {
-          const material = row.material_id ? materials.get(row.material_id) : undefined
+          // `listCatalog` types every row as the widest kind; a subtype row carries `material_id`.
+          const materialId = 'material_id' in row && typeof row.material_id === 'string' ? row.material_id : null
+          const material = materialId ? materials.get(materialId) : undefined
           return { id: row.id, name: material ? `${row.name} (${material})` : row.name }
         })
       }
