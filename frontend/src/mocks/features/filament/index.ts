@@ -1620,6 +1620,83 @@ function printerLabelRows(root: S['Location']): S['PrinterLabel'][] {
   return [row(root, 0), ...kids(root).flatMap((unit) => [row(unit, 1), ...kids(unit).map((slot) => row(slot, 2))])]
 }
 
+/**
+ * `bind_on`: binds the tag with this cleaned UID or tray UUID (made when no tag holds either)
+ * to the spool, closing the tag's and the spool's other open bindings. The tag route and the
+ * reads route (`tags.ts`, #7273) both bind through it.
+ */
+export function bindOn(spoolId: string, uid: string | null, tray: string | null, kind: S['Tag']['kind'], override: boolean): S['TagBinding'] | Response {
+  const row = findSpool(spoolId)
+  if (!row) return problem(404, `no spool ${spoolId}`)
+  const found = state.tags.filter((one) => (uid !== null && one.tag_uid === uid) || (tray !== null && one.tray_uuid === tray))
+  if (found.length > 1) return problem(409, REFUSED.tagKeysClash)
+  let tag = found[0]
+  if (tag) {
+    // The tag takes a key it lacked.
+    tag.tag_uid ??= uid
+    tag.tray_uuid ??= tray
+  } else {
+    tag = { id: newId(), kind, tag_uid: uid, tray_uuid: tray, raw_blob: null, note: null, created_at: now() }
+    state.tags.push(tag)
+  }
+  const held = openBinding(tag.id)
+  if (held?.spool_id === row.id) {
+    // As the backend's `bind_on`: the same tag again with another `override` changes it in place.
+    if (held.override !== override) {
+      held.override = override
+      if (override) row.weight_locked = true
+    }
+    return held
+  }
+  if (held) closeBinding(held, 'rebound')
+  const other = state.bindings.find((one) => one.spool_id === row.id && !one.unbound_at)
+  if (other) closeBinding(other, 'rebound')
+  const binding: S['TagBinding'] = { id: newId(), tag_id: tag.id, spool_id: row.id, override, bound_at: now(), unbound_at: null, reason: null }
+  state.bindings.push(binding)
+  // Decision 3: a bind with `override` locks the spool's weight; nothing unlocks it but a person.
+  if (binding.override) row.weight_locked = true
+  addEvent(row.id, 'tag_bound', { data: { tag_id: tag.id } })
+  // #7149 R-7149-1: a person's bind is a hand link, Bambuddy's `nfc_link`.
+  if (row.data_origin !== 'nfc_link') {
+    addEvent(row.id, 'edited', { data: { changes: { data_origin: [row.data_origin ?? null, 'nfc_link'] } } })
+    row.data_origin = 'nfc_link'
+  }
+  return binding
+}
+
+/** `clean_tag_uid`: hex digits only, the last 16, upper case; none when empty or all zeros. */
+export const cleanTagUid = (uid: string | null | undefined) => keyOf(hexOf(uid).slice(-16))
+
+/**
+ * #7273 `seen_on` for a phone read: the tag with this cleaned UID, made when none holds it,
+ * marked seen. A read in a known format gives the tag that format's kind (R13), but a Bambu tag's.
+ */
+export function seenTag(uid: string, kind: S['Tag']['kind'] | null): S['Tag'] {
+  let tag = state.tags.find((one) => one.tag_uid === uid)
+  if (!tag) {
+    tag = { id: newId(), kind: kind ?? 'other', tag_uid: uid, tray_uuid: null, raw_blob: null, note: null, created_at: now() }
+    state.tags.push(tag)
+  } else if (kind && tag.kind !== 'bambu_mifare') tag.kind = kind
+  Object.assign(tag, { last_seen_at: now(), last_seen_source: 'phone' })
+  return tag
+}
+
+/** A tag as the tag list shows it: with its open binding and its spool's number. */
+export function tagRowOf(tag: S['Tag']): S['TagRow'] {
+  const binding = openBinding(tag.id) ?? null
+  return { ...tag, binding, spool_number: binding ? numberOf(binding.spool_id) : null }
+}
+
+/** The spool that holds the tag now, as the spool routes answer it. */
+export function holderOf(tagId: string): FilamentSpool | null {
+  const binding = openBinding(tagId)
+  const row = binding ? findSpool(binding.spool_id) : undefined
+  return row ? view(row) : null
+}
+
+/** `catalog.find_by_key`: the id of the row whose name or alias has `name`'s key (a subtype's within `material`). */
+export const findByKey = (kind: Aliased, name: string, material: string | null = null) => keyHolder(kind, name, material, undefined, false)?.id ?? null
+
 export const handlers = [
   // -- catalogs --
   http.get(`${BASE}/catalog/:kind`, ({ params, request }) => {
@@ -2111,41 +2188,8 @@ export const handlers = [
     if (uid === null && tray === null) return problem(422, REFUSED.tagUnnamed)
     const row = findSpool(String(params.id))
     if (!row) return problem(404, `no spool ${String(params.id)}`)
-    const found = state.tags.filter((one) => (uid !== null && one.tag_uid === uid) || (tray !== null && one.tray_uuid === tray))
-    if (found.length > 1) return problem(409, REFUSED.tagKeysClash)
-    let tag = found[0]
-    if (tag) {
-      // The tag takes a key it lacked.
-      tag.tag_uid ??= uid
-      tag.tray_uuid ??= tray
-    } else {
-      tag = { id: newId(), kind: body.kind ?? 'other', tag_uid: uid, tray_uuid: tray, raw_blob: null, note: null, created_at: now() }
-      state.tags.push(tag)
-    }
-    const held = openBinding(tag.id)
-    if (held?.spool_id === row.id) {
-      // As the backend's `bind_on`: the same tag again with another `override` changes it in place.
-      const wanted = body.override ?? false
-      if (held.override !== wanted) {
-        held.override = wanted
-        if (wanted) row.weight_locked = true
-      }
-      return HttpResponse.json(held, { status: 201 })
-    }
-    if (held) closeBinding(held, 'rebound')
-    const other = state.bindings.find((one) => one.spool_id === row.id && !one.unbound_at)
-    if (other) closeBinding(other, 'rebound')
-    const binding: S['TagBinding'] = { id: newId(), tag_id: tag.id, spool_id: row.id, override: body.override ?? false, bound_at: now(), unbound_at: null, reason: null }
-    state.bindings.push(binding)
-    // Decision 3: a bind with `override` locks the spool's weight; nothing unlocks it but a person.
-    if (binding.override) row.weight_locked = true
-    addEvent(row.id, 'tag_bound', { data: { tag_id: tag.id } })
-    // #7149 R-7149-1: a person's bind is a hand link, Bambuddy's `nfc_link`.
-    if (row.data_origin !== 'nfc_link') {
-      addEvent(row.id, 'edited', { data: { changes: { data_origin: [row.data_origin ?? null, 'nfc_link'] } } })
-      row.data_origin = 'nfc_link'
-    }
-    return HttpResponse.json(binding, { status: 201 })
+    const bound = bindOn(row.id, uid, tray, body.kind ?? 'other', body.override ?? false)
+    return bound instanceof Response ? bound : HttpResponse.json(bound, { status: 201 })
   }),
   http.delete(`${BASE}/tags/:id/binding`, ({ params }) => {
     const binding = openBinding(String(params.id))

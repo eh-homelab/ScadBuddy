@@ -201,6 +201,19 @@ export const deleteSpool = (id: string) => request<void>(`${BASE}/spools/${seg(i
 export const bindTag = (spoolId: string, body: TagBind) =>
   request<TagBinding>(`${BASE}/spools/${seg(spoolId)}/tags`, json('POST', body))
 
+// -- tags read through Web NFC (#7273) -----------------------------------------------------
+
+export type TagReadIn = Schemas['TagReadIn']
+export type TagReadResult = Schemas['TagReadResult']
+export type NdefRecord = Schemas['NdefRecord']
+export type DecodedSpool = Schemas['DecodedSpool']
+
+/**
+ * One phone read: finds or makes the tag by its UID, and answers its spool, what its records
+ * decode to, a new spool's draft, and what to do `next`. With `bind_spool_id`, binds it there first.
+ */
+export const postTagRead = (body: TagReadIn) => request<TagReadResult>(`${BASE}/tags/reads`, json('POST', body))
+
 // -- NTAG through SpoolBuddy (#6264) --------------------------------------------------
 
 export type ScanResult = Schemas['ScanResult']

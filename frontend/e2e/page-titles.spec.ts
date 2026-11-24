@@ -68,6 +68,8 @@ const PAGES = [
   '/filament/ledger',
   // Spool labels (#6264): with no spools chosen; the route check below reads paths, not queries.
   '/filament/labels',
+  // The phone page that reads tags (#7273): without Web NFC it shows how to open it on a phone.
+  '/filament/scan',
   // The component gallery (#3653): in the mocked build only, which this spec runs on.
   '/ui-gallery',
 ]
