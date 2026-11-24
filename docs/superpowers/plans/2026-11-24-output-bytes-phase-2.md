@@ -34,7 +34,7 @@
 - R3: The byte copy verifies each upload by reading it back from the backend, past the download cache (`ContentStore.verify`). It doubles the first copy's transfer. Cost if wrong: drop one call.
 - R4: A model delete releases its outputs' byte holds (`output-*` keys) with their rows. It leaves the Parts holds as today (the reaper's documented cost). Cost if wrong: one `LIKE` clause.
 - R5: A store migration to a `bambuddy` target is refused while the index holds an `output` blob, so outputs never reach Bambuddy's library through a migration. Cost if wrong: one check in `store/migrate.py`.
-- R6: Sync readers on worker threads get the temporary file through `OutputBytes.blocking_local_file`, which runs the download on the API's loop (`asyncio.run_coroutine_threadsafe`) and refuses to run on the loop's own thread. Cost if wrong: callers turned async one by one.
+- R6 (revised after the Task 3 review): there is no blocking temp-file helper. Sync readers run as `async with blobs.local_file(...) as path: await asyncio.to_thread(reader, path)`: the download stays on the loop and only the reader takes a thread. A thread that waited for the loop's download deadlocked once its callers filled the default executor (reproduced with `max_workers=2`). A sync caller that cannot become async yet keeps its file path (the fallback) until it is turned async. Cost if wrong: callers turned async one by one.
 
 ## Review Focus
 
@@ -42,7 +42,7 @@
 2. An old pod uploads a thumbnail during the roll-out, after the byte copy copied the old one: the next copy run replaces the blob; a new pod's upload that races the copy is not undone (`test_byte_copy_takes_newer_thumbnail_file`, `test_byte_copy_does_not_undo_live_thumbnail`, Task 9).
 3. An output deleted while the byte copy uploads its bytes: the row does not come back and no hold is left, so the sweep removes the blobs (`test_byte_copy_leaves_no_hold_for_deleted_output`, Task 9).
 4. A store near its cap: the copy refuses before any upload and names the shortfall; a save into a full store answers 507 and leaves no folder, row or hold (`test_byte_copy_refuses_past_cap`, Task 9; `test_save_store_full_is_507_and_cleans_up`, Task 5).
-5. The blocking temp-file helper called on the loop thread raises at once and never deadlocks; a temp file is removed when the body raises (`test_blocking_local_file_refuses_loop_thread`, `test_local_file_removed_after_error`, Task 3).
+5. A temp file is removed when the body raises or the reader is cancelled during the download, and the download never reopens its path (`test_local_file_removed_after_error`, `test_local_file_cancelled_during_download_leaves_no_file`, Task 3).
 
 ---
 
@@ -108,20 +108,20 @@
 - Produces:
   - `ContentStore.verify(ref: BlobRef) -> bool`: downloads from the backend (never from `downloads`) and checks the sha256; False on `BlobCorruptError` or `BlobMissingError`.
   - `def usable(content: ContentStore | None) -> bool`: True only for a content store whose `name` is not `"bambuddy"`.
-  - `@dataclass class OutputStream(size: int, sha256: str | None, chunks: AsyncIterator[bytes])`.
-  - `class OutputBytes(content: ContentStore, loop: asyncio.AbstractEventLoop)` with:
+  - `@dataclass class OutputStream(size: int, sha256: str | None, chunks: AsyncGenerator[bytes], _source: AsyncGenerator[bytes] | None = None)`, with `async aclose()` (closes `chunks`, then `_source`, the backend's read) and `async with` (its exit calls `aclose`). Whoever takes a stream closes it, read or not.
+  - `class OutputFileNameError(ValueError)` with `names: tuple[str, ...]`.
+  - `class OutputBytes(content: ContentStore)` with:
     - `async put(key: str, data: BlobData, *, slug: str) -> BlobRef` (kind `output`, `BlobScope(slug=slug)`).
-    - `async put_if_absent(key: str, data: bytes, *, slug: str) -> bool` (`ContentStore.replace(expected=None)`).
+    - `async put_if_absent(key: str, data: bytes, *, slug: str) -> bool` (the index's `ref` first: a key that exists answers False with no hash or upload; then `ContentStore.replace(expected=None)`, the guard for a racing put).
     - `async replace(key: str, data: BlobData, *, slug: str, expected: str | None) -> BlobRef | None` (the copy's compare-and-swap on the index sha).
-    - `async put_folder(directory: Path, output_id: str, slug: str) -> OutputBlobs`: `model.3mf` and `preview.glb` (required: a missing one raises `FileNotFoundError`), `thumbnail.png` when there, each `files/` entry matching `FILE_NAME_PATTERN`; each opened and put a file at a time, never read whole.
+    - `async put_folder(directory: Path, output_id: str, slug: str) -> OutputBlobs`: `model.3mf` and `preview.glb` (required: a missing one raises `FileNotFoundError`), `thumbnail.png` when there, every `files/` entry; each opened and put a file at a time, never read whole. Before any put, a `files/` entry that is not a regular file or fails `FILE_NAME_PATTERN` raises `OutputFileNameError` with every such name.
     - `ref(key: str) -> BlobRef | None` (sync: `content.index.get`, SQL only, no backend call).
     - `async stream(key: str) -> OutputStream` (the first chunk is read before it returns, so a missing blob raises `BlobMissingError` here, not mid-response).
     - `async read(key: str) -> bytes`.
-    - `local_file(key: str, suffix: str) -> AbstractAsyncContextManager[Path]`: the blob in a named temporary file under `content.spool` (made on first use; the pod's local disk, `SCADBUDDY_SPOOL_DIR`), removed on exit, error or not.
-    - `blocking_local_file(key: str, suffix: str) -> AbstractContextManager[Path]` (Ruling R6): for a worker thread; raises `RuntimeError` on the loop's thread; waits at most `BLOCKING_READ_TIMEOUT = 300.0` s.
+    - `local_file(key: str, suffix: str) -> AbstractAsyncContextManager[Path]`: the blob in a named temporary file under `content.spool` (made on first use; the pod's local disk, `SCADBUDDY_SPOOL_DIR`), removed on exit, error or not. The download writes to the file `mkstemp` opened, never the path again. A sync reader runs as `async with blobs.local_file(...) as path: await asyncio.to_thread(reader, path)` (Ruling R6).
     - `async verify(key: str) -> bool`.
 
-- [ ] **Step 1:** Write tests (`local_content` fixture): `test_put_folder_puts_every_role_and_file`, `test_put_folder_without_preview_raises`, `test_put_if_absent_keeps_first`, `test_replace_refuses_moved_key`, `test_stream_raises_missing_before_first_chunk`, `test_local_file_holds_blob_bytes_then_is_removed`, `test_local_file_removed_after_error`, `test_blocking_local_file_from_thread`, `test_blocking_local_file_refuses_loop_thread`, `test_usable_refuses_bambuddy_and_none`; in `test_content_store.py`, `test_verify_reads_backend_not_cache` (corrupt the backend object, keep the cache whole: `verify` is False).
+- [ ] **Step 1:** Write tests (`local_content` fixture): `test_put_folder_puts_every_role_and_file`, `test_put_folder_without_preview_raises`, `test_put_if_absent_keeps_first`, `test_replace_refuses_moved_key`, `test_stream_raises_missing_before_first_chunk`, `test_local_file_holds_blob_bytes_then_is_removed`, `test_local_file_removed_after_error`, `test_local_file_cancelled_during_download_leaves_no_file`, `test_put_folder_refuses_a_name_an_output_may_not_hold`, `test_put_if_absent_uploads_nothing_when_key_exists`, `test_stream_aclose_closes_source_unread`, `test_usable_refuses_bambuddy_and_none`; in `test_content_store.py`, `test_verify_reads_backend_not_cache` (corrupt the backend object, keep the cache whole: `verify` is False).
 - [ ] **Step 2:** Run them; expect FAIL.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run them; expect PASS.
@@ -130,7 +130,7 @@
 ### Task 4: `OutputStore` reads blobs first, files as the fallback
 
 **Files:**
-- Modify: `backend/scadbuddy/library/outputs.py`, `backend/scadbuddy/main.py` (lifespan: after `build_store`, `state.outputs.bytes = OutputBytes(content, asyncio.get_running_loop())` when `usable(state.store.content)`)
+- Modify: `backend/scadbuddy/library/outputs.py`, `backend/scadbuddy/main.py` (lifespan: after `build_store`, `state.outputs.bytes = OutputBytes(content)` when `usable(state.store.content)`)
 - Test: `backend/tests/test_output_store_bytes.py`
 
 **Interfaces:**
@@ -139,14 +139,14 @@
   - `bytes: OutputBytes | None` (None: files only, as today).
   - `_blob_key(output_id: str, role: Role) -> str | None` (from `_row_of`; no glob once copied).
   - `async open_role(output_id: str, role: Role) -> OutputStream | None`: the blob; on `BlobMissingError`/`BlobCorruptError` a warning and the file; the file when the row has no key; None when neither exists.
-  - `local_role(output_id: str, role: Role) -> AbstractAsyncContextManager[Path | None]` and `blocking_local_role(output_id: str, role: Role) -> AbstractContextManager[Path | None]`: the blob's temp file, else the NFS file itself (never copied), else None.
+  - `local_role(output_id: str, role: Role) -> AbstractAsyncContextManager[Path | None]`: the blob's temp file, else the NFS file itself (never copied), else None. A sync reader runs as `async with outputs.local_role(id, role) as path: await asyncio.to_thread(reader, path)` (Ruling R6); there is no blocking form.
   - `role_size(output_id: str, role: Role) -> int | None` (index size, else `stat`).
   - `thumbnail_version(output_id: str) -> str | None` (the blob's `sha256[:16]`, else today's `_thumbnail_version` of the file).
   - `has_role(output_id: str, role: Role) -> bool`.
   - `files(output_id)` from `output_files` when the row has `bytes_at`, else the folder; `async open_file(output_id: str, name: str) -> OutputStream` (raises `OutputNotFoundError` as `file_path` does; name checked against `FILE_NAME_PATTERN` first).
   - `async model_3mf(output_id)` reads the `model` blob first (`send.py`, `api/internal.py`, `meshmodel/operations.py` follow unchanged).
 
-- [ ] **Step 1:** Write tests (row-backed store plus `local_content`): `test_open_role_reads_blob_not_file` (remove the file after the put), `test_open_role_falls_back_to_file_without_key`, `test_open_role_falls_back_when_blob_missing`, `test_blocking_local_role_gives_nfs_path_without_blob`, `test_files_from_output_files_rows`, `test_open_file_refuses_path_names`, `test_thumbnail_version_is_blob_sha`, `test_model_3mf_from_blob`, `test_store_without_bytes_reads_files`.
+- [ ] **Step 1:** Write tests (row-backed store plus `local_content`): `test_open_role_reads_blob_not_file` (remove the file after the put), `test_open_role_falls_back_to_file_without_key`, `test_open_role_falls_back_when_blob_missing`, `test_local_role_gives_nfs_path_without_blob`, `test_files_from_output_files_rows`, `test_open_file_refuses_path_names`, `test_thumbnail_version_is_blob_sha`, `test_model_3mf_from_blob`, `test_store_without_bytes_reads_files`.
 - [ ] **Step 2:** Run them; expect FAIL.
 - [ ] **Step 3:** Implement; wire it in `main.py`.
 - [ ] **Step 4:** Run them and every existing output test (`tests/test_output_*.py`, `tests/test_packing_and_outputs.py`, `tests/test_arrange_outputs.py`, `tests/api/test_recent_outputs.py`); expect PASS.
@@ -181,9 +181,9 @@
 - Test: `backend/tests/api/test_output_bytes_routes.py`
 
 **Interfaces:**
-- Consumes: Task 4's `open_role`, `local_role`, `blocking_local_role`, `open_file`, `thumbnail_version`, `has_role`.
-- Produces: `def stream_response(stream: OutputStream, *, media_type: str, headers: Mapping[str, str]) -> StreamingResponse` in `api/outputs.py` (as `api/library_print.py` `_native_download`: `content-length`, `etag` from the sha when known, `accept-ranges: none`); `download_3mf(stream: OutputStream, meta: OutputMeta) -> StreamingResponse` in `bambuddy/download.py` (its only caller is this route; same filename and media type).
-- Behaviour: downloads, the preview (no plate), `files/{name}` (with `UI_FILE_HEADERS`, same media types) and the thumbnail stream; `get_output_view`, `_draw_thumbnail`'s `draw_view`, `get_output_plates`' `plates_of` and `provenance`'s `read_provenance` take `local_role`/`blocking_local_role` paths. `drawable_thumbnail` asks `has_role(id, "preview")`. Each 404 text stays as it is.
+- Consumes: Task 4's `open_role`, `local_role`, `open_file`, `thumbnail_version`, `has_role`.
+- Produces: `def stream_response(stream: OutputStream, *, media_type: str, headers: Mapping[str, str]) -> StreamingResponse` in `api/outputs.py` (as `api/library_print.py` `_native_download`: `content-length`, `etag` from the sha when known, `accept-ranges: none`). It returns a `StreamingResponse` subclass whose `__call__` wraps `super().__call__` in `try/finally`, with `anyio.CancelScope(shield=True)` around `await stream.aclose()`, so a client that goes away, or a response never sent, still closes the backend's read. A route that does more work after `stream()` and before it returns the response uses `async with stream:` around that work; `download_3mf(stream: OutputStream, meta: OutputMeta) -> StreamingResponse` in `bambuddy/download.py` (its only caller is this route; same filename and media type).
+- Behaviour: downloads, the preview (no plate), `files/{name}` (with `UI_FILE_HEADERS`, same media types) and the thumbnail stream; `get_output_view`, `_draw_thumbnail`'s `draw_view`, `get_output_plates`' `plates_of` and `provenance`'s `read_provenance` take `local_role` paths, each sync reader as `async with outputs.local_role(...) as path: await asyncio.to_thread(reader, path)` (Ruling R6); `provenance` becomes async for it. `drawable_thumbnail` asks `has_role(id, "preview")`. Each 404 text stays as it is.
 
 - [ ] **Step 1:** Write tests (app with a `local_content` store; each byte route once with the file removed after the save, once with no blob): `test_download_streams_blob_with_length_and_etag`, `test_download_falls_back_to_file_when_blob_missing`, `test_preview_streams_blob`, `test_output_file_streams_blob`, `test_thumbnail_streams_blob_and_draws_from_preview_blob`, `test_view_and_plates_read_blob_through_temp_file` (the spool holds no file afterwards), `test_edit_target_provenance_from_blob`.
 - [ ] **Step 2:** Run them; expect FAIL.
@@ -200,10 +200,10 @@
 **Interfaces:**
 - Consumes: Task 2's `derived`/`write_derived`, Task 4's helpers.
 - Behaviour:
-  - `geometry(id, plate)`: `rows.derived(id, "geometry", plate)` when its version is `str(ANALYSIS_VERSION)`, else the file cache as today (before the copy), else `analyze_3mf` on `blocking_local_role(id, "model")`, written with `write_derived` (and still the file, until #7257). `attributed`/`write_attributed`: kind `attributed`, data `{"model_version", "analysis"}`, the same miss rules.
-  - `plate_cover(slug)` once copied: the id from `oldest_with_plate_cover`, `PLATE_THUMBNAIL` read from `blocking_local_role(id, "model")`. Check each caller of `Catalogue.thumbnail` runs in a thread or a sync route; move any that runs on the loop to `asyncio.to_thread`.
-  - `_output_files` sizes from `role_size`; `_output_plate_names` through `blocking_local_role`.
-  - `referenced_asset_ids(paths, records, outputs: OutputStore | None = None)`: with `outputs` copied, every row's jsonb is scanned in place of the folder walk, and the 3MF of each row whose `params` is `{}` is read through `blocking_local_role`; else today's walk. The asset sweep passes `state.outputs`.
+  - `geometry(id, plate)`: `rows.derived(id, "geometry", plate)` when its version is `str(ANALYSIS_VERSION)`, else the file cache as today (before the copy), else `analyze_3mf` as `async with outputs.local_role(id, "model") as path: await asyncio.to_thread(analyze_3mf, path)` (Ruling R6; `geometry` becomes async, and a caller that cannot become async yet keeps the file path), written with `write_derived` (and still the file, until #7257). `attributed`/`write_attributed`: kind `attributed`, data `{"model_version", "analysis"}`, the same miss rules.
+  - `plate_cover(slug)` once copied: the id from `oldest_with_plate_cover`, `PLATE_THUMBNAIL` read as `async with outputs.local_role(id, "model") as path: await asyncio.to_thread(read, path)` (Ruling R6). `Catalogue.thumbnail` is sync: each caller that can become async takes this path; one that cannot yet keeps the NFS file (the fallback) until it is turned async.
+  - `_output_files` sizes from `role_size`; `_output_plate_names` as `async with outputs.local_role(id, "model") as path: await asyncio.to_thread(plate_names, path)` (Ruling R6).
+  - `referenced_asset_ids(paths, records, outputs: OutputStore | None = None)`: with `outputs` copied, every row's jsonb is scanned in place of the folder walk, and the 3MF of each row whose `params` is `{}` is read as `async with outputs.local_role(id, "model") as path: await asyncio.to_thread(reader, path)` (Ruling R6; the sweep's caller is async, so `referenced_asset_ids` becomes async for it); else today's walk. The asset sweep passes `state.outputs`.
 
 - [ ] **Step 1:** Write tests: `test_geometry_cached_in_output_derived`, `test_geometry_version_mismatch_recomputes`, `test_attributed_round_trip_in_rows`, `test_plate_cover_from_model_blob`, `test_print_history_sizes_from_index`, `test_variant_preview_streams_blob`, `test_gather_model_3mf_temp_file_lives_through_analysis`, `test_filing_uploads_blob_bytes`, `test_referenced_asset_ids_from_rows_and_blob_3mf`.
 - [ ] **Step 2:** Run them; expect FAIL.
@@ -243,12 +243,12 @@ Behaviour (spec §4.5 phase 2, §6.3, §6.4, §6.5):
 - `content` None → a run ended `refused="the local store has no blob store; output bytes stay on the share"`; `content.name == "bambuddy"` → `refused="outputs do not go into Bambuddy's library"`. No upload.
 - Walk `rows.byte_states()`; for each, `bytes_stamp` of its folder; skip when `bytes_at` is set and the stamp equals the row's (`skipped`). A stat that fails with anything but a missing file sets `incomplete`.
 - Quota first: over the outputs with `bytes_at` NULL, the sum of their byte files' sizes and their count. If `usage.bytes + needed > max_total_bytes` or `usage.count + count > max_count` (a cap of 0 is no cap), end the run `refused` with a text that names both numbers, the cap's setting name and the shortfall, and upload nothing.
-- Per output, per role file there: read the index sha of its key first, then hash the file; equal → no upload; else `OutputBytes.replace(key, file, expected=<that sha or None>)`; None (a live writer moved the key) → keep the live blob. Each uploaded blob is checked with `OutputBytes.verify`; a False is a `failed` entry `{output_id, role, error}` and the output's `bytes_at` stays NULL. A missing `model.3mf` or `preview.glb` is a `damaged` entry and goes in `bytes_damaged`; any other read error is `failed`.
+- Per output, per role file there: read the index sha of its key first, then hash the file; equal → no upload; else `OutputBytes.replace(key, file, expected=<that sha or None>)`; None (a live writer moved the key) → keep the live blob. Each uploaded blob is checked with `OutputBytes.verify`; a False is a `failed` entry `{output_id, role, error}` and the output's `bytes_at` stays NULL. A missing `model.3mf` or `preview.glb` is a `damaged` entry and goes in `bytes_damaged`. The copy lists `files/` as `put_folder` does (`output_bytes._put_names`), so a `files/` entry that is not a regular file or has a name an output may not hold raises `OutputFileNameError`, which the copy catches: the output is a `damaged` entry with the names (`{output_id, role: "files", error, names}`), goes in `bytes_damaged`, and is never copied. Any other read error is `failed`.
 - `rows.write_bytes` per batch of `BATCH_BYTES = 50` outputs; an id it does not return was deleted meanwhile: its blobs stay unheld for the sweep.
 - `stop` is checked between outputs: the batch so far is written, the run ends unfinished. The run has `finished_at` only when nothing was refused, failed or incomplete.
 - `store/migrate.py`: a migration whose target is `bambuddy` is refused while `store_blobs` holds a row of kind `output`.
 
-- [ ] **Step 1:** Write tests (fixture tree of outputs: one plain, one arranged, one with `files/`, one with a backfill, one with no `preview.glb`): `test_byte_copy_uploads_and_verifies_every_role`, `test_byte_copy_second_run_changes_nothing`, `test_byte_copy_corrupt_upload_fails_verification`, `test_byte_copy_marks_missing_preview_damaged`, `test_byte_copy_takes_newer_thumbnail_file`, `test_byte_copy_does_not_undo_live_thumbnail` (a live `put_thumbnail` between the copy's index read and its replace wins), `test_byte_copy_leaves_no_hold_for_deleted_output`, `test_byte_copy_refuses_past_cap`, `test_byte_copy_refuses_on_bambuddy_and_local`, `test_byte_copy_runs_once_under_lock`, `test_byte_copy_stops_unfinished_on_stop`; the replay test with `output_bytes.json`; `test_migrate_to_bambuddy_refused_with_output_blobs`.
+- [ ] **Step 1:** Write tests (fixture tree of outputs: one plain, one arranged, one with `files/`, one with a backfill, one with no `preview.glb`): `test_byte_copy_uploads_and_verifies_every_role`, `test_byte_copy_second_run_changes_nothing`, `test_byte_copy_corrupt_upload_fails_verification`, `test_byte_copy_marks_missing_preview_damaged`, `test_byte_copy_marks_bad_file_name_damaged`, `test_byte_copy_takes_newer_thumbnail_file`, `test_byte_copy_does_not_undo_live_thumbnail` (a live `put_thumbnail` between the copy's index read and its replace wins), `test_byte_copy_leaves_no_hold_for_deleted_output`, `test_byte_copy_refuses_past_cap`, `test_byte_copy_refuses_on_bambuddy_and_local`, `test_byte_copy_runs_once_under_lock`, `test_byte_copy_stops_unfinished_on_stop`; the replay test with `output_bytes.json`; `test_migrate_to_bambuddy_refused_with_output_blobs`.
 - [ ] **Step 2:** Run them; expect FAIL.
 - [ ] **Step 3:** Implement; record the replay history as the phase 1 sweep's was recorded.
 - [ ] **Step 4:** Run them, `tests/test_output_copy.py` and the housekeeping tests; expect PASS.
