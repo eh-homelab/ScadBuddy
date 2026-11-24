@@ -32,6 +32,7 @@ from psycopg import Connection, sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
+from temporalio.worker import _workflow as temporal_workflow_worker
 
 from scadbuddy import main as scadbuddy_main
 from scadbuddy.api.jobs import forget_unreadable_notes_logs
@@ -73,6 +74,25 @@ trace.set_tracer_provider(_provider)
 #: Every app a test starts binds its CRUD listener to a free port (#5298): on the fixed
 #: default, two xdist workers' apps (or a developer's own API) would collide.
 settings_module.DEFAULT_CRUD_PORT = 0
+
+#: The SDK fails a workflow task whose activation runs past 2 s as a deadlock
+#: (`temporalio.worker._workflow`, `_deadlock_timeout_seconds`). On a CI runner starved by
+#: a shard's other xdist workers, a plain activation paused that long and failed a test
+#: (#7443). Every test worker gets this larger bound: a pause passes, a real deadlock still
+#: fails the task. Not `debug_mode`, which also turns the bound off entirely.
+TEST_DEADLOCK_SECONDS = 30
+
+_sdk_workflow_worker_init = temporal_workflow_worker._WorkflowWorker.__init__
+
+
+@functools.wraps(_sdk_workflow_worker_init)
+def _patient_workflow_worker_init(self: Any, *args: Any, **kwargs: Any) -> None:
+    _sdk_workflow_worker_init(self, *args, **kwargs)
+    if self._deadlock_timeout_seconds is not None:
+        self._deadlock_timeout_seconds = TEST_DEADLOCK_SECONDS
+
+
+temporal_workflow_worker._WorkflowWorker.__init__ = _patient_workflow_worker_init  # type: ignore[method-assign]
 
 
 @pytest.fixture(autouse=True)
