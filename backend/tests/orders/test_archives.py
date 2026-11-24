@@ -40,7 +40,6 @@ from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
     CopiedMedia,
-    LocalDensity,
     MaintenanceDone,
     MaintenanceTask,
     MediaTooLargeError,
@@ -82,9 +81,6 @@ class Archives:
     def __init__(self, *facts: ArchiveFacts) -> None:
         self.facts = {f.archive_id: f for f in facts}
         self.downloads: list[tuple[int, str, str | None]] = []
-
-    async def local_densities(self) -> dict[str, LocalDensity]:
-        raise AssertionError("not asked")
 
     async def spool_assignments(self) -> list[SpoolAssignment]:
         raise AssertionError("not asked")

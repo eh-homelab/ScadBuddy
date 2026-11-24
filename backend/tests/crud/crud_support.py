@@ -111,7 +111,6 @@ from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.usage import RackUsageStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.slicing.component import SLICING
-from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.store import NativeSliceStore
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.content import ContentStore
@@ -702,11 +701,8 @@ def print_crud_app(
             reports=PrinterReportStore(store.pool),
         ),
         RACK_USAGE: rack,
-        # The kept presets and native slices: the API's own stores on ``store``'s pool
-        # (#5298 Task 31).
-        SLICING: SimpleNamespace(
-            store=NativeSliceStore(store.pool), held=HeldPresetStore(store.pool)
-        ),
+        # The native slices: the API's own store on ``store``'s pool (#5298 Task 31).
+        SLICING: SimpleNamespace(store=NativeSliceStore(store.pool)),
         # A native run's SB spools (#6262 Task 6) and the Bambuddy sync's plan and results
         # (#6265 Task 6): the API's own stores on ``store``'s pool.
         FILAMENT: filament_on(store.pool),
