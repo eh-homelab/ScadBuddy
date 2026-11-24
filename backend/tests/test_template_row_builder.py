@@ -6,6 +6,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -288,19 +289,19 @@ def test_stamp_raises_when_a_folder_listing_is_stale(
 def _meta_reads(
     monkeypatch: pytest.MonkeyPatch, meta: Path, answer: Exception | None = None
 ) -> list[str]:
-    """Count the reads of ``meta``, and raise ``answer`` from each when given."""
+    """Count the opens and reads of ``meta``, and raise ``answer`` from each when given."""
     reads: list[str] = []
-    for name in ("read_bytes", "read_text"):
-        real = getattr(Path, name)
+    for owner, name in ((Path, "read_bytes"), (Path, "read_text"), (os, "open")):
+        real = getattr(owner, name)
 
-        def read(self: Path, *args: Any, _real: Any = real, _name: str = name, **kw: Any) -> Any:
-            if self == meta:
+        def read(path: Any, *args: Any, _real: Any = real, _name: str = name, **kw: Any) -> Any:
+            if os.fspath(path) == os.fspath(meta):
                 reads.append(_name)
                 if answer is not None:
                     raise answer
-            return _real(self, *args, **kw)
+            return _real(path, *args, **kw)
 
-        monkeypatch.setattr(Path, name, read)
+        monkeypatch.setattr(owner, name, read)
     return reads
 
 
@@ -326,6 +327,32 @@ def test_row_of_meta_deleted_while_read_is_a_missing_meta(
     assert row.meta_error is None
     assert row.meta_text is None
     assert row.name == "demo"
+
+
+def test_row_of_a_fifo_at_model_json_is_a_missing_meta(
+    catalogue: Catalogue, paths: DataPaths
+) -> None:
+    # A FIFO, or anything not a regular file, must not block the read.
+    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
+    meta = paths.model_meta("demo")
+    meta.unlink()
+    os.mkfifo(meta)
+    found: list[TemplateRow | None] = []
+    reader = threading.Thread(
+        target=lambda: found.append(catalogue.template_row("demo", version=None, head=None)),
+        daemon=True,
+    )
+    reader.start()
+    reader.join(timeout=5)
+    if reader.is_alive():
+        # Free the blocked reader so the test process can end.
+        os.close(os.open(meta, os.O_WRONLY | os.O_NONBLOCK))
+        pytest.fail("the read of a FIFO at model.json blocked")
+    assert found and found[0] is not None
+    row = found[0]
+    assert row.meta == {}
+    assert row.meta_error is None
+    assert row.meta_text is None
 
 
 @pytest.mark.requires_postgres

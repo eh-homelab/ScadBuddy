@@ -1127,10 +1127,7 @@ class Catalogue:
         meta_text: str | None = None
         parsed: ModelMeta | None = None
         # One read: a second could see another file, or none (review M1).
-        try:
-            data: bytes | None = self.paths.model_meta(template_id).read_bytes()
-        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
-            data = None
+        data = _read_regular(self.paths.model_meta(template_id))
         try:
             meta = {} if data is None else _raw_meta_of(template_id, data)
             if (problem := _unstorable(meta)) is not None:
@@ -3308,6 +3305,20 @@ class _MediaEdit:
 def _default_name(slug: str) -> str:
     """The name a template whose ``model.json`` names none shows: its slug."""
     return slug.removeprefix(BUILTIN_PREFIX)
+
+
+def _read_regular(path: Path) -> bytes | None:
+    """The bytes of ``path``, or None when it is missing or not a regular file. It is
+    opened without blocking and checked on the open descriptor, so a FIFO placed there
+    never blocks the read, and the file checked is the file read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+        return None
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        return handle.read()
 
 
 def _raw_meta_of(slug: str, data: bytes) -> dict[str, Any]:
