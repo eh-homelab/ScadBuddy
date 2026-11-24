@@ -17,13 +17,15 @@
 Locks: the item `FOR SHARE` (the parent), then the rows being changed `FOR UPDATE`. A take
 locks all of the item's lots in FIFO order, so takes, give-backs and counts of one item run
 one after another. A caller that takes or gives back several items in one transaction (an
-order's parts, the plan's Task 7) takes them in `item_id` order, and locks its own rows
-(the order and its items) before any lot, so two such callers cannot deadlock."""
+order's parts, the plan's Task 7) locks its own rows (the order and its items) first, then
+every item it will touch with `lock_items` (in `item_id` order: each item, its lots, and
+the lock that opens a first lot), before the first take, so two such callers cannot
+deadlock (R-P2-28)."""
 
 from __future__ import annotations
 
 import builtins
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, NamedTuple
@@ -233,9 +235,10 @@ class StockStore:
         return [Move.model_validate(dict(r)) for r in rows]
 
     def estimate_unit_cost(self, conn: Conn, item_id: UUID, qty: Decimal) -> tuple[Decimal, bool]:
-        """What `take` of `qty` would charge per unit now, and whether any of it is of
-        unknown cost. Reads only. An item with no lot is `(0, True)`, as `take` would open
-        a zero-cost lot of unknown cost. `BadQuantity` where `take` would refuse it: a
+        """What `take` of `qty` would charge per unit now for the part of it of known cost
+        (the known lots' amounts over `qty`), and whether any of it is of unknown cost
+        (R-P2-29). Reads only. An item with no lot is `(0, True)`, as `take` would open a
+        zero-cost lot of unknown cost. `BadQuantity` where `take` would refuse it: a
         quantity, or a part of it at its lot's cost, past what `numeric(20,6)` holds
         (R-P2-16)."""
         item = _item(conn, item_id, "lot", lock=False)
@@ -246,8 +249,15 @@ class StockStore:
         if not lots:
             return Decimal(0), True
         plan = _fifo([dict(r) for r in lots], qty, None)
-        total = sum((_amount(part, lot["unit_cost_minor"]) for lot, part, _ in plan), Decimal(0))
-        return _six(total / qty), any(lot["cost_unknown"] for lot, _, _ in plan)
+        total = Decimal(0)
+        unknown = False
+        for lot, part, _ in plan:
+            amount = _amount(part, lot["unit_cost_minor"])
+            if lot["cost_unknown"]:
+                unknown = True
+            else:
+                total += amount
+        return _six(total / qty), unknown
 
     # -- lots ----------------------------------------------------------------------------
 
@@ -434,7 +444,8 @@ class StockStore:
             "UPDATE stock_moves SET unit_cost_minor = %s, amount_minor = round(qty * %s, 6),"
             " cost_unknown = %s WHERE lot_id = %s AND kind = ANY(%s)"
             " AND (unit_cost_minor <> %s OR cost_unknown <> %s)"
-            " RETURNING order_item_id, kind, old.amount_minor AS old_amount,"
+            " RETURNING order_item_id, kind, old.unit_cost_minor AS old_cost,"
+            " old.amount_minor AS old_amount,"
             " new.amount_minor AS new_amount",
             (cost, cost, unknown, lot_id, list(_RECOST_KINDS), cost, unknown),
         ).fetchall()
@@ -457,9 +468,26 @@ class StockStore:
             )
             if (item.before_minor, item.before_unknown) != (item.after_minor, item.after_unknown):
                 orders.append(item)
-        return RecostResult(moves=len(rows), orders=orders)
+        return RecostResult(
+            item_id=lot["item_id"],
+            unit_cost_minor=cost,
+            cost_unknown=unknown,
+            before_unit_costs_minor=sorted({r["old_cost"] for r in rows}),
+            moves=len(rows),
+            orders=orders,
+        )
 
     # -- takes ---------------------------------------------------------------------------
+
+    def lock_items(self, conn: Conn, item_ids: Iterable[UUID]) -> None:
+        """Every item's locks a take of it takes, in the caller's transaction, item by item
+        in `item_id` order: the item `FOR SHARE`, its lots `FOR UPDATE` in FIFO order, and
+        for an item with no lot the lock that opens its first one (`_open_lots`). A caller
+        that then takes several items takes no lock out of this order (R-P2-28)."""
+        for item_id in sorted(set(item_ids)):
+            _item(conn, item_id, "lot", lock=True)
+            if not _lock_lots(conn, item_id):
+                _open_lock(conn, item_id)
 
     def take(
         self,
@@ -753,10 +781,7 @@ def _open_lots(conn: Conn, item_id: UUID, by: Actor) -> builtins.list[dict[str, 
     """For an item that had no lot: a zero-cost `adjustment` lot of unknown cost. Two
     callers that both found none wait on one lock, and the second takes the lot the first
     opened."""
-    conn.execute(
-        "SELECT pg_advisory_xact_lock(hashtext('stock_lots_open'), hashtext(%s))",
-        (str(item_id),),
-    )
+    _open_lock(conn, item_id)
     lots = _lock_lots(conn, item_id)
     if lots:
         return lots
@@ -768,6 +793,14 @@ def _open_lots(conn: Conn, item_id: UUID, by: Actor) -> builtins.list[dict[str, 
     ).fetchone()
     assert row is not None
     return [dict(row)]
+
+
+def _open_lock(conn: Conn, item_id: UUID) -> None:
+    """The transaction's lock on opening the item's first lot."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext('stock_lots_open'), hashtext(%s))",
+        (str(item_id),),
+    )
 
 
 def _move(

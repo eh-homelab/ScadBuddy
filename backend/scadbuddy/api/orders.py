@@ -1153,9 +1153,10 @@ async def estimate(
         "itself (a price above the cost can still warn with a thin margin). Advice only. "
         "With no history, `jobs` is 0 and nothing warns. With `item_id` (the item being "
         "quoted), its parts at what a FIFO take of its quantity from the inventory lots "
-        "would cost now (`parts_unit_minor`, #5543, #7067; a part of unknown cost adds "
-        "nothing, and in a currency other than the shop's the parts are 0) replace the "
-        "past jobs' own parts entries in the unit cost and the suggestion. 422 when that "
+        "would cost now (`parts_unit_minor`, #5543, #7067; the share of unknown cost adds "
+        "nothing and sets `parts_unknown`, the known share is kept; in a currency other "
+        "than the shop's the parts are 0) replace the past jobs' own parts cost "
+        "(`parts_minor`) in the unit cost and the suggestion. 422 (on `item_id`) when that "
         "take is past what a stock move's amount holds."
     ),
 )
@@ -1170,14 +1171,24 @@ async def unit_cost(
     check_path(slug, *([item_id] if item_id is not None else []))
     runtime = settings.snapshot().runtime
     parts_unit: Decimal | None = None
+    parts_unknown = False
     if item_id is not None:
         quoted: str = item_id
-        parts_unit = await _run(
-            lambda: orders.lifecycle.parts_unit_cost(
-                quoted, currency or runtime.orders_currency, runtime.orders_currency
+        try:
+            parts_unit, parts_unknown = await asyncio.to_thread(
+                orders.lifecycle.parts_unit_cost,
+                quoted,
+                currency or runtime.orders_currency,
+                runtime.orders_currency,
             )
-        )
-    return await asyncio.to_thread(
+        except LifecycleError as error:
+            # R-P2-30: the take the query's item would make is past what an amount holds.
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+                errors=[{"loc": ["query", "item_id"], "msg": str(error)}],
+            ) from None
+    answer = await asyncio.to_thread(
         unit_cost_history,
         orders.store,
         slug,
@@ -1188,6 +1199,8 @@ async def unit_cost(
         unit_price_minor=unit_price_minor,
         parts_unit_minor=parts_unit,
     )
+    answer.parts_unknown = parts_unknown
+    return answer
 
 
 @router.get(
@@ -3244,6 +3257,13 @@ async def copy_archive_media(
     return operation_answer(result, Attachment)
 
 
+_PARTS_TOO_LARGE = (
+    "`bad_quantity` when the item's parts (from the inventory lots, #7067) are more than "
+    "one stock move holds: a count past 2,147,483,647, or a count times its lot's cost "
+    "past what `numeric(20,6)` holds"
+)
+
+
 @router.post(
     "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/accept",
     response_model=Fulfilment,
@@ -3253,8 +3273,10 @@ async def copy_archive_media(
         "attempts reach its quantity. 409 `fulfilment_accepted`, `fulfilment_failed`, "
         "`item_not_open`, and `fulfilment_stale` for an attempt that printed a revision "
         "earlier than the one the accepted quote prices (an item revised after acceptance, "
-        "#5350): it printed an earlier design."
+        "#5350): it printed an earlier design. A fulfilled item takes its parts from the "
+        "inventory lots: 409 " + _PARTS_TOO_LARGE + "."
     ),
+    responses={409: {"description": "A refusal; among them " + _PARTS_TOO_LARGE + "."}},
 )
 async def accept_fulfilment(
     order_id: str, item_id: str, fulfilment_id: str, orders: OrdersDep
@@ -3286,8 +3308,10 @@ class FulfilBody(BaseModel):
         "writes nothing: 409 `order_not_accepted`, `order_on_hold`, `item_not_open` (settled) "
         "or `item_not_approved` (not `approved` or `failed`; a printed item's print attempt "
         "is accepted on its own), naming the item in `items`; 422 `items` for an item named "
-        "twice; 404 for an item not the order's. The attempts, in the body's order."
+        "twice; 404 for an item not the order's. A fulfilled item takes its parts from the "
+        "inventory lots: 409 " + _PARTS_TOO_LARGE + ". The attempts, in the body's order."
     ),
+    responses={409: {"description": "A refusal; among them " + _PARTS_TOO_LARGE + "."}},
 )
 async def fulfil_items(order_id: str, body: FulfilBody, orders: OrdersDep) -> list[Fulfilment]:
     check_path(order_id)
@@ -3305,8 +3329,11 @@ async def fulfil_items(order_id: str, body: FulfilBody, orders: OrdersDep) -> li
         "`failed`); the order's status follows. 409 `item_not_fulfilled`, "
         "`order_item_shipped` (a shipment carries it: its `shipments` name them), "
         "`order_on_hold`, `order_closed`/`order_cancelled`, and "
-        "`unfulfil_disabled` while the stored setting `orders_allow_unfulfil` is off."
+        "`unfulfil_disabled` while the stored setting `orders_allow_unfulfil` is off. The "
+        "item's parts go back to the lots they came from at their use's cost; 409 "
+        "`bad_quantity` when a lot cannot hold them."
     ),
+    responses={409: {"description": "A refusal; among them `bad_quantity` (a give-back)."}},
 )
 async def unfulfil_item(
     order_id: str, item_id: str, orders: OrdersDep, settings: SettingsStoreDep

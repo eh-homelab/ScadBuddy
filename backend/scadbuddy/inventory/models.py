@@ -523,8 +523,23 @@ class RecostedItem(_Decimals):
         return self._decimal(value)
 
 
-class RecostResult(BaseModel):
+class RecostResult(_Decimals):
+    #: The lot's item, and the lot's cost now (and whether it is unknown), which every
+    #: re-costed move took.
+    item_id: UUID
+    unit_cost_minor: Decimal
+    cost_unknown: bool
+    #: The distinct unit costs the changed moves had before, lowest first.
+    before_unit_costs_minor: list[Decimal]
     #: The moves whose snapshot changed.
     moves: int
     #: The order items whose parts cost or its unknown flag changed.
     orders: list[RecostedItem]
+
+    @field_serializer("unit_cost_minor")
+    def _cost(self, value: Decimal) -> str | None:
+        return self._decimal(value)
+
+    @field_serializer("before_unit_costs_minor")
+    def _costs(self, values: list[Decimal]) -> list[str | None]:
+        return [self._decimal(v) for v in values]

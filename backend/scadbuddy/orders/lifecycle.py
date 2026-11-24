@@ -5077,6 +5077,14 @@ class Lifecycle:
                         f"item {item.id} is {item.status}",
                         items=[item.id],
                     )
+            self._lock_parts_of(
+                conn,
+                [
+                    item
+                    for item, line in zip(items, lines, strict=True)
+                    if self._made(conn, item) + line.quantity >= item.quantity
+                ],
+            )
             attempts: list[Fulfilment] = []
             changed: list[tuple[OrderItem, int | None]] = []
             for item, line in zip(items, lines, strict=True):
@@ -5227,11 +5235,7 @@ class Lifecycle:
         """The attempt accepted, the item `fulfilled` once its accepted attempts reach its
         quantity (its parts out of stock), and the audit row."""
         attempt = self.store.accept_fulfilment(conn, attempt.id, datetime.now(UTC))
-        made = sum(
-            f.quantity
-            for f in self.store.fulfilments(item.id, conn=conn)
-            if f.accepted_at is not None
-        )
+        made = self._made(conn, item)
         if made >= item.quantity:
             item = self.store.update_item(conn, item.id, status="fulfilled")
             self._use_parts(conn, order, item, by)
@@ -5341,6 +5345,24 @@ class Lifecycle:
         self._told(_Change(order, [(item, None)]))
         return rows
 
+    def _made(self, conn: Conn, item: OrderItem) -> int:
+        """How many of the item its accepted attempts made."""
+        return sum(
+            f.quantity
+            for f in self.store.fulfilments(item.id, conn=conn)
+            if f.accepted_at is not None
+        )
+
+    def _lock_parts_of(self, conn: Conn, items: Sequence[OrderItem]) -> None:
+        """The part items that ``items`` take when fulfilled, locked together in
+        `item_id` order (`StockStore.lock_items`) before the first take, so a transition
+        that fulfils several order items never locks a later part item before an earlier
+        one (R-P2-28)."""
+        rows = self.parts.item_parts([item.id for item in items], conn=conn)
+        wanted = {UUID(r.item_id) for found in rows.values() for r in found if r.used == 0}
+        if wanted:
+            self.stock.lock_items(conn, wanted)
+
     def _use_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
         """The item's parts times its quantity out of the lots (`StockStore.take`: FIFO,
         each move at its lot's cost now, of unknown cost where the lot's is), in
@@ -5380,7 +5402,15 @@ class Lifecycle:
                     "cost_unknown": any(m.cost_unknown for m in moves),
                 }
             )
-        self._event(conn, order, by, "parts.used", item_id=item.id, parts=used)
+        self._event(
+            conn,
+            order,
+            by,
+            "parts.used",
+            item_id=item.id,
+            currency=self.rules().shop_currency,
+            parts=used,
+        )
 
     def _return_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
         """What the item's fulfilment took, back to the lots it came from, each use at its
@@ -5390,9 +5420,17 @@ class Lifecycle:
             return
         returned: list[dict[str, Any]] = []
         for row in sorted(rows, key=lambda r: r.item_id):
-            moves = self.stock.give_back(
-                conn, order_item_id=item.id, item_id=UUID(row.item_id), by=by
-            )
+            try:
+                moves = self.stock.give_back(
+                    conn, order_item_id=item.id, item_id=UUID(row.item_id), by=by
+                )
+            except BadQuantity:
+                raise LifecycleError(
+                    "bad_quantity",
+                    f"item {item.id} gives back {row.used} of part {row.item_id}: more than"
+                    " its lot holds",
+                    items=[item.id],
+                ) from None
             self.parts.set_used(conn, item.id, row.item_id, 0)
             returned.append(
                 {
@@ -5401,25 +5439,37 @@ class Lifecycle:
                     "amount_minor": _minor(sum((m.amount_minor for m in moves), Decimal(0))),
                 }
             )
-        self._event(conn, order, by, "parts.returned", item_id=item.id, parts=returned)
+        self._event(
+            conn,
+            order,
+            by,
+            "parts.returned",
+            item_id=item.id,
+            currency=self.rules().shop_currency,
+            parts=returned,
+        )
 
-    def parts_unit_cost(self, order_item_id: str, currency: str, shop_currency: str) -> Decimal:
+    def parts_unit_cost(
+        self, order_item_id: str, currency: str, shop_currency: str
+    ) -> tuple[Decimal, bool]:
         """One unit of the order item's parts at what a FIFO take of its quantity would
         cost now (the plan's Ruling 10, `StockStore.estimate_unit_cost`), in the shop's
-        currency. A part of unknown cost adds nothing, and in any other currency the parts
-        are 0, as a part priced in another currency was before #7067. 0 for an order item
-        that does not exist. ``bad_quantity`` (unprocessable) when the take is past what a
-        move's amount holds (R-P2-16)."""
+        currency, and whether some of it is of unknown cost: the known share is kept and
+        the flag says the rest is missing (R-P2-29). In any other currency the parts are
+        `(0, False)`, as a part priced in another currency was before #7067, and so for
+        an order item that does not exist. ``bad_quantity`` (unprocessable) when the take
+        is past what a move's amount holds (R-P2-16)."""
         item = self.store.item(order_item_id)
         if item is None or currency != shop_currency:
-            return Decimal(0)
+            return Decimal(0), False
         rows = self.parts.item_parts([item.id])[item.id]
         total = Decimal(0)
+        unknown = False
         with self.store.transaction() as conn:
             for row in rows:
                 count = row.per_unit * item.quantity
                 try:
-                    cost, unknown = self.stock.estimate_unit_cost(
+                    cost, some_unknown = self.stock.estimate_unit_cost(
                         conn, UUID(row.item_id), Decimal(count)
                     )
                 except BadQuantity:
@@ -5429,9 +5479,9 @@ class Lifecycle:
                         " stock move holds at its cost",
                         unprocessable=True,
                     ) from None
-                if not unknown:
-                    total += cost * row.per_unit
-        return total
+                total += cost * row.per_unit
+                unknown = unknown or some_unknown
+        return total, unknown
 
     def recost_lot(self, lot_id: UUID, by: Actor) -> RecostResult:
         """ "Re-cost past uses" (spec §6.6): every past `use`, `return` and `adjust` of the
@@ -5480,9 +5530,13 @@ class Lifecycle:
                     by,
                     "item.parts_recosted",
                     lot_id=str(lot_id),
+                    item_id=str(result.item_id),
+                    unit_cost_minor=_minor(result.unit_cost_minor),
+                    before_unit_costs_minor=[_minor(c) for c in result.before_unit_costs_minor],
+                    currency=self.rules().shop_currency,
                     items=[
                         {
-                            "item_id": i.order_item_id,
+                            "order_item_id": i.order_item_id,
                             "before_minor": _minor(i.before_minor),
                             "after_minor": _minor(i.after_minor),
                             "before_unknown": i.before_unknown,

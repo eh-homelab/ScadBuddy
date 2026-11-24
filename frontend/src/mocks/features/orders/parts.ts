@@ -274,13 +274,14 @@ export const handlers = [
     }
     const needs = [...needed].map(([id, n]) => {
       const p = answer(find(id))
-      return { part_id: id, name: p.name, needed: n, on_hand: p.on_hand, short: Math.max(0, n - p.on_hand), low: p.low }
+      // `PartNeed`'s decimals are strings (#7067: lots hold `numeric`).
+      return { item_id: id, part_id: id, name: p.name, needed: n, on_hand: decimal(p.on_hand), short: decimal(Math.max(0, n - p.on_hand)), low: p.low }
     })
     return HttpResponse.json({
       order_id: order.id,
       items: items.map((i) => ({ item_id: i.id, parts: parts.items.get(i.id) ?? [] })),
       needs,
-      short: needs.filter((n) => n.short > 0),
+      short: needs.filter((n) => Number(n.short) > 0),
     })
   }),
   http.put('/api/v1/orders/:id/items/:item/parts', async ({ request, params }) => {

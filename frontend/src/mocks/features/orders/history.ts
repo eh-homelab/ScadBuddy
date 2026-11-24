@@ -55,6 +55,7 @@ export const handlers = [
       main_reason_minor: null,
       suggested_unit_price_minor: null,
       parts_unit_minor: null,
+      parts_unknown: false,
       margin_percent: null,
       warning: false,
       below_cost: false,

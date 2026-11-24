@@ -22,8 +22,9 @@ export function PartsShort({ parts }: { parts: OrderParts }) {
 
 /**
  * An item's parts per unit (#5543): filled from its model's rule when it was added, changed
- * here by hand. They leave stock as a material cost when the item is fulfilled, so a
- * fulfilled item's are fixed (unfulfil it to change them).
+ * here by hand. They leave the inventory lots when the item is fulfilled, and job cost
+ * counts them as its `parts_minor` (#7067), so a fulfilled item's are fixed (unfulfil it to
+ * change them).
  */
 export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { orderId: string; item: Pick<OrderItem, 'id' | 'quantity' | 'status'>; rows: ItemPartRow[]; editable: boolean; onChanged: () => void }) {
   const inventory = useAsync(() => api.parts(), [])

@@ -197,9 +197,11 @@ async def get_rule(slug: Slug, orders: OrdersDep) -> PartRule:
     summary="Set the parts a model's items use",
     description=(
         "Each line is one part per unit: the first `when` whose colour the item has (in any "
-        "case), else `part_id` (null: none). A new item of the model copies the parts it "
-        "gives; items already added keep theirs. No lines removes the rule. 404 "
-        "`part_not_found` for a part that does not exist."
+        "case), else `item_id` (null: none). A part is an inventory item whose kind tracks "
+        "lots (#7067); a line or `when` may still name it `part_id`, read the same, and the "
+        "rule answers `item_id`. A new item of the model copies the parts it gives; items "
+        "already added keep theirs. No lines removes the rule. 404 `part_not_found` for an "
+        "item that does not exist or does not track lots."
     ),
 )
 async def put_rule(slug: Slug, body: PartRuleInput, orders: OrdersDep) -> PartRule:
@@ -217,8 +219,8 @@ async def put_rule(slug: Slug, body: PartRuleInput, orders: OrdersDep) -> PartRu
     description=(
         "Each item's parts per unit and how many its fulfilment took (`used`). `needs` is "
         "what the items not yet fulfilled (nor cancelled) need, part by part, against the "
-        "stock on hand; `short` lists those it does not cover. Advice only: stock never "
-        "blocks."
+        "stock on hand (the item's lots summed; `on_hand` and `short` are decimal strings, "
+        "#7067); `short` lists those it does not cover. Advice only: stock never blocks."
     ),
 )
 async def get_order_parts(order_id: str, orders: OrdersDep) -> OrderParts:
@@ -235,10 +237,13 @@ async def get_order_parts(order_id: str, orders: OrdersDep) -> OrderParts:
     summary="Set the parts a line item uses",
     description=(
         "The parts one unit uses, replaced whole; on the audit line as `item.parts_set`. "
-        "They leave stock, each as a `material` cost entry (`source` "
-        "`part:<item>:<part>`), when the item is fulfilled, and come back when it is "
-        "unfulfilled. 409 `item_parts_used` for a fulfilled item, `part_not_found` for a "
-        "part that does not exist, `order_closed`/`order_cancelled` once ended."
+        "Each part is an inventory item whose kind tracks lots, named `item_id` (`part_id` "
+        "is read the same, for one release; a row that names both is 422). They leave the "
+        "item's lots (FIFO, each move at its lot's cost) when the item is fulfilled, and "
+        "come back to the same lots at the same cost when it is unfulfilled; job cost reads "
+        "them as the item's `parts_minor` (#7067). 409 `item_parts_used` for a fulfilled "
+        "item, `part_not_found` for an item that does not exist or does not track lots, "
+        "`order_closed`/`order_cancelled` once ended."
     ),
 )
 async def set_item_parts(

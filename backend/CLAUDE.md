@@ -2123,15 +2123,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `pages/ProfitPage.tsx` (`/orders/profit`, tab `components/orders/OrdersTabs.tsx`, links
   `components/orders/profit.ts`; mock `mocks/features/orders/report.ts`); agent
   `orders_profit_report` (read) and `order_list`'s new filters.
-  Job cost phase 6, parts (#5543, §11): `orders/parts.py` (`PartStore`, the `parts`,
-  `part_stock_moves`, `model_part_rules` and `order_item_parts` rows; a unit cost is a
-  `numeric` rate, each cost entry rounded once), routes `api/parts.py` (`/parts…`,
-  `GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`). `Lifecycle.add_item` copies
-  the model's rule; `accept_fulfilment` making an item `fulfilled` takes its parts out of stock
-  as `material` cost entries `part:<item>:<part>` (`parts.used`), `unfulfil_item` gives them
-  back (`parts.returned`); a fulfilled item's parts are fixed (`item_parts_used`). The
-  unit-cost history takes `item_id` (`parts_unit_minor`). Agent `part_list`, `part_stock_add`,
-  `order_item_parts_set`.
+  Job cost phase 6, parts (#5543, §11; since #7067 a part is an inventory item whose kind
+  tracks lots): `orders/parts.py` (`PartStore`: the `model_part_rules` and `order_item_parts`
+  rows, over `item_id`; `part_id` is read the same for one release), routes `api/parts.py`
+  (`/parts…`, `GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`).
+  `Lifecycle.add_item` copies the model's rule; `accept_fulfilment` or `fulfil_items` making an
+  item `fulfilled` takes its parts from the lots (`StockStore.take`, the part items locked
+  first in `item_id` order; `parts.used`), and `unfulfil_item` gives each use back to its lot
+  at its cost (`parts.returned`); no cost entry is written: job cost reads the moves as
+  `parts_minor` (`costs.py`). A fulfilled item's parts are fixed (`item_parts_used`).
+  `POST /inventory/lots/{id}/recost` runs `Lifecycle.recost_lot` (`item.parts_recosted`). The
+  unit-cost history takes `item_id` (`parts_unit_minor`, `parts_unknown`). Agent `part_list`,
+  `part_stock_add`, `order_item_parts_set`.
   The machine rate (#4625, order operations spec 2026-11-07 §6): per registry printer,
   `orders/machine_rate.py` (`compute`, pure; `MachineRateStore` over
   `printer_cost_profiles`, `printer_wear_parts` and `printer_maintenance_costs`, each in

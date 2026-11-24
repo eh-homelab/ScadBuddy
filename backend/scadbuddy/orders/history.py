@@ -91,6 +91,9 @@ class UnitCostHistory(BaseModel):
     #: This item's parts per unit at what a FIFO take would cost now, in the unit cost; None
     #: when not asked about an item.
     parts_unit_minor: Money | None = None
+    #: Some of those parts would be taken at an unknown cost, left out of
+    #: ``parts_unit_minor`` (R-P2-29).
+    parts_unknown: bool = False
     #: The settings the figures use.
     markup_percent: str
     thin_margin_percent: str

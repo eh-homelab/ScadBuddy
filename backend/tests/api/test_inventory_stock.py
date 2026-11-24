@@ -330,6 +330,8 @@ def test_an_orders_parts_take_from_lots_and_recost_writes_the_order(client: Test
     done = client.put(path, json={"parts": [{"part_id": hook["id"], "per_unit": 2}]})
     assert done.status_code == 200, done.text
     assert done.json() == [{"item_id": hook["id"], "part_id": hook["id"], "per_unit": 2, "used": 0}]
+    both = {"parts": [{"item_id": hook["id"], "part_id": hook["id"], "per_unit": 1}]}
+    assert client.put(path, json=both).status_code == 422
     twice = {"parts": [{"item_id": hook["id"], "per_unit": 1}] * 2}
     assert client.put(path, json=twice).status_code == 422
     for missing in ("nope", str(uuid.uuid4())):
@@ -344,12 +346,17 @@ def test_an_orders_parts_take_from_lots_and_recost_writes_the_order(client: Test
     history = client.get(
         "/api/v1/orders/history/unit-cost", params={"slug": SLUG, "item_id": item_id}
     ).json()
-    assert (history["jobs"], history["parts_unit_minor"]) == (1, 10)
+    assert (history["jobs"], history["parts_unit_minor"], history["parts_unknown"]) == (
+        1,
+        10,
+        False,
+    )
 
     client.patch(f"{API}/lots/{lot['id']}", json={"unit_cost_minor": "6"}, headers=press())
     recosted = _post(client, f"/lots/{lot['id']}/recost")
     assert recosted.status_code == 200, recosted.text
     assert recosted.json()["moves"] == 1
+    assert (recosted.json()["item_id"], recosted.json()["unit_cost_minor"]) == (hook["id"], "6")
     assert [
         (o["order_id"], o["order_item_id"], o["before_minor"], o["after_minor"])
         for o in recosted.json()["orders"]
@@ -375,3 +382,4 @@ def test_a_parts_estimate_past_an_amount_is_a_422(client: TestClient) -> None:
     got = client.get("/api/v1/orders/history/unit-cost", params={"slug": SLUG, "item_id": item_id})
 
     assert got.status_code == 422, got.text
+    assert got.json()["errors"][0]["loc"] == ["query", "item_id"]
