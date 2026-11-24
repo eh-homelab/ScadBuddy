@@ -7,6 +7,7 @@ import logging
 import math
 import unicodedata
 from dataclasses import replace
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -481,6 +482,43 @@ def model_facets(
     return ModelFacets(
         total=len(records), matched=len(selected), tags=tag_counts(selected, tag or [])
     )
+
+
+class TemplateCopyStatus(BaseModel):
+    """The last run of the copy of the templates' files to rows (#7317): at an API start,
+    or in a housekeeping sweep (`library/template_copy.py` `copy_templates`)."""
+
+    started_at: datetime
+    #: ``None`` while the run goes on, when it stopped before its end, or when it is
+    #: ``incomplete``.
+    finished_at: datetime | None
+    #: The run walked to its end but may have missed templates (a listing, a stat or a
+    #: batch's read failed, ``models/`` was missing, or the walk saw no template while
+    #: rows exist). It dropped no row; the next run tries again.
+    incomplete: bool
+    added: int
+    refreshed: int
+    dropped: int
+    #: ``{template_id, error}`` for each template the run walked whose row keeps no
+    #: ``meta`` (its ``model.json`` could not be read or stored).
+    unreadable: list[dict[str, str]]
+
+
+@router.get(
+    "/model-records/copy-status",
+    response_model=TemplateCopyStatus,
+    summary="The last copy of the templates' files to rows",
+)
+async def template_copy_status(catalogue: CatalogueDep) -> TemplateCopyStatus:
+    """The last run of the copy of the templates' files to rows (#7317), at an API start
+    or in a housekeeping sweep: when it started and finished, what it added, refreshed and
+    dropped, and the templates whose ``model.json`` its rows could not keep. 404 before
+    any run."""
+    refresh = catalogue.refresh
+    last = None if refresh is None else await asyncio.to_thread(refresh.rows.last_run)
+    if last is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "no copy of the templates to rows has run")
+    return TemplateCopyStatus.model_validate(last)
 
 
 class PastedSource(BaseModel):

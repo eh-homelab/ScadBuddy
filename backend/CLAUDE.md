@@ -1422,6 +1422,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   parameters (`assets.py`: the bytes under `data/assets/`, the metadata, last use and
   usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes;
   a render worker's `RemoteAssetStore` keeps its copies and reads the rows through CRUD routes, #5298).
+  Template records (#7317, spec `2026-11-25-model-records-in-postgres-design.md`, phase 1;
+  `docs/architecture/data.md` "Template records"): `template_rows.py` (`TemplateRows`, the
+  derived `templates` rows and the `template_copy_runs` ledger; git stays the record),
+  `template_refresh.py` (`TemplateRefresh`, the models history's hook: a commit's rows in
+  its HEAD transaction, a no-commit write's under the write lock; a failure is logged and
+  counted in `scadbuddy_template_refresh_failures_total`, never raised) and
+  `template_copy.py` (`copy_templates`, at each API start and in the housekeeping sweep
+  `TEMPLATE_COPY_SWEEP`, under the advisory lock `COPY_LOCK`, `BATCH` templates per hold
+  of the write lock; `GET /model-records/copy-status` answers its last run). A test's app
+  skips the start copy unless the test is marked `template_copy` (`tests/api/conftest.py`).
 - `backend/scadbuddy/editor/` — the language server's guards (#95): `nonet.py`, the
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with
