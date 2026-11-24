@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -10,7 +11,7 @@ import threading
 import time
 import uuid
 import zipfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -392,6 +393,8 @@ class OutputStore:
         #: `UNDRAWABLE_MAX`.
         self._undrawable: dict[str, float | None] = {}
         self._undrawable_lock = threading.Lock()
+        #: The row `reading` read for this thread, as ``(output_id, row)``.
+        self._held = threading.local()
 
     def _changed(self, slug: str) -> None:
         if self.on_change is None:
@@ -401,12 +404,35 @@ class OutputStore:
         except Exception:
             logger.exception("an output change listener failed", extra={"slug": slug})
 
+    @contextlib.contextmanager
+    def reading(self, output_id: str) -> Iterator[None]:
+        """Within it, on this thread, every read of ``output_id`` uses one read of its row
+        (#7255): a detail asks for about ten parts of one output, which would otherwise
+        be one query each. With no row (before a copy run finished), each part reads its
+        files, as before. Raises `OutputNotFoundError` as `get` does."""
+        row = self._row_of(output_id)
+        self._held.row = (output_id, row)
+        try:
+            yield
+        finally:
+            del self._held.row
+
+    def _held_row(self, output_id: str) -> tuple[bool, OutputRow | None]:
+        """Whether `reading` holds ``output_id`` on this thread, and its row."""
+        held: tuple[str, OutputRow | None] | None = getattr(self._held, "row", None)
+        if held is None or held[0] != output_id:
+            return False, None
+        return True, held[1]
+
     def _row_of(self, output_id: str) -> OutputRow | None:
         """The output's row (#7255). ``None`` when the store has no rows, or when a copy
         run has not finished and the output has no row: the caller then reads the files.
         Once a copy run finished, an output with no row is gone."""
         if self.rows is None:
             return None
+        held, row = self._held_row(output_id)
+        if held:
+            return row
         row = self.rows.get(output_id)
         if row is None and self.rows.copied():
             raise OutputNotFoundError(output_id)
@@ -417,6 +443,11 @@ class OutputStore:
         return self.rows is not None and self.rows.copied()
 
     def _find_dir(self, output_id: str) -> Path:
+        held, row = self._held_row(output_id)
+        if held:
+            if row is not None:
+                return self.paths.output_dir(row.slug, output_id)
+            return self._files_dir(output_id)
         if self.rows is not None:
             # One indexed read, no glob (#7255).
             slug = self.rows.slug_of(output_id)

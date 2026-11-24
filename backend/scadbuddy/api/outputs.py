@@ -226,6 +226,17 @@ def detail(
     *,
     failed_before_queueing: bool = False,
 ) -> OutputDetail:
+    # One read of the output's row for every part below (#7255).
+    with store.reading(meta.id):
+        return _detail(store, meta, library_files, failed_before_queueing)
+
+
+def _detail(
+    store: OutputStore,
+    meta: OutputMeta,
+    library_files: list[LibraryCopy],
+    failed_before_queueing: bool,
+) -> OutputDetail:
     params = store.params(meta.id)
     thumbnail_version = _thumbnail_version(store.thumbnail_path(meta.id))
     return OutputDetail(

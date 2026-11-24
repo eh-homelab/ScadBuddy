@@ -12,10 +12,12 @@ import zipfile
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
 
+from scadbuddy.api.outputs import detail
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.output_index import OutputIndex
@@ -439,3 +441,45 @@ async def test_a_save_orders_by_the_rows_after_a_copy(
     later = store.create(job, name="second")
     assert later.created_at > meta.created_at
     assert [m.id for m in store.list_for(job.slug)] == [later.id, meta.id]
+
+
+def _counting_connections(monkeypatch: pytest.MonkeyPatch, store: OutputStore) -> list[int]:
+    pool = rows_of(store)._pool
+    taken: list[int] = []
+    connection = pool.connection
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        taken.append(1)
+        return connection(*args, **kwargs)
+
+    monkeypatch.setattr(pool, "connection", counted)
+    return taken
+
+
+async def test_an_output_detail_reads_its_row_once(
+    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`detail` answers the params, inputs, bom, record, files, manifest, sources and
+    backfill of one output from one read of its row, not one query each."""
+    store, meta, job = saved
+    finish_copy(store)
+    assert rows_of(store).copied()
+    expected = detail(store, meta, [])
+    taken = _counting_connections(monkeypatch, store)
+    got = detail(store, meta, [])
+    assert len(taken) == 1
+    assert got == expected
+    assert got.params == job.params
+    assert got.record is not None and got.manifest and got.bom
+    assert got.inputs["v"] == 1
+
+
+async def test_an_output_detail_falls_back_to_its_files_before_a_copy(
+    saved: tuple[OutputStore, OutputMeta, Job],
+) -> None:
+    store, meta, job = saved
+    with_row = detail(store, meta, [])
+    rows_of(store).delete(meta.id)
+    from_files = detail(store, meta, [])
+    assert from_files == with_row
+    assert from_files.params == job.params and from_files.record is not None
