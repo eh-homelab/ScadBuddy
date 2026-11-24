@@ -1574,7 +1574,8 @@ async def _import_maintenance_logged(state: AppState) -> None:
 
 async def _import_attempt_media_logged(state: AppState) -> None:
     """#7234: one ``AttemptMedia`` step for each order attempt still missing a medium
-    (`orders.archives.sweep_media`, spec 2026-11-05 §4.6)."""
+    (`orders.archives.sweep_media`, spec 2026-11-05 §4.6), counted in
+    ``scadbuddy_attempt_media_sweep_starts`` (#7491)."""
     orders = state.components.get(ORDERS)
     try:
         started = await sweep_media(
@@ -1586,6 +1587,7 @@ async def _import_attempt_media_logged(state: AppState) -> None:
     except Exception:
         logger.exception("could not sweep the order attempts' media")
         raise
+    state.metrics.attempt_media_sweep_starts.inc(started)
     if started:
         logger.info("started attempt media imports", extra={"count": started})
 

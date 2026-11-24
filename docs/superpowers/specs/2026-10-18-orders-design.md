@@ -1245,18 +1245,21 @@ for a click. Each attempt has one `AttemptMedia` workflow on the `library` queue
 `attempt-media:<fulfilment id>`, `workflows/attempt_media.py`), whose step
 (`orders/archives.py` `mirror_attempt`) copies the archives' facts, then imports each
 archive's latest `finish_` photo (the last by name) and its timelapse that the attempt, or
-its item, does not have yet (`mirror_media`). Three triggers start it: a hand attempt with
-`archive_id` (`record_fulfilment`, `update_fulfilment`, after `_with_archive_facts`), a
+its item, does not have yet (`mirror_media`). Four starters start it: a hand attempt with
+`archive_id` (`record_fulfilment`, `update_fulfilment`, after `_with_archive_facts`) and a
 heard `print.outcome` (`mirror_run`), both with steps now, at +2 min and at +15 min (a
-signal-with-start of `with_retries`, so a one-step run they join steps again); and
+signal-with-start of `with_retries`, so a one-step run they join steps again);
 `GET …/fulfilments/{f}/archives`, one step, only when an archive offers a medium the
-attempt lacks. A step finds a medium missing when it is neither attached nor refused, and
+attempt lacks; and the housekeeping sweep `housekeeping_import_attempt_media`
+(`orders/archives.py` `sweep_media`, #7234, below), one step, no retries. A step finds a medium missing when it is neither attached nor refused, and
 its archive offers it or completed under an hour ago or has no completion time yet. A medium refused as larger than the upload limit is a row of
 `order_attempt_media_refusals`; the steps, the read and the sweep skip it while the limit
-is no higher than that row's `limit_bytes`. No route waits on a download. The housekeeping sweep
-`housekeeping_import_attempt_media` (#7234, on the prune Schedule) starts one step for each
+is no higher than that row's `limit_bytes`. No route waits on a download. The sweep runs
+on the prune Schedule and starts one step for each
 attempt of the last 14 days that still lacks a medium and was not checked in the last hour
-(`media_checked_at`). Every copy, imported or by hand, carries `archive_id` and
+(`media_checked_at`), at most 40 a pass, least lately checked first, and leaves out a medium
+that the last step found an archive past an hour not offering
+(`order_attempt_media_not_offered`, #7453). Every copy, imported or by hand, carries `archive_id` and
 `archive_media` (`finished_photo` or `timelapse`) on `entity_attachments` and the audit
 line `source: archive` (#7232), and a partial unique index on
 `(subject, archive_id, archive_media, filename)` makes a race between two copies one row.
