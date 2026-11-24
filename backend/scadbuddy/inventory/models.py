@@ -294,7 +294,7 @@ class Lot(_Decimals):
     unit_cost_minor: Decimal
     cost_unknown: bool
     #: The currency the lot was bought in, when it was not the shop's (R-7067-11,
-    #: R-P2-12); a cost set later keeps it.
+    #: R-P2-12); null means the shop's. A cost set later keeps it.
     cost_currency: str | None
     #: One unit's cost as given in `cost_currency`, in its minor units (R-P2-11).
     foreign_unit_cost_minor: Decimal | None
