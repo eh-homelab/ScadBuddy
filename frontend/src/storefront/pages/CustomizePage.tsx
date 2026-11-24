@@ -481,7 +481,7 @@ export function CustomizePage({
       </section>
     )
   }
-  if (file) return <FileCustomize initial={file} timing={timing} wait={wait} now={now} debounceMs={debounceMs} />
+  if (file) return <FileCustomize key={file.id} initial={file} timing={timing} wait={wait} now={now} debounceMs={debounceMs} />
   if (!listing) return <p className="sf-hint">Loading the design…</p>
 
   return (

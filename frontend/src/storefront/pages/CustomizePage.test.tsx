@@ -2,7 +2,7 @@ import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PreviewJob } from '../../components/Preview'
-import { CHARM_ID, ESTIMATE, FILE_ID, KEYCHAIN, NO_PRICE, PENDING_PRICE, TAG_ID } from '../../mocks/features/storefrontPublic'
+import { CHARM_ID, ESTIMATE, FILE, FILE_ID, KEYCHAIN, NO_PRICE, PENDING_PRICE, TAG_ID } from '../../mocks/features/storefrontPublic'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import type { PollTiming } from '../poll'
@@ -1014,6 +1014,15 @@ describe('CustomizePage of a file listing (#6710)', () => {
     // The read waits out the debounce; the page says it is working the price out meanwhile.
     expect(await screen.findByText('Working out the price…')).toBeInTheDocument()
     expect(screen.queryByText('We price this design by hand')).toBeNull()
+  })
+
+  it('shows the other file listing when its id changes in place', async () => {
+    server.use(http.get('/api/store/v1/listings/l9', () => HttpResponse.json({ ...FILE, id: 'l9', title: 'Desk hook' })))
+    const { rerender } = show(FILE_ID)
+    expect(await screen.findByText('Bag clip')).toBeInTheDocument()
+    rerender(<CustomizePage id="l9" timing={FAST} debounceMs={10} />)
+    expect(await screen.findByText('Desk hook')).toBeInTheDocument()
+    expect(screen.queryByText('Bag clip')).toBeNull()
   })
 
   it('adds the colours to the order, with no values', async () => {

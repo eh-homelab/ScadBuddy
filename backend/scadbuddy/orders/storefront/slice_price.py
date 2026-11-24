@@ -454,14 +454,17 @@ class SlicePrices:
         file ``model_sha256``, of any colours, the listing's own before another's: two
         listings of one file share a price (`key_subject`), and its row names only the one
         that made it. None when the file has none."""
+        read = (
+            f"SELECT {_COLUMNS} FROM storefront_slice_prices"
+            " WHERE model_sha256 = %s AND status = 'done' AND listing_id {}"
+            " AND currency IS NOT NULL AND total_minor IS NOT NULL"
+            " ORDER BY finished_at DESC LIMIT 1"
+        )
+        # Two reads, so each takes the order of `storefront_slice_prices_listing_last`.
         with self._pool.connection() as conn:
-            found = conn.execute(
-                f"SELECT {_COLUMNS} FROM storefront_slice_prices"
-                " WHERE model_sha256 = %s AND status = 'done' AND listing_id IS NOT NULL"
-                " AND currency IS NOT NULL AND total_minor IS NOT NULL"
-                " ORDER BY (listing_id = %s) DESC, finished_at DESC LIMIT 1",
-                (model_sha256, listing_id),
-            ).fetchone()
+            found = conn.execute(read.format("= %s"), (model_sha256, listing_id)).fetchone()
+            if found is None:
+                found = conn.execute(read.format("IS NOT NULL"), (model_sha256,)).fetchone()
         return _row(found)
 
     def fail(self, price_key: str, model_sha256: str, failure: str) -> PriceRow:
