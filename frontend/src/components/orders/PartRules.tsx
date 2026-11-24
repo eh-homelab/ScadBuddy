@@ -11,7 +11,7 @@ import { refusalText } from './refusal'
 /** The Select's value for "no part": a Radix item cannot have an empty value. */
 const NONE = '__none'
 
-/** A part picker over the inventory's lot items; `allowNone` offers "None". */
+/** A part picker over the inventory's unarchived lot items (and the chosen one, archived or not); `allowNone` offers "None". */
 export function PartSelect({ parts, value, onChange, label, allowNone = false }: { parts: PartChoice[]; value: string | null; onChange: (id: string | null) => void; label: string; allowNone?: boolean }) {
   return (
     <Select value={value ?? NONE} onValueChange={(next) => onChange(next === NONE ? null : next)}>
@@ -20,11 +20,13 @@ export function PartSelect({ parts, value, onChange, label, allowNone = false }:
       </SelectTrigger>
       <SelectContent position="popper">
         {allowNone && <SelectItem value={NONE}>None</SelectItem>}
-        {parts.map((p) => (
-          <SelectItem key={p.id} value={p.id}>
-            {p.name}
-          </SelectItem>
-        ))}
+        {parts
+          .filter((p) => !p.archived || p.id === value)
+          .map((p) => (
+            <SelectItem key={p.id} value={p.id}>
+              {p.archived ? `${p.name} (archived)` : p.name}
+            </SelectItem>
+          ))}
       </SelectContent>
     </Select>
   )
@@ -37,7 +39,9 @@ export function PartSelect({ parts, value, onChange, label, allowNone = false }:
  */
 export function PartRules() {
   const id = useId()
-  const parts = usePartItems().data ?? []
+  const partItems = usePartItems()
+  const all = partItems.data ?? []
+  const parts = all.filter((p) => !p.archived)
   const [slug, setSlug] = useState('')
   const [loaded, setLoaded] = useState<string | null>(null)
   const [lines, setLines] = useState<PartRuleLine[]>([])
@@ -119,7 +123,7 @@ export function PartRules() {
                   value={String(line.per_unit)}
                   onChange={(e) => edit(index, { per_unit: Math.max(1, Number(e.target.value) || 1) })}
                 />
-                <PartSelect parts={parts} value={line.item_id ?? null} onChange={(item_id) => edit(index, { item_id })} label={`Line ${index + 1} part`} allowNone />
+                <PartSelect parts={all} value={line.item_id ?? null} onChange={(item_id) => edit(index, { item_id })} label={`Line ${index + 1} part`} allowNone />
                 <Button size="xs" variant="ghost" onClick={() => edit(index, { when: [...(line.when ?? []), { colour: '#000000', item_id: parts[0]?.id ?? '' }] })} disabled={parts.length === 0}>
                   Add colour
                 </Button>
@@ -137,7 +141,7 @@ export function PartRules() {
                     onChange={(e) => edit(index, { when: (line.when ?? []).map((x, i) => (i === wi ? { ...x, colour: e.target.value } : x)) })}
                   />
                   <span>use</span>
-                  <PartSelect parts={parts} value={w.item_id || null} onChange={(part) => part && edit(index, { when: (line.when ?? []).map((x, i) => (i === wi ? { ...x, item_id: part } : x)) })} label={`Line ${index + 1} colour ${wi + 1} part`} />
+                  <PartSelect parts={all} value={w.item_id || null} onChange={(part) => part && edit(index, { when: (line.when ?? []).map((x, i) => (i === wi ? { ...x, item_id: part } : x)) })} label={`Line ${index + 1} colour ${wi + 1} part`} />
                   <Button size="xs" variant="ghost" onClick={() => edit(index, { when: (line.when ?? []).filter((_, i) => i !== wi) })}>
                     Remove colour
                   </Button>
@@ -164,6 +168,11 @@ export function PartRules() {
       {error && (
         <p role="alert" className="text-[13px] text-warn">
           {error}
+        </p>
+      )}
+      {partItems.error && (
+        <p role="alert" className="text-[13px] text-warn">
+          The parts could not be loaded: {partItems.error.message}
         </p>
       )}
     </section>

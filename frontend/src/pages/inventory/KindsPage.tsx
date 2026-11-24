@@ -23,7 +23,18 @@ const NEW_TRACKING: Tracking[] = ['lot', 'unit', 'none']
 /** A key's JSON Schema type as the key table names it. */
 const KEY_TYPES = { string: 'Text', number: 'Number', integer: 'Whole number', boolean: 'Yes/no', array: 'List' } as const
 type KeyType = keyof typeof KEY_TYPES
-type KeyRow = { key: string; type: KeyType; description: string; was: string | null }
+/** One key row; `rid` names the row for React, so a removed row never hands its inputs to the next. */
+type KeyRow = { rid: string; key: string; type: KeyType; description: string; was: string | null }
+
+let rowCount = 0
+const rowId = () => `key-row-${(rowCount += 1)}`
+
+/**
+ * The keywords whose value only holds for one type (a bound, a length, a list's items, a
+ * value of the type). A key whose type changes drops them; the server would refuse an
+ * `enum` of the old type, and a bound of no use on the new one only misleads.
+ */
+const TYPED_KEYWORDS = ['enum', 'const', 'default', 'examples', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'pattern', 'format', 'items', 'prefixItems', 'contains', 'minItems', 'maxItems', 'uniqueItems']
 
 /** The first type of a key's `type` that is not `null`; text when it names none the table knows. */
 function keyTypeOf(sub: Record<string, unknown> | undefined): KeyType {
@@ -34,12 +45,13 @@ function keyTypeOf(sub: Record<string, unknown> | undefined): KeyType {
 const propertiesOf = (schema: Record<string, unknown>) => (schema.properties && typeof schema.properties === 'object' ? (schema.properties as Record<string, Record<string, unknown>>) : {})
 
 function rowsOf(schema: Record<string, unknown>): KeyRow[] {
-  return Object.entries(propertiesOf(schema)).map(([key, sub]) => ({ key, type: keyTypeOf(sub), description: typeof sub.description === 'string' ? sub.description : '', was: key }))
+  return Object.entries(propertiesOf(schema)).map(([key, sub]) => ({ rid: rowId(), key, type: keyTypeOf(sub), description: typeof sub.description === 'string' ? sub.description : '', was: key }))
 }
 
 /**
  * The kind's own schema with the table's keys. A key keeps every other keyword it had (an
- * `enum`, a bound); a type left as it was keeps its union with `null`. The server checks the
+ * `enum`, a bound) while its type stays; a type left as it was keeps its union with `null`.
+ * A changed type drops the keywords of the old one (`TYPED_KEYWORDS`). The server checks the
  * whole schema (`bad_property_schema`), and a schema never refuses a key (spec §6.3a).
  */
 function schemaOf(own: Record<string, unknown>, rows: KeyRow[]): Record<string, unknown> {
@@ -50,6 +62,7 @@ function schemaOf(own: Record<string, unknown>, rows: KeyRow[]): Record<string, 
     if (!key) continue
     const old = row.was !== null ? before[row.was] : undefined
     const sub: Record<string, unknown> = { ...old }
+    if (old && keyTypeOf(old) !== row.type) for (const keyword of TYPED_KEYWORDS) delete sub[keyword]
     if (!old || keyTypeOf(old) !== row.type) sub.type = row.type
     if (row.type === 'array') sub.items = (old?.items as unknown) ?? { type: 'string' }
     else delete sub.items
@@ -124,7 +137,7 @@ export function KindsPage() {
           </p>
         )}
         {kinds.data && (
-          <ul role="tree" aria-label="Item kinds" className="rounded-md border p-2">
+          <ul aria-label="Item kinds" className="rounded-md border p-2">
             {kindTree(all).map((node) => (
               <Node key={node.kind.id} node={node} kinds={all} editing={editing} onEdit={setEditing} onArchive={(kind) => void archive(kind)} onSaved={kinds.refresh} />
             ))}
@@ -148,7 +161,7 @@ onSaved: () => void
 function Node({ node, kinds, editing, onEdit, onArchive, onSaved }: NodeProps) {
   const { kind } = node
   return (
-    <li role="treeitem" aria-label={kind.name} aria-expanded={node.children.length > 0 ? true : undefined} aria-selected={false} className="py-0.5">
+    <li className="py-0.5">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md px-2 py-1 hover:bg-muted/40">
         <Link to={inventoryPaths.kind(kind.id)} className="font-medium underline-offset-4 hover:underline">
           {kind.name}
@@ -181,7 +194,7 @@ function Node({ node, kinds, editing, onEdit, onArchive, onSaved }: NodeProps) {
         />
       )}
       {node.children.length > 0 && (
-        <ul role="group" className="ml-4 border-l pl-2">
+        <ul aria-label={`Kinds under ${kind.name}`} className="ml-4 border-l pl-2">
           {node.children.map((child) => (
             <Node key={child.kind.id} node={child} kinds={kinds} editing={editing} onEdit={onEdit} onArchive={onArchive} onSaved={onSaved} />
           ))}
@@ -418,7 +431,7 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
             </thead>
             <tbody>
               {rows.map((row, at) => (
-                <tr key={at}>
+                <tr key={row.rid}>
                   <td className="py-1 pr-2">
                     <Input aria-label={`Key ${at + 1}`} value={row.key} onChange={(e) => edit(at, { key: e.target.value })} className="h-8 w-36 font-mono" />
                   </td>
@@ -450,7 +463,7 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
           </table>
         )}
         <div>
-          <Button type="button" size="xs" variant="outline" onClick={() => setRows((all) => [...all, { key: '', type: 'string', description: '', was: null }])}>
+          <Button type="button" size="xs" variant="outline" onClick={() => setRows((all) => [...all, { rid: rowId(), key: '', type: 'string', description: '', was: null }])}>
             Add key
           </Button>
         </div>

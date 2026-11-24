@@ -95,7 +95,7 @@ function LowStock({ items }: { items: Item[] }) {
           <Link to={inventoryPaths.item(item.id)} className="underline-offset-4 hover:underline">
             {item.name}
           </Link>{' '}
-          ({item.on_hand})
+          ({item.on_hand} {item.uom})
         </span>
       ))}
       .{' '}

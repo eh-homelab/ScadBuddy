@@ -1,5 +1,6 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { HttpResponse, http } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
@@ -98,5 +99,27 @@ describe('item parts (#5543, #7067)', () => {
     expect((await inventoryApi.item(hook.id)).on_hand).toBe('10')
     const after = await api.orderCosts(ORDER_ACCEPTED)
     expect(after.items.find((i) => i.item_id === ITEM_APPROVED)!.parts_minor).toBe(0)
+  })
+
+  it("names an archived part on the item, and offers only unarchived ones to pick", async () => {
+    const user = userEvent.setup()
+    const hook = seedHook(10)
+    const old = seedHook(0)
+    await inventoryApi.patchItem(old.id, { name: 'Old hook' })
+    await inventoryApi.archiveItem(old.id)
+    renderPage(<ItemPartsEditor orderId={ORDER_ACCEPTED} item={{ id: ITEM_APPROVED, quantity: 2, status: 'approved' }} rows={[{ item_id: old.id, part_id: old.id, per_unit: 1, used: 0 } as never]} editable onChanged={() => {}} />)
+    expect(await screen.findByText(/Old hook/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Edit parts' }))
+    await user.click(screen.getByRole('combobox', { name: 'Part 1' }))
+    const options = (await screen.findAllByRole('option')).map((o) => o.textContent)
+    expect(options).toContain('Old hook (archived)')
+    expect(options).toContain(hook.name)
+    expect(options.filter((name) => name === 'Old hook')).toEqual([])
+  })
+
+  it('says when the parts cannot be read', async () => {
+    server.use(http.get('/api/v1/inventory/items', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    renderPage(<ItemPartsEditor orderId={ORDER_ACCEPTED} item={{ id: ITEM_APPROVED, quantity: 2, status: 'approved' }} rows={[]} editable onChanged={() => {}} />)
+    expect(await screen.findByText(/The parts could not be loaded/)).toHaveAttribute('role', 'alert')
   })
 })

@@ -6,15 +6,16 @@ import { DataTable, type Column } from '../../components/records/DataTable'
 import { parseDecimal } from '../../lib/decimal'
 import { inventoryAnchors, inventoryPaths } from '../../lib/inventoryLinks'
 import { useAsync } from '../../lib/useAsync'
+import { useHashTarget } from '../../lib/useHashTarget'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { inventoryApi, type Item, type Lot, type Move, type Offer, type RecostResult, type Unit, type UnitStatus } from './api'
-import { PlaceSelect } from './PlaceSelect'
+import { PlaceSelect, PlacesError } from './PlaceSelect'
 import { placeName, usePlaces, type Place } from './places'
-import { dayText, dec, majorToMinor, minorText, minorToMajor, packCost, pricedOffer, qtyText, STATUS_LABELS, unitLabel, valueText } from './format'
+import { dayText, dec, foreignCostText, majorToMinor, minorText, minorToMajor, packCost, pricedOffer, qtyText, STATUS_LABELS, unitLabel, valueText } from './format'
 
 const failed = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
 
@@ -88,14 +89,23 @@ function useRefreshOn(version: number, refresh: () => void) {
   }, [version, refresh])
 }
 
+/** The anchor id's lot, or null. */
+const lotAnchored = (hashId: string | null) => (hashId?.startsWith('lot-') ? hashId.slice('lot-'.length) : null)
+
+/** A lot something has taken from or put back: its stock moved past the receive, or a listed move names it. */
+const hasUses = (lot: Lot, moved: ReadonlySet<string>) => moved.has(lot.id) || dec(lot.on_hand) !== dec(lot.received_qty)
+
 /**
  * #7067 — a lot item's stock: its lots in FIFO order, "Receive", "Use" and "Count", a lot's
- * cost and "Re-cost past uses". A use past the stock on hand goes below 0 and is flagged for
- * review; stock never blocks (spec §6.6).
+ * cost and "Re-cost past uses" (on every lot with uses). A use past the stock on hand goes
+ * below 0 and is flagged for review; stock never blocks (spec §6.6). `offers` is null until
+ * they are read (or when the read failed: the page says so). `#lot-<id>` scrolls once the
+ * lots have rendered.
  */
-export function LotStock({ item, offers, money, named, version, onChanged }: { item: Item; offers: Offer[]; money: ShopMoney; named: string | null; version: number; onChanged: () => void }) {
+export function LotStock({ item, offers, money, moved, version, onChanged }: { item: Item; offers: Offer[] | null; money: ShopMoney; moved: ReadonlySet<string>; version: number; onChanged: () => void }) {
   const lots = useAsync(() => inventoryApi.lots(item.id), [item.id])
   useRefreshOn(version, lots.refresh)
+  const named = lotAnchored(useHashTarget(!!lots.data))
   const places = usePlaces()
   const [placing, setPlacing] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -103,7 +113,22 @@ export function LotStock({ item, offers, money, named, version, onChanged }: { i
   const [editing, setEditing] = useState<string | null>(null)
   const [costed, setCosted] = useState<string | null>(null)
   const [recost, setRecost] = useState<RecostResult | null>(null)
-  const priced = pricedOffer(offers, money.currency)
+  const [recosting, setRecosting] = useState<string | null>(null)
+  const priced = offers ? pricedOffer(offers, money.currency) : undefined
+
+  async function recostLot(lotId: string) {
+    if (recosting) return
+    setRecosting(lotId)
+    setError(null)
+    try {
+      setRecost(await inventoryApi.recostLot(lotId))
+      onChanged()
+    } catch (cause) {
+      setError(failed(cause, 'The past uses could not be re-costed. Try again.'))
+    } finally {
+      setRecosting(null)
+    }
+  }
 
   function done() {
     setOpen(null)
@@ -135,9 +160,7 @@ export function LotStock({ item, offers, money, named, version, onChanged }: { i
           <span>
             {minorText(lot.unit_cost_minor, money, lot.cost_unknown)}
             {lot.cost_currency && lot.foreign_unit_cost_minor && (
-              <span className="block text-[12px] text-muted-foreground">
-                bought at {lot.foreign_unit_cost_minor} minor units of {lot.cost_currency}
-              </span>
+              <span className="block text-[12px] text-muted-foreground">bought at {foreignCostText(lot.foreign_unit_cost_minor, lot.cost_currency, money)} a unit</span>
             )}
           </span>
         ),
@@ -173,24 +196,12 @@ export function LotStock({ item, offers, money, named, version, onChanged }: { i
       cell: (lot) =>
         editing === lot.id ? null : (
           <span className="flex flex-wrap gap-1">
-            <Button size="xs" variant="ghost" onClick={() => setEditing(lot.id)}>
+            <Button size="xs" variant="ghost" disabled={!money.currency} onClick={() => setEditing(lot.id)}>
               Edit cost
             </Button>
-            {costed === lot.id && (
-              <Button
-                size="xs"
-                variant="outline"
-                onClick={() =>
-                  void inventoryApi.recostLot(lot.id).then(
-                    (result) => {
-                      setRecost(result)
-                      onChanged()
-                    },
-                    (cause: unknown) => setError(failed(cause, 'The past uses could not be re-costed. Try again.')),
-                  )
-                }
-              >
-                Re-cost past uses
+            {hasUses(lot, moved) && (
+              <Button size="xs" variant={costed === lot.id ? 'outline' : 'ghost'} disabled={recosting !== null} aria-busy={recosting === lot.id} onClick={() => void recostLot(lot.id)}>
+                {recosting === lot.id ? 'Re-costing…' : 'Re-cost past uses'}
               </Button>
             )}
           </span>
@@ -208,12 +219,13 @@ export function LotStock({ item, offers, money, named, version, onChanged }: { i
           </Button>
         ))}
       </div>
-      {!priced && <p className="text-[13px] text-muted-foreground">No supplier offer gives a price in {money.currency ?? 'the shop currency'}: enter what a lot cost when you receive it, or leave it empty and set the cost later.</p>}
+      {offers && !priced && money.currency && <p className="text-[13px] text-muted-foreground">No supplier offer gives a price in {money.currency ?? 'the shop currency'}: enter what a lot cost when you receive it, or leave it empty and set the cost later.</p>}
       {open === 'receive' && <ReceiveLotForm item={item} offer={priced} money={money} places={places.data ?? []} onDone={done} />}
       {open === 'use' && <UseForm item={item} onDone={done} />}
       {open === 'count' && <CountForm item={item} onDone={done} />}
       {costed && !recost && <p className="text-[13px] text-muted-foreground">Past uses keep the cost they were taken at. "Re-cost past uses" gives them this lot's cost now, and changes the parts cost of the orders that used them.</p>}
       {recost && <RecostSummary result={recost} money={money} />}
+      <PlacesError error={places.error} />
       {(error ?? lots.error) && (
         <p role="alert" className="text-[13px] text-warn">
           {error ?? `The lots could not be loaded: ${lots.error!.message}`}
@@ -241,6 +253,7 @@ function LotCostEditor({ lot, money, onCancel, onSaved }: { lot: Lot; money: Sho
   const write = useWrite(onSaved)
 
   function save() {
+    if (!money.currency) return
     const minor = majorToMinor(cost, money.exponent, money.exponent + UNIT_COST_PLACES)
     if (minor === null) return write.fail(`Enter the cost of one unit, such as 0.25, with up to ${money.exponent + UNIT_COST_PLACES} decimals.`)
     void write.run(() => inventoryApi.patchLot(lot.id, { unit_cost_minor: minor }), 'The cost could not be saved. Try again.')
@@ -251,8 +264,8 @@ function LotCostEditor({ lot, money, onCancel, onSaved }: { lot: Lot; money: Sho
       <label htmlFor={`${id}-cost`} className="sr-only">
         Unit cost
       </label>
-      <Input id={`${id}-cost`} inputMode="decimal" className="h-7 w-24 text-right tabular-nums" value={cost} onChange={(e) => setCost(e.target.value)} />
-      <Button size="xs" disabled={write.busy} onClick={save}>
+      <Input id={`${id}-cost`} inputMode="decimal" className="h-7 w-24 text-right tabular-nums" value={cost} disabled={!money.currency} onChange={(e) => setCost(e.target.value)} />
+      <Button size="xs" disabled={write.busy || !money.currency} onClick={save}>
         Save cost
       </Button>
       <Button size="xs" variant="ghost" onClick={onCancel}>
@@ -326,13 +339,13 @@ function ReceiveLotForm({ item, offer, money, places, onDone }: { item: Item; of
   const write = useWrite(onDone)
   // Until the person types a cost, it follows the quantity: the newest pack price × qty / pack size.
   const parsedQty = parseDecimal(qty)
-  const prefill = offer && parsedQty ? packCost(offer.latest_price!.price, parsedQty, offer.pack_size, money.exponent) : ''
+  const prefill = offer && parsedQty && money.currency ? packCost(offer.latest_price!.price, parsedQty, offer.pack_size, money.exponent) : ''
   const shown = cost ?? prefill
 
   function submit() {
     if (parsedQty === null || Number(parsedQty) <= 0) return write.fail('Enter how many arrived, such as 100.')
     let total: string | null = null
-    if (shown.trim()) {
+    if (shown.trim() && money.currency) {
       total = majorToMinor(shown, money.exponent)
       if (total === null) return write.fail(`Enter the total cost, such as 12.50, with up to ${money.exponent} decimals, or leave it empty.`)
     }
@@ -345,7 +358,7 @@ function ReceiveLotForm({ item, offer, money, places, onDone }: { item: Item; of
         <Input id={`${id}-qty`} inputMode="decimal" className="w-24" value={qty} onChange={(e) => setQty(e.target.value)} />
       </Field>
       <Field label={`Total cost (${money.currency ?? 'shop currency'})`} id={`${id}-cost`}>
-        <Input id={`${id}-cost`} inputMode="decimal" className="w-28 text-right tabular-nums" value={shown} placeholder="unknown" onChange={(e) => setCost(e.target.value)} />
+        <Input id={`${id}-cost`} inputMode="decimal" className="w-28 text-right tabular-nums" value={shown} placeholder="unknown" disabled={!money.currency} onChange={(e) => setCost(e.target.value)} />
       </Field>
       <Field label="Place" id={`${id}-place`}>
         <PlaceSelect id={`${id}-place`} label="Place" places={places} value={place} onChange={setPlace} />
@@ -493,6 +506,7 @@ export function UnitStock({ item, money, version, onChanged }: { item: Item; mon
           }}
         />
       )}
+      <PlacesError error={places.error} />
       {(error ?? units.error) && (
         <p role="alert" className="text-[13px] text-warn">
           {error ?? `The units could not be loaded: ${units.error!.message}`}
@@ -515,7 +529,7 @@ function ReceiveUnitsForm({ item, money, places, onDone }: { item: Item; money: 
     const n = Number(count)
     if (!Number.isInteger(n) || n < 1 || n > 100) return write.fail('Enter how many arrived, 1 to 100.')
     let each: string | null = null
-    if (cost.trim()) {
+    if (cost.trim() && money.currency) {
       each = majorToMinor(cost, money.exponent)
       if (each === null) return write.fail(`Enter the cost of one unit, such as 19.99, with up to ${money.exponent} decimals, or leave it empty.`)
     }
@@ -531,7 +545,7 @@ function ReceiveUnitsForm({ item, money, places, onDone }: { item: Item; money: 
         <Input id={`${id}-count`} inputMode="numeric" className="w-20" value={count} onChange={(e) => setCount(e.target.value)} />
       </Field>
       <Field label={`Cost of one (${money.currency ?? 'shop currency'})`} id={`${id}-cost`}>
-        <Input id={`${id}-cost`} inputMode="decimal" className="w-28 text-right tabular-nums" placeholder="unknown" value={cost} onChange={(e) => setCost(e.target.value)} />
+        <Input id={`${id}-cost`} inputMode="decimal" className="w-28 text-right tabular-nums" placeholder="unknown" value={cost} disabled={!money.currency} onChange={(e) => setCost(e.target.value)} />
       </Field>
       <Field label="Serials, one a line" id={`${id}-serials`}>
         <textarea id={`${id}-serials`} rows={Math.min(Math.max(Number(count) || 1, 1), 6)} className="w-48 rounded-md border bg-transparent px-2 py-1" value={serials} onChange={(e) => setSerials(e.target.value)} />

@@ -41,7 +41,9 @@ export function ItemPage() {
   const counted = !!item.data && item.data.tracking !== 'none' && item.data.tracking !== 'filament'
   const moves = useAsync(() => (counted ? inventoryApi.moves({ item_id: id, limit: 50 }) : Promise.resolve([])), [id, counted])
   const byId = useMemo(() => new Map((kinds.data ?? []).map((k) => [k.id, k])), [kinds.data])
+  // `#offer-<id>`; `LotStock` scrolls to `#lot-<id>` itself, once its lots have rendered.
   const hashId = useHashTarget(!!item.data && !!offers.data)
+  const moved = useMemo(() => new Set((moves.data ?? []).filter((m) => m.lot_id && m.kind !== 'receive').map((m) => m.lot_id!)), [moves.data])
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const current = item.data
@@ -81,6 +83,10 @@ export function ItemPage() {
   }
 
   const kind = byId.get(current.kind_id)
+  const readErrors = [
+    kinds.error && `The item kinds could not be loaded: ${kinds.error.message}`,
+    money.error && `The shop currency could not be read, so no cost can be entered: ${money.error}`,
+  ].filter(Boolean)
   return (
     <Shell>
       <nav aria-label="Kind" className="flex flex-wrap items-center gap-x-1 text-[13px] text-muted-foreground">
@@ -116,6 +122,11 @@ export function ItemPage() {
           {error}
         </p>
       )}
+      {readErrors.map((text) => (
+        <p key={text} role="alert" className="mb-3 text-[13px] text-warn">
+          {text}
+        </p>
+      ))}
       {editing && (
         <DetailsForm
           item={current}
@@ -173,9 +184,19 @@ export function ItemPage() {
 
       <div className="flex flex-col gap-8">
         {offers.data && <ItemOffers item={current} offers={offers.data} money={money} named={anchored(hashId, 'offer-')} onChanged={changed} />}
-        {current.tracking === 'lot' && offers.data && <LotStock item={current} offers={offers.data} money={money} named={anchored(hashId, 'lot-')} version={version} onChanged={changed} />}
+        {offers.error && (
+          <p role="alert" className="text-[13px] text-warn">
+            The offers could not be loaded: {offers.error.message}
+          </p>
+        )}
+        {current.tracking === 'lot' && <LotStock item={current} offers={offers.data ?? null} money={money} moved={moved} version={version} onChanged={changed} />}
         {current.tracking === 'unit' && <UnitStock item={current} money={money} version={version} onChanged={changed} />}
         {counted && moves.data && <MovesTable moves={moves.data} uom={current.uom} money={money} />}
+        {counted && moves.error && (
+          <p role="alert" className="text-[13px] text-warn">
+            The stock moves could not be loaded: {moves.error.message}
+          </p>
+        )}
         <section aria-label="Files, links and properties" className="flex flex-col gap-2">
           <h2 className="text-sm font-semibold tracking-tight">Files, links and properties</h2>
           <PropertiesPanel entity={`item:${current.id}`} />

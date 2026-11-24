@@ -15,7 +15,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { inventoryApi, type Unit, type UnitStatus } from './api'
 import { dayText, lifeText, minorText, STATUS_LABELS } from './format'
-import { PlaceSelect } from './PlaceSelect'
+import { PlaceSelect, PlacesError } from './PlaceSelect'
 import { placeName, usePlaces, type Place } from './places'
 
 /**
@@ -104,6 +104,7 @@ export function UnitPage() {
         )}
       </dl>
       <div className="flex flex-col gap-4">
+        <PlacesError error={places.error} />
         <DetailsForm key={shown.id} unit={shown} places={places.data ?? []} onChanged={(next) => unit.setData(next, { supersede: true })} />
         <StatusForm unit={shown} onChanged={(next) => unit.setData(next, { supersede: true })} />
       </div>

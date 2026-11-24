@@ -37,11 +37,13 @@ export function PartsShort({ parts }: { parts: OrderParts }) {
  * change them).
  */
 export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { orderId: string; item: Pick<OrderItem, 'id' | 'quantity' | 'status'>; rows: ItemPartRow[]; editable: boolean; onChanged: () => void }) {
-  const parts = usePartItems().data ?? []
+  const partItems = usePartItems()
+  const all = partItems.data ?? []
+  const parts = all.filter((p) => !p.archived)
   const [draft, setDraft] = useState<ItemPart[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const name = (id: string) => parts.find((p) => p.id === id)?.name ?? id
+  const name = (id: string) => all.find((p) => p.id === id)?.name ?? id
 
   async function save() {
     if (!draft) return
@@ -100,7 +102,7 @@ export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { 
                 value={String(row.per_unit)}
                 onChange={(e) => setDraft(draft.map((r, i) => (i === index ? { ...r, per_unit: Math.max(1, Number(e.target.value) || 1) } : r)))}
               />
-              <PartSelect parts={parts} value={row.item_id || null} onChange={(id) => id && setDraft(draft.map((r, i) => (i === index ? { ...r, item_id: id } : r)))} label={`Part ${index + 1}`} />
+              <PartSelect parts={all} value={row.item_id || null} onChange={(id) => id && setDraft(draft.map((r, i) => (i === index ? { ...r, item_id: id } : r)))} label={`Part ${index + 1}`} />
               <Button size="xs" variant="ghost" aria-label={`Remove part ${index + 1}`} onClick={() => setDraft(draft.filter((_, i) => i !== index))}>
                 Remove
               </Button>
@@ -130,6 +132,11 @@ export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { 
       {error && (
         <p role="alert" className="text-warn">
           {error}
+        </p>
+      )}
+      {partItems.error && (
+        <p role="alert" className="text-warn">
+          The parts could not be loaded: {partItems.error.message}
         </p>
       )}
     </section>

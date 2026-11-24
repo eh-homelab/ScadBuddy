@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
@@ -140,5 +141,21 @@ describe('InventoryPage (#7067)', () => {
     expect(await screen.findByRole('region', { name: 'Model rules' })).toBeInTheDocument()
     await user.click(within(screen.getByRole('navigation', { name: 'Kinds' })).getByRole('link', { name: 'All items' }))
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Model rules' })).toBeNull())
+  })
+
+  it('lists archived items only when "Show archived" is on, in the address', async () => {
+    seedItem({ kind_id: 'hardware', name: 'Old clip', archived_at: '2026-11-01T00:00:00Z' })
+    const { user } = render()
+    expect(await names()).not.toContain('Old clip')
+    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/inventory?archived=true'))
+    const row = within(await table()).getByRole('link', { name: 'Old clip' }).closest('tr')!
+    expect(row).toHaveTextContent('Archived')
+  })
+
+  it('says when the kinds cannot be read', async () => {
+    server.use(http.get('/api/v1/inventory/kinds', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    render()
+    expect(await screen.findByText(/The kinds could not be loaded/)).toHaveAttribute('role', 'alert')
   })
 })

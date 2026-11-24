@@ -1568,7 +1568,7 @@ export const orderTools: Tool[] = [
   }),
   // Parts inventory (#5543, job cost spec §11): the hooks, rings and magnets an item uses
   // beside its filament. Making a part, editing it, correcting a count, its stock line and
-  // a model's rule are the Parts page's (coverage.ts).
+  // a model's rule are the Inventory area's (#7067, coverage.ts).
   defineTool({
     name: 'part_list',
     label: 'List parts',

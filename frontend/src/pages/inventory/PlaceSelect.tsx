@@ -22,3 +22,13 @@ export function PlaceSelect({ id, label, places, value, onChange }: { id?: strin
     </Select>
   )
 }
+
+/** The places' read failure, said where a place is shown or picked. */
+export function PlacesError({ error }: { error: Error | undefined }) {
+  if (!error) return null
+  return (
+    <p role="alert" className="text-[13px] text-warn">
+      The places could not be loaded: {error.message}
+    </p>
+  )
+}

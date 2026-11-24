@@ -21,17 +21,18 @@ import { kindTree, type KindNode } from './kindTree'
 
 /**
  * #7067 — `/inventory`: every item the shop buys or uses that is not filament, with its
- * stock. The kind tree filters by a kind and the kinds below it; the search and "Low stock
- * only" are in the address too, so a link (`inventoryPaths.kind`) opens the same view.
+ * stock. The kind tree filters by a kind and the kinds below it; the search, "Low stock
+ * only" and "Show archived" are in the address too, so a link (`inventoryPaths.kind`) opens the same view.
  */
 export function InventoryPage() {
   const [params, setParams] = useSearchParams()
   const kind = params.get('kind')
   const q = params.get('q') ?? ''
   const low = params.get('low') === 'true'
+  const archived = params.get('archived') === 'true'
   const money = useMoney()
   const kinds = useAsync(() => inventoryApi.kinds(), [])
-  const items = useAsync(() => inventoryApi.items({ kind, q, low }), [kind, q, low])
+  const items = useAsync(() => inventoryApi.items({ kind, q, low, archived }), [kind, q, low, archived])
   const [adding, setAdding] = useState(false)
   const byId = useMemo(() => new Map((kinds.data ?? []).map((k) => [k.id, k])), [kinds.data])
 
@@ -54,6 +55,7 @@ export function InventoryPage() {
           </Link>
           {item.low && <Badge variant="destructive">Low</Badge>}
           {item.effective_saleable && <Badge variant="secondary">For sale</Badge>}
+          {item.archived_at && <Badge variant="outline">Archived</Badge>}
         </span>
       ),
     },
@@ -101,6 +103,11 @@ export function InventoryPage() {
             <Link to={inventoryPaths.list} className={treeLink(!kind)} aria-current={kind ? undefined : 'page'}>
               All items
             </Link>
+            {kinds.error && (
+              <p role="alert" className="mt-2 text-warn">
+                The kinds could not be loaded: {kinds.error.message}
+              </p>
+            )}
             {kinds.data && <KindLinks nodes={kindTree(kinds.data.filter((k) => k.tracking !== 'filament'))} current={kind} />}
           </nav>
           <div className="flex min-w-0 flex-col gap-3">
@@ -110,6 +117,10 @@ export function InventoryPage() {
               <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
                 <Checkbox checked={low} aria-label="Low stock only" onCheckedChange={(next) => set('low', next === true ? 'true' : null)} />
                 Low stock only
+              </label>
+              <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+                <Checkbox checked={archived} aria-label="Show archived" onCheckedChange={(next) => set('archived', next === true ? 'true' : null)} />
+                Show archived
               </label>
             </div>
             {items.error ? (
@@ -123,7 +134,7 @@ export function InventoryPage() {
                 ))}
               </div>
             ) : (
-              <DataTable label="Items" columns={columns} rows={items.data ?? []} rowKey={(item) => item.id} empty={q || low || kind ? 'No item matches.' : 'No items yet. Add the hooks, nozzles or boxes you buy.'} />
+              <DataTable label="Items" columns={columns} rows={items.data ?? []} rowKey={(item) => item.id} empty={q || low || kind || archived ? 'No item matches.' : 'No items yet. Add the hooks, nozzles or boxes you buy.'} />
             )}
             {/* #5543 — moved from the parts page (#7067): the parts each unit of a model uses,
                 under the Part kind and the kinds below it only (R-P2-39). */}

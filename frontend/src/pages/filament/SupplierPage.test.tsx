@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { listPrices, listProducts, patchProduct } from '../../api/filamentPurchasing'
@@ -191,5 +192,12 @@ describe('the supplier page', () => {
     expect(link).toHaveAttribute('href', 'https://us.store.bambulab.com/products/bearing')
     expect(link).toHaveAttribute('rel', 'noopener noreferrer')
     expect(offers).toHaveTextContent('BRG-608')
+  })
+
+  it("says when the supplier's other offers cannot be read (#7067)", async () => {
+    server.use(http.get('/api/v1/inventory/suppliers/:id/offers', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    render()
+    await heading('Bambu Lab')
+    expect(await screen.findByText(/The other offers could not be loaded/)).toHaveAttribute('role', 'alert')
   })
 })

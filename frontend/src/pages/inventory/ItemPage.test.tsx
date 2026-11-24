@@ -1,8 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { Route, Routes } from 'react-router'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
-import { INVENTORY, inventoryMock, seedItem, seedLot, takeStock } from '../../mocks/features/inventory'
+import { failNextRecost, INVENTORY, inventoryMock, seedItem, seedLot, takeStock } from '../../mocks/features/inventory'
+import { server } from '../../mocks/server'
 import { L } from '../../mocks/features/filament/seed'
 import { ITEM_APPROVED, ORDER_ACCEPTED } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
@@ -19,9 +21,11 @@ function render(id: string, hash = '') {
 }
 
 const bodyOf = (route: string) => inventoryMock.bodies.filter((b) => b.route === route).map((b) => b.body)
+const broken = (method: 'get' | 'post', path: string) => http[method](`/api/v1${path}`, () => HttpResponse.json({ detail: 'down' }, { status: 500 }))
 
 describe('ItemPage (#7067)', () => {
   beforeEach(() => resetMockState())
+  afterEach(() => vi.restoreAllMocks())
 
   it("names the item with its kind path, and links each offer's page in a new tab", async () => {
     render(INVENTORY.HOOK)
@@ -60,7 +64,7 @@ describe('ItemPage (#7067)', () => {
     const bolt = seedItem({ kind_id: 'hardware', name: 'M3 bolt' })
     const { user } = render(bolt.id)
     await screen.findByRole('heading', { level: 1, name: 'M3 bolt' })
-    expect(screen.getByText(/no supplier offer/i)).toBeInTheDocument()
+    expect(await screen.findByText(/no supplier offer/i)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Receive' }))
     const form = screen.getByRole('form', { name: 'Receive a lot' })
     await user.type(within(form).getByLabelText('Quantity'), '10')
@@ -183,5 +187,160 @@ describe('ItemPage (#7067)', () => {
     await user.click(within(form).getByRole('button', { name: 'Save details' }))
     await waitFor(() => expect(bodyOf('patchItem')).toHaveLength(1))
     expect(bodyOf('patchItem')[0]).toMatchObject({ life_hours: '500', life_months: 12 })
+  })
+
+  it('scrolls to the lot an address names once the lots have rendered', async () => {
+    const scrolled: string[] = []
+    const own = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = vi.fn(function (this: Element) {
+      scrolled.push(this.id)
+    })
+    try {
+      render(INVENTORY.HOOK, `#lot-${INVENTORY.HOOK_LOT}`)
+      await screen.findByTestId(`lot-row-${INVENTORY.HOOK_LOT}`)
+      await waitFor(() => expect(scrolled).toContain(`lot-${INVENTORY.HOOK_LOT}`))
+    } finally {
+      Element.prototype.scrollIntoView = own
+    }
+  })
+
+  it('says when the offers cannot be read, and still shows the stock', async () => {
+    server.use(broken('get', '/inventory/items/:id/offers'))
+    render(INVENTORY.HOOK)
+    expect(await screen.findByText(/The offers could not be loaded/)).toHaveAttribute('role', 'alert')
+    expect(await screen.findByRole('table', { name: 'Lots' })).toBeInTheDocument()
+    expect(screen.queryByText(/no supplier offer/i)).toBeNull()
+  })
+
+  it('says when the stock moves cannot be read', async () => {
+    server.use(broken('get', '/inventory/moves'))
+    render(INVENTORY.HOOK)
+    expect(await screen.findByText(/The stock moves could not be loaded/)).toHaveAttribute('role', 'alert')
+  })
+
+  it('says when the places cannot be read', async () => {
+    server.use(broken('get', '/filament/locations'))
+    render(INVENTORY.HOOK)
+    expect(await screen.findByText(/The places could not be loaded/)).toHaveAttribute('role', 'alert')
+  })
+
+  it('keeps every cost input off when the shop currency cannot be read (R-P2-41)', async () => {
+    server.use(broken('get', '/orders/price-book'))
+    const { user } = render(INVENTORY.HOOK)
+    expect(await screen.findByText(/The shop currency could not be read/)).toHaveAttribute('role', 'alert')
+    const row = await screen.findByTestId(`lot-row-${INVENTORY.HOOK_LOT}`)
+    expect(within(row).getByRole('button', { name: 'Edit cost' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Receive' }))
+    const form = screen.getByRole('form', { name: 'Receive a lot' })
+    expect(within(form).getByLabelText(/Total cost/)).toBeDisabled()
+    expect(within(form).getByLabelText(/Total cost/)).toHaveValue('')
+  })
+
+  it('shows a lot bought in another currency at that currency\'s own digits', async () => {
+    const ring = seedItem({ kind_id: 'hardware', name: 'Split ring' })
+    const lot = seedLot(ring.id, 10, null, { cost_currency: 'JPY', foreign_unit_cost: '1500' })
+    render(ring.id)
+    const row = await screen.findByTestId(`lot-row-${lot.id}`)
+    expect(row).toHaveTextContent('bought at ¥1,500 a unit')
+    expect(row).not.toHaveTextContent('minor units')
+  })
+
+  it('offers "Re-cost past uses" on every lot with uses, and sends one request at a time', async () => {
+    const ring = seedItem({ kind_id: 'hardware', name: 'Split ring' })
+    const lot = seedLot(ring.id, 10, 25)
+    takeStock(ring.id, 4, { order_id: ORDER_ACCEPTED, order_item_id: ITEM_APPROVED })
+    let calls = 0
+    server.use(
+      http.post('/api/v1/inventory/lots/:id/recost', () => {
+        calls += 1
+        return new Promise<never>(() => undefined)
+      }),
+    )
+    const { user } = render(ring.id)
+    const row = await screen.findByTestId(`lot-row-${lot.id}`)
+    const button = within(row).getByRole('button', { name: 'Re-cost past uses' })
+    await user.click(button)
+    expect(await within(row).findByRole('button', { name: 'Re-costing…' })).toBeDisabled()
+    await user.click(within(row).getByRole('button', { name: 'Re-costing…' }))
+    expect(calls).toBe(1)
+  })
+
+  it('offers no re-cost on a lot nothing has taken from', async () => {
+    render(INVENTORY.HOOK)
+    const row = await screen.findByTestId(`lot-row-${INVENTORY.HOOK_LOT}`)
+    expect(within(row).queryByRole('button', { name: 'Re-cost past uses' })).toBeNull()
+  })
+
+  it("shows the orders problem when new order moves keep reaching the lot (recost_busy)", async () => {
+    const ring = seedItem({ kind_id: 'hardware', name: 'Split ring' })
+    const lot = seedLot(ring.id, 10, 25)
+    takeStock(ring.id, 4, { order_id: ORDER_ACCEPTED, order_item_id: ITEM_APPROVED })
+    failNextRecost()
+    const { user } = render(ring.id)
+    const row = await screen.findByTestId(`lot-row-${lot.id}`)
+    await user.click(within(row).getByRole('button', { name: 'Re-cost past uses' }))
+    expect(await screen.findByText(/kept taking new order moves/)).toHaveAttribute('role', 'alert')
+  })
+
+  it('checks one serial a line for each unit, and shows a serial the item already has', async () => {
+    const { user } = render(INVENTORY.NOZZLE)
+    await screen.findByRole('table', { name: 'Units' })
+    await user.click(screen.getByRole('button', { name: 'Receive' }))
+    const form = screen.getByRole('form', { name: 'Receive units' })
+    const count = within(form).getByLabelText('Count')
+    await user.clear(count)
+    await user.type(count, '2')
+    const serials = within(form).getByLabelText('Serials, one a line')
+    await user.type(serials, 'HS-0009')
+    await user.click(within(form).getByRole('button', { name: 'Receive units' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('Give one serial a line for each of the 2 units, or none.')
+    expect(bodyOf('receiveUnits')).toEqual([])
+    await user.type(serials, '{Enter}HS-0001')
+    await user.click(within(form).getByRole('button', { name: 'Receive units' }))
+    await waitFor(() => expect(within(form).getByRole('alert')).toHaveTextContent('another unit of the item has that serial'))
+    expect(bodyOf('receiveUnits')).toEqual([{ count: 2, serials: ['HS-0009', 'HS-0001'] }])
+  })
+
+  it('adds an offer, and links the suppliers page from the form', async () => {
+    const { user } = render(INVENTORY.HOOK)
+    await screen.findByRole('table', { name: 'Offers' })
+    await user.click(screen.getByRole('button', { name: 'Add offer' }))
+    const form = screen.getByRole('form', { name: 'Add offer' })
+    expect(within(form).getByRole('link', { name: 'Filament → Suppliers' })).toHaveAttribute('href', '/filament/suppliers')
+    await choose(user, within(form).getByRole('combobox', { name: 'Supplier' }), 'Amazon')
+    await user.type(within(form).getByLabelText('SKU'), 'B0HOOK500')
+    const size = within(form).getByLabelText('Pack size')
+    await user.clear(size)
+    await user.type(size, '500.0')
+    await user.click(within(form).getByRole('button', { name: 'Add offer' }))
+    await waitFor(() => expect(within(screen.getByRole('table', { name: 'Offers' })).getAllByRole('row')).toHaveLength(3))
+    expect(screen.getByRole('table', { name: 'Offers' })).toHaveTextContent('500 each')
+    expect(bodyOf('createOffer')).toEqual([{ supplier_id: expect.any(String), item_id: INVENTORY.HOOK, sku: 'B0HOOK500', url: null, pack_size: '500.0', pack_uom: 'each' }])
+  })
+
+  it('says when the suppliers cannot be read for a new offer', async () => {
+    server.use(broken('get', '/filament/suppliers'))
+    const { user } = render(INVENTORY.HOOK)
+    await screen.findByRole('table', { name: 'Offers' })
+    await user.click(screen.getByRole('button', { name: 'Add offer' }))
+    const form = screen.getByRole('form', { name: 'Add offer' })
+    expect(await within(form).findByText(/The suppliers could not be loaded/)).toHaveAttribute('role', 'alert')
+  })
+
+  it('archives an offer', async () => {
+    const { user } = render(INVENTORY.HOOK)
+    const offers = await screen.findByRole('table', { name: 'Offers' })
+    await user.click(within(offers).getByRole('button', { name: 'Archive offer B0HOOK100' }))
+    expect(await screen.findByText(/No offers yet/)).toBeInTheDocument()
+  })
+
+  it('archives the item and restores it', async () => {
+    const { user } = render(INVENTORY.HOOK)
+    await screen.findByRole('heading', { level: 1, name: 'Silver keychain hook' })
+    await user.click(screen.getByRole('button', { name: 'Archive' }))
+    expect(await screen.findByText('Archived')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Restore' }))
+    await waitFor(() => expect(screen.queryByText('Archived')).toBeNull())
+    expect(screen.getByRole('button', { name: 'Archive' })).toBeInTheDocument()
   })
 })

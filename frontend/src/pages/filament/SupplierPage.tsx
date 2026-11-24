@@ -300,6 +300,13 @@ export function SupplierPage() {
 function OtherOffers({ supplierId }: { supplierId: string }) {
   const money = useMoney()
   const offers = useAsync(() => inventoryApi.supplierOffers(supplierId), [supplierId])
+  if (offers.error) {
+    return (
+      <p role="alert" className="mt-8 text-[13px] text-warn">
+        The other offers could not be loaded: {offers.error.message}
+      </p>
+    )
+  }
   if (!offers.data?.length) return null
   const columns: Column<Offer>[] = [
     {

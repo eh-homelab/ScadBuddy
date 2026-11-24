@@ -26,8 +26,8 @@ the router (`:28-34`), and loads tracing after the first paint (`:50-56`).
 
 Every route sits under `AppShell` (`src/App.tsx:84`); every page but the catalogue and
 Activity (both imported eagerly, `src/App.tsx:6-7`) is a lazily loaded chunk
-(`src/App.tsx:17-58`). The sidebar lists Models, Prints, Library,
-Orders, Storefront, Workflows, Activity and Settings (`src/components/AppShell.tsx:108-115`).
+(`src/App.tsx:17-58`). The sidebar lists Models, Prints, Library, Filament, Inventory,
+Orders, Storefront, Workflows, Activity and Settings (`src/components/AppShell.tsx:108-119`).
 
 | Path | Page | Feature doc |
 |---|---|---|

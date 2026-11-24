@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { inventoryApi, type Item, type Offer } from './api'
-import { dayText } from './format'
+import { currencyExponent, dayText } from './format'
 
 const failed = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
 
@@ -22,7 +22,9 @@ const failed = (cause: unknown, fallback: string) => (cause instanceof ApiError 
 function priceText(offer: Offer, money: ShopMoney): string {
   const point = offer.latest_price
   if (!point) return 'no price yet'
-  return `${formatCost(point.price, point.currency, point.currency === money.currency ? money.exponent : 2)} on ${dayText(point.on_date)}`
+  const exponent = point.currency === money.currency ? money.exponent : currencyExponent(point.currency)
+  const price = exponent === null ? `${point.price} ${point.currency}` : formatCost(point.price, point.currency, exponent)
+  return `${price} on ${dayText(point.on_date)}`
 }
 
 /**
@@ -133,6 +135,7 @@ function AddOfferPrice({ offer, money, onDone }: { offer: Offer; money: ShopMone
 
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (!money.currency) return
     const parsed = parseDecimal(price)
     if (parsed === null) return setError('Enter the price of one pack, such as 5.99.')
     setBusy(true)
@@ -152,9 +155,9 @@ function AddOfferPrice({ offer, money, onDone }: { offer: Offer; money: ShopMone
         <Label htmlFor={`${id}-price`}>
           Pack price of {offer.pack_size} {offer.pack_uom} ({money.currency ?? 'shop currency'})
         </Label>
-        <Input id={`${id}-price`} inputMode="decimal" className="h-8 w-28 text-right tabular-nums" value={price} onChange={(e) => setPrice(e.target.value)} />
+        <Input id={`${id}-price`} inputMode="decimal" className="h-8 w-28 text-right tabular-nums" value={price} disabled={!money.currency} onChange={(e) => setPrice(e.target.value)} />
       </div>
-      <Button type="submit" size="sm" disabled={busy}>
+      <Button type="submit" size="sm" disabled={busy || !money.currency}>
         Add price
       </Button>
       {error && (
@@ -230,7 +233,18 @@ function AddOfferForm({ item, onDone, onCancel }: { item: Item; onDone: () => vo
           <Input id={`${id}-uom`} value={packUom} onChange={(e) => setPackUom(e.target.value)} className="w-20" />
         </div>
       </div>
-      <p className="text-muted-foreground">Suppliers are kept on Filament → Suppliers.</p>
+      {suppliers.error && (
+        <p role="alert" className="text-warn">
+          The suppliers could not be loaded: {suppliers.error.message}
+        </p>
+      )}
+      <p className="text-muted-foreground">
+        Suppliers are kept on{' '}
+        <Link to={filamentLinks.suppliers} className="underline underline-offset-4">
+          Filament → Suppliers
+        </Link>
+        .
+      </p>
       <div className="flex flex-wrap gap-2">
         <Button type="submit" size="sm" disabled={busy}>
           Add offer

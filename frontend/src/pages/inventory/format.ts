@@ -1,5 +1,5 @@
 import type { ShopMoney } from '../../components/filament/purchasing/useMoney'
-import { divDecimal, fromScaled, parseDecimal, toScaled } from '../../lib/decimal'
+import { divDecimal, fromScaled, mulDecimals, parseDecimal, toScaled } from '../../lib/decimal'
 import { formatUnitCost } from '../../lib/money'
 import type { Offer, Tracking, Unit, UnitStatus } from './api'
 
@@ -25,17 +25,29 @@ export function minorText(minor: string | null | undefined, money: ShopMoney, un
   return formatUnitCost(dec(minor), money.currency, money.exponent)
 }
 
+/** A currency's minor-unit digits as `Intl` knows them (ISO 4217: JPY 0, USD 2, KWD 3), or null for a code it refuses. */
+export function currencyExponent(code: string): number | null {
+  try {
+    return new Intl.NumberFormat('en', { style: 'currency', currency: code }).resolvedOptions().maximumFractionDigits ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A lot's cost in the currency it was bought in (`foreign_unit_cost_minor`, minor units of
+ * `currency`), at that currency's own digits; the raw minor figure only for a code with none known.
+ */
+export function foreignCostText(minor: string, currency: string, money: ShopMoney): string {
+  const exponent = currency === money.currency ? money.exponent : currencyExponent(currency)
+  if (exponent === null) return `${minor} minor units of ${currency}`
+  return formatUnitCost(minor, currency, exponent)
+}
+
 /** A stock value: the known part, and "unknown" for what has no cost (R-P2-35). */
 export function valueText(minor: string | null | undefined, unknown: boolean, money: ShopMoney): string {
   if (!unknown) return minorText(minor, money)
   return Number(dec(minor)) === 0 ? 'unknown' : `${minorText(minor, money)} and some unknown`
-}
-
-/** `a × b` of two decimal strings, exactly. */
-export function mulDecimals(a: string, b: string): string {
-  const scaleA = a.split('.')[1]?.length ?? 0
-  const scaleB = b.split('.')[1]?.length ?? 0
-  return fromScaled(toScaled(a, scaleA) * toScaled(b, scaleB), scaleA + scaleB)
 }
 
 /** `price × qty / packSize` in major units, rounded to the currency's digits (Ruling 4's prefill). */
@@ -79,7 +91,6 @@ export function pricedOffer(offers: Offer[], currency: string | null): Offer | u
 export function unitLabel(unit: Unit, at: number): string {
   return unit.serial || unit.name || `Unit ${at + 1}`
 }
-
 
 /** A service life: "500 print hours", "12 months", or both; "not set" for neither. */
 export function lifeText(hours: string | null, months: number | null): string {

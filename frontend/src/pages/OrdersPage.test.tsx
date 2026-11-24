@@ -65,7 +65,7 @@ describe('OrdersPage (#4249)', () => {
     renderPage(<OrdersPage />, { route: '/orders' })
 
     const banner = await screen.findByTestId('low-stock')
-    expect(banner).toHaveTextContent('Low stock: Silver hook (2).')
+    expect(banner).toHaveTextContent('Low stock: Silver hook (2 each).')
     expect(within(banner).getByRole('link', { name: 'Silver hook' })).toHaveAttribute('href', `/inventory/items/${hook.id}`)
     expect(within(banner).getByRole('link', { name: 'Inventory' })).toHaveAttribute('href', '/inventory?kind=part&low=true')
   })
