@@ -169,13 +169,17 @@ def test_a_spools_own_preset_resolves_to_its_standard_ref(
     ]
 
 
-def test_a_spools_bambuddy_local_preset_falls_back_on_native(profiles: Profiles) -> None:
-    """A Bambuddy local id is not in the image: the slot falls back as one with no preset
-    of its own does (#4349), here to the Generic preset, saying so."""
+def test_a_spools_bambuddy_local_preset_is_said_on_native(profiles: Profiles) -> None:
+    """A Bambuddy local id no ScadBuddy preset holds is not read (#7244): the slot gets no
+    preset, as one with none of its own does (#4349), and the error names the id and the
+    import."""
     resolved = _spool_with_own_preset(profiles, "7")
     fallback = _spool_with_own_preset(profiles, None)
     assert resolved.filament_presets == fallback.filament_presets
-    assert resolved.warnings == fallback.warnings and resolved.errors == fallback.errors
+    assert resolved.warnings == fallback.warnings
+    (error,) = resolved.errors
+    assert error.kind == "no-preset" and "Bambuddy local preset 7" in error.message
+    assert "Import Bambuddy's presets" in error.message
 
 
 def _spool_with_own_preset(profiles: Profiles, preset_id: str | None) -> Any:
@@ -414,9 +418,8 @@ async def test_the_api_start_does_not_wait_on_the_build(
     stored = SimpleNamespace(slicer_backend="native")
     slicing = SimpleNamespace(
         profiles=Profiles(_tree(tmp_path)),
-        held=SimpleNamespace(strip_kept=lambda stop: 0),
         core=SimpleNamespace(
-            settings_store=SimpleNamespace(load=lambda: stored),
+            settings_store=SimpleNamespace(load=lambda: stored, pool=None),
             settings=SimpleNamespace(spool_overlay_refresh_seconds=300),
         ),
     )

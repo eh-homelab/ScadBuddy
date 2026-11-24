@@ -1,6 +1,6 @@
-"""The print worker's kept presets and a native slice's start through its CRUD routes
-(area ``spools``, #5298 Task 31, inventory Q30): the reads answer as the SQL stores do, a
-native slice's start sent twice starts once, another caller's credential is refused, and
+"""The print worker's native slice start through its CRUD routes (area ``spools``, #5298
+Task 31, inventory Q30): a native slice's start sent twice starts once, the retired kept
+presets' reads answer empty (#7244), another caller's credential is refused, and
 every method the worker does not call is refused on it. The spool overlay's routes went
 with it (#6262 Task 12): they answer 404."""
 
@@ -18,23 +18,19 @@ import pytest
 from scadbuddy.api import crud_print
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.auth.service_auth import ServiceAuth
-from scadbuddy.bambuddy.models import LocalPresetDetail
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient
 from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.print import (
     BASE,
-    HELD_PRESETS_API_ONLY,
     NATIVE_SLICES_API_ONLY,
     OWN_PRESET_DOCUMENTS_MAX,
     SLICE_SUBJECT,
     ApiOnlyError,
     RemoteFilamentPresets,
-    RemoteHeldPresets,
     RemoteNativeSlices,
 )
 from scadbuddy.library.settings_store import SettingsStore
-from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.own_presets import OwnRow
 from scadbuddy.slicing.store import NativeSliceStore, SliceSubjectError
 from scadbuddy.worker import PRINT_CRUD_AREAS
@@ -44,7 +40,6 @@ from tests.crud.crud_support import FixedToken, served_print_crud, threaded_prin
 #: The `(store, remote, refused, composed)` of each store: the composed methods only call
 #: others of the store's own, each of which the worker sends over a route. None here.
 STORES: list[tuple[type, type, tuple[str, ...], set[str]]] = [
-    (HeldPresetStore, RemoteHeldPresets, HELD_PRESETS_API_ONLY, set()),
     (NativeSliceStore, RemoteNativeSlices, NATIVE_SLICES_API_ONLY, set()),
 ]
 
@@ -102,8 +97,7 @@ def test_a_method_only_the_api_calls_is_refused(remote: type, name: str) -> None
 
 
 def test_the_worker_stores_hold_no_pool() -> None:
-    # Neither of these SQL stores has a public pool; the remote ones keep none of their own.
-    assert not hasattr(RemoteHeldPresets(None), "_pool")  # type: ignore[arg-type]
+    # The SQL store has no public pool; the remote one keeps none of its own.
     assert not hasattr(RemoteNativeSlices(None), "_pool")  # type: ignore[arg-type]
 
 
@@ -119,19 +113,7 @@ def _stand_in(answer: Any) -> tuple[CrudClient, CrudSyncClient]:
     )
 
 
-async def test_nothing_to_ask_asks_nothing() -> None:
-    def answer(request: httpx.Request) -> httpx.Response:
-        raise AssertionError(f"asked {request.url}")
-
-    client, blocking = _stand_in(answer)
-    try:
-        assert await RemoteHeldPresets(client).documents([]) == {}
-    finally:
-        await client.aclose()
-        blocking.close()
-
-
-#: A kept machine preset's document with Bambu Studio's print-host fields.
+#: A preset document with Bambu Studio's print-host fields.
 _HOSTED = {
     "print_host": "octopi.local",
     "printhost_apikey": "k-123",
@@ -143,40 +125,11 @@ _HOSTED = {
 _CREDENTIALS = {"printhost_apikey", "printhost_password", "printhost_user", "upload_token"}
 
 
-def _hosted(preset_id: int) -> LocalPresetDetail:
-    return _preset(preset_id).model_copy(update={"preset_type": "printer", "setting": _HOSTED})
-
-
-async def test_the_documents_route_never_serves_a_print_host_credential() -> None:
-    """The documents route never forwards a print-host credential key (#5298 Task 32)."""
-
-    class Held:
-        async def documents(self, ids: list[int]) -> dict[int, LocalPresetDetail]:
-            return {found: _hosted(found) for found in ids}
-
-    slicing = SimpleNamespace(held=Held())
-    answer = await crud_print.held_preset_documents(slicing, [7])  # type: ignore[arg-type]
-    setting = answer[7].setting
-    assert not _CREDENTIALS & set(setting)
-    assert setting["print_host"] == "octopi.local" and setting["printable_height"] == "300"
-
-
-async def test_the_remote_documents_drop_a_print_host_credential() -> None:
-    """An answer that still carries one (an older API) is stripped by the worker too."""
-
-    def answer(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json={"7": _hosted(7).model_dump(mode="json")}, headers=CRUD_HEADERS
-        )
-
-    client, blocking = _stand_in(answer)
-    try:
-        setting = (await RemoteHeldPresets(client).documents([7]))[7].setting
-    finally:
-        await client.aclose()
-        blocking.close()
-    assert not _CREDENTIALS & set(setting)
-    assert setting["print_host"] == "octopi.local"
+async def test_the_retired_held_presets_reads_answer_empty() -> None:
+    """No copy of Bambuddy's local presets is kept (#7244): a print worker of an older
+    build, during a roll, reads none and so slices none."""
+    assert await crud_print.held_presets() == []
+    assert await crud_print.held_preset_documents([7]) == {}
 
 
 def test_the_own_presets_area_is_served_and_awaited() -> None:
@@ -315,29 +268,11 @@ def _rows(store: SettingsStore, table: str) -> list[dict[str, Any]]:
     return sorted((dict(row) for row in rows), key=lambda row: repr(sorted(row.items())))
 
 
-def _preset(preset_id: int) -> LocalPresetDetail:
-    return LocalPresetDetail(
-        id=preset_id,
-        name=f"Preset {preset_id}",
-        preset_type="filament",
-        source="local",
-        updated_at="2026-11-10T12:00:00Z",
-        setting={"filament_type": ["PLA"]},
-    )
-
-
 @pytest.mark.requires_postgres
-async def test_the_reads_answer_as_the_sql_stores(
-    store: SettingsStore, crud: CrudClient, blocking: CrudSyncClient
-) -> None:
-    held = HeldPresetStore(store.pool)
-    await held.keep(_preset(7))
-    await held.keep(_preset(9))
-
-    remote_held = RemoteHeldPresets(crud)
-    assert await remote_held.rows() == await held.rows()
-    assert await remote_held.documents([7, 8]) == await held.documents([7, 8])
-    assert set(await remote_held.documents([7, 9])) == {7, 9}
+async def test_the_held_presets_routes_answer_empty(crud: CrudClient) -> None:
+    assert (await crud.request("GET", f"{BASE}/held-presets")).json() == []
+    answer = await crud.request("GET", f"{BASE}/held-presets/documents?id=7")
+    assert answer.json() == {}
 
 
 @pytest.mark.requires_postgres

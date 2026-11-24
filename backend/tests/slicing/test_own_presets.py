@@ -19,8 +19,8 @@ from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.own_presets import OwnRow, facts
 from scadbuddy.slicing.presets import build_presets, needs_bambuddy
 from scadbuddy.slicing.profiles import ProfileError, Profiles
-from tests.slicing.conftest import PROFILES, MemoryHeld
-from tests.slicing.test_held_presets import PLA, h2c_choices, tray, tray_plan
+from tests.slicing.conftest import PROFILES
+from tests.slicing.test_bambuddy_local_presets import h2c_choices, tray, tray_plan
 
 H2C = "Bambu Lab H2C 0.4 nozzle"
 
@@ -100,10 +100,10 @@ async def test_a_scadbuddy_preset_that_is_gone_is_refused(plan: SlicePlan) -> No
 
 
 async def test_the_catalogue_lists_a_preset_once(own: MemoryOwn) -> None:
-    """The kept copy's row of the Bambuddy id a ScadBuddy preset has (its mirror) is left
-    out: one preset, one row."""
+    """A ScadBuddy preset with a Bambuddy id (its mirror, or its origin) is one row, its
+    ``sb-`` ref: no row of the Bambuddy id."""
     own.bb[12] = 7
-    profiles = Profiles(PROFILES, held=MemoryHeld(PLA), own=own)
+    profiles = Profiles(PROFILES, own=own)
     catalogue = await catalogue_for(None, native=profiles)
     local = [row for row in catalogue.filament if row.ref.source == "local"]
     assert [
@@ -116,10 +116,10 @@ async def test_the_catalogue_lists_a_preset_once(own: MemoryOwn) -> None:
 async def test_a_local_ref_to_an_adopted_id_resolves_to_its_scadbuddy_preset(
     own: MemoryOwn,
 ) -> None:
-    """The hidden kept row's id still resolves: a remembered override and a binding not
-    yet adopted both slice the ScadBuddy preset that holds it."""
+    """A Bambuddy id a ScadBuddy preset holds still resolves: a remembered override and a
+    binding not yet adopted both slice the ScadBuddy preset that holds it."""
     own.bb[12] = 7
-    catalogue = await catalogue_for(None, native=Profiles(PROFILES, held=MemoryHeld(PLA), own=own))
+    catalogue = await catalogue_for(None, native=Profiles(PROFILES, own=own))
     seven, sb = PresetRef(source="local", id="7"), PresetRef(source="local", id="sb-12")
     assert catalogue.native_ref(seven, "filament") == sb
     override = resolve(
@@ -137,13 +137,12 @@ async def test_a_local_ref_to_an_adopted_id_resolves_to_its_scadbuddy_preset(
     assert bound.errors == [] and bound.filament_presets == [sb]
 
 
-async def test_a_scadbuddy_preset_that_does_not_flatten_leaves_the_kept_row() -> None:
+async def test_a_scadbuddy_preset_that_does_not_flatten_is_not_offered() -> None:
+    """Nor does its Bambuddy id fall back to Bambuddy's preset (#7244)."""
     own = MemoryOwn({12: {**SILK, "inherits": "No such parent"}}, bb={12: 7})
-    catalogue = await catalogue_for(None, native=Profiles(PROFILES, held=MemoryHeld(PLA), own=own))
-    local = [row.ref.id for row in catalogue.filament if row.ref.source == "local"]
-    assert local == ["7"]
-    seven = PresetRef(source="local", id="7")
-    assert catalogue.native_ref(seven, "filament") == seven
+    catalogue = await catalogue_for(None, native=Profiles(PROFILES, own=own))
+    assert not [row for row in catalogue.filament if row.ref.source == "local"]
+    assert catalogue.native_ref(PresetRef(source="local", id="7"), "filament") is None
 
 
 async def test_a_spool_naming_a_scadbuddy_preset_resolves_natively(own: MemoryOwn) -> None:

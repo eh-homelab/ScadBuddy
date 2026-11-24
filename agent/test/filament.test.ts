@@ -462,6 +462,42 @@ describe('filament spool tools', () => {
     expect(tool('filament_spool_add_event').parse({ spool_id: ROW, kind: 'consumed_reset' }).kind).toBe('consumed_reset')
   })
 
+  it('edits several spools with one POST, all or none (#7151, R-7151-1)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOLS}/bulk-update`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ changed: [ROW], unchanged: [], not_found: [] })
+      }),
+    )
+    const input = { spool_ids: [ROW], patch: { note: 'June order', cost_per_kg: null } }
+    const result = await runTool(tool('filament_spools_bulk_update'), input, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([input])
+    expect(firstText(result)).toEqual({ changed: [ROW], unchanged: [], not_found: [] })
+    expect(() => tool('filament_spools_bulk_update').parse({ spool_ids: [], patch: { note: 'x' } })).toThrow()
+    expect(tool('filament_spools_bulk_update').risk).toBe('write')
+  })
+
+  it.each([
+    [true, 'bulk-archive'],
+    [false, 'bulk-restore'],
+  ])('archived %s sends one POST to %s (#7151, R-7151-2)', async (archived, route) => {
+    const bodies: unknown[] = []
+    const answer = { changed: [ROW], unchanged: [], not_found: [] }
+    server.use(
+      http.post(`${SPOOLS}/${route}`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(answer)
+      }),
+    )
+    const result = await runTool(tool('filament_spools_bulk_archive'), { spool_ids: [ROW], archived }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([{ spool_ids: [ROW] }])
+    expect(firstText(result)).toEqual(answer)
+    expect(tool('filament_spools_bulk_archive').risk).toBe('write')
+  })
+
   it('lists the spools that need a type, reads one and its ledger', async () => {
     server.use(
       http.get(SPOOLS, ({ request }) => {
@@ -1491,7 +1527,7 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     const bodies: unknown[] = []
     server.use(
       http.get(`${SPOOLS}/${SOURCE_ID}/copy`, () =>
-        HttpResponse.json({ spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false }, location_id: null, presets: [], k_values: [] }),
+        HttpResponse.json({ spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false }, location_id: null, presets: [], k_values: [], copy_of: SOURCE_ID }),
       ),
       http.post(BULK, async ({ request }) => {
         bodies.push(await request.json())
@@ -1501,7 +1537,8 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     const result = await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID, fields: { note: 'second' } }, ctx())
     expect(result.isError).toBeFalsy()
     expect(bodies).toEqual([
-      { spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false, note: 'second' }, location_id: null, presets: [], k_values: [], quantity: 1 },
+      // R-7150-13: the draft names its source (the route answers `copy_of`), so the backend keeps a copied migrated row so.
+      { spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false, note: 'second' }, location_id: null, presets: [], k_values: [], quantity: 1, copy_of: SOURCE_ID },
     ])
   })
 

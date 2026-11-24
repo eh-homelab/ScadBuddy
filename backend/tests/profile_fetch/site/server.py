@@ -99,6 +99,8 @@ class Replica:
     ] = "hooked"
     sessions: set[str] = field(default_factory=set)
     in_spools: set[int] = field(default_factory=set)
+    #: The status of the My Spools page of a known filament with no record (#7228).
+    no_record_status: int = 200
     logins: int = 0
     adds: list[int] = field(default_factory=list)
     exports: list[dict[str, str]] = field(default_factory=list)
@@ -246,12 +248,18 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
                     if tdfp_id is None or tdfp_id not in site.known_ids:
                         self._send(404, b"<!doctype html><title>404</title><h1>Not found</h1>")
                         return
+                    if page == "my-spool.html" and tdfp_id not in site.in_spools:
+                        # No record of it in My Spools: no export button.
+                        self._send(
+                            site.no_record_status,
+                            b"<!doctype html><title>My spool</title><h1>No spools</h1>",
+                        )
+                        return
                     self._send(
                         200,
                         _page(
                             page,
                             ID=str(tdfp_id),
-                            IN_SPOOLS="true" if tdfp_id in site.in_spools else "false",
                             OPTIONS=json.dumps(site.options),
                             DOWNLOAD=json.dumps(site.download),
                             OPTION_DELAY_MS=str(site.option_delay_ms),

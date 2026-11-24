@@ -40,7 +40,10 @@ slot setup and NTAG writes write BB whatever `filament_sync` says.
   sides, and every one ScadBuddy could compare (a time on both sides) was edited there since the
   last pull: then say that is why there is no keep, because ScadBuddy cannot prove it is
   the same Bambuddy. Only then call it with `expect_kept: false`, which reads no Bambuddy and
-  deletes the links, intents and error rows of that old instance (`kept: false`). Either
+  deletes the links, intents and error rows of that old instance (`kept: false`). ScadBuddy's
+  filament presets' Bambuddy ids are links too (`presets` in the counts, #7176): when they are
+  the only links nothing can prove the same Bambuddy, so the reset deletes them, and the
+  preset mirror then creates each preset on the new Bambuddy. Either
   way it asks for a full pass, and it never deletes an SB spool, type, supplier or
   location. It writes, so it needs approval. Pass `confirm_instance` as the status's
   `instance`; a 409 `confirm_mismatch`, `same_instance`, `nothing_to_reset` or
@@ -243,8 +246,10 @@ search or a fetch of the site: 3DFP's bot check refuses those.
 A worker fetches a type's slicer presets from 3DFP. 3DFP sits behind a Vercel bot
 check, so the worker drives a real Chromium. It exports one Bambu Studio preset per
 printer model that SB's printers have and per nozzle in the setting
-`profile_fetch_nozzles` (default 0.2, 0.4, 0.6, 0.8). SB imports them into BB's
-local presets, sets them as the type's presets for those keys, and sets K values
+`profile_fetch_nozzles` (default 0.2, 0.4, 0.6, 0.8). SB keeps each one as the
+type's own SB preset of its key (`sb-<id>`, #7176), sets them as the type's presets
+for those keys, copies them to BB's local presets while the setting
+`filament_preset_mirror` is on, and sets K values
 from the printers' K tables where one matches exactly. An old K value of a fetched
 key that the new preset does not match is removed, and the run's `notes` name it.
 The fetch writes and removes only K values an earlier fetch set (`source`
@@ -283,15 +288,18 @@ still win.
    fetches". Tell the person to check both: whether the worker's Deployment runs,
    and whether other fetches (an invoice's many types) kept it busy. Do not start
    the fetch again until they know which.
-6. **Preset names.** BB keeps a preset it already has (plan Decision 22, #6625; it
-   rests on the plan's reading of Bambuddy's `POST /local-presets/import`, which
-   answers `skipped`, and no test of #6625 ran against a live Bambuddy). A fetched preset binds only
-   to a BB preset that this fetch made or that an earlier fetch of the type made. A
-   BB preset of the same name that no fetch of this type made (a hand-made one, or
-   one another type's fetch made) leaves the key missing, and the run is `partial`.
-   Tell the person; do not delete their preset.
+6. **Versions and the copy in BB.** Each key is the type's `3dfp` SB preset (#7176,
+   plan `docs/superpowers/plans/2026-11-23-scadbuddy-filament-presets.md`). A fetch
+   whose file changed makes a new version of the same preset, and the run's `notes`
+   name the keys that changed; the same file changes nothing. A BB preset of the
+   same name never stops a fetch. The copy in BB is the mirror's: it rewrites the
+   same BB preset in place, so the id BB's spools and AMS slots name stays. A copy
+   BB refused is the preset's `mirror_error` and never fails the run; the next
+   refresh of the kept presets sends it again. BB refuses every copy while its auth
+   is on (an API key cannot write presets). Tell the person; never write a preset to
+   BB by hand.
 
-The fetch only reads 3DFP and writes SB and BB's local presets. Never start a
+The fetch only reads 3DFP and writes SB's presets; the mirror copies them to BB. Never start a
 fetch to test a change, and never write a preset to BB by hand to fill a gap.
 For the BB-era scripts (`intake.py`, `3dfp.mjs`), use
 `.claude/skills/filament-intake/SKILL.md`.
