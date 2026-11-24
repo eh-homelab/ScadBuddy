@@ -5,7 +5,6 @@ stops when told."""
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import errno
 import os
@@ -20,7 +19,8 @@ import psycopg
 import pytest
 
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.output_copy import COPY_LOCK, copy_outputs
+from scadbuddy.library import output_copy
+from scadbuddy.library.output_copy import COPY_LOCK, CopyResult, copy_outputs
 from scadbuddy.library.output_rows import OutputRow, OutputRows
 from scadbuddy.library.outputs import (
     BOM_NAME,
@@ -74,7 +74,7 @@ def test_copy_fills_missing_rows_and_finishes_run(
 ) -> None:
     paths, job, metas = files
     store, rows = _stores(paths, projection)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.copied == 2
     assert (result.refreshed, result.dropped) == (0, 0)
@@ -97,11 +97,11 @@ def test_copy_refreshes_row_from_newer_meta(
 ) -> None:
     paths, _, metas = files
     store, rows = _stores(paths, projection)
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     meta_path = paths.output_dir(metas[0].slug, metas[0].id) / META_NAME
     renamed = metas[0].model_copy(update={"name": "renamed by an old pod"})
     meta_path.write_text(renamed.model_dump_json(), encoding="utf-8")
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert (result.copied, result.refreshed, result.dropped) == (0, 1, 0)
     row = rows.get(metas[0].id)
@@ -113,9 +113,9 @@ def test_copy_second_run_changes_nothing(
 ) -> None:
     paths, _, metas = files
     store, rows = _stores(paths, projection)
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     before = {meta.id: rows.get(meta.id) for meta in metas}
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert (result.copied, result.refreshed, result.dropped) == (0, 0, 0)
     assert {meta.id: rows.get(meta.id) for meta in metas} == before
@@ -130,7 +130,7 @@ def test_copy_lists_unreadable_folder(
     (broken / META_NAME).write_text("{not json", encoding="utf-8")
     bare = paths.output_dir(metas[0].slug, "f" * 32)
     bare.mkdir()
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.copied == 1
     assert sorted(result.not_copied) == sorted(
@@ -148,7 +148,7 @@ def test_copy_marks_damaged_side_file(
     store, rows = _stores(paths, projection)
     directory = paths.output_dir(metas[0].slug, metas[0].id)
     (directory / BOM_NAME).write_text("[{half", encoding="utf-8")
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.copied == 2
     assert [(d["output_id"], d["file"]) for d in result.damaged] == [(metas[0].id, BOM_NAME)]
@@ -165,9 +165,9 @@ def test_copy_drops_rows_whose_folder_is_gone(
 ) -> None:
     paths, _, metas = files
     store, rows = _stores(paths, projection)
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     shutil.rmtree(paths.output_dir(metas[0].slug, metas[0].id))
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert (result.copied, result.refreshed, result.dropped) == (0, 0, 1)
     assert rows.get(metas[0].id) is None
@@ -180,9 +180,9 @@ def test_copy_keeps_rows_when_it_sees_no_folder(
     """An outputs folder that reads empty (a volume not mounted) is no delete."""
     paths, _, metas = files
     store, rows = _stores(paths, projection)
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     shutil.rmtree(paths.outputs)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.dropped == 0
     assert rows.existing(m.id for m in metas) == {m.id for m in metas}
@@ -196,11 +196,11 @@ def test_copy_runs_once_under_lock(
     with projection.pool.connection() as holder:
         holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (COPY_LOCK,))
         try:
-            assert copy_outputs(store, rows, projection.pool) is None
+            assert copy_outputs(store, rows, projection.conninfo) is None
         finally:
             holder.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (COPY_LOCK,))
     assert rows.last_run() is None
-    assert copy_outputs(store, rows, projection.pool) is not None
+    assert copy_outputs(store, rows, projection.conninfo) is not None
 
 
 def test_copy_stops_unfinished_on_stop(
@@ -210,7 +210,7 @@ def test_copy_stops_unfinished_on_stop(
     store, rows = _stores(paths, projection)
     stop = threading.Event()
     stop.set()
-    result = copy_outputs(store, rows, projection.pool, stop)
+    result = copy_outputs(store, rows, projection.conninfo, stop)
     assert result is not None
     assert result.copied == 0
     assert rows.copied() is False
@@ -225,13 +225,13 @@ def test_copy_refreshes_a_changed_file_whatever_its_mtime(
     changed: a file whose mtime reads older than the row is still read again."""
     paths, _, metas = files
     store, rows = _stores(paths, projection)
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     meta_path = paths.output_dir(metas[0].slug, metas[0].id) / META_NAME
     renamed = metas[0].model_copy(update={"name": "renamed by a pod with a slow clock"})
     meta_path.write_text(renamed.model_dump_json(), encoding="utf-8")
     long_ago = time.time() - 365 * 24 * 3600
     os.utime(meta_path, (long_ago, long_ago))
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.refreshed == 1
     row = rows.get(metas[0].id)
@@ -271,10 +271,10 @@ def test_a_rename_in_the_gap_survives(
 ) -> None:
     paths, _, metas = files
     store, rows = _stores(paths, projection)
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     _written_by_an_old_pod(paths, metas[0])
     _in_the_gap(monkeypatch, store, metas[0].id, lambda _: store.rename(metas[0].id, "live"))
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     row = rows.get(metas[0].id)
     assert row is not None and row.meta.name == "live"
 
@@ -286,10 +286,10 @@ def test_a_delete_in_the_gap_stays_deleted(
 ) -> None:
     paths, _, metas = files
     store, rows = _stores(paths, projection)
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     _written_by_an_old_pod(paths, metas[0])
     _in_the_gap(monkeypatch, store, metas[0].id, lambda _: store.delete(metas[0].id))
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     assert rows.get(metas[0].id) is None
     assert rows.get(metas[1].id) is not None
 
@@ -303,7 +303,7 @@ def test_a_folder_deleted_in_the_gap_gets_no_row(
     paths, _, metas = files
     store, rows = _stores(paths, projection)
     _in_the_gap(monkeypatch, store, metas[0].id, shutil.rmtree)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert rows.get(metas[0].id) is None
     assert rows.get(metas[1].id) is not None
@@ -329,7 +329,7 @@ def test_a_create_in_the_gap_keeps_its_row(
         rows.insert(_live_row(row, "saved live"))
 
     _in_the_gap(monkeypatch, store, metas[0].id, save)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.copied == 1
     row = rows.get(metas[0].id)
@@ -343,7 +343,7 @@ def test_a_save_after_the_copy_wrote_its_folder_succeeds(
     replaces the copy's row, and does not fail on the id."""
     paths, _, metas = files
     store, rows = _stores(paths, projection)
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     row = rows.get(metas[0].id)
     assert row is not None
     rows.insert(_live_row(row, "saved live"))
@@ -357,7 +357,7 @@ def test_copy_marks_an_undecodable_side_file(
     paths, _, metas = files
     store, rows = _stores(paths, projection)
     (paths.output_dir(metas[0].slug, metas[0].id) / PARAMS_NAME).write_bytes(b"\xff\xfe{")
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.copied == 2
     assert [(d["output_id"], d["file"], d["error"]) for d in result.damaged] == [
@@ -375,7 +375,7 @@ def test_copy_marks_a_directory_where_a_side_file_belongs(
     bom = paths.output_dir(metas[0].slug, metas[0].id) / BOM_NAME
     bom.unlink()
     bom.mkdir()
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.copied == 2
     assert [(d["output_id"], d["file"], d["error"]) for d in result.damaged] == [
@@ -401,7 +401,7 @@ def test_copy_marks_a_side_file_it_cannot_read(
         return read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", failing)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.copied == 2
     assert [(d["output_id"], d["file"], d["error"]) for d in result.damaged] == [
@@ -420,7 +420,7 @@ def test_a_stale_slug_folder_drops_nothing(
     paths, job, metas = files
     store, rows = _stores(paths, projection)
     other = store.create(job.model_copy(update={"slug": "other-model"}), name="other")
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     stale = paths.outputs / job.slug
     iterdir = Path.iterdir
 
@@ -430,7 +430,7 @@ def test_a_stale_slug_folder_drops_nothing(
         return iterdir(self)
 
     monkeypatch.setattr(Path, "iterdir", failing)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.dropped == 0
     every = {*(m.id for m in metas), other.id}
@@ -444,7 +444,7 @@ def test_a_stale_output_folder_drops_nothing(
 ) -> None:
     paths, _, metas = files
     store, rows = _stores(paths, projection)
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     stale = paths.output_dir(metas[0].slug, metas[0].id)
     stat = Path.stat
 
@@ -454,7 +454,7 @@ def test_a_stale_output_folder_drops_nothing(
         return stat(self, **kwargs)
 
     monkeypatch.setattr(Path, "stat", failing)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.dropped == 0
     assert rows.get(metas[0].id) is not None
@@ -479,7 +479,7 @@ def test_a_row_written_during_the_run_is_not_dropped(
         rows.insert(dataclasses.replace(row, output_id=new_id, meta=meta))
 
     _in_the_gap(monkeypatch, store, metas[0].id, save)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.dropped == 0
     assert rows.get(new_id) is not None
@@ -508,7 +508,7 @@ def test_a_folder_removed_after_its_batch_loses_the_copys_row(
         return got
 
     monkeypatch.setattr(rows, "undo_copy", hooked)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert rows.get(metas[0].id) is None
     assert rows.get(metas[1].id) is not None
@@ -533,7 +533,7 @@ def test_a_stop_mid_batch_writes_what_it_read(
         return got
 
     monkeypatch.setattr(store, "row_from_files", hooked)
-    result = copy_outputs(store, rows, projection.pool, stop)
+    result = copy_outputs(store, rows, projection.conninfo, stop)
     assert result is not None
     assert result.copied == 1
     assert len(rows.existing(m.id for m in metas)) == 1
@@ -559,7 +559,7 @@ def test_a_first_run_with_a_stale_folder_does_not_end_the_fallback(
         return iterdir(self)
 
     monkeypatch.setattr(Path, "iterdir", failing)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     monkeypatch.undo()
     assert result is not None
     assert result.incomplete is True
@@ -580,9 +580,9 @@ def test_an_outputs_folder_that_reads_empty_is_an_incomplete_run(
 ) -> None:
     paths, _, _ = files
     store, rows = _stores(paths, projection)
-    copy_outputs(store, rows, projection.pool)
+    copy_outputs(store, rows, projection.conninfo)
     shutil.rmtree(paths.outputs)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.incomplete is True
     last = rows.last_run()
@@ -597,7 +597,7 @@ def test_a_first_run_with_no_outputs_folder_does_not_end_the_fallback(
     paths = DataPaths(tmp_path / "data")
     assert not paths.outputs.exists()
     store, rows = _stores(paths, projection)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.incomplete is True
     assert rows.copied() is False
@@ -613,7 +613,7 @@ def test_a_first_run_with_an_empty_outputs_folder_finishes(
     paths = DataPaths(tmp_path / "data")
     paths.outputs.mkdir(parents=True)
     store, rows = _stores(paths, projection)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None
     assert result.incomplete is False
     assert rows.copied() is True
@@ -624,51 +624,40 @@ def test_a_complete_run_is_not_incomplete(
 ) -> None:
     paths, _, _ = files
     store, rows = _stores(paths, projection)
-    result = copy_outputs(store, rows, projection.pool)
+    result = copy_outputs(store, rows, projection.conninfo)
     assert result is not None and result.incomplete is False
     last = rows.last_run()
     assert last is not None and last["incomplete"] is False
 
 
-class _FailingUnlock:
-    """A connection whose advisory unlock fails, as one whose server went away would."""
-
-    def __init__(self, conn: Any) -> None:
-        self.conn = conn
-
-    def execute(self, query: str, params: Any = None) -> Any:
-        if "pg_advisory_unlock" in query:
-            raise OSError("the connection broke")
-        return self.conn.execute(query, params)
-
-    def close(self) -> None:
-        self.conn.close()
-
-
-class _FailingUnlockPool:
-    def __init__(self, pool: Any) -> None:
-        self.pool = pool
-        self.used: list[Any] = []
-
-    @contextlib.contextmanager
-    def connection(self) -> Iterator[_FailingUnlock]:
-        with self.pool.connection() as conn:
-            self.used.append(conn)
-            yield _FailingUnlock(conn)
-
-
-def test_a_failed_unlock_closes_the_lock_connection(
-    files: tuple[DataPaths, Job, list[OutputMeta]], projection: JobProjection, pg_conninfo: str
+def test_the_lock_is_on_a_connection_of_its_own_and_ends_with_the_run(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A connection whose unlock failed would go back to the pool with the lock held,
-    and no other replica could copy. Closing it ends its session, and the lock."""
+    """The run holds its lock for up to 15 minutes: never on a connection of the API's
+    pool, so the pool keeps all of its connections (#7360). The run's end releases it."""
     paths, _, _ = files
     store, rows = _stores(paths, projection)
-    pool = _FailingUnlockPool(projection.pool)
-    result = copy_outputs(store, rows, pool)  # type: ignore[arg-type]
-    assert result is not None
-    [conn] = pool.used
-    assert conn.closed
+    seen: list[tuple[str, int]] = []
+
+    def run(*args: Any) -> CopyResult:
+        with psycopg.connect(pg_conninfo, autocommit=True) as other:
+            found = other.execute(
+                "SELECT a.application_name FROM pg_locks l"
+                " JOIN pg_stat_activity a ON a.pid = l.pid"
+                " WHERE l.locktype = 'advisory' AND l.granted"
+                " AND a.datname = current_database()"
+            ).fetchall()
+        seen.extend((str(name), 0) for (name,) in found)
+        stats = projection.pool.get_stats()
+        seen.append(("pool in use", stats["pool_size"] - stats["pool_available"]))
+        return CopyResult()
+
+    monkeypatch.setattr(output_copy, "_copy", run)
+    assert copy_outputs(store, rows, projection.conninfo) is not None
+    assert seen == [(output_copy.LOCK_APPLICATION, 0), ("pool in use", 0)]
     with psycopg.connect(pg_conninfo, autocommit=True) as other:
         got = other.execute(
             "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (COPY_LOCK,)

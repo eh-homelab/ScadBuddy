@@ -595,7 +595,7 @@ async def _copy_outputs_once(state: AppState, stop: threading.Event) -> None:
         return
     try:
         result = await asyncio.to_thread(
-            copy_outputs, state.outputs, rows, state.projection.pool, stop
+            copy_outputs, state.outputs, rows, state.projection.conninfo, stop
         )
     except Exception:
         logger.exception(
