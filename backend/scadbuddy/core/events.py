@@ -233,6 +233,11 @@ class FlowChanged(BaseEvent):
     name: str
 
 
+#: One character of a task's ``place``, which becomes part of a realtime topic: no
+#: control character. `tasks.models` and `api.realtime` share it.
+TASK_PLACE_CHAR = r"[^\x00-\x1f\x7f-\x9f]"
+
+
 class TaskChanged(BaseEvent):
     """A task (a typed question a flow asks a person, #7364) was opened or moved to
     another state: re-read it. ``place`` is where it is shown, if anywhere."""

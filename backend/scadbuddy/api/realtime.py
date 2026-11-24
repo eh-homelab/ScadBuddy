@@ -115,6 +115,7 @@ from scadbuddy.api.deps import HEX_ID_PATTERN, AppState, StateDep
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Person
 from scadbuddy.core.events import (
+    TASK_PLACE_CHAR,
     ActivityEvent,
     AgentOperationEvent,
     AnalyzerDecisionEvent,
@@ -144,6 +145,7 @@ from scadbuddy.core.events import (
     SettingsChanged,
     SourceChanged,
     Subscription,
+    TaskChanged,
     UpstreamAvailable,
     VersionCommitted,
 )
@@ -193,6 +195,8 @@ COLLECTION_TOPICS = frozenset(
         "printers",
         # Orders (#4249, spec 2026-10-18 §4): the list re-reads on any order's change.
         "orders",
+        # Tasks (#7364): the list of every task a flow asks.
+        "tasks",
     }
 )
 #: A flow run's id (#1057): a UUID, as ``api/flows.py`` makes them.
@@ -219,12 +223,16 @@ _TOPIC = re.compile(
             f"printer:{FLOW_RUN_ID_PATTERN}",
             # An order (#4249): its id is a text uuid, as `orders/store.py` makes it.
             f"order:{FLOW_RUN_ID_PATTERN}",
+            # A task (#7364): its id is the harness call id, a UUID; ``tasks:<place>`` is
+            # the tasks shown in one place.
+            f"task:{FLOW_RUN_ID_PATTERN}",
+            f"tasks:{TASK_PLACE_CHAR}{{1,100}}",
             # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
             r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
             *sorted(COLLECTION_TOPICS),
         ]
     )
-    + ")$"
+    + r")\Z"  # not `$`, which also matches before a trailing newline
 )
 
 
@@ -251,6 +259,9 @@ def topics_of(event: Event) -> list[str]:
             return ["workflow-runs", f"workflow-run:{event.run_id}"]
         case FlowChanged():
             return ["flows"]
+        case TaskChanged():
+            topics = ["tasks", f"task:{event.task_id}"]
+            return [*topics, f"tasks:{event.place}"] if event.place else topics
         case PreviewSliceEvent():
             return [f"preview-slice:{event.slicer}:{event.job_id}"]
         case PrinterEvent():
