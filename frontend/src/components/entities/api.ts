@@ -78,14 +78,16 @@ export const entityApi = {
   propertySchema: (kind: string) => request<KindPropertySchema>(`/entity-kinds/${encodeURIComponent(kind)}/property-schema`),
 }
 
-/**
- * #7026 — every entity of `kind`'s property values as search text (`propertyTexts`), by ref. A
- * failed read gives an empty map: the filament search still runs on everything else.
- */
+/** #7026 — every entity of `kind`'s property values as search text (`propertyTexts`), by ref. A failed read throws. */
+export async function readKindPropertyTexts(kind: string): Promise<Map<string, string[]>> {
+  const found = await entityApi.kindProperties(kind)
+  return new Map(Object.entries(found).map(([ref, values]) => [ref, propertyTexts(values)]))
+}
+
+/** `readKindPropertyTexts`, but a failed read gives an empty map: the filament search still runs on everything else. */
 export async function loadKindPropertyTexts(kind: string): Promise<Map<string, string[]>> {
   try {
-    const found = await entityApi.kindProperties(kind)
-    return new Map(Object.entries(found).map(([ref, values]) => [ref, propertyTexts(values)]))
+    return await readKindPropertyTexts(kind)
   } catch {
     return new Map()
   }

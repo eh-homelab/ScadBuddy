@@ -49,7 +49,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { downloadBlob } from '../../lib/embed'
-import { loadKindPropertyTexts } from '../../components/entities/api'
+import { readKindPropertyTexts } from '../../components/entities/api'
 import { loadTypeSkus, spoolSearchDoc, tagsBySpool, traysBySpool } from '../../lib/filamentSearch'
 import { toast } from '../../lib/toast'
 import { syncText } from './syncText'
@@ -168,10 +168,14 @@ export function SpoolsTab() {
   const load = useCallback(async () => {
     const mine = ++latest.current
     // #7026: each spool's property values, searched as text, read on every load so an edit
-    // shows; beside the list, never holding it back. A failed read leaves the map empty.
-    void loadKindPropertyTexts('spool').then((found) => {
-      if (mine === latest.current) setPropertyTexts(found)
-    })
+    // shows; beside the list, never holding it back. A failed read keeps the map it has
+    // (empty when the first read fails): the search still runs on everything else.
+    readKindPropertyTexts('spool').then(
+      (found) => {
+        if (mine === latest.current) setPropertyTexts(found)
+      },
+      () => {},
+    )
     try {
       const [spools, summary, types, tree] = await Promise.all([listSpools({ includeArchived: true }), getSummary(), listTypes(), listLocations()])
       if (mine !== latest.current) return

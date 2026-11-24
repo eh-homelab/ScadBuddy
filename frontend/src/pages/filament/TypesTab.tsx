@@ -10,7 +10,7 @@ import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { FilamentsEditor } from '../../components/orders/FilamentsEditor'
-import { loadKindPropertyTexts } from '../../components/entities/api'
+import { readKindPropertyTexts } from '../../components/entities/api'
 import { addSku, matchesSearch, parseSearch, typeSearchDoc } from '../../lib/filamentSearch'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -87,10 +87,14 @@ export function TypesTab() {
   const load = useCallback(async () => {
     const mine = ++latest.current
     // #7026: each type's property values, searched as text, read on every load so an edit
-    // shows; beside the list, never holding it back. A failed read leaves the map empty.
-    void loadKindPropertyTexts('spool_type').then((found) => {
-      if (mine === latest.current) setPropertyTexts(found)
-    })
+    // shows; beside the list, never holding it back. A failed read keeps the map it has
+    // (empty when the first read fails): the search still runs on everything else.
+    readKindPropertyTexts('spool_type').then(
+      (found) => {
+        if (mine === latest.current) setPropertyTexts(found)
+      },
+      () => {},
+    )
     try {
       const [types, spools, materials, subtypes, brands] = await Promise.all([
         listTypes({ includeArchived: true }),
