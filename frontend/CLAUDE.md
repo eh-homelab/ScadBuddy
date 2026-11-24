@@ -103,7 +103,9 @@ same way, `vite.config.ts`).
   `Preview` `slotColours` (`lib/partOpacity.ts` `ownSlotMaterials`, `recolourSlots`: a mesh
   with a `scadbuddy_slot` extra takes its slot's colour, one with none keeps its own). The
   price is `store.price` (`POST /listings/{id}/price`), the add sends `values` empty and
-  `colours` by slot. The mock lists `FILE` (`l4`) and every file listing the back office's
+  `colours` by slot. A `last` price shows marked as updating while the page reads again; a
+  read that ends with no price (a limit, a failure, too slow) keeps it on screen as `Estimate`
+  `held` ("This was our last price…"), neither updating nor firm. The mock lists `FILE` (`l4`) and every file listing the back office's
   mock published in the tab (`storefront.ts` `publishedFiles`, from `sessionStorage`); e2e
   `e2e/storefront-sell.spec.ts` sells a library file, publishes it and opens its public page.
   The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)

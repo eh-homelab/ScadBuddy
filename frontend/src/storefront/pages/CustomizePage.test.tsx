@@ -858,6 +858,10 @@ describe('CustomizePage', () => {
   })
 })
 
+/** A file listing's price of other colours, while the shop works out the chosen ones'. */
+const LAST = { source: 'last', price_minor: 650, currency: 'USD', minor_exponent: 2, retry_after: 0 }
+const HELD_NOTE = 'This was our last price. We confirm the price before you pay.'
+
 describe('CustomizePage of a file listing (#6710)', () => {
   beforeEach(() => {
     window.localStorage.clear()
@@ -918,7 +922,6 @@ describe('CustomizePage of a file listing (#6710)', () => {
   })
 
   it("shows the listing's last price, marked as updating, for colours never priced (#6710 §7.5)", async () => {
-    const LAST = { source: 'last', price_minor: 650, currency: 'USD', minor_exponent: 2, retry_after: 0 }
     let reads = 0
     server.use(
       http.post('/api/store/v1/listings/l4/price', () => {
@@ -944,6 +947,50 @@ describe('CustomizePage of a file listing (#6710)', () => {
     expect(await screen.findByRole('alert')).toBeInTheDocument()
     expect(screen.getByText('$7.00 for one')).toBeInTheDocument()
     expect(screen.queryByText('Updating this price…')).toBeNull()
+    // Another colours' price is never shown as firm.
+    expect(screen.getByText(HELD_NOTE)).toBeInTheDocument()
+  })
+
+  it('keeps a last price, never as firm, when a read again is refused or fails', async () => {
+    for (const refusal of [
+      () => HttpResponse.json(LIMITED, { status: 429, headers: { 'Retry-After': '42' } }),
+      () => HttpResponse.json({ type: 'about:blank', title: 'Bad Request', status: 400, detail: 'No.' }, { status: 400 }),
+    ]) {
+      let reads = 0
+      server.use(http.post('/api/store/v1/listings/l4/price', () => (++reads === 1 ? HttpResponse.json(LAST) : refusal())))
+      const { unmount } = show(FILE_ID)
+      expect(await screen.findByRole('alert')).toBeInTheDocument()
+      expect(screen.getByText('$6.50 for one')).toBeInTheDocument()
+      expect(screen.getByText(HELD_NOTE)).toBeInTheDocument()
+      expect(screen.queryByText('Updating this price…')).toBeNull()
+      unmount()
+    }
+  })
+
+  it('keeps a last price, never as firm, past the time limit', async () => {
+    server.use(http.post('/api/store/v1/listings/l4/price', () => HttpResponse.json(LAST)))
+    show(FILE_ID, { ...FAST, limitMs: 60 })
+    expect(await screen.findByText(HELD_NOTE)).toBeInTheDocument()
+    expect(screen.getByText('$6.50 for one')).toBeInTheDocument()
+    expect(screen.queryByText('We price this design by hand')).toBeNull()
+  })
+
+  it('marks the price as updating again once the colours change after a refusal', async () => {
+    const { user } = show(FILE_ID, FAST, 300)
+    await screen.findByText('$7.00 for one')
+    server.use(http.post('/api/store/v1/listings/l4/price', () => HttpResponse.json(LIMITED, { status: 429, headers: { 'Retry-After': '42' } })))
+    const pick = async (colour: string) => {
+      await user.click(screen.getByRole('button', { name: /Part 1/ }))
+      await user.click(await screen.findByRole('radio', { name: colour }))
+    }
+    await pick('Signal orange')
+    await screen.findByText(HELD_NOTE)
+    await pick('Ocean blue')
+    await pick('Signal orange')
+    // Through the debounce: the refusal was of an earlier read, and a new one is due.
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText(HELD_NOTE)).toBeNull()
+    expect(screen.getByText('Updating this price…')).toBeInTheDocument()
   })
 
   it('reads no price again when the colour on screen is picked again', async () => {

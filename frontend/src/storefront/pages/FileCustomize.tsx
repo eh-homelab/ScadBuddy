@@ -66,8 +66,9 @@ export function FileCustomize({
   const [quantity, setQuantity] = useState(() => Math.min(loadChoices(initial.id)?.quantity ?? 1, MAX_QUANTITY))
   const [plate, setPlate] = useState(0)
   /** The price on screen and the colours (`current`) it is the price of. `heldFor` is the
-   * colours a read was refused for (`render_limited`, `rate_limited`): the price stays on
-   * screen for them, not marked as updating, since no update will come. */
+   * colours whose read ended with no price of their own (refused, failed or too slow): the
+   * price stays on screen for them as the last one, not as updating, since no update will
+   * come, and never as firm. */
   const [priced, setPriced] = useState<{ key: string; estimate: StoreEstimate; heldFor?: string }>()
   /** The colours whose price the shop is working out (it answered `pending`). */
   const [pendingFor, setPendingFor] = useState<string>()
@@ -95,6 +96,9 @@ export function FileCustomize({
   const current = JSON.stringify([listing.updated_at, chosen])
   const blocked = listingUnavailable(view) || chosen === null || stale
   const previews = listing.previews ?? []
+  /** Whether the price on screen is the firm price of the colours on screen. */
+  const firm = priced !== undefined && priced.key === current && priced.estimate.source === 'slice' && pendingFor !== current
+  const held = !firm && priced?.heldFor === current
   const shownPlate = Math.min(plate, Math.max(0, previews.length - 1))
 
   useEffect(() => {
@@ -112,12 +116,14 @@ export function FileCustomize({
     if (blocked) return
     let live = true
     const key = current
+    // A read is due: what an earlier one ended with says nothing about it.
+    setPriceError(null)
+    setPriced((p) => (p?.heldFor === undefined ? p : { key: p.key, estimate: p.estimate }))
     // The key is the body: a change that keeps it (a pick of the colour on screen, a reload
     // that keeps the colours) reads nothing again and leaves a read that runs alone.
     const [listingUpdatedAt, colours] = JSON.parse(key) as [string, Record<string, string>]
     const body = { listing_updated_at: listingUpdatedAt, colours }
     const read = async () => {
-      setPriceError(null)
       const began = now()
       let delay = timing.firstMs
       const pause = async (seconds: number | null | undefined) => {
@@ -143,9 +149,9 @@ export function FileCustomize({
           setPendingFor(key)
           if (await pause(answer.retry_after)) continue
           if (!live) return
-          // Past the time limit the shop prices it by hand.
+          // Past the time limit the last price stays; with none, the shop prices it by hand.
           setPendingFor(undefined)
-          setPriced({ key, estimate: BY_HAND })
+          setPriced((p) => (p && hasNumber(p.estimate) ? { ...p, heldFor: key } : { key, estimate: BY_HAND }))
           return
         } catch (caught) {
           if (!live) return
@@ -155,10 +161,10 @@ export function FileCustomize({
           setPendingFor(undefined)
           setPriced((p) => {
             if (!p) return p
-            // Always show a price: a refused read keeps the last one on screen, not marked as
-            // updating, since no update will come.
-            if (limited && hasNumber(p.estimate)) return { ...p, heldFor: key }
-            // The colours on screen have no price now: no other price stays as if it were updating.
+            // Always show a price: a limit keeps any price on screen as the last one, and any
+            // other end keeps the listing's `last` price these colours were answered.
+            if (hasNumber(p.estimate) && (limited || p.key === key)) return { ...p, heldFor: key }
+            // The shop refuses these colours: a price of others says nothing about them.
             return p.key !== key ? undefined : p
           })
           if (changedListing(caught)) setStale(true)
@@ -277,11 +283,8 @@ export function FileCustomize({
         )}
         {priced && hasNumber(priced.estimate) ? (
           // The owner's rule: always show a price. The last one stays, marked as updating,
-          // until the colours on screen are priced, or not marked when their read was refused.
-          <Estimate
-            estimate={priced.estimate}
-            updating={priced.heldFor !== current && (priced.key !== current || priced.estimate.source !== 'slice' || pendingFor === current)}
-          />
+          // until the colours on screen are priced, or held when their read ended with none.
+          <Estimate estimate={priced.estimate} updating={!firm && !held} held={held} />
         ) : priced && priced.key === current ? (
           <Estimate estimate={priced.estimate} />
         ) : (

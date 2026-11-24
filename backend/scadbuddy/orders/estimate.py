@@ -71,7 +71,8 @@ class RoughEstimate(OrderEstimate):
 #: last firm price of the visitor's choices, which the instant read gives when the shop's
 #: settings changed since, and a file listing's last firm price of other colours, which its
 #: price read gives while the colours' own slice runs (#6710): the page shows it marked as
-#: updating, and never as firm.
+#: updating (or, on a file listing's page whose read ended with no price, as the last
+#: price), and never as firm.
 PriceSource = Literal["slice", "pending", "none", "last"]
 
 
