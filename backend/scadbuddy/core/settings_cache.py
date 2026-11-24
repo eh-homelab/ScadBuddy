@@ -43,8 +43,9 @@ _CACHES: weakref.WeakSet[SettingsCache[Any]] = weakref.WeakSet()
 
 def settings_written() -> None:
     """Drop every cache of this process: for a writer of ``settings`` rows outside
-    `SettingsStore` (the printer registry's merge and delete), called in the write's
-    path. The trigger's notification drops them too, and every other replica's."""
+    `SettingsStore` (the printer registry's merge and delete), called after the write's
+    commit: a read between a drop and the commit would keep the old rows. The trigger's
+    notification drops them too, and every other replica's."""
     for cache in list(_CACHES):
         cache.drop()
 

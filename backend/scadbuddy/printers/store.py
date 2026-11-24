@@ -309,10 +309,6 @@ def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None
         " updated_at = now() WHERE name = ANY(%(names)s) AND value ? %(merged)s",
         {"into": into, "merged": merged, "names": list(PRINTER_LISTED_SETTINGS)},
     )
-    # Drop this process's cached settings (#7384). It runs before the caller's commit, so a
-    # read in between can keep the old rows until the trigger's NOTIFY, which also drops
-    # every other replica's.
-    settings_written()
 
 
 def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
@@ -327,7 +323,6 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
         " WHERE name = ANY(%s) AND value ? %s",
         (printer_id, [*PRINTER_KEYED_SETTINGS, *PRINTER_LISTED_SETTINGS], printer_id),
     )
-    settings_written()
     # A subject's remembered printer goes too (#6106): the dialog does not offer a gone
     # printer.
     conn.execute(
@@ -665,6 +660,10 @@ class PrinterStore:
                 (bambuddy_printer_id,),
             )
         if merged is not None:
+            # The merge repointed settings rows (#7384). Drop this process's cache after
+            # the commit: a read between a drop and the commit would keep the old rows.
+            # The trigger's NOTIFY drops every other replica's.
+            settings_written()
             self._announce(merged, linked.id)
         return linked
 
@@ -883,6 +882,7 @@ class PrinterStore:
                 conn, bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed
             )
         if merged is not None:
+            settings_written()  # after the commit, as in `link_bambuddy`
             self._announce(*merged)
         return row, wrote
 
@@ -1167,3 +1167,5 @@ class PrinterStore:
             # offers a printer that is gone (#4442 M3).
             _forget_run_activity(conn, str(key))
             _forget_settings(conn, str(key))
+        # After the commit (#7384), as in `link_bambuddy`.
+        settings_written()
