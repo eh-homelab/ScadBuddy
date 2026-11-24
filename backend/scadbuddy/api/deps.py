@@ -63,6 +63,7 @@ from scadbuddy.library.libraries import (
 from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.library.output_index import OutputIndex
 from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
@@ -340,6 +341,8 @@ def _build_core(settings: Settings) -> AppState:
     projection = JobProjection(
         settings.database_url, pool_size=settings.database_pool_size, pool=settings_store.pool
     )
+    # The plain settings cached while the shared listener listens (#7384).
+    settings_store.follow(projection.pg_listener)
     pool = projection.pool
     # Registered on the shared listener before the bus (#2507): a commit's HEAD is
     # refreshed here before the bus delivers the events the writer published after
@@ -360,6 +363,7 @@ def _build_core(settings: Settings) -> AppState:
     preview_store = PreviewStore(pool.connection)
     outputs = OutputStore(paths, prints=OutputPrintStore(pool))
     outputs.index = OutputIndex(pool, paths)
+    outputs.rows = OutputRows(pool)
     uploads = BambuddyUploadStore(pool)
     # Render leases in Postgres, so a removal here sees the render worker's (#872).
     checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))

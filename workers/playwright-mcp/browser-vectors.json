@@ -1,0 +1,157 @@
+{
+  "about": "A session's browser options (#7027): the bounds the API (backend/scadbuddy/api/crud_agent_sessions.py) and the playwright-mcp wrapper (options.mjs) both hold, and values each must take or refuse. backend/tests/crud/test_crud_agent_sessions.py and options.test.mjs check their own constants and checks against this file.",
+  "bounds": {
+    "user_agent_pattern": "^[\\x20-\\x7E]{1,512}$",
+    "locale_pattern": "^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$",
+    "locale_max": 35,
+    "viewport_width": [
+      320,
+      3840
+    ],
+    "viewport_height": [
+      320,
+      2160
+    ]
+  },
+  "valid": [
+    {
+      "name": "every key",
+      "value": {
+        "user_agent": "Mozilla/5.0 (Test)",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "locale": "en-GB"
+      }
+    },
+    {
+      "name": "a user agent of 512 characters",
+      "value": {
+        "user_agent": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "the smallest viewport",
+      "value": {
+        "viewport": {
+          "width": 320,
+          "height": 320
+        }
+      }
+    },
+    {
+      "name": "the largest viewport",
+      "value": {
+        "viewport": {
+          "width": 3840,
+          "height": 2160
+        }
+      }
+    },
+    {
+      "name": "a locale of 35 characters",
+      "value": {
+        "locale": "abcdefgh-abcdefgh-abcdefgh-abcdefgh"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "an empty user agent",
+      "value": {
+        "user_agent": ""
+      }
+    },
+    {
+      "name": "a user agent of 513 characters",
+      "value": {
+        "user_agent": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "a user agent with a newline",
+      "value": {
+        "user_agent": "Mozilla\n5.0"
+      }
+    },
+    {
+      "name": "a user agent that is not ASCII",
+      "value": {
+        "user_agent": "Mozilla/5.0 é"
+      }
+    },
+    {
+      "name": "width 319",
+      "value": {
+        "viewport": {
+          "width": 319,
+          "height": 600
+        }
+      }
+    },
+    {
+      "name": "width 3841",
+      "value": {
+        "viewport": {
+          "width": 3841,
+          "height": 600
+        }
+      }
+    },
+    {
+      "name": "height 319",
+      "value": {
+        "viewport": {
+          "width": 800,
+          "height": 319
+        }
+      }
+    },
+    {
+      "name": "height 2161",
+      "value": {
+        "viewport": {
+          "width": 800,
+          "height": 2161
+        }
+      }
+    },
+    {
+      "name": "a width that is not an integer",
+      "value": {
+        "viewport": {
+          "width": 800.5,
+          "height": 600
+        }
+      }
+    },
+    {
+      "name": "a width as a string",
+      "value": {
+        "viewport": {
+          "width": "800",
+          "height": 600
+        }
+      }
+    },
+    {
+      "name": "a locale of 37 characters, each subtag allowed",
+      "value": {
+        "locale": "abcdefgh-abcdefgh-abcdefgh-abcdefgh-a"
+      }
+    },
+    {
+      "name": "a locale with an underscore",
+      "value": {
+        "locale": "en_GB"
+      }
+    },
+    {
+      "name": "a one-letter locale",
+      "value": {
+        "locale": "e"
+      }
+    }
+  ]
+}

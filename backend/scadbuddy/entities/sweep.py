@@ -16,7 +16,8 @@ def sweep_orphan_entities(
     their holds) first, since `entity_attachments.entity_id` restricts the delete, then
     the row, which takes its links. An order's kinds (a swept cart, a deleted draft item,
     a released claim) go too, but only once they hold no file: their files are the order
-    code's, which removes or moves them before the owner's row goes."""
+    code's, which removes or moves them before the owner's row goes. An orphan that a
+    stock move names stays: the move's foreign key keeps it as history (R-P2-4, #7067)."""
     removed = 0
     with entities.pool.connection() as conn:
         for entity_id, ref in entities.orphans(conn, limit, guarded=ORDER_KINDS):
@@ -24,7 +25,12 @@ def sweep_orphan_entities(
                 # The owner is checked again under the entity's lock: a row made under
                 # the same id since `orphans` read keeps its files and links.
                 conn.execute("SELECT 1 FROM entities WHERE id = %s FOR UPDATE", (entity_id,))
-                if entities.exists(conn, ref):
+                if (
+                    entities.exists(conn, ref)
+                    or conn.execute(
+                        "SELECT 1 FROM stock_moves WHERE entity_id = %s LIMIT 1", (entity_id,)
+                    ).fetchone()
+                ):
                     continue
                 rows = conn.execute(
                     "SELECT id FROM entity_attachments WHERE entity_id = %s FOR UPDATE",

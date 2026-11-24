@@ -12,6 +12,12 @@ import type { ResourceRef } from './touched.js'
 // of the row with its events (a send's claim, a placement's, its spend, the turn's end) are
 // turnRows.ts's (#6449); an edit's are sessions/edits.ts's.
 
+/**
+ * What a session's browser reports (#7027, `ai_sessions.browser`); a key left out is the
+ * browser's default. The API checks the bounds (browserOptions.ts).
+ */
+export type SessionBrowser = { user_agent?: string; viewport?: { width: number; height: number }; locale?: string }
+
 /** The row as `SessionRecord` is built from it (manager.ts `record`). */
 export type SessionRow = {
   id: string
@@ -29,6 +35,8 @@ export type SessionRow = {
   title: string
   tags: string[]
   scope: Record<string, unknown>
+  /** Its browser options, or null for the browser's defaults (#7027). */
+  browser: SessionBrowser | null
   parent_id: string | null
   runtime: SessionRuntime | null
   max_turns: number
@@ -108,6 +116,8 @@ export type NewSessionRow = {
   forkOf?: { parentId: string; cut: number }
   /** `ai_sessions.background_tools` (#5870): false given; else the parent's, for a session with one; else true. */
   backgroundTools?: false
+  /** `ai_sessions.browser` (#7027): left out, the parent's for a session with one, else none. */
+  browser?: SessionBrowser
   /** Counted under the owner's start lock: refused `rate_limited` at `max` in the window. */
   limit?: { max: number; windowMs: number }
 }
@@ -235,6 +245,7 @@ export class CrudSessionRows implements SessionRows {
         ...(row.budgetOf ? { budget_of: row.budgetOf } : {}),
         ...(row.forkOf ? { fork_of: { parent_id: row.forkOf.parentId, cut: row.forkOf.cut } } : {}),
         ...(row.backgroundTools === false ? { background_tools: false } : {}),
+        ...(row.browser ? { browser: row.browser } : {}),
         ...(row.limit ? { limit: { max: row.limit.max, window_ms: row.limit.windowMs } } : {}),
       })
       return undefined

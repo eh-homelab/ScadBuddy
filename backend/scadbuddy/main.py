@@ -124,10 +124,12 @@ from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
+from scadbuddy.library.output_copy import copy_outputs
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
     NATIVE_LIBRARY_NOT_READY,
+    PUBLIC_URL,
     RECOVER_BAMBUDDY_LIBRARY_SQL,
     StoreNotReadyError,
     load_render_store_settings,
@@ -233,6 +235,7 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_COPIES_SWEEP,
     NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
+    OUTPUT_COPY_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CLOSES_SWEEP,
     PREVIEWS_SWEEP,
@@ -615,11 +618,50 @@ async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
         )
 
 
+async def _copy_outputs_once(state: AppState, stop: threading.Event) -> None:
+    """One run of the copy of the saved outputs' files to rows (#7255, `copy_outputs`),
+    logged. It takes the copy's advisory lock, so one replica copies at a time; a run
+    that does not get it does nothing. A failure is logged, then raised."""
+    rows = state.outputs.rows
+    if rows is None:
+        return
+    try:
+        result = await asyncio.to_thread(
+            copy_outputs, state.outputs, rows, state.projection.conninfo, stop
+        )
+    except Exception:
+        logger.exception(
+            "could not copy the saved outputs to rows; the next sweep or start retries"
+        )
+        raise
+    if result is not None:
+        logger.info(
+            "copied the saved outputs to rows",
+            extra={
+                "copied": result.copied,
+                "refreshed": result.refreshed,
+                "dropped": result.dropped,
+                "not_copied": len(result.not_copied),
+                "damaged": len(result.damaged),
+                "incomplete": result.incomplete,
+                "stopped": stop.is_set(),
+            },
+        )
+
+
 async def _copy_templates_logged(state: AppState, *, stop: threading.Event) -> None:
     """The start's copy (#7317), once and best effort: a failure is logged only. The
     housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again."""
     with suppress(Exception):
         await _copy_templates_once(state, stop)
+
+
+async def _copy_outputs_logged(state: AppState, *, stop: threading.Event) -> None:
+    """The start's copy (#7255), once and best effort: a failure is logged only. The
+    housekeeping sweep `OUTPUT_COPY_SWEEP` runs it again, for the writes of pods on an
+    older build."""
+    with suppress(Exception):
+        await _copy_outputs_once(state, stop)
 
 
 #: How often a long sweep heartbeats: well inside its `HEARTBEAT_TIMEOUT`.
@@ -755,6 +797,18 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # A scan of every output's directory can be slow on a network volume: heartbeat.
         await _heartbeating(_reap_output_holds_logged(state))
 
+    @activity.defn(name=OUTPUT_COPY_SWEEP)
+    async def copy_outputs_to_rows() -> None:
+        # #7255: its own stop, as `sweep_assets`': the worker's shutdown ends the walk
+        # between folders. Any cancel sets it too, as a timeout's: the thread then ends and
+        # frees the advisory lock.
+        stop = threading.Event()
+        try:
+            await _heartbeating(_copy_outputs_once(state, stop), stop)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
+
     @activity.defn(name=FLOWS_SWEEP)
     async def sweep_flow_runs() -> None:
         await _heartbeating(_sweep_flow_runs_logged(state))
@@ -879,6 +933,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_claims,
         sweep_backfills,
         reap_output_holds,
+        copy_outputs_to_rows,
         sweep_flow_runs,
         sweep_preview_slices,
         sweep_lost_slice_starts,
@@ -1623,7 +1678,8 @@ async def _import_maintenance_logged(state: AppState) -> None:
 
 async def _import_attempt_media_logged(state: AppState) -> None:
     """#7234: one ``AttemptMedia`` step for each order attempt still missing a medium
-    (`orders.archives.sweep_media`, spec 2026-11-05 §4.6)."""
+    (`orders.archives.sweep_media`, spec 2026-11-05 §4.6), counted in
+    ``scadbuddy_attempt_media_sweep_starts`` (#7491)."""
     orders = state.components.get(ORDERS)
     try:
         started = await sweep_media(
@@ -1635,6 +1691,7 @@ async def _import_attempt_media_logged(state: AppState) -> None:
     except Exception:
         logger.exception("could not sweep the order attempts' media")
         raise
+    state.metrics.attempt_media_sweep_starts.inc(started)
     if started:
         logger.info("started attempt media imports", extra={"count": started})
 
@@ -2443,6 +2500,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     adopt_now: asyncio.Task[None] | None = None
     index_now: asyncio.Task[None] | None = None
     copy_templates_now: asyncio.Task[None] | None = None
+    copy_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -2498,6 +2556,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         copy_templates_now = asyncio.create_task(
             _copy_templates_logged(state, stop=stop_background), name="copy templates"
         )
+        # #7255: every saved output's files copied to its row, and the rows reconciled
+        # with the files; until a copy run finishes, a missing row falls back to them.
+        # The housekeeping sweep `OUTPUT_COPY_SWEEP` runs it again, for older pods' writes.
+        copy_now = asyncio.create_task(
+            _copy_outputs_logged(state, stop=stop_background), name="copy outputs"
+        )
         # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
         # VP's, with the sweeps off too.
         adopt_now = asyncio.create_task(
@@ -2550,7 +2614,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if unfollow_backfills is not None:
             await unfollow_backfills()
         await _join_background(
-            stop_background, backfill, attach_now, adopt_now, index_now, copy_templates_now
+            stop_background,
+            backfill,
+            attach_now,
+            adopt_now,
+            index_now,
+            copy_templates_now,
+            copy_now,
         )
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
@@ -2698,7 +2768,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     # A write from a page on another origin is refused before its body is read (#962).
     app.add_middleware(
         CrossSiteGate,
-        public_url=lambda: state.settings_store.load().public_url,
+        public_url=lambda: state.settings_store.get(PUBLIC_URL),
         allowed_origins=lambda: state.settings.allowed_origin_list,
     )
     # Outside every route and gate, so their answers go out gzipped too (#1033).

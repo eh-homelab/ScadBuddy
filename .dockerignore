@@ -29,6 +29,7 @@ agent/dist
 agent/node_modules
 agent/coverage
 node_modules
+workers/playwright-mcp/node_modules
 # Cargo's build output (gigabytes on a dev host).
 workers/rust/target
 

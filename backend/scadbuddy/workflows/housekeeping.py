@@ -253,6 +253,15 @@ AUTO_IMPORT_PATCH = "housekeeping-auto-import-prints"
 #: the Prints page for at most `PRUNE_INTERVAL` too.
 RUN_HOLDS_SWEEP = "housekeeping_reap_print_run_holds"
 RUN_HOLDS_PATCH = "housekeeping-reap-print-run-holds"
+#: #7255: copy the saved outputs' files to their `outputs` rows and reconcile the rows
+#: with the folders (`library.output_copy.copy_outputs`), as the API's start does once.
+#: It catches the saves, deletes, renames and backfill changes that pods on an older
+#: build wrote to the files only, during a roll-out or after a rollback. Its advisory
+#: lock keeps one run at a time: a run that does not get it (another replica's, or the
+#: start's copy) does nothing. After the output holds' reaper, behind its own patch; on
+#: the sweeps' Schedule only, so it obeys their switch.
+OUTPUT_COPY_SWEEP = "housekeeping_copy_outputs"
+OUTPUT_COPY_PATCH = "housekeeping-copy-outputs"
 #: #7234 (spec 2026-11-05 §4.6): one step of ``AttemptMedia`` for each order attempt of
 #: the last 14 days that still lacks its finish photo or timelapse and was not read for
 #: media in the last hour (`orders.archives.sweep_media`). It catches what the triggers
@@ -271,6 +280,7 @@ SWEEPS = (
     "housekeeping_sweep_claims",
     BACKFILL_SWEEP,
     REAP_SWEEP,
+    OUTPUT_COPY_SWEEP,
     FLOWS_SWEEP,
     PREVIEWS_SWEEP,
     LOST_SLICES_SWEEP,
@@ -438,6 +448,9 @@ AUTO_IMPORT_TIMEOUT = timedelta(minutes=15)
 #: bounded by its `SEQUENCE_CHECK_TIMEOUT`, 10 s, and the pass by half of this), then one
 #: delete.
 RUN_HOLDS_TIMEOUT = timedelta(minutes=2)
+#: One walk of every output folder: about ten stats each, a read of each folder whose
+#: stamp changed, and a batched write per batch of folders.
+OUTPUT_COPY_TIMEOUT = timedelta(minutes=15)
 #: One read of the attempts, then one Temporal start per attempt; the downloads run in
 #: each attempt's own ``AttemptMedia`` step, not here.
 ATTEMPT_MEDIA_TIMEOUT = timedelta(minutes=5)
@@ -500,6 +513,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return AUTO_IMPORT_TIMEOUT
     if sweep == RUN_HOLDS_SWEEP:
         return RUN_HOLDS_TIMEOUT
+    if sweep == OUTPUT_COPY_SWEEP:
+        return OUTPUT_COPY_TIMEOUT
     if sweep == ATTEMPT_MEDIA_SWEEP:
         return ATTEMPT_MEDIA_TIMEOUT
     if sweep == TEMPLATE_COPY_SWEEP:
@@ -572,6 +587,8 @@ class Housekeeping:
             if sweep == AUTO_IMPORT_SWEEP and not workflow.patched(AUTO_IMPORT_PATCH):
                 continue
             if sweep == RUN_HOLDS_SWEEP and not workflow.patched(RUN_HOLDS_PATCH):
+                continue
+            if sweep == OUTPUT_COPY_SWEEP and not workflow.patched(OUTPUT_COPY_PATCH):
                 continue
             if sweep == ATTEMPT_MEDIA_SWEEP and not workflow.patched(ATTEMPT_MEDIA_PATCH):
                 continue

@@ -357,7 +357,7 @@ same way, `vite.config.ts`).
   `linkOtherBambuddy` sets that state; with the dry run's `same_bambuddy` the dialog is "Keep the
   Bambuddy links?" and the reset sends `expect_kept` and deletes nothing, #6845,
   `linkOtherBambuddy(id, { same: true })`; a 409 `proof_changed` reads the dry run again and
-  says why, `loseSameBambuddy`; a dry run with `changed_since_pull` says every linked spool with a time on both sides changed since the last pull and offers the delete, `linkOtherBambuddy(id, { changed: true })`; a dry run that cannot read Bambuddy notes it and offers the
+  says why, `loseSameBambuddy`; a dry run with `changed_since_pull` says every linked spool (or, with no spool linked, every linked filament preset) ScadBuddy could compare (a time on both sides) changed in Bambuddy since ScadBuddy last saw it, and offers the delete, `linkOtherBambuddy(id, { changed: true })`; a dry run that cannot read Bambuddy notes it and offers the
   delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264, and above it the stored switch `filament_auto_add_unknown_rfid` (#7156; the mode's status line says when that setting holds Bambuddy's auto-add off, and both statuses are read again after "Save Filament"), and the drying defaults `filament_drying_temp_c` and `filament_drying_hours` (empty offers none; the spool page then says "the default in Settings");
   the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
   `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and

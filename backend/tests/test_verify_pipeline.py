@@ -54,6 +54,7 @@ async def test_a_failing_case_is_reported(tmp_path: Path) -> None:
     assert len(failures) == 1 and "pipeline/pipeline.py:3: KeyError" in failures[0]
 
 
+@pytest.mark.usefixtures("sdk_deadlock_bound")
 async def test_a_pipeline_that_never_yields_is_that_cases_failure(tmp_path: Path) -> None:
     """Bounded as production bounds it (`Config.pipeline_timeout`), then the next case."""
     config = replace(

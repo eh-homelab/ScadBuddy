@@ -36,6 +36,7 @@ from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
+    SHORT_TASK_TIMEOUT,
     CommandClosedError,
     TemporalBusyError,
     TemporalRefusedError,
@@ -423,6 +424,22 @@ def test_an_execution_ended_before_it_answered_is_still_accepting(
     response = post(client, {})
     assert response.status_code == 503, response.text
     assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+
+
+def test_an_operation_starts_with_the_short_task_timeout(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7288: a workflow task the server loses costs 3 s, not Temporal's 10 s default."""
+    seen: list[timedelta | None] = []
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("task_timeout"))
+        return await start_command(*args, **kwargs)
+
+    monkeypatch.setattr(operations_api, "start_command", spy)
+    response = post(client, {})
+    assert response.status_code == 200, response.text
+    assert seen == [SHORT_TASK_TIMEOUT]
 
 
 def test_the_run_commits_as_the_requests_agent_author(client: TestClient) -> None:

@@ -231,6 +231,17 @@ describe('assistant images (#1866)', () => {
     expect(sentMessages()[0]).not.toHaveProperty('images')
   })
 
+  it('sends nothing when an image is removed after the message is typed', async () => {
+    const { view, box } = await openComposer()
+    paste(box, [png('a.png'), png('b.png')])
+    const list = await screen.findByRole('list', { name: 'Images to send' })
+    await waitFor(() => expect(within(list).getAllByRole('img')).toHaveLength(2))
+    await view.user.type(box, 'one picture')
+    await view.user.click(screen.getByRole('button', { name: 'Remove a.png' }))
+    expect(sentMessages()).toHaveLength(0)
+    expect(box).toHaveValue('one picture')
+  })
+
   it('takes images dropped on the composer', async () => {
     const { box } = await openComposer()
     fireEvent.drop(box, { dataTransfer: { files: [png('dropped.png')], items: [], types: ['Files'] } })

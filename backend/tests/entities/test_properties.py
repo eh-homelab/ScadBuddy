@@ -13,10 +13,15 @@ from scadbuddy.entities.properties import (
     BadPropertyValue,
     EntityPropertyStore,
     PropertyPatch,
+    SchemaOwnedByKind,
     check_schema,
+    schema_for,
 )
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityNotFound, EntityStore, UnknownEntityKind
+from scadbuddy.inventory.items import ItemStore
+from scadbuddy.inventory.kinds import KindStore
+from scadbuddy.inventory.models import ItemInput, KindPatch
 from tests.conftest import PgPool
 from tests.entities.test_sweep import BY
 
@@ -596,3 +601,39 @@ def test_a_write_raced_by_a_merge_that_deletes_the_owner_is_refused(
 
     with pg_pool.connection() as conn:
         assert entities.find(conn, kind) is None
+
+
+def test_an_items_schema_is_its_kinds(pg_pool: PgPool, props: EntityPropertyStore) -> None:
+    KindStore(pg_pool).update(
+        "part",
+        KindPatch(attribute_schema={"type": "object", "properties": {"mpn": {"type": "string"}}}),
+        BY,
+    )
+    made = ItemStore(pg_pool, EntityStore(pg_pool)).create(
+        ItemInput(kind_id="hardware", name="M3 nut"), BY
+    )
+    item = EntityRef("item", str(made.id))
+
+    with pytest.raises(BadPropertyValue) as refused:
+        props.apply(item, _patch({"mpn": 5}), BY)
+    assert refused.value.key == "mpn"
+    props.apply(item, _patch({"colour": "red"}), BY)
+    assert _values(props, item) == {"colour": "red"}
+    with pytest.raises(SchemaOwnedByKind):
+        props.set_schema("item", {"type": "object", "properties": {}}, BY)
+    with pytest.raises(SchemaOwnedByKind):
+        props.schema("item")
+
+
+def test_schema_for_reads_the_kinds_schema_for_other_kinds(
+    pg_pool: PgPool, props: EntityPropertyStore
+) -> None:
+    typed = {"type": "object", "properties": {"td": {"type": "number"}}}
+    props.set_schema("spool_type", typed, BY)
+
+    with pg_pool.connection() as conn:
+        assert schema_for(conn, _spool_type(pg_pool)) == typed
+        assert schema_for(conn, EntityRef("item", "not-a-uuid")) == {
+            "type": "object",
+            "properties": {},
+        }

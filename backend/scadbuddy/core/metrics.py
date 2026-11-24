@@ -547,6 +547,14 @@ class Metrics:
             "Stored files removed by the sweep because nothing referenced or used them.",
             registry=r,
         )
+        # #7491 (spec 2026-11-05 §4.6): the attempt media sweep's steady-state cost.
+        self.attempt_media_sweep_starts = Counter(
+            "scadbuddy_attempt_media_sweep_starts",
+            "AttemptMedia steps the housekeeping sweep housekeeping_import_attempt_media"
+            " asked to start, one per order attempt still missing a medium (each a"
+            " Bambuddy read); at most SWEEP_BATCH a pass.",
+            registry=r,
+        )
         # The filament inventory (#6269 plan Decisions 2-5), the API's only: set from a
         # snapshot at most once a minute (`api/metrics.py` `refresh_filament_metrics`).
         # Labels are catalog names, more than 20 values a label folded into `other`

@@ -400,6 +400,8 @@ def test_an_old_records_copy_is_not_reused_and_the_next_send_uploads_afresh(
         library_files=[{"id": 41, "folder_id": INBOX, "target_key": DEFAULT_PLATE.key}],
     )
     path.write_text(json.dumps(meta), encoding="utf-8")
+    # A record that old has no row until the copy (#7255): its file answers.
+    getattr(client.app.state, STATE_ATTR).outputs.rows.delete(output_id)  # type: ignore[attr-defined]
     upload = uploads(42)
 
     response = client.post(
