@@ -224,18 +224,21 @@ class StockStore:
 
     def receive_lot(self, item_id: UUID, body: ReceiveLot, by: Actor) -> Lot:
         """A new lot (`origin = manual`) and its `receive` move. A cost in a currency other
-        than the shop's opens it at 0 with its cost unknown and `cost_currency` kept
-        (R-7067-11, D11); so does a receive with no cost."""
+        than the shop's opens it at 0 with its cost unknown, `cost_currency` set and the
+        cost given kept as `foreign_unit_cost_minor` (R-7067-11, D11, R-P2-11); a receive
+        with no cost opens at 0 with its cost unknown too."""
         # The shop's currency is a settings read on a connection of its own: take it first.
         shop = self._shop_currency()
         currency = body.currency or shop
+        given: Decimal | None = body.unit_cost_minor
+        if given is None and body.total_cost_minor is not None:
+            given = _six(body.total_cost_minor / body.qty)
         cost_currency: str | None = None
+        foreign: Decimal | None = None
         if currency != shop:
-            cost, unknown, cost_currency = Decimal(0), True, currency
-        elif body.unit_cost_minor is not None:
-            cost, unknown = body.unit_cost_minor, False
-        elif body.total_cost_minor is not None:
-            cost, unknown = _six(body.total_cost_minor / body.qty), False
+            cost, unknown, cost_currency, foreign = Decimal(0), True, currency, given
+        elif given is not None:
+            cost, unknown = given, False
         else:
             cost, unknown = Decimal(0), True
         with self.pool.connection() as conn, conn.transaction():
@@ -244,8 +247,9 @@ class StockStore:
             try:
                 row = conn.execute(
                     "INSERT INTO stock_lots (item_id, location_id, received_qty, on_hand,"
-                    " unit_cost_minor, cost_unknown, cost_currency, origin, note, received_at,"
-                    " created_by) VALUES (%s, %s, %s, 0, %s, %s, %s, 'manual', %s,"
+                    " unit_cost_minor, cost_unknown, cost_currency, foreign_unit_cost_minor,"
+                    " origin, note, received_at, created_by)"
+                    " VALUES (%s, %s, %s, 0, %s, %s, %s, %s, 'manual', %s,"
                     " coalesce(%s, clock_timestamp()), %s) RETURNING *",
                     (
                         item_id,
@@ -254,6 +258,7 @@ class StockStore:
                         cost,
                         unknown,
                         cost_currency,
+                        foreign,
                         body.note,
                         body.received_at,
                         Jsonb(by.model_dump(mode="json")),

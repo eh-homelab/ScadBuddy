@@ -295,6 +295,8 @@ class Lot(_Decimals):
     cost_unknown: bool
     #: The currency a cost was given in when it was not the shop's (R-7067-11).
     cost_currency: str | None
+    #: One unit's cost as given in `cost_currency`, in its minor units (R-P2-11).
+    foreign_unit_cost_minor: Decimal | None
     origin: Origin
     invoice_line_id: UUID | None
     production_run_id: UUID | None
@@ -302,8 +304,8 @@ class Lot(_Decimals):
     received_at: datetime
     created_by: Actor
 
-    @field_serializer("received_qty", "on_hand", "unit_cost_minor")
-    def _decimals(self, value: Decimal) -> str | None:
+    @field_serializer("received_qty", "on_hand", "unit_cost_minor", "foreign_unit_cost_minor")
+    def _decimals(self, value: Decimal | None) -> str | None:
         return self._decimal(value)
 
 
@@ -368,7 +370,8 @@ class ReceiveLot(BaseModel):
     """A receive with no invoice yet (`origin = manual`). The cost is `unit_cost_minor`
     or `total_cost_minor` (for the whole quantity), in `currency` (the shop's
     `orders_currency` when absent); with neither, or in another currency, the lot opens
-    with its cost unknown (R-7067-11, D11)."""
+    with its cost unknown (R-7067-11, D11). A cost in another currency is kept as
+    `foreign_unit_cost_minor` (R-P2-11)."""
 
     model_config = ConfigDict(extra="forbid")
 

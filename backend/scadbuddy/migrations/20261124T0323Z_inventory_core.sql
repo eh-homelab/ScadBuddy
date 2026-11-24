@@ -88,7 +88,10 @@ CREATE INDEX offer_price_points_offer ON offer_price_points (offer_id, on_date D
 
 -- §6.4 A lot of a `lot` item. `on_hand` is derived from its moves and kept for reads; it
 -- may go below zero (§6.6). `origin = 'manual'` is a receive with no invoice yet.
--- `cost_currency` is set only on the opening lots made from parts.
+-- `cost_currency` is set on the opening lots made from parts, and on a lot received at a
+-- cost in a currency other than the shop's, which opens with its cost unknown
+-- (R-7067-11). `foreign_unit_cost_minor` keeps that cost, one unit's in minor units of
+-- `cost_currency`, so the amount a person gave is not lost (R-P2-11).
 CREATE TABLE stock_lots (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     item_id uuid NOT NULL REFERENCES items (id),
@@ -98,13 +101,15 @@ CREATE TABLE stock_lots (
     unit_cost_minor numeric(20,6) NOT NULL CHECK (unit_cost_minor >= 0),
     cost_unknown boolean NOT NULL DEFAULT false,
     cost_currency text CHECK (cost_currency ~ '^[A-Z]{3}$'),
+    foreign_unit_cost_minor numeric(20,6) CHECK (foreign_unit_cost_minor >= 0),
     origin text NOT NULL
         CHECK (origin IN ('invoice_line', 'production_run', 'opening', 'adjustment', 'manual')),
     invoice_line_id uuid REFERENCES filament_invoice_lines (id),
     production_run_id uuid,
     note text NOT NULL DEFAULT '',
     received_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    created_by jsonb NOT NULL
+    created_by jsonb NOT NULL,
+    CONSTRAINT stock_lots_foreign_cost CHECK (foreign_unit_cost_minor IS NULL OR cost_currency IS NOT NULL)
 );
 -- FIFO order (D2).
 CREATE INDEX stock_lots_fifo ON stock_lots (item_id, received_at, id);

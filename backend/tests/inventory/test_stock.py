@@ -331,10 +331,27 @@ def test_a_lot_in_another_currency_opens_cost_unknown(stock: StockStore, items: 
         item, ReceiveLot(qty=Decimal(4), unit_cost_minor=Decimal(250), currency="USD"), BY
     )
     blank = stock.receive_lot(item, ReceiveLot(qty=Decimal(1)), BY)
+    total = stock.receive_lot(
+        item, ReceiveLot(qty=Decimal(3), total_cost_minor=Decimal(1000), currency="GBP"), BY
+    )
 
-    assert _row(lot.unit_cost_minor, lot.cost_unknown, lot.cost_currency) == (0, True, "EUR")
-    assert _row(shop.unit_cost_minor, shop.cost_unknown, shop.cost_currency) == (250, False, None)
-    assert _row(blank.unit_cost_minor, blank.cost_unknown) == (0, True)
+    # R-P2-11: the amount given in the other currency is kept.
+    assert _row(
+        lot.unit_cost_minor, lot.cost_unknown, lot.cost_currency, lot.foreign_unit_cost_minor
+    ) == (0, True, "EUR", 250)
+    assert _row(
+        shop.unit_cost_minor, shop.cost_unknown, shop.cost_currency, shop.foreign_unit_cost_minor
+    ) == (250, False, None, None)
+    assert _row(blank.unit_cost_minor, blank.cost_unknown, blank.foreign_unit_cost_minor) == (
+        0,
+        True,
+        None,
+    )
+    assert _row(total.cost_currency, total.foreign_unit_cost_minor) == (
+        "GBP",
+        Decimal("333.333333"),
+    )
+    assert lot.model_dump(mode="json")["foreign_unit_cost_minor"] == "250"
     (receive,) = stock.moves(lot_id=lot.id)
     assert receive.cost_unknown is True
 

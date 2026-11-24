@@ -290,6 +290,18 @@ def test_a_lot_cost_currency_is_an_iso_code(pg_pool: PgPool) -> None:
             _lot(pg_pool, item, cost_currency=bad)
 
 
+def test_a_foreign_unit_cost_needs_its_currency(pg_pool: PgPool) -> None:
+    """R-P2-11: the amount a person gave in another currency is kept with that currency."""
+    item = _item(pg_pool, "M3 nut")
+
+    _lot(pg_pool, item, cost_currency="EUR", foreign_unit_cost_minor=250)
+    _lot(pg_pool, item, cost_currency="EUR")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _lot(pg_pool, item, foreign_unit_cost_minor=250)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _lot(pg_pool, item, cost_currency="EUR", foreign_unit_cost_minor=-1)
+
+
 def test_a_unit_serial_is_unique_per_item(pg_pool: PgPool) -> None:
     nozzle = _item(pg_pool, "0.4 nozzle", kind="nozzle")
     hotend = _item(pg_pool, "Hotend", kind="hotend")
