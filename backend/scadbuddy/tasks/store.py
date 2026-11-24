@@ -39,6 +39,11 @@ class RunEndedError(Exception):
     """The task's run has ended, so it opens no task."""
 
 
+class RunBehindError(Exception):
+    """The run's row does not know the caller's execution yet: a Reset that nothing has
+    followed. The same write later is taken."""
+
+
 class TaskStore:
     def __init__(
         self,
@@ -49,21 +54,24 @@ class TaskStore:
         self._pool = pool
         self.events = events
 
-    def open(self, task: TaskOpen) -> Task:
+    def open(self, task: TaskOpen, *, workflow_run_id: str | None = None) -> Task:
         """Insert the task. The same id again returns the row as it is, whatever the run's
         state. A new task needs a run that has not ended: the run's row is read ``FOR
         SHARE`` in the transaction, so a run that ends meanwhile waits for the insert (and
-        cancels the task), or ends first and refuses it. Raises `RunNotFoundError` and
-        `RunEndedError`."""
+        cancels the task), or ends first and refuses it. An execution ``workflow_run_id``
+        that a Reset replaced opens none: its run goes on without it. Raises
+        `RunNotFoundError` and `RunEndedError`."""
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(f"SELECT {_COLUMNS} FROM tasks WHERE id = %s", (task.id,)).fetchone()
             if row is None:
                 run = conn.execute(
-                    "SELECT status FROM workflow_runs WHERE id = %s FOR SHARE", (task.run_id,)
+                    "SELECT status, coalesce(%s = ANY(superseded_run_ids), false) AS replaced"
+                    " FROM workflow_runs WHERE id = %s FOR SHARE",
+                    (workflow_run_id, task.run_id),
                 ).fetchone()
                 if run is None:
                     raise RunNotFoundError(task.run_id)
-                if run["status"] in TERMINAL:
+                if run["replaced"] or run["status"] in TERMINAL:
                     # An earlier attempt may have committed while this one waited.
                     held = conn.execute(
                         f"SELECT {_COLUMNS} FROM tasks WHERE id = %s", (task.id,)
@@ -100,6 +108,17 @@ class TaskStore:
             row = conn.execute(f"SELECT {_COLUMNS} FROM tasks WHERE id = %s", (task_id,)).fetchone()
         return Task.model_validate(row) if row else None
 
+    def of_run(self, run_id: str, ids: Collection[str]) -> dict[str, Task]:
+        """The run's tasks among ``ids``, by id."""
+        if not ids:
+            return {}
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM tasks WHERE run_id = %s AND id = ANY(%s::text[])",
+                (run_id, [*ids]),
+            ).fetchall()
+        return {row["id"]: Task.model_validate(row) for row in rows}
+
     def list(
         self, *, state: TaskState | None = "open", place: str | None = None, limit: int = 100
     ) -> list[Task]:
@@ -114,7 +133,13 @@ class TaskStore:
         return [Task.model_validate(row) for row in rows]
 
     def mark_answered(
-        self, task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str
+        self,
+        task_id: str,
+        answer: dict[str, Any],
+        by: str | None,
+        workflow_run_id: str,
+        *,
+        final: bool = False,
     ) -> Task:
         """Record the answer the run's execution ``workflow_run_id`` took. An open task, and
         one its run's end cancelled before this mark, is answered. The same answer again
@@ -123,13 +148,13 @@ class TaskStore:
 
         A Reset undoes an answer, so when the run is at another execution the task is
         answered as it stands. The run's row is locked before the task's, as `open` and
-        `FlowStore._reset_run` do: a Reset under way commits first, and a later one waits."""
+        `FlowStore._reset_run` do: a Reset under way commits first, and a later one waits.
+
+        ``final`` is the run's own mark, of the answer its script gets. It replaces another
+        answer and who gave it, and leaves an expired task as it stands. It is never lost:
+        for an execution the run's row does not know yet it raises `RunBehindError`."""
         with self._pool.connection() as conn, conn.transaction():
-            run = conn.execute(
-                "SELECT workflow_run_id FROM workflow_runs"
-                " WHERE id = (SELECT run_id FROM tasks WHERE id = %s) FOR SHARE",
-                (task_id,),
-            ).fetchone()
+            run = self._run_of(conn, task_id, workflow_run_id)
             row = conn.execute(
                 f"SELECT {_COLUMNS}, answer = %s::jsonb AS same FROM tasks"
                 " WHERE id = %s FOR UPDATE",
@@ -137,12 +162,16 @@ class TaskStore:
             ).fetchone()
             if run is None or row is None:
                 raise KeyError(task_id)
-            if run["workflow_run_id"] != workflow_run_id:
+            if not run["current"]:
+                if final and not run["replaced"]:
+                    raise RunBehindError(task_id)
                 return Task.model_validate(row)
-            state = row["state"]
-            if state == "expired" or (state == "answered" and not row["same"]):
+            state, same = row["state"], row["state"] == "answered" and row["same"]
+            if state == "expired" and final:
+                return Task.model_validate(row)
+            if state == "expired" or (state == "answered" and not same and not final):
                 raise TaskNotOpenError(state)
-            if state != "answered" or (row["answered_by"] is None and by is not None):
+            if not same or (row["answered_by"] is None and by is not None):
                 row = conn.execute(
                     "UPDATE tasks SET state = 'answered', answer = %s, answered_by = %s,"
                     f" updated_at = now() WHERE id = %s RETURNING {_COLUMNS}",
@@ -165,22 +194,56 @@ class TaskStore:
                 self._announce(conn, row)
         return Task.model_validate(row) if row else None
 
-    def close_or_current(self, task_id: str, state: Literal["expired", "cancelled"]) -> Task | None:
+    def close_or_current(
+        self,
+        task_id: str,
+        state: Literal["expired", "cancelled"],
+        *,
+        workflow_run_id: str | None = None,
+    ) -> Task | None:
         """`close`, and the row as it stands when it was not open, in one transaction;
-        ``None`` for a missing task."""
+        ``None`` for a missing task.
+
+        With ``workflow_run_id`` it is that execution's own close of a question it took no
+        answer to, so it replaces an answer too. The executions are as `mark_answered`'s
+        with ``final``, and so is the order of the locks."""
         with self._pool.connection() as conn, conn.transaction():
+            closes: tuple[TaskState, ...] = ("open",)
+            if workflow_run_id is not None:
+                run = self._run_of(conn, task_id, workflow_run_id)
+                if run is None:
+                    return None
+                if run["current"]:
+                    closes = ("open", "answered")
+                elif run["replaced"]:
+                    closes = ()
+                else:
+                    raise RunBehindError(task_id)
             row = conn.execute(
                 f"SELECT {_COLUMNS} FROM tasks WHERE id = %s FOR UPDATE", (task_id,)
             ).fetchone()
-            if row is not None and row["state"] == "open":
+            if row is not None and row["state"] in closes:
                 row = conn.execute(
-                    "UPDATE tasks SET state = %s, updated_at = now()"
-                    f" WHERE id = %s RETURNING {_COLUMNS}",
+                    "UPDATE tasks SET state = %s, answer = NULL, answered_by = NULL,"
+                    f" updated_at = now() WHERE id = %s RETURNING {_COLUMNS}",
                     (state, task_id),
                 ).fetchone()
                 assert row is not None
                 self._announce(conn, row)
         return Task.model_validate(row) if row else None
+
+    def reopen_in(self, conn: Connection[DictRow], run_id: str, task_id: str) -> None:
+        """Open the run's task again, with no answer, if it is not open: the run waits for
+        it. In the caller's transaction, with the caller's order as `match_waiting_in`."""
+        with conn.transaction():
+            row = conn.execute(
+                "UPDATE tasks SET state = 'open', answer = NULL, answered_by = NULL,"
+                " updated_at = now() WHERE id = %s AND run_id = %s AND state <> 'open'"
+                f" RETURNING {_MOVED}",
+                (task_id, run_id),
+            ).fetchone()
+            if row is not None:
+                self._announce(conn, row)
 
     def cancel_for_run(self, run_id: str) -> int:
         with self._pool.connection() as conn:
@@ -234,6 +297,18 @@ class TaskStore:
             for row in (*cancelled, *reopened):
                 self._announce(conn, row)
             return len(cancelled) + len(reopened)
+
+    def _run_of(
+        self, conn: Connection[DictRow], task_id: str, workflow_run_id: str
+    ) -> DictRow | None:
+        """The task's run, locked ``FOR SHARE``: whether ``workflow_run_id`` is its current
+        execution, or one a Reset replaced."""
+        return conn.execute(
+            "SELECT workflow_run_id = %(id)s AS current,"
+            " %(id)s = ANY(superseded_run_ids) AS replaced FROM workflow_runs"
+            " WHERE id = (SELECT run_id FROM tasks WHERE id = %(task)s) FOR SHARE",
+            {"id": workflow_run_id, "task": task_id},
+        ).fetchone()
 
     def _announce(self, conn: Connection[DictRow], row: DictRow) -> None:
         if self.events is not None:

@@ -23,11 +23,17 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.tasks.component import TasksDep
 from scadbuddy.tasks.models import MAX_BY_CHARS, MAX_JSON_BYTES, Task, TaskOpen, json_fits
-from scadbuddy.tasks.store import RunEndedError, RunNotFoundError, TaskNotOpenError
+from scadbuddy.tasks.store import (
+    RunBehindError,
+    RunEndedError,
+    RunNotFoundError,
+    TaskNotOpenError,
+)
 
 #: `crud/tasks.py` repeats these.
 RUN_NOT_FOUND = "run-not-found"
 RUN_ENDED = "run-ended"
+RUN_BEHIND = "run-behind"
 TASK_NOT_FOUND = "task-not-found"
 TASK_NOT_OPEN = "task-not-open"
 #: Matched whole (`fullmatch`: a trailing newline fails).
@@ -36,8 +42,15 @@ _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 router = crud_router("projects")
 
 
+class OpenWrite(TaskOpen):
+    #: The run's execution that opens it.
+    workflow_run_id: str | None = None
+
+
 class CloseWrite(BaseModel):
     state: Literal["expired", "cancelled"]
+    #: The run's execution whose own close it is; none closes only an open task.
+    workflow_run_id: str | None = None
 
 
 class AnswerWrite(BaseModel):
@@ -45,6 +58,8 @@ class AnswerWrite(BaseModel):
     by: str | None
     #: The run's execution that took the answer.
     workflow_run_id: str
+    #: The run's own mark, of the answer its script gets.
+    final: bool = False
 
     @field_validator("answer", "by")
     @classmethod
@@ -84,18 +99,26 @@ def _not_open(state: str) -> ApiError:
     )
 
 
+def _behind() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The run's row does not know that execution yet.",
+        reason=RUN_BEHIND,
+    )
+
+
 def _missing() -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, "No such task.", reason=TASK_NOT_FOUND)
 
 
 @router.post("/tasks", name="crud_projects_open_task")
-def open_task(body: TaskOpen, tasks: TasksDep) -> Task:
+def open_task(body: OpenWrite, tasks: TasksDep) -> Task:
     """`TaskStore.open`: the same id again answers the stored row, whatever its run's
     state."""
     _uuid("task id", body.id)
     _uuid("run id", body.run_id)
     try:
-        return tasks.store.open(body)
+        return tasks.store.open(body, workflow_run_id=body.workflow_run_id)
     except RunNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such run.", reason=RUN_NOT_FOUND) from None
     except RunEndedError:
@@ -108,7 +131,12 @@ def close_task(task_id: str, body: CloseWrite, tasks: TasksDep) -> Task:
     a retry after a lost answer is the same request; another state is 409
     ``task-not-open``."""
     _uuid("task id", task_id)
-    held = tasks.store.close_or_current(task_id, body.state)
+    try:
+        held = tasks.store.close_or_current(
+            task_id, body.state, workflow_run_id=body.workflow_run_id
+        )
+    except RunBehindError:
+        raise _behind() from None
     if held is None:
         raise _missing()
     if held.state == body.state:
@@ -122,8 +150,12 @@ def answer_task(task_id: str, body: AnswerWrite, tasks: TasksDep) -> Task:
     and so does one of another execution."""
     _uuid("task id", task_id)
     try:
-        return tasks.store.mark_answered(task_id, body.answer, body.by, body.workflow_run_id)
+        return tasks.store.mark_answered(
+            task_id, body.answer, body.by, body.workflow_run_id, final=body.final
+        )
     except KeyError:
         raise _missing() from None
+    except RunBehindError:
+        raise _behind() from None
     except TaskNotOpenError as error:
         raise _not_open(error.state) from None

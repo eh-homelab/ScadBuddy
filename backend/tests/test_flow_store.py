@@ -10,13 +10,21 @@ from typing import Any
 import pytest
 from psycopg import Connection
 
-from scadbuddy.core.events import Event, FlowRunEvent
+from scadbuddy.core.events import Event, FlowRunEvent, TaskChanged
 from scadbuddy.flows import store as flow_store
 from scadbuddy.flows.models import RESULT_MAX
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
+from scadbuddy.tasks.models import TaskOpen
+from scadbuddy.tasks.store import TaskStore
+from scadbuddy.workflows.flow_models import (
+    FlowRecord,
+    FlowStep,
+    FlowWaiting,
+    HopRecord,
+    ProjectionWrite,
+)
 from tests.flows.flows_support import define
 
 pytestmark = pytest.mark.requires_postgres
@@ -452,3 +460,134 @@ async def test_resolved_entries_are_capped_and_a_reset_before_the_cut_is_refused
     # Event 26 does again from 25 on: q2 (answered at 25) waits again; q0 and q1 stay done.
     run = await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
     assert run is not None and [w.call_id for w in run.waiting_on] == ["q2"]
+
+
+# -- tasks (#7364) ----------------------------------------------------------------
+
+
+def waits(call_id: str, at: int = 10) -> FlowWaiting:
+    return FlowWaiting(
+        call_id=call_id, kind="answer", fn="prompt", prompt="q", since=NOW, history_length=at
+    )
+
+
+def opened(store: FlowStore, *ids: str, run_id: str = "r1") -> TaskStore:
+    tasks = TaskStore(store._pool)
+    for task_id in ids:
+        tasks.open(TaskOpen(id=task_id, run_id=run_id, title="q", schema={"type": "object"}))
+    return tasks
+
+
+def states(tasks: TaskStore, run_id: str = "r1") -> dict[str, str]:
+    return {t.id: t.state for t in tasks.list(state=None) if t.run_id == run_id}
+
+
+async def park(store: FlowStore, call_id: str, at: int = 10, execution: str = "wr1") -> None:
+    await store.project(
+        ProjectionWrite(run_id="r1", workflow_run_id=execution, waiting_add=waits(call_id, at))
+    )
+
+
+async def answer(store: FlowStore, call_id: str, at: int) -> None:
+    await store.project(
+        ProjectionWrite(
+            run_id="r1", workflow_run_id="wr1", waiting_remove=call_id, history_length=at
+        )
+    )
+
+
+async def end(store: FlowStore, how: str) -> None:
+    if how == "terminated":
+        assert await store.mark_terminated("r1") is not None
+    else:
+        await store.project(
+            ProjectionWrite.model_validate(
+                {"run_id": "r1", "workflow_run_id": "wr1", "status": how}
+            )
+        )
+
+
+async def to_wr2() -> str:
+    return "wr2"
+
+
+@pytest.mark.parametrize("how", ["succeeded", "failed", "terminated"])
+async def test_a_run_that_ends_cancels_its_open_tasks_before_its_own_event(
+    store: FlowStore, events: Events, how: str
+) -> None:
+    await started(store)
+    tasks = opened(store, "a", "b", "done")
+    tasks.mark_answered("done", {}, None, "wr1")
+    events.published.clear()
+    await end(store, how)
+    assert states(tasks) == {"a": "cancelled", "b": "cancelled", "done": "answered"}
+    *first, last = events.published
+    assert sorted(e.task_id for e in first if isinstance(e, TaskChanged)) == ["a", "b"]
+    assert len(first) == 2 and isinstance(last, FlowRunEvent)
+
+
+async def test_a_reset_matches_the_runs_tasks_before_its_own_event(
+    store: FlowStore, events: Events
+) -> None:
+    await started(store)
+    tasks = opened(store, "early", "parked", "late")
+    await park(store, "early", 4)
+    await answer(store, "early", 6)
+    await park(store, "parked", 10)
+    await answer(store, "parked", 20)
+    await park(store, "late", 22)
+    for task_id in ("early", "parked"):
+        tasks.mark_answered(task_id, {}, None, "wr1")
+    events.published.clear()
+    # After the first answer, before the second.
+    await store.reset_run("r1", replaced="wr1", point=15, request_id="q", reset=to_wr2)
+    assert states(tasks) == {"early": "answered", "parked": "open", "late": "cancelled"}
+    *first, last = events.published
+    assert sorted((e.task_id, e.state) for e in first if isinstance(e, TaskChanged)) == [
+        ("late", "cancelled"),
+        ("parked", "open"),
+    ]
+    assert isinstance(last, FlowRunEvent)
+
+
+@pytest.mark.parametrize("was", ["cancelled", "answered", "expired"])
+async def test_a_call_that_parks_opens_its_task_again(
+    store: FlowStore, events: Events, was: str
+) -> None:
+    """A Reset to a point after the task opened and before its call parked: the Reset
+    cannot tell that the call will park, so the parking says it."""
+    await started(store)
+    tasks = opened(store, "a")
+    with store._pool.connection() as conn:
+        conn.execute("UPDATE tasks SET state = %s", (was,))
+    events.published.clear()
+    await park(store, "a")
+    assert states(tasks) == {"a": "open"}
+    first, last = events.published
+    assert isinstance(first, TaskChanged) and isinstance(last, FlowRunEvent)
+
+
+async def test_a_repeated_park_leaves_the_task_as_it_stands(store: FlowStore) -> None:
+    await started(store)
+    tasks = opened(store, "a")
+    await park(store, "a")
+    tasks.mark_answered("a", {}, None, "wr1")
+    await park(store, "a")
+    assert states(tasks) == {"a": "answered"}
+
+
+async def test_a_replaced_executions_park_opens_nothing(store: FlowStore) -> None:
+    await started(store)
+    tasks = opened(store, "a")
+    await store.reset_run("r1", replaced="wr1", point=5, request_id="q", reset=to_wr2)
+    await park(store, "a")
+    assert states(tasks) == {"a": "cancelled"}
+
+
+async def test_a_moved_hop_and_a_followed_run_touch_no_task(store: FlowStore) -> None:
+    await started(store)
+    tasks = opened(store, "a")
+    await store.follow_run("r1", "wr9")
+    record = HopRecord(hop="parent", action="timeout", actor="system", at=NOW)
+    await store.move_hop("r1", "a", record)
+    assert states(tasks) == {"a": "open"}

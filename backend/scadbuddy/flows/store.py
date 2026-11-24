@@ -46,6 +46,7 @@ from scadbuddy.flows.models import (
     StoredDefinition,
 )
 from scadbuddy.flows.states import REVIVE
+from scadbuddy.tasks.store import TaskStore
 from scadbuddy.workflows.flow_models import (
     FlowRecord,
     FlowStep,
@@ -172,6 +173,11 @@ class FlowStore:
     ) -> None:
         self._pool = pool
         self.events = events
+
+    @property
+    def _tasks(self) -> TaskStore:
+        """The runs' tasks (#7364), which a run's writes move in their own transaction."""
+        return TaskStore(self._pool, events=self.events)
 
     # -- definitions ------------------------------------------------------------
 
@@ -1213,9 +1219,10 @@ class FlowStore:
                 if w.call_id == write.waiting_remove
             ]
             done, floor = _trimmed(done, row["reset_floor"])
-            if write.waiting_add is not None and all(
+            parks = write.waiting_add is not None and all(
                 w.call_id != write.waiting_add.call_id for w in waiting
-            ):
+            )
+            if write.waiting_add is not None and parks:
                 waiting.append(
                     write.waiting_add.model_copy(update={"workflow_run_id": write.workflow_run_id})
                 )
@@ -1244,6 +1251,13 @@ class FlowStore:
             ).fetchone()
             assert updated is not None
             after = Run.model_validate(updated)
+            # Each before the run's own event (`TaskStore.cancel_for_run_in`).
+            if after.status in TERMINAL:
+                self._tasks.cancel_for_run_in(conn, after.id)
+            elif write.waiting_add is not None and parks and write.waiting_add.kind == "answer":
+                # A Reset to between the prompt's open and its park cancelled the task: the
+                # open is in the history and is not done again.
+                self._tasks.reopen_in(conn, after.id, write.waiting_add.call_id)
             self._announce(conn, after)
         return after
 
@@ -1329,6 +1343,9 @@ class FlowStore:
             ).fetchone()
             assert updated is not None
             after = Run.model_validate(updated)
+            self._tasks.match_waiting_in(
+                conn, run_id, [w.call_id for w in waiting], [w.call_id for w in done]
+            )
             self._announce(conn, after)
         return after
 
@@ -1352,6 +1369,7 @@ class FlowStore:
             if row is None:
                 return None
             run = Run.model_validate(row)
+            self._tasks.cancel_for_run_in(conn, run_id)
             self._announce(conn, run)
         return run
 

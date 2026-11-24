@@ -30,7 +30,13 @@ from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.tasks import RemoteTasks
 from scadbuddy.tasks.component import TASKS
 from scadbuddy.tasks.models import TaskOpen
-from scadbuddy.tasks.store import RunEndedError, RunNotFoundError, TaskNotOpenError, TaskStore
+from scadbuddy.tasks.store import (
+    RunBehindError,
+    RunEndedError,
+    RunNotFoundError,
+    TaskNotOpenError,
+    TaskStore,
+)
 from scadbuddy.worker import PROJECTS_CRUD_AREAS
 from tests.conftest import PgPool
 from tests.test_flow_store import NOW
@@ -428,3 +434,46 @@ async def test_a_refusal_it_does_not_know_is_raised(remote: RemoteTasks) -> None
     with pytest.raises(CrudRefusedError) as refused:
         await remote.open(_task("not-a-uuid"))
     assert refused.value.status == 422
+
+
+async def test_the_final_mark_replaces_another_answer(
+    remote: RemoteTasks, store: TaskStore
+) -> None:
+    await remote.open(_task(T1), workflow_run_id="x")
+    await remote.mark_answered(T1, {"ok": False}, "alice", "x")
+    final = await remote.mark_answered(T1, {"ok": True}, None, "x", final=True)
+    assert (final.answer, final.answered_by) == ({"ok": True}, None)
+    assert store.get(T1) == final
+
+
+async def test_the_runs_own_close_replaces_an_answer(remote: RemoteTasks, store: TaskStore) -> None:
+    await remote.open(_task(T1), workflow_run_id="x")
+    await remote.mark_answered(T1, {"ok": True}, "alice", "x")
+    closed = await remote.close(T1, "expired", workflow_run_id="x")
+    assert closed is not None and (closed.state, closed.answer) == ("expired", None)
+    assert store.get(T1) == closed
+
+
+async def test_a_final_write_of_an_execution_the_row_does_not_know_yet_is_a_typed_409(
+    remote: RemoteTasks, http: httpx.AsyncClient
+) -> None:
+    await remote.open(_task(T1), workflow_run_id="x")
+    with pytest.raises(RunBehindError):
+        await remote.mark_answered(T1, {"ok": True}, None, "newer", final=True)
+    with pytest.raises(RunBehindError):
+        await remote.close(T1, "expired", workflow_run_id="newer")
+    raw = await http.post(
+        f"{BASE}/{T1}/answered",
+        json={"answer": {}, "by": None, "workflow_run_id": "newer", "final": True},
+    )
+    assert raw.status_code == 409 and raw.json()["reason"] == "run-behind"
+
+
+async def test_the_open_of_a_replaced_execution_is_a_typed_409(
+    remote: RemoteTasks, store: TaskStore, pg_pool: PgPool
+) -> None:
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE workflow_runs SET superseded_run_ids = '{old}' WHERE id = %s", (RUN,))
+    with pytest.raises(RunEndedError):
+        await remote.open(_task(T1), workflow_run_id="old")
+    assert store.list(state=None) == []

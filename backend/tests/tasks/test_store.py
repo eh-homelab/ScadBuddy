@@ -15,7 +15,13 @@ from psycopg.rows import dict_row
 from scadbuddy.core.events import Event, TaskChanged
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.tasks.models import TaskOpen
-from scadbuddy.tasks.store import RunEndedError, RunNotFoundError, TaskNotOpenError, TaskStore
+from scadbuddy.tasks.store import (
+    RunBehindError,
+    RunEndedError,
+    RunNotFoundError,
+    TaskNotOpenError,
+    TaskStore,
+)
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -409,7 +415,8 @@ def test_a_mark_in_flight_while_a_reset_commits_marks_nothing(
         run = FlowStore(pg_pool)._reset_run("run-1", "x", 10, "req-1", reset)
         assert run is not None and run.workflow_run_id == "y"
         left = marks[0].result(timeout=30)
-    assert (left.state, left.answer) == ("open", None)
+    # The run does not wait on it, so the Reset cancelled it.
+    assert (left.state, left.answer) == ("cancelled", None)
     assert store.get("t1") == left
     assert recorder.changes() == [("t1", "open")]
 
@@ -500,3 +507,152 @@ def test_the_model_refuses_a_big_context_or_ui() -> None:
         TaskOpen(id="t", run_id="r", title="t", schema=SCHEMA, ui="x" * 201)
     ok = TaskOpen(id="t", run_id="r", title="t", schema=SCHEMA, ui="x" * 200)
     assert ok.ui == "x" * 200
+
+
+def _reset_to(pg_pool: PgPool, execution: str) -> None:
+    """Run-1 as a Reset leaves it: at ``execution``, its old one replaced."""
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE workflow_runs SET superseded_run_ids ="
+            " array_append(superseded_run_ids, workflow_run_id), workflow_run_id = %s"
+            " WHERE id = 'run-1'",
+            (execution,),
+        )
+
+
+def test_the_final_mark_replaces_another_answer_and_the_one_who_gave_it(
+    store: TaskStore, recorder: Recorder
+) -> None:
+    store.open(_task("t1"))
+    store.mark_answered("t1", {"ok": False}, "u1", "x")
+    recorder.events.clear()
+    got = store.mark_answered("t1", {"ok": True}, None, "x", final=True)
+    assert (got.state, got.answer, got.answered_by) == ("answered", {"ok": True}, None)
+    assert store.get("t1") == got
+    # The state did not change.
+    assert recorder.events == []
+
+
+@pytest.mark.parametrize("state", ["open", "cancelled"])
+def test_the_final_mark_answers_an_open_or_cancelled_task(
+    store: TaskStore, recorder: Recorder, state: str
+) -> None:
+    store.open(_task("t1"))
+    if state == "cancelled":
+        store.close("t1", "cancelled")
+    recorder.events.clear()
+    got = store.mark_answered("t1", {"ok": True}, None, "x", final=True)
+    assert (got.state, got.answer) == ("answered", {"ok": True})
+    assert recorder.changes() == [("t1", "answered")]
+    assert store.mark_answered("t1", {"ok": True}, None, "x", final=True) == got
+    assert recorder.changes() == [("t1", "answered")]
+
+
+def test_the_final_mark_keeps_who_gave_the_same_answer(store: TaskStore) -> None:
+    store.open(_task("t1"))
+    first = store.mark_answered("t1", {"ok": True}, "u1", "x")
+    assert store.mark_answered("t1", {"ok": True}, None, "x", final=True) == first
+
+
+def test_a_mark_after_the_final_one_fills_its_name_or_changes_nothing(store: TaskStore) -> None:
+    store.open(_task("t1"))
+    final = store.mark_answered("t1", {"ok": True}, None, "x", final=True)
+    with pytest.raises(TaskNotOpenError):
+        store.mark_answered("t1", {"ok": False}, "u2", "x")
+    assert store.get("t1") == final
+    named = store.mark_answered("t1", {"ok": True}, "u1", "x")
+    assert (named.answer, named.answered_by) == ({"ok": True}, "u1")
+
+
+def test_the_final_mark_leaves_an_expired_task_alone(store: TaskStore, recorder: Recorder) -> None:
+    store.open(_task("t1"))
+    store.close("t1", "expired")
+    held = store.get("t1")
+    recorder.events.clear()
+    assert store.mark_answered("t1", {"ok": True}, None, "x", final=True) == held
+    assert store.get("t1") == held and recorder.events == []
+
+
+def test_the_final_mark_of_a_replaced_execution_answers_the_row_as_it_stands(
+    store: TaskStore, pg_pool: PgPool
+) -> None:
+    opened = store.open(_task("t1"))
+    _reset_to(pg_pool, "y")
+    assert store.mark_answered("t1", {"ok": True}, None, "x", final=True) == opened
+    assert store.mark_answered("t1", {"ok": True}, None, "y", final=True).state == "answered"
+
+
+def test_the_final_mark_of_an_execution_the_row_does_not_know_yet_is_refused(
+    store: TaskStore, pg_pool: PgPool
+) -> None:
+    """A Reset made in Temporal, which the sweep has not followed: tried again later."""
+    opened = store.open(_task("t1"))
+    with pytest.raises(RunBehindError):
+        store.mark_answered("t1", {"ok": True}, None, "newer", final=True)
+    with pytest.raises(RunBehindError):
+        store.close_or_current("t1", "expired", workflow_run_id="newer")
+    assert store.get("t1") == opened
+    FlowStore(pg_pool)._follow_run("run-1", "newer")
+    assert store.mark_answered("t1", {"ok": True}, None, "newer", final=True).state == "answered"
+
+
+def test_the_runs_own_close_replaces_an_answer_the_run_never_took(
+    store: TaskStore, recorder: Recorder
+) -> None:
+    store.open(_task("t1"))
+    store.mark_answered("t1", {"ok": True}, "u1", "x")
+    recorder.events.clear()
+    closed = store.close_or_current("t1", "expired", workflow_run_id="x")
+    assert closed is not None
+    assert (closed.state, closed.answer, closed.answered_by) == ("expired", None, None)
+    assert store.get("t1") == closed
+    assert recorder.changes() == [("t1", "expired")]
+    assert store.close_or_current("t1", "expired", workflow_run_id="x") == closed
+    assert recorder.changes() == [("t1", "expired")]
+    with pytest.raises(TaskNotOpenError):
+        store.mark_answered("t1", {"ok": True}, "u1", "x")
+
+
+def test_the_close_of_a_replaced_execution_closes_nothing(
+    store: TaskStore, pg_pool: PgPool
+) -> None:
+    opened = store.open(_task("t1"))
+    _reset_to(pg_pool, "y")
+    assert store.close_or_current("t1", "expired", workflow_run_id="x") == opened
+    assert store.get("t1") == opened
+    assert store.close_or_current("nope", "expired", workflow_run_id="x") is None
+
+
+def test_the_open_of_a_replaced_execution_opens_nothing(store: TaskStore, pg_pool: PgPool) -> None:
+    _reset_to(pg_pool, "y")
+    with pytest.raises(RunEndedError):
+        store.open(_task("t1"), workflow_run_id="x")
+    assert store.list(state=None) == []
+    assert store.open(_task("t1"), workflow_run_id="y").state == "open"
+
+
+def test_reopen_in_opens_a_task_that_is_not_open_again(
+    store: TaskStore, pg_pool: PgPool, recorder: Recorder
+) -> None:
+    store.open(_task("t1"))
+    store.mark_answered("t1", {"ok": True}, "u1", "x")
+    recorder.events.clear()
+    with pg_pool.connection() as conn, conn.transaction():
+        store.reopen_in(conn, "run-2", "t1")
+        store.reopen_in(conn, "run-1", "nope")
+    assert recorder.events == []
+    with pg_pool.connection() as conn, conn.transaction():
+        store.reopen_in(conn, "run-1", "t1")
+        store.reopen_in(conn, "run-1", "t1")
+    got = store.get("t1")
+    assert got is not None
+    assert (got.state, got.answer, got.answered_by) == ("open", None, None)
+    assert recorder.changes() == [("t1", "open")]
+
+
+def test_of_run_reads_a_runs_tasks_by_id(store: TaskStore) -> None:
+    a, b = store.open(_task("a")), store.open(_task("b"))
+    store.open(_task("c", run_id="run-2"))
+    assert store.of_run("run-1", ["a", "c", "nope"]) == {"a": a}
+    assert store.of_run("run-1", ["a", "b"]) == {"a": a, "b": b}
+    assert store.of_run("run-1", []) == {}
