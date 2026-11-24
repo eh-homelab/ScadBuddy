@@ -21,7 +21,7 @@ done
 q="['\"\`]"
 code() {
   grep -rnE "$1" "${trees[@]}" --include='*.ts' --include='*.tsx' --include='*.py' \
-    --exclude-dir=node_modules --exclude-dir=__pycache__ \
+    --exclude-dir=node_modules --exclude-dir=__pycache__ "${@:2}" \
     | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*|#)'
 }
 if code "mode$q?[])]? ?[!=]==? ?$q(durable|classic)$q|case $q(durable|classic)$q|sessionModeOf|session_mode"; then
@@ -29,9 +29,9 @@ if code "mode$q?[])]? ?[!=]==? ?$q(durable|classic)$q|case $q(durable|classic)$q
   fail=1
 fi
 # The names of the session mode the classic runtime left (#7323), each added here by the PR
-# that removed it.
-retired=()
-if [ "${#retired[@]}" -gt 0 ] && code "\\b($(IFS='|'; echo "${retired[*]}"))\\b"; then
+# that removed it. A frontend test may send an older peer's, to show it is dropped.
+retired=(SessionModeSchema)
+if [ "${#retired[@]}" -gt 0 ] && code "\\b($(IFS='|'; echo "${retired[*]}"))\\b" --exclude='*.test.ts' --exclude='*.test.tsx'; then
   echo "a session mode is back: every session is an AgentSession" >&2
   fail=1
 fi

@@ -983,8 +983,6 @@ export interface AiSessionView {
   cost_usd: number
   budget_usd: number
   running: boolean
-  /** Plan 5d — absent from an older agent (classic). */
-  mode?: 'classic' | 'durable'
   /** #1885 — archived by its owner: out of the panel's list, and read-only. Absent from an older agent. */
   archived?: boolean
   archived_at?: string | null
