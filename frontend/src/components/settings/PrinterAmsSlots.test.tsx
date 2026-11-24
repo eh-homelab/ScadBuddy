@@ -1,9 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { PrinterRow } from '../../api/types'
-import { amsSent, setAmsLabelAdminOnly, setAmsPrinting, setAmsTrayNow } from '../../mocks/features/printerAmsSlots'
+import { amsPresetsSaved, amsSent, setAmsAdminOnly, setAmsPrinting, setAmsTrayNow } from '../../mocks/features/printerAmsSlots'
 import { initialPrinters } from '../../mocks/features/printers'
 import { server } from '../../mocks/server'
+import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { PrinterAmsSlots } from './PrinterAmsSlots'
 
@@ -89,6 +90,71 @@ describe('PrinterAmsSlots (#7153)', () => {
     await waitFor(() => expect(slot).toHaveTextContent('Saved: Generic PETG'))
   })
 
+  async function configureForm(user: Awaited<ReturnType<typeof opened>>['user'], name: string) {
+    await user.click(await screen.findByRole('button', { name }))
+    await user.click(screen.getByRole('button', { name: 'Configure…' }))
+    return screen.getByRole('form', { name: `Configure ${name}` })
+  }
+
+  async function confirm(user: Awaited<ReturnType<typeof opened>>['user'], form: HTMLElement, name: string) {
+    await user.click(within(form).getByRole('button', { name: `Configure ${name}…` }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Configure' }))
+  }
+
+  it('saves the preset with the source the form names', async () => {
+    const { user } = await opened()
+    const form = await configureForm(user, 'AMS-A slot 4')
+    await user.type(within(form).getByLabelText('Material'), 'PETG')
+    await user.type(within(form).getByLabelText('Preset id'), 'PFUS1234')
+    await user.type(within(form).getByLabelText('Preset name'), 'My PETG')
+    await user.type(within(form).getByLabelText('Nozzle min (°C)'), '230')
+    await user.type(within(form).getByLabelText('Nozzle max (°C)'), '260')
+    await choose(user, within(form).getByRole('combobox', { name: 'Preset source' }), 'Local')
+    await confirm(user, form, 'AMS-A slot 4')
+    await waitFor(() =>
+      expect(amsPresetsSaved()).toEqual([
+        { preset_id: 'PFUS1234', preset_name: 'My PETG', preset_source: 'local', tray_info_idx: 'PFUS1234' },
+      ]),
+    )
+  })
+
+  it('saves the preset a spool sent', async () => {
+    const { user } = await opened()
+    const form = await configureForm(user, 'AMS-A slot 4')
+    await user.click(within(form).getByRole('combobox', { name: 'From a spool' }))
+    const [, first] = await screen.findAllByRole('option')
+    await user.click(first!)
+    await confirm(user, form, 'AMS-A slot 4')
+    await waitFor(() =>
+      expect(amsPresetsSaved()).toEqual([
+        { preset_id: 'GFA00', preset_name: 'Bambu PLA Basic', preset_source: 'cloud', tray_info_idx: 'GFA00' },
+      ]),
+    )
+    const slot = await screen.findByRole('button', { name: 'AMS-A slot 4' })
+    await waitFor(() => expect(slot).toHaveTextContent('Saved: Bambu PLA Basic'))
+  })
+
+  it('clears the saved preset when the configure sent none', async () => {
+    const { user } = await opened()
+    const form = await configureForm(user, 'AMS-A slot 2')
+    await user.clear(within(form).getByLabelText('Preset id'))
+    await confirm(user, form, 'AMS-A slot 2')
+    await waitFor(() => expect(amsSent()).toEqual(['configure 0/1']))
+    const slot = await screen.findByRole('button', { name: 'AMS-A slot 2' })
+    await waitFor(() => expect(slot).not.toHaveTextContent('Saved:'))
+    expect(amsPresetsSaved()).toEqual([])
+  })
+
+  it('warns when the slot was configured but its preset was not saved', async () => {
+    setAmsAdminOnly(true)
+    const { user } = await opened()
+    const form = await configureForm(user, 'AMS-A slot 2')
+    await confirm(user, form, 'AMS-A slot 2')
+    const status = await screen.findByRole('status')
+    await waitFor(() => expect(status).toHaveTextContent('The slot’s saved preset was not changed'))
+    expect(status).toHaveClass('text-warn')
+  })
+
   it('labels a unit, which names its place too', async () => {
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'Rename AMS-A' }))
@@ -126,7 +192,7 @@ describe('PrinterAmsSlots (#7153)', () => {
   })
 
   it("says why Bambuddy refused a label", async () => {
-    setAmsLabelAdminOnly(true)
+    setAmsAdminOnly(true)
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'Rename AMS-A' }))
     await user.type(screen.getByLabelText('Label for AMS-A'), 'Left rack')

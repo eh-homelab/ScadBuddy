@@ -2,7 +2,7 @@ import { ChevronRightIcon, PencilIcon, RotateCwIcon } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { api, ApiError } from '../../api/client'
 import { listSpools } from '../../api/filament'
-import type { AmsUnitView, AmsView, PrinterRow, SlotCommandSent, SlotConfigureBody, SlotView } from '../../api/types'
+import type { AmsUnitView, AmsView, PrinterRow, SlotCommandSent, SlotConfigureBody, SlotPresetBody, SlotView } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { cn } from '@/lib/utils'
 import {
@@ -43,6 +43,15 @@ const NOZZLES = [
   ...['0.2', '0.4', '0.6', '0.8'].map((value) => ({ value, label: `${value} mm` })),
 ]
 
+type PresetSource = NonNullable<SlotPresetBody['preset_source']>
+
+const PRESET_SOURCES: { value: PresetSource; label: string }[] = [
+  { value: 'cloud', label: 'Bambu cloud' },
+  { value: 'local', label: 'Local' },
+  { value: 'builtin', label: 'Built-in' },
+  { value: 'orca_cloud', label: 'Orca cloud' },
+]
+
 function problem(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
 }
@@ -67,6 +76,7 @@ interface Pending {
   unit: AmsUnitView
   slot: SlotView
   body?: SlotConfigureBody
+  presetSource?: PresetSource
 }
 
 function AmsBody({ row }: { row: PrinterRow }) {
@@ -86,18 +96,24 @@ function AmsBody({ row }: { row: PrinterRow }) {
       if (pending.action === 'configure' && pending.body) {
         const sent = await api.configureSlot(row.id, unit.ams_id, slot.tray_id, pending.body)
         let text = `Configured ${slot.label}: ${sent.material} ${sent.preset_name}.`
-        if (pending.body.preset_id) {
-          try {
+        let warn = false
+        try {
+          // The saved preset follows what the slot was sent: a spool's type preset too, and none clears it.
+          if (sent.preset_id) {
             await api.setSlotPreset(row.id, unit.ams_id, slot.tray_id, {
-              preset_id: pending.body.preset_id,
+              preset_id: sent.preset_id,
               preset_name: sent.preset_name,
-              tray_info_idx: sent.preset_id || null,
+              preset_source: pending.presetSource ?? 'cloud',
+              tray_info_idx: sent.preset_id,
             })
-          } catch (cause) {
-            text += ` The slot’s saved preset was not changed: ${problem(cause, 'Bambuddy refused it.')}`
+          } else if (slot.saved_preset) {
+            await api.clearSlotPreset(row.id, unit.ams_id, slot.tray_id)
           }
+        } catch (cause) {
+          warn = true
+          text += ` The slot’s saved preset was not changed: ${problem(cause, 'Bambuddy refused it.')}`
         }
-        setMessage({ text, warn: text.includes('not changed') })
+        setMessage({ text, warn })
         setConfiguring(false)
       } else {
         const sent = await api.slotCommand(row.id, unit.ams_id, slot.tray_id, pending.action)
@@ -210,7 +226,7 @@ function AmsBody({ row }: { row: PrinterRow }) {
         <ConfigureForm
           slot={slot}
           onCancel={() => setConfiguring(false)}
-          onSubmit={(body) => setAsking({ action: 'configure', unit, slot, body })}
+          onSubmit={(body, presetSource) => setAsking({ action: 'configure', unit, slot, body, presetSource })}
         />
       )}
 
@@ -377,7 +393,7 @@ function ConfigureForm({
 }: {
   slot: SlotView
   onCancel: () => void
-  onSubmit: (body: SlotConfigureBody) => void
+  onSubmit: (body: SlotConfigureBody, presetSource: PresetSource) => void
 }) {
   const spools = useAsync(() => listSpools(), [])
   const [spool, setSpool] = useState('')
@@ -388,6 +404,7 @@ function ConfigureForm({
   const [low, setLow] = useState(slot.nozzle_temp_min?.toString() ?? '')
   const [high, setHigh] = useState(slot.nozzle_temp_max?.toString() ?? '')
   const [nozzle, setNozzle] = useState('')
+  const [presetSource, setPresetSource] = useState<PresetSource>('cloud')
   const fromSpool = spool !== ''
 
   function submit(event: FormEvent) {
@@ -403,7 +420,7 @@ function ConfigureForm({
           nozzle_temp_max: high ? Number(high) : null,
         }
     if (nozzle) body.nozzle_diameter = nozzle as SlotConfigureBody['nozzle_diameter']
-    onSubmit(body)
+    onSubmit(body, presetSource)
   }
 
   const spoolChoices = [
@@ -436,6 +453,16 @@ function ConfigureForm({
           <LabeledInput label="Nozzle max (°C)" type="number" min={0} max={500} required value={high} onChange={(e) => setHigh(e.target.value)} />
         </>
       )}
+      <div className="grid gap-1.5">
+        <span className="text-xs font-normal">Preset source</span>
+        <ChoiceSelect
+          aria-label="Preset source"
+          size="sm"
+          value={presetSource}
+          onValueChange={(value) => setPresetSource(value as PresetSource)}
+          choices={PRESET_SOURCES}
+        />
+      </div>
       <div className="grid gap-1.5">
         <span className="text-xs font-normal">Nozzle</span>
         <ChoiceSelect aria-label="Nozzle" size="sm" value={nozzle} onValueChange={setNozzle} choices={NOZZLES} />

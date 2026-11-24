@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -18,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.filament.component import FILAMENT, Filament
-from scadbuddy.filament.models import Material, SpoolCreate
+from scadbuddy.filament.models import Material, SpoolCreate, SpoolKValueCreate
 from scadbuddy.printers.models import PrinterCreate
 from tests.api.test_printer_kprofiles import SERIAL, linked, store
 from tests.api.test_send import API, configure
@@ -287,6 +288,74 @@ def test_configure_from_any_spool_takes_its_values(client: TestClient) -> None:
     assert (sent["nozzle_temp_min"], sent["nozzle_temp_max"]) == ("190", "220")
     assert sent["nozzle_diameter"] == "0.4"
     assert response.json()["spool_id"] == str(spool.id)
+
+
+def single_nozzle() -> dict[str, Any]:
+    """An X1C-like status: one 0.4 nozzle, Bambuddy's empty second ``nozzles`` entry, no
+    AMS map and no Filament Track Switch."""
+    body = idle(ams_extruder_map={}, ams_switch_inlet={}, fila_switch=None)
+    body["nozzles"][0].update({"nozzle_type": "HS01", "nozzle_diameter": "0.4"})
+    body["nozzles"][1].update({"nozzle_type": "", "nozzle_diameter": ""})
+    return body
+
+
+def k_spool(client: TestClient, printer: str, extruder: int) -> UUID:
+    store_ = filament(client)
+    pla = next(
+        r.id
+        for r in store_.catalog.list("materials")
+        if isinstance(r, Material) and r.name == "PLA"
+    )
+    spool = store_.spools.create(
+        SpoolCreate(material_id=pla, rgba="#112233FF", nozzle_temp_min=190, nozzle_temp_max=220),
+        actor="ann",
+    )
+    store_.spools.set_k_values(
+        spool.id,
+        [
+            SpoolKValueCreate(
+                printer_id=UUID(printer),
+                extruder=extruder,
+                nozzle_diameter="0.4",
+                k_value=Decimal("0.031"),
+                cali_idx=7,
+            )
+        ],
+        actor="ann",
+    )
+    return spool.id
+
+
+@respx.mock
+def test_a_single_nozzle_printer_takes_the_spools_k_value(client: TestClient) -> None:
+    pid = linked(client, 3)
+    status_route(single_nozzle())
+    route = respx.post(f"{API}/printers/3/slots/0/1/configure").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+    spool = k_spool(client, pid, extruder=0)
+
+    response = client.post(f"{slot(pid)}/configure", json={"spool_id": str(spool)})
+
+    assert response.status_code == 200, response.text
+    assert (response.json()["nozzle_diameter"], response.json()["k_value"]) == ("0.4", 0.031)
+    sent = dict(route.calls.last.request.url.params)
+    assert (sent["cali_idx"], sent["k_value"]) == ("7", "0.031")
+
+
+@respx.mock
+def test_configure_from_a_spool_needs_a_nozzle_the_status_names(client: TestClient) -> None:
+    pid = linked(client, 3)
+    # Two nozzles, but nothing says which one AMS 0 feeds.
+    status_route(idle(ams_extruder_map={}, ams_switch_inlet={}))
+    configure_ = respx.post(f"{API}/printers/3/slots/0/1/configure")
+    spool = k_spool(client, pid, extruder=0)
+
+    response = client.post(f"{slot(pid)}/configure", json={"spool_id": str(spool)})
+
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "no_nozzle"
+    assert not configure_.called
 
 
 @respx.mock

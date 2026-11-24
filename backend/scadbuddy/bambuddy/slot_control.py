@@ -16,7 +16,7 @@ from uuid import UUID
 from fastapi import status
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
-from scadbuddy.bambuddy.extruders import extruder_of
+from scadbuddy.bambuddy.extruders import extruder_of, two_nozzles
 from scadbuddy.bambuddy.models import AmsTray, PrinterStatus, SlotConfigure
 from scadbuddy.bambuddy.resolver import PRINTER_MODEL
 from scadbuddy.bambuddy.trays import EXTERNAL, seen_trays, tray_at, tray_label
@@ -308,9 +308,18 @@ def _rgba(colour: str) -> str:
     return f"#{hex_}FF" if len(hex_) == 6 else f"#{hex_}"
 
 
+def slot_extruder(status: PrinterStatus, ams_id: int, tray_id: int) -> int | None:
+    """The extruder the slot feeds: `extruder_of`, else extruder 0 on a printer with one
+    nozzle, whose status maps no AMS to an extruder."""
+    extruder = extruder_of(ams_id, tray_id, status)
+    if extruder is None and not two_nozzles(status):
+        return 0
+    return extruder
+
+
 def nozzle_of(status: PrinterStatus, ams_id: int, tray_id: int) -> str | None:
     """The nozzle diameter of the extruder the slot feeds, as Bambuddy's status names it."""
-    extruder = extruder_of(ams_id, tray_id, status)
+    extruder = slot_extruder(status, ams_id, tray_id)
     if extruder is None or extruder >= len(status.nozzles):
         return None
     return status.nozzles[extruder].nozzle_diameter or None
@@ -338,7 +347,7 @@ def configure_values(
             f"Bambuddy's status does not say which nozzle {tray_label(ams_id, tray_id)}"
             " feeds; send nozzle_diameter",
         )
-    extruder = extruder_of(ams_id, tray_id, status)
+    extruder = slot_extruder(status, ams_id, tray_id)
     material = body.material
     colour = body.colour
     preset_id = body.preset_id

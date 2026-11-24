@@ -6,8 +6,8 @@ import type { AmsUnitView, AmsView, SlotConfigureBody, SlotPresetBody, SlotView 
  * Printer 1's row (`printers.ts`, the H2C linked to Bambuddy printer 1) has AMS-A with three
  * spools and an empty slot, and an empty external holder; any other printer is not linked, a 409,
  * as the route answers. `setAmsPrinting(true)` makes the printer print, so every printer write is
- * the route's 409 `printer_busy`; `setAmsLabelAdminOnly(true)` makes a label write Bambuddy's
- * admin-only scope problem.
+ * the route's 409 `printer_busy`; `setAmsAdminOnly(true)` makes a label or saved-preset write
+ * Bambuddy's admin-only scope problem. A configure from a spool sends its type's preset, `GFA00`.
  */
 
 export const H2C = '00000000-0000-4000-8000-000000000001'
@@ -84,13 +84,21 @@ function seedUnits(): AmsUnitView[] {
   ]
 }
 
-const state = { units: seedUnits(), printing: false, adminOnly: false, sent: [] as string[], trayNow: undefined as number | null | undefined }
+const state = {
+  units: seedUnits(),
+  printing: false,
+  adminOnly: false,
+  sent: [] as string[],
+  presets: [] as SlotPresetBody[],
+  trayNow: undefined as number | null | undefined,
+}
 
 export function reset(): void {
   state.units = seedUnits()
   state.printing = false
   state.adminOnly = false
   state.sent = []
+  state.presets = []
   state.trayNow = undefined
 }
 
@@ -103,8 +111,13 @@ export function setAmsTrayNow(value: number | null | undefined): void {
   state.trayNow = value
 }
 
-export function setAmsLabelAdminOnly(on: boolean): void {
+export function setAmsAdminOnly(on: boolean): void {
   state.adminOnly = on
+}
+
+/** The saved-preset bodies the mock was sent, in order. */
+export function amsPresetsSaved(): SlotPresetBody[] {
+  return state.presets
 }
 
 /** What the mock was asked to do, in order (`load 0/1`, `configure 0/3`, …). */
@@ -124,6 +137,18 @@ function view(): AmsView {
     units: state.units,
   }
 }
+
+const adminOnly = (what: string) =>
+  HttpResponse.json(
+    {
+      type: SCOPE_PROBLEM,
+      title: 'Bambuddy API key scope',
+      status: 409,
+      detail: `Bambuddy refused the API key when asked to ${what} of printer 1. No Bambuddy API key can change a printer's slot presets or AMS labels while Bambuddy's auth is on: turn its auth off, or make the change in Bambuddy`,
+      required_scope: 'Printers (admin only)',
+    },
+    { status: 409 },
+  )
 
 const notLinked = () =>
   HttpResponse.json(
@@ -155,12 +180,13 @@ export const handlers = [
     if (action === 'configure') {
       const body = (await request.json()) as SlotConfigureBody
       const colour = (body.colour ?? '#808080').toUpperCase()
+      const fromSpool = body.spool_id != null
       Object.assign(target, {
         filled: true,
         material: body.material ?? 'PLA',
         colour: colour.length === 7 ? `${colour}FF` : colour,
-        preset_id: body.preset_id ?? '',
-        preset_name: body.preset_name ?? body.material ?? 'PLA',
+        preset_id: body.preset_id ?? (fromSpool ? 'GFA00' : ''),
+        preset_name: body.preset_name ?? (fromSpool ? 'Bambu PLA Basic' : (body.material ?? 'PLA')),
         nozzle_temp_min: body.nozzle_temp_min ?? 190,
         nozzle_temp_max: body.nozzle_temp_max ?? 230,
       })
@@ -195,7 +221,9 @@ export const handlers = [
   }),
   http.put('/api/v1/printers/:id/trays/:ams/:tray/preset', async ({ params, request }) => {
     if (params.id !== H2C) return notLinked()
+    if (state.adminOnly) return adminOnly('save the preset of a slot')
     const body = (await request.json()) as SlotPresetBody
+    state.presets.push(body)
     const target = find(Number(params.ams), Number(params.tray))
     const saved = { preset_id: body.preset_id, preset_name: body.preset_name, tray_info_idx: body.tray_info_idx ?? null }
     if (target) target.saved_preset = saved
@@ -203,24 +231,14 @@ export const handlers = [
   }),
   http.delete('/api/v1/printers/:id/trays/:ams/:tray/preset', ({ params }) => {
     if (params.id !== H2C) return notLinked()
+    if (state.adminOnly) return adminOnly('clear the preset of a slot')
     const target = find(Number(params.ams), Number(params.tray))
     if (target) target.saved_preset = null
     return new HttpResponse(null, { status: 204 })
   }),
   http.put('/api/v1/printers/:id/ams/:ams/label', async ({ params, request }) => {
     if (params.id !== H2C) return notLinked()
-    if (state.adminOnly)
-      return HttpResponse.json(
-        {
-          type: SCOPE_PROBLEM,
-          title: 'Bambuddy API key scope',
-          status: 409,
-          detail:
-            "Bambuddy refused the API key when asked to label AMS 0 of printer 1. No Bambuddy API key can change a printer's slot presets or AMS labels while Bambuddy's auth is on: turn its auth off, or make the change in Bambuddy",
-          required_scope: 'Printers (admin only)',
-        },
-        { status: 409 },
-      )
+    if (state.adminOnly) return adminOnly('label AMS 0')
     const { label } = (await request.json()) as { label: string }
     const unit = state.units.find((u) => u.ams_id === Number(params.ams))
     if (unit) Object.assign(unit, { label, place_name: label })
