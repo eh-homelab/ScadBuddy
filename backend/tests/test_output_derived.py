@@ -345,7 +345,6 @@ def _client_error(status: int, code: str | None = None) -> ClientError:
     [
         pytest.param(lambda: _client_error(404), id="404"),
         pytest.param(lambda: _client_error(404, "NoSuchKey"), id="NoSuchKey"),
-        pytest.param(lambda: FileNotFoundError("gone"), id="FileNotFoundError"),
     ],
 )
 async def test_plate_cover_missing_object_is_no_cover_once(
@@ -356,8 +355,9 @@ async def test_plate_cover_missing_object_is_no_cover_once(
     caplog: pytest.LogCaptureFixture,
     error: Any,
 ) -> None:
-    """#7256 Task 8 amendment: only a missing object (404, ``NoSuchKey``, a local
-    ``FileNotFoundError``) is kept as no cover, so the next ask does not read again."""
+    """#7256 Task 8 amendment: only a missing object (404, ``NoSuchKey``) is kept as no
+    cover, so the next ask does not read again. A guard: no backend raises these past
+    `local_role` (see the local backend test below)."""
     store, meta = await _covered(tmp_path, projection, content)
     gets: list[Any] = []
 
@@ -374,6 +374,75 @@ async def test_plate_cover_missing_object_is_no_cover_once(
     assert len(gets) == 1
     assert store.rows is not None
     assert store.rows.derived(meta.id, "plate_cover", 0) == ("1", {"key": None})
+
+
+async def test_plate_cover_missing_object_in_local_backend_keeps_nothing(
+    tmp_path: Path, projection: JobProjection, content: ContentStore
+) -> None:
+    """#7256 Task 8 review B-M1: through the real local backend, a missing object is a
+    lost blob. With no file either there is no cover for now, and nothing is kept."""
+    store, meta = await _covered(tmp_path, projection, content)
+    objects = [path for path in (tmp_path / "remote").rglob("*") if path.is_file()]
+    assert objects
+    for path in objects:
+        path.unlink()
+    assert await store.read_plate_cover(meta.slug) is None
+    assert store.rows is not None
+    assert store.rows.derived(meta.id, "plate_cover", 0) is None
+
+
+async def test_plate_cover_disk_error_is_not_kept(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7256 Task 8 review B-M1: a ``FileNotFoundError`` of the local disk (the spool
+    removed during the read) is transient. It is not kept as "no cover"."""
+    store, meta = await _covered(tmp_path, projection, content)
+    assert store.bytes is not None
+    real = store.bytes._download_to
+
+    async def spool_gone(*args: Any, **kwargs: Any) -> None:
+        raise FileNotFoundError("spool removed")
+
+    monkeypatch.setattr(store.bytes, "_download_to", spool_gone)
+    assert await store.read_plate_cover(meta.slug) is None
+    assert store.rows is not None
+    assert store.rows.derived(meta.id, "plate_cover", 0) is None
+    monkeypatch.setattr(store.bytes, "_download_to", real)
+    assert await store.read_plate_cover(meta.slug) == COVER_PNG
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_kept_plate_cover_refused_read_is_no_cover(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    status: int,
+) -> None:
+    """#7256 Task 8 review A-M1: a refused read of a kept cover blob answers no cover
+    (as the derive path does), logs one warning and keeps nothing new, never a 500."""
+    store, meta = await _covered(tmp_path, projection, content)
+    assert await store.read_plate_cover(meta.slug) == COVER_PNG
+    kept = ("1", {"key": plate_cover_key(meta.id)})
+    assert store.rows is not None
+    assert store.rows.derived(meta.id, "plate_cover", 0) == kept
+    real = content.get
+
+    def refused(ref: Any, *args: Any, **kwargs: Any) -> Any:
+        raise _client_error(status)
+
+    monkeypatch.setattr(content, "get", refused)
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+        assert await store.read_plate_cover(meta.slug) is None
+    warned = [r for r in caplog.records if "plate cover" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelno == logging.WARNING
+    assert store.rows.derived(meta.id, "plate_cover", 0) == kept
+    monkeypatch.setattr(content, "get", real)
+    assert await store.read_plate_cover(meta.slug) == COVER_PNG
 
 
 @pytest.mark.parametrize("status", [401, 403, 400])

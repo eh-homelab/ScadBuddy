@@ -140,10 +140,11 @@ _MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
 
 def _object_missing(error: Exception) -> bool:
     """Whether ``error`` says that the object is not there: a 404 or ``NoSuchKey``
-    answer, or a local ``FileNotFoundError``. A 401, 403 or other refusal is not one,
-    because a key rotation can heal it."""
-    if isinstance(error, FileNotFoundError):
-        return True
+    answer. A guard only: both backends raise `BlobMissingError` for a missing object
+    (`store/s3.py` `_missing`, `store/local.py` `download`), which `local_role` takes as
+    a lost blob and answers from the file. A 401, 403 or other refusal is not one,
+    because a key rotation can heal it. A local disk error (a ``FileNotFoundError`` of
+    the spool or the download cache) is not one either: it is transient."""
     if not isinstance(error, ClientError):
         return False
     status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
@@ -1762,7 +1763,15 @@ class OutputStore:
                 return await self.bytes.read(key)
             except Exception as error:
                 if not _lost(error):
-                    raise
+                    if not isinstance(error, _COVER_READ_ERRORS):
+                        raise
+                    # A refusal (401, 403) or a disk error: no cover for this ask, as
+                    # the derive path answers, and nothing kept, so a key rotation heals.
+                    logger.warning(
+                        "could not read an output's kept plate cover",
+                        extra={"output_id": output_id, "error": str(error)},
+                    )
+                    return None
                 _warn_lost(output_id, PLATE_COVER_KIND, key, error)
         return await self._derive_plate_cover(slug, output_id)
 
