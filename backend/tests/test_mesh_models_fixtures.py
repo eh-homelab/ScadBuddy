@@ -61,17 +61,29 @@ def test_every_readable_fixture_opens_with_its_objects_parts_and_paint(
     # faces), so a part's file is held to what was read, not to watertight: the same
     # faces, and closed exactly when the source part is once welded the way a load welds
     # it (a pinched vertex stays two in the source's index space and one after the weld).
-    load = mesh_of(tmp_path)
     first = 0
     for obj in read:
         for source, part in zip(obj.parts, scene.objects[first].parts, strict=True):
-            mesh = load(part.mesh)
+            mesh = welded_part(tmp_path / part.mesh)
             welded = source.mesh.copy()
             welded.merge_vertices()
             assert len(mesh.faces) == len(welded.faces), f"{obj.name} {part.id}"
             assert mesh.is_watertight == welded.is_watertight, f"{obj.name} {part.id}"
         first += obj.count
     assert "module o1()" in compile_scene(scene)
+
+
+def welded_part(path: Path) -> trimesh.Trimesh:
+    """A part file's mesh welded as a load welds it (`trimesh.load`'s ``process=True``
+    merges vertices and drops no face). Read with ScadBuddy's streaming reader, not
+    `trimesh.load`: trimesh parses the whole XML tree, 2.9 GB for the olive bottle's 228 MB
+    part file against about 0.1 GB here, and that spike, beside a shard's other xdist
+    workers and Temporal dev servers, filled the CI runner's memory (#6978)."""
+    [obj] = read_objects(path.read_bytes(), ReadBudget())
+    [part] = obj.parts
+    mesh = part.mesh.copy()
+    mesh.merge_vertices()
+    return mesh
 
 
 def carrot_neck(directory: Path, scene: Scene) -> tuple[SceneObject, Any, float, Section]:

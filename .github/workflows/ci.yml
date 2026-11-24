@@ -1604,7 +1604,10 @@ jobs:
       # and an xdist worker 2.5 GiB; shards 1 to 3 were killed opening a whole
       # MakerWorld fixture (3.5 to 3.9 GiB of anon RSS in the killed worker).
       # The whole-fixture reads take a lock, one at a time per shard
-      # (`tests/conftest.py` `one_whole_read_at_a_time`). No `GOMEMLIMIT` for the
+      # (`tests/conftest.py` `one_whole_read_at_a_time`), and read each part file with
+      # ScadBuddy's streaming reader: `trimesh.load` of the olive bottle's 228 MB part
+      # took 2.9 GB, and that test peaked at 6.7 GB alone (2.2 GB now); on run
+      # 45318737267 it filled the 13 GiB cap on shards 1 to 3. No `GOMEMLIMIT` for the
       # Temporal dev servers: at 768 MiB (run 45303037684) they stayed at about
       # 950 MiB, their Go GC ran without end, and shards 4 and 6 took 2567 and 2751 s
       # against main's 1674 to 1852 s (runs 45268094893, 45252653403).
