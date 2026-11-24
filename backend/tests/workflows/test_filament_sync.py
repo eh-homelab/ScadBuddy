@@ -4,7 +4,6 @@ Decisions 11, 12 and 17, R-T7-1) on a dev server, over a stub of its pass activi
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -27,6 +26,7 @@ from scadbuddy.filament.bb_sync_nudge import (
 )
 from scadbuddy.workflows import filament_sync
 from scadbuddy.workflows.filament_sync import DEBOUNCE, MAX_PASSES_IN_A_ROW, FilamentBbSync
+from tests.support import waits
 from tests.support.temporal import temporal_client, terminate_open_workflows
 
 pytestmark = pytest.mark.requires_temporal
@@ -115,10 +115,8 @@ async def start(
 
 
 async def until(check: Callable[[], bool], timeout: float = 20) -> None:
-    deadline = time.monotonic() + timeout
-    while not check():
-        assert time.monotonic() < deadline, "timed out"
-        await asyncio.sleep(0.05)
+    """`tests.support.waits.until`, with this module's budget and interval (#7014)."""
+    await waits.until(check, timeout, interval=0.05, what="timed out")
 
 
 async def test_a_signal_runs_one_debounced_pass(client: Client) -> None:
