@@ -21,6 +21,7 @@ from scadbuddy.entities.problems import (
     entity_not_found,
     no_properties_kind,
     parsed,
+    schema_owned_by_item_kind,
 )
 from scadbuddy.entities.properties import (
     BadPropertySchema,
@@ -28,6 +29,7 @@ from scadbuddy.entities.properties import (
     EntityProperty,
     PropertyPatch,
     PropertyValue,
+    SchemaOwnedByKind,
 )
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import KINDS, EntityNotFound
@@ -196,9 +198,13 @@ async def get_property_schema(kind: KindPath, entities: EntitiesDep) -> KindProp
         "`maxItems`, `uniqueItems`; an `enum` or `const` must fit its key, and no bound may "
         "cross its pair or a cap. Anything else is 422 "
         "`bad_property_schema`, naming the keyword, and the old schema stays. Values already "
-        "stored are not checked again."
+        "stored are not checked again. An item's schema is its item kind's "
+        "`attribute_schema`, so `item` is 409 `schema_owned_by_item_kind`."
     ),
-    responses={422: {"description": "`unknown_entity_kind` or `bad_property_schema`"}},
+    responses={
+        409: {"description": "`schema_owned_by_item_kind`"},
+        422: {"description": "`unknown_entity_kind` or `bad_property_schema`"},
+    },
 )
 async def put_property_schema(
     kind: KindPath, body: SchemaBody, entities: EntitiesDep
@@ -208,4 +214,6 @@ async def put_property_schema(
         await asyncio.to_thread(entities.properties.set_schema, name, body.schema_, current_actor())
     except BadPropertySchema as e:
         raise bad_property_schema(e.reason) from None
+    except SchemaOwnedByKind:
+        raise schema_owned_by_item_kind() from None
     return await _schema_view(entities, name)

@@ -136,3 +136,13 @@ def test_a_good_schema_types_a_key_and_counts_keys_in_use(client: TestClient) ->
         "/api/v1/entity-kinds/Spool/property-schema", json={"schema": good}, headers=press()
     )
     _code(other, 422, "unknown_entity_kind")
+
+
+def test_an_items_schema_is_set_on_its_kind(client: TestClient) -> None:
+    refused = client.put(
+        "/api/v1/entity-kinds/item/property-schema",
+        json={"schema": {"type": "object", "properties": {}}},
+        headers=press(),
+    )
+    _code(refused, 409, "schema_owned_by_item_kind")
+    assert "attribute_schema" in refused.json()["detail"]
