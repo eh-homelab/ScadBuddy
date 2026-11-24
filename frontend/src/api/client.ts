@@ -2511,6 +2511,10 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /** #7151 — unassign: the tray's spool moves to no place (a `moved` ledger event); the spool stays. */
+  unlinkTraySpool: (printer: string, amsId: number, trayId: number) =>
+    request<void>(`/printers/${seg(printer)}/trays/${amsId}/${trayId}/spool`, { method: 'DELETE' }),
+
   /**
    * #7150 — create from slot: a new SB spool from what the printer last reported in the
    * tray (material, colour, tag), placed in it. `key` is one `Idempotency-Key` per click.

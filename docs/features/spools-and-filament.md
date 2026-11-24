@@ -63,6 +63,26 @@ makes a spool from a tray. A resend of a copy reads its source again: its key na
 draft it read, so an unchanged source makes nothing twice and a changed one makes a new set
 (R-7150-8).
 
+The Spools tab's bulk bar acts on the selected spools (#7151, plan
+`docs/superpowers/plans/2026-11-23-spool-bulk-ops.md`):
+
+- **Edit fields.** A dialog lists every field a spool's edit sets, except archived. Each
+  ticked field is set on every selected spool; a ticked field left empty clears the spool's
+  own value, so it takes its type's. It is one request, `POST /filament/spools/bulk-update`,
+  and all or none: when one spool refuses, nothing changes and the reason names that spool.
+  Each spool that changed gets its own `edited` event.
+- **Archive and Restore.** One request each, `POST /filament/spools/bulk-archive` and
+  `/bulk-restore`. The answer lists the spools changed, those already so and the ids that
+  name no spool, and the bar reports it once.
+
+An AMS tray's place page that holds a spool has "Take the spool out of this tray"
+(`DELETE /printers/{id}/trays/{ams}/{tray}/spool`): the spool moves to no place.
+
+The Spools and Tags tabs find a tag by its UID or tray UUID. A search token of at least 4 hex
+digits matches a spool's open tag that holds it, with `:` and `-` left out, so `04:A1:B2`
+finds tag `04A1B2…`. The agent's `filament_spool_list` `q` does the same. Its bulk tools are
+`filament_spools_bulk_update` and `filament_spools_bulk_archive`.
+
 Tray changes and print ends are recorded when a printer report is written
 (`backend/scadbuddy/filament/capture.py`). They are not a workflow of their own.
 
@@ -88,10 +108,29 @@ store; Bambuddy knows each one only by its mirror's local preset id
 configure send. After each refresh of the kept presets, a binding that still names a
 Bambuddy local preset is moved to a ScadBuddy preset made from the kept copy, and a preset
 made in Bambuddy takes a new version when Bambuddy edits it
-(`backend/scadbuddy/filament/sb_presets.py`). Until the fetch writes ScadBuddy presets
-itself (#7176's second PR), a re-fetch still imports into Bambuddy: at a key whose `3dfp`
-preset was already adopted, the new Bambuddy id is adopted as a second, `bambuddy` preset
-(plan Decision 6).
+(`backend/scadbuddy/filament/sb_presets.py`). While the stored setting
+`filament_preset_mirror` is on (the default), each preset ScadBuddy owns is copied to
+Bambuddy's local presets after a fetch and after each refresh, rewritten in place under the
+same Bambuddy id when it changes; a failed copy is the preset's `mirror_error`
+(`backend/scadbuddy/filament/preset_mirror.py`). One mirror runs at a time, a preset's
+Bambuddy id is kept with the Bambuddy it belongs to. That id is a Bambuddy link as the
+filament sync's are: the write that stores it records its Bambuddy as the links' one when
+none is recorded, so a site whose only links are presets has one too. After the Bambuddy
+URL changes the mirror waits, as the filament sync does, until the links are reset
+(`POST /filament/sync/reset-links`): a reset that finds the same Bambuddy (proved by the
+spool links, so never when presets are the only links) moves the ids to the new URL, and
+one that deletes the links drops them (the dry run's and the answer's `presets` count), so
+each preset is created on the new Bambuddy;
+meanwhile no path hands Bambuddy an id of the old one. A create whose answer was lost is
+found above the highest id listed before it, by its name and its document, not made
+twice; one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
+own `mirror_error` and never stops the rest.
+
+A fetch writes ScadBuddy only: each file is the type's `3dfp` preset of its key, a changed
+one a new version with its changed keys in the run's notes, and the type's own nozzle range
+wins over 3DFP's (#7142). Fetching presets is the `ProfileFetch` workflow on the
+profile-fetch worker, and a 3DFP search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
+([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).
 
 A printer's K-profiles (#7154, plan
 `docs/superpowers/plans/2026-11-23-printer-kprofiles.md`) are read from the printer through
@@ -112,10 +151,6 @@ one already feeding, and refresh refuses while filament is loaded. Configure tak
 spool (its values and its type's preset and K value for the slot's nozzle) or the values by
 hand. A slot's saved preset and an AMS unit's label live in Bambuddy; a label write also
 names ScadBuddy's place of the unit. The page asks before every printer write.
-
-Fetching presets is the `ProfileFetch` workflow on the profile-fetch worker, and a 3DFP
-search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
-([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).
 
 ## Code
 
@@ -159,6 +194,7 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   (`backend/scadbuddy/migrations/20261118T1235Z_drop_native_spool_tables.sql`).
 - Settings: `spool_overlay_refresh_seconds` (the refresh Schedule), `filament_sync`,
   `filament_low_stock_pct`, `filament_default_cost_per_kg`, `profile_fetch_nozzles`,
+  `filament_preset_mirror`,
   `filament_drying_temp_c` and `filament_drying_hours` (#7156: the drying a spool is offered
   when its spool, type, subtype and material set none; empty by default, so none is offered),
   `filament_auto_add_unknown_rfid` (#7156, stored only, on by default: on leaves Bambuddy's own
@@ -230,13 +266,16 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   - `backend/tests/api/test_filament*.py`, `test_tray_spools.py`, `test_print_filaments.py`;
   - the create operations (#7150): `test_filament_spool_create_ops.py`, and create from slot
     in `test_tray_spools.py`;
+  - bulk edit, archive and restore (#7151): `test_filament_spool_bulk_ops.py`;
   - `backend/tests/test_spool_refresh_replay.py`;
   - `backend/tests/profile_fetch/`;
   - `backend/tests/api/test_printer_kprofiles.py`, `backend/tests/bambuddy/test_client_kprofiles.py`;
   - `backend/tests/api/test_printer_slots.py`, `backend/tests/bambuddy/test_client_slots.py`.
 - Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`),
   `frontend/src/components/settings/PrinterAmsSlots.test.tsx` (mocks `frontend/src/mocks/features/printerAmsSlots.ts`),
-  and the AMS unit place's rename in `frontend/src/pages/filament/LocationsTab.test.tsx`.
+  and the AMS unit place's rename in `frontend/src/pages/filament/LocationsTab.test.tsx`;
+  the #7151 operations in `components/filament/BulkBar.test.tsx`, `pages/filament/LocationPage.test.tsx`,
+  `pages/filament/SpoolsTab.search.test.tsx` and `pages/filament/TagsTab.test.tsx`.
 - Agent: `agent/test/printerSlots.test.ts`.
 
 ## Limits and known issues

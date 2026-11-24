@@ -1105,16 +1105,6 @@ class SliceJob(BambuddyModel):
         return "Bambuddy did not say why"
 
 
-class PresetImport(BambuddyModel):
-    """``POST /api/v1/local-presets/import``'s answer (``ImportResponse``): how many
-    presets of the zip Bambuddy took (#6625)."""
-
-    success: bool
-    imported: int = 0
-    skipped: int = 0
-    errors: list[str] = Field(default_factory=list)
-
-
 class KProfile(BambuddyModel):
     """A row of a printer's K table, ``GET /api/v1/printers/{id}/kprofiles/`` (``KProfile``
     in Bambuddy's schema): the flow-dynamics value the printer holds for one filament and

@@ -25,6 +25,26 @@ describe('the Tags tab', () => {
     expect(within(await rowOf(TAG.BLACK)).getByText('No')).toBeInTheDocument()
   })
 
+  it('searches by tag UID or tray UUID, as a reader prints it, and by spool number (#7151)', async () => {
+    const { user } = renderPage(<TagsTab />, { route: '/filament/tags?q=04:A1:B2' })
+    const shown = async () =>
+      within(await table())
+        .getAllByRole('row')
+        .flatMap((row) => (row.dataset.tag ? [row.dataset.tag] : []))
+    await waitFor(async () => expect(await shown()).toEqual([TAG.MOVED]))
+    const box = screen.getByRole('searchbox', { name: 'Search tags' })
+    expect(box).toHaveValue('04:A1:B2')
+    for (const [query, expected] of [
+      ['7f3e1c0a', [TAG.BLACK]],
+      ['04ffee', [TAG.LOOSE]],
+      ['#4', [TAG.BLACK]],
+    ] as const) {
+      await user.clear(box)
+      await user.type(box, query)
+      await waitFor(async () => expect(await shown(), query).toEqual(expected))
+    }
+  })
+
   it('opens a tag history: where the tag has been, newest first', async () => {
     const { user } = renderPage(<TagsTab />)
     await table()
