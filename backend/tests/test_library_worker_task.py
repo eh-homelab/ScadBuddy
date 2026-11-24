@@ -454,6 +454,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
 
     monkeypatch.setattr(main, "sweep_media", slow_media)
     state.settings = SimpleNamespace(media_upload_max_bytes=1 << 20)
+    # #7491: the sweep counts the starts it asked for.
+    state.metrics = SimpleNamespace(attempt_media_sweep_starts=SimpleNamespace(inc=lambda n: None))
     # #5298: the CRUD routes' idempotency replies past their 24 h, one delete.
     monkeypatch.setattr(main, "_prune_crud_requests", lambda state: time.sleep(0.1))
 
