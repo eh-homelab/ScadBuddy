@@ -1,5 +1,5 @@
 {
-  "comment": "#6894, #7151: the filament text search's cases. frontend/src/lib/filamentSearch.test.ts and agent/test/filamentSearch.test.ts both run every group, so the two copies of the matcher cannot drift apart. A spool group gives the spool and its extras; a type group gives the type, its catalog names and its SKUs.",
+  "comment": "#6894, #7151: the filament text search's cases. frontend/src/lib/filamentSearch.test.ts and agent/test/filamentSearch.test.ts both run every group, so the two copies of the matcher cannot drift apart. A spool group gives the spool and its extras; a type group gives the type, its catalog names and its SKUs. Either may give `properties`, the entity's property values (#7026), which each test turns into search text with `propertyTexts`.",
   "groups": [
     {
       "name": "a pink Bambu spool in a tray",
@@ -90,6 +90,34 @@
         { "query": "elg-silk", "match": true },
         { "query": "el-pla", "match": true },
         { "query": "#1", "match": false }
+      ]
+    },
+    {
+      "name": "a type found by its property values (#7026)",
+      "kind": "type",
+      "type": { "code": "PLA-BLK", "brand_id": null, "material_id": null, "subtype_id": null, "colour_name": "Black", "rgba": "#000000FF" },
+      "names": {},
+      "skus": [],
+      "properties": { "gtin": ["06975337041234", "06975337049999"], "td": 1.8, "food_safe": true, "mpn": "A00-K0" },
+      "cases": [
+        { "query": "9999", "match": true },
+        { "query": "06975337041234", "match": true },
+        { "query": "1.8", "match": true },
+        { "query": "true", "match": false },
+        { "query": "a00-k0 black", "match": true },
+        { "query": "gtin", "match": false },
+        { "query": "food_safe", "match": false }
+      ]
+    },
+    {
+      "name": "a spool found by its lot (#7026)",
+      "kind": "spool",
+      "spool": { "number": 9, "names": {}, "effective": {} },
+      "extras": {},
+      "properties": { "lot_number": "L-2207" },
+      "cases": [
+        { "query": "l-2207", "match": true },
+        { "query": "lot_number", "match": false }
       ]
     }
   ]

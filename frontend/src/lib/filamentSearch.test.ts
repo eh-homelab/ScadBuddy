@@ -5,9 +5,10 @@ import { addSku, matchesSearch, namesNumber, parseSearch, propertyTexts, spoolSe
 import type { SpoolExtras } from './filamentSearch'
 
 type Cases = { query: string; match: boolean }[]
+type Properties = Parameters<typeof propertyTexts>[0]
 type Vector =
-  | { name: string; kind: 'spool'; spool: Spool; extras: SpoolExtras; cases: Cases }
-  | { name: string; kind: 'type'; type: SpoolType; names: Record<string, string>; skus: string[]; cases: Cases }
+  | { name: string; kind: 'spool'; spool: Spool; extras: SpoolExtras; properties?: Properties; cases: Cases }
+  | { name: string; kind: 'type'; type: SpoolType; names: Record<string, string>; skus: string[]; properties?: Properties; cases: Cases }
 
 // The agent's copy of the matcher runs the same file (agent/test/filamentSearch.test.ts).
 const { groups } = JSON.parse(readFileSync(`${import.meta.dirname}/../../../test-fixtures/filament/search-vectors.json`, 'utf8')) as { groups: Vector[] }
@@ -15,7 +16,11 @@ const { groups } = JSON.parse(readFileSync(`${import.meta.dirname}/../../../test
 describe('the filament search (#6894)', () => {
   for (const group of groups) {
     it(`matches the shared vectors: ${group.name}`, () => {
-      const doc = group.kind === 'spool' ? spoolSearchDoc(group.spool, group.extras) : typeSearchDoc(group.type, new Map(Object.entries(group.names)), group.skus)
+      const properties = propertyTexts(group.properties)
+      const doc =
+        group.kind === 'spool'
+          ? spoolSearchDoc(group.spool, { ...group.extras, properties })
+          : typeSearchDoc(group.type, new Map(Object.entries(group.names)), group.skus, { properties })
       for (const { query, match } of group.cases) expect(matchesSearch(doc, parseSearch(query)), JSON.stringify(query)).toBe(match)
     })
   }
@@ -44,8 +49,8 @@ describe('the filament search (#6894)', () => {
     expect(skus.get('t')).toEqual(['A', 'B'])
   })
 
-  it('reads property values as text: strings, list items, numbers and booleans (#7026)', () => {
-    expect(propertyTexts({ gtin: ['0123', '0456'], td: 1.8, ok: true })).toEqual(['0123', '0456', '1.8', 'true'])
+  it('reads property values as text: strings, list items and numbers, never booleans (#7026, #7379)', () => {
+    expect(propertyTexts({ gtin: ['0123', '0456'], td: 1.8, ok: true, dried: false })).toEqual(['0123', '0456', '1.8'])
     expect(propertyTexts(undefined)).toEqual([])
   })
 

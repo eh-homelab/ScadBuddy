@@ -52,6 +52,7 @@ export function MicButton({
     return (
       <Tip wrap={disabled} content="Bambuddy doesn’t give its embedded pages the microphone">
         <Button
+          type="button"
           size="sm"
           variant="ghost"
           disabled={disabled}

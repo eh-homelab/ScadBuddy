@@ -358,6 +358,21 @@ describe('turn tools in a durable session', () => {
     expect(notes.tierOf('mcp__notes__delete', {})).toBe('outward')
   })
 
+  it("gives a session's browser options to its remote plugins from its context, and a flow's none (#7027)", async () => {
+    const options = { user_agent: 'Mozilla/5.0 (Test)', locale: 'en-GB' }
+    const given: unknown[] = []
+    const build = turnServers({
+      remotePlugins: async (browser) => {
+        given.push(browser)
+        return { plugins: [], problems: [], secrets: [], terminate: async () => {}, release: () => {} }
+      },
+    })
+    await build({ session: SESSION, owner: BROWSER, browser: options, signal: new AbortController().signal })
+    await build({ session: SESSION, owner: BROWSER, signal: new AbortController().signal })
+    await build({ session: 'flow-run-1', flow: 'run-1', owner: BROWSER, browser: options, signal: new AbortController().signal })
+    expect(given).toEqual([options, undefined, undefined])
+  })
+
   it("lists the real http_request as may_park, and tiers a POST outward and refuses it unapproved (review of #2324)", async () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const deps: TurnToolsDeps = {
@@ -471,6 +486,19 @@ describe('turn tools in a durable session', () => {
     await env('turn:notes__read_note').run(h.call, { id: 'a' })
     expect(h.audits).toEqual([expect.objectContaining({ turnId })])
     expect(h.contexts.at(-1)?.turnId).toBe(turnId)
+  })
+
+  it("takes a call's browser options from the row its owner is read from: one read, never a second that could fail (#7027)", async () => {
+    const browser = { viewport: { width: 1024, height: 768 } }
+    const h = harness({ owner: { ...BROWSER, browser } as never })
+    let reads = 0
+    const ownerOf = h.deps.sessions.ownerOf.bind(h.deps.sessions)
+    h.deps.sessions.ownerOf = async (id) => (reads++, ownerOf(id))
+    expect(await env('turn:notes__read_note').run(turnToolActivity(h.deps), { id: 'a' })).toBe('note a')
+    expect(reads).toBe(1)
+    expect(h.contexts.at(-1)?.browser).toEqual(browser)
+    // The options stay out of the owner the call runs and is audited as.
+    expect(h.contexts.at(-1)?.owner).toEqual(BROWSER)
   })
 
   it('lists a keyed server once for a tier check and the call after it (#2497)', async () => {

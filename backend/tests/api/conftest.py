@@ -139,7 +139,7 @@ def settings(
     fake_openscad: str,
 ) -> Iterator[Settings]:
     """The app renders on the session's Temporal with its own in-process worker, on a
-    task queue of its own: each test has its own data directory and database schema,
+    task queue of its own: each test has its own data directory and database,
     so a worker is per app, not per session. The fake openscad exports a red 10x10x5
     box, and fails a render with ``width: 999`` (FAIL_WIDTH).
 

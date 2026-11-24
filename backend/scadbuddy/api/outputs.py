@@ -121,7 +121,7 @@ from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryReads, served_reads
-from scadbuddy.print_library.store import NativeFile
+from scadbuddy.print_library.store import NativeFile, NativeListedFile
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
@@ -488,7 +488,7 @@ async def live_outputs_for_files(
 
 
 async def native_outputs_for_files(
-    outputs: OutputStore, files: Iterable[NativeFile]
+    outputs: OutputStore, files: Iterable[NativeFile | NativeListedFile]
 ) -> dict[int, str]:
     """`live_outputs_for_files` for ScadBuddy's own library (plan
     2026-10-17-native-print-library, Task 4): the output each file's row names, while

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.library.settings_store import DEFAULT_PLATE
 from scadbuddy.render.plate import (
     Axis,
     PlateGeometry,
@@ -103,7 +104,7 @@ def get_plate(
 ) -> PlateView:
     """An absent or unknown model is the configured default plate, not an error: that is
     what a customizer with no printer chosen, or no Bambuddy at all, draws."""
-    return _view(_resolve(model, store.load().default_plate))
+    return _view(_resolve(model, store.get(DEFAULT_PLATE)))
 
 
 @router.get("/plate/fit", response_model=PlateFit, summary="Whether a model fits a printer")
@@ -120,7 +121,7 @@ def get_plate_fit(
         ),
     ] = 1,
 ) -> PlateFit:
-    plate = _resolve(model, store.load().default_plate)
+    plate = _resolve(model, store.get(DEFAULT_PLATE))
     size = (x, y, z)
     over = [
         Overshoot(axis=axis, size=want, limit=have) for axis, want, have in overshoots(size, plate)
@@ -138,6 +139,6 @@ def get_plate_fit(
 @router.get("/plates", response_model=PlateCatalogue, summary="Every plate ScadBuddy knows")
 def list_plates(store: SettingsStoreDep) -> PlateCatalogue:
     return PlateCatalogue(
-        default=_view(_resolve(None, store.load().default_plate)),
+        default=_view(_resolve(None, store.get(DEFAULT_PLATE))),
         plates=[_view(plate_for(model)) for model in PLATE_PROFILES],
     )

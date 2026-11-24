@@ -10,6 +10,8 @@ from psycopg import errors
 from scadbuddy.render.pg_store import MIGRATIONS, migrate
 from tests.conftest import PgPool
 
+pytestmark = pytest.mark.pg_empty
+
 pg = pytest.mark.requires_postgres
 
 _TYPE = (

@@ -61,7 +61,8 @@ import type { TitleResolver } from './sdkEvents.js'
 import { TranscriptStore, type TranscriptRows } from './store.js'
 import type { UserAttachment } from './images.js'
 import { type ResourceRows, SessionResources, type TouchedRecord } from './touched.js'
-import { type ListFilter, ROW_TITLE_MAX, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
+import { type ListFilter, ROW_TITLE_MAX, type SessionBrowser, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
+import { CrudReadError } from '../api/crudRead.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, SessionRuntime } from './durable.js'
 import type { PendingReads } from '../gate/projection.js'
@@ -387,8 +388,10 @@ export type SessionErrorCode =
   | 'queue_full'
   /** A queued message that is no longer waiting: it started, or was removed (#6386). */
   | 'not_queued'
+  /** The API refused a new session's browser options (#7027): its bounds, not the agent's. */
+  | 'invalid_browser'
 
-type SessionErrorStatus = 400 | 403 | 404 | 409 | 429 | 503
+type SessionErrorStatus = 400 | 403 | 404 | 409 | 422 | 429 | 503
 
 const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   not_found: 404,
@@ -403,6 +406,7 @@ const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   archived: 409,
   queue_full: 409,
   not_queued: 409,
+  invalid_browser: 422,
 }
 
 /**
@@ -435,6 +439,20 @@ export function archivedError(id: string): SessionError {
   return new SessionError('archived', `session ${id} is archived, so it is read-only; unarchive it to continue it, or fork it`)
 }
 
+/**
+ * The API's 422 on a new session's browser options (#7027) as `invalid_browser`, naming each
+ * refused field with the API's message for it (the bound it broke, which only the API holds);
+ * undefined for any other error.
+ */
+function browserRefusal(error: unknown): SessionError | undefined {
+  if (!(error instanceof CrudReadError) || !error.fromRoute || error.status !== 422) return undefined
+  const refused = error.errors
+    .filter((e) => e.field === 'body.browser' || e.field.startsWith('body.browser.'))
+    .map((e) => `${e.field.slice('body.'.length)}: ${e.msg || error.detail || 'invalid value'}`)
+  if (!refused.length) return undefined
+  return new SessionError('invalid_browser', `the browser options were refused: ${refused.join('; ')}`)
+}
+
 /** A pending handoff (`handoff`): who may accept it, and until when. */
 export type HandoffOffer = { to: Owner; until: string }
 
@@ -449,6 +467,8 @@ export type SessionRecord = {
   title: string
   tags: string[]
   scope: Record<string, unknown>
+  /** What its browser reports (#7027): the options it started with, or its parent's; null for the defaults. */
+  browser: SessionBrowser | null
   parentId: string | null
   /**
    * Deprecated on the wire: always `durable`, since every session runs as an AgentSession (plan
@@ -568,6 +588,8 @@ export type StartOptions = {
    * not offered the background built-ins (ClaimedSession.backgroundTools).
    */
   withoutBackground?: boolean
+  /** What its browser reports (#7027), kept for its life and its forks'; the API checks the bounds. */
+  browser?: SessionBrowser
   /** Taken and ignored (plan Step 6.3): every session is an AgentSession. */
   mode?: SessionMode
 }
@@ -732,7 +754,7 @@ export type SessionManagerDeps = {
    * list them (temporal/turnTools.ts `listTurnTools`), for the in-process proxies a turn
    * on Temporal gets in place of its plugins and http_request (plan 2026-10-13 Step 9.3).
    */
-  turnTools?: (context: { session: string; owner: Owner; signal: AbortSignal }, only: ReadonlySet<string>) => Promise<Pick<TurnToolsResult, 'tools' | 'unlisted'>>
+  turnTools?: (context: { session: string; owner: Owner; browser?: SessionBrowser; signal: AbortSignal }, only: ReadonlySet<string>) => Promise<Pick<TurnToolsResult, 'tools' | 'unlisted'>>
   /**
    * What an outward call parks, for a registry tool that resolves its arguments (#4442,
    * tools/harness.ts `prepareApproval`): bound to the turn's principal, as `mcpServers` is.
@@ -750,11 +772,11 @@ export type SessionManagerDeps = {
   /**
    * The registered, enabled remote MCP plugins for a turn (#297), registered
    * with the loopback forwarder: in production
-   * `forwardForRun(await loadEnabledPlugins(store), forwarder)`. Read once
+   * `forwardForRun(await loadEnabledPlugins(store), forwarder, { browser })`. Read once
    * per turn, so enabling or changing a plugin applies from the next turn on;
-   * released when the turn ends.
+   * released when the turn ends. `browser` is the session's browser options (#7027).
    */
-  remotePlugins?: () => Promise<PluginsForRun>
+  remotePlugins?: (browser?: SessionBrowser) => Promise<PluginsForRun>
   /**
    * The enabled plugin packages for a turn (#297), each materialised from its
    * pin and verified: in production
@@ -864,6 +886,7 @@ function record(row: SessionRow): SessionRecord {
     title: row.title,
     tags: row.tags,
     scope: row.scope,
+    browser: row.browser ?? null,
     parentId: row.parent_id,
     mode: 'durable',
     runtime: row.runtime,
@@ -1164,6 +1187,8 @@ export class SessionManager {
       forkOf?: { parentId: string; cut: number }
       /** `ai_sessions.background_tools` (#5870): false given; else the parent's, for a session with one; else true. */
       backgroundTools?: false
+      /** `ai_sessions.browser` (#7027): left out, the parent's for a session with one, else none. */
+      browser?: SessionBrowser
     },
     options: { rateLimited?: boolean; budgetOf?: SessionRecord } = {},
   ): Promise<SessionRecord> {
@@ -1187,7 +1212,10 @@ export class SessionManager {
       ...(from ? { budgetOf: from.id } : {}),
       ...(forkOf ? { forkOf } : {}),
       ...(fields.backgroundTools === false ? { backgroundTools: false as const } : {}),
+      ...(fields.browser ? { browser: fields.browser } : {}),
       ...(options.rateLimited ? { limit: this.newSessionLimit() } : {}),
+    }).catch((error: unknown) => {
+      throw browserRefusal(error) ?? error
     })
     if (refused === 'rate_limited') throw this.rateLimited()
     if (refused === 'forgotten') throw new SessionError('not_found', `session ${forkOf?.parentId} was forgotten; it cannot be forked`)
@@ -1229,6 +1257,7 @@ export class SessionManager {
       parentId: null,
       runtime: 'unified',
       ...(options.withoutBackground ? { backgroundTools: false as const } : {}),
+      ...(options.browser ? { browser: options.browser } : {}),
     }, { rateLimited: true })
     await this.events.append(id, [
       event({

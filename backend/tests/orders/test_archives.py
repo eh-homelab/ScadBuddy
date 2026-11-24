@@ -16,10 +16,12 @@ from typing import Any, cast
 
 import pytest
 
+from scadbuddy import main
 from scadbuddy.api.orders import record_fulfilment, update_fulfilment
 from scadbuddy.bambuddy.models import SpoolAssignment
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.core.events import OrderItemChanged, PrintOutcome
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders import archives as archives_module
@@ -61,6 +63,7 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.attempt_media import AttemptMediaStep
+from scadbuddy.workflows.housekeeping import ATTEMPT_MEDIA_TIMEOUT
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop
 from tests.orders.test_printing import SUBJECT, run_row, settle, started
@@ -1261,7 +1264,7 @@ async def test_the_sweep_starts_one_step_for_an_attempt_missing_a_medium(
     medium and was last read more than an hour ago gets one step; the sweep asks Bambuddy
     nothing itself."""
     _, _, missing_photo = by_hand(shop, 81)
-    await step(PerArchive(facts(81, finish_photos=[])), missing_photo.id)
+    await step(PerArchive(facts(81, finish_photos=[], completed_at=None)), missing_photo.id)
     _, _, checked_lately = by_hand(shop, 82)
     _, _, too_old = by_hand(shop, 83)
     _, _, has_both = by_hand(shop, 84)
@@ -1317,6 +1320,125 @@ async def test_the_sweep_skips_a_medium_refused_at_the_current_limit(
 
     await sweep_media(shop.lifecycle, Archives(), starts, limit=small + 1)
     assert starts.started == [(attempt.id, False)]
+
+
+async def test_the_sweep_starts_at_most_a_batch_least_lately_checked_first(
+    shop: Shop, pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7453: each start may wait `START_TIMEOUT`, so one pass starts at most
+    `SWEEP_BATCH` attempts, least lately checked first; the rest wait for the next."""
+    monkeypatch.setattr(archives_module, "SWEEP_BATCH", 2)
+    _, _, lately = by_hand(shop, 81)
+    _, _, never = by_hand(shop, 82)
+    _, _, long_ago = by_hand(shop, 83)
+    aged(pool, lately.id, timedelta(days=1), timedelta(hours=2))
+    aged(pool, never.id, timedelta(days=1), None)
+    aged(pool, long_ago.id, timedelta(days=1), timedelta(hours=5))
+    starts = Starts()
+
+    assert await sweep_media(shop.lifecycle, Archives(), starts, limit=LIMIT) == 2
+
+    assert starts.started == [(never.id, False), (long_ago.id, False)]
+
+
+def test_a_full_batch_of_slow_starts_fits_the_sweeps_timeout() -> None:
+    """#7453: a pass of `SWEEP_BATCH` starts that each take `START_TIMEOUT` ends inside
+    the activity's timeout, with time left for the read."""
+    budget = archives_module.SWEEP_BATCH * attempt_media_module.START_TIMEOUT
+    assert budget <= ATTEMPT_MEDIA_TIMEOUT.total_seconds() * 0.75
+
+
+async def test_the_sweep_skips_a_medium_an_archive_past_fresh_does_not_offer(
+    shop: Shop, pool: PgPool, step: Step
+) -> None:
+    """#7453: an archive that completed `FRESH` ago or more and offers no timelapse (the
+    printer took none) is not read again each hour for 14 days: the step records it, and
+    the sweep leaves it out, as `mirror_attempt`'s ``missing`` does. A medium still
+    offered and not imported keeps the attempt in the sweep."""
+    old = datetime.now(UTC) - FRESH
+    _, _, no_timelapse = by_hand(shop, 81)
+    seam = PerArchive(facts(81, timelapse=False, timelapse_name=None, completed_at=old))
+    assert not (await step(seam, no_timelapse.id)).missing
+    _, _, still_fresh = by_hand(shop, 82)
+    fresh = PerArchive(facts(82, timelapse=False, timelapse_name=None, completed_at=None))
+    assert (await step(fresh, still_fresh.id)).missing
+    _, _, photo_failed = by_hand(shop, 83)
+    assert (
+        await step(
+            FailingDownloads(facts(83, timelapse=False, timelapse_name=None, completed_at=old)),
+            photo_failed.id,
+        )
+    ).missing
+    for attempt in (no_timelapse, still_fresh, photo_failed):
+        aged(pool, attempt.id, timedelta(days=3), timedelta(hours=2))
+    starts = Starts()
+
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=LIMIT)
+
+    assert sorted(starts.started) == sorted([(still_fresh.id, False), (photo_failed.id, False)])
+
+
+async def test_a_medium_offered_later_returns_the_attempt_to_the_sweep(
+    shop: Shop, pool: PgPool, step: Step
+) -> None:
+    """#7453: the record of a medium not offered is rewritten by each step, so a
+    timelapse Bambuddy offers later, whose import failed, is swept again."""
+    old = datetime.now(UTC) - FRESH
+    _, _, attempt = by_hand(shop, 81)
+    await step(
+        PerArchive(facts(81, timelapse=False, timelapse_name=None, completed_at=old)), attempt.id
+    )
+    assert (await step(TimelapseFails(facts(81, completed_at=old)), attempt.id)).missing
+    aged(pool, attempt.id, timedelta(days=3), timedelta(hours=2))
+    starts = Starts()
+
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=LIMIT)
+
+    assert starts.started == [(attempt.id, False)]
+
+
+class FailingDownloads(Archives):
+    """A Bambuddy whose archives read, but whose media downloads fail."""
+
+    async def download_archive_media(
+        self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
+    ) -> CopiedMedia:
+        raise RuntimeError("Bambuddy did not answer")
+
+
+class TimelapseFails(Archives):
+    """A Bambuddy whose timelapse downloads fail."""
+
+    async def download_archive_media(
+        self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
+    ) -> CopiedMedia:
+        if what == "timelapse":
+            raise RuntimeError("Bambuddy did not answer")
+        return await super().download_archive_media(archive_id, what, name, target, limit)
+
+
+async def test_the_housekeeping_sweep_counts_the_starts_it_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7491: each pass adds the starts `sweep_media` asked for to
+    ``scadbuddy_attempt_media_sweep_starts_total``, so its steady-state cost shows."""
+
+    async def three(*args: object, **kwargs: object) -> int:
+        return 3
+
+    monkeypatch.setattr(main, "sweep_media", three)
+    metrics = Metrics()
+    orders = SimpleNamespace(lifecycle=None, integrations=None, media_starter=None)
+    state = SimpleNamespace(
+        components=SimpleNamespace(get=lambda _: orders),
+        settings=SimpleNamespace(media_upload_max_bytes=LIMIT),
+        metrics=metrics,
+    )
+
+    await main._import_attempt_media_logged(state)  # type: ignore[arg-type]
+    await main._import_attempt_media_logged(state)  # type: ignore[arg-type]
+
+    assert metrics.registry.get_sample_value("scadbuddy_attempt_media_sweep_starts_total") == 6
 
 
 async def test_without_bambuddy_the_sweep_starts_nothing(shop: Shop) -> None:

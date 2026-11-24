@@ -32,7 +32,7 @@ from scadbuddy.main import sweep_assets
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
 from tests.support.operations import press
 
-# Saved presets are rows in Postgres (#332): every test here runs on a throwaway schema.
+# Saved presets are rows in Postgres (#332): every test here runs on a throwaway database.
 pytestmark = pytest.mark.requires_postgres
 
 BUILTIN = "builtin:keychain"

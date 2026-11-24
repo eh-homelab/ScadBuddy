@@ -1371,9 +1371,13 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   nothing and spends no attempt. Temporal retries the task, and an auto-upgrade run's
   retry goes to the current build, which the new build becomes as it starts.
   Measured on the dev server (Temporal CLI 1.8.2, server 1.31.2;
-  `tests/test_operation_deferral.py`): the first failure is retried at once, then
-  about every 10 s (attempt 4 after 25 s), because the SDK lets a repeated failure time
-  out at the 10 s workflow task timeout rather than report it; the server logs it once.
+  `tests/test_operation_deferral.py`), at Temporal's default workflow task timeout of
+  10 s: the first failure is retried at once, then about every 10 s (attempt 4 after
+  25 s), because the SDK lets a repeated failure time out at the workflow task timeout
+  rather than report it; the server logs it once. A deployed `Operation` starts with
+  `SHORT_TASK_TIMEOUT` (3 s, `workflows/commands.py`, #7288), so it retries after each
+  3 s timeout: on Temporal CLI 1.10.1 (server 1.32.2) attempts began at 0, 0.25, 3.1 and
+  6.1 s, and from the fifth (14 s, 26 s) the server adds a growing backoff to the timeout.
   While the task fails, Temporal refuses an Update on that execution ("Workflow Task in
   failed state"); `start_command` answers that as still accepting (the route's 202 to
   follow, or 503 to send again), not as a refusal, and the re-send attaches to the

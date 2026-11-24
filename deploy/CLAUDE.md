@@ -38,6 +38,13 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
   `.status.operationState.phase` `Succeeded` with `.syncResult.revision` at or after the
   merge. While another sync is running (an API rollout), the change is applied on the next
   one (2026-11-14, clusters#3578).
+- Temporal's `matching.numTaskqueueReadPartitions` must equal `TASK_QUEUE_PARTITIONS` in
+  `backend/scadbuddy/workflows/pollers.py` and `agent/src/temporal/pollers.ts` (4,
+  Temporal's default). Both read a queue's pollers partition by partition (#7306, #7350); a
+  worker that polls only a higher partition is not seen, and nothing reports it. Prod's
+  dynamic config (`kubectl -n bambuddy get configmap scadbuddy-temporal-v2-dynamicconfig -o yaml`,
+  in eh-homelab/clusters) does not set it (read 2026-11-24). Set it there only together with
+  both constants.
 
 ## See also
 

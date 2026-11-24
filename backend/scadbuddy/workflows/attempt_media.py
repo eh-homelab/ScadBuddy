@@ -1,10 +1,11 @@
 """One media import per order attempt (#7233, spec 2026-11-05 §4.1, §4.6).
 
 ``AttemptMedia`` runs on the ``library`` queue (the API's worker), one execution per
-attempt, id ``attempt-media:<fulfilment id>``. Three triggers start it
+attempt, id ``attempt-media:<fulfilment id>``. Four starters start it
 (`orders/attempt_media.py` `TemporalMediaStarter`): a hand attempt that names an archive,
-a heard print outcome, and a read of the attempt's archives. A start joins a run that is
-still going, and starts again once a run ended.
+a heard print outcome, a read of the attempt's archives, and the housekeeping sweep
+``housekeeping_import_attempt_media`` (#7234, `orders/archives.py` `sweep_media`, one step,
+no retries). A start joins a run that is still going, and starts again once a run ended.
 
 Each step is one activity, ``attempt_media_step`` (`orders/archives.py`
 `mirror_attempt`): it copies the archives' facts, imports the finish photo and the
@@ -12,9 +13,10 @@ timelapse the attempt does not have yet, and answers whether a medium is still m
 Bambuddy writes the finish photo seconds after the print completes and the timelapse
 minutes after, so a run started with ``retries`` steps at its start, at +2 min and at
 +15 min, and ends after the first step that answers nothing missing. A run without
-``retries`` (the read's) steps once. A start with ``retries`` is a signal-with-start of
-``with_retries``: when it joins a run without retries, that run steps again at +2 and
-+15 min from the signal (#7281 review). A step out of tries counts as a step.
+``retries`` (the read's and the sweep's) steps once. A start with ``retries`` is a
+signal-with-start of ``with_retries``: when it joins a run without retries, that run
+steps again at +2 and +15 min from the signal (#7281 review). A step out of tries counts
+as a step.
 
 On the versioned ``library`` worker it is AUTO_UPGRADE (`VersionedAttemptMedia`): a run
 waits 15 minutes, so a deploy can move it to a new build. A change to the commands
