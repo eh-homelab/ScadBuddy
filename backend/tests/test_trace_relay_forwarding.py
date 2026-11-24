@@ -21,6 +21,7 @@ from scadbuddy.telemetry.forwarder import (
     TraceForwarder,
 )
 from scadbuddy.telemetry.payload import MAX_PREPARED_BYTES
+from tests.support import waits
 
 ENDPOINT = "http://collector.test:4318"
 TARGET: tuple[str, dict[str, str]] = (ENDPOINT + "/v1/traces", {})
@@ -55,24 +56,9 @@ def make(
     return forwarder, metrics
 
 
-#: Turns of the loop ``until`` gives the work that was ready once its deadline passed.
-LATE_TURNS = 100
-
-
 async def until(condition: Callable[[], bool], budget: float = 5.0) -> None:
-    try:
-        async with asyncio.timeout(budget):
-            while not condition():
-                await asyncio.sleep(0.01)
-    except TimeoutError:
-        # A loop blocked past the deadline (a long GC pause on a loaded xdist worker)
-        # wakes this wait and its timeout in one turn, before a post already under way
-        # can finish (#7014). Let the ready work run, then look again; no more time.
-        for _ in range(LATE_TURNS):
-            if condition():
-                return
-            await asyncio.sleep(0)
-        raise
+    """`tests.support.waits.until`, with this module's budget (#7014's late look)."""
+    await waits.until(condition, budget)
 
 
 async def test_an_accepted_batch_is_posted_to_the_traces_path() -> None:
