@@ -16,8 +16,8 @@
 - A migration is a NEW file `backend/scadbuddy/migrations/$(date -u +%Y%m%dT%H%MZ)_tasks.sql`; edit no other migration.
 - `ProjectWorkflow` is AUTO_UPGRADE: every recorded history in `backend/tests/fixtures/project_workflow_histories/` must still replay (`tests/flows/test_project_replay.py`). A changed command path goes behind `workflow.patched`, id format `"flow-<slug>-7364"`.
 - No wait has a default limit (D11a). An explicit `timeout_s` is the only limit; its floor stays `MIN_WAIT_S` (10 s).
-- A1 accepts only the `core/input_schema.py` subset in a prompt's schema (`schema_problems`); `x-sb-widget` and the other widget hints are A2.
-- An answer body is at most 16 KB of JSON (the `AnswerBody` bound in `api/flows.py`).
+- A1 accepts only the `core/input_schema.py` subset in a prompt's schema (`schema_problems(formats=True)`, which also takes `format` `email`, `date` and `date-time` on a string, each checked by a dedicated `FormatChecker` that needs no dev dependency); `x-sb-widget` and the other widget hints are A2.
+- An answer body is at most 16 KB of JSON (the serialized size, checked before the answer is validated; `AnswerBody` in `api/flows.py` bounds one string's characters and is not that bound). `validate_answer` runs off the event loop.
 - The answer route is browser-only, as `answer_flow_run` is (`_browser_only()`).
 - Never commit `backend/openapi.json` or a `schema.d.ts`.
 - Backend tests need `SCADBUDDY_TEST_DATABASE_URL` and a Temporal dev server (backend/CLAUDE.md "Commands").
@@ -45,7 +45,7 @@
   - `TaskState = Literal["open", "answered", "cancelled", "expired"]`
   - `class TaskOpen(BaseModel)`: `id: str` (the harness call id), `run_id: str`, `title: str` (1–500 chars), `schema_: dict[str, Any]` (alias `schema`), `context: list[dict[str, Any]] = []`, `place: str | None = None`, `ui: str | None = None`, `expires_at: datetime | None = None`
   - `class Task(TaskOpen)`: `project_id: str | None`, `state: TaskState`, `answer: dict[str, Any] | None`, `answered_by: str | None`, `created_at: datetime`, `updated_at: datetime`
-  - `class AnswerProblem(BaseModel)`: `field: str` (JSON pointer path joined by `/`, `""` for the root), `message: str` (never holds the rejected value)
+  - `class AnswerProblem(BaseModel)`: `field: str` (a path of declared property names and array indexes joined by `/`, `""` for the root), `message: str` (never holds the rejected value)
 - Produces (`tasks/validate.py`): `validate_answer(schema: dict[str, Any], answer: Any) -> list[AnswerProblem]`; `prompt_schema_problems(schema: dict[str, Any]) -> list[str]` (delegates to `core/input_schema.schema_problems`).
 - Produces (`tasks/store.py`, class `TaskStore` over the shared `scadbuddy-rows` pool, events through `TransactionalEvents.publish_in`):
   - `open(task: TaskOpen) -> Task` (insert; same id again returns the existing row unchanged)
@@ -89,7 +89,9 @@ def test_a_nested_or_referencing_schema_is_refused_for_a_prompt():
 Run: `cd backend && uv run --frozen pytest tests/tasks -v`
 Expected: FAIL, `ModuleNotFoundError: scadbuddy.tasks`
 
-- [ ] **Step 3: Implement the migration, models, `validate_answer` (`Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER)`, one problem per error, `field` from `error.absolute_path`), `prompt_schema_problems` and `TaskStore`**
+- [ ] **Step 3: Implement the migration, models, `validate_answer`, `prompt_schema_problems` and `TaskStore`**
+
+`validate_answer` never raises and stays bounded: it refuses what jsonb cannot hold (NUL, lone surrogates, non-finite numbers) and a too deep answer, then a stored schema outside the subset (`schema_problems(stored=True, formats=True, defaults=False)`, so no `$ref` is ever fetched), then validates with `core/input_schema.Validator`, its formats and its pattern deadline and budget (#2661), extra keys refused. `TaskOpen` refuses a schema `prompt_schema_problems` refuses; reading a stored `Task` does not check it again.
 
 - [ ] **Step 4: Run them to see them pass**
 
@@ -107,7 +109,7 @@ Expected: PASS
 **Interfaces:**
 - Consumes: `TaskChanged` (Task 1). Produces topics: `"tasks"`, `f"task:{task_id}"`, and `f"tasks:{place}"` when `place` is set.
 
-- [ ] **Step 1: Failing test** — `test_a_task_change_reaches_its_topics`: `topics_of(TaskChanged(task_id="t1", run_id="r1", state="open", place="packing bench")) == ["tasks", "task:t1", "tasks:packing bench"]`; and the `_TOPIC` regex accepts `task:t1` and `tasks:packing bench`.
+- [ ] **Step 1: Failing test** — `test_a_task_change_reaches_its_topics`: `topics_of(TaskChanged(task_id=T, run_id="r1", state="open", place="packing bench")) == ["tasks", f"task:{T}", "tasks:packing bench"]` with `T` a uuid; `valid_topic` accepts both forms and refuses a trailing newline; and every member of the `Event` union is handled by `topics_of`.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest <that module> -k task -v` → FAIL
 - [ ] **Step 3: Implement** the event and the three topic forms.
 - [ ] **Step 4: Run** → PASS
@@ -122,7 +124,7 @@ Expected: PASS
 - Test: `backend/tests/crud/test_crud_tasks.py`
 
 **Interfaces:**
-- Produces routes: `POST /api/v1/internal/crud/projects/tasks` (body `TaskOpen`, natural: the same id again answers the stored row), `POST /api/v1/internal/crud/projects/tasks/{task_id}/close` (body `{"state": "expired"|"cancelled"}`; answers the row, or 409 `task-not-open` with the current `state`); and `POST /api/v1/internal/crud/projects/tasks/{task_id}/answered` (body `{answer, by}`, `TaskStore.mark_answered`'s rules, 409 `task-not-open`): the `task_answer` operation runs on the projects worker, which has no SQL.
+- Produces routes: `POST /api/v1/internal/crud/projects/tasks` (body `TaskOpen`, natural: the same id again answers the stored row; a run that ended is 409 `run-ended`, read `FOR SHARE` in the insert's transaction; an unknown one 404), `POST /api/v1/internal/crud/projects/tasks/{task_id}/close` (body `{"state": "expired"|"cancelled"}`; answers the row, or 409 `task-not-open` with the current `state`); and `POST /api/v1/internal/crud/projects/tasks/{task_id}/answered` (body `{answer, by}`, `TaskStore.mark_answered`'s rules, 409 `task-not-open`): the `task_answer` operation runs on the projects worker, which has no SQL.
 - Consumes: `TaskStore` (Task 1).
 
 - [ ] **Step 1: Failing tests** — `test_open_without_a_credential_is_401`; `test_open_with_another_callers_credential_is_403`; `test_open_twice_answers_the_same_row`; `test_close_of_an_answered_task_is_409_with_its_state`; `test_the_same_answer_twice_answers_the_same_row`; `test_the_projects_areas_include_tasks` (`"tasks" in CRUD_AREAS["projects"]` and `"tasks" in PROJECTS_CRUD_AREAS`).
@@ -164,6 +166,7 @@ Expected: PASS
 - Modify: `backend/scadbuddy/workflows/flow_entries.py` (`run_callback`'s `timeout_s: float | None`)
 - Modify: `backend/scadbuddy/workflows/flow_tools.py` (`task_answer` and `human_answer_open` callbacks, `prompt`, `wait_for_human`, `FLOW_TOOLS`, `_INNER`)
 - Modify: `backend/scadbuddy/workflows/flow_activities.py` (activities `flow_task_open`, `flow_task_close` over `RemoteTasks`), `backend/scadbuddy/worker.py` (register them on the projects worker and the in-process one)
+- Modify: `backend/scadbuddy/flows/typecheck.py` and `backend/tests/flows/test_typecheck.py` (a literal `timeout_s` of `wait_for_human` or `prompt` is refused only under `MIN_WAIT_S`: registration and every start refuse one over `MAX_WAIT_S` today)
 - Modify: `backend/scadbuddy/flows/models.py` `HOST_FN` (`"task_answer": "prompt"`, `"human_answer_open": "wait_for_human"`)
 - Modify: `backend/scadbuddy/flows/store.py` (in the same transaction: a terminal status and `mark_terminated` call `cancel_for_run_in`; `_reset_run` calls `match_waiting_in` with the new waiting and done ids)
 - Modify: `backend/scadbuddy/api/flows.py` (`PendingEntry` gains `task: Task | None`, filled by `TaskStore.get(call_id)` for `kind == "answer"`)
@@ -175,10 +178,10 @@ Expected: PASS
   - `OPEN_WAIT = timedelta(days=3650)`: the declared timeout of both new callbacks (the harness requires one; it is never the limit a person meets).
   - `@agent.callback_tool_defn(inherently_safe=True, timeout=OPEN_WAIT) async def task_answer(title: str, schema: dict[str, Any]) -> TaskAnswer` with `class TaskAnswer(BaseModel): answer: dict[str, Any]`
   - `@agent.callback_tool_defn(inherently_safe=True, timeout=OPEN_WAIT) async def human_answer_open(question: str) -> HumanAnswer`
-  - `@agent.tool_defn(inherently_safe=True) async def prompt(title: str, schema: dict[str, Any], context: list[dict[str, Any]] | None = None, where: str | None = None, ui: str | None = None, timeout_s: int | None = None) -> dict[str, Any]`
+  - `@agent.tool_defn(inherently_safe=True) async def prompt(title: str, schema: dict[str, Any], context: list[dict[str, Any]] | None = None, place: str | None = None, ui: str | None = None, timeout_s: int | None = None) -> dict[str, Any]`
   - `run_callback(run_tool, tool, timeout_s: float | None, *, call_id=None, **kwargs)`: `None` waits with no timer.
   - `WAIT_OPEN_PATCH = "flow-open-wait-7364"`.
-- `prompt` does, in order: `prompt_schema_problems(schema)` → `ValueError` naming them; `timeout_s` below `MIN_WAIT_S` → `ValueError`; `call_id = str(workflow.uuid4())`; activity `flow_task_open(TaskOpen(id=call_id, run_id=owner.run_id, title=…, schema=…, context=…, place=where, ui=…, expires_at=now+timeout_s or None))`; `async with step("prompt", call_id, outward=False, waiting="answer", prompt=title)`: `run_callback(owner.runner.run_tool, task_answer, timeout_s, call_id=call_id, title=title, schema=schema)`; on `TimeoutError` → activity `flow_task_close(call_id, "expired")` and re-raise; the result's `answer` is validated with `inputs_model(schema)` and returned as a dict.
+- `prompt` does, in order: `prompt_schema_problems(schema)` → `ValueError` naming them; `timeout_s` below `MIN_WAIT_S` → `ValueError`; `call_id = str(workflow.uuid4())`; activity `flow_task_open(TaskOpen(id=call_id, run_id=owner.run_id, title=…, schema=…, context=…, place=place, ui=…, expires_at=now+timeout_s or None))`; `async with step("prompt", call_id, outward=False, waiting="answer", prompt=title)`: `run_callback(owner.runner.run_tool, task_answer, timeout_s, call_id=call_id, title=title, schema=schema)`; on `TimeoutError` → activity `flow_task_close(call_id, "expired")` and re-raise; the result's `answer` is validated with `inputs_model(schema)` and returned as a dict.
 - `wait_for_human(question: str, timeout_s: int | None = None) -> HumanAnswer`: when `workflow.patched(f"{WAIT_OPEN_PATCH}:{call_id}")` (per call, as `FLOW_PINNED_CALL_PATCH`, so an older run's next question is open too): no `MAX_WAIT_S`, `None` waits with no timer, callback `human_answer_open`; otherwise the old body unchanged (`None` means `DEFAULT_WAIT_S`, callback `human_answer`), so `answered.json` replays.
 
 - [ ] **Step 1: Failing tests** (`test_prompt.py`, `requires_temporal`, `requires_postgres`, the flow-run harness the existing `wait_for_human` tests use):
@@ -188,7 +191,8 @@ Expected: PASS
   - `test_a_refused_schema_raises_before_any_task_row` (`{"properties": {"x": {"$ref": "#/a"}}}` → `ValueError` naming `$ref`; no row)
   - `test_a_closed_run_cancels_its_open_task` (a cancelled run and one the sweep ends; task `cancelled`)
   - `test_a_reset_before_the_answer_opens_the_task_again` and `test_a_reset_before_the_prompt_cancels_its_task`
-  - `test_wait_for_human_has_no_default_limit` (a patched run parks with no timer shorter than `OPEN_WAIT`; `timeout_s=200_000` is accepted)
+  - `test_wait_for_human_has_no_default_limit` (a patched run parks with no timer shorter than `OPEN_WAIT`; `timeout_s=200_000` is accepted, through `check_script` too)
+  - `test_typecheck.py`: a literal `timeout_s=200_000` has no problem; `timeout_s=5` is refused, for `wait_for_human` and `prompt`
   - `test_harness_facts.py::test_a_callback_declared_with_a_ten_year_timeout_parks_and_answers`
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/flows/test_prompt.py tests/flows/test_harness_facts.py -v` → FAIL
 - [ ] **Step 3: Implement** as the Interfaces block says; record `prompted.json` and `waited_open.json`.
@@ -199,13 +203,13 @@ Expected: PASS
 
 **Files:**
 - Create: `frontend/src/components/flows/SchemaForm.tsx` (the form `StartRun.tsx` draws today, moved out: fields from `inputFields`, values, per-field errors)
-- Modify: `frontend/src/components/flows/StartRun.tsx` (uses `SchemaForm`; no behaviour change), `frontend/src/lib/flowInputs.ts` (`InputField.format?: 'email' | 'uri' | 'date' | 'date-time'`), `frontend/src/components/flows/PendingCard.tsx` (an `answer` entry with `task` draws `SchemaForm`), `frontend/src/api/client.ts` (`answerTask(taskId: string, answer: Record<string, unknown>)` through `command()`, so it sends and re-sends one `Idempotency-Key`)
+- Modify: `frontend/src/components/flows/StartRun.tsx` (uses `SchemaForm`; no behaviour change), `frontend/src/lib/flowInputs.ts` (`InputField.format?: 'email' | 'date' | 'date-time'`), `frontend/src/components/flows/PendingCard.tsx` (an `answer` entry with `task` draws `SchemaForm`), `frontend/src/api/client.ts` (`answerTask(taskId: string, answer: Record<string, unknown>)` through `command()`, so it sends and re-sends one `Idempotency-Key`)
 - Create: `frontend/src/mocks/features/tasks.ts` (`handlers`: the answer route, refusing a bad email with the backend's 422 shape)
 - Test: `frontend/src/components/flows/SchemaForm.test.tsx`, `PendingCard.test.tsx`
 
 **Interfaces:**
 - Produces: `SchemaForm({ schema, submitLabel, busy, problems, onSubmit }: { schema: unknown; submitLabel: string; busy: boolean; problems?: { field: string; message: string }[]; onSubmit: (values: Record<string, unknown>) => void })`.
-- Input type by format: `email` → `type="email" autoComplete="email"`, `uri` → `url`, `date` → `date`, `date-time` → `datetime-local`.
+- Input type by format: `email` → `type="email" autoComplete="email"`, `date` → `date`, `date-time` → `datetime-local`, sent as ISO 8601 with an offset (the server refuses one without).
 
 - [ ] **Step 1: Failing tests**
   - `SchemaForm`: an `email` field renders `input[type=email]` labelled "Email"; a `problems` entry `{field: "email", message: "not a valid address"}` shows under that field; a root problem shows above the button.
@@ -222,5 +226,5 @@ Expected: PASS
 - Modify: `docs/features/flows.md` (prompts and tasks: the table, the routes, no default limit), `backend/CLAUDE.md` (the `workflows/` and `flows/` bullets: `prompt`, `task_answer`, `WAIT_OPEN_PATCH`, the `tasks` area), and the place flow authors read host functions (grep `wait_for_human` under `docs/` and `agent/src` for the authoring guide)
 
 - [ ] **Step 1:** Write the changes; every claim names its file and symbol.
-- [ ] **Step 2:** `rg -n "MAX_WAIT_S|one day|86.?400" docs backend/CLAUDE.md agent/src` shows no text that still says `wait_for_human` is capped at one day or defaults to an hour.
+- [ ] **Step 2:** `rg -n "MAX_WAIT_S|one day|86.?400" docs backend/CLAUDE.md backend/scadbuddy backend/tests/flows agent/src` shows, but for the pre-patch branch that old runs replay, no code or text that still says `wait_for_human` is capped at one day or defaults to an hour.
 - [ ] **Step 3: Commit** — `docs(flows): prompts, tasks and waits with no default limit (#7364)`

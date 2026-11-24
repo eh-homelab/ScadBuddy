@@ -272,13 +272,14 @@ shows its steps before anything runs. A step whose key is computed shows as "dyn
 
 **The task row** (`tasks`): `id`, `run_id`, `project_id` (the node it belongs to), `title`,
 `schema` (JSON Schema of the answer), `context` (a list of blocks, below), `ui` (nullable
-module path), `where` (a station name, nullable), `assignee` (nullable principal),
+module path), `place` (a station name, nullable), `assignee` (nullable principal, A2),
 `expires_at`, `state` (`open`, `answered`, `cancelled`, `expired`), `answer` (jsonb),
-`answered_by`, `progress` (jsonb, for batch tasks). Entity kind `task`.
+`answered_by`, `progress` (jsonb, for batch tasks, A3). Entity kind `task`. A1's table leaves out
+`assignee` and `progress`: each comes with the phase that reads it.
 
 **The life of a prompt:**
 
-1. The flow calls `prompt(title, schema=…, context=…, where=…, ui=…, timeout_s=…)`. The
+1. The flow calls `prompt(title, schema=…, context=…, place=…, ui=…, timeout_s=…)`. The
    host function posts the task through a CRUD route and waits on a temporal-agent-harness
    callback whose call id is the task id; the answer arrives as the harness's own Update
    (`provide_callback_result`), the path `wait_for_human` answers take today. Unlike
@@ -286,11 +287,13 @@ module path), `where` (a station name, nullable), `assignee` (nullable principal
    has no cap: with no `timeout_s` it waits until answered or cancelled. With one, the task
    becomes `expired` and `prompt()` raises `TimeoutError`, which the script may catch.
 2. The CRUD service stores the row and publishes `task.changed` on the bus. The realtime
-   topic `tasks` (and `tasks:<where>`) carries it to open screens.
+   topic `tasks` (and `tasks:<place>`) carries it to open screens.
 3. A screen draws the form from the schema (below) and shows the context blocks.
 4. On submit the CRUD service validates the answer against the stored schema (JSON Schema,
    draft 2020-12, with `format` checks on). A failure is a 422 naming the field, and the task
-   stays open. A pass stores the answer and sends the update to the run.
+   stays open. A pass sends the update to the run, and the task is marked answered once the
+   update landed, so a task is never answered without its run. One decision row per call
+   picks the winner of two answers. A failure's message never quotes the rejected value.
 5. `prompt()` returns the answer as a dict, validated again in the run with a model built
    from the schema (the `inputs_model` path flow inputs use), so the script reads
    `answer["email"]`.
@@ -329,7 +332,7 @@ sequenceDiagram
 
 | Schema | Widget |
 |---|---|
-| `string` | text input; `format: email`, `uri`, `date`, `date-time` pick the input type and the phone keyboard |
+| `string` | text input; `format: email`, `date`, `date-time` pick the input type and the phone keyboard (only formats the server checks; `uri` waits for a check) |
 | `string` + `enum` | segmented buttons up to 5 options, a select past 5 |
 | `boolean` | switch |
 | `number` / `integer` + bounds | stepper or number field |
@@ -363,7 +366,7 @@ person (designer's call, secure by default: no shared login to audit around).
 - **Needs you** (`lib/needsYou.ts`): an open task is a parked call in the run's
   `waiting_on`, which already reaches the bell, the toast, the page notification and the push
   through the agent's pending-input list (#6399); A1 adds no new source.
-- **Station view** `/station/<where>`: open tasks for that place, oldest first, large touch
+- **Station view** `/station/<place>`: open tasks for that place, oldest first, large touch
   targets, the scan field always focused. A station is a `filament_locations` row with a
   station flag (designer's call: the location tree is the shop's places, #6949).
 - **Project page**: the step graph, each step's tasks and their answers.
@@ -375,7 +378,7 @@ a grant allows. No task waits for it.
 
 ### 6.4 Capture: batch scans and photos
 
-**Batch tasks.** `prompt.scan_many(title, expects=…, count=…, where=…)` is a task whose
+**Batch tasks.** `prompt.scan_many(title, expects=…, count=…, place=…)` is a task whose
 answer is a list. While it is open:
 
 - each scan is posted as it happens (`POST /tasks/{id}/parts`) and checked at once: the code
@@ -682,7 +685,8 @@ call.
 - D11. The finish state sets a print's outcome; an optional inspect prompt overrides it (§6.6).
 - D11a. No wait is capped by default (owner, 2026-11-24). `prompt()` waits until answered
   or cancelled unless the script passes `timeout_s`. `wait_for_human` becomes a text
-  `prompt()`: its default changes from one hour (`DEFAULT_WAIT_S`) to no limit, and the
+  `prompt()` in A2, with the station view that needs its task row; A1 keeps its answer route
+  and lifts its limits: its default changes from one hour (`DEFAULT_WAIT_S`) to no limit, and the
   one-day ceiling (`MAX_WAIT_S`) goes, so an explicit `timeout_s` is the only cap. The change
   goes behind `workflow.patched`; runs already waiting keep their timer (A1).
 - D12. Stations use signed-in sessions, never a device credential (§6.3).
@@ -706,8 +710,9 @@ call.
 
 **Epic A: tasks and capture**
 - A1. `tasks` table, CRUD routes, `prompt()` host function, Temporal update, Needs you;
-  `wait_for_human` moved onto `prompt()` with no default cap (D11a).
-- A2. Widget renderer (extends `inputFields`), context blocks, station view, scan-to-answer.
+  `wait_for_human` with no default cap (D11a).
+- A2. Widget renderer (extends `inputFields`), context blocks, station view, scan-to-answer,
+  `wait_for_human` moved onto `prompt()`.
 - A3. Batch tasks, capture mode, photo routing, the browser upload queue, containers.
 - A4. Input devices: camera decoders, USB scanner mode, NFC, phone pairing.
 - A5. Custom task modules (task host).
