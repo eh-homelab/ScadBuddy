@@ -36,6 +36,7 @@ def test_a_fixture_is_the_file_its_manifest_names(entry: dict[str, Any]) -> None
 
 
 @pytest.mark.requires_fixtures
+@pytest.mark.usefixtures("one_whole_read_at_a_time")
 @pytest.mark.parametrize("entry", FIXTURES, ids=ids)
 def test_arranges_reader_reads_each_fixture_as_recorded(entry: dict[str, Any]) -> None:
     # Every fixture reads since #2337; a refusal is the reader's own tests' to pin (#2490).
