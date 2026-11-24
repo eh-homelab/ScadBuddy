@@ -1399,13 +1399,11 @@ async def _draw_thumbnail(
     # would announce the thumbnail to the page that got it.
     await slots.acquire()
     try:
-        # Another read drew it, or its draw came to nothing, while this one waited.
-        drawn_meanwhile, drawable = await asyncio.to_thread(
-            lambda: (
-                outputs.has_role(output_id, "thumbnail"),
-                outputs.drawable_thumbnail(output_id),
-            )
-        )
+        # Another read drew it, or its draw came to nothing, while this one waited. A
+        # thumbnail counts only when it can be read: a blob the index names but the store
+        # lost, with no file, is drawn again.
+        drawn_meanwhile = await _readable(outputs, output_id)
+        drawable = await asyncio.to_thread(outputs.drawable_thumbnail, output_id)
     except BaseException:
         slots.release()
         raise
@@ -1460,6 +1458,15 @@ async def _draw_thumbnail(
         raise missing from None
     if not drawn:
         raise missing
+
+
+async def _readable(outputs: OutputStore, output_id: str) -> bool:
+    """Whether the output's thumbnail can be read now (`OutputStore.open_role`)."""
+    stream = await outputs.open_role(output_id, "thumbnail")
+    if stream is None:
+        return False
+    await stream.aclose()
+    return True
 
 
 def _drawn(drawing: asyncio.Future[bool]) -> bool:

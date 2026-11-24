@@ -749,13 +749,10 @@ class OutputStore:
 
     async def provenance(self, output_id: str) -> Provenance | None:
         """What the 3MF itself says produced it — the fallback when the record is gone.
-        The 3MF is the model's blob, else its file (`local_role`, #7256), read in a
-        thread. With no such 3MF, the tree is searched for a folder that holds only a
-        ``model.3mf``, and only before a copy run finished (#7255)."""
+        Its one caller asks only when the output has no row and no record, so it has no
+        blob either: the tree is searched for a folder that holds only a ``model.3mf``,
+        and only before a copy run finished (#7255), in a thread."""
         with span("outputs.provenance", attributes={"scadbuddy.output_id": output_id}):
-            async with self.local_role(output_id, "model") as path:
-                if path is not None:
-                    return await asyncio.to_thread(read_provenance, path)
             return await asyncio.to_thread(self._provenance_in_tree, output_id)
 
     def _provenance_in_tree(self, output_id: str) -> Provenance | None:

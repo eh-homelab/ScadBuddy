@@ -5,6 +5,7 @@ the verified prefetch ends short, never clean."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -17,7 +18,6 @@ import anyio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from starlette.requests import ClientDisconnect
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE
@@ -31,7 +31,6 @@ from scadbuddy.library.outputs import (
     MODEL_NAME,
     PREVIEW_NAME,
     THUMBNAIL_NAME,
-    OutputNotFoundError,
     OutputStore,
     download_filename,
 )
@@ -289,6 +288,21 @@ def test_thumbnail_streams_blob_and_draws_from_preview_blob(
     assert _spooled(spool) == []
 
 
+def test_thumbnail_drawn_when_its_blob_is_lost_and_no_file(
+    client: TestClient, model: str, outputs: OutputStore, content: ContentStore
+) -> None:
+    # The index still names the thumbnail blob, but the store lost it and no file holds
+    # it: the thumbnail is drawn from the preview, not counted as drawn meanwhile.
+    outputs.draw_thumbnails = True
+    output_id = _copied(client, model, outputs)
+    _lose(client, content, output_blob_key(output_id, "thumbnail"))
+    (outputs.directory(output_id) / THUMBNAIL_NAME).unlink()
+    response = client.get(f"/api/v1/outputs/{output_id}/thumbnail")
+    assert response.status_code == 200, response.text
+    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+    assert response.content != PNG_BYTES
+
+
 def test_thumbnail_404_without_preview(
     client: TestClient, model: str, outputs: OutputStore, content: ContentStore
 ) -> None:
@@ -317,7 +331,9 @@ def test_view_and_plates_read_blob_through_temp_file(
     assert plates.status_code == 200, plates.text
     assert [plate["index"] for plate in plates.json()] == [1]
     cover = client.get(f"/api/v1/outputs/{output_id}/plates/1/thumbnail")
-    assert cover.status_code in (200, 404), cover.text
+    # The saved 3MF carries plate 1's cover, read from the blob's temporary file.
+    assert cover.status_code == 200, cover.text
+    assert cover.content.startswith(b"\x89PNG\r\n\x1a\n")
     # Each temporary file went when its reader was done.
     assert _spooled(spool) == []
 
@@ -336,25 +352,6 @@ def test_view_and_plates_404_without_bytes(
     plates = client.get(f"/api/v1/outputs/{output_id}/plates")
     assert plates.status_code == 404
     assert plates.json()["detail"] == f"output {output_id!r} has no 3MF"
-
-
-def test_edit_target_provenance_from_blob(
-    client: TestClient, model: str, outputs: OutputStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    output_id = _copied(client, model, outputs)
-    (outputs.directory(output_id) / MODEL_NAME).unlink()
-
-    def gone(_output_id: str) -> None:
-        raise OutputNotFoundError(_output_id)
-
-    # The record unreadable while the row still names the 3MF's blob.
-    monkeypatch.setattr(outputs, "get", gone)
-    response = client.get(f"/api/v1/outputs/{output_id}/edit")
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["source"] == "3mf"
-    assert body["slug"] == model
-    assert body["params"] == {"width": 12, "label": "hi"}
 
 
 def test_download_of_corrupt_large_blob_ends_short(
@@ -437,15 +434,17 @@ async def _raw_get(app: FastAPI, path: str) -> _Sent:
 
 
 async def test_stream_response_closes_its_stream_when_never_sent() -> None:
-    """A client gone before the first byte fails the response's start, so the body
-    never runs: the response still closes the stream."""
+    """A client gone before the first byte cancels the response, so the body never
+    runs: the response still closes the stream. The close runs in a thread
+    (`_file_stream`'s), which only the shield lets a cancelled response wait for."""
     closed: list[bool] = []
 
     async def chunks() -> AsyncGenerator[bytes]:
         yield b"never sent"
 
     async def on_close() -> None:
-        await anyio.sleep(0)
+        await asyncio.to_thread(lambda: None)
+        # Reached only when the wait for the thread was not cancelled.
         closed.append(True)
 
     stream = OutputStream(size=10, sha256=None, chunks=chunks(), _on_close=on_close)
@@ -454,13 +453,16 @@ async def test_stream_response_closes_its_stream_when_never_sent() -> None:
     async def receive() -> dict[str, Any]:
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def send(message: MutableMapping[str, Any]) -> None:
-        raise OSError("the client went away")
-
     scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}}
-    # Starlette turns the failed send into `ClientDisconnect`.
-    with pytest.raises(ClientDisconnect):
+    with anyio.CancelScope() as cancelled:
+
+        async def send(message: MutableMapping[str, Any]) -> None:
+            # The client went away: the server cancels the response.
+            cancelled.cancel()
+            await anyio.sleep(0)
+
         await response(scope, receive, send)
+    assert cancelled.cancelled_caught
     assert closed == [True]
 
 

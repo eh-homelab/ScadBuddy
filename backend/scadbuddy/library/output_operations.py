@@ -262,7 +262,8 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         except Exception:
             logger.exception("could not file a saved output in the library", extra={"id": meta.id})
         # A new output has no uploads yet: no read to make.
-        detail = outputs_api.detail(state.outputs, meta, [])
+        # In a thread: the detail reads the blob index and the row.
+        detail = await asyncio.to_thread(outputs_api.detail, state.outputs, meta, [])
         dumped: dict[str, Any] = detail.model_dump(mode="json")
         return dumped
 

@@ -4,6 +4,7 @@ outputs-in-Postgres spec 2026-11-23 §6.6), and a store with no room fails the s
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from typing import Any
 
@@ -12,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import scadbuddy.library.output_operations as output_operations
+from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
@@ -175,3 +177,29 @@ def test_save_store_full_is_507_and_cleans_up(
     # The save held its Parts before the puts; neither they nor any byte hold is left.
     assert len(held_before) == 1 and held_before[0] != []
     assert _output_holds(pool) == []
+
+
+def test_save_reads_its_detail_off_the_loop(
+    s3_client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The detail reads the blob index (`thumbnail_version`, `has_role`): never on the loop.
+    job_id = _finished_job(s3_client, model)
+    on_loop: list[bool] = []
+    detail = outputs_api.detail
+
+    def probed(*args: Any, **kwargs: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+        return detail(*args, **kwargs)
+
+    monkeypatch.setattr(outputs_api, "detail", probed)
+    saved = s3_client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
+    )
+    assert saved.status_code == 201, saved.text
+    assert on_loop
+    assert not any(on_loop)
