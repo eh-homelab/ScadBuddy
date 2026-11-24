@@ -8,11 +8,13 @@ exporter: spans are created, so context still propagates, and dropped.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import socket
+import time
 import weakref
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Final
 
@@ -260,6 +262,34 @@ def detached_span(
         current.end()
 
 
+#: How long a `traced_thread` call waited for a free thread of the loop's default
+#: executor, the pool behind every ``asyncio.to_thread`` (#7245). The span's duration
+#: less this is the time the call ran.
+THREAD_WAIT_ATTRIBUTE: Final = "scadbuddy.thread_wait_ms"
+
+
+async def traced_thread[T, *Ts](
+    name: str,
+    func: Callable[[*Ts], T],
+    /,
+    *args: *Ts,
+    attributes: Mapping[str, AttributeValue] | None = None,
+) -> T:
+    """``asyncio.to_thread(func, *args)`` inside a span ``name`` (#7245). The span says
+    how long the call waited for a thread (`THREAD_WAIT_ATTRIBUTE`): a trace then shows
+    a full pool apart from slow work. The thread runs in a copy of the current context,
+    so a span that ``func`` opens is a child of this one."""
+    with span(name, attributes=attributes) as current:
+        handed = time.monotonic()
+
+        def run() -> T:
+            waited = time.monotonic() - handed
+            current.set_attribute(THREAD_WAIT_ATTRIBUTE, round(waited * 1000, 3))
+            return func(*args)
+
+        return await asyncio.to_thread(run)
+
+
 def current_traceparent() -> str | None:
     """The current span's ``traceparent``, when it is valid and sampled (spec §4)."""
     span_context = trace.get_current_span().get_span_context()
@@ -302,6 +332,7 @@ def use_traceparent(traceparent: str | None) -> Iterator[None]:
 
 __all__ = [
     "DEFAULT_SAMPLER",
+    "THREAD_WAIT_ATTRIBUTE",
     "TRACER_NAME",
     "adopt_provider",
     "build_provider",
@@ -311,6 +342,7 @@ __all__ = [
     "failure_class",
     "link_to",
     "span",
+    "traced_thread",
     "traces_export_enabled",
     "tracing_disabled",
     "use_traceparent",

@@ -24,15 +24,15 @@ import { HostedPluginEditor } from './HostedPluginEditor'
 import { offerState } from './hostedDraft'
 import { usePackagesChanged } from './packagesChanged'
 
+/** The most unsaved files the Settings leave dialog names; more are counted (#7260). */
+const NAMED_FILES_MAX = 3
+
 /**
  * Settings → Tools & plugins → Hosted plugins (#6937, spec 2026-11-21 §6.2 and §6.3): Claude
  * plugins written here as a draft of files and published as numbered versions that never
  * change. The backend keeps the drafts and versions (`/api/v1/hosted-plugins`); the agent's
  * package install takes a version on an Offer, and Packages approves it as any package.
  */
-/** The most unsaved files the Settings leave dialog names; more are counted (#7260). */
-const NAMED_FILES_MAX = 3
-
 export function HostedPluginsPanel() {
   const list = useAsync(() => hostedPlugins.list(), [])
   const packages = useAsync(() => aiPlugins.listPackages(), [])

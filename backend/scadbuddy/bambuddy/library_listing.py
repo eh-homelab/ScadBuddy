@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.models import Folder, LibraryListRow
 from scadbuddy.bambuddy.print_source import is_sliced, printable
+from scadbuddy.core.tracing import span
 from scadbuddy.print_library.reads import LibraryListingSource
 
 #: What the page lists without Advanced: unsliced 3MFs (spec 2026-09-28 §2).
@@ -122,18 +123,28 @@ async def list_library(
     """One read of the tree and one of the folder, however many files it holds. The two
     are read at once (#3633): each is most of a second on a library of hundreds of
     folders, and neither waits on the other."""
-    tree, rows = await asyncio.gather(client.folders(), client.library_listing(folder_id=folder_id))
-    here = [row for row in rows if row.folder_id == folder_id]
-    shown = [row for row in here if show_all or row.file_type.lower() in DEFAULT_TYPES]
-    return LibraryListing(
-        folder_id=folder_id,
-        all=show_all,
-        folders=folder_views(tree),
-        files=[
-            _entry(row) for row in sorted(shown, key=lambda row: (row.filename.casefold(), row.id))
-        ],
-        hidden=len(here) - len(shown),
-    )
+    with span("library.listing", attributes={"scadbuddy.show_all": show_all}) as current:
+        tree, rows = await asyncio.gather(
+            client.folders(), client.library_listing(folder_id=folder_id)
+        )
+        # The tree is shaped on the event loop: a span of its own (#7245), as a library of
+        # hundreds of folders makes it a noticeable part of the request.
+        with span("library.shape", attributes={"scadbuddy.rows": len(rows)}):
+            here = [row for row in rows if row.folder_id == folder_id]
+            shown = [row for row in here if show_all or row.file_type.lower() in DEFAULT_TYPES]
+            listing = LibraryListing(
+                folder_id=folder_id,
+                all=show_all,
+                folders=folder_views(tree),
+                files=[
+                    _entry(row)
+                    for row in sorted(shown, key=lambda row: (row.filename.casefold(), row.id))
+                ],
+                hidden=len(here) - len(shown),
+            )
+        current.set_attribute("scadbuddy.folders", len(listing.folders))
+        current.set_attribute("scadbuddy.files", len(listing.files))
+        return listing
 
 
 #: The most files one search answers; ``total`` says how many matched.
