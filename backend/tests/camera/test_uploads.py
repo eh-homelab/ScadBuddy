@@ -117,7 +117,9 @@ async def test_failed_put_names_no_secret(tmp_path: Path, moto: RecorderSettings
         assert secret not in repr(uploader)
 
 
-async def test_failed_put_drops_the_error_text(tmp_path: Path) -> None:
+async def test_failed_put_drops_the_error_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A client error's own text may carry a presigned query or the key id: never kept."""
     path = write_segment(tmp_path, "p1", T0)
     uploader = Uploader(settings())
@@ -131,7 +133,7 @@ async def test_failed_put_drops_the_error_text(tmp_path: Path) -> None:
     async def client() -> Leaky:
         return Leaky()
 
-    uploader.client = client  # type: ignore[method-assign]
+    monkeypatch.setattr(uploader, "client", client)
     with pytest.raises(UploadError) as raised:
         await uploader.put(segment(path))
     assert str(raised.value).endswith("RuntimeError")

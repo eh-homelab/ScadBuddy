@@ -7,7 +7,7 @@ import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -251,7 +251,9 @@ def api() -> FakeCamera:
     return FakeCamera(FakeBucket())
 
 
-async def test_leader_uploads_before_index(tmp_path: Path, api: FakeCamera) -> None:
+async def test_leader_uploads_before_index(
+    tmp_path: Path, api: FakeCamera, monkeypatch: pytest.MonkeyPatch
+) -> None:
     rig = Rig(tmp_path, api)
     await rig.recorder.reconcile_all()
     for second in (0, 4, 8):
@@ -267,11 +269,11 @@ async def test_leader_uploads_before_index(tmp_path: Path, api: FakeCamera) -> N
             raise UploadError("the bucket did not take a segment of p1: down")
         return await real(self, seg)
 
-    rig.recorder._uploader.put = flaky.__get__(rig.recorder._uploader)  # type: ignore[attr-defined]
+    monkeypatch.setattr(rig.recorder._uploader, "put", flaky.__get__(rig.recorder._uploader))
     await rig.recorder.tick(P1)
     assert api.starts() == [at(0)]
     assert rig.files() == [name(4), name(8)]
-    rig.recorder._uploader.put = real.__get__(rig.recorder._uploader)  # type: ignore[attr-defined]
+    monkeypatch.setattr(rig.recorder._uploader, "put", real.__get__(rig.recorder._uploader))
     await rig.recorder.tick(P1)
     assert api.starts() == [at(0), at(4), at(8)]
     assert api.unput == []
@@ -554,7 +556,9 @@ async def test_hook_server_calls_on_segment(tmp_path: Path, api: FakeCamera) -> 
     assert api.index[0][2].duration_ms == 4800
 
 
-async def test_bucket_keys_never_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+async def test_bucket_keys_never_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
     caplog.set_level(logging.DEBUG)
     api = FakeCamera(FakeBucket())
     errors: list[BaseException] = []
@@ -573,7 +577,7 @@ async def test_bucket_keys_never_logged(tmp_path: Path, caplog: pytest.LogCaptur
             async def put_object(**_: Any) -> None:
                 raise RuntimeError(f"?X-Amz-Credential={KEY_ID}&X-Amz-Signature=x {SECRET}")
 
-            leaky.put_object = put_object  # type: ignore[method-assign]
+            monkeypatch.setattr(leaky, "put_object", put_object)
             await rig.recorder.tick(P1)
             try:
                 await uploader.put(rig.recorder._feeds[P1].pending[0].seg)
@@ -636,7 +640,9 @@ async def test_renew_failure_past_the_lease_drops_leadership(
     assert api.bucket.objects == {}
 
 
-async def test_renewal_cadence_holds_while_a_put_is_slow(tmp_path: Path, api: FakeCamera) -> None:
+async def test_renewal_cadence_holds_while_a_put_is_slow(
+    tmp_path: Path, api: FakeCamera, monkeypatch: pytest.MonkeyPatch
+) -> None:
     every = 0.05
     rig = Rig(tmp_path, api, tick_seconds=every, real_clock=True)
     slow = asyncio.Event()
@@ -645,7 +651,7 @@ async def test_renewal_cadence_holds_while_a_put_is_slow(tmp_path: Path, api: Fa
         await slow.wait()
         return object_key("rec", seg.printer_id, seg.started_at)
 
-    rig.recorder._uploader.put = put  # type: ignore[attr-defined]
+    monkeypatch.setattr(rig.recorder._uploader, "put", put)
     try:
         await rig.recorder.reconcile_all()
         await until(lambda: P1 in api.leases)
@@ -666,10 +672,10 @@ async def test_renewal_cadence_holds_while_a_put_is_slow(tmp_path: Path, api: Fa
 
 
 async def test_stop_with_a_large_backlog_renews_while_it_flushes(
-    tmp_path: Path, api: FakeCamera
+    tmp_path: Path, api: FakeCamera, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     rig = Rig(tmp_path, api, tick_seconds=0.01, real_clock=True)
-    fake = rig.recorder._uploader
+    fake = cast("FakeUploader", rig.recorder._uploader)
 
     async def put(seg: LocalSegment) -> str:
         if api.bucket.fail:
@@ -679,7 +685,7 @@ async def test_stop_with_a_large_backlog_renews_while_it_flushes(
         await asyncio.sleep(0.005)
         return await FakeUploader.put(fake, seg)
 
-    rig.recorder._uploader.put = put  # type: ignore[attr-defined]
+    monkeypatch.setattr(rig.recorder._uploader, "put", put)
     try:
         await rig.recorder.reconcile_all()
         await until(lambda: P1 in api.leases)
@@ -706,9 +712,9 @@ async def test_restart_adopts_leftovers_and_releases(tmp_path: Path, api: FakeCa
     assert api.indexed_until(P1) == at(4)
     # More segments, not uploaded yet, then the container dies: its files stay.
     old = time.time() - 60
-    for second in (4, 8, 12):
-        path = write_segment(first.root, P1, at(second))
-        os.utime(path, (old + second, old + second))
+    for offset in (4, 8, 12):
+        path = write_segment(first.root, P1, at(offset))
+        os.utime(path, (old + offset, old + offset))
     writing = write_segment(first.root, P1, at(16))  # still open in MediaMTX
     puts = list(first.mtx.calls)
 

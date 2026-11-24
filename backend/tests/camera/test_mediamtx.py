@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 
 from scadbuddy.camera.mediamtx import MediaMtx
 
 
-def make(paths: dict[str, dict]) -> tuple[MediaMtx, list[tuple[str, str, dict | None]]]:
-    calls: list[tuple[str, str, dict | None]] = []
+def make(
+    paths: dict[str, dict[str, Any]],
+) -> tuple[MediaMtx, list[tuple[str, str, dict[str, Any] | None]]]:
+    calls: list[tuple[str, str, dict[str, Any] | None]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else None
@@ -38,7 +41,7 @@ def make(paths: dict[str, dict]) -> tuple[MediaMtx, list[tuple[str, str, dict | 
 
 
 async def test_put_path_adds_then_replaces() -> None:
-    stored: dict[str, dict] = {}
+    stored: dict[str, dict[str, Any]] = {}
     mtx, calls = make(stored)
     await mtx.put_path("p1", {"source": "rtsps://a"})
     await mtx.put_path("p1", {"source": "rtsps://b"})
@@ -52,7 +55,7 @@ async def test_paths_lists_by_name() -> None:
 
 
 async def test_delete_path_ignores_404() -> None:
-    stored = {"p1": {}}
+    stored: dict[str, dict[str, Any]] = {"p1": {}}
     mtx, _ = make(stored)
     await mtx.delete_path("p1")
     await mtx.delete_path("p1")

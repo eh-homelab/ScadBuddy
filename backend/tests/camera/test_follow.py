@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from typing import Any
 
 import httpx
 
@@ -21,7 +22,7 @@ class Token:
         pass
 
 
-def frame(event: str, data: dict, id: str | None = None) -> bytes:
+def frame(event: str, data: dict[str, Any], id: str | None = None) -> bytes:
     head = f"id: {id}\n" if id else ""
     return f"{head}event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
@@ -47,7 +48,12 @@ def sse(chunks: list[bytes], hold: asyncio.Event | None = None) -> httpx.Respons
     return httpx.Response(200, headers=headers, stream=Body(chunks, hold))
 
 
-def follower(handler, changes: list[str], resyncs: list[int], **options) -> ChangeFollower:
+def follower(
+    handler: Callable[[httpx.Request], httpx.Response],
+    changes: list[str],
+    resyncs: list[int],
+    **options: Any,
+) -> ChangeFollower:
     client = CrudClient(
         "http://api", "camera", ServiceAuth(Token()), transport=httpx.MockTransport(handler)
     )
@@ -63,7 +69,7 @@ def follower(handler, changes: list[str], resyncs: list[int], **options) -> Chan
     )
 
 
-async def until(predicate, timeout: float = 5.0) -> None:
+async def until(predicate: Callable[[], object], timeout: float = 5.0) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():
             await asyncio.sleep(0.01)
