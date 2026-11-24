@@ -168,12 +168,18 @@ describe('NfcJobBanner (#7273)', () => {
     expect(await screen.findByText(/The tag was not written: The tag moved away/)).toBeInTheDocument()
   })
 
-  it('ends a job whose records this page cannot write before it backs the tag up', async () => {
+  it('says why a job cannot be written when it shows it, keeps Arm off and lets it be declined', async () => {
     // A smart poster that holds an absolute-URL record, which Web NFC refuses inside one.
     const job = seedNfcJob({ kind: 'write', records: [{ record_type: 'smart-poster', data_hex: 'd3010078' }] })
     const { user } = render()
-    await user.click(await armButton())
-    await waitFor(() => expect(log.bodyOf(`POST ${JOBS}/${job.id}/result`)).toEqual({ error: expect.stringContaining('cannot be written from this page') }))
+    const banner = await screen.findByRole('region', { name: 'Agent job' })
+    expect(await within(banner).findByText(/This job cannot be written from this page: the smart poster holds an absolute-URL record/)).toBeInTheDocument()
+    const decline = within(banner).getByRole('button', { name: 'Decline' })
+    await waitFor(() => expect(decline).toBeEnabled())
+    expect(within(banner).getByRole('button', { name: 'Arm' })).toBeDisabled()
+    expect(log.lines()).not.toContain(`POST ${JOBS}/${job.id}/claim`)
+    await user.click(decline)
+    await waitFor(() => expect(log.bodyOf(`POST ${JOBS}/${job.id}/result`)).toEqual({ error: 'declined by the person' }))
     expect(log.lines()).not.toContain('POST /api/v1/filament/tags/backups')
     expect(stub.writes).toHaveLength(0)
   })
@@ -320,7 +326,9 @@ describe('NfcJobBanner (#7273)', () => {
       seedNfcJob({ kind: 'write', records })
       render()
       const list = await screen.findByRole('list', { name: 'Records to write' })
-      await armButton()
+      // Decline, not Arm: a poster this page cannot write is shown too, with Arm off.
+      const decline = await screen.findByRole('button', { name: 'Decline' })
+      await waitFor(() => expect(decline).toBeEnabled())
       // The list's own items: a smart poster's records are a list inside its item.
       return Array.from(list.children) as HTMLElement[]
     }
@@ -386,6 +394,25 @@ describe('NfcJobBanner (#7273)', () => {
       expect(items[1]).not.toHaveTextContent('Hi there')
       expect(items[2]).toHaveTextContent('100 bytes')
       expect(items[2]).toHaveTextContent('36 more bytes')
+    })
+
+    it('reads a UTF-16 text record with no BOM as big-endian, as an NFC reader does, and by its BOM otherwise', async () => {
+      const items = await shown([
+        { record_type: 'text', encoding: 'utf-16', lang: 'en', data_hex: '00480069' },
+        { record_type: 'text', encoding: 'utf-16', lang: 'en', data_hex: 'fffe48006900' },
+      ])
+      expect(items[0]).toHaveTextContent('Hi')
+      expect(items[1]).toHaveTextContent('Hi')
+    })
+
+    it('shows bidi, control and zero-width characters as escapes, never raw', async () => {
+      const items = await shown([
+        { record_type: 'url', data_hex: hexOfText('https://example.com/\u202Egpj.exe') },
+        { record_type: 'text', encoding: 'utf-8', lang: 'en', data_hex: hexOfText('\uFEFFa\u200Bb\u0007c\u0085d\u2066e\u200Ff') },
+      ])
+      expect(items[0]).toHaveTextContent('https://example.com/⟨U+202E⟩gpj.exe')
+      expect(items[0]!.textContent).not.toContain('\u202E')
+      expect(items[1]).toHaveTextContent('⟨U+FEFF⟩a⟨U+200B⟩b⟨U+0007⟩c⟨U+0085⟩d⟨U+2066⟩e⟨U+200F⟩f')
     })
   })
 

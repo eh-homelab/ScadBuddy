@@ -202,6 +202,36 @@ export function posterRecords(dataHex: string): PosterRecord[] | null {
   return out
 }
 
+/**
+ * The text of a text record's bytes in `encoding`, or null when they are not valid text in it. UTF-16
+ * with no byte order named ("utf-16") is read as an NFC reader reads it: by its BOM when it has one,
+ * else big-endian (NFC Forum Text RTD 1.0, 3.2.1, https://nfc-forum.org/build/specifications), not
+ * as TextDecoder's "utf-16", which is little-endian. A UTF-8 BOM is kept, so a preview can show it.
+ */
+export function decodeText(bytes: Uint8Array, encoding: string): string | null {
+  let label = encoding.toLowerCase()
+  if (label === 'utf-16') label = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le' : 'utf-16be'
+  try {
+    // A UTF-16 BOM that matches the label is dropped; a UTF-8 one is kept.
+    return new TextDecoder(label, { fatal: true, ignoreBOM: !label.startsWith('utf-16') }).decode(bytes)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Characters a preview must not show raw, as they change how the text around them reads or are not
+ * seen: C0 and C1 controls but line feed and tab, DEL, bidi marks, embeddings, overrides and isolates
+ * (U+061C, U+200E/U+200F, U+202A–U+202E, U+2066–U+2069), zero-width characters and the BOM.
+ */
+// eslint-disable-next-line no-control-regex -- the controls are what it finds
+const HIDDEN = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g
+
+/** `text` with every `HIDDEN` character as a visible escape such as ⟨U+202E⟩. */
+export function visibleText(text: string): string {
+  return text.replace(HIDDEN, (char) => `⟨U+${char.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}⟩`)
+}
+
 /** A well-known "T" record's payload: its status byte (bit 7 UTF-16, bits 0-5 the language's length), language and text. */
 function textOf(payload: Uint8Array): { utf16: boolean; lang: string; bytes: Uint8Array; text: string | null } | null {
   if (payload.length === 0) return null
@@ -210,13 +240,7 @@ function textOf(payload: Uint8Array): { utf16: boolean; lang: string; bytes: Uin
   if (langEnd > payload.length) return null
   const bytes = payload.subarray(langEnd)
   const utf16 = (status & 0x80) !== 0
-  let text: string | null
-  try {
-    text = new TextDecoder(utf16 ? 'utf-16be' : 'utf-8', { fatal: true }).decode(bytes)
-  } catch {
-    text = null
-  }
-  return { utf16, lang: utf8(payload.subarray(1, langEnd)) ?? '', bytes, text }
+  return { utf16, lang: utf8(payload.subarray(1, langEnd)) ?? '', bytes, text: decodeText(bytes, utf16 ? 'utf-16' : 'utf-8') }
 }
 
 /** The init of a record inside a smart poster; throws `RecordNotWritableError` for one Web NFC refuses there. */
@@ -282,19 +306,32 @@ export function notWritable(records: readonly WireRecord[]): string | null {
   }
 }
 
-/** Equal when their `(record_type, media_type, data_hex)` are equal in order (Global Constraints). */
+/**
+ * What a record is compared by. A smart poster's data is compared by the records it holds, each by
+ * its TNF, type and payload, a "U" record by its URL with the prefix code expanded: Web NFC writes the
+ * nested message itself, with its own URI prefix codes and SR/IL flags (https://w3c.github.io/web-nfc/,
+ * "map a URL to NDEF"), so a correct write can read back as other bytes. A nested record's id is not
+ * compared, as at the top level. A poster that does not parse, and every other type, is compared byte
+ * for byte. The server's `same_records` (backend/scadbuddy/filament/tags.py) uses the same rule.
+ */
+function comparedOf(record: WireRecord): string {
+  const data = record.data_hex.toLowerCase()
+  let body: unknown = data
+  if (record.record_type === 'smart-poster') {
+    const nested = parseMessage(bytesOf(data))
+    if (nested) {
+      body = nested.map(({ tnf, type, payload }) => {
+        const url = tnf === 1 && type.length === 1 && type[0] === 0x55 ? uriOf(payload) : null
+        return url !== null ? [tnf, hexOf(type), 'url', url] : [tnf, hexOf(type), 'hex', hexOf(payload)]
+      })
+    }
+  }
+  return JSON.stringify([record.record_type, record.media_type ?? null, body])
+}
+
+/** Equal when their `(record_type, media_type, data_hex)` are equal in order (Global Constraints), a smart poster by its records (`comparedOf`). */
 export function sameRecords(a: readonly WireRecord[], b: readonly WireRecord[]): boolean {
-  return (
-    a.length === b.length &&
-    a.every((one, at) => {
-      const other = b[at]!
-      return (
-        one.record_type === other.record_type &&
-        (one.media_type ?? null) === (other.media_type ?? null) &&
-        one.data_hex.toLowerCase() === other.data_hex.toLowerCase()
-      )
-    })
-  )
+  return a.length === b.length && a.every((one, at) => comparedOf(one) === comparedOf(b[at]!))
 }
 
 /**

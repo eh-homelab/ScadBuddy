@@ -2066,7 +2066,13 @@ class DecodedSpool(BaseModel):
     label_weight_g: int | None = None
     empty_weight_g: int | None = None
     serial: str | None = None
-    warnings: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "A field the tag holds that could not be read (`min_temp`), a field read and "
+            "then cut (`brand cut to 128 characters`), or a note (`newer minor version`)."
+        ),
+    )
 
 
 class TagReadResult(BaseModel):

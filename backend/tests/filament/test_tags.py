@@ -724,6 +724,83 @@ def test_same_records_compares_type_media_and_data_in_order() -> None:
     assert tags.same_records([REC], [REC.model_copy(update={"id": "x", "lang": "en"})])
 
 
+def _poster(data_hex: str) -> dict[str, str]:
+    return {"record_type": "smart-poster", "data_hex": data_hex}
+
+
+#: ``(a, b, equal)``: the same vectors as ``SAME_RECORD_VECTORS`` in
+#: ``frontend/src/lib/webNfc.test.ts``, so the page's ``sameRecords`` and ``same_records``
+#: give one verdict. The first posters hold one "U" record for https://example.org: prefix 0
+#: and the whole URL, prefix 4 and the rest, the long (non-SR) form, and one with an id (IL).
+SAME_RECORD_VECTORS: list[tuple[dict[str, str], dict[str, str], bool]] = [
+    (
+        _poster("d10114550068747470733a2f2f6578616d706c652e6f7267"),
+        _poster("d1010c55046578616d706c652e6f7267"),
+        True,
+    ),
+    (
+        _poster("d1010c55046578616d706c652e6f7267"),
+        _poster("c1010000000c55046578616d706c652e6f7267"),
+        True,
+    ),
+    (
+        _poster("d1010c55046578616d706c652e6f7267"),
+        _poster("d9010c015561046578616d706c652e6f7267"),
+        True,
+    ),
+    (
+        _poster("D1010C55046578616D706C652E6F7267"),
+        _poster("d1010c55046578616d706c652e6f7267"),
+        True,
+    ),
+    (
+        _poster("d1010c55046578616d706c652e6f7267"),
+        _poster("d1010c55046578616d706c652e636f6d"),
+        False,
+    ),
+    (
+        _poster("91010c55046578616d706c652e6f72675101055402656e4869"),
+        _poster("910114550068747470733a2f2f6578616d706c652e6f72675101055402656e4869"),
+        True,
+    ),
+    (
+        _poster("91010c55046578616d706c652e6f72675101055402656e4869"),
+        _poster("d1010c55046578616d706c652e6f7267"),
+        False,
+    ),
+    (_poster("91"), _poster("91"), True),
+    (_poster("91"), _poster("d1"), False),
+    (_poster("91"), _poster("d1010c55046578616d706c652e6f7267"), False),
+    # Every other type is compared by its bytes: a "url" record's prefix is not expanded.
+    (
+        {"record_type": "url", "data_hex": "68747470733a2f2f6578616d706c652e6f7267"},
+        {"record_type": "url", "data_hex": "046578616d706c652e6f7267"},
+        False,
+    ),
+    (
+        {"record_type": "mime", "media_type": "application/json", "data_hex": "AB"},
+        {"record_type": "mime", "media_type": "application/json", "data_hex": "ab"},
+        True,
+    ),
+    (
+        {"record_type": "mime", "media_type": "application/json", "data_hex": "ab"},
+        {"record_type": "mime", "media_type": "text/plain", "data_hex": "ab"},
+        False,
+    ),
+]
+
+
+@pytest.mark.parametrize(("a", "b", "equal"), SAME_RECORD_VECTORS)
+def test_same_records_reads_a_smart_poster_by_its_records(
+    a: dict[str, str], b: dict[str, str], equal: bool
+) -> None:
+    # Web NFC writes a poster's nested message itself, with its own URI prefix codes and
+    # SR/IL flags, so a correct write can read back as other bytes.
+    one, other = NdefRecord.model_validate(a), NdefRecord.model_validate(b)
+    assert tags.same_records([one], [other]) is equal
+    assert tags.same_records([other], [one]) is equal
+
+
 def test_a_checked_write_books_one_edited_event_with_the_formats_origin(pg_pool: PgPool) -> None:
     store = FilamentSpoolStore(pg_pool)
     spool = _spool(store, pg_pool)

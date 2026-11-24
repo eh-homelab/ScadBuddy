@@ -1,6 +1,46 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { installNdefStub, type NdefStub } from '../test/ndefStub'
-import { NfcSession, nfcSupport, posterRecords, recordsSha256, RecordNotWritableError, sameRecords, toInit, toWire, type NDEFRecord, type NDEFRecordInit, type Reading } from './webNfc'
+import {
+  decodeText,
+  NfcSession,
+  nfcSupport,
+  posterRecords,
+  recordsSha256,
+  RecordNotWritableError,
+  sameRecords,
+  toInit,
+  toWire,
+  visibleText,
+  type NDEFRecord,
+  type NDEFRecordInit,
+  type Reading,
+  type WireRecord,
+} from './webNfc'
+
+const poster = (data_hex: string): WireRecord => ({ record_type: 'smart-poster', data_hex })
+
+/**
+ * `[a, b, equal]`: the same vectors as `SAME_RECORD_VECTORS` in backend/tests/filament/test_tags.py,
+ * so `sameRecords` and the server's `same_records` give one verdict. The first posters hold one "U"
+ * record for https://example.org: prefix 0 and the whole URL, prefix 4 and the rest, the long (non-SR)
+ * form, and one with an id (IL).
+ */
+const SAME_RECORD_VECTORS: [WireRecord, WireRecord, boolean][] = [
+  [poster('d10114550068747470733a2f2f6578616d706c652e6f7267'), poster('d1010c55046578616d706c652e6f7267'), true],
+  [poster('d1010c55046578616d706c652e6f7267'), poster('c1010000000c55046578616d706c652e6f7267'), true],
+  [poster('d1010c55046578616d706c652e6f7267'), poster('d9010c015561046578616d706c652e6f7267'), true],
+  [poster('D1010C55046578616D706C652E6F7267'), poster('d1010c55046578616d706c652e6f7267'), true],
+  [poster('d1010c55046578616d706c652e6f7267'), poster('d1010c55046578616d706c652e636f6d'), false],
+  [poster('91010c55046578616d706c652e6f72675101055402656e4869'), poster('910114550068747470733a2f2f6578616d706c652e6f72675101055402656e4869'), true],
+  [poster('91010c55046578616d706c652e6f72675101055402656e4869'), poster('d1010c55046578616d706c652e6f7267'), false],
+  [poster('91'), poster('91'), true],
+  [poster('91'), poster('d1'), false],
+  [poster('91'), poster('d1010c55046578616d706c652e6f7267'), false],
+  // Every other type is compared by its bytes: a "url" record's prefix is not expanded.
+  [{ record_type: 'url', data_hex: '68747470733a2f2f6578616d706c652e6f7267' }, { record_type: 'url', data_hex: '046578616d706c652e6f7267' }, false],
+  [{ record_type: 'mime', media_type: 'application/json', data_hex: 'AB' }, { record_type: 'mime', media_type: 'application/json', data_hex: 'ab' }, true],
+  [{ record_type: 'mime', media_type: 'application/json', data_hex: 'ab' }, { record_type: 'mime', media_type: 'text/plain', data_hex: 'ab' }, false],
+]
 
 const bytes = (text: string) => new TextEncoder().encode(text)
 const hex = (text: string) => Array.from(bytes(text), (b) => b.toString(16).padStart(2, '0')).join('')
@@ -75,6 +115,30 @@ describe('records', () => {
       { recordType: 'text', text: 'Hi', hex: '02' + hex('en') + hex('Hi') },
     ])
     expect(posterRecords('91')).toBeNull()
+  })
+
+  it('reads a UTF-16 text record by its BOM, else as big-endian', () => {
+    // A poster with one "T" record: status 0x82 (UTF-16, a 2-byte language), "en", then "Hi".
+    expect(posterRecords('d101075482656e00480069')?.[0]?.text).toBe('Hi')
+    expect(posterRecords('d101095482656efffe48006900')?.[0]?.text).toBe('Hi')
+    expect(posterRecords('d101095482656efeff00480069')?.[0]?.text).toBe('Hi')
+    expect(decodeText(new Uint8Array([0x00, 0x48, 0x00, 0x69]), 'utf-16')).toBe('Hi')
+    expect(decodeText(new Uint8Array([0xff, 0xfe, 0x48, 0x00]), 'UTF-16')).toBe('H')
+  })
+
+  it('shows bidi, control and zero-width characters as escapes', () => {
+    expect(visibleText('a\u202Eb\u2069c\u200Ed\u061Ce\u0000f\u007Fg\u009Fh\u2060i\uFEFFj\rk')).toBe(
+      'a⟨U+202E⟩b⟨U+2069⟩c⟨U+200E⟩d⟨U+061C⟩e⟨U+0000⟩f⟨U+007F⟩g⟨U+009F⟩h⟨U+2060⟩i⟨U+FEFF⟩j⟨U+000D⟩k',
+    )
+    // A line break and a tab lay text out; they are kept.
+    expect(visibleText('a\nb\tc é')).toBe('a\nb\tc é')
+  })
+
+  it('compares records with the server\'s rule: the shared vectors', () => {
+    for (const [a, b, equal] of SAME_RECORD_VECTORS) {
+      expect(sameRecords([a], [b]), `${a.data_hex} ${b.data_hex}`).toBe(equal)
+      expect(sameRecords([b], [a]), `${b.data_hex} ${a.data_hex}`).toBe(equal)
+    }
   })
 
   it('compares records by type, media type and data', () => {

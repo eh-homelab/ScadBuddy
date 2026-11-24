@@ -1,7 +1,8 @@
 import { HttpResponse, http } from 'msw'
 import type { components } from '../../../api/schema'
 import { parseRgba } from '../../../lib/rgba'
-import { recordsSha256 } from '../../../lib/webNfc'
+// `same_records`'s rule is the page's own `sameRecords`.
+import { recordsSha256, sameRecords } from '../../../lib/webNfc'
 import { newId } from '../../newId'
 import { bindOn, cleanTagUid, findByKey, holderOf, seenTag, setOrigin, spoolViewOf, tagOf, tagRowOf } from './index'
 
@@ -139,11 +140,6 @@ const jobOf = (id: string) => {
 }
 
 const hexOfText = (value: string) => Array.from(new TextEncoder().encode(value), (byte) => byte.toString(16).padStart(2, '0')).join('')
-
-/** `sameRecords`: equal `(record_type, media_type, data_hex)` in order. */
-const sameRecords = (a: readonly S['NdefRecord'][], b: readonly S['NdefRecord'][]) =>
-  a.length === b.length &&
-  a.every((one, at) => one.record_type === b[at]!.record_type && (one.media_type ?? null) === (b[at]!.media_type ?? null) && one.data_hex.toLowerCase() === b[at]!.data_hex.toLowerCase())
 
 /** `_openspool_encode` for the spool as its routes answer it. */
 function openSpoolRecords(spool: NonNullable<ReturnType<typeof spoolViewOf>>): S['TagRecords'] {

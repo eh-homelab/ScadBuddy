@@ -383,12 +383,94 @@ class TagBackupNotFoundError(LookupError):
     """No such tag, or no such backup of it."""
 
 
+#: The URI record's prefixes, by identifier code (NFC Forum URI RTD), as Web NFC expands
+#: them (https://w3c.github.io/web-nfc/, "Parsing NDEF well-known U records"); the page's
+#: ``URI_PREFIXES`` (``frontend/src/lib/webNfc.ts``) is the same list.
+_URI_PREFIXES: Final = (
+    "", "http://www.", "https://www.", "http://", "https://", "tel:", "mailto:",
+    "ftp://anonymous:anonymous@", "ftp://ftp.", "ftps://", "sftp://", "smb://", "nfs://",
+    "ftp://", "dav://", "news:", "telnet://", "imap:", "rtsp://", "urn:", "pop:", "sip:",
+    "sips:", "tftp:", "btspp://", "btl2cap://", "btgoep://", "tcpobex://", "irdaobex://",
+    "file://", "urn:epc:id:", "urn:epc:tag:", "urn:epc:pat:", "urn:epc:raw:", "urn:epc:",
+    "urn:nfc:",
+)  # fmt: skip
+
+
+def _nested_records(data: bytes) -> list[tuple[int, bytes, bytes]] | None:
+    """The ``(tnf, type, payload)`` of each record of a raw NDEF message (a smart poster's
+    payload), from each header's MB, ME, CF, SR, IL and TNF (NFC Forum NDEF 1.0, 3.2).
+    ``None`` when the bytes are cut short or a record is chunked, as the page's
+    ``parseMessage`` answers."""
+    out: list[tuple[int, bytes, bytes]] = []
+    at = 0
+
+    def take(n: int) -> bytes | None:
+        nonlocal at
+        if at + n > len(data):
+            return None
+        part = data[at : at + n]
+        at += n
+        return part
+
+    while at < len(data):
+        head = take(2)
+        if head is None:
+            return None
+        flags = head[0]
+        if flags & 0x20:
+            return None
+        size = take(1 if flags & 0x10 else 4)
+        if size is None:
+            return None
+        id_length = 0
+        if flags & 0x08:
+            il = take(1)
+            if il is None:
+                return None
+            id_length = il[0]
+        type_ = take(head[1])
+        id_ = take(id_length)
+        payload = take(int.from_bytes(size, "big"))
+        if type_ is None or id_ is None or payload is None:
+            return None
+        out.append((flags & 0x07, type_, payload))
+        if flags & 0x40:
+            break
+    return out if out and at == len(data) else None
+
+
+def _nested_key(tnf: int, type_: bytes, payload: bytes) -> tuple[object, ...]:
+    """A record in a smart poster as it is compared: a "U" record by its URL, its prefix
+    code expanded; any other by its payload. Its id is not compared, as at the top level."""
+    if tnf == 1 and type_ == b"U" and payload and payload[0] < len(_URI_PREFIXES):
+        try:
+            # "utf-8-sig" drops a leading BOM, as the page's TextDecoder does.
+            rest = payload[1:].decode("utf-8-sig")
+        except UnicodeDecodeError:
+            pass
+        else:
+            return (tnf, type_.hex(), "url", _URI_PREFIXES[payload[0]] + rest)
+    return (tnf, type_.hex(), "hex", payload.hex())
+
+
+def _compared(record: m.NdefRecord) -> tuple[object, ...]:
+    body: object = record.data_hex
+    if record.record_type == "smart-poster":
+        nested = _nested_records(bytes.fromhex(record.data_hex))
+        if nested is not None:
+            body = tuple(_nested_key(*one) for one in nested)
+    return (record.record_type, record.media_type, body)
+
+
 def same_records(a: Sequence[m.NdefRecord], b: Sequence[m.NdefRecord]) -> bool:
     """Two record lists are equal when their ``(record_type, media_type, data_hex)``
-    triples are, in order (``data_hex`` is lower case already)."""
-    return [(r.record_type, r.media_type, r.data_hex) for r in a] == [
-        (r.record_type, r.media_type, r.data_hex) for r in b
-    ]
+    triples are, in order (``data_hex`` is lower case already). A smart poster's data is
+    compared by the records it holds (`_nested_key`): Web NFC writes the nested message
+    itself, with its own URI prefix codes and SR/IL flags (https://w3c.github.io/web-nfc/,
+    "map a URL to NDEF"), so a correct write can read back as other bytes. A poster that
+    does not parse, and every other type, is compared byte for byte. The page's
+    ``sameRecords`` (``frontend/src/lib/webNfc.ts``) uses the same rule."""
+    return [_compared(r) for r in a] == [_compared(r) for r in b]
 
 
 def _encoded(

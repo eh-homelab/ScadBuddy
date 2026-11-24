@@ -53,7 +53,7 @@
 - Backup reasons are fixed: `spool_write`, `agent_write` and `restore`. Job kinds are `read` and `write`. Job states are `pending`, `armed`, `done`, `failed`, `expired` and `cancelled` (R23).
 - Photo roles are fixed: `filament_label` and `spool_label` (entity attachment `role`, `^[a-z_]{1,32}$`, `backend/scadbuddy/api/entity_attachments.py:126`).
 - The phone page polls jobs every 2 s, and only while `document.visibilityState === 'visible'`.
-- The tags store a record's `data_hex` in lower case. Two record lists are equal when their `(record_type, media_type, data_hex)` triples are equal in order.
+- The tags store a record's `data_hex` in lower case. Two record lists are equal when their `(record_type, media_type, data_hex)` triples are equal in order. A smart poster's `data_hex` is compared by the records it holds, a "U" record by its expanded URL, because Web NFC writes the nested message with its own URI prefix codes and SR/IL flags; one that does not parse is compared byte for byte (`same_records`, `sameRecords`).
 - Backend tests use a Postgres in Docker on a unique port (see `CLAUDE.local.md`):
   `docker run -d --rm --name sbtest-7273 -p 55473:5432 -e POSTGRES_HOST_AUTH_METHOD=trust mirror.gcr.io/library/postgres:18 -c timezone=UTC`, then
   `docker exec sbtest-7273 createdb -U postgres scadbuddy_test`, then

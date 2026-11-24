@@ -219,10 +219,11 @@ def _text(value: object) -> str | None:
 
 
 def _capped(value: object, key: str, warnings: list[str]) -> str | None:
-    """`_text`, cut to `_TEXT_MAX_CHARS` characters; a cut names ``key`` in ``warnings``."""
+    """`_text`, cut to `_TEXT_MAX_CHARS` characters. A cut adds ``"<key> cut to 128
+    characters"`` to ``warnings``, so it does not read as a field that could not be read."""
     text = _text(value)
     if text is not None and len(text) > _TEXT_MAX_CHARS:
-        warnings.append(key)
+        warnings.append(f"{key} cut to {_TEXT_MAX_CHARS} characters")
         text = text[:_TEXT_MAX_CHARS].rstrip()
     return text
 

@@ -211,7 +211,8 @@ def test_openspool_cuts_a_long_string_and_names_it() -> None:
     )
     got = decode([record])
     assert got is not None and got.brand == "B" * 128 and got.material == "é" * 128
-    assert got.warnings == ["type", "brand"]
+    # A field read and then cut says so; it is not a field that could not be read.
+    assert got.warnings == ["type cut to 128 characters", "brand cut to 128 characters"]
 
 
 def test_openspool_encodes_back_to_the_sample_keys_and_strings() -> None:

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../../api/client'
 import { claimNfcJob, getNfcJob, listPendingNfcJobs, postNfcJobResult, type NfcJob } from '../../../api/filament'
 import { headlineOf, writeWithBackup, type WriteOutcome, type WriteStep } from '../../../lib/tagWrite'
-import { notWritable, posterRecords, recordsSha256, type NfcSession, type PosterRecord, type WireRecord } from '../../../lib/webNfc'
+import { decodeText, notWritable, posterRecords, recordsSha256, visibleText, type NfcSession, type PosterRecord, type WireRecord } from '../../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -42,15 +42,6 @@ function bytesOf(hex: string): Uint8Array {
   return new Uint8Array(hex.match(/../g)?.map((pair) => parseInt(pair, 16)) ?? [])
 }
 
-/** The text of `bytes` in `encoding`, or null when they are not valid text in it. */
-function decode(bytes: Uint8Array, encoding: string): string | null {
-  try {
-    return new TextDecoder(encoding, { fatal: true }).decode(bytes)
-  } catch {
-    return null
-  }
-}
-
 const isJson = (record: WireRecord) => /^application\/([\w.-]+\+)?json$/i.test(record.media_type ?? '')
 
 /** The encodings an NDEF text record can use (NFC Forum Text RTD: UTF-8 or UTF-16), by their Web NFC names. */
@@ -69,7 +60,8 @@ type Preview = { kind: 'text'; text: string } | { kind: 'hex'; text: string; mor
  * R22: every record is shown before Arm. It is text only where the text is exactly what was sent: a
  * text record in an NDEF encoding, a URL (as text, never a link), JSON as sent (laid out only when
  * that changes no value). A smart poster shows each record it holds. Any other record, or bytes
- * that are not valid text, is shown as hex; a record with no bytes says so.
+ * that are not valid text, is shown as hex; a record with no bytes says so. Text shows bidi, control
+ * and zero-width characters as escapes (`visibleText`), so what is approved reads as a reader shows it.
  */
 function previewOf(record: WireRecord): Preview {
   const bytes = bytesOf(record.data_hex)
@@ -77,13 +69,13 @@ function previewOf(record: WireRecord): Preview {
   let text: string | null = null
   if (record.record_type === 'text') {
     const encoding = (record.encoding ?? 'utf-8').toLowerCase()
-    if (TEXT_ENCODINGS.has(encoding)) text = decode(bytes, encoding)
-  } else if (record.record_type === 'url' || record.record_type === 'absolute-url') text = decode(bytes, 'utf-8')
+    if (TEXT_ENCODINGS.has(encoding)) text = decodeText(bytes, encoding)
+  } else if (record.record_type === 'url' || record.record_type === 'absolute-url') text = decodeText(bytes, 'utf-8')
   else if (record.record_type === 'smart-poster') {
     const records = posterRecords(record.data_hex)
     if (records) return { kind: 'poster', records }
   } else if (isJson(record)) {
-    text = decode(bytes, 'utf-8')
+    text = decodeText(bytes, 'utf-8')
     if (text !== null) {
       try {
         const parsed: unknown = JSON.parse(text)
@@ -93,7 +85,7 @@ function previewOf(record: WireRecord): Preview {
       }
     }
   }
-  if (text !== null) return { kind: 'text', text }
+  if (text !== null) return { kind: 'text', text: visibleText(text) }
   return { kind: 'hex', ...hexPreview(bytes) }
 }
 
@@ -304,15 +296,8 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
       release()
     }
 
+    // A job whose records Web NFC would refuse is never armed (`refused`).
     const records = target.records ?? []
-    // A record Web NFC would refuse ends the job before the tag is backed up or written.
-    const refused = notWritable(records)
-    if (refused) {
-      const text = `This record cannot be written from this page: ${refused}. Nothing was written.`
-      await fail(target.id, text)
-      end(target.id, text)
-      return
-    }
     const outcome = await writeWithBackup({
       session,
       reason: 'agent_write',
@@ -358,6 +343,8 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
   if (!job && !notice) return null
   const sha = recordsKey !== null && hash?.key === recordsKey ? hash.value : null
   const ready = job !== null && !expired && !run && (job.kind === 'read' || sha !== null)
+  // A record Web NFC would refuse is named as the job is shown: it can be declined, never armed.
+  const refused = job?.kind === 'write' ? notWritable(job.records ?? []) : null
   const count = job?.records?.length ?? 0
 
   return (
@@ -400,7 +387,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
                           <li key={index} className="flex flex-col gap-0.5">
                             <span className="font-medium">{inner.recordType}</span>
                             {inner.text !== null ? (
-                              <pre className="max-h-24 overflow-auto font-mono text-[12px] leading-snug break-words whitespace-pre-wrap">{inner.text || 'No text'}</pre>
+                              <pre className="max-h-24 overflow-auto font-mono text-[12px] leading-snug break-words whitespace-pre-wrap">{visibleText(inner.text) || 'No text'}</pre>
                             ) : (
                               <HexText {...hexPreview(bytesOf(inner.hex))} />
                             )}
@@ -415,11 +402,12 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
               })}
             </ul>
           )}
+          {refused && !run && <p className="font-medium text-warn">This job cannot be written from this page: {refused}. Decline it to tell the agent.</p>}
           {run ? (
             <p className="text-base font-medium">{PHASE_TEXT[run.phase]}</p>
           ) : (
             <div className="grid grid-cols-2 gap-3">
-              <Button type="button" className="h-11" disabled={!ready} onClick={() => void arm(job, sha)}>
+              <Button type="button" className="h-11" disabled={!ready || refused !== null} onClick={() => void arm(job, sha)}>
                 Arm
               </Button>
               <Button type="button" variant="outline" className="h-11" disabled={!ready} onClick={() => void decline(job, sha)}>

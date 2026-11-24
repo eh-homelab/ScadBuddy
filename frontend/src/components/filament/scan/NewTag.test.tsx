@@ -5,7 +5,7 @@ import { postTagRead, type TagReadResult } from '../../../api/filament'
 import { filamentLinks } from '../../../lib/filamentLinks'
 import { server } from '../../../mocks/server'
 import { renderPage } from '../../../test/utils'
-import { NewTag } from './NewTag'
+import { DecodedFields, NewTag } from './NewTag'
 
 const hex = (text: string) => Array.from(new TextEncoder().encode(text), (byte) => byte.toString(16).padStart(2, '0')).join('')
 const OPENSPOOL = [{ record_type: 'mime', media_type: 'application/json', data_hex: hex('{"protocol":"openspool","version":"1.0","type":"PLA","color_hex":"FFAABB","min_temp":"220","max_temp":"240"}') }]
@@ -25,6 +25,14 @@ describe('NewTag (#7273)', () => {
     await user.click(screen.getByRole('button', { name: 'Create a spool from this tag' }))
     await waitFor(() => expect(bound).toHaveBeenCalledOnce())
     expect(bound.mock.calls[0]![0].next).toBe('open_spool')
+  })
+
+  it('says which fields were cut apart from the fields it could not read', () => {
+    const decoded = { format: 'openspool' as const, version: '1.0', warnings: ['min_temp', 'type cut to 128 characters', 'brand cut to 128 characters'] }
+    renderPage(<DecodedFields decoded={decoded} />)
+    const region = screen.getByRole('region', { name: 'On the tag' })
+    expect(within(region).getByText('Cut to 128 characters: type, brand.')).toBeInTheDocument()
+    expect(within(region).getByText('Some fields could not be read: min_temp.')).toBeInTheDocument()
   })
 
   it('binds the spool it made when the bind failed, and makes no second spool', async () => {

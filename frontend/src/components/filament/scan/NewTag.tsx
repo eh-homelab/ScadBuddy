@@ -18,8 +18,14 @@ function range(min: number | null | undefined, max: number | null | undefined): 
   return null
 }
 
+/** A warning for a field read and then cut, as the backend's `_capped` words it. */
+const CUT = / cut to 128 characters$/
+
 /** What the tag's records decode to: only the fields that are set. */
 export function DecodedFields({ decoded }: { decoded: DecodedSpool }) {
+  const warnings = decoded.warnings ?? []
+  const cut = warnings.filter((one) => CUT.test(one)).map((one) => one.replace(CUT, ''))
+  const unread = warnings.filter((one) => !CUT.test(one))
   const rows: [string, ReactNode][] = [['Format', `${FORMAT_NAMES[decoded.format]} ${decoded.version}`.trim()]]
   const material = [decoded.material, decoded.subtype].filter(Boolean).join(' ')
   if (material) rows.push(['Material', material])
@@ -49,9 +55,8 @@ export function DecodedFields({ decoded }: { decoded: DecodedSpool }) {
           </div>
         ))}
       </dl>
-      {decoded.warnings && decoded.warnings.length > 0 && (
-        <p className="mt-2 text-warn">Some fields could not be read: {decoded.warnings.join(', ')}.</p>
-      )}
+      {cut.length > 0 && <p className="mt-2 text-warn">Cut to 128 characters: {cut.join(', ')}.</p>}
+      {unread.length > 0 && <p className="mt-2 text-warn">Some fields could not be read: {unread.join(', ')}.</p>}
     </section>
   )
 }
