@@ -27,6 +27,9 @@ export const TRANSIENT_KINDS: ReadonlySet<string> = new Set(['UND_ERR_SOCKET', '
  */
 export const RETRY_DELAYS_MS: readonly number[] = [250, 1_000, 3_000]
 
+/** One field a 422 refused: its `loc` joined with `.`, and the API's message (`''` without one). */
+export type CrudFieldError = { field: string; msg: string }
+
 /** A CRUD route that did not answer, or did not answer as one (its message names no URL or credential). */
 export class CrudReadError extends Error {
   override name = 'CrudReadError'
@@ -39,6 +42,8 @@ export class CrudReadError extends Error {
   readonly reason: string | undefined
   /** A 422's refused fields, each `loc` joined with `.` (`body.turn_id`); none on another problem. */
   readonly fields: readonly string[]
+  /** A 422's refused fields with the API's message for each (`errors[].msg`), in `fields`' order. */
+  readonly errors: readonly CrudFieldError[]
   /** The transport error's kind (`backendUp.ts` `transportKind`) when no answer came. */
   readonly transport: string | undefined
 
@@ -46,7 +51,7 @@ export class CrudReadError extends Error {
     message: string,
     status?: number,
     fromRoute = false,
-    problem: { detail?: string; reason?: string; fields?: readonly string[] } = {},
+    problem: { detail?: string; reason?: string; fields?: readonly string[]; errors?: readonly CrudFieldError[] } = {},
     transport?: string,
   ) {
     super(message)
@@ -54,7 +59,8 @@ export class CrudReadError extends Error {
     this.fromRoute = fromRoute
     this.detail = problem.detail ?? ''
     this.reason = problem.reason
-    this.fields = problem.fields ?? []
+    this.errors = problem.errors ?? (problem.fields ?? []).map((field) => ({ field, msg: '' }))
+    this.fields = problem.fields ?? this.errors.map((e) => e.field)
     this.transport = transport
   }
 
@@ -144,18 +150,18 @@ export function wellFormed(value: unknown): unknown {
   return value
 }
 
-/** The `detail`, `reason` and, on a 422, refused fields (`errors[].loc`, backend crud/guard.py) of a problem response. */
-async function problemOf(response: Response): Promise<{ detail: string; reason?: string; fields: string[] }> {
+/** The `detail`, `reason` and, on a 422, refused fields (`errors[].loc` and `.msg`, backend crud/guard.py) of a problem response. */
+async function problemOf(response: Response): Promise<{ detail: string; reason?: string; errors: CrudFieldError[] }> {
   const body = (await response.json().catch(() => undefined)) as { detail?: unknown; reason?: unknown; errors?: unknown } | undefined
-  const errors = response.status === 422 && Array.isArray(body?.errors) ? (body.errors as unknown[]) : []
-  const fields = errors.flatMap((e) => {
-    const loc = (e as { loc?: unknown } | null)?.loc
-    return Array.isArray(loc) ? [loc.map(String).join('.')] : []
+  const raw = response.status === 422 && Array.isArray(body?.errors) ? (body.errors as unknown[]) : []
+  const errors = raw.flatMap((e) => {
+    const { loc, msg } = (e ?? {}) as { loc?: unknown; msg?: unknown }
+    return Array.isArray(loc) ? [{ field: loc.map(String).join('.'), msg: typeof msg === 'string' ? msg : '' }] : []
   })
   return {
     detail: typeof body?.detail === 'string' ? body.detail : '',
     ...(typeof body?.reason === 'string' ? { reason: body.reason } : {}),
-    fields,
+    errors,
   }
 }
 

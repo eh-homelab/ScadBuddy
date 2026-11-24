@@ -24,7 +24,7 @@ export const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_k
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_id END AS offer_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_label END AS offer_label,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
-  status, title, tags, scope, parent_id, runtime, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
+  status, title, tags, scope, browser, parent_id, runtime, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
   ${POOL_COST} AS pool_cost_usd, turns,
   (runtime = 'unified' AND durable_turn_id IS NOT NULL) AS turn_active, created_at, updated_at, archived_at`
 
@@ -154,7 +154,7 @@ export class PgSessionRows implements SessionRows {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
                                  status, title, tags, scope, parent_id, runtime, max_turns, budget_usd, budget_root_id,
-                                 fork_parent_id, fork_cut, background_tools)
+                                 fork_parent_id, fork_cut, background_tools, browser)
         VALUES (${row.id}, ${row.origin}, ${row.owner.kind}, ${row.owner.id}, ${row.owner.label},
                 ${row.owner.kind}, ${row.owner.id}, 'idle', ${row.title}, ${sql.array(row.tags)},
                 ${sql.json(row.scope as never)}, ${row.parentId}, ${row.runtime}, ${row.maxTurns}, ${row.budgetUsd},
@@ -166,6 +166,13 @@ export class PgSessionRows implements SessionRows {
                     : row.parentId
                       ? sql`coalesce((SELECT background_tools FROM ai_sessions WHERE id = ${row.parentId}), true)`
                       : true
+                },
+                ${
+                  row.browser && Object.keys(row.browser).length
+                    ? sql.json(row.browser as never)
+                    : row.parentId
+                      ? sql`(SELECT browser FROM ai_sessions WHERE id = ${row.parentId})`
+                      : null
                 })`
     }
     const { limit, forkOf } = row

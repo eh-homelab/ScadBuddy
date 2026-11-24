@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { ANSWER_MAX, QUESTIONS_MAX } from '../harness/questions.js'
 import { AttachmentRefsSchema } from '../attachments/store.js'
+import { SessionBrowserInput } from './browserOptions.js'
 import { PROTOCOL_VERSION, SESSION_MODES } from './protocol.js'
 
 // The panel → server half of the assistant panel's wire protocol, version 1,
@@ -63,6 +64,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
      * sends, are refused with STALE_TAB_IMAGES (#1959).
      */
     images: AttachmentRefsSchema.optional(),
+    /** The new session's browser options (#7027); used only when the message starts a session (no `sessionId`). */
+    browser: SessionBrowserInput.optional(),
     /**
      * Taken and ignored (plan Step 6.3): every session is an AgentSession. Kept so a
      * tab of an earlier release that still sends it is not refused.

@@ -28,6 +28,7 @@ from temporalio.client import Client, ScheduleActionStartWorkflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
+from scadbuddy.workflows.commands import SHORT_TASK_TIMEOUT
 from scadbuddy.workflows.housekeeping import ensure_workflow_schedule
 
 with workflow.unsafe.imports_passed_through():
@@ -81,5 +82,6 @@ async def ensure_sensor_notify_schedule(client: Client, task_queue: str) -> None
         id=schedule_id,
         task_queue=task_queue,
         execution_timeout=RUN_TIMEOUT,
+        task_timeout=SHORT_TASK_TIMEOUT,
     )
     await ensure_workflow_schedule(client, schedule_id, INTERVAL.total_seconds(), action)

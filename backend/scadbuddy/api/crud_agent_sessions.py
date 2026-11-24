@@ -12,7 +12,8 @@ Area ``sessions``, the ``ai_sessions`` row as the session manager reads and writ
 - ``POST …/sessions/list``: a principal's sessions, filtered, newest first;
 - ``GET …/session-starts``: how many sessions an owner started in a window;
 - ``POST …/sessions``: a new row, under the owner's start lock (``rate_limited``) and, for a
-  fork, its parent's lock (``forgotten``);
+  fork, its parent's lock (``forgotten``); its ``browser`` options (#7027) are validated
+  here, and a child without its own keeps its parent's;
 - ``POST …/sessions/{id}/agent``: a Workflow agent's chat's model, effort and subagent;
 - ``POST …/sessions/{id}/offer``, ``…/offer/cancel`` and ``…/owner``: a handoff, each
   conditional on what the agent read (``changed: false`` otherwise);
@@ -172,6 +173,7 @@ class SessionRow(BaseModel):
     title: str
     tags: list[str]
     scope: dict[str, Any]
+    browser: dict[str, Any] | None
     parent_id: str | None
     runtime: str | None
     max_turns: int
@@ -281,6 +283,30 @@ class NewSessionLimit(_Body):
     window_ms: int = Field(ge=1, le=WINDOW_MS_MAX)
 
 
+#: The bounds of a session's browser options (#7027). The wrapper
+#: (``workers/playwright-mcp/options.mjs``) repeats them.
+BROWSER_UA_PATTERN = r"^[\x20-\x7E]{1,512}$"
+BROWSER_LOCALE_PATTERN = r"^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$"
+BROWSER_LOCALE_MAX = 35
+VIEWPORT_WIDTH = (320, 3840)
+VIEWPORT_HEIGHT = (320, 2160)
+
+
+class Viewport(_Body):
+    width: int = Field(ge=VIEWPORT_WIDTH[0], le=VIEWPORT_WIDTH[1], strict=True)
+    height: int = Field(ge=VIEWPORT_HEIGHT[0], le=VIEWPORT_HEIGHT[1], strict=True)
+
+
+class SessionBrowser(_Body):
+    """What a session's browser reports; a key left out is the browser's default."""
+
+    user_agent: str | None = Field(default=None, pattern=BROWSER_UA_PATTERN)
+    viewport: Viewport | None = None
+    locale: str | None = Field(
+        default=None, max_length=BROWSER_LOCALE_MAX, pattern=BROWSER_LOCALE_PATTERN
+    )
+
+
 class NewSession(_Body):
     id: str = Field(pattern=UUID_PATTERN)
     origin: Origin
@@ -297,6 +323,8 @@ class NewSession(_Body):
     fork_of: ForkOf | None = None
     #: False: none; left out, the parent's, for a session with one, else true (#5870).
     background_tools: Literal[False] | None = None
+    #: Left out or ``{}``, the parent's for a session with one, else none (#7027).
+    browser: SessionBrowser | None = None
     #: Counted under the owner's start lock: refused ``rate_limited`` at ``max`` in the window.
     limit: NewSessionLimit | None = None
 
@@ -326,6 +354,9 @@ async def create_session(body: NewSession, state: StateDep) -> OneSession:
             budget_of=body.budget_of,
             fork_of=None if body.fork_of is None else (body.fork_of.parent_id, body.fork_of.cut),
             background_tools=body.background_tools,
+            browser=None
+            if body.browser is None
+            else body.browser.model_dump(exclude_none=True) or None,
             limit=None if body.limit is None else (body.limit.max, body.limit.window_ms),
         )
         return refused, None if refused else sessions.get(conn, body.id)

@@ -547,6 +547,18 @@ export type ServerEventOf<T extends ServerEvent['type']> = Extract<ServerEvent, 
 // Panel → server
 // ---------------------------------------------------------------------------------
 
+/**
+ * #7027 — what a new chat's browser (its Playwright MCP) reports: the agent's
+ * `src/sessions/browserOptions.ts` `SessionBrowserInput`, the shape only. The bounds are
+ * the API's alone; a value it refuses comes back as an `error` with code `invalid_browser`.
+ */
+export const SessionBrowserInputSchema = z.strictObject({
+  user_agent: z.string().optional(),
+  viewport: z.strictObject({ width: z.number().int(), height: z.number().int() }).optional(),
+  locale: z.string().optional(),
+})
+export type SessionBrowserInput = z.infer<typeof SessionBrowserInputSchema>
+
 export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({
     v,
@@ -557,6 +569,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     context: PageContextSchema,
     /** #1941 — uploaded images for the model, by id (#1866 sent them inline). */
     images: z.array(AttachmentRefSchema).min(1).optional(),
+    /** #7027 — a new chat's browser options; the agent ignores them on a message with a `sessionId`. */
+    browser: SessionBrowserInputSchema.optional(),
     /**
      * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
      * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent
