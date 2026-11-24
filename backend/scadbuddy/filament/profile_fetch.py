@@ -354,7 +354,9 @@ class QueueProbe(Protocol):
 
 class PollerCache:
     """DescribeTaskQueue's answer per queue, kept `POLLERS_CACHE_SECONDS`: each read of
-    a fetch's status (a page polls it) would otherwise ask Temporal twice."""
+    a fetch's status (a page polls it) would otherwise ask every partition of the
+    workflow task queue, and of the activity one when the first has no poller: up to
+    `2 * TASK_QUEUE_PARTITIONS` calls (`workflows/pollers.py`)."""
 
     def __init__(
         self,
