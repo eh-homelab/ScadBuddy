@@ -1908,6 +1908,31 @@ class TagBackupMade(BaseModel):
     backup_id: UUID
 
 
+class TagRecordsIn(_FitsOneTag):
+    """The tag as a phone just read it, and the backup it took of it (#7273 G2, G7)."""
+
+    uid: Annotated[str, Field(max_length=64)]
+    backup_id: UUID
+
+
+class TagRecords(BaseModel):
+    """The records to write. ``format`` is ``None`` for a restore of records that are in
+    neither format."""
+
+    format: Literal["openspool", "opentag3d"] | None
+    records: list[NdefRecord]
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TagWrittenIn(_In):
+    """A write the phone made: what it sent and what the tag held after (#7273 R4)."""
+
+    uid: Annotated[str, Field(max_length=64)]
+    backup_id: UUID
+    sent: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
+    read_back: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
+
+
 class DecodedSpool(BaseModel):
     """A spool as a tag's records describe it."""
 

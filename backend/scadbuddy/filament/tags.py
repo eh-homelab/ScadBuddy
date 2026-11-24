@@ -4,8 +4,9 @@ the spool that holds it."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 from uuid import UUID
 
@@ -15,7 +16,16 @@ from pydantic import ValidationError
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import find_by_key
 from scadbuddy.filament.spools import Conn, FilamentDefaults, FilamentSpoolStore, NoSpoolError
-from scadbuddy.filament.tag_formats import KIND_OF, decode, format_of
+from scadbuddy.filament.tag_formats import (
+    KIND_OF,
+    ORIGIN_OF,
+    TagFormat,
+    decode,
+    encode,
+    facts_of,
+    format_of,
+    pick_format,
+)
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 
@@ -330,3 +340,135 @@ def valid_backup(
     ):
         raise BackupMismatchError()
     return found
+
+
+class ReadBackMismatchError(ValueError):
+    """The tag does not hold what the phone sent."""
+
+    code = "read_back_mismatch"
+
+    def __init__(self) -> None:
+        super().__init__("the tag does not hold what was sent")
+
+
+class SentMismatchError(ValueError):
+    """What the phone sent is not what ScadBuddy would write for this spool now."""
+
+    code = "sent_mismatch"
+
+    def __init__(self) -> None:
+        super().__init__("the records sent are not what ScadBuddy writes for this spool now")
+
+
+class UnknownFormatError(ValueError):
+    """The records sent are not one OpenSpool or OpenTag3D record."""
+
+    code = "unknown_format"
+
+    def __init__(self) -> None:
+        super().__init__("the records sent are not one OpenSpool or OpenTag3D record")
+
+
+class TagBackupNotFoundError(LookupError):
+    """No such tag, or no such backup of it."""
+
+
+def same_records(a: Sequence[m.NdefRecord], b: Sequence[m.NdefRecord]) -> bool:
+    """Two record lists are equal when their ``(record_type, media_type, data_hex)``
+    triples are, in order (``data_hex`` is lower case already)."""
+    return [(r.record_type, r.media_type, r.data_hex) for r in a] == [
+        (r.record_type, r.media_type, r.data_hex) for r in b
+    ]
+
+
+def _encoded(
+    spool: m.Spool, fmt: TagFormat, empty_weight_g: Callable[[UUID], int | None]
+) -> m.TagRecords:
+    insert = spool.effective.insert_type_id
+    weight = None if insert is None else empty_weight_g(insert)
+    encoded = encode(fmt, facts_of(spool, weight))
+    return m.TagRecords(format=encoded.format, records=encoded.records, warnings=encoded.warnings)
+
+
+def records_for_spool(
+    spools: FilamentSpoolStore,
+    spool_id: UUID,
+    body: m.TagRecordsIn,
+    *,
+    default: TagFormat,
+    empty_weight_g: Callable[[UUID], int | None],
+    defaults: FilamentDefaults,
+) -> m.TagRecords | None:
+    """The records that put the spool on the tag, in the tag's own format, else
+    ``default``; ``None`` for no such spool. The backup must cover this write."""
+    with spools.transaction() as conn:
+        valid_backup(conn, body.backup_id, body.uid, "spool_write")
+        spool = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
+    if spool is None:
+        return None
+    return _encoded(spool, pick_format(body.records, default), empty_weight_g)
+
+
+def written(
+    spools: FilamentSpoolStore,
+    spool_id: UUID,
+    body: m.TagWrittenIn,
+    *,
+    actor: str,
+    defaults: FilamentDefaults,
+    empty_weight_g: Callable[[UUID], int | None],
+) -> m.TagReadResult | None:
+    """Check a write and bind the tag, in one transaction: the backup covers it, the tag
+    holds what was sent, and what was sent is what `records_for_spool` gives now. The
+    spool then holds the tag, with the format's origin and the write's time (R11).
+    ``None`` for no such spool."""
+    with spools.transaction() as conn:
+        valid_backup(conn, body.backup_id, body.uid, "spool_write")
+        if not same_records(body.sent, body.read_back):
+            raise ReadBackMismatchError()
+        fmt = format_of(body.sent) if len(body.sent) == 1 else None
+        if fmt is None:
+            raise UnknownFormatError()
+        spool = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
+        if spool is None:
+            return None
+        if not same_records(body.sent, _encoded(spool, fmt, empty_weight_g).records):
+            raise SentMismatchError()
+        result = read_on(
+            conn,
+            TagRead(source="phone", uid=body.uid, records=tuple(body.read_back)),
+            actor=actor,
+            bind_spool_id=spool_id,
+            marks_origin=False,
+            defaults=defaults,
+        )
+        FilamentSpoolStore.set_origin(
+            conn,
+            spool_id,
+            actor,
+            data_origin=ORIGIN_OF[fmt],
+            tag_encoded_at=datetime.now(UTC),
+        )
+        # The origin changed the spool row after `read_on` read it.
+        return result.model_copy(
+            update={"spool": FilamentSpoolStore.read(conn, spool_id, defaults=defaults)}
+        )
+
+
+def restore_records(
+    spools: FilamentSpoolStore, tag_id: UUID, backup_id: UUID, body: m.TagRecordsIn
+) -> m.TagRecords:
+    """The records of an old backup, to write back. ``body.backup_id`` is the fresh
+    backup (reason ``restore``) of the tag as it is now, and is of this tag.
+    `TagBackupNotFoundError` for no such tag or backup."""
+    with spools.transaction() as conn:
+        old = conn.execute(
+            "SELECT records FROM filament_tag_backups WHERE id = %s AND tag_id = %s",
+            (backup_id, tag_id),
+        ).fetchone()
+        if old is None:
+            raise TagBackupNotFoundError()
+        if valid_backup(conn, body.backup_id, body.uid, "restore").tag_id != tag_id:
+            raise BackupMismatchError()
+    records = [m.NdefRecord.model_validate(r) for r in old["records"]]
+    return m.TagRecords(format=format_of(records), records=records)

@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import Annotated, Any, cast
@@ -1819,6 +1819,131 @@ async def list_tag_backups(
     if found is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no tag {tag_id}")
     return found
+
+
+def _empty_weight_of(filament: Filament) -> Callable[[UUID], int | None]:
+    def weight(insert_type_id: UUID) -> int | None:
+        row = filament.catalog.get("insert-types", insert_type_id)
+        return row.empty_weight_g if isinstance(row, m.InsertType) else None
+
+    return weight
+
+
+@router.post(
+    "/spools/{spool_id}/tag-records",
+    response_model=m.TagRecords,
+    summary="The records that put a spool on a tag",
+    description=(
+        "Takes the tag as just read (`uid` and `records`) and the `backup_id` of the backup "
+        "taken of it for this write, and answers the records to write: in the tag's own "
+        "format when it holds OpenSpool or OpenTag3D, else in the `filament_tag_format` "
+        "setting. Answers the records only. The browser writes them, and a write that skips "
+        "this route has no backup. 404 for no spool. 409 `backup_mismatch` when the backup "
+        "is unknown, is of another UID, is over 10 minutes old or is not a `spool_write` "
+        "backup."
+    ),
+)
+async def tag_records(
+    filament: FilamentDep, store: SettingsStoreDep, spool_id: UUID, body: m.TagRecordsIn
+) -> m.TagRecords:
+    default = store.read({"filament_tag_format"})["filament_tag_format"]
+    try:
+        found = await asyncio.to_thread(
+            lambda: tags.records_for_spool(
+                filament.spools,
+                spool_id,
+                body,
+                default=default,
+                empty_weight_g=_empty_weight_of(filament),
+                defaults=filament.spools.defaults(),
+            )
+        )
+    except tags.BackupMismatchError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+    if found is None:
+        raise _no_spool(spool_id)
+    return found
+
+
+@router.post(
+    "/spools/{spool_id}/tag-written",
+    response_model=m.TagReadResult,
+    summary="Check a tag write and bind the tag",
+    description=(
+        "After a phone writes a tag: `sent` is what it wrote and `read_back` what the tag "
+        "held after. In one transaction ScadBuddy checks the backup (as `tag-records` "
+        "does), that `read_back` equals `sent`, that `sent` is one OpenSpool or OpenTag3D "
+        "record and that it equals what `tag-records` answers for the spool now. Only then "
+        "does it bind the tag to the spool, with the format's `data_origin` and the time "
+        "of the write. 404 for no spool. 409 `backup_mismatch` for a backup that does not "
+        "cover the write. 409 `read_back_mismatch` when the tag does not hold what was "
+        "sent. 409 `sent_mismatch` when `sent` is not what the spool gives now (the spool "
+        "changed since `tag-records`). 422 `unknown_format` for `sent` in no known format. "
+        "Nothing is bound on a refusal."
+    ),
+)
+async def tag_written(
+    filament: FilamentDep,
+    store: SettingsStoreDep,
+    caller: CallerDep,
+    spool_id: UUID,
+    body: m.TagWrittenIn,
+) -> m.TagReadResult:
+    try:
+        result = await asyncio.to_thread(
+            lambda: tags.written(
+                filament.spools,
+                spool_id,
+                body,
+                actor=actor(caller),
+                defaults=filament.spools.defaults(),
+                empty_weight_g=_empty_weight_of(filament),
+            )
+        )
+    except tags.UnknownFormatError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code=exc.code) from None
+    except (
+        tags.BackupMismatchError,
+        tags.ReadBackMismatchError,
+        tags.SentMismatchError,
+    ) as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+    except tags.SpoolNotFoundError as exc:
+        raise _no_spool(exc.spool_id) from None
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    if result is None:
+        raise _no_spool(spool_id)
+    await _push_now(filament, store)
+    return result
+
+
+@router.post(
+    "/tags/{tag_id}/backups/{backup_id}/restore",
+    response_model=m.TagRecords,
+    summary="The records of a backup, to write back",
+    description=(
+        "Answers the records of backup `backup_id` of this tag, to write back the same way "
+        "(`format` is null when they are in neither known format). The body is the tag as "
+        "just read and the `backup_id` of a fresh backup of it with reason `restore`; "
+        "nothing is restored without one. 404 for no such tag or backup. 409 "
+        "`backup_mismatch` when the fresh backup does not cover this write or is of "
+        "another tag."
+    ),
+)
+async def restore_tag_backup(
+    filament: FilamentDep, tag_id: UUID, backup_id: UUID, body: m.TagRecordsIn
+) -> m.TagRecords:
+    try:
+        return await asyncio.to_thread(
+            tags.restore_records, filament.spools, tag_id, backup_id, body
+        )
+    except tags.TagBackupNotFoundError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"no backup {backup_id} of tag {tag_id}"
+        ) from None
+    except tags.BackupMismatchError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
 
 
 @router.get(

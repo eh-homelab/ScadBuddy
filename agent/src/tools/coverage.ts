@@ -32,6 +32,21 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The phone page backs a tag up right before it writes, in the same tap (#7273 G7). An agent's write is backed up by the page when it runs the nfc_write job.",
   },
   {
+    operation: 'POST /api/v1/filament/spools/{spool_id}/tag-records',
+    reason:
+      "One step of the phone page's write in one tap (#7273 G7): read and back up, the records, the write, the read-back check. The browser holds the tag, so an agent writes through nfc_write, which the page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/spools/{spool_id}/tag-written',
+    reason:
+      "One step of the phone page's write in one tap (#7273 G7): read and back up, the records, the write, the read-back check. The browser holds the tag, so an agent writes through nfc_write, which the page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/tags/{tag_id}/backups/{backup_id}/restore',
+    reason:
+      "One step of the phone page's write in one tap (#7273 G7): read and back up, the records, the write, the read-back check. The browser holds the tag, so an agent writes through nfc_write, which the page runs.",
+  },
+  {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
     reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
   },

@@ -12,7 +12,15 @@ import pytest
 from scadbuddy.filament import tags
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import FilamentInventory
-from scadbuddy.filament.models import Material, NdefRecord, SpoolCreate, TagBackup, TagBackupIn
+from scadbuddy.filament.models import (
+    Material,
+    NdefRecord,
+    SpoolCreate,
+    TagBackup,
+    TagBackupIn,
+    TagRecordsIn,
+    TagWrittenIn,
+)
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore, TagKeysClashError
 from scadbuddy.filament.tags import TagRead
 from scadbuddy.spools.models import SeenTray
@@ -469,3 +477,47 @@ def test_a_backup_over_one_tags_bytes_is_refused() -> None:
     half = NdefRecord(record_type="mime", data_hex="00" * 500)
     with pytest.raises(ValueError):
         TagBackupIn(uid="04AA", records=[half, half], reason="spool_write")
+
+
+def test_same_records_compares_type_media_and_data_in_order() -> None:
+    other = NdefRecord(record_type="mime", media_type="x/y", data_hex="00")
+    assert tags.same_records([REC, other], [REC, other])
+    assert not tags.same_records([REC, other], [other, REC])
+    assert not tags.same_records([REC], [REC, other])
+    assert tags.same_records([REC], [REC.model_copy(update={"id": "x", "lang": "en"})])
+
+
+def test_a_checked_write_books_one_edited_event_with_the_formats_origin(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    made = _backup(store)
+
+    def weight(_: UUID) -> int | None:
+        return None
+
+    sent = tags.records_for_spool(
+        store,
+        spool,
+        TagRecordsIn(uid="04AA", records=[], backup_id=made.id),
+        default="openspool",
+        empty_weight_g=weight,
+        defaults=DEFAULTS,
+    )
+    assert sent is not None
+    result = tags.written(
+        store,
+        spool,
+        TagWrittenIn(uid="04AA", backup_id=made.id, sent=sent.records, read_back=sent.records),
+        actor="ann",
+        defaults=DEFAULTS,
+        empty_weight_g=weight,
+    )
+    assert result is not None and result.spool is not None
+    assert result.spool.data_origin == "openspool" and result.spool.tag_encoded_at is not None
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM filament_spool_events"
+            " WHERE spool_id = %s AND kind = 'edited'",
+            (spool,),
+        ).fetchone()
+    assert row is not None and row["n"] == 1
