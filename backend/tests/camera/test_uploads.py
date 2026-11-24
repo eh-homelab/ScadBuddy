@@ -32,7 +32,9 @@ def write_segment(
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{start.strftime(SEGMENT_NAME)}.mp4"
     path.write_bytes(
-        box(b"ftyp", b"isom\0\0\0\0") + box(b"moov", init * 16) + box(b"mdat", b"\0" * media)
+        box(b"ftyp", b"isom\0\0\0\0")
+        + box(b"moov", box(b"trak", init * 16))
+        + box(b"mdat", b"\0" * media)
     )
     return path
 

@@ -31,19 +31,40 @@ def _box(handle: BinaryIO, offset: int) -> tuple[bytes, int]:
 
 
 def init_span(path: Path) -> tuple[int, str]:
-    """The byte length of the leading ``ftyp`` and ``moov`` boxes, and the sha256 of those bytes."""
+    """The byte length of the leading ``ftyp`` and ``moov`` boxes, and the sha256 of the
+    codec setup they hold: ``ftyp`` and each child of ``moov`` but ``udta``.
+
+    MediaMTX writes a ``moov/udta/mtxi`` box in each segment's init, with the stream id and
+    the segment's number, DTS and NTP time (measured 2026-11-23 on v1.21.4, segments of one
+    ffmpeg stream). With it, no two segments share an init digest, and each one would start
+    a discontinuity."""
     with path.open("rb") as handle:
         end = 0
+        spans: list[tuple[int, int]] = []
         for expected in (b"ftyp", b"moov"):
             kind, size = _box(handle, end)
             if kind != expected:
                 raise ValueError(f"expected a {expected.decode()} box, found {kind!r}")
+            spans.append((end, size))
             end += size
+        (_, ftyp), (moov, moov_size) = spans
+        kept = [(0, ftyp)]
+        child = moov + 8
+        while child < moov + moov_size:
+            kind, size = _box(handle, child)
+            if child + size > moov + moov_size:
+                raise ValueError("a box runs past the end of moov")
+            if kind != b"udta":
+                kept.append((child, size))
+            child += size
         handle.seek(0)
         data = handle.read(end)
     if len(data) != end:
         raise ValueError("the file ends inside the init segment")
-    return end, hashlib.sha256(data).hexdigest()
+    digest = hashlib.sha256()
+    for at, size in kept:
+        digest.update(data[at : at + size])
+    return end, digest.hexdigest()
 
 
 def segment_start(path: Path) -> datetime:

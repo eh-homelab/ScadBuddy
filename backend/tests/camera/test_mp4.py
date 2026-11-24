@@ -27,7 +27,39 @@ def test_init_span_of_fixture() -> None:
     assert [k for k, _ in kinds[:3]] == [b"ftyp", b"moov", b"moof"]
     length, digest = init_span(FIXTURE)
     assert length == kinds[0][1] + kinds[1][1]
-    assert digest == hashlib.sha256(data[:length]).hexdigest()
+    ftyp = kinds[0][1]
+    children = boxes(data[ftyp + 8 : length])
+    assert b"udta" in [k for k, _ in children]
+    kept, at = data[:ftyp], ftyp + 8
+    for kind, size in children:
+        if kind != b"udta":
+            kept += data[at : at + size]
+        at += size
+    assert digest == hashlib.sha256(kept).hexdigest()
+
+
+def box(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I4s", 8 + len(payload), kind) + payload
+
+
+def init(trak: bytes, mtxi: bytes) -> bytes:
+    """An init as MediaMTX writes it: a ``udta`` with an ``mtxi`` box after the tracks."""
+    moov = box(b"mvhd", b"\0" * 100) + box(b"trak", trak) + box(b"udta", box(b"mtxi", mtxi))
+    return box(b"ftyp", b"iso5\0\0\0\1") + box(b"moov", moov) + box(b"moof", b"\0" * 8)
+
+
+def test_init_digest_ignores_mediamtx_segment_info(tmp_path: Path) -> None:
+    """MediaMTX v1.21.4 writes ``moov/udta/mtxi`` in each segment's init: its stream id, the
+    segment's number, DTS and NTP time. So two segments of one stream share no whole init;
+    the digest leaves ``udta`` out, and only a change of the codec setup changes it."""
+    first, second, other = tmp_path / "1.mp4", tmp_path / "2.mp4", tmp_path / "3.mp4"
+    first.write_bytes(init(b"avc1 640x480", b"\0" * 44))
+    second.write_bytes(init(b"avc1 640x480", b"\1" * 44))
+    other.write_bytes(init(b"avc1 320x240", b"\0" * 44))
+    length, digest = init_span(first)
+    assert length == first.stat().st_size - 16
+    assert init_span(second) == (length, digest)
+    assert init_span(other)[1] != digest
 
 
 def test_init_span_rejects_non_mp4(tmp_path: Path) -> None:
