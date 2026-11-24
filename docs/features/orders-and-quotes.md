@@ -7,7 +7,8 @@ commit and its inputs; quotes priced by hand, from a past print's archive, from 
 (each plate's grams and time at the price book's filaments and rates); a rough estimate
 from a render's volume; payment requests, deposits and the balance; printing an item;
 fulfilment, shipping and closing, with an audit line per order. The real cost and margin
-of each order, a profit report, a parts inventory and per-printer machine rates.
+of each order, a profit report, the parts each item uses (inventory items, see
+[inventory.md](inventory.md)) and per-printer machine rates.
 See README "Features" and the [orders spec](../superpowers/specs/2026-10-18-orders-design.md).
 
 ## How it works
@@ -46,11 +47,28 @@ off) is recorded in `order_attempt_media_not_offered`, and the sweep leaves it o
 The order page's row shows what is attached, says to attach a refused medium by hand, and
 offers a copy only for what is still missing ([orders spec §8.2](../superpowers/specs/2026-10-18-orders-design.md#82-archives)).
 
+## Parts and job cost
+
+Since #7067 a part is an inventory item (kind `hardware` for every migrated part), not a
+`parts` row (`backend/scadbuddy/migrations/20261124T0918Z_parts_to_items.sql:1-10`). An order
+item's parts are rows of `order_item_parts` by `item_id`. A model's rule copies them to a new
+item (`Lifecycle.add_item`). When an item becomes `fulfilled`, `StockStore.take` takes each part
+from its lots FIFO; `unfulfil_item` gives each use back at its own cost
+(`backend/scadbuddy/inventory/stock.py:513`, `:557`).
+
+Job cost has a `parts` part, `ItemCost.parts_minor` (`backend/scadbuddy/orders/costs.py:183`).
+It is read from `stock_moves`, not from cost entries: the migration deleted the `part:` cost
+entries that the moves replace (Ruling 3). A `use` of unknown cost that nothing returned
+makes the figure unknown (R-P2-19). The profit report reads the same figure (R-P2-31). The
+quote estimate prices parts at what a FIFO take would cost now and returns `parts_unknown`
+(R-P2-29). More in [inventory.md](inventory.md).
+
 ## Code
 
 - UI: `frontend/src/pages/OrdersPage.tsx`, `OrderPage.tsx`, `ProfitPage.tsx`,
   `CustomersPage.tsx`; `frontend/src/components/orders/`. Parts and the model part rules are in
-  the Inventory area, `frontend/src/pages/inventory/` (#7067).
+  the Inventory area, `frontend/src/pages/inventory/` (#7067); `/orders/parts` redirects to
+  `/inventory?kind=part` (`frontend/src/App.tsx:154`).
 - Routes: `backend/scadbuddy/api/orders.py:187`, `order_payments.py`, `order_attachments.py`,
   `order_messages.py`, `order_purchases.py`, `order_sources.py`, `order_bank_deposits.py`,
   `customers.py`, `parts.py`, `machine_rates.py`.
@@ -68,7 +86,7 @@ offers a copy only for what is still missing ([orders spec §8.2](../superpowers
   after they completed; the sweep skips them),
   `order_shipments`,
   `order_events`, `order_payments`, `order_charges`, `entity_attachments` (an order's files, the rows with an `order_id`), `order_messages`,
-  `order_time_entries`, `order_cost_entries`, `parts*`, `filaments` (the price book),
+  `order_time_entries`, `order_cost_entries`, `order_item_parts` and `model_part_rules` (by `item_id` since #7067; the parts are `items` and their stock `stock_lots` and `stock_moves`, see [inventory.md](inventory.md)), `filaments` (the price book),
   `printer_cost_profiles`, `payment_*`, `bank_*`.
 - Blob keys: `quote-<sha256>`, `attachment-<sha256>`.
 - Settings: `orders_currency`, `pricing_*`, `orders_tax_percent`, `rough_estimate_factor`,
