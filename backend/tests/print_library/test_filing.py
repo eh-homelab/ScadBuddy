@@ -4,6 +4,7 @@ Task 8): one top-level folder per template title, one copy per output."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,8 +15,14 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import OutputMeta
-from scadbuddy.print_library.filing import file_output, put_in_folder, trash_filed
+from scadbuddy.library.outputs import MODEL_NAME, OutputMeta
+from scadbuddy.print_library.filing import (
+    file_output,
+    file_saved_output,
+    put_in_folder,
+    put_saved_in_folder,
+    trash_filed,
+)
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.store import NativeFile, NativeLibraryStore
 from scadbuddy.render.glb import BoundingBox
@@ -23,6 +30,7 @@ from scadbuddy.rows.component import CONNECT_TIMEOUT
 from scadbuddy.rows.component import POOL_SIZE as ROW_POOL_SIZE
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
+from tests.support.output_blobs import blob_output
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -75,6 +83,31 @@ async def test_a_retried_filing_after_the_copy_moved_files_a_second_copy(
     assert [f.id for f in native.rows.files(template_folder)] == [again.id]
     moved = native.rows.file(first.id)
     assert moved is not None and moved.folder_id is None and not moved.filed
+
+
+async def test_filing_uploads_blob_bytes(
+    native: NativeLibrary, tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#7256: a saved output's filing and its put in a chosen folder read its 3MF from
+    the model blob, with the NFS file gone; with neither it is the 404."""
+    async with blob_output(tmp_path / "output", pg_conninfo) as output:
+        model = output.directory / MODEL_NAME
+        data = model.read_bytes()
+        model.unlink()
+        filed = await file_saved_output(native, output.store, output.meta, "Demo")
+        assert filed.sha256 == hashlib.sha256(data).hexdigest()
+        gifts = native.rows.create_folder("Gifts", None).id
+        placed, created = await put_saved_in_folder(
+            native, output.store, output.meta, gifts, "Demo"
+        )
+        assert created and placed.sha256 == filed.sha256
+        assert output.store.rows is not None
+        output.store.rows.set_blob(output.meta.id, "model", "output-gone-model")
+        with pytest.raises(ApiError) as refused:
+            await put_saved_in_folder(
+                native, output.store, output.meta, native.rows.create_folder("B", None).id, "x"
+            )
+        assert refused.value.status == 404
 
 
 async def test_a_chosen_folder_copy_never_suppresses_the_filing(

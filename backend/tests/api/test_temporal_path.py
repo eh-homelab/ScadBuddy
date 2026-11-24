@@ -154,9 +154,9 @@ def test_the_api_sets_up_its_housekeeping_schedule_and_runs_it_once(
     (review #1095 1): the triggered run is the start's one sweep."""
     walks: list[object] = []
 
-    def counted(state: AppState, stop: threading.Event | None = None) -> list[str]:
+    async def counted(state: AppState, stop: threading.Event | None = None) -> list[str]:
         walks.append(state)
-        return sweep_assets(state, stop)
+        return await sweep_assets(state, stop)
 
     monkeypatch.setattr(main, "sweep_assets", counted)
     settings = settings.model_copy(update={"asset_sweep_interval": NO_TICK})

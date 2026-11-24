@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -20,6 +21,7 @@ import trimesh
 from PIL import Image
 from psycopg import Connection
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 from psycopg_pool import PoolClosed, PoolTimeout
 
 from scadbuddy.core.paths import DataPaths
@@ -37,17 +39,24 @@ from scadbuddy.library.assets import (
     referenced_asset_ids,
     sanitise_svg,
 )
+from scadbuddy.library.output_rows import ByteWrite
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.provenance import ROOT_MODEL, Provenance, stamp
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.split import ColourPart
 from tests.conftest import PgPool, open_pg_pool
+from tests.support.output_blobs import blob_output
 
 DAY = 86400.0
 GRACE = 7 * DAY
 LOCK = "SELECT pg_advisory_lock(hashtextextended(%s, 0))"
 UNLOCK = "SELECT pg_advisory_unlock(hashtextextended(%s, 0))"
+
+
+def _referenced(paths: DataPaths, records: Any = ()) -> set[str]:
+    """`referenced_asset_ids` over the folders, from a test with no loop."""
+    return asyncio.run(referenced_asset_ids(paths, records))
 
 
 def svg(n: int) -> bytes:
@@ -332,7 +341,7 @@ def test_every_reference_source_is_read(paths: DataPaths, store: AssetStore) -> 
     (paths.model_dir("builtin:demo") / "model.json").write_text(json.dumps({"x": ids[4]}))
 
     # A saved preset's values (rows in Postgres) and a job's reach it as `params`.
-    found = referenced_asset_ids(paths, [{"label": ids[2]}, {"label": ids[5]}])
+    found = _referenced(paths, [{"label": ids[2]}, {"label": ids[5]}])
 
     assert found >= set(ids[:6])
     assert ids[6] not in found
@@ -343,7 +352,7 @@ def test_a_damaged_record_still_keeps_its_asset(paths: DataPaths, store: AssetSt
     output = paths.output_dir("demo", "a" * 32)
     output.mkdir(parents=True)
     (output / "params.json").write_text('{"label": "' + meta.id + '", truncated')
-    assert meta.id in referenced_asset_ids(paths)
+    assert meta.id in _referenced(paths)
 
 
 def test_an_unreadable_reference_source_fails_the_collection(paths: DataPaths) -> None:
@@ -351,7 +360,7 @@ def test_an_unreadable_reference_source_fails_the_collection(paths: DataPaths) -
     # A directory where a record should be: reading it is an OSError, not "no refs".
     (output / "params.json").mkdir(parents=True)
     with pytest.raises(OSError):
-        referenced_asset_ids(paths)
+        _referenced(paths)
 
 
 def test_a_stamp_provenance_cannot_parse_still_keeps_its_asset(
@@ -370,7 +379,7 @@ def test_a_stamp_provenance_cannot_parse_still_keeps_its_asset(
             f'"{meta.id}"}}</metadata></model>',
         )
     assert read_provenance(archive) is None
-    assert meta.id in referenced_asset_ids(paths)
+    assert meta.id in _referenced(paths)
 
 
 def test_a_3mf_that_cannot_be_opened_fails_the_collection(paths: DataPaths) -> None:
@@ -378,7 +387,39 @@ def test_a_3mf_that_cannot_be_opened_fails_the_collection(paths: DataPaths) -> N
     output.mkdir(parents=True)
     (output / "model.3mf").write_bytes(b"PK\x03\x04 truncated")
     with pytest.raises(OSError, match=r"model\.3mf"):
-        referenced_asset_ids(paths)
+        _referenced(paths)
+
+
+@pytest.mark.requires_postgres
+async def test_referenced_asset_ids_from_rows_and_blob_3mf(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#7256: once a copy into rows finished, the rows' JSON is scanned in place of the
+    folders, and the 3MF of a row whose ``params`` is empty is read from its model blob."""
+    in_record, in_archive, in_files = "a" * 64, "b" * 64, "c" * 64
+    async with blob_output(tmp_path / "o", pg_conninfo) as output:
+        store, rows = output.store, output.store.rows
+        assert rows is not None and store.bytes is not None
+        model = output.directory / "model.3mf"
+        with zipfile.ZipFile(model, "w") as written:
+            written.writestr(ROOT_MODEL, f"<model>{in_archive}</model>")
+        blobs = await store.bytes.put_folder(output.directory, output.meta.id, output.meta.slug)
+        rows.write_bytes([ByteWrite(output.meta.id, blobs, "stamp", None)])
+        with output.pool.connection() as conn:
+            conn.execute(
+                "UPDATE outputs SET params = '{}', inputs = %s WHERE output_id = %s",
+                (Jsonb({"label": in_record}), output.meta.id),
+            )
+        # Only the folder would name this one; the rows answer once copied.
+        (output.directory / "params.json").write_text(json.dumps({"label": in_files}))
+        before = await referenced_asset_ids(store.paths, [], store)
+        assert in_files in before  # no finished copy yet: the folders
+        run = rows.start_run()
+        rows.finish_run(run, copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
+        model.unlink()
+        found = await referenced_asset_ids(store.paths, [{"x": "d" * 64}], store)
+        assert {in_record, in_archive, "d" * 64} <= found
+        assert in_files not in found
 
 
 # -- the sweep --------------------------------------------------------------------
@@ -390,7 +431,7 @@ def test_the_sweep_removes_an_old_asset_nothing_references(
     meta = store.put(svg(1), "a.svg")
     age(pg_pool, meta, GRACE + DAY)
 
-    assert store.sweep(referenced_asset_ids(paths), grace=GRACE) == [meta.id]
+    assert store.sweep(_referenced(paths), grace=GRACE) == [meta.id]
     assert not exists(store, meta)
     assert list(store.root.iterdir()) == []
     assert store.usage().count == 0
@@ -406,9 +447,9 @@ def test_a_stopped_sweep_removes_nothing_more(
     stop = threading.Event()
     stop.set()
 
-    assert store.sweep(referenced_asset_ids(paths), grace=GRACE, stop=stop) == []
+    assert store.sweep(_referenced(paths), grace=GRACE, stop=stop) == []
     assert exists(store, meta)
-    assert store.sweep(referenced_asset_ids(paths), grace=GRACE) == [meta.id]
+    assert store.sweep(_referenced(paths), grace=GRACE) == [meta.id]
 
 
 def test_the_sweep_never_removes_a_referenced_asset(
@@ -427,7 +468,7 @@ def test_the_sweep_never_removes_a_referenced_asset(
     # A saved preset's values and a job's.
     params = [{"label": kept[1].id}, {"label": kept[3].id}]
 
-    removed = store.sweep(referenced_asset_ids(paths, params), grace=GRACE)
+    removed = store.sweep(_referenced(paths, params), grace=GRACE)
 
     assert removed == [swept.id]
     assert all(exists(store, meta) for meta in kept)
@@ -440,7 +481,7 @@ def test_the_sweep_keeps_an_unreferenced_asset_inside_its_grace(
     age(pg_pool, meta, GRACE - DAY)
     # The blob's mtime is not the last use any more: only the row's is.
     age_file(store.blob_path(meta), 10 * GRACE)
-    assert store.sweep(referenced_asset_ids(paths), grace=GRACE) == []
+    assert store.sweep(_referenced(paths), grace=GRACE) == []
     assert exists(store, meta)
 
 
@@ -451,7 +492,7 @@ def test_an_asset_used_after_the_references_were_read_is_kept(
     not in the set the sweep read, but validating it marked the asset used."""
     meta = store.put(svg(1), "a.svg")
     age(pg_pool, meta, 10 * GRACE)
-    referenced = referenced_asset_ids(paths)  # before the render exists
+    referenced = _referenced(paths)  # before the render exists
     schema = CustomizerSchema(
         parameters=[Parameter(name="label", type="file", initial="", accept=["svg"])]
     )
@@ -466,7 +507,7 @@ def test_an_asset_uploaded_again_after_the_references_were_read_is_kept(
 ) -> None:
     meta = store.put(svg(1), "a.svg")
     age(pg_pool, meta, 10 * GRACE)
-    referenced = referenced_asset_ids(paths)
+    referenced = _referenced(paths)
     store.put(svg(1), "again.svg")
 
     assert store.sweep(referenced, grace=GRACE) == []
@@ -478,7 +519,7 @@ def test_a_use_after_the_sweep_removed_the_asset_is_a_not_found(
 ) -> None:
     meta = store.put(svg(1), "a.svg")
     age(pg_pool, meta, 10 * GRACE)
-    store.sweep(referenced_asset_ids(paths), grace=GRACE)
+    store.sweep(_referenced(paths), grace=GRACE)
     with pytest.raises(AssetNotFoundError):
         store.use(meta.id)
 

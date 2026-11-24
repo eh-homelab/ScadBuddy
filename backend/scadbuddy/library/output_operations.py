@@ -35,7 +35,6 @@ from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import answered_as_routes
 from scadbuddy.library.outputs import (
     BACK_OFFICE,
-    MODEL_NAME,
     hold_parts,
     release_parts,
     require_output,
@@ -44,7 +43,7 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copies import open_runs_on_copies, trash_copies
-from scadbuddy.print_library.filing import file_output, put_in_folder, trash_filed
+from scadbuddy.print_library.filing import file_saved_output, put_saved_in_folder, trash_filed
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
@@ -257,8 +256,8 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                 title = await asyncio.to_thread(
                     template_title, state.paths.model_source(meta.slug).parent, meta.slug
                 )
-                model_3mf = state.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
-                await file_output(native, meta, model_3mf, title)
+                # The 3MF from its blob, else its file (#7256).
+                await file_saved_output(native, state.outputs, meta, title)
         except Exception:
             logger.exception("could not file a saved output in the library", extra={"id": meta.id})
         # A new output has no uploads yet: no read to make.
@@ -416,8 +415,9 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         native = await serving_native()
         meta = await asyncio.to_thread(require_output, state.outputs, request["output_id"])
         folder_id: int = request["folder_id"]
-        model_3mf = state.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
-        row, created = await put_in_folder(native, meta, model_3mf, folder_id, checked["stem"])
+        row, created = await put_saved_in_folder(
+            native, state.outputs, meta, folder_id, checked["stem"]
+        )
         # The destination picker's "last touched" order (#3651), best effort as on Bambuddy.
         try:
             await state.uploads.touch_destination("folder", folder_id)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -99,6 +100,17 @@ class Fixes:
     ) -> PrintRunRequest:
         if not request.accepted_fixes:
             return request
+        # Holds the output's 3MF from the blob store while the analyzers run (#7256).
+        async with AsyncExitStack() as stack:
+            return await self._judged(request, output_id, library_file_id, stack)
+
+    async def _judged(
+        self,
+        request: PrintRunRequest,
+        output_id: str | None,
+        library_file_id: int | None,
+        stack: AsyncExitStack,
+    ) -> PrintRunRequest:
         from scadbuddy.api.analyzers import AnalysisTarget, analysis_context
 
         analysis = analysis_request(request)
@@ -116,6 +128,7 @@ class Fixes:
             self.printers,
             self.filament.inventory,
             reads=self.filament.reads,
+            stack=stack,
         )
         try:
             stored = await asyncio.to_thread(self.decisions.list, scopes=context.scopes())

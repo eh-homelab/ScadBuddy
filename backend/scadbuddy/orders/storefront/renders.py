@@ -46,7 +46,6 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import status
@@ -56,7 +55,8 @@ from temporalio.client import WorkflowUpdateFailedError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.idempotency import Replay, idempotent_write
-from scadbuddy.library.outputs import PREVIEW_NAME, OutputMeta, OutputNotFoundError
+from scadbuddy.library.output_bytes import OutputStream
+from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament, Reference
@@ -781,7 +781,8 @@ def output_of(state: AppState, row: PriceRow, listing: Listing) -> OutputMeta | 
         return None
     if (meta.slug, meta.model_version) != (listing.slug, listing.commit):
         return None
-    if not (state.outputs.directory(row.output_id) / PREVIEW_NAME).is_file():
+    # A preview blob in the index, else its file (#7256).
+    if not state.outputs.has_role(row.output_id, "preview"):
         return None
     return meta
 
@@ -836,11 +837,12 @@ def variant_not_found() -> ApiError:
     )
 
 
-async def variant_preview(state: AppState, key: str) -> Path:
+async def variant_preview(state: AppState, key: str) -> OutputStream:
     """The preview mesh of the output the priced slice of variant ``key`` saved (#6921,
-    `SlicePrices.variant_row`); 404 ``variant_not_found`` for a key that names none, one
-    whose output is gone, or one whose listing is no longer published or no longer shows
-    the output's design (#6921 review)."""
+    `SlicePrices.variant_row`), as a stream of its blob, else its file (#7256); the
+    caller closes it. 404 ``variant_not_found`` for a key that names none, one whose
+    output or its preview is gone, or one whose listing is no longer published or no
+    longer shows the output's design (#6921 review)."""
     orders = _orders(state)
     row = await asyncio.to_thread(orders.slice_prices.variant_row, key)
     if row is None or row.output_id is None or row.listing_id is None:
@@ -853,7 +855,10 @@ async def variant_preview(state: AppState, key: str) -> Path:
     meta = await asyncio.to_thread(output_of, state, row, listing)
     if meta is None:
         raise variant_not_found()
-    return state.outputs.directory(row.output_id) / PREVIEW_NAME
+    stream = await state.outputs.open_role(row.output_id, "preview")
+    if stream is None:
+        raise variant_not_found()
+    return stream
 
 
 async def variant_colours(state: AppState, key: str) -> list[str] | None:

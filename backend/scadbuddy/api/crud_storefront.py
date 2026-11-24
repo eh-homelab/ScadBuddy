@@ -113,12 +113,12 @@ from typing import Annotated, Any, Final
 from urllib.parse import urlsplit
 
 from fastapi import Depends, Path, Query, Request, Response, status
-from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.api.deps import AppState, PathsDep, ReadBudgetDep, StateDep
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE, get_job_preview
 from scadbuddy.api.orders import ensure_order_projects
+from scadbuddy.api.output_streams import stream_response
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import MaybeIdempotencyKey, required_key
@@ -495,10 +495,12 @@ async def variant_preview_route(
     state: StateDep,
     _visitor: Visitor,
     _client: StoreClient,
-) -> FileResponse:
-    """The preview mesh of the output a priced slice of the variant saved (#6921); 404
-    ``variant_not_found`` for a key that names none."""
-    return FileResponse(await variant_preview(state, variant_key), media_type=GLB_MEDIA_TYPE)
+) -> Response:
+    """The preview mesh of the output a priced slice of the variant saved (#6921),
+    streamed from its blob, else its file (#7256); 404 ``variant_not_found`` for a key
+    that names none."""
+    stream = await variant_preview(state, variant_key)
+    return stream_response(stream, media_type=GLB_MEDIA_TYPE, headers={})
 
 
 @router.get("/draft", name="crud_storefront_draft")

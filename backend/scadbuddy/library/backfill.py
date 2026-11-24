@@ -235,19 +235,25 @@ def _announce(events: EventBus | None, outputs: OutputStore, output_id: str) -> 
     so a reader waiting on it reads it again rather than polling (#1970).
 
     Never raises: it runs after the attach is done, so a failure here must not mark
-    that attach failed or stop the pass. The slug comes from the output's directory,
-    as `attach_backfill` names it, not from ``meta.json`` or the database, which can
-    fail where the attach did not."""
+    that attach failed or stop the pass. The slug comes from the output's row (#7256),
+    else from its directory, as `attach_backfill` names it, not from ``meta.json``,
+    which can fail where the attach did not."""
     if events is None:
         return
     try:
-        slug = outputs.directory(output_id).parent.name
+        slug = _slug_of(outputs, output_id)
     except OutputNotFoundError:
         return  # deleted meanwhile: its own output.deleted said so
     except Exception:
         logger.exception("could not announce a backfill", extra={"id": output_id})
         return
     emit(events, OutputEvent(kind="output.updated", output_id=output_id, slug=slug))
+
+
+def _slug_of(outputs: OutputStore, output_id: str) -> str:
+    """The output's model: its row's slug, else its directory's."""
+    slug = outputs.rows.slug_of(output_id) if outputs.rows is not None else None
+    return slug if slug is not None else outputs.directory(output_id).parent.name
 
 
 def _attach(

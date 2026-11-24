@@ -235,6 +235,11 @@ def _broken(error: Exception) -> Callable[..., Any]:
     return fail
 
 
+def _wait_for(stop: threading.Event) -> None:
+    while not stop.wait(0.01):
+        pass
+
+
 async def _broken_async(*args: Any, **kwargs: Any) -> None:
     raise RuntimeError("the projection is gone")
 
@@ -648,13 +653,13 @@ async def test_a_stop_at_one_shutdown_does_not_stop_the_next_workers_sweep(
     entered = threading.Event()
     stops: list[threading.Event] = []
 
-    def sweeping(state: Any, stop: threading.Event | None = None) -> list[str]:
+    async def sweeping(state: Any, stop: threading.Event | None = None) -> list[str]:
         assert stop is not None
         stops.append(stop)
         if len(stops) == 1:
             entered.set()
-            while not stop.wait(0.01):
-                pass
+            # A sweep's thread half, as `sweep_assets` runs its reads.
+            await asyncio.to_thread(_wait_for, stop)
         return []
 
     monkeypatch.setattr(main, "sweep_assets", sweeping)

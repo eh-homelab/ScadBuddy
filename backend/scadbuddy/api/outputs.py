@@ -1611,9 +1611,9 @@ async def get_output_geometry(
     the preview. A 3MF with more than one plate (#289) is measured a plate at a time;
     ``plates`` in the result says how many there are. Computed on first ask and cached
     beside the output."""
-    require_output(outputs, output_id)
+    await asyncio.to_thread(require_output, outputs, output_id)
     try:
-        analysis = await asyncio.to_thread(outputs.geometry, output_id, plate)
+        analysis = await outputs.geometry(output_id, plate)
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
     except NoSuchPlateError as error:

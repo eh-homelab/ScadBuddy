@@ -26,6 +26,7 @@ anywhere -- OpenSCAD reads them where they are, as it does any bundled file.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -42,7 +43,7 @@ from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import psycopg
 from lxml import etree
@@ -60,6 +61,10 @@ from scadbuddy.library.catalogue import THUMBNAIL_NAME
 from scadbuddy.render.provenance import ROOT_MODEL
 from scadbuddy.render.schema import FILE_KINDS, CustomizerSchema, ParamValue, is_bare_filename
 from scadbuddy.render.solids import WRAPPER_PREFIX
+
+if TYPE_CHECKING:
+    from scadbuddy.library.output_rows import OutputRows
+    from scadbuddy.library.outputs import OutputStore
 
 logger = logging.getLogger(__name__)
 
@@ -1195,15 +1200,18 @@ def stopped(stop: threading.Event | None) -> bool:
     return stop is not None and stop.is_set()
 
 
-def referenced_asset_ids(
+async def referenced_asset_ids(
     paths: DataPaths,
     records: Iterable[Mapping[str, Any]] = (),
+    outputs: OutputStore | None = None,
 ) -> set[str]:
     """Every asset id something keeps (#296): the sweep removes nothing in here.
 
-    - every output's records (``params.json`` and the rest of its JSON), and for an
-      output whose ``params.json`` is gone, the root model of its 3MF, where the
-      provenance "Edit in ScadBuddy" falls back to is stamped;
+    - every output's records, and for an output whose ``params`` is empty or gone, the
+      root model of its 3MF, where the provenance "Edit in ScadBuddy" falls back to is
+      stamped. Once ``outputs`` has finished a copy into its rows (#7255), its rows'
+      JSON is scanned, and such a 3MF is read from its model blob through a temporary
+      file, else its file (#7256). Before that, the folders' JSON files and 3MFs;
     - ``records``: JSON records from Postgres, each scanned whole: every saved
       preset's and every job's inputs (the ``render_jobs`` projection, finished or
       not), and every order item's (#4249, orders spec §3.3) -- their ``params`` and
@@ -1213,8 +1221,59 @@ def referenced_asset_ids(
 
     A source that exists but cannot be read raises OSError: a sweep that cannot see
     every reference must not remove anything, so the caller skips the whole sweep
-    rather than guessing.
+    rather than guessing. Every read runs in a thread.
     """
+    rows = outputs.rows if outputs is not None else None
+    if outputs is None or rows is None or not await asyncio.to_thread(rows.copied):
+        return await asyncio.to_thread(_referenced_in_tree, paths, list(records))
+    # One span for the scan, with what it read (#7245), as the folder walk has.
+    with span("assets.referenced") as current:
+        found, read, bare = await asyncio.to_thread(_referenced_in_rows, paths, records, rows)
+        for output_id in bare:
+            async with outputs.local_role(output_id, "model") as archive:
+                if archive is not None:
+                    read["archives"] += 1
+                    found.update(await asyncio.to_thread(_ids_in_archive, archive))
+        for name, count in read.items():
+            current.set_attribute(f"scadbuddy.{name}", count)
+        current.set_attribute("scadbuddy.assets", len(found))
+    return found
+
+
+def _referenced_in_rows(
+    paths: DataPaths, records: Iterable[Mapping[str, Any]], rows: OutputRows
+) -> tuple[set[str], dict[str, int], list[str]]:
+    """The ids in every output row's JSON, the templates' files and ``records``, what was
+    read, and the outputs whose 3MF is still to scan (``params`` empty). Blocking."""
+    found: set[str] = set()
+    read = {"files": 0, "archives": 0, "outputs": 0}
+    bare: list[str] = []
+    for output_id, empty, text in rows.documents():
+        read["outputs"] += 1
+        found.update(_ids_in(text.encode()))
+        if empty:
+            bare.append(output_id)
+    found.update(_template_ids(paths, read))
+    for document in records:
+        found.update(_ids_in(json.dumps(document).encode()))
+    return found, read, bare
+
+
+def _template_ids(paths: DataPaths, read: dict[str, int]) -> set[str]:
+    """The ids every template's shipped presets and ``model.json`` name. Blocking."""
+    found: set[str] = set()
+    for pattern in (f"*/{LEGACY_PRESETS_NAME}", "*/model.json"):
+        for template_file in (*paths.models.glob(pattern), *paths.builtins.glob(pattern)):
+            read["files"] += 1
+            # Removed since the listing: it keeps nothing now.
+            with suppress(FileNotFoundError):
+                found.update(_ids_in(template_file.read_bytes()))
+    return found
+
+
+def _referenced_in_tree(paths: DataPaths, records: Iterable[Mapping[str, Any]]) -> set[str]:
+    """`referenced_asset_ids` from the output folders, before a copy into rows
+    finished. Blocking."""
     found: set[str] = set()
     read = {"files": 0, "archives": 0, "outputs": 0}
 
@@ -1235,9 +1294,7 @@ def referenced_asset_ids(
             if not (directory / "params.json").is_file() and archive.is_file():
                 read["archives"] += 1
                 found.update(_ids_in_archive(archive))
-        for pattern in (f"*/{LEGACY_PRESETS_NAME}", "*/model.json"):
-            for template_file in (*paths.models.glob(pattern), *paths.builtins.glob(pattern)):
-                scan(template_file)
+        found.update(_template_ids(paths, read))
         for document in records:
             found.update(_ids_in(json.dumps(document).encode()))
         for name, count in read.items():

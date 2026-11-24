@@ -25,7 +25,8 @@ import asyncio
 import functools
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Annotated, Literal
 
@@ -322,6 +323,16 @@ class SchemaAt:
 ParamsCheckDep = Annotated[ParamsCheck, Depends()]
 
 
+async def _analysis_files() -> AsyncIterator[AsyncExitStack]:
+    """What a route's analysis holds open while its analyzers run: the output's 3MF
+    from the blob store as a temporary file (#7256), removed when the route ends."""
+    async with AsyncExitStack() as stack:
+        yield stack
+
+
+AnalysisFilesDep = Annotated[AsyncExitStack, Depends(_analysis_files)]
+
+
 def _subject(
     target: AnalysisTarget, outputs: OutputStore, catalogue: Catalogue
 ) -> tuple[str | None, dict[str, ParamValue], OutputMeta | None]:
@@ -386,9 +397,13 @@ async def analysis_context(
     inventory: FilamentInventory | None = None,
     schema: SchemaAt | None = None,
     reads: SbSpoolReads | None = None,
+    *,
+    stack: AsyncExitStack,
 ) -> AnalysisContext:
     """``inventory`` reads the SB spool in a native route's trays; ``reads`` the SB
-    spools Bambuddy's path offers (#6262 Task 7)."""
+    spools Bambuddy's path offers (#6262 Task 7). ``stack`` holds the output's 3MF
+    while the caller runs the analyzers on the context (#7256): the caller closes it
+    after the run."""
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
     if meta is None and target.output_id is None and slug is not None:
         meta = await _newest_render(slug, params, outputs, schema)
@@ -410,6 +425,7 @@ async def analysis_context(
         downloads=downloads,
         native=native,
         reads=reads,
+        stack=stack,
     )
     route: RunRoute | None = None
     #: Why the named registry printer cannot be judged (gone, a disagreeing pair): the
@@ -574,6 +590,7 @@ async def post_run(
     library: PrintLibraryDep,
     printers: PrintersDep,
     filament: FilamentDep,
+    stack: AnalysisFilesDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
@@ -607,6 +624,7 @@ async def post_run(
         filament.inventory,
         schema=schema,
         reads=filament.reads,
+        stack=stack,
     )
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
@@ -637,6 +655,7 @@ async def post_preview(
     library: PrintLibraryDep,
     printers: PrintersDep,
     filament: FilamentDep,
+    stack: AnalysisFilesDep,
 ) -> FixPreview:
     """The fix's whole diff, where each line would land, whether it can be applied yet,
     and the fingerprint an apply confirms against (diff, scope, subject and base).
@@ -658,6 +677,7 @@ async def post_preview(
         filament.inventory,
         schema=schema,
         reads=filament.reads,
+        stack=stack,
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
@@ -690,6 +710,7 @@ async def post_apply(
     library: PrintLibraryDep,
     printers: PrintersDep,
     filament: FilamentDep,
+    stack: AnalysisFilesDep,
 ) -> Decision:
     """Record the fix as accepted at ``scope``: its diff joins the effective diff
     (``accepted_changes``) of every later run in that scope while the diff is unchanged.
@@ -722,6 +743,7 @@ async def post_apply(
         filament.inventory,
         schema=schema,
         reads=filament.reads,
+        stack=stack,
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)

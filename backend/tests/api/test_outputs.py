@@ -847,8 +847,12 @@ def test_the_geometry_of_an_output_is_measured_and_cached(
 
     cache = paths.output_dir(model, created["id"]) / "geometry.json"
     assert json.loads(cache.read_text(encoding="utf-8")) == body
-    # Served from the cache from then on: a doctored cache comes back as written.
-    cache.write_text(json.dumps({**body, "height_mm": 42}), encoding="utf-8")
+    # Served from the cache from then on: its row in `output_derived` (#7256), so a
+    # doctored row comes back as written.
+    rows = client.app.state.scadbuddy.outputs.rows  # type: ignore[attr-defined]
+    found = rows.derived(created["id"], "geometry", 1)
+    assert found is not None and found[1] == body
+    rows.write_derived(created["id"], "geometry", 1, found[0], {**body, "height_mm": 42})
     assert client.get(f"/api/v1/outputs/{created['id']}/geometry").json()["height_mm"] == 42
 
 

@@ -3,6 +3,7 @@ store's NFS globs and the asset sweep's walk."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from opentelemetry import trace
@@ -86,7 +87,7 @@ def test_the_asset_references_walk_is_one_span_with_its_counts(
     _output(paths, "demo", OUTPUT_ID)
     (paths.outputs / "demo" / OUTPUT_ID / "params.json").write_text("{}", encoding="utf-8")
     with span("sweep"):
-        referenced_asset_ids(paths, [{"file": "not an asset"}])
+        asyncio.run(referenced_asset_ids(paths, [{"file": "not an asset"}]))
     (walk,) = [s for s in spans.get_finished_spans() if s.name == "assets.referenced"]
     assert walk.attributes is not None
     assert walk.attributes["scadbuddy.outputs"] == 1

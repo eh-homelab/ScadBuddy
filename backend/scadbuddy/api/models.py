@@ -2027,14 +2027,15 @@ def etag_matches(if_none_match: str | None, etag: str) -> bool:
         "answered 304 with no body."
     ),
 )
-def get_thumbnail(
+async def get_thumbnail(
     slug: SlugPath,
     catalogue: CatalogueDep,
     if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
 ) -> Response:
-    require_model_exists(catalogue, slug)
+    await asyncio.to_thread(require_model_exists, catalogue, slug)
     try:
-        cover = catalogue.thumbnail(slug)
+        # The plate cover comes from the output's model blob (#7256).
+        cover = await catalogue.read_thumbnail(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     if cover is None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import hashlib
@@ -910,16 +911,40 @@ class Catalogue:
             current.set_attribute("scadbuddy.found", found is not None)
             return found
 
+    async def read_thumbnail(self, slug: str) -> tuple[bytes, str] | None:
+        """`thumbnail`, with the plate cover read from the output's model blob
+        (`OutputStore.read_plate_cover`, #7256). The file reads run in threads."""
+        with span("catalogue.thumbnail", attributes={"scadbuddy.slug": slug}) as current:
+            found = await asyncio.to_thread(self._own_cover, slug)
+            if found is None and self.outputs is not None:
+                plate = await self.outputs.read_plate_cover(slug)
+                found = (plate, "image/png") if plate is not None else None
+            if found is None:
+                found = await asyncio.to_thread(self._preview, slug)
+            current.set_attribute("scadbuddy.found", found is not None)
+            return found
+
     def _thumbnail(self, slug: str) -> tuple[bytes, str] | None:
+        found = self._own_cover(slug)
+        if found is not None:
+            return found
+        if self.outputs is not None:
+            plate = self.outputs.plate_cover(slug)
+            if plate is not None:
+                return plate, "image/png"
+        return self._preview(slug)
+
+    def _own_cover(self, slug: str) -> tuple[bytes, str] | None:
+        """The template's own cover image and its content type. Blocking."""
         self._require(slug)
         cover = self._cover(slug, self.list_media(slug))
         if cover is not None:
             with contextlib.suppress(FileNotFoundError):
                 return cover[0].read_bytes(), cover[1]
-        if self.outputs is not None:
-            plate = self.outputs.plate_cover(slug)
-            if plate is not None:
-                return plate, "image/png"
+        return None
+
+    def _preview(self, slug: str) -> tuple[bytes, str] | None:
+        """The default-render preview, when it is served. Blocking."""
         if self.previews is None or not self.serve_previews:
             return None
         preview = self.previews.image(slug)

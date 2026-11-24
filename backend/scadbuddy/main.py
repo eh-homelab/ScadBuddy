@@ -354,7 +354,7 @@ async def _close_quietly(state: AppState) -> None:
             logger.exception("could not release what a failed start opened")
 
 
-def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[str]:
+async def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[str]:
     """Remove the uploads nothing references or has used for the grace (#296).
 
     The references are read first -- every job in the projection, then every
@@ -364,9 +364,29 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
     store's lock per asset.
     ``stop``, once set, ends it before its next asset (#2140), and before and after
     reading the references, which no per-asset check can interrupt (#2554).
+    The records and the sweep run in threads; the outputs' references are read on the
+    loop, since an output's 3MF can come from the blob store (#7256).
     """
     if stopped(stop):
         return []
+    records = await asyncio.to_thread(_asset_records, state)
+    if records is None:
+        return []
+    referenced = await referenced_asset_ids(state.paths, records, state.outputs)
+    if stopped(stop):
+        return []
+    removed = await asyncio.to_thread(
+        state.assets.sweep, referenced, grace=state.config.asset_sweep_grace, stop=stop
+    )
+    state.metrics.assets_swept.inc(len(removed))
+    if removed:
+        logger.info("removed unused uploads", extra={"count": len(removed)})
+    return removed
+
+
+def _asset_records(state: AppState) -> list[Mapping[str, Any]] | None:
+    """The JSON records from Postgres that can name an upload; None when the orders'
+    cannot be read, which skips the pass. Blocking."""
     jobs = state.render.store.list_jobs()
     # Whole inputs, not only their `params`: a template UI's own state can name an
     # upload too (#725). A job's `params` beside them, for a row whose inputs are `{}`.
@@ -380,15 +400,8 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
         records += state.components.get(ORDERS).store.item_inputs()
     except Exception:
         logger.exception("skipping the asset sweep: the orders' inputs could not be read")
-        return []
-    referenced = referenced_asset_ids(state.paths, records)
-    if stopped(stop):
-        return []
-    removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
-    state.metrics.assets_swept.inc(len(removed))
-    if removed:
-        logger.info("removed unused uploads", extra={"count": len(removed)})
-    return removed
+        return None
+    return records
 
 
 def _sweep_checkouts(state: AppState) -> list[str]:
@@ -457,7 +470,7 @@ async def _sweep_assets_logged(state: AppState, stop: threading.Event | None = N
     try:
         remote = _remote_assets(state)
         cutoff = await remote.clock() if remote is not None else None
-        removed = await asyncio.to_thread(sweep_assets, state, stop)
+        removed = await sweep_assets(state, stop)
         if remote is None or cutoff is None:
             return
         if stop is not None and stop.is_set():

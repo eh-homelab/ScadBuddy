@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import threading
@@ -53,6 +54,14 @@ def file_model(paths: DataPaths, model: str) -> str:
 def client(app: FastAPI, file_model: str) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
+
+
+def _sweep(client: TestClient, state: AppState) -> list[str]:
+    """`sweep_assets` on the app's loop, where the output store's blob reads run."""
+    portal = client.portal
+    assert portal is not None
+    removed: list[str] = portal.call(sweep_assets, state)
+    return removed
 
 
 def _upload(
@@ -433,7 +442,7 @@ def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
     for asset_id in (in_output, in_preset, in_job, unused):
         _age(pg_conninfo, asset_id, 30 * 86400)
 
-    assert sweep_assets(state) == [unused]
+    assert _sweep(client, state) == [unused]
 
     for asset_id in (in_output, in_preset, in_job):
         assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code == 200
@@ -477,7 +486,7 @@ def test_the_sweep_keeps_what_inputs_ui_state_names(
     for asset_id in (in_output, in_preset, in_job, unused):
         _age(pg_conninfo, asset_id, 30 * 86400)
 
-    assert sweep_assets(state) == [unused]
+    assert _sweep(client, state) == [unused]
 
     for asset_id in (in_output, in_preset, in_job):
         assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code == 200
@@ -640,7 +649,7 @@ def test_sweep_keeps_an_ordered_asset(app: FastAPI, client: TestClient, pg_conni
         )
     for asset_id in (ordered, unused):
         _age(pg_conninfo, asset_id, 30 * 86400)
-    assert sweep_assets(state) == [unused]
+    assert _sweep(client, state) == [unused]
     assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{ordered}").status_code == 200
 
 
@@ -659,7 +668,7 @@ def test_sweep_skips_when_orders_are_unavailable(
     unanswering = SimpleNamespace(store=SimpleNamespace(item_inputs=broken))
     state.components.override(ORDERS, cast(OrdersComponent, unanswering))
     with caplog.at_level("WARNING"):
-        assert sweep_assets(state) == []
+        assert _sweep(client, state) == []
     assert any("orders" in record.getMessage() for record in caplog.records)
     assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{unused}").status_code == 200
 
@@ -673,7 +682,7 @@ def test_a_stopped_sweep_reads_no_references() -> None:
         render=SimpleNamespace(store=SimpleNamespace(list_jobs=_never)),
         assets=SimpleNamespace(sweep=_never),
     )
-    assert sweep_assets(state, stop) == []  # type: ignore[arg-type]
+    assert asyncio.run(sweep_assets(state, stop)) == []  # type: ignore[arg-type]
 
 
 def test_a_sweep_stopped_while_it_read_its_references_removes_nothing(
@@ -682,7 +691,7 @@ def test_a_sweep_stopped_while_it_read_its_references_removes_nothing(
     """#2554: stopped during the reference reads, it returns before the per-asset pass."""
     stop = threading.Event()
 
-    def referenced(paths: object, records: object = ()) -> set[str]:
+    async def referenced(paths: object, records: object = (), outputs: object = None) -> set[str]:
         stop.set()  # the shutdown arrives while the templates are read
         return set()
 
@@ -694,10 +703,11 @@ def test_a_sweep_stopped_while_it_read_its_references_removes_nothing(
             get=lambda key: SimpleNamespace(store=SimpleNamespace(item_inputs=list))
         ),
         paths=None,
+        outputs=None,
         assets=SimpleNamespace(sweep=_never),
         config=SimpleNamespace(asset_sweep_grace=0),
     )
-    assert sweep_assets(state, stop) == []  # type: ignore[arg-type]
+    assert asyncio.run(sweep_assets(state, stop)) == []  # type: ignore[arg-type]
 
 
 def test_a_mesh_is_uploaded_with_its_shape_and_previewed(client: TestClient) -> None:

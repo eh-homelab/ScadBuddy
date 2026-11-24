@@ -90,6 +90,9 @@ PARAMS_NAME = "params.json"
 INPUTS_NAME = "inputs.json"
 #: The cached `render.geometry` analysis of ``model.3mf``, written on first ask.
 GEOMETRY_NAME = "geometry.json"
+#: The ``output_derived`` kinds of `OutputStore.geometry` and `OutputStore.attributed`.
+GEOMETRY_KIND = "geometry"
+ATTRIBUTED_KIND = "attributed"
 #: A pipeline output's bill of materials, what reproduces it (§8.4), and its extra files.
 BOM_NAME = "bom.json"
 RECORD_NAME = "record.json"
@@ -207,6 +210,24 @@ def _holds_plate_cover(model: Path) -> bool:
             return PLATE_THUMBNAIL in archive.namelist()
     except (OSError, zipfile.BadZipFile):
         return False
+
+
+def _read_plate_cover(model: Path) -> bytes:
+    """The plate cover image inside the 3MF at ``model``. Blocking."""
+    with zipfile.ZipFile(model) as archive:
+        return archive.read(PLATE_THUMBNAIL)
+
+
+def _attributed_of(stored: Any, model_version: str) -> GeometryAnalysis | None:
+    """An attributed cache entry's analysis, when it is of ``model_version`` and this
+    `ANALYSIS_VERSION`."""
+    try:
+        cached = GeometryAnalysis.model_validate(stored["analysis"])
+        if stored["model_version"] != model_version or cached.version != ANALYSIS_VERSION:
+            return None
+    except (ValueError, KeyError, TypeError):
+        return None
+    return cached
 
 
 def _cover_from_3mf(model: Path, thumbnail: Path) -> None:
@@ -1660,69 +1681,113 @@ class OutputStore:
 
         Read out of the output's 3MF, where the renderer already put it, rather than
         copied beside the model: the model's directory is versioned, and a render is
-        not a catalogue change. Only the resolved archive is opened.
+        not a catalogue change. Only the resolved archive is opened. Blocking, and the
+        NFS file only: an async caller takes `read_plate_cover`, which reads the blob.
         """
         archive_path = self.plate_cover_archive(slug)
         if archive_path is None:
             return None
         try:
-            with zipfile.ZipFile(archive_path) as archive:
-                return archive.read(PLATE_THUMBNAIL)
+            return _read_plate_cover(archive_path)
         except (OSError, KeyError, zipfile.BadZipFile):
             # Deleted or replaced since it was resolved; the next ask rescans.
             self.forget_plate_cover(slug)
             return None
 
-    def geometry(self, output_id: str, plate: int = 1) -> GeometryAnalysis:
+    async def read_plate_cover(self, slug: str) -> bytes | None:
+        """`plate_cover`, with the 3MF read from the output's model blob through a
+        temporary file, else from its NFS file (#7256)."""
+        output_id = await asyncio.to_thread(self.plate_cover_output, slug)
+        if output_id is None:
+            return None
+        try:
+            async with self.local_role(output_id, "model") as path:
+                if path is None:
+                    raise FileNotFoundError(output_id)
+                return await asyncio.to_thread(_read_plate_cover, path)
+        except (OSError, KeyError, zipfile.BadZipFile):
+            # Deleted or replaced since it was resolved; the next ask rescans.
+            await asyncio.to_thread(self.forget_plate_cover, slug)
+            return None
+
+    async def geometry(self, output_id: str, plate: int = 1) -> GeometryAnalysis:
         """The mesh analysis of one plate of the output's 3MF (#284, #289), computed
-        once and cached.
+        once and cached: in ``output_derived`` (#7256), else in the file cache beside
+        the output.
 
         ``model.3mf`` is not rewritten after `create` stamps it -- a send re-places
         a copy in memory -- so the cache only goes stale when the analysis itself
         changes, which :data:`~scadbuddy.render.geometry.ANALYSIS_VERSION` tracks.
-        Raises `FileNotFoundError` when there is no 3MF to analyse and
-        `~scadbuddy.render.geometry.NoSuchPlateError` when it has no such plate.
+        A miss reads the 3MF from its blob through a temporary file, else from its
+        file, in a thread. Raises `FileNotFoundError` when there is no 3MF to analyse
+        and `~scadbuddy.render.geometry.NoSuchPlateError` when it has no such plate.
         """
-        directory = self._find_dir(output_id)
+        cached = await asyncio.to_thread(self._cached_geometry, output_id, plate)
+        if cached is not None:
+            return cached
+        warnings = (await asyncio.to_thread(self.get, output_id)).warnings
+        async with self.local_role(output_id, "model") as model:
+            if model is None:
+                raise FileNotFoundError(f"output {output_id} has no {MODEL_NAME}")
+            analysis = await asyncio.to_thread(analyze_3mf, model, warnings=warnings, plate=plate)
+        await asyncio.to_thread(self._keep_geometry, output_id, plate, analysis)
+        return analysis
+
+    def _geometry_path(self, output_id: str, plate: int) -> Path:
         name = GEOMETRY_NAME if plate == 1 else f"geometry-plate-{plate}.json"
-        cache = directory / name
+        return self._find_dir(output_id) / name
+
+    def _cached_geometry(self, output_id: str, plate: int) -> GeometryAnalysis | None:
+        """The row's analysis of this `ANALYSIS_VERSION`, else the file cache's.
+        Blocking."""
+        if self.rows is not None:
+            found = self.rows.derived(output_id, GEOMETRY_KIND, plate)
+            if found is not None and found[0] == str(ANALYSIS_VERSION):
+                with contextlib.suppress(ValidationError):
+                    return GeometryAnalysis.model_validate(found[1])
+        cache = self._geometry_path(output_id, plate)
         try:
             cached = GeometryAnalysis.model_validate_json(cache.read_text(encoding="utf-8"))
         except (OSError, ValidationError):
-            cached = None
-        if cached is not None and cached.version == ANALYSIS_VERSION:
-            return cached
-        model = directory / MODEL_NAME
-        if not model.is_file():
-            raise FileNotFoundError(model)
-        analysis = analyze_3mf(model, warnings=self.get(output_id).warnings, plate=plate)
+            return None
+        return cached if cached.version == ANALYSIS_VERSION else None
+
+    def _keep_geometry(self, output_id: str, plate: int, analysis: GeometryAnalysis) -> None:
+        """The analysis in its row, and in the file cache until #7257. Blocking."""
+        if self.rows is not None:
+            self.rows.write_derived(
+                output_id,
+                GEOMETRY_KIND,
+                plate,
+                str(ANALYSIS_VERSION),
+                analysis.model_dump(mode="json"),
+            )
         # Written aside and renamed, so a concurrent reader never sees half a file.
-        partial = cache.with_name(f".{name}.{uuid.uuid4().hex}")
-        partial.write_text(analysis.model_dump_json(indent=2) + "\n", encoding="utf-8")
-        partial.replace(cache)
-        return analysis
+        _replace(self._geometry_path(output_id, plate), analysis.model_dump_json(indent=2) + "\n")
 
     def attributed(self, output_id: str, plate: int, model_version: str) -> GeometryAnalysis | None:
         """The cached analysis whose weak joints name their scene objects at
-        ``model_version`` (see :meth:`geometry`), or None when there is none, or it was
-        made by another :data:`~scadbuddy.render.geometry.ANALYSIS_VERSION`."""
+        ``model_version`` (see :meth:`geometry`): its ``output_derived`` row, else its
+        file. None when there is none, or it was made by another
+        :data:`~scadbuddy.render.geometry.ANALYSIS_VERSION`. Blocking."""
+        if self.rows is not None:
+            found = self.rows.derived(output_id, ATTRIBUTED_KIND, plate)
+            if found is not None and found[0] == str(ANALYSIS_VERSION):
+                return _attributed_of(found[1], model_version)
         try:
             stored = json.loads(self._attributed_path(output_id, plate).read_text("utf-8"))
-            cached = GeometryAnalysis.model_validate(stored["analysis"])
-            if stored["model_version"] != model_version or cached.version != ANALYSIS_VERSION:
-                return None
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError):
             return None
-        return cached
+        return _attributed_of(stored, model_version)
 
     def write_attributed(
         self, output_id: str, plate: int, model_version: str, analysis: GeometryAnalysis
     ) -> None:
-        path = self._attributed_path(output_id, plate)
+        """The attributed analysis in its row, and in its file until #7257. Blocking."""
         body = {"model_version": model_version, "analysis": analysis.model_dump(mode="json")}
-        partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-        partial.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-        partial.replace(path)
+        if self.rows is not None:
+            self.rows.write_derived(output_id, ATTRIBUTED_KIND, plate, str(ANALYSIS_VERSION), body)
+        _replace(self._attributed_path(output_id, plate), json.dumps(body, indent=2) + "\n")
 
     def _attributed_path(self, output_id: str, plate: int) -> Path:
         name = (

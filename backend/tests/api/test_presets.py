@@ -467,7 +467,9 @@ def test_an_upload_a_saved_preset_names_is_kept_by_the_sweep(
             "UPDATE assets SET last_used_at = now() - make_interval(secs => %s)",
             (10 * state.config.asset_sweep_grace,),
         )
-    assert sweep_assets(state) == [swept.id]
+    portal = client.portal
+    assert portal is not None
+    assert portal.call(sweep_assets, state) == [swept.id]
 
 
 def _duplicate(client: TestClient, model_id: str, preset_id: str, name: str) -> Any:

@@ -643,6 +643,18 @@ class OutputRows:
             _release_bytes(conn, deleted)
         return len(deleted)
 
+    def documents(self) -> list[tuple[str, bool, str]]:
+        """Each row's id, whether its ``params`` is ``{}``, and the text of every JSON
+        column it holds (its meta and records): what the asset sweep scans for the ids
+        an output names, as it scanned the folder's JSON files (#7256)."""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                "SELECT output_id, params = '{}'::jsonb AS bare,"
+                " jsonb_build_array(meta, params, inputs, record, manifest, bom,"
+                " arranged_from, backfill)::text AS text FROM outputs"
+            ).fetchall()
+        return [(str(item["output_id"]), bool(item["bare"]), str(item["text"])) for item in found]
+
     def stamps(self) -> dict[str, str | None]:
         """Each row's ``files_stamp``, by output id: what the copy compares the files with."""
         with self._pool.connection() as conn:
