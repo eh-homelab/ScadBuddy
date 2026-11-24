@@ -169,3 +169,32 @@ func TestARemovedWriteBackFileIsNotTracedAsQueued(t *testing.T) {
 		}
 	}
 }
+
+// A write-back file not yet sent renames and removes as any queued write does: the
+// retrier sends it under its final name, and a removed one is never sent.
+func TestAWriteBackFileRenamesAndRemovesBeforeItIsSent(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.setDown(true)
+	state := t.TempDir()
+	dir, _ := retrying(t, lib, Options{StateDir: state, WriteBack: true})
+	logs(t)
+	for _, name := range []string{"a.3mf", "c.3mf"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("abc"), 0o644); err != nil {
+			t.Fatalf("close %s: %v", name, err)
+		}
+	}
+	eventually(t, "both queued", func() bool { return len(queued(t, state)) == 2 })
+	if err := os.Rename(filepath.Join(dir, "a.3mf"), filepath.Join(dir, "b.3mf")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "c.3mf")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	eventually(t, "the record renamed and the removed one gone", func() bool {
+		q := queued(t, state)
+		return len(q) == 1 && q[0].Name == "b.3mf"
+	})
+	lib.setDown(false)
+	eventually(t, "the upload under its final name", func() bool { return libraryHas(lib, map[string]string{"0/b.3mf": "abc"}) })
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+}

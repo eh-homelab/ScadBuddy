@@ -22,7 +22,8 @@ import (
 // Writes (spec §8). Bambuddy has no in-place write, so a file is written to a temp
 // file under the cache directory and uploaded when it is closed, and writing over a
 // name uploads a new file and then deletes the old one. A failed upload's file moves
-// to the unsent queue (unsent.go, #2865), and a later write of it works on a copy.
+// to the unsent queue (unsent.go, #2865), as every write does under --write-back (#7286),
+// and a later write of it works on a copy.
 
 // uploadTimeout bounds an upload, which runs detached from the request that started
 // it, so a signal that interrupts close(2) does not lose the file.

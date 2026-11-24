@@ -22,7 +22,8 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 )
 
-// Unsent writes (#2865). A write whose upload fails is the user's only copy, so its
+// Unsent writes (#2865). A write whose upload fails, and with --write-back every write
+// (#7286), is the user's only copy, so its
 // bytes move to <state dir>/unsent/<seq>/ (contents, and record.json saying where it
 // goes), not to the cache directory, which cache cleaners may empty. The entry stays
 // in its folder, read from that copy, and can be renamed or removed like any file

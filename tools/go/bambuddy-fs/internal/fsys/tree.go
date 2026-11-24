@@ -76,7 +76,8 @@ type tree struct {
 	// owner is the mounting process's user and group, which own every entry: with
 	// root's, the mounting user's access(W_OK) would be refused.
 	owner fuse.Owner
-	// unsent is the writes whose upload failed (#2865).
+	// unsent is the writes not yet sent (#2865): those whose upload failed and, with
+	// WriteBack, every write until the retrier sends it.
 	unsent *queue
 
 	mu       sync.Mutex
@@ -483,7 +484,7 @@ type file struct {
 	file api.File
 	// pending is the file's write while handles are open on it; its size is the file's.
 	pending *pending
-	// queued is the file's unsent write, if its upload failed.
+	// queued is the file's unsent write, if its upload failed or WriteBack queued it.
 	queued *entry
 }
 

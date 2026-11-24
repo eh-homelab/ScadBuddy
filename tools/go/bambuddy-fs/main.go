@@ -62,7 +62,8 @@ mount mounts Bambuddy's print library, through ScadBuddy's API, as a filesystem,
 unless --background.
 umount unmounts it and stops its process.
 status says whether it is mounted and its process running.
-unsent lists the writes whose upload failed, kept to be sent again, and exits.
+unsent lists the writes not yet sent (those whose upload failed and, with --write-back,
+every write until the retrier sends it), kept to be sent, and exits.
 allow-other turns on user_allow_other in /etc/fuse.conf (through sudo), so mounts let
 other users and Windows Explorer (\\wsl$) see them.
 

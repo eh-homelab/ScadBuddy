@@ -232,7 +232,8 @@ A write whose upload fails for any reason but a refusal of the request itself (s
 "Refused writes") is not dropped: ScadBuddy down or unreachable, a 5xx, a timeout, a 404
 from an older ScadBuddy without the upload route, and also a 401 or 403 (the API key
 lacks a Bambuddy scope) or a 409, which a later attempt may get past once the cause is
-fixed. Its bytes move to
+fixed. With `--write-back` every write takes this path at `close()`, before any upload
+is tried (see "Write-back"). Its bytes move to
 `<state-dir>/unsent/<n>/contents`, beside a `record.json` (folder ID, name, size, when
 it was saved, attempts, last error, and the stored files it replaces), both fsync'd, and
 the log names that directory once.
