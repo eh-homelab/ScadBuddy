@@ -47,6 +47,7 @@ def _quick(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(site, "BOT_CHECK_SECONDS", 1.0)
     monkeypatch.setattr(site, "STEP_TIMEOUT_MS", 3_000)
     monkeypatch.setattr(site, "LOGIN_WAIT_MS", 1_500)
+    monkeypatch.setattr(site, "RECORD_WAIT_MS", 500)
 
 
 @pytest.fixture
@@ -214,6 +215,16 @@ async def test_a_filament_already_in_my_spools_adds_nothing(
     assert replica.site.adds == []
     exported = await browser.export(30173, "H2C", "0.4")
     assert exported.name == EXPORT_NAME
+
+
+async def test_a_my_spools_404_for_a_known_filament_adds_it(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    """R-7228-2: a 404 from the My Spools page means no record, so the step adds one."""
+    replica.site.no_record_status = 404
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    assert replica.site.adds == [30173]
 
 
 async def test_an_unknown_id_is_tdfp_not_found(browser: ThreeDfpSite) -> None:

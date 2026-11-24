@@ -77,11 +77,18 @@ try {
     }
   } else if (cmd === 'add') {
     // Adds silently: no dialog, no toast worth reading. Verify with `export`.
+    // 3DFP shows "Add to My Spools" every time, and each click adds one more
+    // record (#7228). So read the My Spools page first: an "Export slicer
+    // profile" button there means a record exists, and nothing is added.
     for (const id of args) {
+      await p.goto(`${SITE}/my/spools/details/${id}`, { waitUntil: 'domcontentloaded' });
+      const has = await p.getByRole('button', { name: 'Export slicer profile' }).first()
+        .waitFor({ state: 'attached', timeout: 5000 }).then(() => true, () => false);
+      if (has) { console.log(id, 'already in My Spools'); continue; }
       await p.goto(`${SITE}/filament/details/${id}`, { waitUntil: 'domcontentloaded' }); await p.waitForTimeout(4000);
       const btn = p.getByRole('button', { name: 'Add to My Spools' }).first();
       if (await btn.count()) { await btn.click(); await p.waitForTimeout(2500); console.log(id, 'added'); }
-      else console.log(id, 'already in My Spools');
+      else console.log(id, 'no Add to My Spools button');
     }
   } else if (cmd === 'export') {
     fs.mkdirSync(OUT, { recursive: true });
