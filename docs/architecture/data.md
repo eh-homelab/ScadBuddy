@@ -121,7 +121,7 @@ token (`scadbuddy/slicing/transfer.py:52-57`, `scadbuddy/slicing/transfer_token.
 ## Files on the data volume
 
 Templates are git repositories on the API's data volume (`SCADBUDDY_DATA_DIR`,
-`Dockerfile:981`). The bundled models are mirrored into `_builtin/` as one commit at
+`Dockerfile:1107`). The bundled models are mirrored into `_builtin/` as one commit at
 start (`scadbuddy/library/catalogue.py:2940-2956`, called from `scadbuddy/main.py:1561-1565`).
 Every model edit is a commit, which is what versions and history read
 ([features/versions-and-history.md](../features/versions-and-history.md)).

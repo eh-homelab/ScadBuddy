@@ -14,6 +14,7 @@ from typing import Final
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import ValidationError
 
+from scadbuddy.camera.mediamtx import MediaMtx
 from scadbuddy.camera.settings import CameraRefusal
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.intake_worker.hardening import forbid_dumping
@@ -59,29 +60,58 @@ async def serve_local(route: Route, host: str, port: int) -> asyncio.Server:
     return await asyncio.start_server(handle, host, port)
 
 
-async def _healthz(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """``GET /metrics``: the process's metrics; any other request 200."""
-    with suppress(Exception):
-        line = await asyncio.wait_for(reader.readline(), 5)
-        if line.split(b" ")[1:2] == [b"/metrics"]:
-            body, kind = generate_latest(), CONTENT_TYPE_LATEST.encode()
-        else:
-            body, kind = b"ok", b"text/plain"
-        writer.write(
-            b"HTTP/1.1 200 OK\r\nContent-Type: "
-            + kind
-            + b"\r\nContent-Length: "
-            + str(len(body)).encode()
-            + b"\r\nConnection: close\r\n\r\n"
-            + body
-        )
-        await writer.drain()
-    writer.close()
+#: How long one liveness check may take; a slower one answers 503.
+CHECK_BUDGET: Final = 3.0
+
+#: The liveness check behind ``/healthz``.
+Check = Callable[[], Awaitable[bool]]
 
 
-async def serve_health(port: int = HEALTH_PORT) -> asyncio.Server:
-    """``/healthz`` and ``/metrics`` on every address."""
-    return await asyncio.start_server(_healthz, "0.0.0.0", port)
+async def healthy(mtx: MediaMtx, follower: asyncio.Task[None] | None) -> bool:
+    """Alive when MediaMTX's control API answers and the change follower runs. Before the
+    follower starts (``None``: the process waits for the CRUD service, or reads its first
+    list), only MediaMTX counts: a restart cannot bring the API back."""
+    if not await mtx.answers():
+        return False
+    return follower is None or not follower.done()
+
+
+async def _alive(check: Check) -> bool:
+    try:
+        return await asyncio.wait_for(check(), CHECK_BUDGET)
+    except Exception:
+        return False
+
+
+async def serve_health(port: int, alive: Check) -> asyncio.Server:
+    """``GET /metrics``: the process's metrics. Any other request: 200 when ``alive``
+    answers true within `CHECK_BUDGET`, else 503, so a liveness probe restarts a stuck
+    pod. On every address."""
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with suppress(Exception):
+            line = await asyncio.wait_for(reader.readline(), 5)
+            status = b"200 OK"
+            if line.split(b" ")[1:2] == [b"/metrics"]:
+                body, kind = generate_latest(), CONTENT_TYPE_LATEST.encode()
+            elif await _alive(alive):
+                body, kind = b"ok", b"text/plain"
+            else:
+                status, body, kind = b"503 Service Unavailable", b"unhealthy", b"text/plain"
+            writer.write(
+                b"HTTP/1.1 "
+                + status
+                + b"\r\nContent-Type: "
+                + kind
+                + b"\r\nContent-Length: "
+                + str(len(body)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+        writer.close()
+
+    return await asyncio.start_server(handle, "0.0.0.0", port)
 
 
 def main_with[S](

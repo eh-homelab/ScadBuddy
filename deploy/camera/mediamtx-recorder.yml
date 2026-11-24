@@ -16,6 +16,12 @@
 
 logLevel: info
 
+# The timeout of read operations, at MediaMTX's default: the v1.21.4 release's mediamtx.yml
+# (https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml). Pinned here, because
+# the recorder's `ADOPT_AGE` (12 s, backend/scadbuddy/camera/recorder.py) assumes that
+# MediaMTX closes a stalled source's file after 10 s.
+readTimeout: 10s
+
 api: yes
 apiAddress: 127.0.0.1:9997
 metrics: yes

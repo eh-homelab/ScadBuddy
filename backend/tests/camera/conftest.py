@@ -20,7 +20,7 @@ from tests.printers.conftest import KEK
 #: The MediaMTX release the camera e2e runs, the version the deploy configs were measured
 #: on (deploy/camera/*.yml). Release: https://github.com/bluenviron/mediamtx/releases/tag/v1.21.4
 #: Each digest is the release's own `checksums.sha256` line, and equals `sha256sum` of the
-#: tarball downloaded on 2026-11-23. The Dockerfile's `test` stage pins the same two.
+#: tarball downloaded on 2026-11-23. The Dockerfile's `mediamtx` stage pins the same two.
 MEDIAMTX_VERSION = "v1.21.4"
 MEDIAMTX_SHA256 = {
     "amd64": "be0c05d9c8af8338116977e7f1c3fcb409fbf882075e5ab075cf8baad76a59d2",

@@ -102,7 +102,7 @@ document's claim and the code. These specs and docs were not changed in this PR.
   (`backend/scadbuddy/migrations/20260927T2243Z_render_jobs.sql`).
 - `:888` one `<object>` per colour part / one assembly object per declared object with a
   component per colour (`backend/scadbuddy/render/bambu3mf.py:326-391`).
-- `:1299` one replica, `Recreate` / RollingUpdate with `maxSurge` ≥ 1 (`Dockerfile:1127-1129`).
+- `:1299` one replica, `Recreate` / RollingUpdate with `maxSurge` ≥ 1 (`Dockerfile:1236-1238`).
 
 **Template-pipelines spec** (`…/2026-09-27-template-pipelines-design.md`)
 

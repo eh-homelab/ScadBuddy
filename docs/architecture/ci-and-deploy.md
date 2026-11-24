@@ -10,21 +10,22 @@ All line numbers are for `main` at `67d7ff6` (2026-11-21).
 
 ## Images
 
-One `Dockerfile` builds every image. `build-image.yml` publishes six of its stages to
+One `Dockerfile` builds every image. `build-image.yml` publishes eight of its stages to
 GHCR, amd64 only:
 
 | Dockerfile stage | Image | Entry | Job |
 |---|---|---|---|
-| `runtime` (`Dockerfile:1087`) | `ghcr.io/eh-homelab/scadbuddy` | `tini` then `uvicorn --factory scadbuddy.main:create_app` (`Dockerfile:1105`, `:1131`); the same image runs the Python workers, the storefront and the intake worker with another command ([processes.md](processes.md)) | `build` (`.github/workflows/build-image.yml:54`) |
+| `runtime` (`Dockerfile:1228`) | `ghcr.io/eh-homelab/scadbuddy` | `tini` then `uvicorn --factory scadbuddy.main:create_app` (`Dockerfile:1214`, `:1131`); the same image runs the Python workers, the storefront and the intake worker with another command ([processes.md](processes.md)) | `build` (`.github/workflows/build-image.yml:54`) |
 | `agent` (`Dockerfile:237`) | `ghcr.io/eh-homelab/scadbuddy-agent` | `node --import ./dist/telemetry.js dist/main.js` (`Dockerfile:293`) | `agent` (`build-image.yml:217`) |
 | `sandbox` (`Dockerfile:311`) | `ghcr.io/eh-homelab/scadbuddy-sandbox` | `node dist/sandbox/main.js` (`Dockerfile:370`), role `exec` or `egress` from `SCADBUDDY_SANDBOX_ROLE` (`Dockerfile:304-310`) | `sandbox` (`build-image.yml:433`) |
 | `agent-durable` (`Dockerfile:377`) | `ghcr.io/eh-homelab/scadbuddy-agent-durable` | `python -m scadbuddy_durable` (`Dockerfile:439`) | `agent-durable` (`build-image.yml:329`) |
 | `slicer` (`Dockerfile:555`) | `ghcr.io/eh-homelab/scadbuddy-slicer` | `scadbuddy-slicer` (`Dockerfile:609`) | `slicer` (`build-image.yml:544`) |
 | `profile-fetch` (`Dockerfile:654`) | `ghcr.io/eh-homelab/scadbuddy-profile-fetch` | `tini` then the browser service by default (`Dockerfile:728-729`); the worker's Deployment runs `python -m scadbuddy.profile_fetch` ([processes.md](processes.md#profile-fetch-worker-and-browser)) | `profile-fetch` (`build-image.yml:657`) |
+| `camera-relay` (`Dockerfile:859`), `camera-recorder` (`Dockerfile:866`) | `ghcr.io/eh-homelab/scadbuddy-camera-relay`, `ghcr.io/eh-homelab/scadbuddy-camera-recorder` | `tini` then the controller (`Dockerfile:864`, `:874`); each pod runs the image a second time as `mediamtx` ([processes.md](processes.md#camera-relay-and-recorders)) | `camera` (`build-image.yml:764`, one leg per image) |
 
-`openscad-lsp` (`Dockerfile:767`) and `libraries` (`Dockerfile:829`) are internal stages
-copied into `app`; `test` (`Dockerfile:1007`) is the CI image. Only `build` gates the
-workflow: the other five jobs are `continue-on-error` (for example `build-image.yml:221`).
+`openscad-lsp` (`Dockerfile:893`) and `libraries` (`Dockerfile:955`) are internal stages
+copied into `app`; `test` (`Dockerfile:1133`) is the CI image. Only `build` gates the
+workflow: the other six jobs are `continue-on-error` (for example `build-image.yml:221`).
 
 The Go CLIs are published by `build-go-image.yml`, one image per `tools/go/*` module with
 a `main.go` (`build-go-image.yml:46`, `:133`): today only `scadbuddy-bambuddy-fs`. Nothing
@@ -104,6 +105,7 @@ Summary**, which needs every job except `lfs-fixtures` and `dispatch-review`
 | go | `go-select` (`:1941`), `go` (`:1964`, calls `go-module-ci.yml`) | gofmt, vet, build, `test -race`, vendor drift, CLI images | [`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md) |
 | rust | `rust` (`:1976`), `slicer-image` (`:2053`) | the Rust workspace and the `slicer` target | [`workers/rust/CLAUDE.md`](../../workers/rust/CLAUDE.md) |
 | profile-fetch | `profile-fetch-image` (`:2112`) | the profile-fetch site tests in the `test` stage | [`backend/CLAUDE.md`](../../backend/CLAUDE.md) |
+| image | `camera-image` (`:2247`) | builds the `camera-relay` and `camera-recorder` targets, checks MediaMTX, `curl`, `TZ`, the refusals and the relay's read user | [`docs/features/printer-cameras.md`](../features/printer-cameras.md) |
 | freshness | `freshness` (`:2255`), `go-client` (`:2642`) | the generated API files ([data.md](data.md#generated-api-files)) and the Go client | root `CLAUDE.md` "Generated API files" |
 | review | `dispatch-review` (`:2837`) | dispatches `claude-code-review.yml`, which posts the `claude-review` status | root `CLAUDE.md` "PR conventions" |
 

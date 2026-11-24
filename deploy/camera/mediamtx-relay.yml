@@ -13,6 +13,11 @@
 
 logLevel: info
 
+# The timeout of read operations, at MediaMTX's default: the v1.21.4 release's mediamtx.yml
+# (https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml). Pinned here, so an
+# upstream change of the default cannot change it, as in mediamtx-recorder.yml.
+readTimeout: 10s
+
 api: yes
 apiAddress: 127.0.0.1:9997
 metrics: yes

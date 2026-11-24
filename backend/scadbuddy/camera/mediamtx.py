@@ -69,6 +69,14 @@ class MediaMtx:
             if page >= body.get("pageCount", 1):
                 return found
 
+    async def answers(self) -> bool:
+        """Whether the control API answers a one-item runtime list with a 2xx."""
+        try:
+            response = await self._http.get("/v3/paths/list", params={"itemsPerPage": 1})
+        except httpx.HTTPError:
+            return False
+        return response.is_success
+
     async def put_path(self, name: str, conf: dict[str, Any]) -> None:
         """Add the path, or replace it when it exists."""
         quoted = quote(name, safe="")

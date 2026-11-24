@@ -1045,6 +1045,26 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `POST /filament/tdfp/filaments` (an `Idempotency-Key`; one workflow per caller, key, type and ask,
   `create_workflow_id`, R-7025-12; the create is never retried, and a failure before Save
   Filament fails its workflow, so the same key runs it again, `workflow.BEFORE_SAVE`, R-7025-11).
+- `backend/scadbuddy/camera/` — printer camera recording, phase 1 (#7328, plan
+  `docs/superpowers/plans/2026-11-23-printer-camera-recording.md`, feature page
+  `docs/features/printer-cameras.md`). Two processes, each beside its own MediaMTX in one pod,
+  neither with a database secret (`settings.py` refuses `FORBIDDEN_ENV` and
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`; the recorder also refuses a `TZ` other than `UTC`):
+  `python -m scadbuddy.camera.relay` (`relay.py`, CRUD caller `camera-relay`, the only part that
+  holds access codes; it gives MediaMTX one RTSPS pull per printer through the control API) and
+  `python -m scadbuddy.camera.recorder` (`recorder.py`, CRUD caller `camera`, two pods: leases,
+  upload before index, handover from the standby's buffer, the disk cap; the metrics
+  `scadbuddy_camera_*` on prometheus_client's own registry, which `lint-dashboard.sh` reads).
+  `process.py` holds the hook server MediaMTX's `curl` hooks call (127.0.0.1:9091), `/healthz`
+  and `/metrics` on 9090 (`/healthz` 503 unless MediaMTX's control API answers and the change
+  follower runs, `healthy`) and `main_with`. `follow.py` follows the filtered change stream,
+  `feed.py` sends feed states, `mediamtx.py` is the control API client, `uploads.py` the bucket
+  (`Uploader`, the object key), `mp4.py` the init section parse (`moov/udta` left out of the
+  digest). The API side is `store.py` (`CameraStore`: sources, leases, the index, feeds),
+  `models.py`, `api/crud_camera.py` and `api/crud_camera_relay.py`. MediaMTX's configs are
+  `deploy/camera/`; the images are the Dockerfile's `camera-relay` and `camera-recorder`.
+  Tests: `tests/camera/` (the real-MediaMTX e2e `test_e2e_mediamtx.py` needs MediaMTX and
+  ffmpeg, which the `test` stage has; locally it fetches the pinned MediaMTX itself).
 - `backend/scadbuddy/filament/` labels and printer places (#6955, plan
   `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
   (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).

@@ -284,7 +284,8 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 - Python and Rust lanes: `layout` reads the change's paths (`.github/scripts/changed-paths.sh`,
   shared with `go-select`) and `select-lanes.sh` (tested by `select-lanes.test.sh`) picks
   the lanes: `backend` (`lfs-fixtures`, `backend-pytest`), `agent_durable`, `rust`
-  (`rust`, `slicer-image`) and `image` (the app image job and `profile-fetch-image`: any
+  (`rust`, `slicer-image`) and `image` (the app image job, `profile-fetch-image` and
+  `camera-image`: any
   backend change, plus `frontend/` and the Go trees its live mount runs). A lane job skips on a change that
   does not need it; `CI Summary` re-derives the lanes from its own checkout, so a skip
   where the lane was needed is a failure. A push, the schedule, a dispatch, the

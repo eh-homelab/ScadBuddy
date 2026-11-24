@@ -2664,6 +2664,91 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   the button. Afterwards read `GET /api/v1/filament/types/{id}/profile-fetch` (GET only):
   expect `status: imported` and `gaps: []`.
 
+### Printer cameras (#7328)
+
+ScadBuddy records each qualifying printer's camera all the time, as fMP4 segments of about
+4 s in a bucket with an index in Postgres (phase 1 of #7334). What it does, and the code, are
+in [docs/features/printer-cameras.md](docs/features/printer-cameras.md); the design is
+`docs/superpowers/specs/2026-11-23-printer-camera-recording-design.md`. eh-homelab/clusters
+holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 3.
+
+- **Two images.** `ghcr.io/eh-homelab/scadbuddy-camera-relay` and
+  `ghcr.io/eh-homelab/scadbuddy-camera-recorder` are the Dockerfile targets `camera-relay` and
+  `camera-recorder` (python:3.12-slim-bookworm, uid 10001, `tini`, `curl`, the controller's
+  venv with no database client library, and MediaMTX v1.21.4 from the `mediamtx` stage, pinned
+  by sha256). Each holds its MediaMTX config at `/etc/mediamtx/mediamtx.yml`, from
+  `deploy/camera/`. The recorder image sets `TZ=UTC`. MediaMTX names segment files in local
+  time, and the recorder refuses any other `TZ` (`RecorderSettings.check_environment`).
+  `build-image.yml` job `camera` publishes both (amd64); `ci.yml` job `camera-image` builds and
+  checks both. `deploy.reusable.yml` does not pin them yet.
+- **Two containers per pod.** Each pod runs its image twice: MediaMTX
+  (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`) and the controller (the default command,
+  `python -m scadbuddy.camera.relay` or `python -m scadbuddy.camera.recorder`). The controller
+  drives MediaMTX's control API on `127.0.0.1:9997`, and MediaMTX's hooks run `curl` against
+  the controller on `127.0.0.1:9091`, so the two must share the pod. The control API and the
+  metrics (`127.0.0.1:9998`) listen on localhost only (`deploy/camera/*.yml`).
+- **`scadbuddy-camera-relay`.** One replica, strategy `Recreate`, on the node pool that
+  reaches the printer LAN (spec §6.8). ServiceAccount `scadbuddy-camera-relay` (CRUD caller
+  `camera-relay`, `auth/exchange.py` `SERVICE_ACCOUNTS`). A Service on port 8554 (RTSP)
+  for the recorders. It is the only part that holds printers' access codes, in memory only;
+  it gives them to MediaMTX through the control API, never through a file.
+- **`scadbuddy-camera-recorder`.** Two replicas with pod anti-affinity, so one node's loss
+  leaves the standby. Roll one pod at a time (`maxSurge: 0`, `maxUnavailable: 1`) and keep
+  a PodDisruptionBudget with `minAvailable: 1`: the standby holds what the index has not
+  reached, so one pod down leaves no gap. ServiceAccount `scadbuddy-camera` (CRUD caller
+  `camera`). Both containers mount one `emptyDir` at `/segments` with `sizeLimit` =
+  `SCADBUDDY_CAMERA_DISK_MAX_BYTES` + 25% (2.5 GiB for the default 2 GiB): the recorder's cap
+  counts finished segments only, and MediaMTX writes one open segment per printer beside
+  them. `terminationGracePeriodSeconds` at least 35: on SIGTERM the recorder flushes and
+  releases its printers within `SHUTDOWN_SECONDS` (25 s, `camera/recorder.py`).
+- **The three environment sets.**
+  - Relay controller: `SCADBUDDY_API_INTERNAL_URL`, `SCADBUDDY_SERVICE_TOKEN_FILE` (a projected
+    ServiceAccount token, audience `scadbuddy`; or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`
+    outside Kubernetes), `SCADBUDDY_LOG_LEVEL`, and `SCADBUDDY_CAMERA_MEDIAMTX_API_URL`
+    (default `http://127.0.0.1:9997`) (`camera/settings.py` `RelaySettings`).
+  - Recorder controller: the same, plus `SCADBUDDY_CAMERA_S3_ENDPOINT`,
+    `SCADBUDDY_CAMERA_S3_BUCKET`, `SCADBUDDY_CAMERA_S3_PREFIX`,
+    `SCADBUDDY_CAMERA_S3_ACCESS_KEY`, `SCADBUDDY_CAMERA_S3_SECRET_KEY` (the bucket's camera
+    keys: in the recorder pods only), `SCADBUDDY_CAMERA_DISK_MAX_BYTES` (default 2 GiB),
+    `SCADBUDDY_CAMERA_RELAY_RTSP_URL` (e.g. `rtsp://scadbuddy-camera-relay:8554`),
+    `SCADBUDDY_CAMERA_RELAY_READ_USER`, `SCADBUDDY_CAMERA_RELAY_READ_PASS`, and
+    `SCADBUDDY_CAMERA_RECORDER_NAME` (default: the pod's hostname) (`RecorderSettings`).
+  - The relay's MediaMTX container: `MTX_AUTHINTERNALUSERS_0_USER` and
+    `MTX_AUTHINTERNALUSERS_0_PASS`, from the relay read secret. MediaMTX reads no `$VAR` in
+    its yml; it overrides a key from `MTX_<KEY>`, and a list entry by its index
+    ([MediaMTX configuration](https://mediamtx.org/docs/features/configuration)). Entry 0 of
+    `deploy/camera/mediamtx-relay.yml` is the read user; without the two variables it keeps a
+    placeholder that no client can use. Measured 2026-11-24 on the `camera-relay` image
+    (v1.21.4, arm64, Docker): with the variables set, an RTSP `DESCRIBE` with that user and
+    password got past auth (404, no stream), and a wrong password or none got 401. Never set
+    them on the recorder's MediaMTX: there entry 0 is the localhost control-API user, and the
+    same variables replaced it, so the control API answered 401 (same date and image). The
+    recorders' MediaMTX gets the read user inside each path's source URL, which the
+    controller puts through the control API.
+- **The relay read secret.** One user and password, in two pods: the relay's MediaMTX
+  (`MTX_AUTHINTERNALUSERS_0_*`) and the recorder controllers
+  (`SCADBUDDY_CAMERA_RELAY_READ_USER`/`_PASS`). It allows reading the relay's paths over
+  RTSP and nothing else.
+- **No database and no key.** Both controllers refuse to start when
+  `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` is set (exit 2, #5295; `camera/settings.py`).
+- **Probes.** Each controller answers `/healthz` on 9090. It answers 503 when MediaMTX's
+  control API does not answer, or when the controller's change follower has stopped; before
+  the follower starts (the controller waits for the CRUD service, or reads its first list),
+  only MediaMTX counts
+  (`camera/process.py` `healthy`). Use it as the controller's liveness probe. The probe
+  restarts the controller's container only, so give the MediaMTX container an `exec` probe of
+  its own: `curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list`. `/metrics` on 9090
+  serves the recorders' series (the "Cameras" row of the printing dashboard).
+- **Pod security.** uid 10001, `runAsNonRoot`, `allowPrivilegeEscalation: false`, every
+  capability dropped, read-only root file system. Measured 2026-11-24 in Docker
+  (`--read-only --cap-drop ALL`): both MediaMTX configs start and the control API answers 200.
+- **Network policies.** The relay: ingress on 8554 from the recorder pods only, and the
+  metrics scrape on 9090; egress to
+  the printers' LAN (RTSPS, port 322 on the H2C, spec §2), the API's CRUD port 8082, and DNS.
+  The recorders: egress to the relay's 8554, the API's 8082, the bucket and DNS; no ingress
+  but the metrics scrape on 9090. Temporal egress is phase 4's.
+
 ### Switching continuous deploy off
 
 Disable the one workflow; nothing else changes:

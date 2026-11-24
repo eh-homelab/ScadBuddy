@@ -67,7 +67,15 @@ from scadbuddy.camera.follow import ChangeFollower
 from scadbuddy.camera.mediamtx import MediaMtx, MediaMtxError, why
 from scadbuddy.camera.models import CameraSource, LeaseAnswer, SegmentIn
 from scadbuddy.camera.mp4 import init_span, segment_start
-from scadbuddy.camera.process import HOOK_HOST, HOOK_PORT, main_with, serve_health, serve_local
+from scadbuddy.camera.process import (
+    HEALTH_PORT,
+    HOOK_HOST,
+    HOOK_PORT,
+    healthy,
+    main_with,
+    serve_health,
+    serve_local,
+)
 from scadbuddy.camera.settings import RecorderSettings
 from scadbuddy.camera.uploads import LocalSegment, Uploader, UploadError
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, wait_for_areas
@@ -854,9 +862,13 @@ async def run(settings: RecorderSettings, stop: asyncio.Event | None = None) -> 
     mtx = MediaMtx(settings.camera_mediamtx_api_url)
     uploader = Uploader(settings)
     recorder = Recorder(crud, mtx, uploader, settings)
-    health = await serve_health()
     hooks: asyncio.Server | None = None
     follower: asyncio.Task[None] | None = None
+
+    async def alive() -> bool:
+        return await healthy(mtx, follower)
+
+    health = await serve_health(HEALTH_PORT, alive)
     try:
         if not await wait_for_areas(crud, "camera", AREAS, stop):
             logger.info("stopped before the CRUD service served the camera areas")
