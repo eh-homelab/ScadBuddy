@@ -105,13 +105,23 @@ Filament presets are ScadBuddy's own (#7176, plan
 by the ref `sb-<id>` in `slicer_filament`. The native slicer reads them from ScadBuddy's
 store; Bambuddy knows each one only by its mirror's local preset id
 (`EffectivePreset.bambuddy_id`), which its slice path, the spool push and the AMS slot
-configure send. After each refresh of the kept presets, a binding that still names a
-Bambuddy local preset is moved to a ScadBuddy preset made from the kept copy, and a preset
-made in Bambuddy takes a new version when Bambuddy edits it
+configure send. ScadBuddy owns the presets, and Bambuddy is at most a mirror target or
+the source of an import (#7244, the owner's decision of 2026-11-23): ScadBuddy keeps no
+copy of Bambuddy's local presets, and the native slicer, the print dialog and the profile
+fill read none. Bambuddy's presets come in three ways only, each reading `GET
+/local-presets` itself and writing only `filament_presets`: the scheduled pull's import
+while `filament_sync.presets` is `bb_to_sb` or `two_way` (a binding that names a Bambuddy
+local preset is moved to a ScadBuddy preset made from it, and a preset made in Bambuddy
+takes a new version when Bambuddy edits it); the one-time import, whatever the direction
+(`POST /filament/presets/bambuddy-import`, Settings → Printing → Filament's "Import presets
+from Bambuddy now", agent `filament_bambuddy_presets_import`); and the API's start, which
+adopts every binding that still names a Bambuddy local id (`adopt_at_start`), unless the
+links are another Bambuddy's. A binding left naming one is an error the print dialog shows
 (`backend/scadbuddy/filament/sb_presets.py`). While the stored setting
 `filament_preset_mirror` is on (the default), each preset ScadBuddy owns is copied to
-Bambuddy's local presets after a fetch and after each refresh, rewritten in place under the
-same Bambuddy id when it changes; a failed copy is the preset's `mirror_error`
+Bambuddy's local presets after a fetch and at the end of each scheduled pull, whatever
+`filament_sync` says, rewritten in place under the same Bambuddy id when it changes; a
+failed copy is the preset's `mirror_error`
 (`backend/scadbuddy/filament/preset_mirror.py`). One mirror runs at a time, a preset's
 Bambuddy id is kept with the Bambuddy it belongs to. That id is a Bambuddy link as the
 filament sync's are: the write that stores it records its Bambuddy as the links' one when

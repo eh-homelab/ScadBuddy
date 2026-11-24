@@ -30,6 +30,25 @@ export default tseslint.config(
         'error',
         { prefer: 'type-imports', fixStyle: 'inline-type-imports' },
       ],
+      // A task queue's pollers are read on every partition (#7306, agent/CLAUDE.md
+      // "Poller reads"): only temporal/pollers.ts calls DescribeTaskQueue. A unit test's
+      // stub defines it and never calls it. The selectors cover a member, a destructured
+      // and a computed call (test/lintRules.test.ts).
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: [
+            "CallExpression[callee.property.name='describeTaskQueue']",
+            "CallExpression[callee.name='describeTaskQueue']",
+            "CallExpression[callee.property.value='describeTaskQueue']",
+          ].join(', '),
+          message: 'Read pollers with queuePollers (src/temporal/pollers.ts): DescribeTaskQueue reports one partition (#7306).',
+        },
+      ],
     },
+  },
+  {
+    files: ['src/temporal/pollers.ts'],
+    rules: { 'no-restricted-syntax': 'off' },
   },
 )

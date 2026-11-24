@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HttpResponse, http } from 'msw'
-import { api, printRunPoll } from '../../api/client'
+import { ApiError, api, printRunPoll } from '../../api/client'
 import type { ArchiveOutcome, ImportedPrint, ModelSummary } from '../../api/types'
 import { addMockModel, mockModels, resetMockState } from '../../mocks/handlers'
 import { archiveImports } from '../../mocks/features/orders/pastPrints'
@@ -300,6 +300,89 @@ describe('ImportPrintDialog', () => {
       await user.click(within(dialog).getByRole('button', { name: 'Import' }))
       expect(await within(dialog).findByRole('alert')).toHaveTextContent('is a per-print copy')
       expect(within(dialog).queryByTestId('import-done')).not.toBeInTheDocument()
+    })
+
+    // #7335 — a file trashed and added again while the dialog was open.
+    const GONE = 'https://scadbuddy.dev/problems/print-imports/library-file-gone'
+    const gone = (replacement: { id: number; filename: string; folder_id: number | null } | null) =>
+      http.post('/api/v1/print-imports/9104', async ({ request }) => {
+        const body = (await request.clone().json()) as { library_file_id?: number }
+        if (body.library_file_id !== 1_000_000_501) return
+        return HttpResponse.json(
+          {
+            type: GONE,
+            title: 'Not Found',
+            status: 404,
+            detail: "library file 1000000501 was deleted or replaced in ScadBuddy's library: choose the file again",
+            file_id: 1_000_000_501,
+            replacement,
+          },
+          { status: 404 },
+        )
+      })
+
+    async function chooseLibraryFile() {
+      const view = await openArchive(9104)
+      const sources = await within(view.dialog).findByRole('radiogroup', { name: 'Source' })
+      await view.user.click(within(sources).getByRole('radio', { name: /The archive's file/ }))
+      await view.user.click(await within(view.dialog).findByRole('radio', { name: 'A file in the library' }))
+      return view
+    }
+
+    it('offers the copy that took a replaced file\'s place, and imports onto it', async () => {
+      nativeLibrary()
+      server.use(gone({ id: 1_000_000_502, filename: 'benchy_hull.3mf', folder_id: null }))
+      const imported = vi.spyOn(api, 'importPrint')
+      const { dialog, user } = await chooseLibraryFile()
+      await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+
+      const alert = await within(dialog).findByRole('alert')
+      expect(alert).toHaveTextContent('benchy_hull.3mf was deleted or replaced')
+      expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled()
+      expect(within(dialog).queryByRole('group', { name: 'Suggested library files' })).not.toBeInTheDocument()
+
+      await user.click(within(alert).getByRole('button', { name: 'Use the new copy' }))
+      expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+      await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+      expect(await within(dialog).findByTestId('import-done')).toHaveTextContent('library file 1000000502')
+      expect(imported).toHaveBeenLastCalledWith(9104, expect.objectContaining({ library_file_id: 1_000_000_502 }))
+    })
+
+    it('never falls back to another file on its own, and reads the suggestions again', async () => {
+      nativeLibrary()
+      server.use(gone(null))
+      const { dialog, user } = await chooseLibraryFile()
+      const read = vi.spyOn(api, 'getPrintSources')
+      await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+
+      const alert = await within(dialog).findByRole('alert')
+      expect(within(alert).queryByRole('button', { name: 'Use the new copy' })).not.toBeInTheDocument()
+      expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled()
+      // Never the printer: that read reaches it.
+      await waitFor(() => expect(read).toHaveBeenCalledWith(9104))
+    })
+
+    it('finds a chosen file gone when the window gets focus back', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      vi.spyOn(api, 'getLibraryFile').mockRejectedValue(new ApiError(404, 'library file 1000000501 not found'))
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+      })
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('benchy_hull.3mf was deleted or replaced')
+      expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled()
+    })
+
+    it('keeps the chosen file when the check on focus fails for another reason', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      const check = vi.spyOn(api, 'getLibraryFile').mockRejectedValue(new ApiError(503, 'the library did not answer'))
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+      })
+      await waitFor(() => expect(check).toHaveBeenCalledWith(1_000_000_501))
+      expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+      expect(within(dialog).getByRole('button', { name: 'Import' })).toBeEnabled()
     })
   })
 
