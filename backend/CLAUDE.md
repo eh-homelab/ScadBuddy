@@ -1520,8 +1520,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and
   `mocks/features/activity.ts`.
-- `backend/scadbuddy/entities/` — files and links on any row (#6950, inventory spec
-  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3, plan
+- `backend/scadbuddy/entities/` — files, links and key-value properties on any row
+  (#6950, #7026, inventory spec
+  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3a, plan
   `docs/superpowers/plans/2026-11-21-inventory-phase-1-entities.md`): `refs.py`
   (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table;
   `EntityStore`: an `entities` row made by `ensure` only for an owner row that exists, and
@@ -1531,10 +1532,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   are Bambuddy's `print_attachments`, read in the same shape), `links.py` (`EntityLinkStore`
   over `entity_links`, http(s) URLs only), `sweep.py` (`sweep_orphan_entities`, the
   housekeeping step `ENTITY_ORPHANS_SWEEP`: an orphan's files and holds, then its row and
-  links; an order's kinds only once they hold no file), `operations.py` (the
+  links; an order's kinds only once they hold no file), `properties.py` (#7026,
+  `entity_properties` and `entity_property_schemas`; the rules are in
+  `docs/features/spools-and-filament.md` "Properties"), `operations.py` (the
   `entity_attachment_add` kind on the `library` queue), `activity.py`, `problems.py` and
   `component.py` (`ENTITIES`). Routes `api/entity_attachments.py` and `api/entity_links.py`
-  under `/entities/{kind}:{ref}`; the file and thumbnail GETs are scriptless
+  under `/entities/{kind}:{ref}`, and `api/entity_properties.py`
+  (`/entities/{ref}/properties`, `/entity-kinds/{kind}/properties`, `…/property-schema`); the file and thumbnail GETs are scriptless
   (`auth/routes.py` `SCRIPTLESS_GETS`). The migration `20261122T0426Z_entities.sql` keeps
   `order_attachments` as a view, with a trigger that fills `entity_id`, for the previous
   build's replicas during the roll; `20261123T0651Z_drop_order_attachments_view.sql` drops them (#6960).

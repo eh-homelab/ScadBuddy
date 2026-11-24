@@ -273,6 +273,9 @@ same way, `vite.config.ts`).
   `labelSheet.ts` `httpsOrigin`, `labelBase` and `locationPayload`: the QR is `<base>/x/L-<n>`, and a
   payload over 84 bytes is refused with an alert). Both place modes draw at most `MAX_LABELS` (100)
   labels, as spool labels do, and none past it (#7081).
+  The spool and type pages' section "Files, links and properties" (on the spool page, anchor `#files-and-links`) holds
+  `components/entities/PropertiesPanel.tsx` (#7026); `lib/filamentSearch.ts` `propertyTexts` makes
+  search match property values.
   History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
   the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
   `charts/LineChart`) and metrics panel (`SpoolMetricsPanel`); the Metrics tab (`pages/filament/MetricsTab.tsx`:
@@ -323,7 +326,8 @@ same way, `vite.config.ts`).
   line is an error). Search (#6894): the Spools and Types tabs filter their loaded lists by
   `q=` (`FilamentSearchBox`, "/" focuses it) with `lib/filamentSearch.ts` (every token must
   match a field; `#87` is spool 87 only; a hex with or without `#`; SKUs from the suppliers'
-  products, trays from `/filament/inventory`, and each spool's and type's property values (#7026),
+  products, trays from `/filament/inventory`, each spool's open tag's UID and tray UUID from 4 hex digits
+  (#7151, `tagsBySpool`), and each spool's and type's property values (#7026),
   read by `readKindPropertyTexts` on every load of the tab's list; a failed reload keeps the values it had), and every Filament tab has the quick find
   (`FilamentQuickFind`, Ctrl+K or ⌘K: spools and types in groups, Enter opens one), which shares the
   colour picker's remembered filters (`lib/filamentPickerFilters.ts`). The agent's
