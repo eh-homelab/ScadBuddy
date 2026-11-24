@@ -47,6 +47,7 @@ from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.housekeeping import BACKFILL_SWEEP, SWEEPS
 from tests.support.arrange import finished_job
 from tests.support.store import store_pool
+from tests.support.waits import until
 
 
 def _jobs(*jobs: Job):  # type: ignore[no-untyped-def]
@@ -545,10 +546,7 @@ async def test_a_marker_left_after_its_manifest_was_written_is_cleared_not_faile
 
 
 async def _until(check, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]
-    deadline = time.monotonic() + timeout
-    while not check():
-        assert time.monotonic() < deadline, "timed out"
-        await asyncio.sleep(0.02)
+    await until(check, timeout, interval=0.02, what="timed out")
 
 
 def _output_events() -> tuple[InProcessEventBus, list[OutputEvent]]:
