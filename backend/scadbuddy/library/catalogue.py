@@ -94,7 +94,13 @@ from scadbuddy.library.presets import (
 )
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
-from scadbuddy.library.template_rows import META_TEXT_MAX, TemplateRow, template_stamp
+from scadbuddy.library.template_rows import (
+    BIGINT_MAX,
+    BIGINT_MIN,
+    META_TEXT_MAX,
+    TemplateRow,
+    template_stamp,
+)
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -1155,6 +1161,13 @@ class Catalogue:
                 parsed = self._meta(template_id, _as_recorded(template_id, meta))
             except InvalidModelMetaError as error:
                 meta_error = error.reason
+        inputs_version = self._inputs_version(template_id, parsed) if parsed is not None else 0
+        if not BIGINT_MIN <= inputs_version <= BIGINT_MAX:
+            # Kept as meta Postgres refuses (review A-I1): the column is bigint.
+            assert data is not None
+            meta, parsed, inputs_version = None, None, 0
+            meta_error = "not storable (INPUTS_VERSION is outside the bigint range)"
+            meta_text = _storable_text(data.decode("utf-8", "replace")[:META_TEXT_MAX])
 
         builtin = is_builtin(template_id)
         rows = self.media_store.items(template_id)
@@ -1204,7 +1217,7 @@ class Catalogue:
             version=version,
             updated_at=datetime.fromtimestamp(modified, UTC),
             has_readme=self.readme_path(template_id).is_file(),
-            inputs_version=self._inputs_version(template_id, parsed) if parsed is not None else 0,
+            inputs_version=inputs_version,
             colour_params=colour_params,
             files=files,
             cover=cover,

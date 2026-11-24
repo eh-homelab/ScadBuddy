@@ -179,6 +179,37 @@ def test_row_of_meta_that_is_not_json(catalogue: Catalogue, paths: DataPaths) ->
     assert row.name == "demo"
 
 
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize(
+    ("declared", "stored"),
+    [(2**31, True), (2**63 - 1, True), (2**63, False)],
+    ids=["above-int", "bigint-max", "above-bigint"],
+)
+def test_row_of_an_inputs_version_postgres_cannot_store(
+    catalogue: Catalogue, paths: DataPaths, pg_pool: PgPool, declared: int, stored: bool
+) -> None:
+    # Review A-I1 (#7317): `inputs_version` is bigint; past it, as meta Postgres refuses.
+    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
+    text = '{"name": "Demo", "pipeline": {"module": "pipeline/p.py", "api": 1}}'
+    paths.model_meta("demo").write_text(text, encoding="utf-8")
+    (paths.model_dir("demo") / "pipeline").mkdir()
+    (paths.model_dir("demo") / "pipeline" / "p.py").write_text(
+        f"INPUTS_VERSION = {declared}\n", encoding="utf-8"
+    )
+    row = _row(catalogue, "demo")
+    if stored:
+        assert row.inputs_version == declared
+        assert row.meta is not None and row.meta_error is None
+    else:
+        assert row.inputs_version == 0
+        assert row.meta is None
+        assert row.meta_error is not None and row.meta_error.startswith("not storable")
+        assert row.meta_text == text
+    rows = TemplateRows(pg_pool)
+    rows.put([row], [])
+    assert rows.get("demo") == row
+
+
 def test_row_of_meta_with_an_integer_too_long_to_read(
     catalogue: Catalogue, paths: DataPaths
 ) -> None:

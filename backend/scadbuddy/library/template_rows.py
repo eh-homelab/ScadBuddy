@@ -37,6 +37,9 @@ PIPELINE_DIR = "pipeline"
 
 #: The most of a ``model.json`` that is not JSON that a row keeps (spec §5.1).
 META_TEXT_MAX = 64 * 1024
+#: The range of the ``inputs_version`` column, a Postgres ``bigint`` (review A-I1).
+BIGINT_MIN = -(2**63)
+BIGINT_MAX = 2**63 - 1
 
 #: A copy run older than this is deleted when the next run starts (plan decision 8).
 RUN_KEPT = "30 days"

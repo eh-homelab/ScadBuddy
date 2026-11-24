@@ -175,7 +175,7 @@ One migration file, `<timestamp>_templates.sql`.
 - `version` text: the template's last commit; null without git.
 - `updated_at` timestamptz: as today, the newest mtime of `model.scad` and
   `model.json`.
-- `has_readme` boolean, `inputs_version` int, `colour_params` text[] (the `// color`
+- `has_readme` boolean, `inputs_version` bigint, `colour_params` text[] (the `// color`
   parameters of `model.scad`, for `part_print_settings`'s check).
 - `files` jsonb: name → size for `thumbnail.png`, each `media/` file and, for a
   built-in, each `builtin-media/<slug>/` file. The media views' `size`, `missing` and

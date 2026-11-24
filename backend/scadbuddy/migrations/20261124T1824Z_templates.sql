@@ -14,7 +14,7 @@ CREATE TABLE templates (
     version text,
     updated_at timestamptz NOT NULL,
     has_readme boolean NOT NULL,
-    inputs_version int NOT NULL DEFAULT 0,
+    inputs_version bigint NOT NULL DEFAULT 0,
     colour_params text[],
     files jsonb NOT NULL DEFAULT '{}',
     cover jsonb,
