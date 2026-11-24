@@ -98,7 +98,14 @@ class FlowTaskActivities:
 
     @activity.defn(name=FLOW_TASK_OPEN)
     async def open(self, task: dict[str, Any]) -> None:
-        """Open the task, a `TaskOpen`'s JSON. A retry finds it there."""
+        """Open the task, a `TaskOpen`'s JSON. A retry finds it there.
+
+        Final: a task the model or the route refuses (422), a run that has ended, and a run
+        that is not there. Every other refusal is tried again without limit: a credential
+        refused (401, 403), any other 4xx, a 5xx, a route that is missing during a roll, an
+        API that is away. Those are ScadBuddy's to mend and not the script's, so they must
+        not fail a run that may have worked for weeks. Nothing is lost while it waits: the
+        question is not asked yet, and a cancel still ends the run."""
         try:
             # Off the loop: the check of a default runs its pattern.
             checked = await asyncio.to_thread(TaskOpen.model_validate, task)

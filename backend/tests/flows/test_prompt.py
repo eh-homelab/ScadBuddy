@@ -15,7 +15,8 @@ from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError
 from temporalio.testing import ActivityEnvironment
 
-from scadbuddy.crud.client import CrudRefusedError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
+from scadbuddy.crud.tasks import RemoteTasks
 from scadbuddy.flows.models import HOST_FN, TERMINAL, Run
 from scadbuddy.flows.sweep import sweep_flow_runs
 from scadbuddy.flows.typecheck import check_script
@@ -266,13 +267,25 @@ REF = {"type": "object", "properties": {"x": {"type": "string", "$ref": "#/a"}}}
     [
         (f"prompt('q', {REF!r})", "'$ref' is not supported for string"),
         (f"prompt('', {EMAIL!r})", "title"),
-        (f"prompt('x' * 501, {EMAIL!r})", "title"),
+        (f"prompt('x' * 501, {EMAIL!r})", "at most 500 characters"),
         (f"prompt('q', {EMAIL!r}, context=[{{'t': 'x' * 17_000}}])", "16384 bytes"),
+        (f"prompt('q', {EMAIL!r}, context=[{{'t': {'[' * 31 + ']' * 31}}}])", "too deeply"),
+        (f"prompt('q', {EMAIL!r}, context=[{{'t': {'(' * 31 + '1' + ',)' * 31}}}])", "too deeply"),
         (f"prompt('q', {EMAIL!r}, place='a\\nb')", "place"),
-        (f"prompt('q', {EMAIL!r}, ui='x' * 201)", "ui"),
+        (f"prompt('q', {EMAIL!r}, ui='x' * 201)", "200 characters"),
         (f"prompt('q', {EMAIL!r}, timeout_s=5 + 1)", "at least 10 seconds"),
     ],
-    ids=["schema", "no-title", "long-title", "context", "place", "ui", "timeout"],
+    ids=[
+        "schema",
+        "no-title",
+        "long-title",
+        "context",
+        "deep-lists",
+        "deep-tuples",
+        "place",
+        "ui",
+        "timeout",
+    ],
 )
 async def test_a_refused_prompt_raises_before_any_task_row(
     flows: Flows, call: str, said: str
@@ -487,6 +500,59 @@ async def test_a_closed_run_cancels_its_open_task(
     ended = await flows.store.get_run(run_id)
     assert ended is not None and ended.status in TERMINAL
     assert (await task_of(flows, run.waiting_on[0].call_id)).state == "cancelled"
+
+
+@temporal
+@postgres
+@pytest.mark.parametrize(
+    ("write", "name"), [("open", "flow_task_open"), ("mark_answered", "flow_task_answered")]
+)
+@pytest.mark.parametrize("stuck", [False, True], ids=["refused", "stuck"])
+async def test_a_run_cancelled_while_its_task_is_written_again_ends_at_once(
+    flows: Flows,
+    jobs: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+    write: str,
+    name: str,
+    stuck: bool,
+) -> None:
+    """The API is away, so the write is tried again without limit, or is still waiting for
+    its answer."""
+    tries = 0
+    released = asyncio.Event()
+
+    async def away(*_: Any, **__: Any) -> Any:
+        nonlocal tries
+        tries += 1
+        if stuck:
+            await released.wait()
+        raise CrudUnavailableError("away", "unreached")
+
+    monkeypatch.setattr(RemoteTasks, write, away)
+    run_id = await flows.start(script(ASK, "await sleep(0.1)", "return 1"))
+    if write == "mark_answered":
+        run = await parked(flows, run_id)
+        await give(flows, run, run.waiting_on[0].call_id, JANE)
+    async with asyncio.timeout(30):
+        while tries < (1 if stuck else 2):
+            await asyncio.sleep(0.1)
+    handle = flows.client.get_workflow_handle(f"flow-{run_id}")
+    await handle.cancel()
+    try:
+        async with asyncio.timeout(10):
+            while (await handle.describe()).status == WorkflowExecutionStatus.RUNNING:
+                await asyncio.sleep(0.1)
+    finally:
+        released.set()
+    assert (await handle.describe()).status == WorkflowExecutionStatus.CANCELED
+    assert (await activities(flows, run_id)).count(name) == 1
+    await backdate(jobs.pool, "workflow_runs.updated_at", run_id)
+    await sweep_flow_runs(flows.store, flows.client, quiet=timedelta(0))
+    ended = await flows.store.get_run(run_id)
+    assert ended is not None and ended.status == "terminated"
+    assert [t.state for t in await run_tasks(flows, run_id)] == (
+        [] if write == "open" else ["cancelled"]
+    )
 
 
 # -- Resets -------------------------------------------------------------------------

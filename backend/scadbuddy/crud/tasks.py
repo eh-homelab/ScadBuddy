@@ -36,7 +36,7 @@ def _part(value: str) -> str:
 
 
 def _behind(error: CrudUnavailableError, task_id: str) -> None:
-    """The run's row still lagged Temporal at the end of the client's budget."""
+    """The open run's row still lagged Temporal at the end of the client's budget."""
     if error.problem.get("reason") == RUN_BEHIND:
         raise RunBehindError(task_id) from error
 

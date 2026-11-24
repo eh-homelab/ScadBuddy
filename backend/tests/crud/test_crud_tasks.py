@@ -472,6 +472,25 @@ async def test_a_final_write_of_an_execution_the_row_does_not_know_yet_is_503(
     assert store.get(T1) == held
 
 
+async def test_the_final_writes_of_an_execution_an_ended_run_does_not_know_are_answered(
+    remote: RemoteTasks, http: httpx.AsyncClient, store: TaskStore, pg_pool: PgPool
+) -> None:
+    await remote.open(_task(T1), workflow_run_id="x")
+    await remote.open(_task(T2), workflow_run_id="x")
+    await remote.close(T2, "expired")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE workflow_runs SET status = 'failed'")
+    one, two = store.get(T1), store.get(T2)
+    assert await remote.mark_answered(T1, {"ok": True}, None, "newer", final=True) == one
+    assert await remote.close(T1, "expired", workflow_run_id="newer") is None
+    assert await remote.close(T2, "expired", workflow_run_id="newer") == two
+    raw = await http.post(
+        f"{BASE}/{T1}/close", json={"state": "expired", "workflow_run_id": "newer"}
+    )
+    assert raw.status_code == 409 and raw.json()["reason"] == "task-not-open"
+    assert (store.get(T1), store.get(T2)) == (one, two)
+
+
 async def test_the_client_sends_a_final_mark_again_until_the_row_follows(
     app: FastAPI, store: TaskStore, pg_pool: PgPool
 ) -> None:

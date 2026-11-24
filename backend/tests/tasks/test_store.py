@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -13,8 +14,9 @@ from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
 from scadbuddy.core.events import Event, TaskChanged
+from scadbuddy.core.pg_events import EVENT_LOG_LOCK
 from scadbuddy.flows.store import FlowStore
-from scadbuddy.tasks.models import TaskOpen
+from scadbuddy.tasks.models import Task, TaskOpen, TaskQuestion
 from scadbuddy.tasks.store import (
     RunBehindError,
     RunEndedError,
@@ -22,6 +24,7 @@ from scadbuddy.tasks.store import (
     TaskNotOpenError,
     TaskStore,
 )
+from scadbuddy.workflows.flow_models import FlowWaiting, ProjectionWrite
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -472,6 +475,108 @@ def test_a_reset_waits_for_a_mark_in_flight(
     assert _states(store, "run-1") == {"t1": "open"}
 
 
+def _wait_for_blocked(pg_pool: PgPool, count: int) -> None:
+    """Wait until ``count`` backends that hold a lock on this schema's runs wait for one."""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        with pg_pool.connection() as conn:
+            found = conn.execute(
+                "SELECT count(DISTINCT l.pid) AS n FROM pg_locks l WHERE NOT l.granted"
+                " AND EXISTS (SELECT 1 FROM pg_locks h WHERE h.pid = l.pid AND h.granted"
+                " AND h.relation = 'workflow_runs'::regclass)"
+            ).fetchone()
+        if found is not None and found["n"] >= count:
+            return
+        time.sleep(0.05)
+    pytest.fail("nothing waits for a lock")
+
+
+def _parks(call_id: str) -> ProjectionWrite:
+    waits = FlowWaiting(
+        call_id=call_id,
+        kind="answer",
+        fn="prompt",
+        since=datetime(2026, 11, 24, tzinfo=UTC),
+        history_length=10,
+    )
+    return ProjectionWrite(run_id="run-1", workflow_run_id="x", waiting_add=waits)
+
+
+class Log:
+    """Takes the event log's lock at each publish, and holds it to the transaction's end."""
+
+    def publish_in(self, conn: Connection[Any], event: Event) -> None:
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (EVENT_LOG_LOCK,))
+
+
+def _race(pg_pool: PgPool, first: Callable[[], Any], second: Callable[[], Any]) -> tuple[Any, Any]:
+    """``first`` holds the run's row and waits for the task's, ``second`` waits for the
+    run's. Then both go on."""
+    with ThreadPoolExecutor(2) as pool, psycopg.connect(pg_pool.conninfo) as holder:
+        holder.execute("SELECT 1 FROM tasks WHERE id = 't1' FOR UPDATE")
+        one = pool.submit(first)
+        _wait_for_blocked(pg_pool, 1)
+        two = pool.submit(second)
+        _wait_for_blocked(pg_pool, 2)
+        holder.commit()
+        return one.result(timeout=30), two.result(timeout=30)
+
+
+@pytest.mark.parametrize("close_first", [True, False])
+def test_a_runs_own_close_and_its_end_agree_in_either_order(
+    store: TaskStore, pg_pool: PgPool, close_first: bool
+) -> None:
+    store.open(_task("t1"))
+    store.events = Log()
+    runs = FlowStore(pg_pool, events=Log())
+
+    def close() -> Any:
+        return store.close_or_current("t1", "expired", workflow_run_id="x")
+
+    def end() -> Any:
+        return runs._project(
+            ProjectionWrite(run_id="run-1", workflow_run_id="x", status="succeeded")
+        )
+
+    if close_first:
+        closed, ended = _race(pg_pool, close, end)
+    else:
+        ended, closed = _race(pg_pool, end, close)
+    assert ended.status == "succeeded"
+    # The run's end cancels the task only when it is still open.
+    assert closed.state == ("expired" if close_first else "cancelled")
+    assert store.get("t1") == closed
+
+
+@pytest.mark.parametrize("close_first", [True, False])
+def test_a_runs_own_close_and_a_reset_agree_in_either_order(
+    store: TaskStore, pg_pool: PgPool, close_first: bool
+) -> None:
+    """The Reset has the run wait again, so its task is open whichever came first."""
+    store.open(_task("t1"))
+    runs = FlowStore(pg_pool, events=Log())
+    runs._project(_parks("t1"))
+    if not close_first:
+        # So that the Reset changes the task's row, and waits for it.
+        store.mark_answered("t1", {"ok": True}, "u1", "x")
+    store.events = Log()
+
+    def close() -> Any:
+        return store.close_or_current("t1", "expired", workflow_run_id="x")
+
+    def reset() -> Any:
+        return runs._reset_run("run-1", "x", 20, "req-1", lambda: "y")
+
+    if close_first:
+        closed, run = _race(pg_pool, close, reset)
+    else:
+        run, closed = _race(pg_pool, reset, close)
+    assert closed.state == ("expired" if close_first else "open")
+    assert run.workflow_run_id == "y" and [w.call_id for w in run.waiting_on] == ["t1"]
+    held = store.get("t1")
+    assert held is not None and (held.state, held.answer) == ("open", None)
+
+
 def test_close_or_current_closes_an_open_task_and_answers_the_row_as_it_is(
     store: TaskStore, recorder: Recorder
 ) -> None:
@@ -582,10 +687,12 @@ def test_the_final_mark_of_a_replaced_execution_answers_the_row_as_it_stands(
     assert store.mark_answered("t1", {"ok": True}, None, "y", final=True).state == "answered"
 
 
+@pytest.mark.parametrize("status", ["running", "waiting"])
 def test_the_final_mark_of_an_execution_the_row_does_not_know_yet_is_refused(
-    store: TaskStore, pg_pool: PgPool
+    store: TaskStore, pg_pool: PgPool, status: str
 ) -> None:
     """A Reset made in Temporal, which the sweep has not followed: tried again later."""
+    _set_status(pg_pool, status)
     opened = store.open(_task("t1"))
     with pytest.raises(RunBehindError):
         store.mark_answered("t1", {"ok": True}, None, "newer", final=True)
@@ -594,6 +701,70 @@ def test_the_final_mark_of_an_execution_the_row_does_not_know_yet_is_refused(
     assert store.get("t1") == opened
     FlowStore(pg_pool)._follow_run("run-1", "newer")
     assert store.mark_answered("t1", {"ok": True}, None, "newer", final=True).state == "answered"
+
+
+def _set_status(pg_pool: PgPool, status: str) -> None:
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE workflow_runs SET status = %s WHERE id = 'run-1'", (status,))
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "terminated"])
+@pytest.mark.parametrize("was", ["open", "answered", "cancelled", "expired"])
+def test_the_final_writes_of_an_execution_an_ended_run_does_not_know_change_nothing(
+    store: TaskStore, pg_pool: PgPool, recorder: Recorder, status: str, was: str
+) -> None:
+    """The sweep follows no run that ended, so a refusal here would never end."""
+    store.open(_task("t1"))
+    if was == "answered":
+        store.mark_answered("t1", {"ok": False}, "u1", "x")
+    elif was != "open":
+        with pg_pool.connection() as conn:
+            conn.execute("UPDATE tasks SET state = %s", (was,))
+    _set_status(pg_pool, status)
+    held = store.get("t1")
+    recorder.events.clear()
+    assert store.mark_answered("t1", {"ok": True}, None, "newer", final=True) == held
+    assert store.close_or_current("t1", "expired", workflow_run_id="newer") == held
+    assert store.get("t1") == held and recorder.events == []
+
+
+@pytest.mark.parametrize("write", ["mark", "close"])
+def test_a_final_write_that_waits_for_a_reset_of_an_ended_run_is_taken(
+    store: TaskStore, pg_pool: PgPool, write: str
+) -> None:
+    """The new execution writes before the Reset commits. It waits for the run's row, and
+    reads it as the Reset left it: not ended, at the new execution."""
+    store.open(_task("t1"))
+    runs = FlowStore(pg_pool)
+    runs._project(_parks("t1"))
+    runs._project(
+        ProjectionWrite(run_id="run-1", workflow_run_id="x", waiting_remove="t1", history_length=14)
+    )
+    store.mark_answered("t1", {"ok": False}, "u1", "x")
+    runs._project(ProjectionWrite(run_id="run-1", workflow_run_id="x", status="failed"))
+
+    def mark() -> Any:
+        return store.mark_answered("t1", {"ok": True}, None, "y", final=True)
+
+    def close() -> Any:
+        return store.close_or_current("t1", "expired", workflow_run_id="y")
+
+    writes: list[Any] = []
+    with ThreadPoolExecutor(1) as pool:
+
+        def reset() -> str:
+            writes.append(pool.submit(mark if write == "mark" else close))
+            _wait_for_blocked(pg_pool, 1)
+            return "y"
+
+        run = runs._reset_run("run-1", "x", 20, "req-1", reset)
+        assert run is not None and (run.status, run.workflow_run_id) == ("running", "y")
+        held = writes[0].result(timeout=30)
+    if write == "mark":
+        assert (held.state, held.answer) == ("answered", {"ok": True})
+    else:
+        assert (held.state, held.answer) == ("expired", None)
+    assert store.get("t1") == held
 
 
 def test_the_runs_own_close_replaces_an_answer_the_run_never_took(
@@ -650,9 +821,21 @@ def test_reopen_in_opens_a_task_that_is_not_open_again(
     assert recorder.changes() == [("t1", "open")]
 
 
+def _question(task: Task) -> TaskQuestion:
+    return TaskQuestion.model_validate(task.model_dump())
+
+
 def test_of_run_reads_a_runs_tasks_by_id(store: TaskStore) -> None:
-    a, b = store.open(_task("a")), store.open(_task("b"))
+    a, b = _question(store.open(_task("a"))), _question(store.open(_task("b")))
     store.open(_task("c", run_id="run-2"))
     assert store.of_run("run-1", ["a", "c", "nope"]) == {"a": a}
     assert store.of_run("run-1", ["a", "b"]) == {"a": a, "b": b}
     assert store.of_run("run-1", []) == {}
+
+
+def test_of_run_reads_no_answer(store: TaskStore) -> None:
+    store.open(_task("a"))
+    store.mark_answered("a", {"ok": True}, "u1", "x")
+    read = store.of_run("run-1", ["a"])["a"]
+    assert read.state == "answered"
+    assert not {"answer", "answered_by"} & set(read.model_dump())

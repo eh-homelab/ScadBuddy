@@ -107,8 +107,10 @@ export const flowTools: Tool[] = [
       '`sleep(seconds)`, `wait_for_human(question, timeout_s=None)` (returns {answer}), ' +
       '`prompt(title, schema, context=None, place=None, ui=None, timeout_s=None)` (a question with typed fields: ' +
       "`schema` declares them as `inputs_schema` does, and a string may have a `format` of email, date or date-time; " +
-      'returns the answer as a dict by field, defaults filled in, None for a field left out), both with no limit ' +
-      'unless `timeout_s` (at least 10 s; then a TimeoutError) sets one, ' +
+      'returns the answer as a dict by field: a field left out is its default, and with no default a boolean is False ' +
+      'and any other None; raises ValueError for a schema, title, context, place, ui or timeout_s it does not take, where ' +
+      "title, context and ui are limited in size and the refusal names the limit, and for an answer that does not fit its field's type), " +
+      'both with no limit unless `timeout_s` (at least 10 s; then a TimeoutError) sets one, ' +
       '`render(slug, params)` (returns {job_id, status, error}; status done, failed or cancelled), ' +
       '`save_output(slug, job_id, name)` (returns the output id), and two that wait for a person to approve them ' +
       'in ScadBuddy: `queue_print(source, request)` (source {output_id} or {file_id}; request is the print ' +

@@ -1,5 +1,7 @@
+import json
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -10,6 +12,7 @@ import regex
 from pydantic import ValidationError
 
 from scadbuddy.core.input_schema import patterns_deadline, schema_problems
+from scadbuddy.core.json_values import MAX_DEPTH
 from scadbuddy.tasks.models import AnswerProblem, Task, TaskOpen
 from scadbuddy.tasks.validate import prompt_schema_problems, validate_answer
 
@@ -314,6 +317,41 @@ def test_a_deeply_nested_context_or_schema_is_a_validation_error() -> None:
     for place in ({"context": [{"x": _nested(100_000)}]}, {"schema": deep}):
         with pytest.raises(ValidationError, match="nested"):
             TaskOpen(**{**good, **place})
+
+
+def _tuples(depth: int) -> Any:
+    value: Any = ()
+    for _ in range(depth - 1):
+        value = (value,)
+    return value
+
+
+@pytest.mark.parametrize("nested", [_nested, _tuples], ids=["lists", "tuples"])
+def test_a_context_is_bounded_in_depth(nested: Callable[[int], Any]) -> None:
+    good: dict[str, Any] = {"id": "t", "run_id": "r", "title": "x", "schema": EMAIL}
+    # The context and its object are two levels.
+    kept = TaskOpen(**good, context=[{"x": nested(MAX_DEPTH - 2)}])
+    assert json.loads(kept.model_dump_json())["context"] == [{"x": _nested(MAX_DEPTH - 2)}]
+    for depth in (MAX_DEPTH - 1, 900, 5_000):
+        with pytest.raises(ValidationError, match="nested too deeply"):
+            TaskOpen(**good, context=[{"x": nested(depth)}])
+
+
+@pytest.mark.parametrize("nested", [_nested, _tuples], ids=["lists", "tuples"])
+def test_a_schema_is_bounded_in_depth(nested: Callable[[int], Any]) -> None:
+    good: dict[str, Any] = {"id": "t", "run_id": "r", "title": "x"}
+    # The schema, its properties, the property and its enum are four levels.
+    TaskOpen(**good, schema=_asks({"type": "string", "enum": [nested(MAX_DEPTH - 4)]}))
+    for depth in (MAX_DEPTH - 3, 900, 5_000):
+        with pytest.raises(ValidationError, match="nested too deeply"):
+            TaskOpen(**good, schema=_asks({"type": "string", "enum": [nested(depth)]}))
+
+
+@pytest.mark.parametrize("bad", BAD_VALUES)
+def test_a_tuple_holds_only_what_the_store_can_write(bad: Any) -> None:
+    good: dict[str, Any] = {"id": "t", "run_id": "r", "title": "x", "schema": EMAIL}
+    with pytest.raises(ValidationError):
+        TaskOpen(**good, context=[{"x": (bad,)}])
 
 
 @pytest.mark.parametrize(

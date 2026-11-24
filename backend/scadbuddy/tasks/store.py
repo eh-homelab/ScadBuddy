@@ -14,12 +14,13 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import TaskChanged
 from scadbuddy.flows.models import TERMINAL
-from scadbuddy.tasks.models import Task, TaskOpen, TaskState
+from scadbuddy.tasks.models import Task, TaskOpen, TaskQuestion, TaskState
 
-_COLUMNS = (
-    "id, run_id, project_id, title, schema, context, place, ui, expires_at, state, answer,"
-    " answered_by, created_at, updated_at"
+_QUESTION = (
+    "id, run_id, project_id, title, schema, context, place, ui, expires_at, state,"
+    " created_at, updated_at"
 )
+_COLUMNS = f"{_QUESTION}, answer, answered_by"
 _MOVED = "id, run_id, state, place"
 
 
@@ -40,8 +41,9 @@ class RunEndedError(Exception):
 
 
 class RunBehindError(Exception):
-    """The run's row does not know the caller's execution yet: a Reset that nothing has
-    followed. The same write later is taken."""
+    """The row of an open run does not know the caller's execution yet: a Reset made in
+    Temporal, which the sweep has not followed. The same write again is taken once it has,
+    and answered with the row as it stands if the run ends first."""
 
 
 class TaskStore:
@@ -108,16 +110,16 @@ class TaskStore:
             row = conn.execute(f"SELECT {_COLUMNS} FROM tasks WHERE id = %s", (task_id,)).fetchone()
         return Task.model_validate(row) if row else None
 
-    def of_run(self, run_id: str, ids: Collection[str]) -> dict[str, Task]:
-        """The run's tasks among ``ids``, by id."""
+    def of_run(self, run_id: str, ids: Collection[str]) -> dict[str, TaskQuestion]:
+        """The run's tasks among ``ids``, by id, without their answers."""
         if not ids:
             return {}
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM tasks WHERE run_id = %s AND id = ANY(%s::text[])",
+                f"SELECT {_QUESTION} FROM tasks WHERE run_id = %s AND id = ANY(%s::text[])",
                 (run_id, [*ids]),
             ).fetchall()
-        return {row["id"]: Task.model_validate(row) for row in rows}
+        return {row["id"]: TaskQuestion.model_validate(row) for row in rows}
 
     def list(
         self, *, state: TaskState | None = "open", place: str | None = None, limit: int = 100
@@ -151,8 +153,10 @@ class TaskStore:
         `FlowStore._reset_run` do: a Reset under way commits first, and a later one waits.
 
         ``final`` is the run's own mark, of the answer its script gets. It replaces another
-        answer and who gave it, and leaves an expired task as it stands. It is never lost:
-        for an execution the run's row does not know yet it raises `RunBehindError`."""
+        answer and who gave it, and leaves an expired task as it stands. From an execution
+        that the row of an open run does not know yet, it raises `RunBehindError`. From one
+        that the row of an ended run does not know, it is answered with the task as it
+        stands: nothing follows an ended run, so a refusal would never end."""
         with self._pool.connection() as conn, conn.transaction():
             run = self._run_of(conn, task_id, workflow_run_id)
             row = conn.execute(
@@ -163,7 +167,7 @@ class TaskStore:
             if run is None or row is None:
                 raise KeyError(task_id)
             if not run["current"]:
-                if final and not run["replaced"]:
+                if final and run["behind"]:
                     raise RunBehindError(task_id)
                 return Task.model_validate(row)
             state, same = row["state"], row["state"] == "answered" and row["same"]
@@ -213,12 +217,9 @@ class TaskStore:
                 run = self._run_of(conn, task_id, workflow_run_id)
                 if run is None:
                     return None
-                if run["current"]:
-                    closes = ("open", "answered")
-                elif run["replaced"]:
-                    closes = ()
-                else:
+                if run["behind"]:
                     raise RunBehindError(task_id)
+                closes = ("open", "answered") if run["current"] else ()
             row = conn.execute(
                 f"SELECT {_COLUMNS} FROM tasks WHERE id = %s FOR UPDATE", (task_id,)
             ).fetchone()
@@ -302,12 +303,15 @@ class TaskStore:
         self, conn: Connection[DictRow], task_id: str, workflow_run_id: str
     ) -> DictRow | None:
         """The task's run, locked ``FOR SHARE``: whether ``workflow_run_id`` is its current
-        execution, or one a Reset replaced."""
+        execution, and whether the row is behind: the run is open, and the execution is not
+        one that a Reset replaced either. A Reset under way holds the row, so this reads it
+        as that Reset left it."""
         return conn.execute(
             "SELECT workflow_run_id = %(id)s AS current,"
-            " %(id)s = ANY(superseded_run_ids) AS replaced FROM workflow_runs"
+            " workflow_run_id <> %(id)s AND NOT %(id)s = ANY(superseded_run_ids)"
+            " AND NOT status = ANY(%(ended)s) AS behind FROM workflow_runs"
             " WHERE id = (SELECT run_id FROM tasks WHERE id = %(task)s) FOR SHARE",
-            {"id": workflow_run_id, "task": task_id},
+            {"id": workflow_run_id, "task": task_id, "ended": sorted(TERMINAL)},
         ).fetchone()
 
     def _announce(self, conn: Connection[DictRow], row: DictRow) -> None:

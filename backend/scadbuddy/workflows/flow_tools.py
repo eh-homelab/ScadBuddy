@@ -162,7 +162,7 @@ def _prompt_task(call_id: str, run_id: str, **fields: Any) -> dict[str, Any]:
         return task.model_dump(mode="json", by_alias=True)
     except ValidationError as err:
         raise ValueError(open_problems(err)) from None
-    except (TypeError, RecursionError):
+    except TypeError:
         raise ValueError("the schema and the context must be JSON") from None
 
 
@@ -171,6 +171,8 @@ async def _task_write(name: str, *args: Any) -> None:
 
 
 async def _open_task(task: dict[str, Any]) -> None:
+    """Open the prompt's task. A Reset to between this and the call's park does not open
+    it again: its timer starts anew, and the task keeps its first `expires_at`."""
     try:
         await _task_write(FLOW_TASK_OPEN, task)
     except ActivityError as err:
@@ -194,11 +196,13 @@ async def prompt(
     """Ask a person the question `title` and wait for a typed answer, with no limit unless
     `timeout_s` (at least 10 seconds) sets one. `schema` declares the answer's fields as a
     flow's inputs.json does, and a string may also have a `format` of `email`, `date` or
-    `date-time`. Returns the answer as a dict by field name, defaults filled in, with None
-    for a field left out. `context` is a list of JSON objects kept with the question,
-    `place` the name of the place that shows it, and `ui` the name of its screen. Raises
-    ValueError for a schema it does not take, and TimeoutError if nobody answers in
-    time."""
+    `date-time`. Returns the answer as a dict by field name. A field left out is its
+    default; with no default, a boolean is False and any other field is None. `context` is
+    a list of JSON objects kept with the question, `place` the name of the place that shows
+    it, and `ui` the name of its screen. `title`, `context` and `ui` are limited in size,
+    and a refusal names the limit. Raises ValueError for a schema, title, context, place,
+    ui or timeout_s it does not take, and for an answer that fits the schema and not the
+    field's type (a huge number). Raises TimeoutError if nobody answers in time."""
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
     call_id = str(workflow.uuid4())

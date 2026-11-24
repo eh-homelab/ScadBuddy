@@ -100,7 +100,7 @@ def _not_open(state: str) -> ApiError:
 
 
 def _behind() -> ApiError:
-    """The run's row lags Temporal: the client sends the write again (#7364)."""
+    """The row of an open run lags Temporal: the client sends the write again (#7364)."""
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
         "The run's row does not know that execution yet.",
@@ -149,7 +149,8 @@ def close_task(task_id: str, body: CloseWrite, tasks: TasksDep) -> Task:
 def answer_task(task_id: str, body: AnswerWrite, tasks: TasksDep) -> Task:
     """`TaskStore.mark_answered`, with its rules: the same answer again answers the row,
     and so does one of another execution. With ``final`` so do another answer, which it
-    replaces, and an expired task; a row that lags Temporal is 503 ``run-behind``."""
+    replaces, and an expired task; the row of an open run that lags Temporal is 503
+    ``run-behind``."""
     _uuid("task id", task_id)
     try:
         return tasks.store.mark_answered(

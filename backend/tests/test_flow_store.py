@@ -576,6 +576,45 @@ async def test_a_repeated_park_leaves_the_task_as_it_stands(store: FlowStore) ->
     assert states(tasks) == {"a": "answered"}
 
 
+async def ends_step(store: FlowStore, call_id: str, execution: str = "wr1") -> None:
+    await store.project(
+        ProjectionWrite(
+            run_id="r1",
+            workflow_run_id=execution,
+            step=step(call_id, 1, "succeeded").model_copy(update={"ended_at": NOW}),
+            history_length=20,
+        )
+    )
+
+
+@pytest.mark.parametrize("by", ["step", "done"])
+async def test_a_late_park_of_a_call_that_ended_opens_nothing(store: FlowStore, by: str) -> None:
+    """A park sent twice, its first copy late. The call has ended in this execution, so
+    nothing would ever answer the task again."""
+    await started(store)
+    tasks = opened(store, "a")
+    if by == "step":
+        await ends_step(store, "a")
+    else:
+        await park(store, "a")
+        await answer(store, "a", 20)
+    tasks.mark_answered("a", {"ok": True}, None, "wr1")
+    await park(store, "a")
+    held = tasks.get("a")
+    assert held is not None and (held.state, held.answer) == ("answered", {"ok": True})
+
+
+async def test_a_park_of_a_call_another_execution_ended_opens_its_task(store: FlowStore) -> None:
+    """A Reset made in Temporal leaves the old execution's end of the call on the row."""
+    await started(store)
+    tasks = opened(store, "a")
+    await ends_step(store, "a")
+    tasks.mark_answered("a", {}, None, "wr1")
+    await store.follow_run("r1", "wr9")
+    await park(store, "a", execution="wr9")
+    assert states(tasks) == {"a": "open"}
+
+
 async def test_a_replaced_executions_park_opens_nothing(store: FlowStore) -> None:
     await started(store)
     tasks = opened(store, "a")

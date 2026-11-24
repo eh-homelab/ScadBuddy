@@ -159,6 +159,14 @@ def _trimmed(done: list[FlowWaiting], floor: int | None) -> tuple[list[FlowWaiti
     return [w for w in done if id(w) not in gone], max(latest, floor or 0)
 
 
+def _ended(run: Run, done: list[FlowWaiting], call_id: str, execution: str) -> bool:
+    """Whether ``execution`` has ended the call: its own step or resolved entry says so."""
+    return any(
+        s.call_id == call_id and s.workflow_run_id == execution and s.ended_at is not None
+        for s in run.steps
+    ) or any(w.call_id == call_id and w.workflow_run_id == execution for w in done)
+
+
 def _done(row: DictRow) -> list[FlowWaiting]:
     """The row's resolved entries."""
     return [FlowWaiting.model_validate(w) for w in row["waiting_done"]]
@@ -1254,9 +1262,15 @@ class FlowStore:
             # Each before the run's own event (`TaskStore.cancel_for_run_in`).
             if after.status in TERMINAL:
                 self._tasks.cancel_for_run_in(conn, after.id)
-            elif write.waiting_add is not None and parks and write.waiting_add.kind == "answer":
+            elif (
+                write.waiting_add is not None
+                and parks
+                and write.waiting_add.kind == "answer"
+                and not _ended(run, _done(row), write.waiting_add.call_id, write.workflow_run_id)
+            ):
                 # A Reset to between the prompt's open and its park cancelled the task: the
-                # open is in the history and is not done again.
+                # open is in the history and is not done again. A call that this execution
+                # has ended parks only by a late copy of its park.
                 self._tasks.reopen_in(conn, after.id, write.waiting_add.call_id)
             self._announce(conn, after)
         return after

@@ -113,7 +113,7 @@ from scadbuddy.orders.component import OrdersDep
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.tasks.component import TasksComponent, TasksDep
-from scadbuddy.tasks.models import Task
+from scadbuddy.tasks.models import TaskQuestion
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
 from scadbuddy.workflows.flow_models import HopRecord
@@ -249,7 +249,11 @@ class RunAnswer(BaseModel):
 
 class PendingEntry(BaseModel):
     """A host call parked for a person. Never an approval's input (§6.6), nor a
-    parent's narrowing of it (#2482): only that one was proposed."""
+    parent's narrowing of it (#2482): only that one was proposed.
+
+    A prompt's entry holds its question: at most `MAX_SCHEMA_BYTES` of schema,
+    `MAX_JSON_BYTES` of context and a few short texts. How many wait at once is up to the
+    script. It never holds an answer."""
 
     call_id: str
     kind: Literal["approval", "answer"]
@@ -272,8 +276,8 @@ class PendingEntry(BaseModel):
     #: which an approval sends back as `bound_hash` (#4445).
     bound_hash: str | None = None
     #: A prompt's task (#7364), which takes its answer at `POST /tasks/{id}/answer`; None
-    #: for a `wait_for_human`, whose answer is a text.
-    task: Task | None = None
+    #: for a `wait_for_human`, whose answer is a text. Its own route has the answer.
+    task: TaskQuestion | None = None
 
 
 class GrantUseView(BaseModel):

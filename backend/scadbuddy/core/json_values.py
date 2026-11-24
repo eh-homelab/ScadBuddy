@@ -34,19 +34,20 @@ def _scalar_problem(value: Any) -> str | None:
 
 
 def unstorable(value: Any, *, max_depth: int = MAX_DEPTH) -> Iterator[Unstorable]:
-    """Every part of ``value`` that cannot be stored, walked without recursion. A key's
-    problem is named at its object. Nothing below ``max_depth`` is walked."""
+    """Every part of ``value`` that cannot be stored, walked without recursion. A tuple is
+    an array, as JSON writes it. A key's problem is named at its object. Nothing below
+    ``max_depth`` is walked."""
     stack: list[tuple[tuple[str | int, ...], Any]] = [((), value)]
     while stack:
         path, one = stack.pop()
-        if isinstance(one, dict | list) and len(path) >= max_depth:
+        if isinstance(one, dict | list | tuple) and len(path) >= max_depth:
             yield Unstorable(path, "is nested too deeply")
         elif isinstance(one, dict):
             for key in one:
                 if (problem := _scalar_problem(key)) is not None:
                     yield Unstorable(path, problem)
             stack += [((*path, key), item) for key, item in reversed(one.items())]
-        elif isinstance(one, list):
+        elif isinstance(one, list | tuple):
             stack += [((*path, i), one[i]) for i in range(len(one) - 1, -1, -1)]
         elif (problem := _scalar_problem(one)) is not None:
             yield Unstorable(path, problem)

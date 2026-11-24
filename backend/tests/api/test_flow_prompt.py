@@ -19,7 +19,7 @@ from temporalio.client import Client
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.flows import keys as flow_keys
-from scadbuddy.tasks.models import Task
+from scadbuddy.tasks.models import Task, TaskQuestion
 from scadbuddy.tasks.store import TaskNotOpenError, TaskStore
 from scadbuddy.workflows.flow_tools import OPEN_WAIT
 from tests.api.test_flow_reset import preview
@@ -97,9 +97,10 @@ def test_a_prompt_answer_reaches_the_script_as_a_dict(
     run_id, entry = parked(client, ASK, "return a['email']")
     assert (entry["kind"], entry["fn"], entry["prompt"]) == ("answer", "prompt", "Where to?")
     call_id = entry["call_id"]
-    # The run's page has the task itself, as its own route and the list do.
+    # The run's page has the task as its own route and the list do, without the answer.
     held = task(client, call_id)
-    assert entry["task"] == held
+    unanswered = {k: v for k, v in held.items() if k not in ("answer", "answered_by")}
+    assert entry["task"] == unanswered and len(unanswered) == len(held) - 2
     assert (held["state"], held["title"], held["schema"]) == ("open", "Where to?", EMAIL)
     assert (held["run_id"], held["place"], held["context"]) == (run_id, "bench", [{"text": "hi"}])
     listed = client.get("/api/v1/tasks", params={"place": "bench"}).json()["tasks"]
@@ -294,7 +295,9 @@ def test_a_reset_before_the_answer_opens_the_task_again(client: TestClient) -> N
         ),
     )
     held = again["pending"][0]["task"]
-    assert (held["state"], held["answer"], held["answered_by"]) == ("open", None, None)
+    assert held["state"] == "open"
+    whole = task(client, call_id)
+    assert (whole["state"], whole["answer"], whole["answered_by"]) == ("open", None, None)
     given = answer(client, call_id, JANE, "k2")
     assert given.status_code == 200, given.text
     view = until(client, run_id, lambda v: [p["prompt"] for p in v["pending"]] == ["Second?"])
@@ -306,6 +309,24 @@ def test_a_reset_before_the_answer_opens_the_task_again(client: TestClient) -> N
     assert go.status_code == 200, go.text
     assert finished(client, run_id)["run"]["result"] == "result: ['jane@example.com', 'go']"
     assert task(client, call_id)["answer"] == JANE
+
+
+def test_a_run_page_shows_no_answer_of_a_question_still_listed(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """An answer is landing: the row has it, and the run still lists the question."""
+    run_id, entry = parked(client, ASK)
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE tasks SET state = 'answered', answer = '{\"email\": \"secret@example.com\"}',"
+            " answered_by = 'jane' WHERE id = %s",
+            (entry["call_id"],),
+        )
+    page = client.get(f"/api/v1/workflow-runs/{run_id}")
+    [pending] = page.json()["pending"]
+    assert pending["task"]["state"] == "answered"
+    assert not {"answer", "answered_by"} & set(pending["task"])
+    assert "secret@example.com" not in page.text
 
 
 def test_a_run_page_reads_its_tasks_once_and_only_its_own(
@@ -323,7 +344,7 @@ def test_a_run_page_reads_its_tasks_once_and_only_its_own(
     reads: list[tuple[str, list[str]]] = []
     original = TaskStore.of_run
 
-    def of_run(self: TaskStore, run: str, ids: Any) -> dict[str, Task]:
+    def of_run(self: TaskStore, run: str, ids: Any) -> dict[str, TaskQuestion]:
         reads.append((run, sorted(ids)))
         return original(self, run, ids)
 

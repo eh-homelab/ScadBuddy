@@ -56,7 +56,8 @@ class _TaskFields(BaseModel):
 
 class TaskOpen(_TaskFields):
     """What a flow gives to open a task. Only this way in checks the schema, so a stored
-    row still reads when the rules tighten later."""
+    row still reads when the rules tighten later. Its context and its schema nest at most
+    `MAX_DEPTH` deep, counted without recursion."""
 
     @field_validator("title", "context", "place", "ui")
     @classmethod
@@ -97,13 +98,18 @@ def open_problems(error: ValidationError) -> str:
     )
 
 
-class Task(_TaskFields):
+class TaskQuestion(_TaskFields):
+    """A task without its answer, and without who gave it."""
+
     project_id: str | None
     state: TaskState
-    answer: dict[str, Any] | None
-    answered_by: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class Task(TaskQuestion):
+    answer: dict[str, Any] | None
+    answered_by: str | None
 
 
 class AnswerProblem(BaseModel):
