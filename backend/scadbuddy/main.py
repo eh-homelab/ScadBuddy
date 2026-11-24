@@ -135,6 +135,7 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.orders.archives import mirror_attempt
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.orders.storefront.prepare import prepare_activities
@@ -197,6 +198,8 @@ from scadbuddy.worker import (
     worker_deps_from_state,
 )
 from scadbuddy.workflows.activities import WorkerDeps
+from scadbuddy.workflows.attempt_media import STEP_ACTIVITY as ATTEMPT_MEDIA_STEP
+from scadbuddy.workflows.attempt_media import AttemptMediaStep, VersionedAttemptMedia
 from scadbuddy.workflows.client import (
     LIBRARY_DEPLOYMENT_NAME,
     bambuddy_worker,
@@ -649,6 +652,27 @@ async def _join_at_shutdown(running: asyncio.Task[Any]) -> None:
         )
     elif not running.cancelled():
         running.exception()  # retrieved: the sweep logged it
+
+
+def _attempt_media_activity(state: AppState) -> Callable[..., Any]:
+    """The step of an attempt's ``AttemptMedia`` workflow (#7233, spec 2026-11-05 §4.6):
+    it heartbeats while a timelapse downloads."""
+
+    @activity.defn(name=ATTEMPT_MEDIA_STEP)
+    async def attempt_media_step(fulfilment_id: str) -> AttemptMediaStep:
+        orders = state.components.get(ORDERS)
+        return await _heartbeating(
+            mirror_attempt(
+                orders.lifecycle,
+                orders.integrations,
+                state.store.blobs,
+                ClaimStore(state.paths.claims),
+                fulfilment_id,
+                limit=state.settings.media_upload_max_bytes,
+            )
+        )
+
+    return attempt_media_step
 
 
 def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
@@ -1902,6 +1926,7 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedSpoolRefresh,
     VersionedStagedFile,
     VersionedPrepareListing,
+    VersionedAttemptMedia,
 )
 
 
@@ -2055,6 +2080,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             lambda: state.uploads,
         ),  # Each staged customer file's watcher (#6133).
         *staged_file_activities(state),
+        # Each order attempt's media import (#7233).
+        _attempt_media_activity(state),
         # A listing's prepared colour combinations (#6237, #6299 review).
         *prepare_activities(state, lambda: state.components.get(ORDERS)),
     ]
