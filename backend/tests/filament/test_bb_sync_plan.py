@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg.types.json import Jsonb
 
+from scadbuddy.bambuddy.models import BbSupplier
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync, SyncDirection
 from scadbuddy.entities.registry import EntityStore
@@ -697,6 +698,26 @@ def test_an_unlinked_supplier_with_a_filament_product_is_created(pg_pool: PgPool
     writes = _plan(f, _snap([], suppliers=[]), sync).writes
     (create,) = [w for w in writes if w.kind == "supplier"]
     assert (create.op, create.sb_id) == ("create", shop.id)
+
+
+def test_a_supplier_with_an_open_create_intent_is_still_adopted(pg_pool: PgPool) -> None:
+    """R-P2-9: an unlinked supplier with no filament product but an open create intent (a
+    create whose answer was lost) stays in the sync, so Bambuddy's row of its name is
+    adopted as before."""
+    f = _filament(pg_pool)
+    shop = f.suppliers.create(SupplierCreate(name="Bolt Depot"))
+    read_at = datetime.now(UTC)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_creates (kind, sb_id, started_at) VALUES ('supplier', %s, %s)",
+            (shop.id, read_at - timedelta(hours=1)),
+        )
+    sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
+    snap = _snap([], suppliers=[BbSupplier(id=9, name="Bolt Depot")], read_at=read_at)
+    writes = _plan(f, snap, sync).writes
+    assert [(w.op, w.sb_id, w.bb_id) for w in writes if w.kind == "supplier"] == [
+        ("update", shop.id, 9)
+    ]
 
 
 def test_a_linked_supplier_with_no_product_is_still_updated(pg_pool: PgPool) -> None:
