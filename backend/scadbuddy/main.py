@@ -108,8 +108,9 @@ from scadbuddy.filament.bb_sync_results import InProcessFilamentSync, adopt_inst
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
-from scadbuddy.filament.preset_mirror import sync_and_mirror
+from scadbuddy.filament.preset_mirror import mirror_after_pull
 from scadbuddy.filament.print_uses import PoolPrintUses
+from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
 from scadbuddy.filament.sensors import PoolSensorNotifications
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
@@ -135,6 +136,7 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.orders.archives import mirror_attempt
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.orders.storefront.prepare import prepare_activities
@@ -165,7 +167,6 @@ from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.slicing.component import SLICING
-from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activity
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
 from scadbuddy.spools.activities import (
     capture_backstop_activity,
@@ -197,6 +198,8 @@ from scadbuddy.worker import (
     worker_deps_from_state,
 )
 from scadbuddy.workflows.activities import WorkerDeps
+from scadbuddy.workflows.attempt_media import STEP_ACTIVITY as ATTEMPT_MEDIA_STEP
+from scadbuddy.workflows.attempt_media import AttemptMediaStep, VersionedAttemptMedia
 from scadbuddy.workflows.client import (
     LIBRARY_DEPLOYMENT_NAME,
     bambuddy_worker,
@@ -649,6 +652,27 @@ async def _join_at_shutdown(running: asyncio.Task[Any]) -> None:
         )
     elif not running.cancelled():
         running.exception()  # retrieved: the sweep logged it
+
+
+def _attempt_media_activity(state: AppState) -> Callable[..., Any]:
+    """The step of an attempt's ``AttemptMedia`` workflow (#7233, spec 2026-11-05 §4.6):
+    it heartbeats while a timelapse downloads."""
+
+    @activity.defn(name=ATTEMPT_MEDIA_STEP)
+    async def attempt_media_step(fulfilment_id: str) -> AttemptMediaStep:
+        orders = state.components.get(ORDERS)
+        return await _heartbeating(
+            mirror_attempt(
+                orders.lifecycle,
+                orders.integrations,
+                state.store.blobs,
+                ClaimStore(state.paths.claims),
+                fulfilment_id,
+                limit=state.settings.media_upload_max_bytes,
+            )
+        )
+
+    return attempt_media_step
 
 
 def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
@@ -1902,6 +1926,7 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedSpoolRefresh,
     VersionedStagedFile,
     VersionedPrepareListing,
+    VersionedAttemptMedia,
 )
 
 
@@ -1957,6 +1982,12 @@ async def _make_library_current(
         )
     finally:
         routed.set()
+
+
+async def _import_presets(state: AppState) -> PresetImport:
+    """The spool refresh's presets import (#7244), from the configured Bambuddy."""
+    loaded = await asyncio.to_thread(state.settings_store.load)
+    return await import_from_bambuddy(state.settings_store.pool, state.store.blobs, loaded)
 
 
 async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
@@ -2015,11 +2046,17 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *spool_activities(),
         # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule:
         # read by the print worker, which sends the rows to the CRUD routes (#6772).
+        # Then, while `filament_sync.presets` pulls, Bambuddy's filament presets into
+        # ScadBuddy's own, read from Bambuddy (#7244).
         filament_pull_activity(
             state.components.get(FILAMENT),
             lambda: state.settings_store.load(),
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
             partial(execute_pull, client, settings.temporal_task_queue_bambuddy),
+            partial(_import_presets, state),
+            lambda: mirror_after_pull(
+                state.settings_store.pool, state.store.blobs, state.settings_store.load
+            ),
         ),
         # The printers' trays reconciled with the ledger, the watch's backstop (#6263).
         capture_backstop_activity(state.components.get(PRINTERS)),
@@ -2029,15 +2066,6 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             state.components.get(FILAMENT),
             lambda: state.settings_store.load(),
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
-        ),
-        # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
-        # Then ScadBuddy's own filament presets take what the copy read (#7176).
-        held_presets_activity(
-            lambda: HeldPresetStore(state.projection.pool),
-            lambda: state.settings_store.load(),
-            lambda held: sync_and_mirror(
-                state.settings_store.pool, state.store.blobs, held, state.settings_store.load
-            ),
         ),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
@@ -2055,6 +2083,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             lambda: state.uploads,
         ),  # Each staged customer file's watcher (#6133).
         *staged_file_activities(state),
+        # Each order attempt's media import (#7233).
+        _attempt_media_activity(state),
         # A listing's prepared colour combinations (#6237, #6299 review).
         *prepare_activities(state, lambda: state.components.get(ORDERS)),
     ]
@@ -2113,10 +2143,11 @@ async def _set_up_housekeeping(
     spool_refresh: float,
     print_queue: str | None = None,
 ) -> bool:
-    """The housekeeping Schedules, the spool refresh (Bambuddy's kept presets and its
-    spools pulled and the filament capture backstop, every ``spool_refresh`` seconds; 0:
-    none, #3818, #6262, #6263), the sensor notifications' pass on ``print_queue`` (the
-    ``bambuddy`` queue, every minute, #6646) and the
+    """The housekeeping Schedules, the spool refresh (Bambuddy's spools pulled, its
+    presets while ``filament_sync.presets`` pulls, and the filament capture backstop,
+    every ``spool_refresh`` seconds; 0: none, #3818, #6262, #6263, #7244), the sensor
+    notifications' pass on ``print_queue`` (the ``bambuddy`` queue, every minute, #6646)
+    and the
     preview backfill's (``previews``: the scheduler's render bound; None, previews off:
     none), retried until Temporal takes them: a frontend can answer the connect before
     it can create one. Each set-up triggers its Schedule, so the preview one comes last:

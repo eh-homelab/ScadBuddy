@@ -228,8 +228,8 @@ export function offItemReason(off: OffCallItem): string {
 
 /**
  * The one sentence a call of a tool switched off in Settings is refused with, by the name
- * Claude Code gives it (`mcp__<server>__<tool>`, or a built-in's own), in a classic turn's
- * seam, a durable turn's tier check and call, and the forwarder. agent-durable's `TOOL_OFF`
+ * Claude Code gives it (`mcp__<server>__<tool>`, or a built-in's own), in a turn's
+ * seam, a ToolCall's tier check and call, and the forwarder. agent-durable's `TOOL_OFF`
  * says the same (the `refusals` vector pins the text).
  */
 export function toolOffReason(harnessName: string): string {

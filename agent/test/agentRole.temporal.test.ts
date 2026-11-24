@@ -34,7 +34,6 @@ import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { wireRuntimeSync } from '../src/sessions/runtimeSync.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
-import { queuePollers } from '../src/temporal/pollers.js'
 import { FilePayloadStore, subjectDataConverter } from '../src/temporal/payloadCodec.js'
 import { dropPayloadKey, type PgPayloadKeys } from './support/sql/payloadKeys.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from '../src/temporal/session/affinity.js'
@@ -49,7 +48,7 @@ import { fixedCredentials } from './support/fixedCredentials.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
-import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { localTemporal, pollerIdentities, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
 import { PgTurnRows } from './support/sql/turnRows.js'
 import { durableStores, hostStores } from './support/agentSessions.js'
 import { sqlGateDb } from './support/sql/gate.js'
@@ -167,8 +166,7 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
 
   /** The identities polling `queue` (1 workflow, 2 activity) now. */
   async function pollers(queue: string, type: 1 | 2): Promise<string[]> {
-    // Every partition (temporal/pollers.ts): a worker can poll only the non-root ones (#7306).
-    return (await queuePollers(env.client, queue, type, Date.now() + 10_000)).flatMap((p) => (p.identity ? [p.identity] : []))
+    return pollerIdentities(env.client, queue, type)
   }
 
   async function agentProcess(role: 'api' | 'worker'): Promise<AgentProcess> {

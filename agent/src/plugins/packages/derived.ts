@@ -56,7 +56,7 @@ export function omittedOf(access: PackageAccess | undefined, servers: ReadonlyMa
 }
 
 /**
- * What package `pkg`'s copy leaves out in a turn, classic and durable alike: `omittedOf` its
+ * What package `pkg`'s copy leaves out in a turn: `omittedOf` its
  * items' access and its own servers' switches (`switches`, by `packageServerSource`, mcp.ts
  * `serverAccess`), its servers whose names another package's server carries
  * (`colliding`, mcp.ts `collidingServerNames`), and those no turn can offer

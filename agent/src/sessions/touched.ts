@@ -767,6 +767,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_location_upsert',
   'filament_spool_move',
   'filament_bambuddy_import',
+  // #7244: the presets import makes ScadBuddy presets and renames bindings, no recorded kind.
+  'filament_bambuddy_presets_import',
   'filament_sync_ams_weights',
   'filament_sensor_save',
   'filament_sensor_archive',
