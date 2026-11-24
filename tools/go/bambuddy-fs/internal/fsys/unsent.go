@@ -795,7 +795,8 @@ func (t *tree) send(ctx context.Context, e *entry) {
 		e.sending.Unlock()
 		return
 	}
-	// An attempt is the write's (Attempts+1)th: the first was its own upload.
+	// The retry's number is Attempts+1: Attempts counts the tries already made (the
+	// write's own upload, or none for a write-back entry, which is only queued).
 	ctx, retry := telemetry.StartRetry(ctx, rec.Attempts+1)
 	result, sentID := telemetry.RetryFailed, 0
 	defer func() { retry.End(result, sentID) }()
