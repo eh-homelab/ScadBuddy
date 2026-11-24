@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { SpoolType } from '../../api/filament'
@@ -9,7 +9,8 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { MakeTypeError, makeTypeFromBook } from '../filament/makeType'
+import { LinkTypeDialog } from '../filament/LinkTypeDialog'
+import { bookRowIds, linkTypeToBook, MakeTypeError, makeTypeFromBook, rankCandidates, type BookRowIds, type TypeCandidate } from '../filament/makeType'
 import { DataTable, type Column } from '../records/DataTable'
 import { refusalText } from './refusal'
 import { filamentLinks } from '../../lib/filamentLinks'
@@ -113,9 +114,16 @@ function fillLine(row: DensityFillRow): string {
  *
  * #6262 Task 16 (Decision 8): the Filament section's Types tab mounts this as its "Price
  * book" panel, the book's one UI. With `types`, each row shows the type it is linked to
- * (`SpoolType.filament_id`) as a link, or "Make a type" for a row with none.
+ * (`SpoolType.filament_id`) as a link, or "Make a type" for a row with none. #7159: when a
+ * type of the row's brand and colour exists, "Make a type" offers to link it instead
+ * (`LinkTypeDialog`), naming each with its catalog `names` and its `spoolsOf` count.
  */
-export function FilamentsEditor({ types, onTypesChanged }: { types?: SpoolType[]; onTypesChanged?: () => void } = {}) {
+export function FilamentsEditor({
+  types,
+  names = new Map(),
+  spoolsOf,
+  onTypesChanged,
+}: { types?: SpoolType[]; names?: ReadonlyMap<string, string>; spoolsOf?: ReadonlyMap<string, number>; onTypesChanged?: () => void } = {}) {
   const [showArchived, setShowArchived] = useState(false)
   const book = useAsync(() => api.priceBook(showArchived), [showArchived])
   const [draft, setDraft] = useState<Draft>(EMPTY)
@@ -124,12 +132,32 @@ export function FilamentsEditor({ types, onTypesChanged }: { types?: SpoolType[]
   const [error, setError] = useState<string | null>(null)
   const [imported, setImported] = useState<SpoolImportRow[] | null>(null)
   const [filled, setFilled] = useState<DensityFillRow[] | null>(null)
+  /** #7159: the row whose "Make a type" found types of its brand and colour, and its catalog ids. */
+  const [choice, setChoice] = useState<{ row: Filament; ids: BookRowIds } | null>(null)
+  /**
+   * #7344 R-7344-1: the choice's types come from the current `types`, so a reload while it is
+   * open adds, drops or updates them; with none left the choice closes.
+   */
+  const candidates = choice && types ? rankCandidates(choice.row, choice.ids, types) : []
+  if (choice && candidates.length === 0) setChoice(null)
+  /** The newest `types`, for a click whose catalog reads end after a reload. */
+  const latestTypes = useRef(types)
+  useEffect(() => {
+    latestTypes.current = types
+  })
+  const [linked, setLinked] = useState<string | null>(null)
   const filaments = book.data?.filaments ?? []
   const emptyDensities = filaments.some((f) => !f.archived_at && !f.density_g_cm3)
 
+  /** Each action starts with no error and no earlier link notice on screen. */
+  function clearNotices() {
+    setError(null)
+    setLinked(null)
+  }
+
   async function act(action: () => Promise<unknown>) {
     setBusy(true)
-    setError(null)
+    clearNotices()
     try {
       await action()
       setDraft(EMPTY)
@@ -145,7 +173,7 @@ export function FilamentsEditor({ types, onTypesChanged }: { types?: SpoolType[]
   // Not `act`: a draft being typed stays.
   async function importSpools() {
     setBusy(true)
-    setError(null)
+    clearNotices()
     try {
       setImported((await api.importSpools()).rows)
       book.refresh()
@@ -156,10 +184,28 @@ export function FilamentsEditor({ types, onTypesChanged }: { types?: SpoolType[]
     }
   }
 
-  // Not `act`: a draft being typed stays.
+  /**
+   * #7159 — "Make a type" first looks for types of the row's brand and colour (R-7159-1); with
+   * one or more it opens the choice (R-7159-3), else it makes the type as before. Every click
+   * comes here, so each row gets the check (R-7159-6). Not `act`: a draft being typed stays.
+   */
   async function makeType(filament: Filament) {
     setBusy(true)
-    setError(null)
+    clearNotices()
+    try {
+      const ids = types ? await bookRowIds(filament) : null
+      // Ranked on the types of now, not of the click: an empty choice would close unseen.
+      const now = latestTypes.current
+      if (ids && now && rankCandidates(filament, ids, now).length > 0) setChoice({ row: filament, ids })
+      else await makeNewType(filament)
+    } catch (err) {
+      setError(refusalText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function makeNewType(filament: Filament) {
     try {
       await makeTypeFromBook(filament)
       onTypesChanged?.()
@@ -168,6 +214,39 @@ export function FilamentsEditor({ types, onTypesChanged }: { types?: SpoolType[]
         const kept = err.added.length > 0 ? ` ${err.added.join(', ')} stays in the catalog.` : ''
         setError(`${refusalText(err.cause)}${kept}`)
       } else setError(refusalText(err))
+    }
+  }
+
+  async function chooseNew(filament: Filament) {
+    setBusy(true)
+    clearNotices()
+    setChoice(null)
+    try {
+      await makeNewType(filament)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * R-7159-4: only the type's cost; the server links the book row of the type's own identity.
+   * R-7344-2: the answer's `filament_id` says which row that is, whatever the dialog forecast.
+   */
+  async function linkType(filament: Filament, candidate: TypeCandidate) {
+    setBusy(true)
+    clearNotices()
+    setChoice(null)
+    try {
+      const type = await linkTypeToBook(candidate.type, filament)
+      setLinked(
+        type.filament_id === filament.id
+          ? `Linked ${type.code} to ${filamentLabel(filament)}.`
+          : `${type.code} now costs ${filament.cost_per_kg} per kg. It is linked to its own price book row, so ${filamentLabel(filament)} still has no type.`,
+      )
+      onTypesChanged?.()
+      book.refresh()
+    } catch (err) {
+      setError(refusalText(err))
     } finally {
       setBusy(false)
     }
@@ -175,7 +254,7 @@ export function FilamentsEditor({ types, onTypesChanged }: { types?: SpoolType[]
 
   async function fillDensities() {
     setBusy(true)
-    setError(null)
+    clearNotices()
     try {
       setFilled((await api.fillDensities()).rows)
       book.refresh()
@@ -287,7 +366,7 @@ export function FilamentsEditor({ types, onTypesChanged }: { types?: SpoolType[]
               onClick={() => {
                 setEditing(f.id)
                 setDraft(draftOf(f))
-                setError(null)
+                clearNotices()
               }}
             >
               Edit
@@ -408,10 +487,28 @@ export function FilamentsEditor({ types, onTypesChanged }: { types?: SpoolType[]
           </Button>
         )}
       </form>
+      {linked && (
+        <p role="status" aria-label="Type link" className="text-[13px] text-muted-foreground">
+          {linked}
+        </p>
+      )}
       {error && (
         <p role="alert" className="text-[13px] text-warn">
           {error}
         </p>
+      )}
+      {choice && candidates.length > 0 && (
+        <LinkTypeDialog
+          row={choice.row}
+          label={filamentLabel(choice.row)}
+          candidates={candidates}
+          names={names}
+          spoolsOf={spoolsOf}
+          busy={busy}
+          onLink={(candidate) => void linkType(choice.row, candidate)}
+          onMake={() => void chooseNew(choice.row)}
+          onClose={() => setChoice(null)}
+        />
       )}
     </section>
   )

@@ -14,8 +14,8 @@ function turns(pollers: { lastAccessTime?: { seconds: number; nanos?: number } }
     options: { namespace: 'default' },
     withDeadline: <R>(_deadline: number, fn: () => Promise<R>) => fn(),
     workflowService: {
-      describeTaskQueue: () => {
-        calls++
+      describeTaskQueue: ({ taskQueue }: { taskQueue: { name: string } }) => {
+        if (!taskQueue.name.startsWith('/_sys/')) calls++
         return pollers instanceof Error ? Promise.reject(pollers) : Promise.resolve({ pollers })
       },
     },
@@ -31,7 +31,7 @@ describe('whether a session can start now', () => {
     const { t, calls } = turns([{ lastAccessTime: secondsAgo(5) }])
     expect(await t.unready()).toBeUndefined()
     expect(await t.unready()).toBeUndefined()
-    // One answer for both queues, reused for the second call.
+    // One answer for both queues (each asked on its root and every other partition), reused for the second call.
     expect(calls()).toBe(2)
   })
 
@@ -65,8 +65,10 @@ describe('whether a unified session can start now', () => {
       withDeadline: <R>(_deadline: number, fn: () => Promise<R>) => fn(),
       workflowService: {
         describeTaskQueue: ({ taskQueue, taskQueueType }: { taskQueue: { name: string }; taskQueueType: number }) => {
-          asked.push(`${taskQueue.name}/${taskQueueType}`)
-          const gone = missing && missing.queue === taskQueue.name && missing.type === taskQueueType
+          // Every partition of a queue (`/_sys/<queue>/<n>`, temporal/pollers.ts) answers as the queue.
+          const queue = taskQueue.name.replace(/^\/_sys\/(.+)\/\d+$/, '$1')
+          if (queue === taskQueue.name) asked.push(`${queue}/${taskQueueType}`)
+          const gone = missing && missing.queue === queue && missing.type === taskQueueType
           return Promise.resolve({ pollers: gone ? [{ lastAccessTime: secondsAgo(300) }] : [{ lastAccessTime: secondsAgo(5) }] })
         },
       },
