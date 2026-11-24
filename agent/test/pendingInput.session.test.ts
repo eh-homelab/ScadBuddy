@@ -19,6 +19,7 @@ const entry = (id: string, kind: 'approval' | 'answer'): PendingInputEntry =>
 /** A manager whose record holds `rows`; any call to Temporal fails the test. */
 function managerOver(rows: PendingInputEntry[], grant = false) {
   const filters: ProjectionFilter[] = []
+  const grantReads: boolean[] = []
   const temporal = () => {
     throw new Error('the per-session read asked Temporal')
   }
@@ -30,12 +31,18 @@ function managerOver(rows: PendingInputEntry[], grant = false) {
         return rows
       },
     },
-    approvals: { holdsGrant: async () => grant, listVisiblePending: async () => [] },
+    approvals: {
+      holdsGrant: async () => {
+        grantReads.push(grant)
+        return grant
+      },
+      listVisiblePending: async () => [],
+    },
     questions: { listPending: async () => ({ questions: [], summariesTruncated: false }) },
     queue: { ownEntries: async () => [] },
     durable: new Proxy({}, { get: temporal }),
   } as unknown as SessionManager
-  return { sessions, filters }
+  return { sessions, filters, grantReads }
 }
 
 describe("one session's pending input", () => {
@@ -52,9 +59,10 @@ describe("one session's pending input", () => {
   })
 
   it("reads a grant holder's entries with the aggregate's filter", async () => {
-    const { sessions, filters } = managerOver([entry('durable:a', 'approval')], true)
+    const { sessions, filters, grantReads } = managerOver([entry('durable:a', 'approval')], true)
     expect((await sessionPendingInput(sessions, GRANTED, SESSION))?.entries.map((e) => e.id)).toEqual(['durable:a'])
     expect(filters).toEqual([{ sessionId: SESSION, ownedBy: GRANTED, allApprovals: true }])
+    expect(grantReads).toEqual([true])
   })
 
   it('is undefined for a principal that may not see the session, and reads nothing', async () => {

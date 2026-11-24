@@ -116,15 +116,16 @@ export type PendingInputPage = { entries: PendingInputEntry[]; summaries_truncat
  * Every entry `principal` may see (plan 5b ruling 10): for the browser user, all of
  * them. For anyone else, the approvals it may see (all of them with the approval
  * grant; else its own sessions' and its own MCP prepares), and the answers of the
- * sessions it owns. `sessionId` narrows it to one session.
+ * sessions it owns. `sessionId` narrows it to one session; `grant` is whether `principal`
+ * holds the approval grant, where the caller has read it already.
  */
 export async function pendingInput(
   sessions: SessionManager,
   principal: Owner = BROWSER_USER,
-  filter: { sessionId?: string; runs?: boolean } = {},
+  filter: { sessionId?: string; runs?: boolean; grant?: boolean } = {},
 ): Promise<PendingInputPage> {
   const browser = principal.kind === 'browser'
-  const grant = !browser && (await sessions.approvals.holdsGrant(principal))
+  const grant = !browser && (filter.grant ?? (await sessions.approvals.holdsGrant(principal)))
   // A flow run's own parked calls are the person's (#2482, spec 2026-10-11 §4.5): in the
   // browser user's aggregate read, the badge's, and in no other principal's.
   const withRuns = browser && filter.runs === true && filter.sessionId === undefined
@@ -177,9 +178,10 @@ export async function sessionPendingInput(
   if (!isUuid(sessionId)) return undefined
   const session = await sessions.projection.session(sessionId)
   if (!session) return undefined
+  const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
   const own = canSee(principal, { owner: session.owner, creator: session.creator, offer: null })
-  if (principal.kind !== 'browser' && !own && !(await sessions.approvals.holdsGrant(principal))) return undefined
-  return await pendingInput(sessions, principal, { sessionId })
+  if (principal.kind !== 'browser' && !grant && !own) return undefined
+  return await pendingInput(sessions, principal, { sessionId, grant })
 }
 
 /** A response's cap (gate/validate.ts, plan 5b ruling 1). */
