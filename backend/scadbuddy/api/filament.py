@@ -1839,21 +1839,21 @@ def _empty_weight_of(filament: Filament) -> Callable[[UUID], int | None]:
         "format when it holds OpenSpool or OpenTag3D, else in the `filament_tag_format` "
         "setting. Answers the records only. The browser writes them, and a write that skips "
         "this route has no backup. 404 for no spool. 409 `backup_mismatch` when the backup "
-        "is unknown, is of another UID, is over 10 minutes old or is not a `spool_write` "
+        "is unknown, does not hold the `records` sent, is of another UID, is over 10 minutes "
+        "old or is not a `spool_write` "
         "backup."
     ),
 )
 async def tag_records(
     filament: FilamentDep, store: SettingsStoreDep, spool_id: UUID, body: m.TagRecordsIn
 ) -> m.TagRecords:
-    default = store.read({"filament_tag_format"})["filament_tag_format"]
     try:
         found = await asyncio.to_thread(
             lambda: tags.records_for_spool(
                 filament.spools,
                 spool_id,
                 body,
-                default=default,
+                default=store.read({"filament_tag_format"})["filament_tag_format"],
                 empty_weight_g=_empty_weight_of(filament),
                 defaults=filament.spools.defaults(),
             )
@@ -1873,7 +1873,8 @@ async def tag_records(
         "After a phone writes a tag: `sent` is what it wrote and `read_back` what the tag "
         "held after. In one transaction ScadBuddy checks the backup (as `tag-records` "
         "does), that `read_back` equals `sent`, that `sent` is one OpenSpool or OpenTag3D "
-        "record and that it equals what `tag-records` answers for the spool now. Only then "
+        "record and that it equals what `tag-records` answers for the spool now, in the "
+        "format it picks from the backup's records. Only then "
         "does it bind the tag to the spool, with the format's `data_origin` and the time "
         "of the write. 404 for no spool. 409 `backup_mismatch` for a backup that does not "
         "cover the write. 409 `read_back_mismatch` when the tag does not hold what was "
@@ -1896,6 +1897,7 @@ async def tag_written(
                 spool_id,
                 body,
                 actor=actor(caller),
+                default=store.read({"filament_tag_format"})["filament_tag_format"],
                 defaults=filament.spools.defaults(),
                 empty_weight_g=_empty_weight_of(filament),
             )
@@ -1912,8 +1914,6 @@ async def tag_written(
         raise _no_spool(exc.spool_id) from None
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None
-    if result is None:
-        raise _no_spool(spool_id)
     await _push_now(filament, store)
     return result
 

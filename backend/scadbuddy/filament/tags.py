@@ -400,9 +400,12 @@ def records_for_spool(
     defaults: FilamentDefaults,
 ) -> m.TagRecords | None:
     """The records that put the spool on the tag, in the tag's own format, else
-    ``default``; ``None`` for no such spool. The backup must cover this write."""
+    ``default``; ``None`` for no such spool. The backup must cover this write: it holds
+    the records the tag holds now (R19)."""
     with spools.transaction() as conn:
-        valid_backup(conn, body.backup_id, body.uid, "spool_write")
+        backup = valid_backup(conn, body.backup_id, body.uid, "spool_write")
+        if not same_records(body.records, backup.records):
+            raise BackupMismatchError()
         spool = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
     if spool is None:
         return None
@@ -415,25 +418,23 @@ def written(
     body: m.TagWrittenIn,
     *,
     actor: str,
+    default: TagFormat,
     defaults: FilamentDefaults,
     empty_weight_g: Callable[[UUID], int | None],
-) -> m.TagReadResult | None:
+) -> m.TagReadResult:
     """Check a write and bind the tag, in one transaction: the backup covers it, the tag
-    holds what was sent, and what was sent is what `records_for_spool` gives now. The
-    spool then holds the tag, with the format's origin and the write's time (R11).
-    ``None`` for no such spool."""
+    holds what was sent, and what was sent is what `records_for_spool` gives now, in the
+    format it would choose (R20). The check runs after the bind, which holds the spool's
+    lock, so no edit slips in between; a refusal rolls the bind back. The spool then
+    holds the tag, with the format's origin and the write's time (R11).
+    `SpoolNotFoundError` for no such spool."""
     with spools.transaction() as conn:
-        valid_backup(conn, body.backup_id, body.uid, "spool_write")
+        backup = valid_backup(conn, body.backup_id, body.uid, "spool_write")
         if not same_records(body.sent, body.read_back):
             raise ReadBackMismatchError()
         fmt = format_of(body.sent) if len(body.sent) == 1 else None
         if fmt is None:
             raise UnknownFormatError()
-        spool = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
-        if spool is None:
-            return None
-        if not same_records(body.sent, _encoded(spool, fmt, empty_weight_g).records):
-            raise SentMismatchError()
         result = read_on(
             conn,
             TagRead(source="phone", uid=body.uid, records=tuple(body.read_back)),
@@ -442,6 +443,10 @@ def written(
             marks_origin=False,
             defaults=defaults,
         )
+        assert result.spool is not None
+        want = _encoded(result.spool, pick_format(backup.records, default), empty_weight_g)
+        if not same_records(body.sent, want.records):
+            raise SentMismatchError()
         FilamentSpoolStore.set_origin(
             conn,
             spool_id,
@@ -468,7 +473,8 @@ def restore_records(
         ).fetchone()
         if old is None:
             raise TagBackupNotFoundError()
-        if valid_backup(conn, body.backup_id, body.uid, "restore").tag_id != tag_id:
+        fresh = valid_backup(conn, body.backup_id, body.uid, "restore")
+        if fresh.tag_id != tag_id or not same_records(body.records, fresh.records):
             raise BackupMismatchError()
     records = [m.NdefRecord.model_validate(r) for r in old["records"]]
     return m.TagRecords(format=format_of(records), records=records)

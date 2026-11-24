@@ -44,7 +44,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'POST /api/v1/filament/tags/{tag_id}/backups/{backup_id}/restore',
     reason:
-      "One step of the phone page's write in one tap (#7273 G7): read and back up, the records, the write, the read-back check. The browser holds the tag, so an agent writes through nfc_write, which the page runs.",
+      "One step of the phone page's restore of a tag backup (#7273 G7): the records to write back, after a fresh backup. The browser holds the tag and the page checks the read-back itself (R6), so an agent writes through nfc_write, which the page runs.",
   },
   {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',

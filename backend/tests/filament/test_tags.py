@@ -511,6 +511,7 @@ def test_a_checked_write_books_one_edited_event_with_the_formats_origin(pg_pool:
         actor="ann",
         defaults=DEFAULTS,
         empty_weight_g=weight,
+        default="openspool",
     )
     assert result is not None and result.spool is not None
     assert result.spool.data_origin == "openspool" and result.spool.tag_encoded_at is not None

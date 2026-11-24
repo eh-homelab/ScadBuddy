@@ -1,4 +1,6 @@
-"""POST /filament/tags/reads (#7273 Task 1)."""
+"""The phone tag routes (#7273): `POST /tags/reads`, `POST /tags/backups`,
+`GET /tags/{id}/backups`, `POST /spools/{id}/tag-records`, `POST /spools/{id}/tag-written` and
+`POST /tags/{id}/backups/{id}/restore`."""
 
 from __future__ import annotations
 
@@ -144,7 +146,7 @@ def _records(
 ) -> Response:
     got: Response = client.post(
         f"{SPOOLS_URL}/{spool_id}/tag-records",
-        json={"uid": uid, "records": list(records), "backup_id": _fresh(client, uid)},
+        json={"uid": uid, "records": list(records), "backup_id": _fresh(client, uid, records)},
     )
     return got
 
@@ -336,3 +338,77 @@ def test_a_restore_of_another_tags_backup_is_404(client: TestClient) -> None:
         json={"uid": "04AA", "records": [], "backup_id": fresh},
     )
     assert got.status_code == 404
+
+
+def test_a_backup_cannot_be_replayed_for_a_second_spool(client: TestClient) -> None:
+    first, second = _spool(client), _spool(client)
+    sent, backup = _write(client, first["id"])
+    got = client.post(
+        f"{SPOOLS_URL}/{first['id']}/tag-written",
+        json={"uid": "04AA", "backup_id": backup, "sent": sent, "read_back": sent},
+    )
+    assert got.status_code == 200, got.text
+    # The tag now holds `sent`, which the first backup does not.
+    again = client.post(
+        f"{SPOOLS_URL}/{second['id']}/tag-records",
+        json={"uid": "04AA", "records": sent, "backup_id": backup},
+    )
+    assert again.status_code == 409 and again.json()["code"] == "backup_mismatch"
+
+
+def test_a_write_in_the_other_format_is_a_sent_mismatch(client: TestClient) -> None:
+    spool = _spool(client)
+    client.put("/api/v1/settings", json={"filament_tag_format": "opentag3d"})
+    other = _records(client, spool["id"]).json()["records"]
+    client.put("/api/v1/settings", json={"filament_tag_format": "openspool"})
+    got = client.post(
+        f"{SPOOLS_URL}/{spool['id']}/tag-written",
+        json={"uid": "04AA", "backup_id": _fresh(client), "sent": other, "read_back": other},
+    )
+    assert got.status_code == 409 and got.json()["code"] == "sent_mismatch"
+    assert client.get(f"{SPOOLS_URL}/{spool['id']}").json()["tag"] is None
+
+
+def test_an_opentag3d_write_marks_its_origin_and_kind(client: TestClient) -> None:
+    spool = _spool(client)
+    client.put("/api/v1/settings", json={"filament_tag_format": "opentag3d"})
+    sent, backup = _write(client, spool["id"])
+    got = client.post(
+        f"{SPOOLS_URL}/{spool['id']}/tag-written",
+        json={"uid": "04AA", "backup_id": backup, "sent": sent, "read_back": sent},
+    )
+    assert got.status_code == 200, got.text
+    assert got.json()["tag"]["kind"] == "ntag_opentag"
+    detail = client.get(f"{SPOOLS_URL}/{spool['id']}").json()
+    assert detail["data_origin"] == "opentag3d" and detail["tag_encoded_at"] is not None
+
+
+@pytest.mark.parametrize("reason", ["restore", "agent_write"])
+def test_a_backup_of_another_reason_covers_no_spool_write(client: TestClient, reason: str) -> None:
+    spool = _spool(client)
+    sent, _ = _write(client, spool["id"])
+    job = {"job_id": str(uuid4())} if reason == "agent_write" else {}
+    made = client.post(BACKUPS, json={"uid": "04AA", "records": [], "reason": reason, **job})
+    assert made.status_code == 201, made.text
+    backup = made.json()["backup_id"]
+    records = client.post(
+        f"{SPOOLS_URL}/{spool['id']}/tag-records",
+        json={"uid": "04AA", "records": [], "backup_id": backup},
+    )
+    assert records.status_code == 409 and records.json()["code"] == "backup_mismatch"
+    written = client.post(
+        f"{SPOOLS_URL}/{spool['id']}/tag-written",
+        json={"uid": "04AA", "backup_id": backup, "sent": sent, "read_back": sent},
+    )
+    assert written.status_code == 409 and written.json()["code"] == "backup_mismatch"
+
+
+def test_a_restore_refuses_records_that_are_not_the_fresh_backups(client: TestClient) -> None:
+    old = _fresh(client, records=[_REC])
+    tag_id = client.post(READS, json={"uid": "04AA", "records": []}).json()["tag"]["id"]
+    fresh = _fresh(client, reason="restore")
+    got = client.post(
+        f"{TAGS}/{tag_id}/backups/{old}/restore",
+        json={"uid": "04AA", "records": [_REC], "backup_id": fresh},
+    )
+    assert got.status_code == 409 and got.json()["code"] == "backup_mismatch"
