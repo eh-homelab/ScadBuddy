@@ -328,11 +328,6 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "On, the API registers the built-in order-fulfilment flow at start when it has no"
             " version, or updates an unedited older built-in version.",
         ),
-        "output_copy_interval_seconds": SettingDoc(
-            "Copy the saved outputs' files to rows every",
-            "Seconds. The API copies them at start and then at this interval, so saves and"
-            " deletes of pods on an older build reach the rows. 0 copies at start only.",
-        ),
         "storefront_warm_prices": SettingDoc(
             "Warm storefront prices",
             "On, publish renders a listing's default variant and slices its price, and"

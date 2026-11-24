@@ -279,12 +279,15 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "_sweep_storefront", _broken(OSError("the database is gone")))
     # #6950: the entities whose owner is gone.
     monkeypatch.setattr(main, "sweep_orphan_entities", _broken(OSError("the database is gone")))
+    # #7255: the copy of the saved outputs' files to rows.
+    monkeypatch.setattr(main, "copy_outputs", _broken(OSError("the volume is gone")))
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
     state = SimpleNamespace(
         render=SimpleNamespace(prune=_broken_async, store=SimpleNamespace(read=None)),
-        outputs=object(),
+        outputs=SimpleNamespace(rows=object()),
+        projection=SimpleNamespace(pool=object()),
         store=SimpleNamespace(content=None),
         blobs=object(),
         refs=object(),

@@ -52,6 +52,8 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
     NATIVE_SLICES_TIMEOUT,
+    OUTPUT_COPY_SWEEP,
+    OUTPUT_COPY_TIMEOUT,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CAPTURES_TIMEOUT,
     PAYMENT_CLOSES_SWEEP,
@@ -67,6 +69,7 @@ from scadbuddy.workflows.housekeeping import (
     PRUNE_TIMEOUT,
     QUOTE_HOLDS_SWEEP,
     QUOTE_HOLDS_TIMEOUT,
+    REAP_SWEEP,
     RUN_HOLDS_SWEEP,
     RUN_HOLDS_TIMEOUT,
     STOREFRONT_DRAFTS_SWEEP,
@@ -175,6 +178,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         STOREFRONT_MAIL_SWEEP: STOREFRONT_MAIL_TIMEOUT,
         AUTO_IMPORT_SWEEP: AUTO_IMPORT_TIMEOUT,
         RUN_HOLDS_SWEEP: RUN_HOLDS_TIMEOUT,
+        OUTPUT_COPY_SWEEP: OUTPUT_COPY_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -221,6 +225,15 @@ def test_the_run_holds_reaper_is_last_on_both_schedules() -> None:
     with the sweeps off, behind its own patch."""
     assert SWEEPS[-1] == PRUNE_SWEEPS[-1] == RUN_HOLDS_SWEEP
     assert sweep_timeout(RUN_HOLDS_SWEEP) == RUN_HOLDS_TIMEOUT
+
+
+def test_the_output_copy_follows_the_output_holds_reaper_on_the_sweeps_schedule() -> None:
+    """#7255: the copy of the saved outputs' files to rows runs in each sweep run, behind
+    its own patch, so the writes of pods on an older build reach the rows by the next
+    sweep. Sweeps off (`asset_sweep_interval` 0) turns it off, as every sweep."""
+    assert SWEEPS[SWEEPS.index(REAP_SWEEP) + 1] == OUTPUT_COPY_SWEEP
+    assert OUTPUT_COPY_SWEEP not in PRUNE_SWEEPS
+    assert sweep_timeout(OUTPUT_COPY_SWEEP) == OUTPUT_COPY_TIMEOUT
 
 
 def test_the_git_sweeps_timeout_covers_its_gc_and_no_more() -> None:

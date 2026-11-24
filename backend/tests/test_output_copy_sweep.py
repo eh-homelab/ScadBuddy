@@ -1,107 +1,108 @@
-"""The API's copy of the saved outputs' files to rows (#7255) runs at start and then
-once each `SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS`, so saves and deletes of old pods
-during a roll-out reach the rows; 0 is the start's run only, and the shutdown's stop ends
-the loop."""
+"""The copy of the saved outputs' files to rows (#7255) runs once at the API's start and
+then as the housekeeping sweep `OUTPUT_COPY_SWEEP`, so the saves and deletes of pods on
+an older build during a roll-out reach the rows by the next sweep."""
 
 from __future__ import annotations
 
-import asyncio
+import logging
 import threading
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
-from scadbuddy.core.settings import BOOTSTRAP_FIELDS, Settings
 from scadbuddy.library.output_copy import CopyResult
-from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+from scadbuddy.workflows.housekeeping import OUTPUT_COPY_SWEEP, SWEEPS
 
 
-def _state(interval: float) -> Any:
+def _state(rows: object | None = None) -> Any:
     return SimpleNamespace(
-        outputs=SimpleNamespace(rows=object()),
+        outputs=SimpleNamespace(rows=object() if rows is None else rows),
         projection=SimpleNamespace(pool=object()),
-        settings=SimpleNamespace(output_copy_interval_seconds=interval),
     )
 
 
-def _counting(monkeypatch: pytest.MonkeyPatch) -> tuple[list[int], asyncio.Event]:
-    runs: list[int] = []
-    second = asyncio.Event()
-    loop = asyncio.get_running_loop()
+def _recording(monkeypatch: pytest.MonkeyPatch, result: CopyResult | None) -> list[tuple[Any, ...]]:
+    calls: list[tuple[Any, ...]] = []
 
-    def copy(*args: object) -> CopyResult:
-        runs.append(1)
-        if len(runs) >= 2:
-            loop.call_soon_threadsafe(second.set)
-        return CopyResult()
+    def copy(*args: Any) -> CopyResult | None:
+        calls.append(args)
+        return result
 
     monkeypatch.setattr(main, "copy_outputs", copy)
-    monkeypatch.setattr(main, "COPY_STOP_POLL", 0.01)
-    return runs, second
+    return calls
 
 
-async def test_the_copy_runs_again_after_the_interval(monkeypatch: pytest.MonkeyPatch) -> None:
-    runs, second = _counting(monkeypatch)
-    stop = threading.Event()
-    task = asyncio.create_task(main._copy_outputs_logged(_state(0.02), stop=stop))
-    await asyncio.wait_for(second.wait(), 5)
-    assert len(runs) >= 2
-    await main._join_background(stop, task)
-    assert task.done() and not task.cancelled()
+def _sweep(state: Any) -> Any:
+    return dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))[OUTPUT_COPY_SWEEP]
 
 
-async def test_stop_ends_the_wait_between_runs(monkeypatch: pytest.MonkeyPatch) -> None:
-    runs, _ = _counting(monkeypatch)
-    stop = threading.Event()
-    task = asyncio.create_task(main._copy_outputs_logged(_state(3600), stop=stop))
-    while not runs:
-        await asyncio.sleep(0.01)
-    stop.set()
-    await asyncio.wait_for(task, 5)
-    assert runs == [1]
-
-
-async def test_interval_zero_is_the_start_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    runs, _ = _counting(monkeypatch)
-    await asyncio.wait_for(main._copy_outputs_logged(_state(0), stop=threading.Event()), 5)
-    assert runs == [1]
-
-
-async def test_a_failed_run_is_tried_again_at_the_next_interval(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_the_sweep_runs_the_copy(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    calls: list[int] = []
-    second = asyncio.Event()
-    loop = asyncio.get_running_loop()
+    calls = _recording(monkeypatch, CopyResult(copied=2))
+    state = _state()
+    with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
+        await ActivityEnvironment().run(_sweep(state))
+    assert len(calls) == 1
+    store, rows, pool, stop = calls[0]
+    assert (store, rows, pool) == (state.outputs, state.outputs.rows, state.projection.pool)
+    assert isinstance(stop, threading.Event) and not stop.is_set()
+    assert "copied the saved outputs to rows" in [r.getMessage() for r in caplog.records]
 
+
+async def test_a_sweep_that_another_replica_holds_logs_no_counts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The copy's advisory lock: a run that does not get it returns None."""
+    calls = _recording(monkeypatch, None)
+    with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
+        await ActivityEnvironment().run(_sweep(_state()))
+    assert len(calls) == 1
+    assert "copied the saved outputs to rows" not in [r.getMessage() for r in caplog.records]
+
+
+async def test_a_failed_sweep_is_logged_and_fails_its_activity(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     def copy(*args: object) -> CopyResult:
-        calls.append(1)
-        if len(calls) == 1:
-            raise OSError("the volume went")
-        loop.call_soon_threadsafe(second.set)
-        return CopyResult()
+        raise OSError("the volume went")
 
     monkeypatch.setattr(main, "copy_outputs", copy)
-    monkeypatch.setattr(main, "COPY_STOP_POLL", 0.01)
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"), pytest.raises(OSError):
+        await ActivityEnvironment().run(_sweep(_state()))
+    assert [r.getMessage() for r in caplog.records] == [
+        "could not copy the saved outputs to rows; the next sweep retries"
+    ]
+
+
+async def test_the_sweep_does_nothing_without_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _recording(monkeypatch, CopyResult())
+    state = _state()
+    state.outputs.rows = None
+    await ActivityEnvironment().run(_sweep(state))
+    assert calls == []
+
+
+async def test_the_start_copies_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _recording(monkeypatch, CopyResult())
     stop = threading.Event()
-    task = asyncio.create_task(main._copy_outputs_logged(_state(0.02), stop=stop))
-    await asyncio.wait_for(second.wait(), 5)
-    await main._join_background(stop, task)
-    assert len(calls) >= 2
+    await main._copy_outputs_logged(_state(), stop=stop)
+    assert len(calls) == 1
+    assert calls[0][3] is stop
 
 
-def test_the_interval_setting_defaults_to_ten_minutes() -> None:
-    settings = Settings(database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS)
-    assert settings.output_copy_interval_seconds == 600
-    assert "output_copy_interval_seconds" in BOOTSTRAP_FIELDS
+async def test_a_failed_start_copy_is_logged_and_not_raised(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def copy(*args: object) -> CopyResult:
+        raise OSError("the volume went")
 
-
-def test_the_interval_setting_is_never_negative() -> None:
-    with pytest.raises(ValueError, match="output_copy_interval_seconds"):
-        Settings(
-            database_url=UNUSED_DATABASE_URL,
-            temporal_address=UNUSED_TEMPORAL_ADDRESS,
-            output_copy_interval_seconds=-1,
-        )
+    monkeypatch.setattr(main, "copy_outputs", copy)
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
+        await main._copy_outputs_logged(_state(), stop=threading.Event())
+    assert [r.getMessage() for r in caplog.records] == [
+        "could not copy the saved outputs to rows; the next sweep retries"
+    ]

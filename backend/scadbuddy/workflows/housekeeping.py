@@ -244,6 +244,15 @@ AUTO_IMPORT_PATCH = "housekeeping-auto-import-prints"
 #: the Prints page for at most `PRUNE_INTERVAL` too.
 RUN_HOLDS_SWEEP = "housekeeping_reap_print_run_holds"
 RUN_HOLDS_PATCH = "housekeeping-reap-print-run-holds"
+#: #7255: copy the saved outputs' files to their `outputs` rows and reconcile the rows
+#: with the folders (`library.output_copy.copy_outputs`), as the API's start does once.
+#: It catches the saves, deletes, renames and backfill changes that pods on an older
+#: build wrote to the files only, during a roll-out or after a rollback. Its advisory
+#: lock keeps one run at a time: a run that does not get it (another replica's, or the
+#: start's copy) does nothing. After the output holds' reaper, behind its own patch; on
+#: the sweeps' Schedule only, so it obeys their switch.
+OUTPUT_COPY_SWEEP = "housekeeping_copy_outputs"
+OUTPUT_COPY_PATCH = "housekeeping-copy-outputs"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -253,6 +262,7 @@ SWEEPS = (
     "housekeeping_sweep_claims",
     BACKFILL_SWEEP,
     REAP_SWEEP,
+    OUTPUT_COPY_SWEEP,
     FLOWS_SWEEP,
     PREVIEWS_SWEEP,
     LOST_SLICES_SWEEP,
@@ -415,6 +425,9 @@ AUTO_IMPORT_TIMEOUT = timedelta(minutes=15)
 #: bounded by its `SEQUENCE_CHECK_TIMEOUT`, 10 s, and the pass by half of this), then one
 #: delete.
 RUN_HOLDS_TIMEOUT = timedelta(minutes=2)
+#: One walk of every output folder: about ten stats each, a read of each folder whose
+#: stamp changed, and a batched write per batch of folders.
+OUTPUT_COPY_TIMEOUT = timedelta(minutes=15)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -471,6 +484,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return AUTO_IMPORT_TIMEOUT
     if sweep == RUN_HOLDS_SWEEP:
         return RUN_HOLDS_TIMEOUT
+    if sweep == OUTPUT_COPY_SWEEP:
+        return OUTPUT_COPY_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -539,6 +554,8 @@ class Housekeeping:
             if sweep == AUTO_IMPORT_SWEEP and not workflow.patched(AUTO_IMPORT_PATCH):
                 continue
             if sweep == RUN_HOLDS_SWEEP and not workflow.patched(RUN_HOLDS_PATCH):
+                continue
+            if sweep == OUTPUT_COPY_SWEEP and not workflow.patched(OUTPUT_COPY_PATCH):
                 continue
             try:
                 await workflow.execute_activity(
