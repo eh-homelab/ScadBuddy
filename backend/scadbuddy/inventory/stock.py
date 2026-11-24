@@ -59,6 +59,11 @@ class LotNotFound(LookupError):  # noqa: N818
     """No such lot, or not a lot of the item."""
 
 
+class LotEmpty(ValueError):  # noqa: N818
+    """The named lot has no stock on hand. A named lot is taken or refused, never
+    silently replaced by another (R-P2-14)."""
+
+
 class UnitNotFound(LookupError):  # noqa: N818
     """No such unit."""
 
@@ -117,12 +122,14 @@ def _fifo(
 ) -> builtins.list[tuple[dict[str, Any], Decimal, bool]]:
     """What a take of `qty` takes from each lot, as `(lot, qty, shortfall)`: the named lot
     first, then FIFO over the lots with stock; the rest on the newest lot. `lots` are in
-    FIFO order and not empty."""
+    FIFO order and not empty. A named lot with no stock on hand is `LotEmpty` (R-P2-14)."""
     order = lots
     if lot_id is not None:
         named = [lot for lot in lots if lot["id"] == lot_id]
         if not named:
             raise LotNotFound(str(lot_id))
+        if named[0]["on_hand"] <= 0:
+            raise LotEmpty(str(lot_id))
         order = named + [lot for lot in lots if lot["id"] != lot_id]
     left = qty
     out: builtins.list[tuple[dict[str, Any], Decimal, bool]] = []
@@ -307,9 +314,11 @@ class StockStore:
     def count_item(
         self, item_id: UUID, on_hand: Decimal, note: str, by: Actor
     ) -> builtins.list[Move]:
-        """A count of the whole item. A lower count takes the difference FIFO as `adjust`
-        moves; a higher one adds it to the newest lot at its cost (a new `adjustment` lot
-        of unknown cost when there is none)."""
+        """A count of the whole item, as `adjust` moves, one per lot it changes, in FIFO
+        order. No lot keeps an offsetting negative balance (R-P2-15): each negative lot is
+        brought to 0, then a lower count takes the difference FIFO from the lots with
+        stock, and a higher one adds it to the newest lot at its cost (a new `adjustment`
+        lot of unknown cost when there is none)."""
         if not note.strip():
             raise ValueError("a count needs a note")
         with self.pool.connection() as conn, conn.transaction():
@@ -318,24 +327,31 @@ class StockStore:
                 raise BadQuantity(str(on_hand))
             _whole(item["uom"], on_hand)
             lots = _lock_lots(conn, item_id)
-            delta = on_hand - sum((lot["on_hand"] for lot in lots), Decimal(0))
+            change = {lot["id"]: -lot["on_hand"] for lot in lots if lot["on_hand"] < 0}
+            delta = on_hand - sum(
+                (lot["on_hand"] for lot in lots if lot["on_hand"] > 0), Decimal(0)
+            )
             if delta < 0:
-                return self.take(conn, item_id, -delta, by, reason=note, kind="adjust")
-            if delta == 0:
-                return []
-            newest = (lots or _open_lots(conn, item_id, by))[-1]
+                for lot, part, _ in _fifo(lots, -delta, None):
+                    change[lot["id"]] = change.get(lot["id"], Decimal(0)) - part
+            elif delta > 0:
+                lots = lots or _open_lots(conn, item_id, by)
+                newest = lots[-1]["id"]
+                change[newest] = change.get(newest, Decimal(0)) + delta
             return [
                 _move(
                     conn,
                     item_id=item_id,
-                    lot_id=newest["id"],
+                    lot_id=lot["id"],
                     kind="adjust",
-                    qty=delta,
-                    unit_cost=newest["unit_cost_minor"],
-                    cost_unknown=newest["cost_unknown"],
+                    qty=change[lot["id"]],
+                    unit_cost=lot["unit_cost_minor"],
+                    cost_unknown=lot["cost_unknown"],
                     reason=note,
                     by=by,
                 )
+                for lot in lots
+                if change.get(lot["id"])
             ]
 
     def set_lot_cost(self, lot_id: UUID, unit_cost_minor: Decimal, by: Actor) -> Lot:

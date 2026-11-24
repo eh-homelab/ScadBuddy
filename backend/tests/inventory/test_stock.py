@@ -35,6 +35,7 @@ from scadbuddy.inventory.stock import (
     Conn,
     ItemNotCounted,
     LocationNotFound,
+    LotEmpty,
     LotNotFound,
     SerialExists,
     StockStore,
@@ -752,18 +753,21 @@ def test_recost_and_give_back_wait_for_each_other(
     assert [lot.on_hand for lot in stock.lots(item)] == [10, 10]
 
 
-def test_an_empty_named_lot_falls_back_to_fifo(
+def test_an_empty_named_lot_is_refused(
     stock: StockStore, items: ItemStore, pg_pool: PgPool
 ) -> None:
+    """R-P2-14: a named lot is honoured or refused, never silently replaced."""
     item = _item(items)
     first, second = _two_lots(stock, item)
     _take(pg_pool, stock, item, 10, lot_id=first)
+    _take(pg_pool, stock, item, 15, lot_id=second)  # 5 short: second is at -5
 
-    moves = _take(pg_pool, stock, item, 3, lot_id=first)
-
-    assert [_row(m.lot_id, m.qty, m.unit_cost_minor, m.needs_review) for m in moves] == [
-        (second, -3, 700, False)
-    ]
+    for empty in (first, second):
+        with pytest.raises(LotEmpty):
+            _take(pg_pool, stock, item, 3, lot_id=empty)
+        with pytest.raises(LotEmpty):
+            stock.use(item, UseInput(qty=Decimal(1), lot_id=empty), BY)
+    assert [lot.on_hand for lot in stock.lots(item)] == [0, -5]
 
 
 def test_a_named_older_lot_and_a_shortfall_take_the_newest_lots_cost(
@@ -835,3 +839,32 @@ def test_a_cost_set_later_keeps_the_currency_bought_in(stock: StockStore, items:
         costed.foreign_unit_cost_minor,
     ) == (270, False, "EUR", 250)
     assert blank.cost_currency is None
+
+
+def test_a_count_settles_a_negative_lot_first(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    """R-P2-15: no lot keeps an offsetting negative balance after a count. The negative
+    lot is zeroed, then the difference is taken FIFO or added to the newest lot."""
+    item = _item(items)
+    first, second = _two_lots(stock, item)
+    _take(pg_pool, stock, item, 25)  # 0 and -5
+    third = stock.receive_lot(
+        item, ReceiveLot(qty=Decimal(10), unit_cost_minor=Decimal(600), received_at=_day(3)), BY
+    ).id
+
+    down = stock.count_item(item, Decimal(4), "Shelf", BY)
+
+    assert [_row(m.lot_id, m.qty, m.unit_cost_minor) for m in down] == [
+        (second, 5, 700),
+        (third, -6, 600),
+    ]
+    assert [lot.on_hand for lot in stock.lots(item)] == [0, 0, 4]
+
+    _take(pg_pool, stock, item, 6, lot_id=third)  # 0, 0, -2: the newest is negative
+    up = stock.count_item(item, Decimal(3), "Found", BY)
+
+    assert [_row(m.lot_id, m.qty) for m in up] == [(third, 5)]
+    assert [lot.on_hand for lot in stock.lots(item)] == [0, 0, 3]
+    assert first not in {m.lot_id for m in down + up}
+    _on_hand_is_the_sum_of_moves(pg_pool)
