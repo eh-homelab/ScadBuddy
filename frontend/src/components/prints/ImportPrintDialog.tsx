@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
-import { api } from '../../api/client'
+import { ApiError, api } from '../../api/client'
 import type { ArchiveOutcome, AutoImport, ImportedPrint, LibraryFileSuggestion, PrintImportRequest } from '../../api/types'
 import { modelPath } from '../../lib/deeplink'
 import { useAsync } from '../../lib/useAsync'
 import { LibraryFileChoice } from '../library/LibraryFileChoice'
 import { PastPrintsPicker } from '../orders/PastPrintsPicker'
 import { PrintSourceChoice, SLICED_REFUSAL, errorText, sourceChoice, sourceKey, usePrintSources } from './PrintSourceChoice'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
@@ -35,6 +36,9 @@ function recordedSource(row: Pick<AutoImport, 'source' | 'library_file_id'>): st
 
 /** ScadBuddy's own library ids start here (backend `print_library/ids.py` `NATIVE_ID_BASE`). */
 const NATIVE_ID_BASE = 1_000_000_000
+
+/** The 404 of an import onto a file that is gone (backend `api/print_imports.py`, #7335). */
+const LIBRARY_FILE_GONE = 'https://scadbuddy.dev/problems/print-imports/library-file-gone'
 
 /** A library file in the library page, chosen. */
 function libraryFilePath(fileId: number): string {
@@ -198,9 +202,58 @@ function ImportForm({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const suggestedFiles = useMemo(() => sources?.suggested_library_files ?? [], [sources])
+  // #7335: files found deleted or replaced since the list was read, and the suggestions read after.
+  const [goneIds, setGoneIds] = useState<ReadonlySet<number>>(new Set())
+  const [gone, setGone] = useState<{ file: LibraryFileSuggestion; replacement: LibraryFileSuggestion | null } | null>(null)
+  const [freshFiles, setFreshFiles] = useState<LibraryFileSuggestion[] | null>(null)
+  const suggestedFiles = useMemo(
+    () => (freshFiles ?? sources?.suggested_library_files ?? []).filter((f) => !goneIds.has(f.id)),
+    [freshFiles, sources, goneIds],
+  )
   const [pickedFile, setPickedFile] = useState<LibraryFileSuggestion | null>(null)
-  const file = pickedFile ?? suggestedFiles[0] ?? null
+  // A gone file is never swapped for the next suggestion: the person chooses again.
+  const file = gone ? null : (pickedFile ?? suggestedFiles[0] ?? null)
+
+  const markGone = useCallback(
+    (lost: LibraryFileSuggestion, replacement: LibraryFileSuggestion | null) => {
+      setGoneIds((ids) => new Set(ids).add(lost.id))
+      setGone({ file: lost, replacement })
+      setPickedFile(null)
+      setError(null)
+      // Without the printer: that read reaches it. A failed read leaves the list without the gone file.
+      void api.getPrintSources(archive.id).then(
+        (again) => setFreshFiles(again.suggested_library_files),
+        () => undefined,
+      )
+    },
+    [archive.id],
+  )
+
+  function chooseFile(next: LibraryFileSuggestion) {
+    setPickedFile(next)
+    setGone(null)
+    setError(null)
+  }
+
+  // The library may change while the window is away: the chosen file is checked when it is back.
+  const checked = mode === FILE && native && !busy ? file : null
+  useEffect(() => {
+    if (!checked) return
+    let current = true
+    const check = () => {
+      if (document.visibilityState === 'hidden') return
+      api.getLibraryFile(checked.id).catch((caught: unknown) => {
+        if (current && caught instanceof ApiError && caught.status === 404) markGone(checked, null)
+      })
+    }
+    window.addEventListener('focus', check)
+    document.addEventListener('visibilitychange', check)
+    return () => {
+      current = false
+      window.removeEventListener('focus', check)
+      document.removeEventListener('visibilitychange', check)
+    }
+  }, [checked, markGone])
 
   const newBlocked = source?.sliced ?? false
   const ready =
@@ -224,7 +277,11 @@ function ImportForm({
     try {
       onImported(await api.importPrint(archive.id, body))
     } catch (caught) {
-      setError(errorText(caught))
+      if (mode === FILE && file && caught instanceof ApiError && caught.problem.type === LIBRARY_FILE_GONE) {
+        markGone(file, (caught.problem['replacement'] as LibraryFileSuggestion | null | undefined) ?? null)
+      } else {
+        setError(errorText(caught))
+      }
     } finally {
       setBusy(false)
     }
@@ -337,14 +394,30 @@ function ImportForm({
                     <span>A file in the library</span>
                   </label>
                   {mode === FILE && (
-                    <div className="ml-6">
+                    <div className="ml-6 flex min-w-0 flex-col gap-2">
+                      {gone && (
+                        <Alert className="border-warn/40 bg-warn/10 text-warn">
+                          <AlertDescription className="flex min-w-0 flex-col items-start gap-2 text-warn">
+                            <span className="break-words">
+                              <strong>{gone.file.filename}</strong> was deleted or replaced in the library.{' '}
+                              {gone.replacement ? 'The same file is in the library again.' : 'Choose a file again.'}
+                            </span>
+                            {gone.replacement && (
+                              <Button type="button" size="sm" variant="outline" onClick={() => gone.replacement && chooseFile(gone.replacement)}>
+                                Use the new copy
+                              </Button>
+                            )}
+                          </AlertDescription>
+                        </Alert>
+                      )}
                       <LibraryFileChoice
                         id="import-library-search"
                         suggested={suggestedFiles}
                         chosen={file}
-                        onChoose={setPickedFile}
+                        onChoose={chooseFile}
+                        refreshKey={goneIds.size}
                         // A run's per-print copy is never a target: its sweep trashes it (#6394 review).
-                        keep={(hit) => hit.id >= NATIVE_ID_BASE && !hit.per_print}
+                        keep={(hit) => hit.id >= NATIVE_ID_BASE && !hit.per_print && !goneIds.has(hit.id)}
                         emptyHint="No file name matches the job. Find the file by its name."
                       />
                     </div>

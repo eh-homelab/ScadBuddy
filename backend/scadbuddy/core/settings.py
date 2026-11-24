@@ -789,10 +789,10 @@ class Settings(BaseSettings):
     # may set its own, and a run may override both.
     flow_approval_timeout_seconds: int = 0
     # SCADBUDDY_SPOOL_OVERLAY_REFRESH_SECONDS (#3818 tier A, plan 2026-10-18 Task 6b): how
-    # often the kept copy of Bambuddy's local presets (#4645) is refreshed and Bambuddy's
-    # spools are pulled into ScadBuddy's own (#6261), on their own Schedule
+    # often Bambuddy's spools are pulled into ScadBuddy's own (#6261), and its filament
+    # presets while `filament_sync.presets` pulls (#7244), on their own Schedule
     # (`workflows/spool_refresh.py`), which also runs the filament capture backstop (#6263);
-    # 0 turns all three off. The name is older than the spool overlay's removal (#6262
+    # 0 turns them off. The name is older than the spool overlay's removal (#6262
     # Task 12) and stays, so no stored setting moves.
     spool_overlay_refresh_seconds: int = Field(default=300, ge=0)
     # SCADBUDDY_FILAMENT_SYNC (JSON), _FILAMENT_LOW_STOCK_PCT and

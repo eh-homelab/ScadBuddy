@@ -82,7 +82,7 @@ Write endpoints need no API key on this instance. Printer model string is `H2C`.
 | 3DFP answers 429 with "Vercel Security Checkpoint" | Bot challenge. A real Chromium passes it; curl and WebFetch never will. |
 | 3DFP "Export" on a detail page says to add to My Spools | Export is login-only and per spool. `add`, then `export`. |
 | Every 3DFP page answers `403: Forbidden` headless, even with a good cookie | Vercel's firewall rejects the `HeadlessChrome` user agent (since 2026-11-01). `3dfp.mjs` sends a normal Chrome UA; a one-off script must too. |
-| `export` says "not in My Spools" or times out on the row's export button, while the spool is listed | The My Spools row groups several spools of one filament (a second `add` does this) and swaps the export button for "Expand the group". `export` now uses `/my/spools/details/<id>`, which has one button per spool. |
+| `export` says "not in My Spools" or times out on the row's export button, while the spool is listed | The My Spools row groups several spools of one filament (a second `add` did this before #7228; records left from then still group) and swaps the export button for "Expand the group". `export` now uses `/my/spools/details/<id>`, which has one button per spool. |
 | `search` prints only the headings | The site's `?q=` index misses some brands (DEEPLEE). Browse `/filaments/<brand>/<material>/<type>` for the detail ids instead. |
 | Export dies with "Target page, context or browser has been closed" | Chromium crashes on the blob download here. `3dfp.mjs` reads the blob in-page instead; keep that hook. |
 | 3DFP `?search=` / `?brand=` return unfiltered results | Only `?q=` filters. |
