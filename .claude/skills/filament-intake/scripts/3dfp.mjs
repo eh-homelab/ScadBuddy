@@ -82,6 +82,7 @@ try {
     // profile" button there means a record exists, and nothing is added.
     for (const id of args) {
       await p.goto(`${SITE}/my/spools/details/${id}`, { waitUntil: 'domcontentloaded' });
+      if (p.url().includes('/login')) throw new Error('not logged in: run `login` first');
       const has = await p.getByRole('button', { name: 'Export slicer profile' }).first()
         .waitFor({ state: 'attached', timeout: 5000 }).then(() => true, () => false);
       if (has) { console.log(id, 'already in My Spools'); continue; }
