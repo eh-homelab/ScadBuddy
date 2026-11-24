@@ -32,7 +32,7 @@ from temporalio.api.deployment.v1 import (
     WorkerDeploymentVersionInfo,
 )
 from temporalio.api.enums.v1 import TaskQueueType
-from temporalio.api.taskqueue.v1 import PollerInfo, TaskQueue
+from temporalio.api.taskqueue.v1 import PollerInfo
 from temporalio.api.workflowservice.v1 import (
     DescribeTaskQueueRequest,
     DescribeTaskQueueResponse,
@@ -122,7 +122,7 @@ from scadbuddy.workflows.client import (
 )
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from scadbuddy.workflows.pollers import TASK_QUEUE_PARTITIONS, partition_name
+from scadbuddy.workflows.pollers import TASK_QUEUE_PARTITIONS, partition_name, queue_pollers
 from tests.conftest import (
     UNUSED_DATABASE_URL,
     UNUSED_TEMPORAL_ADDRESS,
@@ -1734,14 +1734,8 @@ def _not_found() -> RPCError:
 
 
 async def _pollers(client: Client, queue: str) -> int:
-    described = await client.workflow_service.describe_task_queue(
-        DescribeTaskQueueRequest(
-            namespace=client.namespace,
-            task_queue=TaskQueue(name=queue),
-            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-        )
-    )
-    return len(described.pollers)
+    """Every partition's (#7350): a worker can poll only the non-root ones."""
+    return len(await queue_pollers(client, queue, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW))
 
 
 def _in_process_settings(tmp_path: Path) -> tuple[Settings, WorkerDeps]:
