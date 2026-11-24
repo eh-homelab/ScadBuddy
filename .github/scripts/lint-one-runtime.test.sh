@@ -53,6 +53,29 @@ expect_fail "a case of a mode" sessions/y.ts "switch (row.mode) {
 expect_fail "sessionModeOf" sessions/y.ts "const m = sessionModeOf(row)"
 expect_fail "session_mode in code" sessions/y.ts "await settings.get('session_mode')"
 
+# A session mode in the frontend or the backend (#7323): a tree with an empty agent/src and
+# one file, <dir>/<path>, with <content>.
+other() {
+  local want="$1" why="$2"
+  rm -rf "${work:?}/t"
+  mkdir -p "$work/t/agent/src" "$work/t/$(dirname "$3")"
+  printf '%s\n' "$4" >"$work/t/$3"
+  if "$here/lint-one-runtime.sh" "$work/t" >/dev/null 2>&1; then got=pass; else got=fail; fi
+  if [ "$got" != "$want" ]; then
+    echo "FAIL: ${got}ed, but should $want: $why"
+    fail=1
+  fi
+}
+other fail "a mode branch in the frontend" frontend/src/agent/chat/x.tsx "{session.mode === 'durable' && <Badge />}"
+other fail "a mode branch in the backend" backend/scadbuddy/agent_data/x.py 'if mode == "durable": pass'
+other fail "a subscripted mode" backend/scadbuddy/agent_data/x.py 'if row["mode"] == "classic": pass'
+other fail "a mode read with get" backend/scadbuddy/agent_data/x.py "if row.get('mode') != 'classic': pass"
+other fail "a subscripted mode in TypeScript" frontend/src/agent/chat/x.ts "if (row['mode'] === 'durable') run()"
+other pass "another mode" backend/scadbuddy/agent_data/x.py 'if row["mode"] == "enforce": pass'
+other fail "session_mode in the backend" backend/scadbuddy/agent_data/x.py 'KEY = "session_mode"'
+other pass "a Python comment naming session_mode" backend/scadbuddy/agent_data/x.py '# the session_mode setting is gone'
+other pass "a backend .sql migration naming session_mode" backend/scadbuddy/migrations_agent/x.sql "DELETE FROM ai_settings WHERE key = 'session_mode';"
+
 # A root without agent/src (a wrong path, a moved tree) fails rather than finds nothing.
 rm -rf "${work:?}/t"
 mkdir -p "$work/t"

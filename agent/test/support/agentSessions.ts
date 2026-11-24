@@ -14,7 +14,6 @@ import type { SessionManager, SessionManagerDeps, SessionRecord, Turn } from '..
 import { readRuntimeSettings, RUNTIME_DEFAULTS } from '../../src/sessions/runtimeSettings.js'
 import { TurnHost } from '../../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../../src/temporal/names.js'
-import { queuePollers } from '../../src/temporal/pollers.js'
 import { acquireActivities, releaseActivities } from '../../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../../src/temporal/session/gateActivities.js'
@@ -36,7 +35,7 @@ import { SqlSweep } from './sql/sweep.js'
 import { PgTurnRows } from './sql/turnRows.js'
 import { SqlTurnRoutes } from './sql/turnRoutes.js'
 import { AgentWorker, workerIdentity } from '../../src/temporal/worker.js'
-import { localTemporal, polledHosts, TEMPORAL_CLI, TEMPORAL_SKIP } from './temporal.js'
+import { anyPoller, localTemporal, polledHosts, TEMPORAL_CLI, TEMPORAL_SKIP } from './temporal.js'
 
 // AgentSession for the session tests (unified runtime spec 2026-10-13 §5, plan Step 6.3): one
 // Temporal dev server per test file, and the workers main.ts runs for a session's turns, in this
@@ -161,17 +160,14 @@ export function agentSessions(): void {
     })
     workers = [tools, host]
     await Promise.all(workers.map((w) => w.running()))
-    // DurableTurns.unready reads the pollers: wait until Temporal lists them.
+    // DurableTurns.unready reads the pollers of every partition: wait until Temporal lists them.
     for (;;) {
       const polled = await Promise.all(
         [
           [SESSION_QUEUE, 1],
           [TASK_QUEUE, 2],
           [hostQueue, 2],
-        ].map(async ([queue, type]) => {
-          // Every partition, as DurableTurns.unready reads them (temporal/pollers.ts, #7306).
-          return (await queuePollers(env.client, queue as string, type as number, Date.now() + 10_000)).length > 0
-        }),
+        ].map(([queue, type]) => anyPoller(env.client, queue as string, type as number)),
       )
       if (polled.every(Boolean)) break
       await new Promise((resolve) => setTimeout(resolve, 100))

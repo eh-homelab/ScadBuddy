@@ -74,9 +74,9 @@ class Shelf(Protocol):
         ...
 
     async def stands(self, file_id: int, sha256: str) -> bool:
-        """Whether the live file ``file_id`` still holds the bytes of ``sha256``. A file
-        whose row states no hash stands while it is there: the print's own check reads
-        its bytes (§10.2 step 1) and answers ``restore`` when they are others."""
+        """Whether the live file ``file_id`` still holds the bytes of ``sha256``. A
+        Bambuddy file whose row states no hash stands while it is there: the print's own
+        check reads its bytes (§10.2 step 1) and answers ``restore`` when they are others."""
         ...
 
     async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
@@ -116,6 +116,8 @@ class NativeShelf:
             if error.status == 404:
                 return False
             raise
+        # A native row always states its sha256, so one with none is not the pinned file.
+        # A Bambuddy row may state none, and stands (`BambuddyShelf.stands`).
         return (found.file_hash or "").lower() == sha256
 
     async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
@@ -141,12 +143,15 @@ async def restore_held(
     """The file id the item prints from now on: its held copy put back into "Storefront"
     of ``shelf`` (or found there), the item moved to it, and the remembered choices of
     ``checked_id`` (the file the check read) copied to it when it has none.
-    ``library_file_gone`` when the held copy is gone since the check."""
+    ``library_file_gone`` when the held copy is gone since the check, or the item pins
+    no sha256."""
     item = await asyncio.to_thread(lifecycle.store.item, item_id)
     if item is None or item.library_file is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no library file item {item_id!r}")
     file = item.library_file
-    assert file.sha256 is not None
+    if file.sha256 is None:
+        # The check asks for no restore of an item that pins nothing.
+        raise library_file_gone(item.id, file)
     if file.id != checked_id and await shelf.stands(file.id, file.sha256):
         # Moved by an earlier try of this claim, and that file still stands.
         new_id = file.id

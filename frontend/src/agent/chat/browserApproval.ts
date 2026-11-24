@@ -1,8 +1,8 @@
 /**
  * #982 — an approval the headless browser asked for: a navigation to a site on neither of
  * its lists. Its card offers "Allow once", "Allow for this chat" and "Always allow". The
- * call is a remote plugin's `browser_navigate` (Playwright MCP; a classic turn names it
- * `mcp__<plugin>__browser_navigate`, a durable one `<plugin>__browser_navigate`), never
+ * call is a remote plugin's `browser_navigate` (Playwright MCP, named
+ * `mcp__<plugin>__browser_navigate`; an older card may have another prefix), never
  * the browser bridge's own `mcp__scadbuddy__browser_navigate`, which drives the user's tab.
  * Both are read from the card's summary, which is the tool's name, a space, and its
  * input as JSON (agent `approvals/service.ts`, agent-durable `gate/store.py`); the
