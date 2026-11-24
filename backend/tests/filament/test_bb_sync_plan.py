@@ -700,6 +700,55 @@ def test_an_unlinked_supplier_with_a_filament_product_is_created(pg_pool: PgPool
     assert (create.op, create.sb_id) == ("create", shop.id)
 
 
+def test_an_unlinked_invoice_supplier_is_created_for_its_spools_link(pg_pool: PgPool) -> None:
+    """R-P2-10, Decision 14: a supplier SB knows only from a filament invoice (no product)
+    is a spool's purchase source, so it is still created, and the spool's supplier link
+    follows that create."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shop = f.suppliers.create(SupplierCreate(name="Micro Center"))
+    with pg_pool.connection() as conn:
+        invoice = conn.execute(
+            "INSERT INTO filament_invoices (supplier_id, invoice_date, currency, subtotal, total)"
+            " VALUES (%s, '2026-11-20', 'USD', 20, 20) RETURNING id",
+            (shop.id,),
+        ).fetchone()
+        assert invoice is not None
+        line = conn.execute(
+            "INSERT INTO filament_invoice_lines (invoice_id, position, description, quantity,"
+            " unit_price, line_subtotal, line_tax, line_total, allocated_cost)"
+            " VALUES (%s, 1, 'PLA Red', 1, 20, 20, 0, 20, 20) RETURNING id",
+            (invoice["id"],),
+        ).fetchone()
+        assert line is not None
+        conn.execute(
+            "UPDATE filament_spools SET invoice_line_id = %s WHERE id = %s", (line["id"], spool)
+        )
+    _link(pg_pool, spool, 50)
+    sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
+    first = _plan(f, _snap([_row(50)], suppliers=[]), sync)
+    create = _only([w for w in first.writes if w.kind == "supplier"], "create")
+    assert create.sb_id == shop.id
+    # The spool's link waits for the create (`Pending`), then names the new row.
+    assert [w for w in first.writes if w.op == "suppliers"] == []
+    assert first.deferred == 1
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_suppliers SET bb_supplier_id = 7 WHERE id = %s", (shop.id,))
+        conn.execute("DELETE FROM filament_bb_creates")
+    listed = [BbSupplier(id=7, name="Micro Center")]
+    (link,) = [
+        w for w in _plan(f, _snap([_row(50)], suppliers=listed), sync).writes if w.op == "suppliers"
+    ]
+    assert link.body == [
+        {
+            "supplier_id": 7,
+            "supplier_article_number": None,
+            "quoted_price_per_kg": None,
+            "is_purchase_source": True,
+        }
+    ]
+
+
 def test_a_supplier_with_an_open_create_intent_is_still_adopted(pg_pool: PgPool) -> None:
     """R-P2-9: an unlinked supplier with no filament product but an open create intent (a
     create whose answer was lost) stays in the sync, so Bambuddy's row of its name is

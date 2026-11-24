@@ -1662,17 +1662,20 @@ def _item(row: Mapping[str, Any], bb_column: str, name: str, desired: dict[str, 
 
 
 def _suppliers(conn: Conn) -> list[_Item]:
-    """The suppliers Bambuddy may know: those it has an id for, those with a filament
-    product, and those with an open create intent (a create whose answer may be lost, so
-    its row is still adopted or its intent closed, R-P2-9). Only filament reaches
-    Bambuddy, so a supplier whose offers are all for other items (`supplier_offers`,
-    #7067) is never created there (spec 2026-11-21-inventory-and-purchasing-design.md
-    §6.5, D16)."""
+    """The suppliers Bambuddy may know: those it has an id for; those with a filament
+    product, an archived one included (lenient on purpose: a supplier once sold filament);
+    those with a filament invoice, which a spool's purchase-source link names (Decision 14,
+    `_supplier_links`, R-P2-10); and those with an open create intent (a create whose
+    answer may be lost, so its row is still adopted or its intent closed, R-P2-9). Only
+    filament reaches Bambuddy, so a supplier whose offers are all for other items
+    (`supplier_offers`, #7067) is never created there (spec
+    2026-11-21-inventory-and-purchasing-design.md §6.5, D16)."""
     rows = conn.execute(
         "SELECT id, name, website, customer_number, note, archived_at,"
         " bb_supplier_id, bb_pushed, bb_seen, bb_seen_at FROM filament_suppliers s"
         " WHERE bb_supplier_id IS NOT NULL"
         " OR EXISTS (SELECT 1 FROM filament_supplier_products p WHERE p.supplier_id = s.id)"
+        " OR EXISTS (SELECT 1 FROM filament_invoices i WHERE i.supplier_id = s.id)"
         " OR EXISTS (SELECT 1 FROM filament_bb_creates c"
         " WHERE c.kind = 'supplier' AND c.sb_id = s.id)"
         " ORDER BY upper(name), id"
