@@ -51,9 +51,26 @@ _KRows = list[m.SpoolKValueCreate]
 _Ids = list[UUID]
 
 
-def _carried_migrated(row: m.SpoolPresetCreate) -> bool:
-    """Whether a draft row carries a copied ``migrated`` row's origin (R-7150-11)."""
-    return isinstance(row, m.SpoolDraftPreset) and row.migrated
+#: A preset row's key and values, as a ``migrated`` row is matched by them.
+_PresetValues = tuple[str, Any, str, str | None]
+_MIGRATED_ROWS = (
+    "SELECT printer_model, nozzle_diameter, slicer_filament, slicer_filament_name"
+    " FROM filament_spool_presets WHERE spool_id = %s AND migrated"
+)
+
+
+def _preset_values(rows: list[DictRow]) -> set[_PresetValues]:
+    """The key and values of each preset row; a row of NULLs (a LEFT JOIN's miss) is none."""
+    return {
+        (r["printer_model"], r["nozzle_diameter"], r["slicer_filament"], r["slicer_filament_name"])
+        for r in rows
+        if r["printer_model"] is not None
+    }
+
+
+def _migrated_rows(conn: Conn, spool_id: UUID) -> set[_PresetValues]:
+    """The key and values of each of the spool's ``migrated`` preset rows."""
+    return _preset_values(conn.execute(_MIGRATED_ROWS, (spool_id,)).fetchall())
 
 
 #: The columns of a spool row: every field of `Spool` but the four it is given here.
@@ -144,6 +161,13 @@ class OverrideKindError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("only a bambu_mifare tag can be an override")
+
+
+class SpoolCopySourceError(ValueError):
+    """A bulk create's ``copy_of`` names no spool (#7150, R-7150-13)."""
+
+    def __init__(self) -> None:
+        super().__init__("copy_of names no spool")
 
 
 class SpoolBulkRefusedError(ValueError):
@@ -710,7 +734,25 @@ class FilamentSpoolStore:
         `SpoolTrayPlaceError` for a printer's tray, `MoveTargetError` for a place that does
         not exist, is archived or is an AMS unit's; the driver's `ForeignKeyViolation` or
         `UniqueViolation` for a row the draft names that does not exist or two rows of
-        one key."""
+        one key. With ``copy_of`` a preset row that matches a ``migrated`` row of that
+        spool is written ``migrated`` (R-7150-11, R-7150-13); `SpoolCopySourceError` when
+        it names no spool. The source's ``migrated`` rows are read here, when the create
+        runs, not when the draft was read: if the source's presets are re-set between the
+        copy and the save, an unchanged copied row stops being ``migrated``. That is
+        intended."""
+        carried: set[_PresetValues] = set()
+        if body.copy_of is not None:
+            # One read: the source, and its migrated rows (none: one row of NULLs).
+            rows = conn.execute(
+                "SELECT p.printer_model, p.nozzle_diameter, p.slicer_filament,"
+                " p.slicer_filament_name FROM filament_spools s"
+                " LEFT JOIN filament_spool_presets p ON p.spool_id = s.id AND p.migrated"
+                " WHERE s.id = %s",
+                (body.copy_of,),
+            ).fetchall()
+            if not rows:
+                raise SpoolCopySourceError()
+            carried = _preset_values(rows)
         if body.location_id is not None:
             place = conn.execute(
                 "SELECT tray_id FROM filament_locations WHERE id = %s", (body.location_id,)
@@ -723,7 +765,7 @@ class FilamentSpoolStore:
             if body.location_id is not None:
                 LocationStore.move_on(conn, spool_id, body.location_id, actor=actor)
             if body.presets:
-                self.set_presets_on(conn, spool_id, body.presets, actor=actor)
+                self.set_presets_on(conn, spool_id, body.presets, actor=actor, carried=carried)
             if body.k_values:
                 self.set_k_values_on(conn, spool_id, body.k_values, actor=actor)
             made.append(spool_id)
@@ -734,8 +776,9 @@ class FilamentSpoolStore:
         overrides and note, its own presets and K values, and its place unless that is a
         printer's tray or archived. Not its number, tags, tray place, ledger (so no
         ``grams_left``), weight lock or ``added_full``, a fact of the source's own history
-        (R-7150-10). Each preset row keeps whether it is ``migrated`` (R-7150-11). ``None``
-        for no such spool. Writes nothing."""
+        (R-7150-10). ``copy_of`` names the source, so a bulk create marks the rows that
+        match its ``migrated`` ones (R-7150-11, R-7150-13). ``None`` for no such spool.
+        Writes nothing."""
         left_out = {"grams_left", "weight_locked", "added_full"}
         fields = [f for f in m.SpoolCreate.model_fields if f not in left_out]
         with self._pool.connection() as conn:
@@ -754,8 +797,8 @@ class FilamentSpoolStore:
                 ).fetchone()
                 place = None if kept is None else kept["id"]
             presets = conn.execute(
-                "SELECT printer_model, nozzle_diameter, slicer_filament, slicer_filament_name,"
-                " migrated FROM filament_spool_presets WHERE spool_id = %s"
+                "SELECT printer_model, nozzle_diameter, slicer_filament, slicer_filament_name"
+                " FROM filament_spool_presets WHERE spool_id = %s"
                 " ORDER BY printer_model, nozzle_diameter",
                 (spool_id,),
             ).fetchall()
@@ -764,13 +807,14 @@ class FilamentSpoolStore:
         return m.SpoolDraft(
             spool=m.SpoolCreate.model_validate(own),
             location_id=place,
-            presets=[m.SpoolDraftPreset.model_validate(r) for r in presets],
+            presets=[m.SpoolPresetCreate.model_validate(r) for r in presets],
             k_values=[
                 m.SpoolKValueCreate.model_validate(
                     {f: r[f] for f in m.SpoolKValueCreate.model_fields}
                 )
                 for r in k_values
             ],
+            copy_of=spool_id,
         )
 
     def update(self, spool_id: UUID, patch: m.SpoolPatch, *, actor: str) -> m.Spool | None:
@@ -895,23 +939,24 @@ class FilamentSpoolStore:
 
     @classmethod
     def set_presets_on(
-        cls, conn: Conn, spool_id: UUID, rows: Sequence[m.SpoolPresetCreate], *, actor: str
+        cls,
+        conn: Conn,
+        spool_id: UUID,
+        rows: Sequence[m.SpoolPresetCreate],
+        *,
+        actor: str,
+        carried: set[_PresetValues] | None = None,
     ) -> None:
         """`set_presets` on ``conn``, in the caller's transaction, the spool locked (also a
-        bulk create's new spools, #7150). The driver's errors pass through."""
+        bulk create's new spools, #7150). A row in ``carried`` (a copy source's
+        ``migrated`` rows, R-7150-13) is written ``migrated`` too. The driver's errors
+        pass through."""
         table = "filament_spool_presets"
         before = p.own_presets(conn, spool_id)
-        migrated = {
-            tuple(r.values())
-            for r in conn.execute(
-                f"SELECT printer_model, nozzle_diameter, slicer_filament,"
-                f" slicer_filament_name FROM {table} WHERE spool_id = %s AND migrated",
-                (spool_id,),
-            ).fetchall()
-        }
+        migrated = _migrated_rows(conn, spool_id) | (carried or set())
         conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
         for row in rows:
-            values = (
+            values: _PresetValues = (
                 row.printer_model,
                 row.nozzle_diameter,
                 row.slicer_filament,
@@ -921,8 +966,7 @@ class FilamentSpoolStore:
                 f"INSERT INTO {table} (spool_id, printer_model, nozzle_diameter,"
                 " slicer_filament, slicer_filament_name, migrated)"
                 " VALUES (%s, %s, %s, %s, %s, %s)",
-                # A draft row keeps a copied row's origin (R-7150-11).
-                (spool_id, *values, values in migrated or _carried_migrated(row)),
+                (spool_id, *values, values in migrated),
             )
         after = p.own_presets(conn, spool_id)
         cls._edited(conn, spool_id, "presets", before, after, actor)

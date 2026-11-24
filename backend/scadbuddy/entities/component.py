@@ -1,5 +1,6 @@
-"""`ENTITIES`: the entity registry and the attachments and links on any entity (#6950), over the
-shared rows pool (`rows/component.py`), opened on first use as the orders' store is."""
+"""`ENTITIES`: the entity registry and the attachments, links (#6950) and properties (#7026)
+on any entity, over the shared rows pool (`rows/component.py`), opened on first use as the
+orders' store is."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.entities.attachments import EntityAttachmentStore
 from scadbuddy.entities.links import EntityLinkStore
+from scadbuddy.entities.properties import EntityPropertyStore
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.rows.component import ROWS
 
@@ -23,6 +25,7 @@ class EntitiesComponent:
         self.store = EntityStore(pool)
         self._attachments = EntityAttachmentStore(pool, self.store)
         self._links = EntityLinkStore(pool, self.store)
+        self._properties = EntityPropertyStore(pool, self.store)
 
     def opened(self) -> ConnectionPool[Connection[DictRow]]:
         """The shared pool, opened on first use (an open pool ignores it)."""
@@ -38,6 +41,11 @@ class EntitiesComponent:
     def links(self) -> EntityLinkStore:
         self.opened()
         return self._links
+
+    @property
+    def properties(self) -> EntityPropertyStore:
+        self.opened()
+        return self._properties
 
 
 ENTITIES: Key[EntitiesComponent] = Key("entities")

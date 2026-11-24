@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { SpoolType } from '../../api/filament'
@@ -10,7 +10,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { LinkTypeDialog } from '../filament/LinkTypeDialog'
-import { linkTypeToBook, MakeTypeError, makeTypeFromBook, typeCandidates, type TypeCandidate } from '../filament/makeType'
+import { bookRowIds, linkTypeToBook, MakeTypeError, makeTypeFromBook, rankCandidates, type BookRowIds, type TypeCandidate } from '../filament/makeType'
 import { DataTable, type Column } from '../records/DataTable'
 import { refusalText } from './refusal'
 import { filamentLinks } from '../../lib/filamentLinks'
@@ -132,8 +132,19 @@ export function FilamentsEditor({
   const [error, setError] = useState<string | null>(null)
   const [imported, setImported] = useState<SpoolImportRow[] | null>(null)
   const [filled, setFilled] = useState<DensityFillRow[] | null>(null)
-  /** #7159: the row whose "Make a type" found types of its brand and colour, and those types. */
-  const [choice, setChoice] = useState<{ row: Filament; candidates: TypeCandidate[] } | null>(null)
+  /** #7159: the row whose "Make a type" found types of its brand and colour, and its catalog ids. */
+  const [choice, setChoice] = useState<{ row: Filament; ids: BookRowIds } | null>(null)
+  /**
+   * #7344 R-7344-1: the choice's types come from the current `types`, so a reload while it is
+   * open adds, drops or updates them; with none left the choice closes.
+   */
+  const candidates = choice && types ? rankCandidates(choice.row, choice.ids, types) : []
+  if (choice && candidates.length === 0) setChoice(null)
+  /** The newest `types`, for a click whose catalog reads end after a reload. */
+  const latestTypes = useRef(types)
+  useEffect(() => {
+    latestTypes.current = types
+  })
   const [linked, setLinked] = useState<string | null>(null)
   const filaments = book.data?.filaments ?? []
   const emptyDensities = filaments.some((f) => !f.archived_at && !f.density_g_cm3)
@@ -182,8 +193,10 @@ export function FilamentsEditor({
     setBusy(true)
     clearNotices()
     try {
-      const candidates = types ? await typeCandidates(filament, types) : []
-      if (candidates.length > 0) setChoice({ row: filament, candidates })
+      const ids = types ? await bookRowIds(filament) : null
+      // Ranked on the types of now, not of the click: an empty choice would close unseen.
+      const now = latestTypes.current
+      if (ids && now && rankCandidates(filament, ids, now).length > 0) setChoice({ row: filament, ids })
       else await makeNewType(filament)
     } catch (err) {
       setError(refusalText(err))
@@ -215,7 +228,10 @@ export function FilamentsEditor({
     }
   }
 
-  /** R-7159-4: only the type's cost; the server links the book row of the type's own identity. */
+  /**
+   * R-7159-4: only the type's cost; the server links the book row of the type's own identity.
+   * R-7344-2: the answer's `filament_id` says which row that is, whatever the dialog forecast.
+   */
   async function linkType(filament: Filament, candidate: TypeCandidate) {
     setBusy(true)
     clearNotices()
@@ -481,11 +497,11 @@ export function FilamentsEditor({
           {error}
         </p>
       )}
-      {choice && (
+      {choice && candidates.length > 0 && (
         <LinkTypeDialog
           row={choice.row}
           label={filamentLabel(choice.row)}
-          candidates={choice.candidates}
+          candidates={candidates}
           names={names}
           spoolsOf={spoolsOf}
           busy={busy}
