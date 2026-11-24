@@ -1135,9 +1135,15 @@ class Catalogue:
         except InvalidModelMetaError as error:
             meta_error = error.reason
             text = self.paths.model_meta(template_id).read_bytes().decode("utf-8", "replace")
-            # Postgres text holds no NUL.
-            meta_text = text[:META_TEXT_MAX].replace("\x00", "")
+            meta_text = _storable_text(text[:META_TEXT_MAX])
         else:
+            if (problem := _unstorable(meta)) is not None:
+                # Read as if not JSON: Postgres refuses the dict (review I1).
+                meta = None
+                meta_error = f"not storable ({problem})"
+                text = self.paths.model_meta(template_id).read_bytes().decode("utf-8", "replace")
+                meta_text = _storable_text(text[:META_TEXT_MAX])
+        if meta is not None:
             try:
                 parsed = self._meta(template_id, _as_recorded(template_id, meta))
             except InvalidModelMetaError as error:
@@ -1185,9 +1191,9 @@ class Catalogue:
             template_id=template_id,
             origin="builtin" if builtin else "mine",
             meta=meta,
-            meta_error=meta_error,
+            meta_error=None if meta_error is None else _storable_text(meta_error),
             meta_text=meta_text,
-            name=parsed.name if parsed is not None else _default_name(template_id),
+            name=_storable_text(parsed.name if parsed is not None else _default_name(template_id)),
             version=version,
             updated_at=datetime.fromtimestamp(modified, UTC),
             has_readme=self.readme_path(template_id).is_file(),
@@ -3304,6 +3310,39 @@ class _MediaEdit:
 def _default_name(slug: str) -> str:
     """The name a template whose ``model.json`` names none shows: its slug."""
     return slug.removeprefix(BUILTIN_PREFIX)
+
+
+def _storable_text(text: str) -> str:
+    """``text`` as a Postgres text column takes it: no NUL, lone surrogates replaced."""
+    return text.replace("\x00", "").encode("utf-8", "replace").decode("utf-8")
+
+
+def _has_nul(value: Any) -> bool:
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, dict):
+        return any(_has_nul(key) or _has_nul(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_has_nul(item) for item in value)
+    return False
+
+
+def _unstorable(meta: dict[str, Any]) -> str | None:
+    """Why jsonb refuses ``meta`` (#7317, review I1), or None when it takes it: a NaN
+    or an infinity, a lone surrogate, or a NUL in a key or a string."""
+    try:
+        text = json.dumps(meta, allow_nan=False, ensure_ascii=False)
+    except ValueError:
+        return "a number that is NaN or infinite"
+    except RecursionError:
+        return "nested too deeply"
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return "a lone surrogate"
+    if _has_nul(meta):
+        return "a NUL character"
+    return None
 
 
 def _as_recorded(slug: str, raw: dict[str, Any]) -> dict[str, Any]:

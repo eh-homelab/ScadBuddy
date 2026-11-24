@@ -16,8 +16,14 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.media import MEDIA_UPLOAD_PREFIX, MediaKind, StagedMedia
-from scadbuddy.library.template_rows import META_TEXT_MAX, TemplateRow, template_stamp
+from scadbuddy.library.template_rows import (
+    META_TEXT_MAX,
+    TemplateRow,
+    TemplateRows,
+    template_stamp,
+)
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.conftest import PgPool
 from tests.support.media import MemoryMediaStore
 
 pytestmark = pytest.mark.requires_git
@@ -246,3 +252,33 @@ def test_stamp_raises_on_an_os_error_other_than_not_found(
     with pytest.raises(OSError) as raised:
         _stamp(catalogue, "demo")
     assert raised.value.errno == errno.ESTALE
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"name": "D", "x": NaN}',
+        '{"name": "D", "x": Infinity}',
+        '{"name": "D", "tags": ["\\ud800"]}',
+        '{"name": "D", "x": "a\\u0000b"}',
+        '{"name": "D", "\\u0000k": 1}',
+        '{"name": "D\\u0000"}',
+    ],
+    ids=["nan", "infinity", "lone-surrogate", "nul-in-value", "nul-in-key", "nul-in-name"],
+)
+def test_row_of_meta_postgres_cannot_store_is_written_without_meta(
+    catalogue: Catalogue, paths: DataPaths, pg_pool: PgPool, text: str
+) -> None:
+    # Review I1 (#7317): Python reads each of these, and jsonb or a text column refuses it.
+    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
+    paths.model_meta("demo").write_text(text, encoding="utf-8")
+    row = _row(catalogue, "demo")
+    assert row.meta is None
+    assert row.meta_error is not None
+    assert row.meta_error.startswith("not storable")
+    assert row.meta_text == text
+    assert row.name == "demo"
+    rows = TemplateRows(pg_pool)
+    rows.put([row], [])
+    assert rows.get("demo") == row
