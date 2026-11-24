@@ -135,10 +135,10 @@ Agent (`agent/src/`):
 
 **Interfaces:**
 - Produces (`filament/models.py`):
-  - `class NdefRecord(_In)`: `record_type: str` (1–255 chars, `^[A-Za-z0-9:._/+-]+$`), `media_type: str | None` (≤127), `id: str | None` (≤255), `encoding: str | None` (≤32), `lang: str | None` (≤35), and `data_hex: str` (`^([0-9a-fA-F]{2})*$`, at most `2 * MAX_RECORD_BYTES` characters, lower-cased by a validator).
+  - `class NdefRecord(_In)`: `record_type: str` (1–255 chars, `^[A-Za-z0-9:._/+-]+$`), `media_type: str | None = None` (≤127), `id: str | None = None` (≤255), `encoding: str | None = None` (≤32), `lang: str | None = None` (≤35), and `data_hex: str` (`^([0-9a-fA-F]{2})*$`, at most `2 * MAX_RECORD_BYTES` characters, lower-cased by a validator). `_In` gives no defaults, so every `| None` field in this plan's `_In` models has `= None` written out; the tests leave them out.
   - `MAX_RECORD_BYTES: Final = 888` (NTAG216 usable memory) and `MAX_RECORDS: Final = 16`. A list of records whose `data_hex` bytes add up to more than 888 is a 422.
   - `TagSource = Literal["phone", "agent", "ams"]`.
-  - `class TagReadIn(_In)`: `uid: str | None` (≤64), `tag_type: str | None` (≤32), `records: list[NdefRecord]` (≤16), `bind_spool_id: UUID | None = None`.
+  - `class TagReadIn(_In)`: `uid: str | None = None` (≤64), `tag_type: str | None = None` (≤32), `records: list[NdefRecord]` (≤16), `bind_spool_id: UUID | None = None`.
   - `class DecodedSpool(BaseModel)`: `format: Literal["openspool", "opentag3d"]`, `version: str`, and the optional fields `material`, `subtype`, `brand`, `colour_name`, `rgba`, `extra_colours`, `diameter_mm`, `density_g_cm3`, `nozzle_temp_min`, `nozzle_temp_max`, `bed_temp_min`, `bed_temp_max`, `drying_temp_c`, `drying_hours`, `label_weight_g`, `empty_weight_g` and `serial`. Also `warnings: list[str] = []`. (Task 2 fills it in. Task 1 only declares it.)
   - `class TagReadResult(BaseModel)`: `tag: TagRow | None`, `spool: Spool | None`, `decoded: DecodedSpool | None`, `draft: SpoolCreate | None`, `next: Literal["open_spool", "bind_or_create", "none"]`.
   - `Tag` gains `last_seen_at: datetime | None = None` and `last_seen_source: str | None = None`. `_TAG_COLUMNS` (`spools.py:68-70`) picks them up from `model_fields`.
@@ -146,11 +146,11 @@ Agent (`agent/src/`):
   - `@dataclass(frozen=True) class TagRead`: `source: TagSource`, `uid: str | None`, `tray_uuid: str | None = None`, `tag_type: str | None = None`, `records: tuple[NdefRecord, ...] = ()`, `printer_id: UUID | None = None`, `ams_id: int | None = None`, `tray_id: int | None = None`.
   - `holder_by_keys(conn: Conn, tray_uuid: str | None, tag_uid: str | None) -> UUID | None`. This is the loop at `inventory.py:290-301`, moved here: an open binding of the tray UUID first, then of the UID, on an unarchived spool.
   - `kind_of(read: TagRead) -> m.TagKind`: `bambu_mifare` with a tray UUID, else the decoded format's kind (Task 2), else `other`.
-  - `seen_on(conn: Conn, read: TagRead) -> tuple[UUID | None, UUID | None]` returns `(tag_id, holder_spool_id)` on `conn`'s transaction. It cleans the keys with `clean_tag_uid` and `clean_tray_uuid`. For `phone` and `agent` with a UID, it makes the tag (`FilamentSpoolStore.tag_on`, `spools.py:1203`). For `ams`, it only finds the tag (R2). It sets `last_seen_at = now()`, `last_seen_source` and `last_seen_records` (the records as JSON) on a found or made tag. It changes the kind as R13 says.
-  - `read_on(conn: Conn, read: TagRead, *, actor: str, bind_spool_id: UUID | None = None, defaults: FilamentDefaults) -> TagReadResult`. It calls `seen_on`. With `bind_spool_id`, it binds through `FilamentSpoolStore.bind_on(conn, bind_spool_id, uid, None, kind_of(read), None, actor, marks_origin=True)` (`spools.py:1065`), which books `tag_bound`, and that spool becomes the holder. It reads the holder with `FilamentSpoolStore.read(conn, id, defaults=defaults)`. `next` is `open_spool` with a holder, `bind_or_create` with a tag and no holder, and `none` with no tag (R14). `bind_spool_id` with `source="ams"` raises `ValueError`.
+  - `seen_on(conn: Conn, read: TagRead) -> tuple[UUID | None, UUID | None]` returns `(tag_id, holder_spool_id)` on `conn`'s transaction. It cleans the keys with `clean_tag_uid` and `clean_tray_uuid`. For `phone` and `agent` with a UID, it makes the tag (`FilamentSpoolStore.tag_on`, `spools.py:1203`). For `ams`, it only finds the tag (R2). It sets `last_seen_at = now()`, `last_seen_source` and `last_seen_records` (the records as JSON) on a found or made tag. For `ams`, that update takes the tag row with `FOR UPDATE SKIP LOCKED` and skips the mark when the row is locked: the report write already holds its spools (`capture.lock`), and `bind_on` locks the tag before the spools, so waiting would deadlock (Task 7). It changes the kind as R13 says (from Task 2 on, when `decode` exists; in Task 1 `kind_of` knows no format yet).
+  - `read_on(conn: Conn, read: TagRead, *, actor: str, bind_spool_id: UUID | None = None, marks_origin: bool = True, defaults: FilamentDefaults) -> TagReadResult`. It calls `seen_on`. With `bind_spool_id`, it binds through `FilamentSpoolStore.bind_on(conn, bind_spool_id, uid, None, kind_of(read), None, actor, marks_origin=marks_origin)` (`spools.py:1065`), which books `tag_bound`, and that spool becomes the holder. It reads the holder with `FilamentSpoolStore.read(conn, id, defaults=defaults)`. `next` is `open_spool` with a holder, `bind_or_create` with a tag and no holder, and `none` with no tag (R14). `bind_spool_id` with `source="ams"` raises `ValueError`.
   - `read(spools: FilamentSpoolStore, read: TagRead, *, actor: str, bind_spool_id: UUID | None = None, defaults: FilamentDefaults) -> TagReadResult`. This is `read_on` in one `spools.transaction()`.
   - `BindWithoutUidError(ValueError)` (`code = "no_uid"`): a `bind_spool_id` with no UID.
-- Produces (route): `POST /api/v1/filament/tags/reads`, body `TagReadIn`, answer `TagReadResult` (200). It answers 404 for an unknown `bind_spool_id`, 422 `no_uid` for a bind with no UID, and 409 for a key clash (`TagKeysClashError`, as `bind_spool_tag` maps it, `api/filament.py:1427`). The actor is `actor(caller)` (`api/filament.py:1039`). After a bind it runs `_push_now` (`api/filament.py:1435`), as the bind route does.
+- Produces (route): `POST /api/v1/filament/tags/reads`, body `TagReadIn`, answer `TagReadResult` (200). It answers 404 for an unknown `bind_spool_id`, 422 `no_uid` for a bind with no UID, and 409 for a key clash (`TagKeysClashError`, as `bind_spool_tag` maps it, `api/filament.py:1427`). The actor is `actor(caller)` (`api/filament.py:1039`). After a bind it runs `_push_now` (`api/filament.py:1435`), as the bind route does. Each new error class in this plan that has a `code` reaches the client as the problem document's `code` extension: `ApiError(status, str(exc), code=exc.code)` (`core/problems.py:70`; `_refused` adds no code, so do not route these through it alone).
 
 - [ ] **Step 1: Write the migration** `<ts>_filament_tag_seen.sql`:
 
@@ -206,7 +206,7 @@ def test_the_inventory_finds_a_tray_holder_through_the_same_lookup(pg_pool):
     ...
 ```
 
-In `test_a_read_with_bind_spool_id_binds_and_books_tag_bound`, assert that the last event is `tag_bound`. Assert the full kind list exactly as `bind_on` books it. Read `bind_on`'s order of `tag_bound` and `set_origin`'s `edited` at `spools.py:1135-1149` and copy it into the test.
+In `test_a_read_with_bind_spool_id_binds_and_books_tag_bound`, assert the full kind list exactly as `bind_on` books it. `bind_on` books `tag_bound` and then, with `marks_origin`, `set_origin`'s `edited` when the origin changed (`spools.py:1135-1149`), so for a new spool the list ends `["tag_bound", "edited"]`; `tag_bound` is not the last event.
 
 - [ ] **Step 3: Run them and see them fail**
 
@@ -314,7 +314,7 @@ Write the keys in that order, with `json.dumps(obj, separators=(",", ":"), ensur
 
 | id | start | len | type | from `SpoolFacts` (write) | to `DecodedSpool` (read) |
 | --- | --- | --- | --- | --- | --- |
-| `tag_version` | 0x00 | 2 | int ×0.001 | `2004` | `version` `"2.004"`; a major above 2 decodes to only `format`, `version` and the warning `"newer major version"`; a minor above 004 adds the warning `"newer minor version"` |
+| `tag_version` | 0x00 | 2 | int ×0.001 | `2004` | `version` `"2.004"`; a major above 2 decodes to only `format`, `version` and the warning `"newer major version"`; a major of 2 with a minor above 004 adds the warning `"newer minor version"` (an older major, such as the example `1.234`, gets no version warning) |
 | `material` | 0x02 | 5 | utf8 | `material` (required) | `material` |
 | `material_mod` | 0x07 | 5 | utf8 | `subtype` | `subtype` |
 | `manufacturer` | 0x0C | 16 | utf8 | `brand`, else `"Generic"` (required) | `brand` |
@@ -336,7 +336,7 @@ Write the keys in that order, with `json.dumps(obj, separators=(",", ":"), ensur
 | `weight` | 0x9E | 2 | int (g) | `label_weight_g` (required) | `label_weight_g` |
 | `empty_spool_weight` | 0xA0 | 2 | int (g) | `empty_weight_g` | `empty_weight_g` |
 
-On read, with a min or max print temperature of 0 and a non-zero target, the decoder uses the target for both. Every field not in this table is written as 0. A required field with no value is written as 0, and its id goes into `warnings` (R15). A decoded value of 0 is `None`, except `chamber_temp`, which is never decoded.
+On read, with a min or max print temperature of 0 and a non-zero target, the decoder uses the target for both. Every field not in this table is written as 0. A required field with no value is written as 0, and its id goes into `warnings` (R15). `manufacturer` (falls back to `"Generic"`) and `chamber_temp` (always 0 by design) are never missing, so they never go into `warnings`. A decoded value of 0 is `None`, except `chamber_temp`, which is never decoded.
 
 - [ ] **Step 1: Write the failing format tests** in `backend/tests/filament/test_tag_formats.py` (no database):
 
@@ -469,7 +469,7 @@ Expected: PASS.
 - Consumes: `seen_on`, `TagRead`, `NdefRecord` (Task 1).
 - Produces (models):
   - `BackupReason = Literal["spool_write", "agent_write", "restore"]`.
-  - `class TagBackupIn(_In)`: `uid: str` (1–64), `records: list[NdefRecord]` (≤16), `reason: BackupReason`, `job_id: UUID | None = None`.
+  - `class TagBackupIn(_In)`: `uid: str` (≤64, no minimum length, so `""` reaches `NoUidError` and answers 422 `no_uid` as `"::"` does), `records: list[NdefRecord]` (≤16), `reason: BackupReason`, `job_id: UUID | None = None`. A model validator requires `job_id` exactly when `reason` is `agent_write` (both ways, as the table's CHECK does; a `job_id` on another reason is a 422, not an `IntegrityError`).
   - `class TagBackup(BaseModel)`: `id: UUID`, `tag_id: UUID`, `uid: str`, `records: list[NdefRecord]`, `reason: BackupReason`, `job_id: UUID | None`, `actor: str`, `at: datetime`.
 - Produces (`tags.py`):
   - `BACKUP_TTL: Final = timedelta(minutes=10)` (R5).
@@ -480,7 +480,7 @@ Expected: PASS.
 - Produces (routes):
   - `POST /api/v1/filament/tags/backups`, body `TagBackupIn`, answer 201 `{"backup_id": UUID}` (`model TagBackupMade`). It answers 422 `no_uid`, and 409 on a key clash. An `agent_write` with no `job_id` is 422 (model validator). Task 8 adds the job check.
   - `GET /api/v1/filament/tags/{tag_id}/backups`, answer `list[TagBackup]`, 404 for no such tag.
-- Produces (agent): tool `filament_tag_backups` (`risk: 'read'`, input `{ tag_id: uuid }`, route `GET /api/v1/filament/tags/{tag_id}/backups`).
+- Produces (agent): tool `filament_tag_backups` (`risk: 'read'`, input `{ tag_id: uuid }`, route `GET /api/v1/filament/tags/{tag_id}/backups`, `source: 'NDEF records read from a physical tag, which anyone holding the tag could have written'` for the untrusted-data envelope, `tools/registry.ts:379`).
 
 - [ ] **Step 1: Write the migration** `<ts>_filament_tag_backups.sql`:
 
@@ -579,7 +579,7 @@ Expected: PASS.
   - `records_for_spool(spools, spool_id, body: TagRecordsIn, *, default: TagFormat, empty_weight_g: Callable[[UUID], int | None]) -> TagRecords | None`. It answers `None` for no such spool. It checks `valid_backup(conn, body.backup_id, body.uid, "spool_write")`, then `encode(pick_format(body.records, default), facts_of(spool, empty_weight_g(spool.effective.insert_type_id)))`.
   - `same_records(a: Sequence[NdefRecord], b: Sequence[NdefRecord]) -> bool` (Global Constraints).
   - `ReadBackMismatchError(ValueError)` (`code = "read_back_mismatch"`), `UnknownFormatError(ValueError)` (`code = "unknown_format"`: `sent` is not a single OpenSpool or OpenTag3D record).
-  - `written(spools, spool_id, body: TagWrittenIn, *, actor: str, defaults) -> TagReadResult | None`. In one transaction it runs `valid_backup(..., "spool_write")`, then `same_records(sent, read_back)`, then `format_of(sent)`. Then it calls `read_on(conn, TagRead(source="phone", uid=body.uid, records=tuple(read_back)), actor=actor, bind_spool_id=spool_id, defaults=defaults)`, then `FilamentSpoolStore.set_origin(conn, spool_id, actor, data_origin=ORIGIN_OF[fmt], tag_encoded_at=now)` (R11).
+  - `written(spools, spool_id, body: TagWrittenIn, *, actor: str, defaults) -> TagReadResult | None`. In one transaction it runs `valid_backup(..., "spool_write")`, then `same_records(sent, read_back)`, then `format_of(sent)`. Then it calls `read_on(conn, TagRead(source="phone", uid=body.uid, records=tuple(read_back)), actor=actor, bind_spool_id=spool_id, marks_origin=False, defaults=defaults)`, then `FilamentSpoolStore.set_origin(conn, spool_id, actor, data_origin=ORIGIN_OF[fmt], tag_encoded_at=now)` (R11). `marks_origin=False` keeps the ledger to one `edited` event with the true origin, not a hand-link origin followed by the format's.
   - `restore_records(spools, tag_id, backup_id, body: TagRecordsIn) -> TagRecords | None`. It checks `valid_backup(conn, body.backup_id, body.uid, "restore")`, checks that the old backup's `tag_id` equals `tag_id` and that the fresh backup's tag is the same tag, and answers the old backup's records (`format` is `format_of(records)`).
 - Produces (routes):
   - `POST /api/v1/filament/spools/{spool_id}/tag-records` → `TagRecords`. It answers 404 for no spool and 409 `backup_mismatch`. The default format comes from `store.load().filament_tag_format`. The empty weight is the insert type's `empty_weight_g` (`models.py:295-296`), read through `filament.catalog.get("insert-types", id)`.
@@ -760,8 +760,10 @@ Load `frontend-design:frontend-design` first.
 - Produces (`lib/tagWrite.ts`):
   - `type WriteStep = 'backing_up' | 'writing' | 'reading_back' | 'tap_again'`.
   - `type WriteOutcome = { status: 'checked'; result: TagReadResult | null } | { status: 'mismatch'; backupId: string } | { status: 'other_tag'; backupId: string } | { status: 'failed'; message: string; backupId: string | null }`.
-  - `writeWithBackup(options: { session: NfcSession; expectUid?: string; reason: 'spool_write' | 'agent_write' | 'restore'; jobId?: string; prepare: (now: Reading, backupId: string) => Promise<WireRecord[]>; confirm: (now: Reading, backupId: string, sent: WireRecord[], readBack: Reading) => Promise<TagReadResult | null>; onStep: (step: WriteStep) => void; signal?: AbortSignal }): Promise<WriteOutcome>`.
-  - The order is fixed (G7). 1) `nextReading()`. An empty UID gives `failed` with "This tag gives no serial number, so it cannot be backed up. Nothing was written." 2) `createTagBackup`. On failure, give `failed` with `backupId: null` and write nothing. 3) `prepare`. 4) `session.write(sent)`. 5) `nextReading()` again. When none comes within 3 s, call `onStep('tap_again')` and keep waiting. 6) A different UID gives `other_tag`. Records that are not `sameRecords` give `mismatch`. Otherwise call `confirm` and give `checked`. A 409 `read_back_mismatch` from `confirm` gives `mismatch`.
+  - `writeWithBackup(options: { session: NfcSession; reason: 'spool_write' | 'agent_write' | 'restore'; jobId?: string; prepare: (now: Reading, backupId: string) => Promise<WireRecord[]>; confirm: (now: Reading, backupId: string, sent: WireRecord[], readBack: Reading) => Promise<TagReadResult | null>; onStep: (step: WriteStep) => void; signal?: AbortSignal }): Promise<WriteOutcome>`.
+  - The order is fixed (G7). 1) `nextReading()`. An empty UID gives `failed` with "This tag gives no serial number, so it cannot be backed up. Nothing was written." 2) `createTagBackup({ uid, records, reason, job_id: jobId })`. On failure, give `failed` with `backupId: null` and write nothing. 3) `prepare`. An error from `prepare` (such as 409 `backup_mismatch`) gives `failed` with the backup id and writes nothing. 4) `session.write(sent)`. 5) `nextReading()` again. When none comes within 3 s, call `onStep('tap_again')` and keep waiting. 6) A different UID gives `other_tag`. Records that are not `sameRecords` give `mismatch`. Otherwise call `confirm` and give `checked`. A 409 `read_back_mismatch` from `confirm` gives `mismatch`; any other error from `confirm` gives `failed` with its message and the backup id.
+  - The first reading may come from any tag: the server ties each write to the backup's UID (R5), and writing a spool onto a new tag is a rebind. So there is no expected-UID option.
+  - While `writeWithBackup` runs, the page's own read handler ignores readings (one consumer at a time; Task 9 keeps the same rule for jobs). Otherwise each tap of the write would also post a read and switch the page's view.
 
 **Behaviour:**
 - **Screen 5.** "Write tag" opens `WriteTag` with three steps: "Read and back up", "Write", "Read back". Each step is ticked as `onStep` moves on. With `tap_again`, step 3 reads "Lift the tag and tap it again to check it." There is no format picker. After the records come back, the format and any `warnings` show in step 2 ("Written as OpenSpool"; "Missing on the spool: density, weight").
@@ -809,7 +811,7 @@ Expected: PASS.
 
 **Interfaces:**
 - Consumes: `tags.seen_on`, `TagRead` (Task 1). `SeenTray` has `tag_uid`, `tray_uuid`, `ams_id` and `tray_id` (`spools/models.py:59`).
-- Produces: in `reconcile`, for each filled tray (`seen is not None`) whose `tray_uuid` or `tag_uid` is set, the holder comes from `tags.seen_on(conn, TagRead(source="ams", uid=seen.tag_uid, tray_uuid=seen.tray_uuid, printer_id=printer, ams_id=ams_id, tray_id=tray_id))`. That replaces the tag half of `FilamentInventory.holder_on`. When it finds no holder, `holder_on` runs as before for the placed-spool (`"link"`) half. `found_by` is `"tag"` for a holder from `seen_on`. `touched` (`capture.py:142-169`) still calls `holder_on`, which is lookup only, so taking the locks writes nothing.
+- Produces: in `reconcile`, for each filled tray (`seen is not None`) whose `tray_uuid` or `tag_uid` is set, the holder comes from `tags.seen_on(conn, TagRead(source="ams", uid=seen.tag_uid, tray_uuid=seen.tray_uuid, printer_id=printer, ams_id=ams_id, tray_id=tray_id))`. That replaces the tag half of `FilamentInventory.holder_on`. When it finds no holder, `holder_on` runs as before for the placed-spool (`"link"`) half. `found_by` is `"tag"` for a holder from `seen_on`. `touched` (`capture.py:142-169`) still calls `holder_on`, which is lookup only, so taking the locks writes nothing. `reconcile` runs after `capture.lock` holds the spools, and `bind_on` locks a tag before its spools, so the AMS mark in `seen_on` uses `SKIP LOCKED` (Task 1) and never waits on a tag row.
 
 - [ ] **Step 1: Write the failing tests** in `tests/filament/test_capture.py`. Use its helpers `_spool`, `_printer`, `_tray`, `_report` and `_reconcile` (`:39-84`).
 
@@ -828,6 +830,10 @@ def test_an_unknown_ams_tag_makes_no_tag_row(pg_pool):
 def test_a_resent_report_does_not_touch_the_tag_again(pg_pool):
     # reconcile through PrinterReportStore.write twice with the same report: last_seen_at unchanged,
     # because trays_changed is false for the second (capture.py:130).
+
+def test_a_tag_locked_by_a_bind_is_skipped_not_waited_on(pg_pool):
+    # hold the tag row FOR UPDATE on a second connection; _reconcile returns at once,
+    # books the load, and leaves last_seen_at unchanged.
 ```
 
 - [ ] **Step 2: Run them and see them fail**
@@ -857,9 +863,9 @@ Expected: PASS.
 - Consumes: `read_on`, `back_up`, `valid_backup`, `same_records` (Tasks 1, 3, 4).
 - Produces (models):
   - `NfcJobKind = Literal["read", "write"]`, `NfcJobState = Literal["pending", "armed", "done", "failed", "expired"]`.
-  - `class NfcJobIn(_In)`: `kind: NfcJobKind`, `records: list[NdefRecord] | None` (required for `write`, refused for `read`, 888 bytes at most), `ttl_s: int = Field(600, ge=1, le=600)` (R7).
+  - `class NfcJobIn(_In)`: `kind: NfcJobKind`, `records: list[NdefRecord] | None = None` (required for `write`, refused for `read`, by a model validator; 888 bytes at most), `ttl_s: int = Field(600, ge=1, le=600)` (R7).
   - `class NfcJob(BaseModel)`: `id`, `kind`, `records`, `created_by: str`, `state`, `result: dict[str, Any] | None`, `created_at`, `expires_at`, `armed_by: str | None`.
-  - `class NfcJobResultIn(_In)`: `uid: str | None`, `records: list[NdefRecord] = []` (for a write, the read-back), `backup_id: UUID | None`, `error: str | None` (≤500). An `error` means a failed job and nothing else is read.
+  - `class NfcJobResultIn(_In)`: `uid: str | None = None`, `records: list[NdefRecord] = []` (for a write, the read-back), `backup_id: UUID | None = None`, `error: str | None = None` (≤500). (The read test posts no `backup_id` or `error`, and Decline posts only `error`.) An `error` means a failed job and nothing else is read.
 - Produces (`tags.py`):
   - `expire_jobs(conn) -> None`: `UPDATE … SET state = 'expired' WHERE state IN ('pending', 'armed') AND expires_at <= now()`. It runs first in every job function.
   - `create_job(spools, body: NfcJobIn, *, actor) -> NfcJob`, `pending_jobs(spools) -> list[NfcJob]` (pending, oldest first), `get_job(spools, job_id) -> NfcJob | None`.
@@ -877,7 +883,8 @@ Expected: PASS.
   - `POST /nfc-jobs/{job_id}/result` → `NfcJob`, 404, 409 `job_not_armed`, or 409 `backup_mismatch`.
 - Produces (agent, `tools/nfc.ts`):
   - `nfc_read`: input `{ timeout_s: int 1..600 = 600 }`, `risk: 'write'` (R8), routes `POST /api/v1/filament/nfc-jobs` and `GET /api/v1/filament/nfc-jobs/{job_id}`, `waitsMs: ({timeout_s}) => timeout_s * 1000`. It creates `{kind:'read', ttl_s: timeout_s}`, then polls `GET` every `ctx.pollIntervalMs` until the state is `done`, `failed` or `expired`, `ctx.signal` aborts, or the deadline passes (the `activity_watch` loop, `tools/activity.ts:95-112`). It answers `json({ job_id, state, result })`, or `json({ job_id, state: 'expired' })`.
-  - `nfc_write`: input `{ records: NdefRecord[] (1..16), timeout_s }`, `risk: 'outward'`, `approval: 'none'`, with a comment citing the spec's Constraints ("The person's arm-and-tap on the page is its approval"). It does the same as `nfc_read` with `kind:'write'`.
+  - `nfc_write`: input `{ records: NdefRecord[] (1..16), timeout_s }`, `risk: 'outward'`, `approval: 'none'`, with a comment citing the spec's Constraints ("The person's arm-and-tap on the page is its approval"). It does the same as `nfc_read` with `kind:'write'`. The `approval` doc comment in `tools/registry.ts:331-333` says only `confirm_action` opts out; reword it to name the opt-outs' rule (the tool is the approval path, or a person's own act on a page approves it), since this diff adds one.
+  - Both set `source: 'NDEF records read from a physical tag, which anyone holding the tag could have written'` (`tools/registry.ts:379`): a read job's result carries the tag's records.
   - The descriptions say: "The user must have ScadBuddy's /filament/scan page open in Chrome on Android. It shows the job; the user taps Arm and holds a tag. Records are NDEF records with data as hex. The write replaces every record on the tag, after a backup the user can restore." `nfc_read` adds: "Any tag, not only a spool's."
   - Both go in `TOUCHES_NOTHING`, with the comment "#7273: a tag and an NFC job are no recorded resource kind".
   - `NOT_A_TOOL` gets `GET /nfc-jobs` (pending list), `/claim` and `/result`, with the reason: "The phone page's side of an agent's NFC job (#7273 G4): it lists the pending jobs, arms one when the person taps Arm, and posts what the tag held. The agent creates and waits on jobs with nfc_read and nfc_write."
@@ -966,11 +973,11 @@ Load `frontend-design:frontend-design` first.
   - It shows the oldest job: "Agent wants to read a tag", or "Agent wants to write 2 records". Then come the records (type, media type, bytes), a countdown to `expires_at` (`m:ss`), and "Arm" and "Decline".
   - "Decline" posts `postNfcJobResult(id, { error: 'declined by the person' })`. That route needs an armed job, so Decline claims first, then posts the error.
   - "Arm" claims the job. Then, for a read, it shows "Hold a tag to the phone", takes `session.nextReading()`, and posts `{ uid, records }`. For a write, it runs `writeWithBackup({ reason: 'agent_write', jobId, prepare: async () => job.records, confirm: (_n, backupId, _s, back) => postNfcJobResult(id, { uid: back.uid, records: back.records, backup_id: backupId }).then(() => null) })`.
-  - A `failed` outcome posts `{ error: message }`.
+  - A `failed` outcome posts `{ error: message }`. A `mismatch` outcome posts `{ error: 'the tag does not hold what was sent' }`, and an `other_tag` outcome posts `{ error: 'a different tag answered' }`, so every armed job ends at once and the agent never waits out its timeout. Test: `ends the job when the read-back differs or another tag answers`.
   - While a job runs, the page's own read handler ignores readings (one consumer at a time).
   - At 0:00 it shows "Expired" and the banner goes away on the next poll.
 
-- [ ] **Step 1: Write the failing tests**: `shows a pending job with its records and countdown`, `polls every 2 s only while visible` (fake timers, set `document.visibilityState` through `Object.defineProperty`, count the GETs), `arms a read job and posts what the tag held`, `arms a write job, backs up with the job id, writes the records and posts the read-back`, `declines a job`, `posts the browser's error as a failed job`.
+- [ ] **Step 1: Write the failing tests**: `shows a pending job with its records and countdown`, `polls every 2 s only while visible` (fake timers, set `document.visibilityState` through `Object.defineProperty`, count the GETs), `arms a read job and posts what the tag held`, `arms a write job, backs up with the job id, writes the records and posts the read-back`, `declines a job`, `posts the browser's error as a failed job`, `ends the job when the read-back differs or another tag answers`.
 
 - [ ] **Step 2: Run them and see them fail**
 
@@ -994,7 +1001,8 @@ Expected: PASS.
 - Delete: `backend/scadbuddy/filament/ntag.py`, `backend/tests/filament/test_ntag.py`, `backend/tests/bambuddy/test_client_scan.py`
 - Create: `backend/scadbuddy/migrations/<ts>_drop_filament_ntag_writes.sql`
 - Modify: `backend/scadbuddy/api/filament.py` (module docstring lines 1-15, the import at `:65`, and the routes at `:2805-2909`); `backend/scadbuddy/filament/models.py` (`DeviceId`, `ScanRequest`, `ScanResult`, `NtagWrite`, `NtagCancel`, `NtagQueued`, `NtagConfirm` at `:1960-2030`, `RfidStatus.devices` at `:1950`, and the import at `:29`); `backend/scadbuddy/filament/rfid_mode.py:240-252` (no device list); `backend/scadbuddy/bambuddy/client.py` (`next_tag_scan` `:726-776`, `ws_token` `:679-720`, `_ws_url`, `_tag_scan` `:321-345`, the `_WS_*` constants `:315-320`, `queue_tag_write`, `cancel_tag_write`, `spoolbuddy_devices` `:2653-2693`, their `Operation` names `:191`, `:299-302`, and the `websockets` imports `:38-39`); `backend/scadbuddy/bambuddy/models.py` (`TagScan`, `SpoolBuddyDevice` at `:1696-1720`); `backend/pyproject.toml:46-47` (the `websockets` dependency) and `backend/uv.lock`
-- Modify: `backend/tests/api/test_filament.py` (`:1394-1560`: the scan and ntag tests), `backend/tests/api/test_filament_sync_nudge.py:14,72`, `backend/tests/bambuddy/test_client_rfid.py` (the write, cancel and device tests)
+- Modify: `backend/tests/api/test_filament.py` (`:1394-1560`: the scan and ntag tests), `backend/tests/api/test_filament_sync_nudge.py:14,72`, `backend/tests/bambuddy/test_client_rfid.py` (the write, cancel and device tests), `backend/tests/bambuddy/test_recordings_rfid.py` (drop the six `/api/v1/spoolbuddy/…` rows and `/api/v1/auth/ws-token` from `_EXPECTED_ROUTES`, and the `WriteTagRequest` and `ws_events` asserts) with the same `routes` rows in `backend/tests/bambuddy/recordings/openapi/rfid-routes.json` (that list is "the scope ScadBuddy uses", which would be false for routes it no longer calls; the recorded Bambuddy schemas stay)
+- Line numbers in this task are from the plan's base. Tasks 1, 3, 4 and 8 add routes to `api/filament.py`, and Task 3 adds a test to `agent/test/filament.test.ts`, so find each block by name.
 - Modify: `agent/src/tools/filament.ts:1539-1645` (the 4 tools and `DEVICE_ID` `:37`), `agent/test/filament.test.ts:900-1010`, `agent/src/sessions/touched.ts:782-784`
 - Delete: `frontend/src/components/filament/NtagPanel.tsx`, `NtagPanel.test.tsx`
 - Modify: `frontend/src/components/filament/TagPanel.tsx` (drop `scanTag`, `SCAN_SECONDS` and the scan button; keep the bind form and the phone link from Task 6), `TagPanel.test.tsx`; `frontend/src/pages/filament/SpoolPage.tsx:51,859`; `frontend/src/api/filament.ts:203-289` (the scan and ntag calls, `SpoolBuddyDevice`); `frontend/src/mocks/features/filament/rfid.ts` (the device list and the scan and ntag handlers) and `index.ts:318-325` (their helpers); `frontend/src/pages/settings/sections/filament.tsx:857-860` (`devices`); `frontend/e2e/filament-rfid.spec.ts:24-62` (the NTAG and scan tests)
@@ -1023,7 +1031,7 @@ DROP TABLE filament_ntag_writes;
 Run: `cd backend && uv run --frozen pytest tests/api/test_filament_tags.py::test_the_spoolbuddy_routes_are_gone tests/filament/test_migrations.py tests/bambuddy/test_client_rfid.py -q`
 Expected: FAIL.
 
-- [ ] **Step 4: Remove** everything in "Files" above, in the order backend, agent, frontend, docs. Find every leftover with `grep -rn "ntag\b\|ntag\.\|NtagPanel\|scanTag\|writeNtag\|confirmNtag\|cancelNtag\|rfid/scan\|ScanResult\|ScanRequest\|SpoolBuddyDevice\|next_tag_scan\|queue_tag_write\|cancel_tag_write\|spoolbuddy_devices\|ws_token\|filament_ntag_writes\|DEVICE_ID" backend/scadbuddy backend/tests agent/src agent/test frontend/src frontend/e2e backend/CLAUDE.md frontend/CLAUDE.md docs/features`. Only the merged migrations and the closed plans under `docs/superpowers/plans/` may still match. Then relock with `cd backend && uvx uv@0.13.9 lock`. `websockets` may stay in `uv.lock` as a dependency of another package; only the direct entry goes.
+- [ ] **Step 4: Remove** everything in "Files" above, in the order backend, agent, frontend, docs. Find every leftover with `grep -rn "ntag\b\|ntag\.\|NtagPanel\|scanTag\|writeNtag\|confirmNtag\|cancelNtag\|rfid/scan\|ScanResult\|ScanRequest\|SpoolBuddyDevice\|next_tag_scan\|queue_tag_write\|cancel_tag_write\|spoolbuddy_devices\|ws_token\|ws-token\|/spoolbuddy/\|filament_ntag_writes\|DEVICE_ID" backend/scadbuddy backend/tests agent/src agent/test frontend/src frontend/e2e backend/CLAUDE.md frontend/CLAUDE.md docs/features backend/pyproject.toml`. `backend/tests/fixtures/bambuddy-openapi-*.json` and the recording's schemas are Bambuddy's own spec and may still match. Only the merged migrations and the closed plans under `docs/superpowers/plans/` may still match. Then relock with `cd backend && uvx uv@0.13.9 lock`. `websockets` may stay in `uv.lock` as a dependency of another package; only the direct entry goes.
 
 - [ ] **Step 5: Run every suite this touches**
 
