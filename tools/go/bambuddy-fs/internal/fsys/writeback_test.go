@@ -140,3 +140,32 @@ func TestWriteBackIsTraced(t *testing.T) {
 		t.Fatalf("unsent.queued: %v %v", attrs["bambuddy_fs.unsent.queued"], values["bambuddy_fs.unsent.queued"])
 	}
 }
+
+// A file removed while open under --write-back queues nothing, so its flush span does
+// not say write_back.
+func TestARemovedWriteBackFileIsNotTracedAsQueued(t *testing.T) {
+	spans, _ := recording(t)
+	logs(t)
+	lib := newFakeLibrary()
+	dir, released := releases(t, lib, Options{WriteBack: true})
+	path := filepath.Join(dir, "a.3mf")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	for _, s := range spans.Ended() {
+		if s.Name() == "fuse.flush" && hasAttr(s.Attributes(), "bambuddy_fs.write_back", "true") {
+			t.Fatalf("a removed file's flush says write_back: %v", s.Attributes())
+		}
+	}
+}

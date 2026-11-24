@@ -261,7 +261,8 @@ queued one once it is itself sent or queued. Two saves of one name never land ou
 order: the later always supersedes the earlier.
 
 A background retrier sends each queued write when no handle has it open: first at
-mount start, then after 15 s doubling to 10 min, with 20% jitter. Read-only mounts
+mount start, then after 15 s doubling to 10 min, with 20% jitter. A write queued under
+`--write-back` is sent as soon as its last handle is released ("Write-back" above). Read-only mounts
 retry too. Records survive an unmount, a crash or `kill -9`, and are reloaded at the
 next mount; a record that cannot be read is logged and left in place. If the queued
 write's folder is gone, it is sent to the top level instead.

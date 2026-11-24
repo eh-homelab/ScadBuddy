@@ -146,6 +146,12 @@ func StartOp(ctx context.Context, name string, attrs ...attribute.KeyValue) (con
 	return ctx, &Op{span: span, name: name, start: time.Now()}
 }
 
+// SetOnSpan adds attributes to the span in ctx, for code that has the context but not
+// the operation that started it.
+func SetOnSpan(ctx context.Context, attrs ...attribute.KeyValue) {
+	trace.SpanFromContext(ctx).SetAttributes(attrs...)
+}
+
 // Set adds attributes learned during the operation.
 func (o *Op) Set(attrs ...attribute.KeyValue) {
 	if o != nil {

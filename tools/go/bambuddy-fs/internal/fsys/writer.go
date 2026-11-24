@@ -322,9 +322,6 @@ func (p *pending) tracedUpload(ctx context.Context, name string) syscall.Errno {
 		return 0
 	}
 	ctx, op := telemetry.StartOp(ctx, name, p.attrs()...)
-	if p.node.tree.opts.WriteBack {
-		op.Set(telemetry.WriteBack())
-	}
 	errno := p.upload(ctx)
 	op.End(errno)
 	return errno
@@ -462,7 +459,12 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 		n.mu.Lock()
 		bases, over := slices.Clone(p.bases), slices.Clone(p.over)
 		n.mu.Unlock()
-		return p.queue(n.current(), bases, over, nil, attempt{Key: p.key})
+		errno := p.queue(n.current(), bases, over, nil, attempt{Key: p.key})
+		if errno == 0 {
+			// Only a write it queued: one removed while open queues nothing.
+			telemetry.SetOnSpan(ctx, telemetry.WriteBack())
+		}
+		return errno
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadTimeout)
 	defer cancel()
