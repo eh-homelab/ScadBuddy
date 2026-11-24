@@ -753,7 +753,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   presets and a process preset's values in Bambuddy's shapes, with ScadBuddy's own
   filament presets as `local` `sb-<id>` refs (`Profiles.own`, #7176). No Bambuddy local
   preset is offered, valued or sliced (#7244, the owner's decision of 2026-11-23: the kept
-  copy `held_local_presets` is read by nothing and is to be dropped; a binding or override
+  copy `held_local_presets` was dropped in #7275; a binding or override
   that names one is refused, `presets.py` `bambuddy_local_refusal`, and the dialog says so,
   `resolver.py` kind `no-preset`); cloud user presets are not offered, D5. `print_library/copies.py` files the laid-out per-print copy in the
   native library, marked with its run's subject (`library_files.print_subject`, as is
@@ -1142,8 +1142,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   route and one transaction on the API; every write but `seen` takes an
   `Idempotency-Key`; `spool_history` is the API's), and a native slice's start
   (`RemoteNativeSlices`, area `spools`, #5298 Task 31: each write runs whole on the API
-  under its lock; the area's `…/held-presets` reads answer empty since #7244, for an older
-  worker during a roll), and ScadBuddy's own filament presets (`RemoteFilamentPresets`,
+  under its lock), and ScadBuddy's own filament presets (`RemoteFilamentPresets`,
   area `own-presets`), and the
   SB spools in a native run's trays and what its LAN starts use of them
   (`RemoteFilamentTrays`, `RemotePrintUses`, area `filament`, #6262 Task 6: an area of its
