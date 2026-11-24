@@ -27,6 +27,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The phone page's own Web NFC reading (#7273): the browser reads the tag. An agent reads a tag through nfc_read, which queues a job that the phone page runs.",
   },
   {
+    operation: 'POST /api/v1/filament/tags/backups',
+    reason:
+      "The phone page backs a tag up right before it writes, in the same tap (#7273 G7). An agent's write is backed up by the page when it runs the nfc_write job.",
+  },
+  {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
     reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
   },

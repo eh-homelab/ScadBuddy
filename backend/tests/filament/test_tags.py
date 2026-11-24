@@ -6,12 +6,13 @@ import json
 from typing import Any
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 
 from scadbuddy.filament import tags
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import FilamentInventory
-from scadbuddy.filament.models import Material, NdefRecord, SpoolCreate
+from scadbuddy.filament.models import Material, NdefRecord, SpoolCreate, TagBackup, TagBackupIn
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore, TagKeysClashError
 from scadbuddy.filament.tags import TagRead
 from scadbuddy.spools.models import SeenTray
@@ -310,3 +311,116 @@ def test_a_bambu_tag_keeps_its_kind_whatever_its_records_say(pg_pool: PgPool) ->
     store.bind_tag(spool, tag_uid="04AA", tray_uuid=_TRAY, kind="bambu_mifare", actor="ann")
     result = tags.read(store, _openspool_read(), actor="ann", defaults=DEFAULTS)
     assert result.tag is not None and result.tag.kind == "bambu_mifare"
+
+
+# -- backups (#7273 Task 3) ---------------------------------------------------------------
+
+REC = NdefRecord(record_type="mime", media_type="application/json", data_hex="7b7d")
+
+
+def _backup(
+    store: FilamentSpoolStore, uid: str = "04AA", reason: Any = "spool_write", records: Any = ()
+) -> TagBackup:
+    return tags.back_up(
+        store, TagBackupIn(uid=uid, records=list(records), reason=reason), actor="ann"
+    )
+
+
+def test_a_backup_makes_the_tag_and_keeps_the_records(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    made = _backup(store, "04:aa", records=[REC])
+    assert made.uid == "04AA" and made.records == [REC] and made.actor == "ann"
+    assert made.job_id is None
+    found = tags.backups(store, made.tag_id)
+    assert found is not None and [b.id for b in found] == [made.id]
+
+
+def test_a_backup_with_no_uid_is_refused(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    with pytest.raises(tags.NoUidError):
+        _backup(store, "::")
+    with pytest.raises(tags.NoUidError):
+        _backup(store, "")
+    assert _count(pg_pool, "filament_tag_backups") == 0
+
+
+def test_backups_are_never_changed_or_deleted(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    made = _backup(store)
+    with pg_pool.connection() as conn, pytest.raises(psycopg.errors.RaiseException):
+        conn.execute("DELETE FROM filament_tag_backups WHERE id = %s", (made.id,))
+    with pg_pool.connection() as conn, pytest.raises(psycopg.errors.RaiseException):
+        conn.execute("UPDATE filament_tag_backups SET actor = 'x' WHERE id = %s", (made.id,))
+
+
+def test_every_write_keeps_its_own_backup_newest_first(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    a = _backup(store)
+    b = _backup(store, reason="restore", records=[REC])
+    found = tags.backups(store, a.tag_id)
+    assert found is not None and [x.id for x in found] == [b.id, a.id]
+
+
+def test_backups_of_an_unknown_tag_are_none(pg_pool: PgPool) -> None:
+    assert tags.backups(FilamentSpoolStore(pg_pool), uuid4()) is None
+
+
+def test_unbinding_keeps_the_backups(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    made = _backup(store)
+    tags.read(
+        store,
+        TagRead(source="phone", uid="04AA"),
+        actor="ann",
+        bind_spool_id=spool,
+        defaults=DEFAULTS,
+    )
+    store.unbind_tag(made.tag_id, actor="ann")
+    found = tags.backups(store, made.tag_id)
+    assert found is not None and [b.id for b in found] == [made.id]
+
+
+def test_valid_backup_refuses_another_uid_an_old_backup_and_another_reason(
+    pg_pool: PgPool,
+) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    made = _backup(store)
+    with store.transaction() as conn:
+        assert tags.valid_backup(conn, made.id, "04:aa", "spool_write").id == made.id
+        for uid, reason in (("04BB", "spool_write"), ("04AA", "restore")):
+            with pytest.raises(tags.BackupMismatchError):
+                tags.valid_backup(conn, made.id, uid, reason)  # type: ignore[arg-type]
+        with pytest.raises(tags.BackupMismatchError):
+            tags.valid_backup(conn, uuid4(), "04AA", "spool_write")
+    with pg_pool.connection() as conn:
+        old = conn.execute(
+            "INSERT INTO filament_tag_backups (tag_id, uid, records, reason, actor, at)"
+            " VALUES (%s, '04AA', '[]', 'spool_write', 'ann', now() - interval '11 minutes')"
+            " RETURNING id",
+            (made.tag_id,),
+        ).fetchone()
+    assert old is not None
+    with store.transaction() as conn, pytest.raises(tags.BackupMismatchError):
+        tags.valid_backup(conn, old["id"], "04AA", "spool_write")
+
+
+def test_an_agent_backup_must_match_its_job(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = uuid4()
+    made = tags.back_up(
+        store,
+        TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job),
+        actor="agent",
+    )
+    with store.transaction() as conn:
+        assert tags.valid_backup(conn, made.id, "04AA", "agent_write", job_id=job).id == made.id
+        with pytest.raises(tags.BackupMismatchError):
+            tags.valid_backup(conn, made.id, "04AA", "agent_write", job_id=uuid4())
+
+
+def test_the_job_id_goes_with_agent_write_only() -> None:
+    with pytest.raises(ValueError):
+        TagBackupIn(uid="04AA", records=[], reason="agent_write")
+    with pytest.raises(ValueError):
+        TagBackupIn(uid="04AA", records=[], reason="restore", job_id=uuid4())

@@ -430,6 +430,7 @@ describe('filament spool tools', () => {
     ['filament_spool_events', 'read'],
     ['filament_tag_list', 'read'],
     ['filament_tag_get', 'read'],
+    ['filament_tag_backups', 'read'],
     ['filament_ledger_list', 'read'],
     ['filament_summary', 'read'],
     ['filament_spool_upsert', 'write'],
@@ -443,6 +444,15 @@ describe('filament spool tools', () => {
   ])('%s is %s tier, never gated', (name, risk) => {
     expect(tool(name).risk).toBe(risk)
     expect(tool(name).gated).toBe(false)
+  })
+
+  it('lists the backups of a tag from its path (#7273)', async () => {
+    const backups = [{ id: ROW, tag_id: ROW, uid: '04AA', records: [], reason: 'spool_write' }]
+    server.use(http.get(`${BACKEND}/api/v1/filament/tags/${ROW}/backups`, () => HttpResponse.json(backups)))
+    const result = await runTool(tool('filament_tag_backups'), { tag_id: ROW }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual(backups)
+    expect(() => tool('filament_tag_backups').parse({ tag_id: 'x' })).toThrow()
   })
 
   it('resets the used counter of spools with one POST (#7149)', async () => {

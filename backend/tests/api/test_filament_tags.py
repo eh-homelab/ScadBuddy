@@ -54,3 +54,43 @@ def test_records_past_888_bytes_are_refused(client: TestClient) -> None:
 def test_an_unknown_spool_with_no_uid_is_422_before_404(client: TestClient) -> None:
     got = client.post(READS, json={"uid": None, "records": [], "bind_spool_id": str(uuid4())})
     assert got.status_code == 422 and got.json()["code"] == "no_uid"
+
+
+BACKUPS = "/api/v1/filament/tags/backups"
+_REC = {"record_type": "mime", "media_type": "application/json", "data_hex": "7b7d"}
+
+
+def test_a_backup_answers_its_id_and_lists(client: TestClient) -> None:
+    made = client.post(BACKUPS, json={"uid": "04:aa", "records": [_REC], "reason": "spool_write"})
+    assert made.status_code == 201, made.text
+    tag = client.post(READS, json={"uid": "04aa", "records": []}).json()["tag"]
+    listed = client.get(f"/api/v1/filament/tags/{tag['id']}/backups")
+    assert listed.status_code == 200, listed.text
+    [row] = listed.json()
+    assert row["id"] == made.json()["backup_id"] and row["uid"] == "04AA"
+    assert row["records"][0]["data_hex"] == "7b7d" and row["reason"] == "spool_write"
+
+
+@pytest.mark.parametrize("uid", ["", "::"])
+def test_a_backup_with_no_uid_is_422_no_uid(client: TestClient, uid: str) -> None:
+    got = client.post(BACKUPS, json={"uid": uid, "records": [], "reason": "spool_write"})
+    assert got.status_code == 422 and got.json()["code"] == "no_uid"
+
+
+def test_backups_of_an_unknown_tag_are_404(client: TestClient) -> None:
+    assert client.get(f"/api/v1/filament/tags/{uuid4()}/backups").status_code == 404
+
+
+def test_an_agent_write_backup_needs_a_job_id(client: TestClient) -> None:
+    got = client.post(BACKUPS, json={"uid": "04aa", "records": [], "reason": "agent_write"})
+    assert got.status_code == 422
+    other = client.post(
+        BACKUPS,
+        json={"uid": "04aa", "records": [], "reason": "restore", "job_id": str(uuid4())},
+    )
+    assert other.status_code == 422
+    ok = client.post(
+        BACKUPS,
+        json={"uid": "04aa", "records": [], "reason": "agent_write", "job_id": str(uuid4())},
+    )
+    assert ok.status_code == 201, ok.text

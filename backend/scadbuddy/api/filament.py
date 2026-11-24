@@ -1773,6 +1773,46 @@ async def read_tag(
     return result
 
 
+@router.post(
+    "/tags/backups",
+    response_model=m.TagBackupMade,
+    status_code=status.HTTP_201_CREATED,
+    summary="Back a tag up before a write",
+    description=(
+        "Keeps what a tag holds (its `uid` and NDEF `records`) just before a write, and makes "
+        "the tag when ScadBuddy has not seen it. `reason` is `spool_write`, `agent_write` (with "
+        "the NFC job's `job_id`; no other reason takes one) or `restore`. The answer is the "
+        "`backup_id` the write names. 422 `no_uid` for a UID that cleans to nothing."
+    ),
+)
+async def back_up_tag(
+    filament: FilamentDep, caller: CallerDep, body: m.TagBackupIn
+) -> m.TagBackupMade:
+    try:
+        made = await asyncio.to_thread(tags.back_up, filament.spools, body, actor=actor(caller))
+    except tags.NoUidError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code=exc.code) from None
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    return m.TagBackupMade(backup_id=made.id)
+
+
+@router.get(
+    "/tags/{tag_id}/backups",
+    response_model=list[m.TagBackup],
+    summary="List a tag's backups",
+    description=(
+        "What the tag held before each write, newest first. Rows are never changed or deleted. "
+        "404 for no such tag."
+    ),
+)
+async def list_tag_backups(filament: FilamentDep, tag_id: UUID) -> list[m.TagBackup]:
+    found = await asyncio.to_thread(tags.backups, filament.spools, tag_id)
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no tag {tag_id}")
+    return found
+
+
 @router.get(
     "/events",
     response_model=m.EventPage,

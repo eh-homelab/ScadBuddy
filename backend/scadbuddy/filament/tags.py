@@ -5,7 +5,8 @@ the spool that holds it."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, Literal
+from datetime import timedelta
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
@@ -33,6 +34,29 @@ class BindWithoutUidError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("a tag with no UID cannot be bound to a spool")
+
+
+#: How old a backup may be and still cover a write (#7273 R5).
+BACKUP_TTL: Final = timedelta(minutes=10)
+
+
+class NoUidError(ValueError):
+    """A backup of a tag with no UID."""
+
+    code = "no_uid"
+
+    def __init__(self) -> None:
+        super().__init__("a tag with no UID cannot be backed up")
+
+
+class BackupMismatchError(ValueError):
+    """The backup does not cover this write: unknown, another UID, too old, another reason
+    or another job."""
+
+    code = "backup_mismatch"
+
+    def __init__(self) -> None:
+        super().__init__("no current backup of this tag covers this write")
 
 
 @dataclass(frozen=True)
@@ -227,3 +251,74 @@ def read(
     """`read_on` in one transaction."""
     with spools.transaction() as conn:
         return read_on(conn, read, actor=actor, bind_spool_id=bind_spool_id, defaults=defaults)
+
+
+_BACKUP_COLUMNS: Final = "id, tag_id, uid, records, reason, job_id, actor, at"
+
+
+def _backup_of(row: dict[str, Any]) -> m.TagBackup:
+    return m.TagBackup.model_validate(row)
+
+
+def back_up(spools: FilamentSpoolStore, body: m.TagBackupIn, *, actor: str) -> m.TagBackup:
+    """Keep what a tag holds, before a write. The tag is found or made by its UID."""
+    uid = clean_tag_uid(body.uid)
+    if uid is None:
+        raise NoUidError()
+    source: m.TagSource = "agent" if body.reason == "agent_write" else "phone"
+    with spools.transaction() as conn:
+        tag_id, _ = seen_on(conn, TagRead(source=source, uid=uid, records=tuple(body.records)))
+        row = conn.execute(
+            "INSERT INTO filament_tag_backups (tag_id, uid, records, reason, job_id, actor)"
+            f" VALUES (%s, %s, %s, %s, %s, %s) RETURNING {_BACKUP_COLUMNS}",
+            (
+                tag_id,
+                uid,
+                Jsonb([r.model_dump() for r in body.records]),
+                body.reason,
+                body.job_id,
+                actor,
+            ),
+        ).fetchone()
+    assert row is not None
+    return _backup_of(row)
+
+
+def backups(spools: FilamentSpoolStore, tag_id: UUID) -> list[m.TagBackup] | None:
+    """A tag's backups, newest first; ``None`` for no such tag."""
+    with spools.transaction() as conn:
+        if conn.execute("SELECT 1 FROM filament_tags WHERE id = %s", (tag_id,)).fetchone() is None:
+            return None
+        rows = conn.execute(
+            f"SELECT {_BACKUP_COLUMNS} FROM filament_tag_backups WHERE tag_id = %s"
+            " ORDER BY at DESC, id DESC",
+            (tag_id,),
+        ).fetchall()
+    return [_backup_of(r) for r in rows]
+
+
+def valid_backup(
+    conn: Conn,
+    backup_id: UUID,
+    uid: str,
+    reason: m.BackupReason,
+    *,
+    job_id: UUID | None = None,
+) -> m.TagBackup:
+    """The backup, when it covers one write of this UID for this reason (#7273 R5)."""
+    row = conn.execute(
+        f"SELECT {_BACKUP_COLUMNS}, now() - at AS age FROM filament_tag_backups WHERE id = %s",
+        (backup_id,),
+    ).fetchone()
+    if row is None:
+        raise BackupMismatchError()
+    age = row.pop("age")
+    found = _backup_of(row)
+    if (
+        clean_tag_uid(uid) != found.uid
+        or age > BACKUP_TTL
+        or found.reason != reason
+        or (reason == "agent_write" and found.job_id != job_id)
+    ):
+        raise BackupMismatchError()
+    return found

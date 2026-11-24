@@ -1167,6 +1167,26 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_tag_backups',
+    label: 'List a spool tag’s backups',
+    description:
+      'List what a tag held before each write, newest first: its UID, its NDEF records (record type, media type, ' +
+      'data as hex), why it was written (`spool_write`, `agent_write`, `restore`), who wrote it and when. ' +
+      'Reads ScadBuddy only.',
+    input: z.object({ tag_id: z.string().uuid().describe("A tag's `id` from filament_tag_list") }),
+    risk: 'read',
+    source: 'NDEF records read from a physical tag, which anyone holding the tag could have written',
+    routes: ['GET /api/v1/filament/tags/{tag_id}/backups'],
+    handler: async ({ tag_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/tags/{tag_id}/backups', { params: { path: { tag_id } } }),
+          `read the backups of tag ${tag_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_ledger_list',
     label: 'Read the filament ledger',
     description:

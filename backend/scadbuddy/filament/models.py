@@ -1870,6 +1870,40 @@ class TagReadIn(_In):
         return self
 
 
+BackupReason = Literal["spool_write", "agent_write", "restore"]
+
+
+class TagBackupIn(_In):
+    """What a tag held just before a write (#7273 G7). An empty ``uid`` is allowed here so
+    that it reaches the store and answers 422 ``no_uid``, as ``"::"`` does."""
+
+    uid: Annotated[str, Field(max_length=64)]
+    records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
+    reason: BackupReason
+    job_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _job(self) -> TagBackupIn:
+        if (self.reason == "agent_write") != (self.job_id is not None):
+            raise ValueError("`job_id` goes with the reason `agent_write`, and only with it")
+        return self
+
+
+class TagBackup(BaseModel):
+    id: UUID
+    tag_id: UUID
+    uid: str
+    records: list[NdefRecord]
+    reason: BackupReason
+    job_id: UUID | None
+    actor: str
+    at: datetime
+
+
+class TagBackupMade(BaseModel):
+    backup_id: UUID
+
+
 class DecodedSpool(BaseModel):
     """A spool as a tag's records describe it."""
 
