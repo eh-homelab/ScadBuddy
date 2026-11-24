@@ -534,9 +534,9 @@ function capped(text: string, max: number, what: string, cut: string[]): string 
 /** Temporal's default limit on one payload (a durable turn's `turn_tools` result is one). */
 export const TEMPORAL_PAYLOAD_LIMIT = 2 * 1024 * 1024
 /**
- * The most all of a turn's packages may take in a durable turn's listing, in UTF-8 bytes (#4757
+ * The most all of a turn's packages may take in a turn's listing, in UTF-8 bytes (#4757
  * Task 6 re-review R9): half Temporal's payload limit, the rest left for the tools and notes. A
- * package past it is not loaded, in classic and durable alike, in the order they load, and said
+ * package past it is not loaded, in the order they load, and said
  * (install.ts `loadPackagesForRun`, `listedPackageSize`).
  */
 export const LISTING_PACKAGES_BUDGET = 1024 * 1024
@@ -554,9 +554,9 @@ export function listedItemsSize(items: PackageItems): number {
 }
 
 /**
- * The most a loaded package can take of a durable turn's listing (temporal/turnTools.ts
+ * The most a loaded package can take of a turn's listing (temporal/turnTools.ts
  * `TurnPackage`, with every item: a copy that leaves some out takes less), in UTF-8 bytes. Read
- * from the pin, so a classic turn and a durable one count each package alike.
+ * from the pin, so every turn counts each package alike.
  */
 export function listedPackageSize(name: string, items: PackageItems, builtinTools: readonly string[]): number {
   const hex = 'f'.repeat(64)
