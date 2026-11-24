@@ -548,6 +548,10 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      # At most 2 shards at once (#7510): every workflow shares the organization's
+      # concurrent hosted-job limit (about 20 on GitHub Free, #7509), so a CI run that
+      # holds fewer slots leaves room for review jobs. The other shards wait for a slot.
+      max-parallel: 2
       matrix:
         shard: [1, 2, 3]
     defaults:
@@ -611,6 +615,10 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      # At most 2 shards at once (#7510): every workflow shares the organization's
+      # concurrent hosted-job limit (about 20 on GitHub Free, #7509), so a CI run that
+      # holds fewer slots leaves room for review jobs. The other shards wait for a slot.
+      max-parallel: 2
       matrix:
         shard: [1, 2, 3]
     defaults:
@@ -1519,6 +1527,10 @@ jobs:
     timeout-minutes: 55
     strategy:
       fail-fast: false
+      # At most 4 shards at once (#7510): every workflow shares the organization's
+      # concurrent hosted-job limit (about 20 on GitHub Free, #7509), so a CI run that
+      # holds fewer slots leaves room for review jobs. The other shards wait for a slot.
+      max-parallel: 4
       matrix:
         group: [1, 2, 3, 4, 5, 6, 7, 8]
     services:
