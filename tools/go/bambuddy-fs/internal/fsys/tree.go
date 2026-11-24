@@ -38,7 +38,8 @@ var _ Library = (*api.Client)(nil)
 // Options are the mount's settings. All lists every file type, ReadOnly refuses every
 // write with EROFS, TTL is how long a folder's listing is kept, CacheDir holds
 // downloaded contents (at most CacheMax bytes of them, 0 no bound) and files being
-// written, and StateDir the writes whose upload failed, under unsent/ (#2865).
+// written, and StateDir the writes not yet sent, under unsent/ (#2865): those whose
+// upload failed and, with WriteBack, every write until the retrier sends it.
 // WriteBack makes a close queue what was written there instead of uploading it (#7286).
 type Options struct {
 	All, ReadOnly      bool

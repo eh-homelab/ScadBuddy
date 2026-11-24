@@ -331,7 +331,8 @@ func (p *pending) tracedUpload(ctx context.Context, name string) syscall.Errno {
 // flush could neither send nor queue (one more try), or what a mapping wrote after the
 // last close. If that fails too and no handle has opened meanwhile, the contents are
 // kept under refused/ (keepRefused) and a file never uploaded leaves its folder. The
-// queued entries it held go back to the retrier.
+// queued entries it held go back to the retrier. With --write-back it queues what is
+// left instead of uploading it (#7286).
 func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 	p, n, t := h.p, h.p.node, h.p.node.tree
 	if t.released != nil {

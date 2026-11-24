@@ -92,7 +92,7 @@ func newFlagSet(cfg *config) *flag.FlagSet {
 }
 
 func stateDirFlag(set *flag.FlagSet, cfg *config) {
-	set.StringVar(&cfg.StateDir, "state-dir", defaultStateDir(), "where writes whose upload failed are kept until they are sent")
+	set.StringVar(&cfg.StateDir, "state-dir", defaultStateDir(), "where writes not yet sent are kept: failed uploads and, with --write-back, every write until it is sent")
 }
 
 // byteSize is a flag's size in bytes: a number with an optional binary suffix, K, M,

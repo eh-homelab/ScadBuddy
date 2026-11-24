@@ -121,7 +121,7 @@ bambuddy-fs allow-other
 | `--attr-ttl` | How long listings are cached, and the kernel's entry and attribute timeout. Default `5s`. |
 | `--cache-dir` | Downloaded contents and files being written, under `<cache-dir>/<API host>[_<port>]/`, so two ScadBuddy instances never share contents (file IDs are each one's own). Default `$XDG_CACHE_HOME/bambuddy-fs`, or `~/.cache/bambuddy-fs`. One mount at a time uses an API's cache (it holds a `lock` there). |
 | `--cache-max` | At most this much downloaded contents is kept in `--cache-dir`, the least recently read removed first: a number of bytes, or with `K`, `M`, `G` or `T` (binary; `2G`, `2GiB` and `2GB` are the same). `0` is no bound. Default `2G`. |
-| `--state-dir` | Writes whose upload failed, under `unsent/` (see "Unsent writes"). Default `$XDG_STATE_HOME/bambuddy-fs`, or `~/.local/state/bambuddy-fs`. |
+| `--state-dir` | Writes not yet sent, under `unsent/`: those whose upload failed and, with `--write-back`, every write until the retrier sends it (see "Unsent writes"). Default `$XDG_STATE_HOME/bambuddy-fs`, or `~/.local/state/bambuddy-fs`. |
 | `--otel-endpoint` | OTLP/HTTP collector base URL for traces and metrics (see "Telemetry"). |
 | `--no-telemetry` | Send no traces or metrics. `--no-tracing` is the same. |
 
