@@ -85,6 +85,18 @@ class ArchiveOffer(BaseModel):
     #: Whether the archive has a timelapse to copy (pulled off the printer first,
     #: ``POST /prints/{archive_id}/timelapse/pull``).
     timelapse: bool = False
+    #: The attachment the attempt, or its item, holds of this archive's finish photo,
+    #: if any: what is attached now, not what the import started by this read will
+    #: attach (spec 2026-11-05 §4.4).
+    finished_attachment_id: str | None = None
+    #: The same for the archive's timelapse.
+    timelapse_attachment_id: str | None = None
+    #: Whether the import refused the finish photo as larger than the upload limit, and
+    #: the limit is no higher now (#7281 review): no import tries it again, and the copy
+    #: button is refused too, so it is attached by hand.
+    finished_too_large: bool = False
+    #: The same for the archive's timelapse.
+    timelapse_too_large: bool = False
 
 
 class AttemptArchives(BaseModel):
@@ -370,14 +382,29 @@ async def attempt_archives(
     once and never waits on a download (spec 2026-11-05 §4.1)."""
     attempt = await asyncio.to_thread(attempt_of, lifecycle.store, order_id, item_id, fulfilment_id)
     attempt, facts = await mirror_archives(lifecycle, integrations, attempt)
+    attached: dict[tuple[int, ArchiveCopyMedia], str] = {}
+    refused: set[tuple[int, ArchiveCopyMedia]] = set()
     if facts:
-        skipped = await _skipped(lifecycle, attempt, limit)
+        attached = await asyncio.to_thread(
+            lifecycle.store.archive_media_attachments, attempt.id, item_id
+        )
+        refused = await asyncio.to_thread(lifecycle.store.media_refused, attempt.id, limit)
+        skipped = set(attached) | refused
         if any((f.archive_id, what) not in skipped for f in facts for what, _ in _wanted(f)):
             await start_media(starter, attempt.id, retries=False)
     return AttemptArchives(
         linked=integrations.linked,
         attempt=attempt,
-        archives=[ArchiveOffer(**f.model_dump()) for f in facts],
+        archives=[
+            ArchiveOffer(
+                **f.model_dump(),
+                finished_attachment_id=attached.get((f.archive_id, "finished_photo")),
+                timelapse_attachment_id=attached.get((f.archive_id, "timelapse")),
+                finished_too_large=(f.archive_id, "finished_photo") in refused,
+                timelapse_too_large=(f.archive_id, "timelapse") in refused,
+            )
+            for f in facts
+        ],
     )
 
 

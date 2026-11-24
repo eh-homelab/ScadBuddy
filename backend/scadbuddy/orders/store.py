@@ -3217,13 +3217,22 @@ class OrderStore:
     ) -> set[tuple[int, ArchiveCopyMedia]]:
         """Each ``(archive_id, archive_media)`` the attempt has a copy of, or its item has
         (a copy from before #5268), whatever the file's name (spec 2026-11-05 §4.2)."""
+        return set(self.archive_media_attachments(fulfilment_id, item_id, conn=conn))
+
+    def archive_media_attachments(
+        self, fulfilment_id: str, item_id: str, *, conn: Conn | None = None
+    ) -> dict[tuple[int, ArchiveCopyMedia], str]:
+        """The id of the oldest attachment of each ``(archive_id, archive_media)`` the
+        attempt, or its item, has a copy of (spec 2026-11-05 §4.4)."""
         with self._read(conn) as c:
             rows = c.execute(
-                "SELECT DISTINCT archive_id, archive_media FROM entity_attachments"
-                " WHERE subject IN (%s, %s) AND archive_id IS NOT NULL",
+                "SELECT DISTINCT ON (archive_id, archive_media) archive_id, archive_media, id"
+                " FROM entity_attachments"
+                " WHERE subject IN (%s, %s) AND archive_id IS NOT NULL"
+                " ORDER BY archive_id, archive_media, created_at, id",
                 (fulfilment_subject(fulfilment_id), item_subject(item_id)),
             ).fetchall()
-        return {(r["archive_id"], r["archive_media"]) for r in rows}
+        return {(r["archive_id"], r["archive_media"]): str(r["id"]) for r in rows}
 
     def record_media_refusal(
         self,
