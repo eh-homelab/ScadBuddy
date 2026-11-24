@@ -395,9 +395,10 @@ PRINTER_SYNC_TIMEOUT = timedelta(minutes=5)
 #: once); a few reads, then a trash, and per folder with superseded copies a lock, a read,
 #: a trash and a forget per copy.
 NATIVE_COPIES_TIMEOUT = timedelta(minutes=5)
-#: A push per repository, each bounded by `gitrepo.PUSH_TIMEOUT` (2 min), and a margin.
-#: Not imported, as `GIT_TIMEOUT`'s is not.
-GIT_REMOTE_TIMEOUT = timedelta(minutes=5)
+#: A push per repository, each bounded by `gitrepo.PUSH_TIMEOUT` (2 min), the models'
+#: meshes before theirs (`history.LFS_PUSH_TIMEOUT`, 10 min), and a margin. Not imported,
+#: as `GIT_TIMEOUT`'s is not.
+GIT_REMOTE_TIMEOUT = timedelta(minutes=15)
 #: One delete.
 AUTH_SESSIONS_TIMEOUT = timedelta(minutes=2)
 #: Up to `payments.store.CLOSE_RETRY_BATCH` (8) pages, one after another, each up to

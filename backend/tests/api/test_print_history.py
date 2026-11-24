@@ -1113,7 +1113,7 @@ def lan_run(
 
 
 def set_run_status(pg_conninfo: str, run_id: str, status: str) -> None:
-    """Set a run's status by hand, on the test's own schema (#5739): no store path gives a
+    """Set a run's status by hand, on the test's own database (#5739): no store path gives a
     run a result and then another status."""
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         conn.execute("UPDATE print_runs SET status = %s WHERE id = %s", (status, run_id))
