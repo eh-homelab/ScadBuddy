@@ -23,6 +23,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
@@ -1531,6 +1532,8 @@ class Tag(BaseModel):
     raw_blob: str | None
     note: str | None
     created_at: datetime
+    last_seen_at: datetime | None = None
+    last_seen_source: str | None = None
 
 
 class TagBindingCreate(_In):
@@ -1825,6 +1828,79 @@ class TagRow(Tag):
 class TagDetail(TagRow):
     #: Every binding of the tag, newest first.
     history: list[TagBinding] = Field(default_factory=list)
+
+
+#: NTAG216's usable memory, the most one tag's records can hold.
+MAX_RECORD_BYTES: Final = 888
+MAX_RECORDS: Final = 16
+TagSource = Literal["phone", "agent", "ams"]
+
+
+class NdefRecord(_In):
+    """One NDEF record as a reader gives it: its type and its payload in hex."""
+
+    record_type: Annotated[
+        str, Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9:._/+-]+$")
+    ]
+    media_type: Annotated[str, Field(max_length=127)] | None = None
+    id: Annotated[str, Field(max_length=255)] | None = None
+    encoding: Annotated[str, Field(max_length=32)] | None = None
+    lang: Annotated[str, Field(max_length=35)] | None = None
+    data_hex: Annotated[str, Field(max_length=2 * MAX_RECORD_BYTES, pattern=r"^([0-9a-fA-F]{2})*$")]
+
+    @field_validator("data_hex")
+    @classmethod
+    def _lower(cls, value: str) -> str:
+        return value.lower()
+
+
+class TagReadIn(_In):
+    """What a phone reads from a tag: its UID and its NDEF records."""
+
+    uid: Annotated[str, Field(max_length=64)] | None = None
+    tag_type: Annotated[str, Field(max_length=32)] | None = None
+    records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
+    #: Bind the tag to this spool as part of the read.
+    bind_spool_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _fits(self) -> TagReadIn:
+        if sum(len(r.data_hex) // 2 for r in self.records) > MAX_RECORD_BYTES:
+            raise ValueError(f"the records hold more than {MAX_RECORD_BYTES} bytes")
+        return self
+
+
+class DecodedSpool(BaseModel):
+    """A spool as a tag's records describe it."""
+
+    format: Literal["openspool", "opentag3d"]
+    version: str
+    material: str | None = None
+    subtype: str | None = None
+    brand: str | None = None
+    colour_name: str | None = None
+    rgba: str | None = None
+    extra_colours: list[str] | None = None
+    diameter_mm: Decimal | None = None
+    density_g_cm3: Decimal | None = None
+    nozzle_temp_min: int | None = None
+    nozzle_temp_max: int | None = None
+    bed_temp_min: int | None = None
+    bed_temp_max: int | None = None
+    drying_temp_c: int | None = None
+    drying_hours: Decimal | None = None
+    label_weight_g: int | None = None
+    empty_weight_g: int | None = None
+    serial: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TagReadResult(BaseModel):
+    tag: TagRow | None
+    spool: Spool | None
+    decoded: DecodedSpool | None
+    draft: SpoolCreate | None
+    next: Literal["open_spool", "bind_or_create", "none"]
 
 
 class LedgerRow(SpoolEvent):

@@ -1447,6 +1447,18 @@ class FilamentSpoolStore:
         return None if row is None else _hydrate(conn, [row], defaults, now, hours)[0]
 
     @staticmethod
+    def tag_row_on(conn: Conn, tag_id: UUID) -> m.TagRow | None:
+        """The tag with its open binding and its spool's number, on ``conn``."""
+        row = conn.execute(
+            f"SELECT {_TAG_COLUMNS_T}, {_BINDING_COLUMNS_B}, s.number AS spool_number"
+            " FROM filament_tags t LEFT JOIN filament_tag_bindings b"
+            " ON b.tag_id = t.id AND b.unbound_at IS NULL"
+            " LEFT JOIN filament_spools s ON s.id = b.spool_id WHERE t.id = %s",
+            (tag_id,),
+        ).fetchone()
+        return None if row is None else FilamentSpoolStore._tag_row(row)
+
+    @staticmethod
     def _tag_row(row: Row) -> m.TagRow:
         binding = (
             None

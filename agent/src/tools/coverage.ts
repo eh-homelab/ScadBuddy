@@ -22,6 +22,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The labels PDF (#7157, R-7157-10): the answer is a binary file that the assistant cannot read as text. The download tools' pattern (outputs.ts `binary`) embeds base64, which images and files never travel as (#2479), or links a GET, and this is a POST. The Labels page downloads it; the assistant reads the codes with filament_printer_labels and the sizes with filament_label_templates.",
   },
   {
+    operation: 'POST /api/v1/filament/tags/reads',
+    reason:
+      "The phone page's own Web NFC reading (#7273): the browser reads the tag. An agent reads a tag through nfc_read, which queues a job that the phone page runs.",
+  },
+  {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
     reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
   },

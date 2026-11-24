@@ -62,7 +62,15 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
-from scadbuddy.filament import capture, label_pdf, label_templates, ntag, rfid_mode, type_proposals
+from scadbuddy.filament import (
+    capture,
+    label_pdf,
+    label_templates,
+    ntag,
+    rfid_mode,
+    tags,
+    type_proposals,
+)
 from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
@@ -1717,6 +1725,52 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
     if found is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no tag {tag_id}")
     return found
+
+
+@router.post(
+    "/tags/reads",
+    response_model=m.TagReadResult,
+    summary="Record a tag reading",
+    description=(
+        "A phone's reading of a tag (`source` is `phone`): its `uid` and NDEF `records`. "
+        "The tag is found or made by its UID and marked seen. With `bind_spool_id` the tag "
+        "is also bound to that spool, as `POST /spools/{id}/tags` does. `next` says what the "
+        "page does: `open_spool` when a spool holds the tag, `bind_or_create` for a tag no "
+        "spool holds, `none` for a reading with no UID. 404 for an unknown `bind_spool_id`, "
+        "422 `no_uid` for a bind with no UID, 409 when the two keys name two tags."
+    ),
+)
+async def read_tag(
+    filament: FilamentDep,
+    store: SettingsStoreDep,
+    caller: CallerDep,
+    body: m.TagReadIn,
+) -> m.TagReadResult:
+    reading = tags.TagRead(
+        source="phone", uid=body.uid, tag_type=body.tag_type, records=tuple(body.records)
+    )
+
+    def run() -> m.TagReadResult:
+        return tags.read(
+            filament.spools,
+            reading,
+            actor=actor(caller),
+            bind_spool_id=body.bind_spool_id,
+            defaults=filament.spools.defaults(),
+        )
+
+    try:
+        result = await asyncio.to_thread(run)
+    except tags.SpoolNotFoundError:
+        assert body.bind_spool_id is not None
+        raise _no_spool(body.bind_spool_id) from None
+    except tags.BindWithoutUidError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code=exc.code) from None
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    if body.bind_spool_id is not None:
+        await _push_now(filament, store)
+    return result
 
 
 @router.get(

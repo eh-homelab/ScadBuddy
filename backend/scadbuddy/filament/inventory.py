@@ -38,6 +38,7 @@ from scadbuddy.bambuddy.filaments import colour_distance
 from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
 from scadbuddy.bambuddy.trays import CLOSE_COLOUR, place_label, seen_trays, tray_label
 from scadbuddy.filament import models as m
+from scadbuddy.filament import tags
 from scadbuddy.filament.catalog import catalog_key, resolve_or_add
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.locations import LocationStore
@@ -288,18 +289,9 @@ class FilamentInventory:
         placed at the tray whose ``tray_fingerprint`` equals the tray's: ``"link"``, for a
         tray with no keys and for one whose keys no binding holds (#6263 preflight C5, the
         AMS rescan). Else none."""
-        for column, key in (("tray_uuid", seen.tray_uuid), ("tag_uid", seen.tag_uid)):
-            if key is None:
-                continue
-            row = conn.execute(
-                "SELECT b.spool_id FROM filament_tags t"
-                " JOIN filament_tag_bindings b ON b.tag_id = t.id AND b.unbound_at IS NULL"
-                " JOIN filament_spools s ON s.id = b.spool_id AND s.archived_at IS NULL"
-                f" WHERE t.{column} = %s",
-                (key,),
-            ).fetchone()
-            if row is not None:
-                return row["spool_id"], "tag"
+        keyed = tags.holder_by_keys(conn, seen.tray_uuid, seen.tag_uid)
+        if keyed is not None:
+            return keyed, "tag"
         placed = conn.execute(
             "SELECT s.id FROM filament_spools s JOIN filament_locations l ON l.id = s.location_id"
             " WHERE l.printer_id = %s AND l.ams_id = %s AND l.tray_id = %s"
