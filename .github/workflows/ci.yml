@@ -1594,11 +1594,20 @@ jobs:
       # 16 GB RAM (https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories).
       # A shard whose memory filled the VM lost its runner mid-step, and the job kept
       # no log. `--memory` with an equal `--memory-swap` caps the container (its
-      # /dev/shm included) at 12 GiB with no swap, below the VM's RAM: past it the
-      # kernel kills a process inside the container, xdist reports that worker's test
-      # as crashed, and the job ends with its log. The sampler prints the VM's memory,
-      # the container's (now, its peak, its shmem) and the largest processes every
-      # 30 s; the kernel's OOM lines follow the run.
+      # /dev/shm included) at 13 GiB with no swap, below the VM's RAM (about 1.3 GiB
+      # more is used outside the container): past it the kernel kills a process inside
+      # the container, xdist reports that worker's test as crashed, and the job ends
+      # with its log. The sampler prints the VM's memory, the container's (now, its
+      # peak, its shmem) and the largest processes every 30 s; the kernel's OOM lines
+      # follow the run. Measured on run 45276569396 (12 GiB cap): a passing shard used
+      # about 13 GB of the VM; each of the 4 Temporal dev servers held 1.2 to 1.7 GiB
+      # and an xdist worker 2.5 GiB; shards 1 to 3 were killed opening a whole
+      # MakerWorld fixture (3.5 to 3.9 GiB of anon RSS in the killed worker).
+      # `GOMEMLIMIT` makes the dev servers' Go runtime collect before its heap grows
+      # past it (a soft limit, https://pkg.go.dev/runtime#hdr-Environment_Variables);
+      # the temporal CLI is the Go program these tests start. The whole-fixture
+      # reads take a lock, one at a time per shard (`tests/conftest.py`
+      # `one_whole_read_at_a_time`).
       - name: pytest
         run: |
           set -euo pipefail
@@ -1625,7 +1634,8 @@ jobs:
           sampler=$!
           rc=0
           docker run --rm --cidfile "$cid" --network host --shm-size=1g \
-            --memory=12g --memory-swap=12g \
+            --memory=13g --memory-swap=13g \
+            -e GOMEMLIMIT=768MiB \
             -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -v "$PWD/results:/results" \
             -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test \
@@ -1635,7 +1645,7 @@ jobs:
             --store-durations --clean-durations --durations-path=/results/durations.json \
             --junitxml=/results/junit.xml --durations=20 || rc=$?
           kill "$sampler"
-          echo "container memory peak: $(($(cat "$peak" 2>/dev/null || echo 0) >> 20)) MiB of 12288"
+          echo "container memory peak: $(($(cat "$peak" 2>/dev/null || echo 0) >> 20)) MiB of 13312"
           sudo dmesg | grep -iE 'out of memory|oom-kill|killed process' || echo "no OOM kill in the kernel log"
           exit "$rc"
 
