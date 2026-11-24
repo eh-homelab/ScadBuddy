@@ -13,8 +13,9 @@ two halves, for a route whose write cannot be one callable. `stored` reads a rep
 lock, for a route that answers a retry before it does any other work; `has_reply` says
 whether a key holds one before the body is read.
 
-A write's transaction is `core/tracing.py` `traced_transaction`, its COMMIT a span of
-its own (#7389).
+Every write that keeps a ledger row (`idempotent_write`, the report PUT
+`api/crud_print.py` `put_report`, the profile-fetch import's `finish`) runs in
+`core/tracing.py` `traced_transaction`, its COMMIT a span of its own (#7389).
 """
 
 from __future__ import annotations

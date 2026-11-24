@@ -28,6 +28,7 @@ from opentelemetry.trace import Link, Span, SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import Attributes
 from psycopg import Connection
+from psycopg.pq import TransactionStatus
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.trace_scrub import ScrubbingSpanExporter
@@ -364,7 +365,13 @@ COMMIT_SPAN: Final = "db.commit"
 @contextmanager
 def traced_transaction(conn: Connection[Any]) -> Iterator[None]:
     """``conn.transaction()``, its COMMIT inside the span `COMMIT_SPAN`, which records no
-    value. A block that raises rolls back outside the span, and the error goes on."""
+    value. A block that raises rolls back outside the span, and the error goes on. On a
+    connection already in a transaction it is a savepoint, whose release commits nothing,
+    so it gets no span."""
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        with conn.transaction():
+            yield
+        return
     transaction = conn.transaction()
     transaction.__enter__()
     try:
