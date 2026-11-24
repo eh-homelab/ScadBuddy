@@ -3071,11 +3071,13 @@ async def _with_archive_facts(orders: OrdersComponent, attempt: Fulfilment) -> F
     recorded, and its archives are read again when they are shown. A read slower than
     ``ARCHIVE_READ_TIMEOUT`` is stopped, and the attempt is answered as written (#6145).
     After the facts it starts the attempt's media import, with retries (#7233, spec
-    2026-11-05 §4.1): one Temporal call, logged on failure, never a download."""
+    2026-11-05 §4.1): one Temporal call, logged on failure, never a download. Without a
+    Bambuddy there is nothing to import, and nothing is started."""
     if not attempt.archive_ids or attempt.print_run_id is not None:
         return attempt
-    written = attempt
+    written, linked = attempt, False
     try:
+        linked = orders.integrations.linked
         written, _ = await mirror_archives(
             orders.lifecycle, orders.integrations, attempt, ARCHIVE_READ_TIMEOUT
         )
@@ -3086,7 +3088,8 @@ async def _with_archive_facts(orders: OrdersComponent, attempt: Fulfilment) -> F
         )
     except Exception:
         logger.warning("could not copy a hand attempt's print archives", exc_info=True)
-    await start_media(orders.media_starter, attempt.id, retries=True)
+    if linked:
+        await start_media(orders.media_starter, attempt.id, retries=True)
     return written
 
 
@@ -3180,6 +3183,7 @@ async def get_attempt_archives(
         item_id,
         fulfilment_id,
         orders.media_starter,
+        limit=orders.core.settings.media_upload_max_bytes,
     )
 
 
