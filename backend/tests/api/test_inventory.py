@@ -380,6 +380,31 @@ def test_an_offer_round_trips_with_its_prices(client: TestClient) -> None:
     assert client.get(f"{API}/items/{item['id']}/offers").json()["offers"] == []
 
 
+def test_an_item_counts_its_unarchived_offers(client: TestClient) -> None:
+    """R-P2-37: `offer_count` comes with the item, on the list and on one item."""
+    item = _item(client)
+    bare = _item(client)
+    supplier, other = _supplier(client), _supplier(client)
+    for shop, sku in ((supplier, "A-1"), (other, "B-1"), (supplier, "A-2")):
+        made = client.post(
+            f"{API}/offers",
+            json={"supplier_id": shop, "item_id": item["id"], "sku": sku},
+            headers=press(),
+        )
+        assert made.status_code == 201, made.text
+    assert (
+        client.post(f"{API}/offers/{made.json()['id']}/archive", headers=press()).status_code == 200
+    )
+
+    listed = {
+        i["id"]: i for i in client.get(f"{API}/items", params={"kind": "hardware"}).json()["items"]
+    }
+    assert listed[item["id"]]["offer_count"] == 2
+    assert listed[bare["id"]]["offer_count"] == 0
+    assert client.get(f"{API}/items/{item['id']}").json()["offer_count"] == 2
+    assert bare["offer_count"] == 0
+
+
 def test_offer_refusals(client: TestClient) -> None:
     item = _item(client)
     supplier = _supplier(client)

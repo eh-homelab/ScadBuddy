@@ -127,6 +127,8 @@ class Item(_Decimals):
     #: Some lot with stock on hand, or some unit in stock, has no known cost.
     cost_unknown: bool
     low: bool
+    #: Its unarchived supplier offers (R-P2-37).
+    offer_count: int
 
     @field_serializer("low_stock", "life_hours", "on_hand", "stock_value_minor")
     def _decimals(self, value: Decimal | None) -> str | None:
