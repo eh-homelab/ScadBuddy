@@ -65,9 +65,9 @@ export const handlers = [
     // of its own, so nothing is swapped out).
     const itemId = query.get('item_id')
     const parts = itemId ? partsUnitOf(itemId, currency) : null
-    const cost = seed.unit_cost_minor + Math.round(parts ?? 0)
-    answer.parts_unit_minor = parts === null ? null : Math.round(parts)
-    Object.assign(answer, seed, { unit_cost_minor: cost, suggested_unit_price_minor: suggested(cost, markup, thin) })
+    const cost = seed.unit_cost_minor + Math.round(parts?.minor ?? 0)
+    answer.parts_unit_minor = parts === null ? null : Math.round(parts.minor)
+    Object.assign(answer, seed, { unit_cost_minor: cost, suggested_unit_price_minor: suggested(cost, markup, thin), parts_unknown: parts?.unknown ?? false })
     if (price !== null) {
       const unit = Number(price)
       const percent = unit > 0 ? ((unit - cost) * 100) / unit : null

@@ -44,9 +44,10 @@ function answer(p: MockPart): InventoryPart {
   return { ...rest, unit_cost_minor: decimal(unit_cost), low: p.low_stock > 0 && p.on_hand <= p.low_stock, minor_exponent: minorExponent(p.currency) }
 }
 
-/** Seeds a part for a test, as `POST /parts` makes it. */
+/** Seeds a part for a test, as `POST /parts` makes it; at a supplier unless one is named
+ * (`supplier: ''` seeds a part with no supplier, R-P2-25). */
 export function seedPart(body: PartCreate & { currency?: string }): InventoryPart {
-  return answer(create(body, body.currency ?? mockSettings().orders_currency))
+  return answer(create({ ...body, supplier: body.supplier ?? 'Bolt Depot' }, body.currency ?? mockSettings().orders_currency))
 }
 
 function find(id: string): MockPart {
@@ -85,7 +86,15 @@ function nameTaken(name: string, own: string | null): MockPart | undefined {
   return parts.parts.find((p) => p.name.toLowerCase() === name.toLowerCase() && p.id !== own)
 }
 
+/** R-P2-34: a part with no supplier has no offer to hold a pack. */
+const NO_PACK = 'a part with no supplier has no pack to change: name its supplier'
+
+function hasPack(size: number | null | undefined, price: number | null | undefined): boolean {
+  return (size != null && size !== 1) || (price != null && price !== 0)
+}
+
 function create(body: PartCreate, currency: string): MockPart {
+  const supplied = !!body.supplier?.trim()
   const p: MockPart = {
     id: newId('part'),
     name: body.name,
@@ -94,14 +103,18 @@ function create(body: PartCreate, currency: string): MockPart {
     currency,
     pack_size: body.pack_size,
     pack_price_minor: body.pack_price_minor,
-    unit_cost: round6(body.pack_price_minor / body.pack_size),
+    // R-P2-35: with no supplier there is no price point, so nothing says what a unit costs.
+    unit_cost: supplied ? round6(body.pack_price_minor / body.pack_size) : 0,
+    cost_unknown: !supplied,
     on_hand: 0,
     low_stock: body.low_stock ?? 0,
     created_at: now(),
     updated_at: now(),
   }
   parts.parts.push(p)
-  if ((body.on_hand ?? 0) > 0) move(p, 'adjust', body.on_hand ?? 0, { note: 'Count when the part was added' })
+  // The count on the shelf is received as a lot: an `add` move, of unknown cost with no supplier.
+  const shelf = body.on_hand ?? 0
+  if (shelf > 0) move(p, 'add', shelf, { amount_minor: supplied ? Math.round(shelf * p.unit_cost) : null, note: 'Count when the part was added' })
   return p
 }
 
@@ -165,12 +178,21 @@ export function partsCostOf(itemId: string): { minor: number; unknown: boolean }
   return parts.taken.get(itemId) ?? { minor: 0, unknown: false }
 }
 
-/** One unit of the item's parts at today's unit costs, in `currency`. */
-export function partsUnitOf(itemId: string, currency: string): number {
-  return (parts.items.get(itemId) ?? []).reduce((sum, row) => {
+/** `Lifecycle.parts_unit_cost`: one unit of the item's parts at today's unit costs, and
+ * whether some of it is of unknown cost. Stock costs are in the shop's currency: in another
+ * currency the parts are 0, and unknown when the item has any (R-P2-33). */
+export function partsUnitOf(itemId: string, currency: string): { minor: number; unknown: boolean } {
+  const rows = parts.items.get(itemId) ?? []
+  const shop = mockSettings().orders_currency
+  if (currency !== shop) return { minor: 0, unknown: rows.length > 0 }
+  let minor = 0
+  let unknown = false
+  for (const row of rows) {
     const p = parts.parts.find((x) => x.id === row.item_id)
-    return p && p.currency === currency ? sum + row.per_unit * p.unit_cost : sum
-  }, 0)
+    if (p && p.currency === shop && !p.cost_unknown) minor += row.per_unit * p.unit_cost
+    else unknown = true
+  }
+  return { minor, unknown }
 }
 
 function refusedPart(request: Request, error: unknown) {
@@ -188,6 +210,7 @@ export const handlers = [
     const body = (await request.json()) as PartCreate
     if (!body.name?.trim()) return fieldProblem(request, 'name', 'String should have at least 1 character')
     if (!(body.pack_size >= 1)) return fieldProblem(request, 'pack_size', 'Input should be greater than or equal to 1')
+    if (!body.supplier?.trim() && hasPack(body.pack_size, body.pack_price_minor)) return fieldProblem(request, 'supplier', NO_PACK)
     const taken = nameTaken(body.name, null)
     if (taken) return problem(request, 409, `part '${taken.id}' has that name: ${taken.id}`, PROBLEMS + 'part_exists', { part_id: taken.id })
     return HttpResponse.json(answer(create(body, mockSettings().orders_currency)), { status: 201 })
@@ -201,7 +224,14 @@ export const handlers = [
         if (taken) return problem(request, 409, `part '${taken.id}' has that name`, PROBLEMS + 'part_exists', { part_id: taken.id })
       }
       const packChanged = body.pack_size != null || body.pack_price_minor != null
+      const supplier = body.supplier ?? p.supplier
+      if (!supplier.trim() && packChanged) return fieldProblem(request, 'supplier', NO_PACK)
+      if (body.supplier != null && !body.supplier.trim() && p.supplier.trim()) {
+        // The offer is archived: a pack of 1 at 0; its link stays, as a purchase link.
+        Object.assign(p, { pack_size: 1, pack_price_minor: 0 })
+      }
       Object.assign(p, Object.fromEntries(Object.entries(body).filter(([, v]) => v != null)))
+      if (packChanged) p.cost_unknown = false
       if (p.on_hand <= 0 && packChanged) p.unit_cost = round6(p.pack_price_minor / p.pack_size)
       p.updated_at = now()
       return HttpResponse.json(answer(p))
@@ -214,11 +244,19 @@ export const handlers = [
     try {
       const p = find(String(params.id))
       const packs = body.packs ?? 1
-      if (body.pack_price_minor != null) p.pack_price_minor = body.pack_price_minor
+      const supplied = !!p.supplier.trim()
+      // R-P2-25: with no supplier, single units at the body's price, and no price point.
+      if (supplied && body.pack_price_minor != null) p.pack_price_minor = body.pack_price_minor
+      const each = supplied ? p.pack_price_minor : body.pack_price_minor
       const count = packs * p.pack_size
-      const amount = packs * p.pack_price_minor
-      p.unit_cost = average(p, count, amount)
-      move(p, 'add', count, { amount_minor: amount, note: body.note ?? '' })
+      if (each == null) {
+        move(p, 'add', count, { amount_minor: null, note: body.note ?? '' })
+      } else {
+        const amount = packs * each
+        p.unit_cost = p.cost_unknown ? round6(amount / count) : average(p, count, amount)
+        p.cost_unknown = false
+        move(p, 'add', count, { amount_minor: amount, note: body.note ?? '' })
+      }
       return HttpResponse.json(answer(p))
     } catch (error) {
       return refusedPart(request, error)
@@ -227,6 +265,7 @@ export const handlers = [
   http.post('/api/v1/parts/:id/adjust', async ({ request, params }) => {
     const body = (await request.json()) as StockAdjust
     if (!body.note?.trim()) return fieldProblem(request, 'note', 'String should have at least 1 character')
+    if (!(body.on_hand >= 0)) return fieldProblem(request, 'on_hand', 'Input should be greater than or equal to 0')
     try {
       const p = find(String(params.id))
       move(p, 'adjust', body.on_hand - p.on_hand, { note: body.note })

@@ -1574,7 +1574,8 @@ export const orderTools: Tool[] = [
     label: 'List parts',
     description:
       'The parts inventory (keychain hooks, rings, magnets): each part\'s pack, its unit cost (a decimal string in ' +
-      'minor units, the weighted average of the stock on hand), what is `on_hand` (below zero when more was used ' +
+      'minor units, the weighted average of the stock on hand of known cost; `cost_unknown` when nothing says ' +
+      'what a unit costs), what is `on_hand` (below zero when more was used ' +
       'than recorded) and `low` at or below its low-stock level. With `low`, only the low ones. With `order_id`, ' +
       "that order's items' parts per unit and `short`: the parts its open items need beyond what is on hand " +
       '(there `on_hand` and `short` are decimal strings, the lots summed).',
@@ -1601,8 +1602,10 @@ export const orderTools: Tool[] = [
     label: 'Add stock to a part',
     description:
       "Record packs bought: `packs` of the part's pack join the stock, at `pack_price_minor` each (with tax, in " +
-      "the part's currency's minor units) when given, which becomes the part's pack price. The unit cost becomes " +
-      'the weighted average of the stock on hand and the new packs; orders already fulfilled keep their cost.',
+      "the part's currency's minor units) when given, which becomes the part's pack price. A part with no " +
+      'supplier has no pack: `packs` are single units at `pack_price_minor`, no price point is written, and ' +
+      'with no price the stock is of unknown cost. The unit cost becomes the weighted average of the stock on hand ' +
+      'of known cost and the new packs; orders already fulfilled keep their cost.',
     input: z.object({
       part_id: ID.describe('A part id, as part_list returns it'),
       packs: z.number().int().min(1).max(10_000).default(1),

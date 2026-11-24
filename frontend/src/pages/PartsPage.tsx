@@ -58,8 +58,8 @@ export function PartsPage() {
           p.supplier
         ),
     },
-    { key: 'pack', header: 'Pack', className: 'sb-num', cell: (p) => `${p.pack_size} for ${formatMoney(p.pack_price_minor, p.currency, p.minor_exponent)}` },
-    { key: 'unit', header: 'Unit cost', className: 'sb-num', cell: (p) => formatUnitCost(p.unit_cost_minor, p.currency, p.minor_exponent) },
+    { key: 'pack', header: 'Pack', className: 'sb-num', cell: (p) => (p.supplier ? `${p.pack_size} for ${formatMoney(p.pack_price_minor, p.currency, p.minor_exponent)}` : 'no pack') },
+    { key: 'unit', header: 'Unit cost', className: 'sb-num', cell: (p) => (p.cost_unknown ? 'unknown' : formatUnitCost(p.unit_cost_minor, p.currency, p.minor_exponent)) },
     { key: 'on_hand', header: 'On hand', className: 'sb-num', cell: (p) => <span className={p.on_hand < 0 || p.low ? 'text-warn' : undefined}>{p.on_hand}</span> },
     { key: 'low_stock', header: 'Low at', className: 'sb-num text-muted-foreground', cell: (p) => (p.low_stock > 0 ? p.low_stock : '—') },
     {
