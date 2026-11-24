@@ -335,23 +335,56 @@ async def test_a_nul_never_reaches_postgres(http: httpx.AsyncClient, store: Task
     assert store.get(T2) is None
 
 
-async def test_the_log_and_the_refusals_never_hold_an_answer_a_schema_or_a_context(
+async def test_a_refusal_never_quotes_an_answer_or_a_context_and_the_log_holds_none(
     http: httpx.AsyncClient, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    secret = "s3cret-value"
-    refused = [
+    answer, context, schema = "ans-s3cret", "ctx-s3cret", "schema-s3cret"
+    sent = [
         await http.post(
-            BASE, json={**_wire(T1), "title": "", "context": [{"type": "text", "text": secret}]}
+            BASE, json={**_wire(T1), "title": "", "context": [{"type": "text", "text": context}]}
         ),
-        await http.post(BASE, json={**_wire(T1), "schema": {"type": "object", "x-note": secret}}),
+        await http.post(BASE, json={**_wire(T1), "schema": {"type": "object", "x-note": schema}}),
         await http.post(
-            f"{BASE}/{T1}/answered", json={"answer": {"a": secret}, "by": f"{secret}\u0000"}
+            f"{BASE}/{T1}/answered", json={"answer": {"a": answer}, "by": f"{answer}\u0000"}
         ),
     ]
-    assert {r.status_code for r in refused} == {422}
-    assert all(secret not in r.text for r in refused)
-    assert secret not in caplog.text
+    assert {r.status_code for r in sent} == {422}
+    ok = await http.post(
+        BASE,
+        json={
+            **_wire(T2),
+            "schema": {"type": "object", "properties": {"a": {"type": "string", "title": schema}}},
+            "context": [{"type": "text", "text": context}],
+        },
+    )
+    assert ok.status_code == 200
+    sent += [
+        await http.post(f"{BASE}/{T2}/answered", json={"answer": {"a": answer}, "by": None}),
+        await http.post(f"{BASE}/{T2}/answered", json={"answer": {"a": "other"}, "by": None}),
+    ]
+    assert sent[-1].status_code == 409
+    for response in sent[:3] + sent[-1:]:
+        assert answer not in response.text and context not in response.text
+    for text in (caplog.text,):
+        assert answer not in text and context not in text and schema not in text
+
+
+async def test_a_big_context_or_answer_or_name_is_422(
+    http: httpx.AsyncClient, store: TaskStore
+) -> None:
+    big = [{"type": "text", "text": "x" * 17_000}]
+    assert (await http.post(BASE, json={**_wire(T1), "context": big})).status_code == 422
+    assert (await http.post(BASE, json={**_wire(T1), "ui": "x" * 201})).status_code == 422
+    assert store.get(T1) is None
+    await http.post(BASE, json=_wire(T1))
+    huge = {"answer": {"a": "x" * 17_000}, "by": None}
+    assert (await http.post(f"{BASE}/{T1}/answered", json=huge)).status_code == 422
+    long_by = {"answer": None, "by": "x" * 201}
+    assert (await http.post(f"{BASE}/{T1}/answered", json=long_by)).status_code == 422
+    fine = {"answer": {"a": "x" * 200}, "by": "x" * 200, "newer": 1}
+    assert (await http.post(f"{BASE}/{T1}/answered", json=fine)).status_code == 200
+    assert (await http.post(BASE, json={**_wire(T2), "newer": 1})).status_code == 200
 
 
 async def test_a_refusal_it_does_not_know_is_raised(remote: RemoteTasks) -> None:

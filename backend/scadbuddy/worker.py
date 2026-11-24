@@ -1619,7 +1619,7 @@ async def run_projects_worker(
     health_port: HealthListen | None = HEALTH_PORT,
 ) -> None:
     """``python -m scadbuddy.worker --queue projects``: flow runs (#1057, spec 2026-10-01
-    §4.3). No database (#5298): its flow runs, operations and payload keys go through
+    §4.3). No database (#5298): its flow runs, operations, tasks and payload keys go through
     the API's CRUD routes, with a credential it exchanges its proof for, and the KEK
     opens the payload keys: a flow's payloads are sealed per run, and it never runs
     unsealed. Versioned (#4146): the Worker Deployment ``scadbuddy-projects`` at
@@ -1654,7 +1654,7 @@ async def run_projects_worker(
     routes: FlowRoutes | None = None
     try:
         runtime, sdk_port = _sdk_runtime(settings)
-        # #5298: flow runs, decisions, grants, operations and payload keys through the
+        # #5298: flow runs, decisions, grants, operations, tasks and payload keys through the
         # API's CRUD routes. A key comes sealed and is opened here with the KEK (plan D10).
         crud = CrudClient(settings.api_internal_url, "projects", credential, metrics=metrics)
         keys = RemotePayloadKeys(crud, kek)

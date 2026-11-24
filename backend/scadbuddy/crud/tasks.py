@@ -51,7 +51,8 @@ class RemoteTasks:
 
     async def close(self, task_id: str, state: Literal["expired", "cancelled"]) -> Task | None:
         """`TaskStore.close`: the row once it is in ``state`` (sent again, it still is),
-        or ``None`` when the task is in another state or missing."""
+        or ``None`` when the task is in another state or missing. A missing task is not an
+        error: the run may be forgotten while its timeout closes the task."""
         try:
             response = await self._client.request(
                 "POST", f"{BASE}/{_part(task_id)}/close", json={"state": state}

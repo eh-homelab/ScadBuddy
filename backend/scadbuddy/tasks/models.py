@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Literal
 
@@ -12,6 +13,16 @@ from scadbuddy.core.json_values import unstorable
 from scadbuddy.tasks.schema import prompt_schema_problems
 
 TaskState = Literal["open", "answered", "cancelled", "expired"]
+
+#: A context or an answer, as JSON text, may be this many bytes.
+MAX_JSON_BYTES = 16 * 1024
+MAX_UI_CHARS = 200
+MAX_BY_CHARS = 200
+
+
+def json_fits(value: Any) -> bool:
+    """Whether ``value``, as JSON text, is at most `MAX_JSON_BYTES`."""
+    return len(json.dumps(value, ensure_ascii=False).encode("utf-8", "replace")) <= MAX_JSON_BYTES
 
 
 class _TaskFields(BaseModel):
@@ -42,6 +53,20 @@ class TaskOpen(_TaskFields):
     def _can_be_stored(cls, value: Any) -> Any:
         for bad in unstorable(value):
             raise ValueError(bad.message)
+        return value
+
+    @field_validator("context")
+    @classmethod
+    def _context_is_small(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not json_fits(value):
+            raise ValueError(f"the context is more than {MAX_JSON_BYTES} bytes of JSON")
+        return value
+
+    @field_validator("ui")
+    @classmethod
+    def _ui_is_short(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > MAX_UI_CHARS:
+            raise ValueError(f"the ui is more than {MAX_UI_CHARS} characters")
         return value
 
     @field_validator("schema_")

@@ -64,7 +64,13 @@ class TaskStore:
                 if run is None:
                     raise RunNotFoundError(task.run_id)
                 if run["status"] in TERMINAL:
-                    raise RunEndedError(task.run_id)
+                    # An earlier attempt may have committed while this one waited.
+                    held = conn.execute(
+                        f"SELECT {_COLUMNS} FROM tasks WHERE id = %s", (task.id,)
+                    ).fetchone()
+                    if held is None:
+                        raise RunEndedError(task.run_id)
+                    return Task.model_validate(held)
                 row = conn.execute(
                     "INSERT INTO tasks (id, run_id, title, schema, context, place, ui, expires_at)"
                     " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING"
@@ -135,8 +141,13 @@ class TaskStore:
                     (Jsonb(answer), by, task_id),
                 ).fetchone()
                 assert row is not None
-            elif answer is not None and answer != row["answer"]:
-                raise TaskNotOpenError("answered")
+            elif answer is not None:
+                same = conn.execute(
+                    "SELECT answer = %s::jsonb AS same FROM tasks WHERE id = %s",
+                    (Jsonb(answer), task_id),
+                ).fetchone()
+                if same is None or not same["same"]:
+                    raise TaskNotOpenError("answered")
         return Task.model_validate(row)
 
     def close(self, task_id: str, state: Literal["expired", "cancelled"]) -> Task | None:
@@ -148,6 +159,23 @@ class TaskStore:
                 (state, task_id),
             ).fetchone()
             if row is not None:
+                self._announce(conn, row)
+        return Task.model_validate(row) if row else None
+
+    def close_or_current(self, task_id: str, state: Literal["expired", "cancelled"]) -> Task | None:
+        """`close`, and the row as it stands when it was not open, in one transaction;
+        ``None`` for a missing task."""
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM tasks WHERE id = %s FOR UPDATE", (task_id,)
+            ).fetchone()
+            if row is not None and row["state"] == "open":
+                row = conn.execute(
+                    "UPDATE tasks SET state = %s, updated_at = now()"
+                    f" WHERE id = %s RETURNING {_COLUMNS}",
+                    (state, task_id),
+                ).fetchone()
+                assert row is not None
                 self._announce(conn, row)
         return Task.model_validate(row) if row else None
 

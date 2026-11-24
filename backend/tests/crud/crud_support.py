@@ -39,7 +39,14 @@ import uvicorn
 from fastapi import Depends, FastAPI
 from temporalio.client import Client
 
-from scadbuddy.api import crud_areas, crud_print, crud_projects, crud_render, service_token
+from scadbuddy.api import (
+    crud_areas,
+    crud_print,
+    crud_projects,
+    crud_render,
+    crud_tasks,
+    service_token,
+)
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.exchange import BootstrapVerifier
@@ -109,6 +116,8 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobRef, BlobStat
 from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.tasks.component import TASKS
+from scadbuddy.tasks.store import TaskStore
 from scadbuddy.worker import PRINT_CRUD_AREAS
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
@@ -231,10 +240,12 @@ def crud_app(
     kinds: Mapping[str, OperationKind] | None = None,
     settings_store: SettingsStore | None = None,
     bootstrap: BootstrapVerifier | None = None,
+    tasks: TaskStore | None = None,
 ) -> FastAPI:
     """The routes with the flows component's `store`, Temporal `client` (a Reset's) and
-    payload `keys`, the operations component's store and `kinds`, and the API's
-    `settings_store`; the exchange too, of the proofs `bootstrap` takes, when given."""
+    payload `keys`, the operations component's store and `kinds`, the tasks component's
+    `tasks` store, and the API's `settings_store`; the exchange too, of the proofs
+    `bootstrap` takes, when given."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(
@@ -245,6 +256,7 @@ def crud_app(
         ),
         FLOWS: SimpleNamespace(store=store, client=client, keys=keys),
         OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
+        TASKS: SimpleNamespace(store=tasks),
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
@@ -252,6 +264,7 @@ def crud_app(
         settings_store=settings_store,
     )
     app.include_router(crud_projects.router, prefix="/api/v1")
+    app.include_router(crud_tasks.router, prefix="/api/v1")
     app.include_router(crud_areas.router, prefix="/api/v1")
     if bootstrap is not None:
         app.include_router(service_token.router, prefix="/api/v1")

@@ -6,7 +6,8 @@ refusal carries a ``reason`` the client turns back into its typed error. The rou
 plain ``def``, so the store's blocking pool runs in a thread. A task id is the harness's
 call id and a run id a run's: both a lowercase UUID, refused with 422 otherwise.
 
-Nothing here logs a task's schema, context or answer, and a refusal never quotes one.
+Nothing here logs a task's schema, context or answer. A refusal never quotes an answer or
+a context; a refused schema's problems name its parts.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from scadbuddy.core.json_values import unstorable
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.tasks.component import TasksDep
-from scadbuddy.tasks.models import Task, TaskOpen
+from scadbuddy.tasks.models import MAX_BY_CHARS, MAX_JSON_BYTES, Task, TaskOpen, json_fits
 from scadbuddy.tasks.store import RunEndedError, RunNotFoundError, TaskNotOpenError
 
 #: `crud/tasks.py` repeats these.
@@ -48,6 +49,20 @@ class AnswerWrite(BaseModel):
     def _can_be_stored(cls, value: Any) -> Any:
         for bad in unstorable(value):
             raise ValueError(bad.message)
+        return value
+
+    @field_validator("answer")
+    @classmethod
+    def _answer_is_small(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not json_fits(value):
+            raise ValueError(f"the answer is more than {MAX_JSON_BYTES} bytes of JSON")
+        return value
+
+    @field_validator("by")
+    @classmethod
+    def _by_is_short(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > MAX_BY_CHARS:
+            raise ValueError(f"the name is more than {MAX_BY_CHARS} characters")
         return value
 
 
@@ -90,10 +105,7 @@ def close_task(task_id: str, body: CloseWrite, tasks: TasksDep) -> Task:
     """`TaskStore.close`. A task already in the asked state answers its row, so a retry
     after a lost answer is the same request; another state is 409 ``task-not-open``."""
     _uuid("task id", task_id)
-    closed = tasks.store.close(task_id, body.state)
-    if closed is not None:
-        return closed
-    held = tasks.store.get(task_id)
+    held = tasks.store.close_or_current(task_id, body.state)
     if held is None:
         raise _missing()
     if held.state == body.state:

@@ -307,25 +307,86 @@ def test_open_on_an_ended_run_raises_and_the_same_id_again_answers_its_row(
     assert [t.id for t in store.list(state=None)] == ["t1"]
 
 
+def _wait_for_block(pg_pool: PgPool, blocker: Connection[Any]) -> None:
+    """Wait until a backend of this database waits for a lock that ``blocker`` holds."""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        with pg_pool.connection() as conn:
+            waiting = conn.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                " AND %s = ANY(pg_blocking_pids(pid))",
+                (blocker.info.backend_pid,),
+            ).fetchone()
+        if waiting is not None and waiting["n"]:
+            return
+        time.sleep(0.05)
+    pytest.fail("open did not wait for the run's row")
+
+
 def test_a_run_that_ends_while_open_waits_for_its_row_leaves_no_open_task(
     store: TaskStore, pg_pool: PgPool
 ) -> None:
     with psycopg.connect(pg_pool.conninfo) as ender, ThreadPoolExecutor(1) as pool:
         ender.execute("UPDATE workflow_runs SET status = 'failed' WHERE id = 'run-2'")
         opening = pool.submit(store.open, _task("t1", "run-2"))
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            with pg_pool.connection() as conn:
-                waiting = conn.execute(
-                    "SELECT count(*) AS n FROM pg_stat_activity"
-                    " WHERE wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'"
-                ).fetchone()
-            if waiting is not None and waiting["n"]:
-                break
-            time.sleep(0.05)
-        else:
-            pytest.fail("open did not wait for the run's row")
+        _wait_for_block(pg_pool, ender)
         ender.commit()
         with pytest.raises(RunEndedError):
             opening.result(timeout=30)
     assert store.list(state=None) == []
+
+
+def test_a_retried_open_answers_the_row_the_first_attempt_committed(
+    store: TaskStore, pg_pool: PgPool
+) -> None:
+    with psycopg.connect(pg_pool.conninfo) as ender, ThreadPoolExecutor(1) as pool:
+        ender.execute("UPDATE workflow_runs SET status = 'failed' WHERE id = 'run-2'")
+        retry = pool.submit(store.open, _task("t1", "run-2"))
+        _wait_for_block(pg_pool, ender)
+        # The first attempt's insert commits while the retry waits, then the run ends.
+        with pg_pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO tasks (id, run_id, title, schema) VALUES ('t1', 'run-2', 'Ask', %s)",
+                (json.dumps(SCHEMA),),
+            )
+        ender.commit()
+        answered = retry.result(timeout=30)
+    assert answered.id == "t1" and answered.state == "open"
+
+
+def test_close_or_current_closes_an_open_task_and_answers_the_row_as_it_is(
+    store: TaskStore, recorder: Recorder
+) -> None:
+    store.open(_task("t1"))
+    store.open(_task("t2"))
+    store.mark_answered("t2", {"ok": True}, None)
+    closed = store.close_or_current("t1", "expired")
+    assert closed is not None and closed.state == "expired"
+    held = store.close_or_current("t2", "cancelled")
+    assert held is not None and held.state == "answered"
+    assert store.close_or_current("nope", "expired") is None
+    assert recorder.changes() == [
+        ("t1", "open"),
+        ("t2", "open"),
+        ("t2", "answered"),
+        ("t1", "expired"),
+    ]
+
+
+def test_the_same_answer_with_a_big_number_is_the_same_answer(store: TaskStore) -> None:
+    store.open(_task("t1"))
+    first = store.mark_answered("t1", {"n": 1e23}, "alice")
+    assert store.mark_answered("t1", {"n": 1e23}, "alice") == first
+    with pytest.raises(TaskNotOpenError):
+        store.mark_answered("t1", {"n": 2e23}, "alice")
+
+
+def test_the_model_refuses_a_big_context_or_ui() -> None:
+    big = [{"type": "text", "text": "x" * 16_400}]
+    with pytest.raises(ValueError):
+        TaskOpen(id="t", run_id="r", title="t", schema=SCHEMA, context=big)
+    with pytest.raises(ValueError):
+        TaskOpen(id="t", run_id="r", title="t", schema=SCHEMA, ui="x" * 201)
+    ok = TaskOpen(id="t", run_id="r", title="t", schema=SCHEMA, ui="x" * 200)
+    assert ok.ui == "x" * 200
