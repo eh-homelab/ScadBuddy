@@ -7,10 +7,11 @@ import asyncio
 import logging
 import os
 import signal
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from contextlib import suppress
 from typing import Final
 
+import httpx
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import ValidationError
 
@@ -67,11 +68,21 @@ CHECK_BUDGET: Final = 3.0
 Check = Callable[[], Awaitable[bool]]
 
 
-async def healthy(mtx: MediaMtx, follower: asyncio.Task[None] | None) -> bool:
-    """Alive when MediaMTX's control API answers and the change follower runs. Before the
-    follower starts (``None``: the process waits for the CRUD service, or reads its first
-    list), only MediaMTX counts: a restart cannot bring the API back."""
-    if not await mtx.answers():
+async def healthy(
+    mtx: MediaMtx, follower: asyncio.Task[None] | None, wanted: Collection[str] = ()
+) -> bool:
+    """Alive when MediaMTX's control API answers, its runtime list holds every path the
+    controller has put (``wanted``), and the change follower runs. A path is missing when
+    MediaMTX's container restarted alone and lost them: the controller's restart puts them
+    again. Before the follower starts (``None``: the process waits for the CRUD service, or
+    reads its first list), the follower does not count: a restart cannot bring the API back."""
+    try:
+        running = await mtx.ready()
+    except httpx.HTTPError:
+        return False
+    missing = set(wanted) - running.keys()
+    if missing:
+        logger.warning("MediaMTX lacks %d of the controller's paths", len(missing))
         return False
     return follower is None or not follower.done()
 
@@ -121,7 +132,7 @@ def main_with[S](
     run: Callable[[S, asyncio.Event], Awaitable[None]],
 ) -> int:
     """Refuse a database secret, forbid dumps, read the settings without echoing a value,
-    then ``run`` until SIGTERM or SIGINT."""
+    then ``run`` until SIGTERM or SIGINT. A `CameraRefusal` from ``run`` exits 2."""
     try:
         check_environment(os.environ)
     except CameraRefusal as refusal:
@@ -149,5 +160,11 @@ def main_with[S](
             loop.add_signal_handler(signum, stop.set)
         await run(settings, stop)
 
-    asyncio.run(_main())
+    try:
+        asyncio.run(_main())
+    except CameraRefusal as refusal:
+        # A refusal found after the start, such as the recorder's clock check.
+        for reason in refusal.reasons:
+            logger.error(reason)
+        return 2
     return 0

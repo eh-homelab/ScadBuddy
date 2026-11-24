@@ -53,6 +53,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol
 from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
@@ -76,7 +77,7 @@ from scadbuddy.camera.process import (
     serve_health,
     serve_local,
 )
-from scadbuddy.camera.settings import RecorderSettings
+from scadbuddy.camera.settings import CameraRefusal, RecorderSettings
 from scadbuddy.camera.uploads import LocalSegment, Uploader, UploadError
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, wait_for_areas
 
@@ -104,6 +105,9 @@ START_HOLDOFF: Final = 2 * TICK_SECONDS
 ADOPT_AGE: Final = 12.0
 STALL_SECONDS: Final = 120.0
 GAP: Final = timedelta(seconds=1)
+#: The largest offset from the API's clock a recorder accepts (spec §6.9): segment times
+#: come from the recorder's clock, print times from the API's.
+MAX_CLOCK_OFFSET: Final = 2.0
 #: The most segments one index call takes (`api/crud_camera.py` ``MAX_SEGMENTS``).
 BATCH: Final = 500
 #: How long one lease or index call may retry: well inside a tick.
@@ -127,6 +131,12 @@ LEADER = Gauge(
     "scadbuddy_camera_leader",
     "1 while this recorder holds the printer's lease.",
     ["printer", "recorder"],
+)
+LAST_SEGMENT_AGE = Gauge(
+    "scadbuddy_camera_last_segment_age_seconds",
+    "Seconds since this recorder's last segment of the printer (since the path started, before"
+    " the first one), set at each lease call.",
+    ["printer"],
 )
 
 
@@ -185,6 +195,7 @@ class Recorder:
         segments: Path = SEGMENTS,
         tick_seconds: float | None = TICK_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        wall: Callable[[], float] = time.time,
         call_budget: float = CALL_BUDGET,
         put_timeout: float = PUT_TIMEOUT,
         retry_min: float = RETRY_MIN,
@@ -203,6 +214,9 @@ class Recorder:
         self._segments = segments
         self._tick_seconds = tick_seconds
         self._clock = clock
+        self._wall = wall
+        #: This host's clock minus the API's, from the last answer with a ``Date`` header.
+        self.clock_offset: float | None = None
         self._call_budget = call_budget
         self._put_timeout = put_timeout
         self._feeds: dict[str, _Feed] = {}
@@ -217,6 +231,61 @@ class Recorder:
 
     def __repr__(self) -> str:
         return f"Recorder(name={self._name!r}, printers={sorted(self._feeds)!r})"
+
+    def wanted(self) -> set[str]:
+        """The paths this recorder has put in MediaMTX and not removed: each one must be in
+        MediaMTX's runtime list (`process.healthy`)."""
+        return set(self._confs)
+
+    # Clock (spec §6.9)
+
+    def _offset(self, response: httpx.Response) -> float | None:
+        """This host's clock minus the API's, from the answer's ``Date`` header. The header
+        has 1 s resolution, so the API's time is taken as the middle of its second."""
+        value = response.headers.get("date")
+        if value is None:
+            return None
+        try:
+            date = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        return self._wall() - (date.timestamp() + 0.5)
+
+    def _clock_error(self) -> str | None:
+        if self.clock_ok():
+            return None
+        return (
+            f"the recorder's clock is {self.clock_offset:+.1f} s off the API's"
+            f" (more than {MAX_CLOCK_OFFSET:g} s); check NTP on its node"
+        )
+
+    def clock_ok(self) -> bool:
+        """No offset is known, or it is at most `MAX_CLOCK_OFFSET`."""
+        return self.clock_offset is None or abs(self.clock_offset) <= MAX_CLOCK_OFFSET
+
+    def _note_clock(self, response: httpx.Response) -> None:
+        offset = self._offset(response)
+        if offset is None:
+            return
+        was = self.clock_ok()
+        self.clock_offset = offset
+        error = self._clock_error()
+        if error is not None and was:
+            logger.warning("camera recorder: %s", error)
+        elif error is None and not was:
+            logger.info(
+                "camera recorder: the clock is within %g s of the API's again", MAX_CLOCK_OFFSET
+            )
+        self._feed.set_error(error)
+
+    async def check_clock(self) -> None:
+        """At start: raise `CameraRefusal` when this host's clock is more than
+        `MAX_CLOCK_OFFSET` off the API's."""
+        response = await self._crud.request("GET", f"{BASE}/printers", budget=self._call_budget)
+        self._note_clock(response)
+        error = self._clock_error()
+        if error is not None:
+            raise CameraRefusal([error])
 
     # MediaMTX paths
 
@@ -366,7 +435,11 @@ class Recorder:
                 item.seg.path.unlink(missing_ok=True)
             del self._feeds[printer_id]
             shutil.rmtree(self._segments / printer_id, ignore_errors=True)
-            for gauge, labels in ((BACKLOG, (printer_id,)), (LEADER, (printer_id, self._name))):
+            for gauge, labels in (
+                (BACKLOG, (printer_id,)),
+                (LEADER, (printer_id, self._name)),
+                (LAST_SEGMENT_AGE, (printer_id,)),
+            ):
                 with suppress(KeyError):
                     gauge.remove(*labels)
         if feed is not None or present or self._feed.desired(printer_id) not in (None, "stopped"):
@@ -554,6 +627,7 @@ class Recorder:
             json={"recorder": self._name, "action": action},
             budget=self._call_budget,
         )
+        self._note_clock(response)
         return LeaseAnswer.model_validate(response.json())
 
     def _leads(self, feed: _Feed) -> bool:
@@ -588,6 +662,7 @@ class Recorder:
         if feed is None:
             return
         sent = self._clock()
+        LAST_SEGMENT_AGE.labels(printer_id).set(max(0.0, sent - feed.arrived))
         if not feed.held and sent < feed.not_before:
             return
         calls = feed.indexed_calls
@@ -866,13 +941,22 @@ async def run(settings: RecorderSettings, stop: asyncio.Event | None = None) -> 
     follower: asyncio.Task[None] | None = None
 
     async def alive() -> bool:
-        return await healthy(mtx, follower)
+        return await healthy(mtx, follower, recorder.wanted()) and recorder.clock_ok()
 
     health = await serve_health(HEALTH_PORT, alive)
     try:
         if not await wait_for_areas(crud, "camera", AREAS, stop):
             logger.info("stopped before the CRUD service served the camera areas")
             return
+        try:
+            await recorder.check_clock()
+        except CameraRefusal:
+            raise
+        except Exception as error:
+            # Each lease answer checks the clock again.
+            logger.warning(
+                "camera recorder: the clock check at start failed (%s)", type(error).__name__
+            )
         hooks = await serve_hooks(recorder, HOOK_HOST, HOOK_PORT)
         try:
             await recorder.release_all()

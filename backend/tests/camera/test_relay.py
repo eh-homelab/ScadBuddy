@@ -414,3 +414,57 @@ async def test_code_never_logged(caplog: pytest.LogCaptureFixture) -> None:
     assert "MediaMTX" in caplog.text
     for code in ("SECRETOK1", "SECRETBAD", "SECRETMTX"):
         assert code not in caplog.text
+
+
+def _sample(name: str, printer_id: str) -> float | None:
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(name, {"printer": printer_id})
+
+
+async def test_reconnects_count_each_ready_after_a_not_ready() -> None:
+    printer = "metrics-reconnects"
+    api = FakeApi([source(printer)])
+    subject = relay(api, FakeMtx())
+    await subject.reconcile_all()
+    assert _sample("scadbuddy_camera_relay_pulling", printer) == 0
+    before = _sample("scadbuddy_camera_relay_reconnects_total", printer) or 0.0
+    await subject.on_hook(printer, "ready")
+    await subject.on_hook(printer, "ready")
+    assert _sample("scadbuddy_camera_relay_pulling", printer) == 1
+    # The first ready is no reconnect.
+    assert (_sample("scadbuddy_camera_relay_reconnects_total", printer) or 0.0) == before
+    for event in ("not_ready", "ready", "not_ready", "ready"):
+        await subject.on_hook(printer, event)
+    assert _sample("scadbuddy_camera_relay_reconnects_total", printer) == before + 2
+    assert _sample("scadbuddy_camera_relay_pulling", printer) == 1
+    await subject.on_hook(printer, "not_ready")
+    assert _sample("scadbuddy_camera_relay_pulling", printer) == 0
+    await subject.aclose()
+
+
+async def test_pulling_gauge_goes_with_a_removed_path() -> None:
+    printer = "metrics-removed"
+    api = FakeApi([source(printer)])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    await subject.on_hook(printer, "ready")
+    assert _sample("scadbuddy_camera_relay_pulling", printer) == 1
+    api.sources = []
+    await subject.reconcile_all()
+    assert printer not in mtx.paths
+    assert _sample("scadbuddy_camera_relay_pulling", printer) is None
+    await subject.aclose()
+
+
+async def test_wanted_names_the_paths_put() -> None:
+    api = FakeApi([source("p1"), source("p2", host="10.0.0.6")])
+    subject = relay(api, FakeMtx())
+    assert subject.wanted() == set()
+    await subject.reconcile_all()
+    assert subject.wanted() == {"p1", "p2"}
+    api.sources = [source("p2", host="10.0.0.6")]
+    await subject.reconcile_all()
+    assert subject.wanted() == {"p2"}
+    await subject.aclose()

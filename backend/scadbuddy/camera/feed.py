@@ -41,8 +41,10 @@ class FeedSender:
         self._who = f"camera {part}"
         #: The feed state the process wants the API to hold, per printer.
         self._desired: dict[str, FeedState] = {}
-        #: The last feed state the API took, per printer.
-        self._reported: dict[str, FeedState] = {}
+        #: An error every report carries while it is set (`set_error`).
+        self._error: str | None = None
+        #: The last feed state and error the API took, per printer.
+        self._reported: dict[str, tuple[FeedState, str | None]] = {}
         #: One sender per printer whose desired state has not landed yet.
         self._senders: dict[str, asyncio.Task[None]] = {}
         self._retry_min = retry_min
@@ -60,14 +62,26 @@ class FeedSender:
         again with back-off until it lands; a newer state replaces one still waiting."""
         self._desired[printer_id] = state
         sender = self._senders.get(printer_id)
-        if self._reported.get(printer_id) != state and (sender is None or sender.done()):
+        if self._reported.get(printer_id) != (state, self._error) and (
+            sender is None or sender.done()
+        ):
             self._senders[printer_id] = asyncio.create_task(self._send(printer_id))
+
+    def set_error(self, error: str | None) -> None:
+        """Set (or clear, with ``None``) the error every report carries. A change posts each
+        printer's desired state again."""
+        if error == self._error:
+            return
+        self._error = error
+        for printer_id, state in list(self._desired.items()):
+            self.want(printer_id, state)
 
     async def _send(self, printer_id: str) -> None:
         delay = self._retry_min
         path = f"{self._base}/printers/{quote(printer_id, safe='')}/feed"
-        while (state := self._desired[printer_id]) != self._reported.get(printer_id):
-            report = FeedReport(part=self._part, state=state, recorder=self._recorder)
+        while (sent := (self._desired[printer_id], self._error)) != self._reported.get(printer_id):
+            state, error = sent
+            report = FeedReport(part=self._part, state=state, error=error, recorder=self._recorder)
             body = report.model_dump(mode="json", exclude_none=True)
             try:
                 await self._crud.request("POST", path, json=body)
@@ -97,7 +111,7 @@ class FeedSender:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self._retry_max)
                 continue
-            self._reported[printer_id] = state
+            self._reported[printer_id] = sent
             delay = self._retry_min
 
     async def flushed(self) -> None:

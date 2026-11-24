@@ -6,18 +6,20 @@ import logging
 import os
 import time
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any, cast
 
 import httpx
 import pytest
+from prometheus_client import REGISTRY
 
 from scadbuddy.api.crud_camera import MAX_SEGMENTS
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.camera.models import SegmentIn
 from scadbuddy.camera.process import serve_local
 from scadbuddy.camera.recorder import ADOPT_AGE, BATCH, LEADER, STALL_SECONDS, Recorder, serve_hooks
-from scadbuddy.camera.settings import RecorderSettings
+from scadbuddy.camera.settings import CameraRefusal, RecorderSettings
 from scadbuddy.camera.uploads import LocalSegment, Uploader, UploadError, object_key
 from scadbuddy.crud.client import CrudClient
 from tests.camera.test_follow import Token, until
@@ -53,8 +55,17 @@ class FakeCamera:
         self.unput: list[str] = []
         self.down = False
         self.index_down = False
+        #: The API's clock against this host's, in seconds; ``None`` sends no ``Date``.
+        self.skew: float | None = None
 
     def answer(self, request: httpx.Request) -> httpx.Response:
+        response = self._answer(request)
+        if self.skew is not None:
+            when = datetime.fromtimestamp(time.time() + self.skew, UTC)
+            response.headers["Date"] = format_datetime(when, usegmt=True)
+        return response
+
+    def _answer(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix(BASE)
         parts = path.split("/")
         if path == "/printers":
@@ -839,3 +850,58 @@ async def test_stale_renewal_answer_is_no_handover(tmp_path: Path, api: FakeCame
     await rig.recorder.tick(P1)
     assert api.starts() == [at(0), at(4), at(8), at(12)]
     assert api.flags() == [True, False, False, False]
+
+
+async def test_last_segment_age(tmp_path: Path, api: FakeCamera) -> None:
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    rig.clock.now += 30
+    await rig.recorder.tick(P1)
+    age = {"printer": P1}
+    assert REGISTRY.get_sample_value("scadbuddy_camera_last_segment_age_seconds", age) == 30
+    api.printers = []
+    await rig.recorder.reconcile_all()
+    assert REGISTRY.get_sample_value("scadbuddy_camera_last_segment_age_seconds", age) is None
+    await rig.recorder.aclose()
+
+
+async def test_clock_offset_from_lease_answers(tmp_path: Path, api: FakeCamera) -> None:
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    assert rig.recorder.clock_ok()
+    # The API's clock runs 5 s behind this host's.
+    api.skew = -5.0
+    await rig.recorder.tick(P1)
+    await rig.recorder.flushed()
+    assert not rig.recorder.clock_ok()
+    assert rig.recorder.clock_offset is not None and 4.0 <= rig.recorder.clock_offset <= 6.0
+    error = api.feeds[-1][1].get("error")
+    assert error is not None and "clock" in error
+    api.skew = 0.0
+    await rig.recorder.tick(P1)
+    await rig.recorder.flushed()
+    assert rig.recorder.clock_ok()
+    assert "error" not in api.feeds[-1][1]
+    await rig.recorder.aclose()
+
+
+async def test_start_refuses_a_clock_offset(tmp_path: Path, api: FakeCamera) -> None:
+    rig = Rig(tmp_path, api)
+    await rig.recorder.check_clock()  # no Date header: nothing to compare
+    api.skew = 3.5
+    with pytest.raises(CameraRefusal, match="clock"):
+        await rig.recorder.check_clock()
+    api.skew = -0.4
+    await rig.recorder.check_clock()
+    assert rig.recorder.clock_ok()
+    await rig.recorder.aclose()
+
+
+async def test_wanted_names_the_recorded_paths(tmp_path: Path, api: FakeCamera) -> None:
+    rig = Rig(tmp_path, api)
+    assert rig.recorder.wanted() == set()
+    await rig.recorder.reconcile_all()
+    assert rig.recorder.wanted() == {P1}
+    await rig.recorder.aclose()

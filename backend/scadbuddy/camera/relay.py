@@ -25,10 +25,12 @@ import asyncio
 import logging
 import sys
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
 from typing import Any, Final, Literal
 from urllib.parse import quote
 
 import httpx
+from prometheus_client import Counter, Gauge
 from pydantic import TypeAdapter, ValidationError
 
 from scadbuddy.auth.service_auth import ServiceAuth, exchange_source
@@ -58,6 +60,17 @@ HOOK_URL: Final = f"http://{HOOK_HOST}:{HOOK_PORT}/hook"
 RELAY_USER: Final = "bblp"
 
 HookEvent = Literal["ready", "not_ready"]
+
+RECONNECTS = Counter(
+    "scadbuddy_camera_relay_reconnects_total",
+    "Times the relay's pull of a printer became ready again after it was not ready.",
+    ["printer"],
+)
+PULLING = Gauge(
+    "scadbuddy_camera_relay_pulling",
+    "1 while the relay's pull of the printer is ready, 0 while it is being tried.",
+    ["printer"],
+)
 _SOURCES = TypeAdapter(list[dict[str, Any]])
 
 
@@ -109,6 +122,15 @@ class Relay:
         self._confs: dict[str, dict[str, Any]] = {}
         self._feed = FeedSender(crud, BASE, "relay", retry_min=retry_min, retry_max=retry_max)
         self._lock = asyncio.Lock()
+        #: Each held path's last pull state, and the paths that were ready once, for the
+        #: metrics.
+        self._pull: dict[str, FeedState] = {}
+        self._was_ready: set[str] = set()
+
+    def wanted(self) -> set[str]:
+        """The paths the relay has put in MediaMTX and not removed: each one must be in
+        MediaMTX's runtime list (`process.healthy`)."""
+        return set(self._confs)
 
     def _conf(self, source: CameraSourceWithCode) -> dict[str, Any]:
         return {
@@ -157,6 +179,18 @@ class Relay:
 
     def _want(self, printer_id: str, state: FeedState) -> None:
         self._feed.want(printer_id, state)
+        if state == "stopped":
+            self._pull.pop(printer_id, None)
+            self._was_ready.discard(printer_id)
+            with suppress(KeyError):
+                PULLING.remove(printer_id)
+            return
+        if state == "pulling":
+            if self._pull.get(printer_id) == "retrying" and printer_id in self._was_ready:
+                RECONNECTS.labels(printer_id).inc()
+            self._was_ready.add(printer_id)
+        self._pull[printer_id] = state
+        PULLING.labels(printer_id).set(1 if state == "pulling" else 0)
 
     async def flushed(self) -> None:
         """Wait until every desired feed state has landed."""
@@ -267,7 +301,7 @@ async def run(settings: RelaySettings, stop: asyncio.Event | None = None) -> Non
     follower: asyncio.Task[None] | None = None
 
     async def alive() -> bool:
-        return await healthy(mtx, follower)
+        return await healthy(mtx, follower, relay.wanted())
 
     health = await serve_health(HEALTH_PORT, alive)
     try:

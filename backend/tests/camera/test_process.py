@@ -10,14 +10,18 @@ from scadbuddy.camera.mediamtx import MediaMtx
 from scadbuddy.camera.process import healthy, serve_health
 
 
-def mtx(status: int | None) -> MediaMtx:
-    """A MediaMTX whose API answers ``status``, or refuses the connection for ``None``."""
+def mtx(status: int | None, running: tuple[str, ...] = ()) -> MediaMtx:
+    """A MediaMTX whose API answers ``status`` with the ``running`` paths in its runtime
+    list, or refuses the connection for ``None``."""
 
     def handle(request: httpx.Request) -> httpx.Response:
         if status is None:
             raise httpx.ConnectError("refused", request=request)
         assert request.url.path == "/v3/paths/list"
-        return httpx.Response(status, json={"pageCount": 1, "itemCount": 0, "items": []})
+        items = [{"name": name, "ready": True} for name in running]
+        return httpx.Response(
+            status, json={"pageCount": 1, "itemCount": len(items), "items": items}
+        )
 
     return MediaMtx("http://mtx", transport=httpx.MockTransport(handle))
 
@@ -107,3 +111,45 @@ async def test_before_the_follower_starts_only_mediamtx_counts() -> None:
     """The process waits for the CRUD service or reads its first list: a restart cannot help."""
     assert await healthy(mtx(200), None)
     assert not await healthy(mtx(None), None)
+
+
+async def test_unhealthy_when_a_wanted_path_is_missing() -> None:
+    """MediaMTX's container restarted and lost the controller's paths."""
+    follower = asyncio.create_task(_forever())
+    try:
+        assert await healthy(mtx(200, ("p1", "p2")), follower, {"p1", "p2"})
+        assert not await healthy(mtx(200, ("p1",)), follower, {"p1", "p2"})
+        assert not await healthy(mtx(200), None, {"p1"})
+    finally:
+        follower.cancel()
+
+
+async def test_healthz_503_when_a_wanted_path_is_missing() -> None:
+    wanted = {"p1", "p2"}
+
+    async def all_present() -> bool:
+        return await healthy(mtx(200, ("p1", "p2", "other")), None, wanted)
+
+    async def one_missing() -> bool:
+        return await healthy(mtx(200, ("p2",)), None, wanted)
+
+    assert (await get("/healthz", all_present)).status_code == 200
+    assert (await get("/healthz", one_missing)).status_code == 503
+
+
+def test_a_refusal_from_run_exits_2(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The recorder's clock check at start refuses from inside ``run``."""
+    from scadbuddy.camera import process
+    from scadbuddy.camera.settings import CameraRefusal
+
+    monkeypatch.setattr(process, "forbid_dumping", lambda: None)
+    monkeypatch.setattr(process, "configure_logging", lambda *args: None)
+
+    async def run(settings: object, stop: asyncio.Event) -> None:
+        raise CameraRefusal(["the recorder's clock is +3.0 s off the API's"])
+
+    status = process.main_with(lambda environ: None, object, lambda settings: "INFO", run)
+    assert status == 2
+    assert "+3.0 s off" in caplog.text
