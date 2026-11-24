@@ -21,7 +21,7 @@ from scadbuddy.workflows.housekeeping import OUTPUT_COPY_SWEEP, SWEEPS
 def _state(rows: object | None = None) -> Any:
     return SimpleNamespace(
         outputs=SimpleNamespace(rows=object() if rows is None else rows),
-        projection=SimpleNamespace(pool=object()),
+        projection=SimpleNamespace(conninfo="postgresql://unused.invalid/scadbuddy"),
     )
 
 
@@ -48,8 +48,8 @@ async def test_the_sweep_runs_the_copy(
     with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
         await ActivityEnvironment().run(_sweep(state))
     assert len(calls) == 1
-    store, rows, pool, stop = calls[0]
-    assert (store, rows, pool) == (state.outputs, state.outputs.rows, state.projection.pool)
+    store, rows, conninfo, stop = calls[0]
+    assert (store, rows, conninfo) == (state.outputs, state.outputs.rows, state.projection.conninfo)
     assert isinstance(stop, threading.Event) and not stop.is_set()
     assert "copied the saved outputs to rows" in [r.getMessage() for r in caplog.records]
 

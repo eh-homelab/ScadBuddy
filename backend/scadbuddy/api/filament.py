@@ -13,6 +13,8 @@ and the NTAG confirm,
 `POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
 tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cancel
 (`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks.
+`POST /filament/presets/bambuddy-import` reads Bambuddy's local presets and writes
+ScadBuddy's own presets only (#7244).
 `POST /filament/sync/run` asks the ScadBuddy-to-Bambuddy sync for a full pass (#6265),
 which writes Bambuddy only for the data types set to push; `GET /filament/sync/status`
 reads how its passes went. `GET /filament/sync/reset-links` counts what a reset of the
@@ -156,12 +158,14 @@ from scadbuddy.filament.profile_fill import (
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import failure_label, push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
+from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
     OverrideKindError,
     ResetBeforeLinkError,
     SpoolBambuddyLinkedError,
     SpoolBulkRefusedError,
+    SpoolCopySourceError,
     SpoolInUseError,
     SpoolTrayPlaceError,
     SpoolTypelessError,
@@ -202,7 +206,8 @@ from scadbuddy.workflows.commands import (
 #: and the RFID scan writes nothing, so neither has anything to push (Decision 163), nor
 #: has the labels PDF (#7157);
 #: the printer labels (#6955) make only the printer and AMS places that capture makes
-#: too, un-nudged, and every labels-page load and agent read calls them.
+#: too, un-nudged, and every labels-page load and agent read calls them; the presets
+#: import (#7244) takes Bambuddy's presets, which Bambuddy already holds.
 NOT_NUDGED = frozenset(
     {
         "sync_ams_weights",
@@ -212,6 +217,7 @@ NOT_NUDGED = frozenset(
         "scan_rfid_tag",
         "printer_labels",
         "render_labels_pdf",
+        "import_bambuddy_presets",
     }
 )
 
@@ -752,8 +758,9 @@ async def put_type_k_values(
         "Starts a fetch of the type's slicer presets from 3dfilamentprofiles.com (its "
         "`tdfp_id`): the profile-fetch worker exports one Bambu Studio preset per printer "
         "model ScadBuddy's printers have and per nozzle in the `profile_fetch_nozzles` "
-        "setting, and the API imports them into Bambuddy's local presets and makes them the "
-        "type's presets for those keys. It answers 202 at once with the run (`running`); "
+        "setting, and the API keeps them as ScadBuddy presets and makes them the type's "
+        "presets for those keys; while `filament_preset_mirror` is on it copies them to "
+        "Bambuddy's local presets. It answers 202 at once with the run (`running`); "
         "read its progress with `GET` on this path. A start while a fetch of the type runs "
         "joins it (`joined: true`, the same run) and starts nothing new, unless no "
         "profile-fetch worker serves that run: it then ends `failed` and a new run starts. "
@@ -1102,14 +1109,17 @@ BULK_ROUTE = "POST /filament/spools/bulk"
     description=(
         "`quantity` (1 to 100) spools of one `spool` body, in one transaction (#7150): each "
         "gets its own number and its own `created` event (`grams_left` is each one's first "
-        "reading), its move to `location_id`, and its own `presets` and `k_values`. Answers "
-        "the spools in number order. Needs an `Idempotency-Key` (428 without one): a retry "
+        "reading), its move to `location_id`, and its own `presets` and `k_values`. "
+        "`copy_of` names the spool a copy's draft came from: a preset row that matches one "
+        "of that spool's `migrated` rows stays `migrated`, and no client marks a row so "
+        "itself (R-7150-13). Answers the spools in number order. Needs an "
+        "`Idempotency-Key` (428 without one): a retry "
         "with the same key answers the first result and writes nothing, and the key with "
         "another body is a 422. 422 for a bad field, a row it names that does not exist, an "
         "effective minimum temperature above its maximum, two preset or K rows of one key, "
-        "or a place that does not exist, is archived, is an AMS unit's or is a printer's "
-        "tray (a tray takes one spool, through its own link). Nothing is written on a "
-        "refusal."
+        "a place that does not exist, is archived, is an AMS unit's or is a printer's tray "
+        "(a tray takes one spool, through its own link), or a `copy_of` that names no "
+        "spool. Nothing is written on a refusal."
     ),
 )
 async def bulk_create_spools(
@@ -1149,7 +1159,13 @@ async def bulk_create_spools(
 
     try:
         done = await asyncio.to_thread(write)
-    except (*_SPOOL_REFUSED, SpoolTrayPlaceError, MoveTargetError, CatalogRefError) as exc:
+    except (
+        *_SPOOL_REFUSED,
+        SpoolTrayPlaceError,
+        SpoolCopySourceError,
+        MoveTargetError,
+        CatalogRefError,
+    ) as exc:
         raise _refused(exc) from None
     return JSONResponse(done.body, status_code=done.status)
 
@@ -1162,9 +1178,9 @@ async def bulk_create_spools(
         "The body `POST /filament/spools/bulk` takes, less its `quantity`, filled from the "
         "spool (#7150): its type, its own overrides, its note, its own presets and K values, "
         "and its place unless that is a printer's tray or archived. It leaves out what stays "
-        "the first spool's own: its number, tags, tray, ledger (so no `grams_left`) and "
-        "weight lock. An archived spool can be copied. Writes nothing; 404 for no such "
-        "spool."
+        "the first spool's own: its number, tags, tray, ledger (so no `grams_left`), "
+        "weight lock and `added_full`. `copy_of` is the spool's id, for the bulk create. An "
+        "archived spool can be copied. Writes nothing; 404 for no such spool."
     ),
 )
 async def copy_spool(filament: FilamentDep, spool_id: UUID) -> m.SpoolDraft:
@@ -1633,7 +1649,9 @@ async def reset_consumed(
         "own `edited` ledger event of what changed on it, and none when nothing did, so a "
         "resend books nothing. `null` on an override clears it. All or none: a spool the "
         "patch refuses refuses the whole edit, and the 422 names its number. An id that "
-        "names no spool is in `not_found`. 422 for a bad field, a patch that sets nothing "
+        "names no spool is in `not_found`; the answer lists, in id order, the spools it "
+        "changed (`changed`), those already so (`unchanged`) and `not_found`. 422 for a bad "
+        "field, a patch that sets nothing "
         "or sets `archived` (use `bulk-archive` or `bulk-restore`), a row it names that "
         "does not exist, a spool left with neither type nor material, or an effective "
         "minimum temperature above its maximum."
@@ -2462,6 +2480,42 @@ async def import_bambuddy(
     if outcome.report is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
     return outcome.report
+
+
+@router.post(
+    "/presets/bambuddy-import",
+    response_model=PresetImport,
+    summary="Import Bambuddy's presets now",
+    description=(
+        "Bring Bambuddy's filament local presets into ScadBuddy's own presets once, whatever "
+        "`filament_sync.presets` says (the Schedule's pull does the same only while it is "
+        "`bb_to_sb` or `two_way`). Reads Bambuddy now: its list of local presets, then each "
+        "preset it needs. A preset ScadBuddy took from Bambuddy (`source` `bambuddy`) whose "
+        "`updated_at` moved since takes Bambuddy's document as a new version (`updated`). "
+        "Every spool or type preset that still names a Bambuddy local preset id names a "
+        "ScadBuddy preset instead: the one already made for that id, else a new one made "
+        "from Bambuddy's document (`adopted`, how many were made). A preset gone from "
+        "Bambuddy is left as it is. Never writes to Bambuddy. 409 when no Bambuddy is "
+        "configured, and 409 with `code` `instance_changed` (reading nothing) while the "
+        "links belong to another Bambuddy, until `POST /filament/sync/reset-links`; "
+        "Bambuddy's own errors as they come."
+    ),
+)
+async def import_bambuddy_presets(
+    state: StateDep, filament: FilamentDep, store: SettingsStoreDep
+) -> PresetImport:
+    """The one-time import of #7244 (`filament/sb_presets.py` `import_from_bambuddy`),
+    which reads Bambuddy now."""
+    settings = await asyncio.to_thread(store.load)
+    if not settings.bambuddy_url:
+        raise not_configured("no Bambuddy URL is configured; set one in Settings")
+    if await asyncio.to_thread(links_elsewhere, filament, instance_for(settings.bambuddy_url)):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the Bambuddy links belong to another Bambuddy; reset them first",
+            code="instance_changed",
+        )
+    return await import_from_bambuddy(state.settings_store.pool, state.store.blobs, settings)
 
 
 @router.get(

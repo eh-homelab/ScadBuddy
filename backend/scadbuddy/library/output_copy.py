@@ -22,13 +22,12 @@ inserted row's ``meta.json`` after its batch, and once more at the run's end, an
 undoes the row when the file is gone. A delete whose folder removal is still going at
 the run's end leaves the row until the next run, which drops it with its folder gone.
 
-One replica copies at a time, under a session advisory lock. Synchronous, like
-`OutputRows`: a caller on the loop uses a thread.
+One replica copies at a time, under a session advisory lock on a connection of its
+own. Synchronous, like `OutputRows`: a caller on the loop uses a thread.
 """
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import hashlib
 import json
@@ -42,10 +41,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from psycopg import Connection
-from psycopg.rows import DictRow
-from psycopg_pool import ConnectionPool
+import psycopg
+from psycopg.conninfo import make_conninfo
 
+from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.library.output_rows import OutputRow, OutputRows
 from scadbuddy.library.outputs import (
     ARRANGED_NAME,
@@ -64,6 +63,11 @@ logger = logging.getLogger(__name__)
 
 #: The advisory lock's name: ``pg_try_advisory_lock(hashtextextended(COPY_LOCK, 0))``.
 COPY_LOCK = "scadbuddy:outputs:copy"
+
+#: The lock connection's ``application_name``, as a pool's name is its connections'.
+LOCK_APPLICATION = "scadbuddy-output-copy"
+#: Seconds to connect for the lock: a database that cannot be reached fails the run.
+LOCK_CONNECT_TIMEOUT = 10
 
 #: The files a row holds: their stamp (`files_stamp`) says whether a folder changed.
 RECORD_FILES = (
@@ -160,34 +164,31 @@ class _Walk:
 def copy_outputs(
     store: OutputStore,
     rows: OutputRows,
-    pool: ConnectionPool[Connection[DictRow]],
+    conninfo: str,
     stop: threading.Event | None = None,
 ) -> CopyResult | None:
     """One run of the copy; ``None`` when another replica runs one. ``stop`` ends it
     between folders: it writes the batch read so far and leaves its run unfinished.
 
-    The lock holds one connection of ``pool`` for the whole run. That is fine: the
-    connection is autocommit, so it is never idle in a transaction and holds no row
-    lock."""
-    with pool.connection() as lock:
+    The lock is a session lock on a connection of its own (``conninfo``), held for the
+    whole run (up to `workflows.housekeeping.OUTPUT_COPY_TIMEOUT`, 15 minutes). It is
+    not taken from the API's pool, so the pool's other users keep every connection
+    during a run. Closing the connection ends its session, which releases the lock,
+    also when the run fails."""
+    own = make_conninfo(
+        conninfo,
+        application_name=LOCK_APPLICATION,
+        connect_timeout=LOCK_CONNECT_TIMEOUT,
+        **TCP_KEEPALIVE,
+    )
+    with psycopg.connect(own, autocommit=True) as lock:
         got = lock.execute(
-            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", (COPY_LOCK,)
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (COPY_LOCK,)
         ).fetchone()
-        if got is None or not got["got"]:
+        if got is None or not got[0]:
             logger.info("another replica copies the saved outputs; this one does not")
             return None
-        try:
-            return _copy(store, rows, stop)
-        finally:
-            try:
-                lock.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (COPY_LOCK,))
-            except Exception:
-                # A failed unlock must not hide the copy's own error. The connection
-                # must not go back to the pool with the lock held: closing it ends its
-                # session, which releases the lock, and the pool drops a closed one.
-                logger.warning("could not release the output copy's lock; closed its connection")
-                with contextlib.suppress(Exception):
-                    lock.close()
+        return _copy(store, rows, stop)
 
 
 def _has_meta(directory: Path) -> bool:

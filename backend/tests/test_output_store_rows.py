@@ -8,8 +8,11 @@ from __future__ import annotations
 import errno
 import json
 import shutil
+import threading
+import time
 import zipfile
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -21,7 +24,15 @@ from scadbuddy.api.outputs import detail
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.output_index import OutputIndex
-from scadbuddy.library.output_rows import OutputRow, OutputRows
+from scadbuddy.library.output_rows import (
+    OUTPUT_HOLDER,
+    OutputBlobs,
+    OutputFileBlob,
+    OutputRow,
+    OutputRows,
+    output_blob_key,
+    output_file_key,
+)
 from scadbuddy.library.outputs import (
     BACKFILL_NAME,
     META_NAME,
@@ -191,6 +202,96 @@ async def test_a_failed_save_leaves_no_row_the_copy_wrote(
         save_files(store, job, output_id=output_id)
     assert not store.paths.output_dir(job.slug, output_id).exists()
     assert rows.get(output_id) is None
+
+
+class _HeldOpen(list[OutputRow]):
+    """A copy batch's ``new`` rows that hold `write_copy`'s transaction open after its
+    insert ran: the iteration waits on ``release`` before the commit."""
+
+    def __init__(self, row: OutputRow) -> None:
+        super().__init__([row])
+        self.inserted = threading.Event()
+        self.release = threading.Event()
+
+    def __iter__(self) -> Iterator[OutputRow]:
+        yield from list.__iter__(self)
+        self.inserted.set()
+        assert self.release.wait(30)
+
+
+def _waits_on_a_lock(conninfo: str) -> bool:
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        found = conn.execute(
+            "SELECT count(*) FROM pg_stat_activity"
+            " WHERE wait_event_type = 'Lock' AND datname = current_database()"
+        ).fetchone()
+    return found is not None and found[0] > 0
+
+
+#: A save's blob keys (#7256): the keys alone; no blob is put.
+_SAVE_BLOBS = OutputBlobs(
+    model=output_blob_key("d" * 32, "model"),
+    preview=output_blob_key("d" * 32, "preview"),
+    files=(OutputFileBlob("a.stl", output_file_key("d" * 32, 0), 5),),
+)
+
+
+def _holds(conninfo: str, output_id: str) -> set[str]:
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        found = conn.execute(
+            "SELECT key FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (OUTPUT_HOLDER, output_id),
+        ).fetchall()
+    return {str(key) for (key,) in found}
+
+
+@pytest.mark.parametrize("blobs", [None, _SAVE_BLOBS], ids=["files", "blobs"])
+async def test_a_save_wins_over_a_copy_batch_that_commits_during_its_insert(
+    saved: tuple[OutputStore, OutputMeta, Job], pg_conninfo: str, blobs: OutputBlobs | None
+) -> None:
+    """The copy read the save's folder and inserted its row, and its batch has not
+    committed when the save writes its row. The save waits for the batch, then takes
+    the copy's row over: it keeps its files and its blob keys, and does not fail
+    (#7360, #7256)."""
+    store, meta, job = saved
+    rows = rows_of(store)
+    output_id = "d" * 32
+    template = rows.get(meta.id)
+    assert template is not None
+    copied = replace(
+        template,
+        output_id=output_id,
+        meta=template.meta.model_copy(update={"id": output_id, "name": "copied"}),
+        files_stamp="stamp",
+    )
+    batch = _HeldOpen(copied)
+    with ThreadPoolExecutor(2) as pool:
+        copy = pool.submit(rows.write_copy, batch, [], rows.clock())
+        assert batch.inserted.wait(30)
+        save = pool.submit(
+            lambda: store.commit(store.prepare(job, name="saved", output_id=output_id), blobs)
+        )
+        deadline = time.monotonic() + 30
+        while not _waits_on_a_lock(pg_conninfo):
+            assert not save.done(), save.exception()
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        batch.release.set()
+        assert copy.result(30) == ({output_id}, set())
+        saved_meta = save.result(30)
+    assert saved_meta.name == "saved"
+    assert (store.paths.output_dir(job.slug, output_id) / META_NAME).is_file()
+    row = rows.get(output_id)
+    assert row is not None
+    assert row.meta.name == "saved" and row.files_stamp is None
+    if blobs is None:
+        assert row.bytes_at is None and row.blobs == OutputBlobs()
+        assert _holds(pg_conninfo, output_id) == set()
+    else:
+        assert row.bytes_at is not None
+        assert (row.blobs.model, row.blobs.preview) == (blobs.model, blobs.preview)
+        assert rows.files(output_id) == list(blobs.files)
+        assert _holds(pg_conninfo, output_id) == set(blobs.keys())
 
 
 async def test_rename_updates_row(saved: tuple[OutputStore, OutputMeta, Job]) -> None:

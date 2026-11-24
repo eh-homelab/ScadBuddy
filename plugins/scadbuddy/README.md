@@ -78,8 +78,7 @@ request tool, the headless browser) (#2320;
 [Subagents](https://code.claude.com/docs/en/sub-agents): a subagent with no `tools`
 inherits the main thread's). Each call goes through the same checks as the session's own.
 Each lists `disallowedTools`: Claude Code's shell, file and web built-ins, and for
-`print-analyst` the send and print tools (#2562). In a durable ScadBuddy session they get
-ScadBuddy's own tools only (`docs/ai/claude-plugin.md`).
+`print-analyst` the send and print tools (#2562; `docs/ai/claude-plugin.md`).
 
 ## Versioning
 

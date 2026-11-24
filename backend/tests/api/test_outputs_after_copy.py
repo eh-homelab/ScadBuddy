@@ -46,7 +46,7 @@ def first(client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch) -> It
     store = _store(client)
     assert store.rows is not None
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    result = copy_outputs(store, store.rows, state.projection.pool)
+    result = copy_outputs(store, store.rows, state.projection.conninfo)
     assert result is not None and not result.incomplete
     assert store.rows.copied()
     real_glob = Path.glob

@@ -371,7 +371,7 @@ PER_PRINT_COPY = (
     "is a per-print copy a print run made, which ScadBuddy's sweep trashes: import onto"
     " the file it was copied from"
 )
-NOT_STANDING = "is not a file of ScadBuddy's own library that stands"
+NOT_STANDING = "was deleted or replaced in ScadBuddy's library: choose the file again"
 
 
 def require_import_target(conn: Connection[DictRow], file_id: int) -> None:

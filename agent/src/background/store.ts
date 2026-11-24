@@ -39,7 +39,7 @@ export const EVENT_MAX_CHARS = 8000
 export const NOTICE_MAX_CHARS = 16384
 /**
  * One delivery's events at most, by their recorded text: MAX_EVENTS of NOTICE_MAX_CHARS
- * would be ~3 MB in one message, past any context, and a classic session would then
+ * would be ~3 MB in one message, past any context, and a session would then
  * fail every turn after it on the same transcript. The rest go in the next delivery.
  */
 export const DELIVER_MAX_CHARS = 64_000

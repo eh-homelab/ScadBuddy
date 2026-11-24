@@ -62,7 +62,7 @@
     - `slug_of(output_id: str) -> str | None`
     - `existing(output_ids: Iterable[str]) -> set[str]` (one `= ANY(%s)` query)
     - `for_slug(slug: str) -> list[OutputRow]` (newest first)
-    - `insert(row: OutputRow, conn: Connection[DictRow] | None = None) -> None` (inside the given connection's transaction when one is passed; it first deletes a row the copy wrote of the same id and slug, and raises on any other conflict)
+    - `insert(row: OutputRow, conn: Connection[DictRow] | None = None) -> None` (inside the given connection's transaction when one is passed; it takes over a row the copy wrote of the same id and slug in one upsert, also one whose batch has not committed yet, and raises on any other conflict, #7360)
     - `drop_copied(output_id: str, slug: str) -> None` (a failed save's clean-up: deletes only a row with the copy's stamp)
     - As built (Task 4 fix), the copy's writes, in place of an `upsert`: `clock() -> datetime` (the mark), `write_copy(new, changed, mark) -> tuple[set[str], set[str]]` (`INSERT … ON CONFLICT DO NOTHING`, and `UPDATE … WHERE copied_at < mark`, in one transaction), `undo_copy(output_ids, mark) -> set[str]` (`DELETE … WHERE copied_at = mark`), `drop_unseen(output_ids, started) -> int` (`DELETE … WHERE copied_at < started`) and `stamps() -> dict[str, str | None]`. The live writers set `copied_at = clock_timestamp()`.
     - `update_meta(output_id: str, meta: OutputMeta) -> None`

@@ -714,7 +714,7 @@ changed. A card with more than eight tools has a **Filter**.
   with one **Access** select: **off**, **read**, **write** or **outward (asks first)**.
   The one marked **(default)** is what ScadBuddy (or, for a plugin, outward) gives it.
   A choice applies at once ("Saving…" while it is sent), from the assistant's next
-  call, in classic and durable chats, flows and MCP clients alike.
+  call, in chats, flows and MCP clients alike.
 - A choice below the default asks once, in one line (**Lower to …**, or **Cancel** or
   Esc to keep it). **Reset** returns a changed tool to its default.
 - **Details** shows the tool's parameters and, for a plugin's tool, its annotations as
@@ -768,4 +768,4 @@ changed. A card with more than eight tools has a **Filter**.
   the Claude Code Hindsight plugin does (`recallMaxQueryChars`), or all of it at 0. The
   bank has its own limit in tokens (`HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` on the
   Hindsight server, 500 by default); a query it still finds too long is retried once,
-  shorter. A change applies from your next message, in classic and durable chats.
+  shorter. A change applies from your next message.

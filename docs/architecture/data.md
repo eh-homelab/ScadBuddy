@@ -34,7 +34,7 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 | Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255), `output_files`, `output_derived`, `output_byte_runs` (`20261124T0245Z_output_bytes`, #7256; see [Saved outputs](#saved-outputs)) | the API |
 | Auth | `auth_sessions`, `auth_login_config`, `auth_break_glass_codes`, `service_credentials`, `personal_access_tokens`, `auth_delegation_codes`, `service_caller_suspensions` (2026-11-02 to 2026-11-06 files) | the API |
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
-| Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `held_local_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`) | the API; the print worker through CRUD |
+| Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `held_local_presets` (read by nothing since #7244, to be dropped), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`) | the API; the print worker through CRUD |
 | Flows | `workflow_definitions`, `workflow_runs`, `workflow_run_decisions`, `workflow_flow_states`, `workflow_run_proposals`, `workflow_run_links`, `flow_grants`, `flow_grant_uses`, `flow_triggers`, `flow_trigger_grants`, `flow_trigger_fires` | the API; the projects worker through `crud.projects` (`scadbuddy/api/crud_projects.py:71-73`); the agent's run-grant check reads `flow_grants` and `flow_grant_uses` through `crud.agent` area `gate` (`agent/src/gate/crudStore.ts:13`) |
 | Orders, payments, storefront | `customers*`, `orders`, `order_*` (`20261020T0446Z_orders` and later), `entity_attachments` (an order's files; `20261024T2050Z_order_attachments`, renamed by `20261122T0426Z_entities`), `parts*`, `payment_*`, `bank_*`, `printer_cost_profiles`, `storefront_*` (2026-11-07 to 2026-11-13 files) | the API; the storefront edge through `crud.storefront` (`scadbuddy/api/crud_storefront.py:208`); the intake worker through `crud.intake` (`scadbuddy/api/crud_intake.py:34`) |
 | Entities (files and links on any row, #6950) | `entities`, `entity_links` (`20261122T0426Z_entities`), `entity_attachments` (the old `order_attachments`, renamed there; an order's files are its rows with an `order_id`) | the API |
@@ -174,8 +174,8 @@ byte copy's model swap and its `drop_derived` can stay stale. It needs a hand-ed
 derived rows: readers fall back to the file and derive again until the blob is back.
 
 Each API start copies the folders to rows once (`scadbuddy/library/output_copy.py`
-`copy_outputs`, one replica at a time under an advisory lock; a run that does not get the
-lock does nothing). The housekeeping sweep `housekeeping_copy_outputs` copies them again
+`copy_outputs`, one replica at a time under an advisory lock, held on a connection of its
+own; a run that does not get the lock does nothing). The housekeeping sweep `housekeeping_copy_outputs` copies them again
 on each run of the sweeps' Schedule (`workflows/housekeeping.py` `OUTPUT_COPY_SWEEP`, every
 `asset_sweep_interval`; with the sweeps off, `asset_sweep_interval` 0, only the start
 copies). Each run is a row of `output_copy_runs`.
@@ -204,7 +204,9 @@ reconciles:
   list; a side file that cannot be read is left out of its row and named on `damaged`.
 - Pods on an older build save and delete outputs in the files only, during a roll-out
   and after a rollback. The next housekeeping sweep gives their saves rows and drops the
-  rows of their deletes.
+  rows of their deletes. Until then, such a save is a 404 on the newer pods once a copy
+  run has finished (`OutputRows.copied` stays true in each process); README, "Saved
+  outputs during a roll-out".
 
 After a roll-out, confirm that every pod runs the new image (`kubectl -n bambuddy get
 pods -o jsonpath` on the images), then read `GET /api/v1/outputs/copy-status`. Check that

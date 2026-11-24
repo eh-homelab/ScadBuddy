@@ -277,10 +277,27 @@ _INSERT = (
     " CASE WHEN %s THEN clock_timestamp() END)"
 )
 
-#: A save's row replaces a row the copy wrote (it has a stamp) of the same folder: the
-#: copy may have read the save's folder before the save wrote its row. A row of another
-#: slug stays, so a second save of an id (`orders/quote.py` makes them with uuid5) under
-#: another model still fails on the key.
+#: A save's row. It takes over a row the copy wrote (it has a stamp) of the same folder:
+#: the copy may have read the save's folder before the save wrote its row. When the
+#: copy's batch has not committed yet, the statement waits for it and then takes the row
+#: over, so the save never fails on the copy's row (#7360). The taken row gets the save's
+#: blob keys and no byte stamp or damage; `_insert` then replaces its files, derived rows
+#: and byte holds. A row of another slug, or a row a save wrote, is not taken: the
+#: statement changes no row, and `insert` then fails on the key. So a second save of an
+#: id (`orders/quote.py` makes them with uuid5) under another model still fails.
+_SAVE_UPSERT = (
+    _INSERT + " ON CONFLICT (output_id) DO UPDATE SET meta = EXCLUDED.meta,"
+    " params = EXCLUDED.params, inputs = EXCLUDED.inputs, record = EXCLUDED.record,"
+    " manifest = EXCLUDED.manifest, bom = EXCLUDED.bom,"
+    " arranged_from = EXCLUDED.arranged_from, backfill = EXCLUDED.backfill,"
+    " has_plate_cover = EXCLUDED.has_plate_cover, created_at = EXCLUDED.created_at,"
+    " model_blob = EXCLUDED.model_blob, preview_blob = EXCLUDED.preview_blob,"
+    " thumbnail_blob = EXCLUDED.thumbnail_blob, bytes_at = EXCLUDED.bytes_at,"
+    " bytes_stamp = NULL, damaged = '[]', files_stamp = NULL, copied_at = clock_timestamp()"
+    " WHERE outputs.files_stamp IS NOT NULL AND outputs.slug = EXCLUDED.slug"
+)
+
+#: The copy's row of the folder ``<slug>/<id>``: a failed save deletes it.
 _DROP_COPIED = (
     "DELETE FROM outputs WHERE output_id = %s AND slug = %s AND files_stamp IS NOT NULL"
     " RETURNING output_id"
@@ -386,17 +403,22 @@ class _FileThereError(Exception):
 
 def _insert(conn: Connection[DictRow], row: OutputRow) -> None:
     blobs = row.blobs
-    _drop_copied(conn, row.output_id, row.slug)
-    conn.execute(
-        _INSERT,
-        (
-            *_values(row),
-            blobs.model,
-            blobs.preview,
-            blobs.thumbnail,
-            blobs.model is not None,
-        ),
+    values = (
+        *_values(row),
+        blobs.model,
+        blobs.preview,
+        blobs.thumbnail,
+        blobs.model is not None,
     )
+    if not conn.execute(_SAVE_UPSERT, values).rowcount:
+        # Another row holds the id: the plain insert raises its `UniqueViolation`. (If
+        # that row went meanwhile, the insert adds the save's row.)
+        conn.execute(_INSERT, values)
+    # A row the save took over from the copy keeps nothing of the copy's bytes: its
+    # files, derived rows and byte holds go. A new row has none of them.
+    conn.execute("DELETE FROM output_files WHERE output_id = %s", (row.output_id,))
+    conn.execute("DELETE FROM output_derived WHERE output_id = %s", (row.output_id,))
+    _release_bytes(conn, [row.output_id])
     _write_files(conn, row.output_id, blobs.files)
     _hold_keys(conn, row.output_id, blobs.keys())
 
@@ -547,9 +569,9 @@ class OutputRows:
 
     def insert(self, row: OutputRow, conn: Connection[DictRow] | None = None) -> None:
         """Add a save's row, with its blob keys, its ``output_files`` rows and a hold of
-        each key. It replaces a row the copy wrote of the same slug; any other row with
-        that id is an error, and then nothing is written. With ``conn``, inside its
-        transaction."""
+        each key. It takes over a row the copy wrote of the same slug, also one the copy
+        has not committed yet; any other row with that id is a `UniqueViolation`, and
+        then nothing is written. With ``conn``, inside its transaction."""
         if conn is not None:
             _insert(conn, row)
             return

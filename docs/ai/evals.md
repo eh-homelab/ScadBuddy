@@ -90,10 +90,7 @@ the init message's model and Claude Code version included. Its tier decisions ar
 permission seam's own, as each call ran (`onDecision`,
 [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)).
 
-Until plan Step 6.6 the scenarios also ran on the classic harness and on agent-durable's
-`DurableSession` (`SCADBUDDY_EVAL_MODE`). Since Step 6.3 no new session is either, so
-both runs are gone; Step 7.2 moved the open DurableSessions to AgentSession, and Step 8.1
-retired the Python turn. An allowed package's built-ins are tested on AgentSession
+Every scenario runs on an `AgentSession`, the one session runtime. An allowed package's built-ins are tested on AgentSession
 ([`agent/test/parity.temporal.test.ts`](../../agent/test/parity.temporal.test.ts)).
 
 ### Deterministic run (CI)
@@ -109,8 +106,7 @@ its deadline interrupts its session's turn and terminates its workflow, so the t
 neither spends more budget nor reaches the next run's backend. It is part
 of `pnpm test`, and skips without a Temporal CLI or `SCADBUDDY_TEST_DATABASE_URL`. The
 `agent` job in `ci.yml` has both, so it runs on every PR. A local `pnpm test` without
-them runs no scenario at all (until Step 6.6, `test/evals.test.ts` replayed them on the
-classic harness without either); see agent/CLAUDE.md for the Postgres and Temporal to start.
+them runs no scenario at all; see agent/CLAUDE.md for the Postgres and Temporal to start.
 
 It also runs **negative controls**. These replay a misbehaving model and assert that the
 checks catch it:
