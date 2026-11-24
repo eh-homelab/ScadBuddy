@@ -89,36 +89,52 @@ prod before it, by the build of a83553b30 (workflow ``print-1e3d8e87…``, run
 (``tests/test_print_native_workflow.py``): ``lan_queued_busy`` (the printer runs another
 print: the run succeeds queued, and its sequence waits the print out and for a cleared
 plate, then starts it), both histories.
+
+Recorded on temporalio 1.36.0, which runs a workflow task's activation jobs in one batch
+(workflow logic flag 2), by the workflow as #6929 left it (``SCADBUDDY_RECORD_HISTORIES=1``
+runs the recording below; #7377): ``cancelled_during_check_136`` (a cancel while
+``print_check`` runs: the Update answers ``CANCELLED``) and ``cancelled_during_insert_136``
+(a cancel in the history before ``print_insert`` ends: the row is recorded cancelled and
+the Update answers it). Never re-record them.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 from temporalio import workflow
-from temporalio.client import WorkflowHistory
+from temporalio.api.enums.v1 import EventType
+from temporalio.client import Client, WorkflowFailureError, WorkflowHistory
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import (
     Interceptor,
     Replayer,
     StartActivityInput,
+    Worker,
     WorkflowInboundInterceptor,
     WorkflowInterceptorClassInput,
     WorkflowOutboundInterceptor,
 )
 
+from scadbuddy.workflows.follow import FollowPrint, follow_queue
 from scadbuddy.workflows.print_models import FailInput
 from scadbuddy.workflows.printing import (
     CANCELLED_QUEUEING,
     LanSequenceWorkflow,
     PrintRunWorkflow,
 )
+from tests.support.temporal import temporal_client
+from tests.test_print_workflow import Fake, ended, run_input, start
 
 HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
 SEQUENCE_HISTORIES = Path(__file__).parent / "fixtures" / "print_lan_sequence_histories"
+CANCEL_NAMES = ["cancelled_during_check_136", "cancelled_during_insert_136"]
 
 
 @pytest.mark.parametrize(
@@ -156,6 +172,7 @@ SEQUENCE_HISTORIES = Path(__file__).parent / "fixtures" / "print_lan_sequence_hi
         "lan_run_holds",
         "lan_refused_busy",
         "lan_queued_busy",
+        *CANCEL_NAMES,
     ],
 )
 async def test_print_run_replays_its_recorded_history(name: str) -> None:
@@ -242,3 +259,55 @@ async def test_a_1061_cancel_already_handled_keeps_its_recorded_print_fail() -> 
     assert name == "print_fail" and replaying
     fail: FailInput = args[0]
     assert fail.error == CANCELLED_QUEUEING and not fail.unqueued
+
+
+async def _cancelled(client: Client, name: str) -> None:
+    fake = Fake()
+    step = "check" if name == "cancelled_during_check_136" else "insert"
+    gate = asyncio.Event()
+    if step == "check":
+        fake.check_gate = gate
+    else:
+        fake.insert_gate = gate
+    queue = f"print-{uuid.uuid4().hex[:8]}"
+    arg = run_input()
+    async with (
+        Worker(
+            client,
+            task_queue=queue,
+            workflows=[PrintRunWorkflow, FollowPrint],
+            activities=fake.all(),
+        ),
+        Worker(client, task_queue=follow_queue(queue), activities=[fake.follow_print]),
+    ):
+        accepting = asyncio.create_task(start(client, queue, arg))
+        while step not in fake.calls:
+            await asyncio.sleep(0.05)
+        handle = client.get_workflow_handle(f"print-{arg.key}")
+        await handle.cancel()
+        while not any(
+            event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+            for event in (await handle.fetch_history()).events
+        ):
+            await asyncio.sleep(0.05)
+        if step == "check":
+            await accepting  # the check is cancelled, never completed
+            gate.set()
+        else:
+            gate.set()
+            await accepting
+        if step == "check":
+            with pytest.raises(WorkflowFailureError):
+                await ended(client, arg)
+        else:
+            await ended(client, arg)
+        history = await handle.fetch_history()
+    (HISTORIES / f"{name}.json").write_text(history.to_json())
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records histories")
+async def test_record_print_run_cancel_histories() -> None:
+    async with temporal_client() as client:
+        for name in CANCEL_NAMES:
+            await _cancelled(client, name)
