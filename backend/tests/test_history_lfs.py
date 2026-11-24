@@ -17,7 +17,12 @@ import pytest
 
 from scadbuddy.core.gitrepo import PUSH_TIMEOUT, GitError, git_env
 from scadbuddy.library import history as history_module
-from scadbuddy.library.history import LFS_PUSH_TIMEOUT, ModelHistory, lfs_endpoint
+from scadbuddy.library.history import (
+    LFS_PUSH_TIMEOUT,
+    BlobTooLargeError,
+    ModelHistory,
+    lfs_endpoint,
+)
 from scadbuddy.library.upstream import Upstream, plan_merge
 from scadbuddy.workflows.housekeeping import GIT_REMOTE_TIMEOUT
 
@@ -109,6 +114,15 @@ def test_export_show_and_restore_give_the_bytes(history: ModelHistory, tmp_path:
     assert history.show(first, MESH) == ONE
     history.restore("a", first)
     assert (history.root / MESH).read_bytes() == ONE
+
+
+def test_a_mesh_read_by_size_is_its_own_size_and_bytes(history: ModelHistory) -> None:
+    """The editor's file route refuses a mesh as it is, and never shows its pointer."""
+    commit = put(history, ONE)
+    put(history, TWO)
+    assert history.read_blob(commit, MESH, limit=len(ONE)) == ONE
+    with pytest.raises(BlobTooLargeError):
+        history.read_blob(commit, MESH, limit=len(ONE) - 1)
 
 
 def test_a_lost_object_is_an_error_and_not_a_missing_revision(

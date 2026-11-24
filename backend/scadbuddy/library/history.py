@@ -94,6 +94,7 @@ GIT_LFS = "git-lfs"
 #: The meshes a repository made here keeps in Git LFS.
 LFS_PATTERNS = ("*/meshes/*.3mf", "_builtin/*/meshes/*.3mf")
 LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
+LFS_SIZE = re.compile(rb"^size (\d+)$", re.MULTILINE)
 #: A first push sends every mesh; a later one sends only what the remote lacks.
 LFS_PUSH_TIMEOUT = 600.0
 
@@ -214,9 +215,16 @@ class ModelHistory(GitRepo):
 
     def show(self, commit: str, path: str) -> bytes:
         """As :meth:`GitRepo.show`; a mesh's bytes where git holds its pointer."""
-        data = super().show(commit, path)
+        return self._mesh_or(super().show(commit, path), commit, path)
+
+    def _mesh_or(self, data: bytes, commit: str, path: str, *, limit: int | None = None) -> bytes:
+        """``data``, the blob at ``path``; a mesh's bytes where it is a mesh's pointer.
+        :class:`BlobTooLargeError` for a mesh over ``limit``, before it is read."""
         if not (_is_mesh(path) and data.startswith(LFS_POINTER)):
             return data
+        size = LFS_SIZE.search(data)
+        if limit is not None and size is not None and int(size[1]) > limit:
+            raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
         done = self._run("cat-file", "--filters", f"{self.resolve(commit)}:{path}", text=False)
         assert isinstance(done.stdout, bytes)
         return done.stdout
@@ -518,7 +526,7 @@ class ModelHistory(GitRepo):
                 elif mode in FILE_MODES:
                     if size > limit:
                         raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
-                    return self._blob(oid)
+                    return self._mesh_or(self._blob(oid), resolved, current, limit=limit)
                 else:
                     raise missing
         raise missing
