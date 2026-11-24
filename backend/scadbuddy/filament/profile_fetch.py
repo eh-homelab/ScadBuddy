@@ -46,9 +46,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
-from temporalio.api.enums.v1 import TaskQueueKind, TaskQueueType
-from temporalio.api.taskqueue.v1 import TaskQueue
-from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.api.enums.v1 import TaskQueueType
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
@@ -87,6 +85,7 @@ from scadbuddy.profile_fetch.workflow import (
     TOO_LONG,
 )
 from scadbuddy.slicing.own_presets import sb_ref
+from scadbuddy.workflows.pollers import queue_pollers
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -404,20 +403,12 @@ class TemporalQueueProbe:
         await self.client.get_workflow_handle(fetch_workflow_id(run_id)).cancel()
 
     async def _read(self) -> bool:
+        # Every partition's pollers: a live worker can be absent from the root's (#7350).
         for kind in (
             TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
             TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY,
         ):
-            described = await self.client.workflow_service.describe_task_queue(
-                DescribeTaskQueueRequest(
-                    namespace=self.client.namespace,
-                    task_queue=TaskQueue(
-                        name=self.task_queue, kind=TaskQueueKind.TASK_QUEUE_KIND_NORMAL
-                    ),
-                    task_queue_type=kind,
-                )
-            )
-            if described.pollers:
+            if await queue_pollers(self.client, self.task_queue, kind):
                 return True
         return False
 
