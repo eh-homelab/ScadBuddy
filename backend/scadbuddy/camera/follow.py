@@ -48,6 +48,8 @@ class ChangeFollower:
         self._retry_max = retry_max
         self._idle = idle
         self._last_id: str | None = None
+        #: A callback failed: the next ``ready`` re-reads, until one ``on_resync`` returns.
+        self._pending = False
 
     async def run(self) -> None:
         """Follow the stream until cancelled, opening it again whenever it drops."""
@@ -97,11 +99,18 @@ class ChangeFollower:
         except TimeoutError:
             logger.warning("camera change stream went silent; reconnecting")
         except Exception as error:
-            logger.warning("camera change stream dropped (%s); reconnecting", type(error).__name__)
+            logger.warning(
+                "camera change stream dropped (%s: %s); reconnecting", type(error).__name__, error
+            )
         finally:
             if stream is not None:
                 await stream.aclose()
         return opened
+
+    async def _resync(self) -> None:
+        self._pending = True
+        await self._on_resync()
+        self._pending = False
 
     async def _dispatch(self, frame: dict[str, str]) -> bool:
         """Handle one frame; true for ``ready``."""
@@ -114,15 +123,19 @@ class ChangeFollower:
         if "id" in frame and event in PLACED:
             self._last_id = frame["id"]
         if event == "ready":
-            if data.get("resync") or data.get("reconnect"):
-                await self._on_resync()
+            if self._pending or data.get("resync") or data.get("reconnect"):
+                await self._resync()
             return True
         if event == "reconnected":
-            await self._on_resync()
+            await self._resync()
         elif event == "change":
             printer_id = self._printer_id(data)
             if printer_id is not None:
-                await self._on_change(printer_id)
+                try:
+                    await self._on_change(printer_id)
+                except Exception:
+                    self._pending = True
+                    raise
         return False
 
     @staticmethod

@@ -139,3 +139,74 @@ async def test_follower_treats_silence_as_dead() -> None:
     await until(lambda: len(requests) >= 2)
     task.cancel()
     assert requests[1].headers["last-event-id"] == "5"
+
+
+def test_follow_kinds_match_the_api_filter() -> None:
+    from scadbuddy.api.crud_camera import CAMERA_KINDS
+    from scadbuddy.camera.follow import CHANGE_KINDS
+
+    assert CHANGE_KINDS == CAMERA_KINDS
+
+
+async def test_follower_retries_a_failed_resync() -> None:
+    hold = asyncio.Event()
+    requests: list[httpx.Request] = []
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        body = [
+            frame("ready", {"resync": len(requests) == 1, "reconnect": False}, str(len(requests)))
+        ]
+        return sse(body, hold if len(requests) > 2 else None)
+
+    client = CrudClient(
+        "http://api", "camera", ServiceAuth(Token()), transport=httpx.MockTransport(handler)
+    )
+
+    async def on_change(printer_id: str) -> None:
+        pass
+
+    async def on_resync() -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("API 500")
+
+    task = asyncio.create_task(
+        ChangeFollower(client, PATH, on_change, on_resync, retry_min=0.01, retry_max=0.02).run()
+    )
+    await until(lambda: len(calls) >= 2)
+    await asyncio.sleep(0.1)
+    assert not task.done()
+    task.cancel()
+    assert len(calls) == 2
+
+
+async def test_follower_resyncs_after_a_failed_change() -> None:
+    hold = asyncio.Event()
+    requests: list[httpx.Request] = []
+    resyncs: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        ready = frame("ready", {"resync": False, "reconnect": False}, "5")
+        if len(requests) == 1:
+            return sse([ready, change("printer.changed", "p1", "6")])
+        return sse([ready], hold)
+
+    client = CrudClient(
+        "http://api", "camera", ServiceAuth(Token()), transport=httpx.MockTransport(handler)
+    )
+
+    async def on_change(printer_id: str) -> None:
+        raise RuntimeError("API 500")
+
+    async def on_resync() -> None:
+        resyncs.append(1)
+
+    task = asyncio.create_task(
+        ChangeFollower(client, PATH, on_change, on_resync, retry_min=0.01, retry_max=0.02).run()
+    )
+    await until(lambda: resyncs)
+    task.cancel()
+    assert len(requests) >= 2

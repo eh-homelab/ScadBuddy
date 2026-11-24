@@ -8,7 +8,7 @@ import socket
 from collections.abc import Mapping
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.intake_worker.settings import FORBIDDEN_ENV
@@ -59,7 +59,7 @@ class RecorderSettings(BaseSettings):
     camera_s3_access_key: SecretStr
     camera_s3_secret_key: SecretStr
     camera_disk_max_bytes: int = 2 * 1024**3
-    camera_recorder_name: str = socket.gethostname()
+    camera_recorder_name: str = Field(default_factory=socket.gethostname)
     #: The relay's RTSP address, e.g. ``rtsp://scadbuddy-camera-relay:8554``.
     camera_relay_rtsp_url: str
     camera_relay_read_user: str
