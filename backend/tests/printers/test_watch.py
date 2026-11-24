@@ -526,14 +526,33 @@ def test_a_write_older_than_the_row_moves_nothing_back(
     assert reports.get(pid) == (FINISH_X, later + timedelta(seconds=1))
 
 
-def _camera(url: str, percent: int = 0) -> dict[str, Any]:
-    return {"gcode_state": "RUNNING", "mc_percent": percent, "ipcam": {"rtsp_url": url}}
+def _camera(url: str | None, percent: int = 0) -> dict[str, Any]:
+    ipcam = {} if url is None else {"rtsp_url": url}
+    return {"gcode_state": "RUNNING", "mc_percent": percent, "ipcam": ipcam}
+
+
+URL_A = "rtsps://10.0.0.9:322/a"
+URL_B = "rtsps://10.0.0.8:322/a"
 
 
 async def _kinds(
-    linked: tuple[PrinterStore, PrinterReportStore, str], deltas: list[dict[str, Any]]
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+    deltas: list[dict[str, Any]],
+    *,
+    stored: dict[str, Any] | None = None,
+    empty: bool = False,
 ) -> list[str]:
+    """The event kinds one watch attempt publishes. ``stored`` is the report the row holds
+    when the attempt starts; ``empty`` watches a printer with no stored report at all."""
     printers, reports, pid = linked
+    if empty:
+        pid = printers.create(PrinterCreate(serial="01P00A000000002", name="E")).id
+        printers.link_lan(
+            pid, LanLink(host="10.0.0.10", access_code="12345678"), cert_sha256="ab" * 32
+        )
+        assert reports.get(pid) is None
+    elif stored is not None:
+        reports.put(pid, stored, LONG_AGO)
     bus = RecordingBus()
     lan = Lan(subscribes=True, deltas=deltas)
     watches = WatchActivities(
@@ -543,35 +562,56 @@ async def _kinds(
         connect=lambda *a: cast(LanPrinter, lan),
         write_every=0,
     )
-    last = deltas[-1]
 
-    async def written() -> bool:
-        got = reports.get(pid)
-        if got is None or got[0].get("mc_percent") != last["mc_percent"]:
-            return False
-        await asyncio.sleep(0.05)  # the announce follows the write by a tick
-        return True
+    def kinds() -> list[str]:
+        return [e.kind for e in bus.events if isinstance(e, PrinterEvent)]
 
-    await run_until(ActivityEnvironment(), watches, pid, written)
-    return [e.kind for e in bus.events if isinstance(e, PrinterEvent)]
+    # Every delta moves ``mc_percent``, so each one announces ``printer.report``, in the
+    # same call as any ``printer.changed`` it brings.
+    await run_until(
+        ActivityEnvironment(), watches, pid, lambda: kinds().count("printer.report") == len(deltas)
+    )
+    return kinds()
 
 
 async def test_watch_announces_changed_on_rtsp_url_change(
     linked: tuple[PrinterStore, PrinterReportStore, str],
 ) -> None:
-    kinds = await _kinds(
-        linked,
-        [_camera("rtsps://10.0.0.9:322/a", 1), _camera("rtsps://10.0.0.8:322/a", 2)],
-    )
-    assert kinds.count("printer.changed") == 1
+    kinds = await _kinds(linked, [_camera(URL_A, 1), _camera(URL_B, 2)])
+    assert kinds.count("printer.changed") == 2  # none to A (the stored report), then A to B
 
 
 async def test_watch_announces_no_change_for_progress_only(
     linked: tuple[PrinterStore, PrinterReportStore, str],
 ) -> None:
-    kinds = await _kinds(
-        linked,
-        [_camera("rtsps://10.0.0.9:322/a", 1), _camera("rtsps://10.0.0.9:322/a", 2)],
-    )
+    kinds = await _kinds(linked, [_camera(URL_A, 1), _camera(URL_A, 2)], stored=_camera(URL_A, 0))
     assert "printer.changed" not in kinds
     assert kinds.count("printer.report") == 2
+
+
+async def test_a_first_url_with_an_empty_store_is_announced(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(linked, [_camera(URL_A, 1)], empty=True)
+    assert kinds.count("printer.changed") == 1
+
+
+async def test_a_restart_over_a_stored_report_with_another_url_is_announced(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(linked, [_camera(URL_B, 1)], stored=_camera(URL_A, 0))
+    assert kinds.count("printer.changed") == 1
+
+
+async def test_a_restart_with_the_same_url_announces_no_change(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(linked, [_camera(URL_A, 1)], stored=_camera(URL_A, 0))
+    assert "printer.changed" not in kinds
+
+
+async def test_a_dropped_url_is_announced(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(linked, [_camera(None, 1)], stored=_camera(URL_A, 0))
+    assert kinds.count("printer.changed") == 1

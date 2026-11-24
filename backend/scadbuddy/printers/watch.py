@@ -225,6 +225,11 @@ class WatchActivities:
         last_shown: tuple[Any, ...] | None = None
         #: What the last report written showed, announced once its write lands.
         announced: tuple[Any, ...] | None = None
+        #: The camera URL the row holds before this attempt's first write (none when it
+        #: has no report), then the last one written: ``printer.changed`` follows a write
+        #: that moves it. Seeded from the store, so a change across a restart, or the first
+        #: URL a printer reports, is announced too.
+        camera = await self._stored_camera(printer_id)
         last_write = float("-inf")
         #: The newest report not written yet: held back by `write_every`, or one whose
         #: write never ran. A newer report replaces it.
@@ -244,7 +249,7 @@ class WatchActivities:
 
         async def flush(report: LanReport | None) -> None:
             """One write: the owed report first, else ``report`` (or the pending one)."""
-            nonlocal pending, owed, last_write, announced
+            nonlocal pending, owed, last_write, announced, camera
             last_write = self.clock()
             if owed is not None:
                 sent, key, resends = owed
@@ -252,6 +257,7 @@ class WatchActivities:
                 owed = None
                 if outcome == WRITTEN:
                     announced = self._announce(printer_id, sent, announced)
+                    camera = self._announce_camera(printer_id, sent, camera)
                 elif outcome == REFUSED:
                     # Sent again it would be refused again: dropped, not re-sent.
                     self._gave_up(printer_id)
@@ -274,6 +280,7 @@ class WatchActivities:
                 owed = (target, key, 0)
             elif outcome == WRITTEN:
                 announced = self._announce(printer_id, target, announced)
+                camera = self._announce_camera(printer_id, target, camera)
 
         try:
             while True:
@@ -320,18 +327,33 @@ class WatchActivities:
                 exc_info=True,
             )
 
+    async def _stored_camera(self, printer_id: str) -> str | None:
+        """The camera URL of the row's stored report; none when it has none or cannot be
+        read (the first URL then announces, which a controller reads and finds the same)."""
+        try:
+            got = await asyncio.to_thread(self.reports.get, printer_id)
+        except Exception as error:
+            self._failed("get", printer_id, error)
+            return None
+        return None if got is None else rtsp_url(got[0])
+
     def _announce(
         self, printer_id: str, written: LanReport, announced: tuple[Any, ...] | None
     ) -> tuple[Any, ...]:
         """``printer.report`` once a written report shows a card something new: never for
-        a report not written, which a card would read back as the old one. The last item
-        of ``announced`` is the camera URL (`camera.models.rtsp_url`); when a later report
-        shows another one, ``printer.changed`` follows, which the camera relay reads. The
-        first report written has no URL to differ from."""
-        now = (*shown(written.print), rtsp_url(written.print))
-        if announced is None or now[:-1] != announced[:-1]:
+        a report not written, which a card would read back as the old one."""
+        now = shown(written.print)
+        if now != announced:
             emit(self.events, PrinterEvent(kind="printer.report", printer_id=printer_id))
-        if announced is not None and now[-1] != announced[-1]:
+        return now
+
+    def _announce_camera(
+        self, printer_id: str, written: LanReport, camera: str | None
+    ) -> str | None:
+        """``printer.changed`` when a written report moves the camera URL
+        (`camera.models.rtsp_url`), which the camera relay reads from the report."""
+        now = rtsp_url(written.print)
+        if now != camera:
             emit(self.events, PrinterEvent(kind="printer.changed", printer_id=printer_id))
         return now
 

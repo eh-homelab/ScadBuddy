@@ -70,6 +70,10 @@ class Store:
             return answer
         return Advance(ended=cast(PrintEnd | None, answer))
 
+    def get(self, printer_id: str) -> None:
+        """The stored report the watch seeds its camera URL from: none."""
+        return None
+
     def touch(self, printer_id: str, seen_at: datetime) -> None:
         self.log.append(("touch", None))
 
