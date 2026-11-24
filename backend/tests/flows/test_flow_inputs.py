@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from scadbuddy.core.input_schema import (
+    MAX_PATTERN_SIZE,
     MAX_PATTERNED_LENGTH,
     PATTERN_TIMEOUT_S,
     PATTERNS_BUDGET_S,
@@ -170,6 +171,43 @@ def test_a_pattern_with_a_bounded_max_length_is_accepted() -> None:
         "properties": {"s": {"type": "string", "pattern": "^a+$", "maxLength": 64}},
     }
     assert schema_problems(bounded) == []
+
+
+def _patterned(pattern: str) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"s": {"type": "string", "pattern": pattern, "maxLength": 64}},
+    }
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "^a{4294967294}$",
+        "^(a{100}){101}$",
+        "^((ab){10}){1001}$",
+        "^(?:x|a{6000})b{6000}$",
+        "^(?=a{10001})",
+        "^a{10001,}$",
+    ],
+)
+@pytest.mark.parametrize("stored", [False, True])
+def test_a_pattern_whose_counted_repeats_are_too_large_is_refused(
+    pattern: str, stored: bool
+) -> None:
+    """#7394: `regex` compiles a counted repeat by its count, outside the match's deadline,
+    so a short pattern with a large count held the API's first check of a value. A stored
+    one is refused too: it would hold every check that runs it."""
+    assert schema_problems(_patterned(pattern), stored=stored) == [
+        f"s: a pattern repeats at most {MAX_PATTERN_SIZE} times, nested counts multiplied"
+    ]
+
+
+@pytest.mark.parametrize(
+    "pattern", [r"^(\d{1,3}\.){3}\d{1,3}$", "^(a{100}){99}$", "^[a-z]{2,}[0-9]*$"]
+)
+def test_a_pattern_whose_counted_repeats_fit_is_accepted(pattern: str) -> None:
+    assert schema_problems(_patterned(pattern)) == []
 
 
 @pytest.mark.parametrize(

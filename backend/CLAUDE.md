@@ -852,7 +852,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the newest absolute reading, then the deltas after it (`basis()` returns that anchor and those
   deltas, and `grams_left()` is built on it); events carry their physical time,
   ordered by `(at, delta before reading, seq)` (a paired plate's `print_run` is skipped for its `bb_usage` row); a time-less event gets a clock-step guard because the WSL clock
-  steps back), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
+  steps back), `insert_weights.py` (#7280: an insert's empty weight from new spools'
+  weighings, one row per spool in `filament_insert_weight_readings`, the mean of them with
+  `filament_insert_types.empty_weight_basis` `derived`; routes `…/insert-weight-offer` and
+  `…/insert-weight`), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
   printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
   the BB to SB side only: it writes nothing to Bambuddy (the push is `bb_sync_*.py` below, tags go through `rfid_push.py`); each `filament_sync` data type gates what the pull takes, through `Pulls.of(sync)` (#6265 Decision 3; `weights` since #6268), and BB's suppliers and locations are read only under `pulls(suppliers)` and `pulls(locations)`; it skips a BB spool whose tag an open binding of an SB spool linked elsewhere holds, warned once, and remembers it in `filament_bb_ignored` (the push clears its tag later, and the next pull would otherwise make a second SB spool; nothing un-ignores a row, so a person deletes it by hand, plan Decision 29); it never changes a held binding's `override` (`bind_on` with `override=None`); the Schedule's pull skips when none of the six `filament_sync` data types pulls, read per run (#6262 Task 13, widened by #6265 plan Decision 3, F1; `bb_pull_apply.pull_start`); after a pull it runs `reconcile_trays`, #6713. Since #6772 (plan Decisions 172-186) the CRUD service reads no Bambuddy for the pull: `bb_pull_models.py` is the wire (`PullStart`, the bodies, `BbPullApi`, and `Pulls` and `PullReport`, which `bambuddy_pull` re-exports), `bb_pull_run.py` the print worker's reads in the old order (`run_pull`, `read_and_pull`, `read_catalog`, `read_ha_sensors`, `reconcile_trays`), and `bb_pull_apply.py` the API's apply (`LocalBbPull`, `pull_start`, `execute_pull`); `workflows/filament_pull.py` is `FilamentBbPull` on the `bambuddy` queue (AUTO_UPGRADE; one activity `filament_bb_pull_read`, run once; replays `tests/fixtures/filament_pull_histories/`, so a change to its commands goes behind `workflow.patched`). The spool refresh's `filament_bambuddy_pull` activity (`spools/activities.py`; its commands in `SpoolRefresh` unchanged) and `POST /filament/bambuddy/import` start it and wait; the worker sends what it read to the CRUD area `filament-pull` (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`, `…/pull/colours`; client `crud/print.py` `RemoteBbPull`), whose bodies the app's `BodySizeGate` caps at 8 MiB (`api/limits.py` `MAX_TEXT_BODY_BYTES`, 413 on the headers; Decision 182): the five routes carry their own `RouteLimit` (`api/crud_print.py` `PULL_ROUTE_LIMIT`), so the cap holds whatever the content type, header left out included (#6861) and name the Bambuddy instance read (409 `instance_changed` for another than the configured one) and the run's id, never an actor: the import route keeps the person under that id in `filament_pull_actors` (`remember_actor`), the routes read it there, else `bambuddy` (Decision 181); the route drops the row only once the read answered (a report or a problem); a row left behind is deleted by a later `remember_actor` once it is an hour old (`ACTOR_KEPT`, Decision 183). Tests: `tests/filament/pull_support.py` runs both halves in one process for the old pull tests, `test_bb_pull_run.py` the reads, `tests/crud/test_crud_filament_pull.py` the routes), `csv_import.py` (the spools CSV import, #6262 Task 15:
   rows the caller parsed, as text cells; a dry run reads only, so it adds no catalog row and
@@ -1517,8 +1520,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and
   `mocks/features/activity.ts`.
-- `backend/scadbuddy/entities/` — files and links on any row (#6950, inventory spec
-  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3, plan
+- `backend/scadbuddy/entities/` — files, links and key-value properties on any row
+  (#6950, #7026, inventory spec
+  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3a, plan
   `docs/superpowers/plans/2026-11-21-inventory-phase-1-entities.md`): `refs.py`
   (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table;
   `EntityStore`: an `entities` row made by `ensure` only for an owner row that exists, and
@@ -1528,10 +1532,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   are Bambuddy's `print_attachments`, read in the same shape), `links.py` (`EntityLinkStore`
   over `entity_links`, http(s) URLs only), `sweep.py` (`sweep_orphan_entities`, the
   housekeeping step `ENTITY_ORPHANS_SWEEP`: an orphan's files and holds, then its row and
-  links; an order's kinds only once they hold no file), `operations.py` (the
+  links; an order's kinds only once they hold no file), `properties.py` (#7026,
+  `entity_properties` and `entity_property_schemas`; the rules are in
+  `docs/features/spools-and-filament.md` "Properties"), `operations.py` (the
   `entity_attachment_add` kind on the `library` queue), `activity.py`, `problems.py` and
   `component.py` (`ENTITIES`). Routes `api/entity_attachments.py` and `api/entity_links.py`
-  under `/entities/{kind}:{ref}`; the file and thumbnail GETs are scriptless
+  under `/entities/{kind}:{ref}`, and `api/entity_properties.py`
+  (`/entities/{ref}/properties`, `/entity-kinds/{kind}/properties`, `…/property-schema`); the file and thumbnail GETs are scriptless
   (`auth/routes.py` `SCRIPTLESS_GETS`). The migration `20261122T0426Z_entities.sql` keeps
   `order_attachments` as a view, with a trigger that fills `entity_id`, for the previous
   build's replicas during the roll; `20261123T0651Z_drop_order_attachments_view.sql` drops them (#6960).
