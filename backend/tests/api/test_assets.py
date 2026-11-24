@@ -735,3 +735,20 @@ def test_a_mesh_that_cannot_be_read_is_refused_with_why(client: TestClient) -> N
     )
     assert response.status_code == 422
     assert "vertex" in response.json()["detail"]
+
+
+def test_the_apis_lifespan_watches_its_event_loop(client: TestClient) -> None:
+    """#7245: `LoopWatch` runs in the API's lifespan; its first beat lands within a
+    second of the start, so the lag histogram on `/metrics` counts one."""
+    deadline = time.monotonic() + 5
+    count = 0.0
+    while time.monotonic() < deadline and count == 0.0:
+        text = client.get("/metrics").text
+        counts = [
+            float(line.split()[-1])
+            for line in text.splitlines()
+            if line.startswith("scadbuddy_event_loop_lag_seconds_count")
+        ]
+        count = counts[0] if counts else 0.0
+        time.sleep(0.1)
+    assert count > 0, text

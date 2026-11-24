@@ -194,17 +194,6 @@ function draftOf(spool: SpoolDetail): Draft {
   }
 }
 
-/** A preset row's key and values, as the server compares a row sent back. */
-const presetValues = (row: PresetInput) => JSON.stringify([row.printer_model, row.nozzle_diameter, row.slicer_filament, row.slicer_filament_name ?? null])
-
-/**
- * R-7150-11 — a copy's `migrated` rows, by their values: a row saved unchanged stays
- * `migrated`, so the copy's first type drops it; a row the person edited is theirs.
- */
-function copiedMigrated(copy: SpoolDraft | null): ReadonlySet<string> {
-  return new Set((copy?.presets ?? []).filter((row) => row.migrated).map(presetValues))
-}
-
 /** #7150 — a copy's draft (`GET /filament/spools/{id}/copy`) as the form holds it. */
 function draftOfCopy(copy: SpoolDraft): Draft {
   const spool = copy.spool
@@ -321,6 +310,8 @@ const created = (body: SpoolPatch, grams: string): SpoolCreate => {
   return out as SpoolCreate
 }
 
+/** `SpoolCopySourceError`'s detail: the bulk create's `copy_of` names no spool (#7150, R-7150-13). */
+const COPY_SOURCE_GONE = 'copy_of names no spool'
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : cause instanceof Error ? cause.message : 'The server could not be reached. Try again.')
 
 const NONE = '__none__'
@@ -423,13 +414,14 @@ export function SpoolPage() {
   const location = useLocation()
   const [search] = useSearchParams()
   /** #7150 — the spool a new one is copied from (`?copy=<id>`). */
-  const copyOf = id === 'new' ? search.get('copy') : null
+  const asked = id === 'new' ? search.get('copy') : null
+  /** The source was deleted after the form loaded its copy: the next save sends no `copy_of`. */
+  const [sourceGone, setSourceGone] = useState(false)
+  const copyOf = sourceGone ? null : asked
   /** How many identical spools a save makes (#7150). */
   const [quantity, setQuantity] = useState('1')
   /** One `Idempotency-Key` per opened form: a retry or a second click makes no more spools. */
   const [createKey, setCreateKey] = useState(() => crypto.randomUUID())
-  /** The copied `migrated` preset rows (R-7150-11). */
-  const [migratedRows, setMigratedRows] = useState<ReadonlySet<string>>(() => new Set())
   /** The list's filters this page was opened from: back and a delete return to them. */
   const listPath = `${filamentLinks.spools}${listBack(location.state)}`
   /** Set at once when a new spool's POST lands: the page is then an edit of it. */
@@ -468,9 +460,10 @@ export function SpoolPage() {
     setHistoryError(null)
     setQuantity('1')
     setCreateKey(crypto.randomUUID())
+    setSourceGone(false)
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getSpool(id),
-      copyOf ? copySpool(copyOf) : Promise.resolve(null),
+      asked ? copySpool(asked) : Promise.resolve(null),
       listCatalog('materials'),
       listCatalog('subtypes'),
       listCatalog('brands'),
@@ -489,7 +482,6 @@ export function SpoolPage() {
           setDraft(draftOf(spool))
         }
         if (copy) setDraft(draftOfCopy(copy))
-        setMigratedRows(copiedMigrated(copy))
       })
       .catch((cause: unknown) => {
         if (live) setLoadError(cause instanceof ApiError && cause.status === 404 ? 'That spool is gone. Pick another from the Spools tab.' : `The spool could not be loaded: ${message(cause)}`)
@@ -498,7 +490,7 @@ export function SpoolPage() {
     return () => {
       live = false
     }
-  }, [id, copyOf])
+  }, [id, asked])
 
   const base = useMemo(() => (saved ? draftOf(saved) : BLANK), [saved])
   /** The catalogs and places by id and name: the names the timeline shows for an event's ids. */
@@ -608,7 +600,7 @@ export function SpoolPage() {
     try {
       if (creating) {
         // One request makes every spool with its place, presets and K values (#7150).
-        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets.map((row) => ({ ...row, migrated: migratedRows.has(presetValues(row)) })), k_values: draft.k_values }, createKey)
+        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets, k_values: draft.k_values, copy_of: copyOf }, createKey)
         const first = made[0]!
         setMadeId(first.id)
         setNotice(made.length > 1 ? `Saved ${made.length} spools, #${first.number} to #${made[made.length - 1]!.number}` : 'Saved')
@@ -626,6 +618,12 @@ export function SpoolPage() {
       setSaved(fresh)
       setDraft(draftOf(fresh))
     } catch (cause) {
+      if (creating && copyOf && cause instanceof ApiError && cause.status === 422 && cause.detail === COPY_SOURCE_GONE) {
+        // R-7150-13 keeps this a 422: the form drops the link, so the next save makes a plain new spool.
+        setSourceGone(true)
+        setError('The spool this form copied was deleted after the form opened. Save again to make this one a new spool without a link to it.')
+        return
+      }
       setError(message(cause))
       // A write that did land is shown as it now is, unsaved edits kept.
       if (spoolId !== 'new') await Promise.all([getSpool(spoolId).then(setSaved, () => {}), readHistory(spoolId)])
@@ -782,7 +780,7 @@ export function SpoolPage() {
       </p>
       {creating && copyOf && (
         <p className="mb-4 text-[13px] text-muted-foreground">
-          A copy of <Link to={filamentLinks.spool(copyOf)} className="underline">the first spool</Link>. Its number, tag, tray, weight history and weight lock stay with it.
+          A copy of <Link to={filamentLinks.spool(copyOf)} className="underline">the first spool</Link>. Its number, tag, tray, weight history, weight lock and whether it was added full stay with it.
         </p>
       )}
       {error && (

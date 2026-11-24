@@ -177,7 +177,7 @@ export const createSpool = (body: SpoolCreate) => request<Spool>(`${BASE}/spools
 export const bulkCreateSpools = (body: SpoolBulkCreate, key: string) =>
   request<Spool[]>(`${BASE}/spools/bulk`, { ...json('POST', body), headers: { 'Idempotency-Key': key } })
 
-/** #7150 — a new spool's draft from an existing one: not its number, tags, tray, ledger or weight lock. */
+/** #7150 — a new spool's draft from an existing one: not its number, tags, tray, ledger, weight lock or `added_full`. */
 export const copySpool = (id: string) => request<SpoolDraft>(`${BASE}/spools/${seg(id)}/copy`)
 
 /** Only the fields sent change; `null` clears an override. */
