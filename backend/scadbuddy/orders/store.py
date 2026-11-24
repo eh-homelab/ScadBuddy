@@ -3215,6 +3215,40 @@ class OrderStore:
             ).fetchall()
         return {(r["archive_id"], r["archive_media"]) for r in rows}
 
+    def record_media_refusal(
+        self,
+        fulfilment_id: str,
+        archive_id: int,
+        what: ArchiveCopyMedia,
+        limit: int,
+        at: datetime,
+    ) -> None:
+        """The import refused the attempt's ``what`` of ``archive_id`` at ``limit`` bytes
+        (#7281 review): it skips it while the limit is no higher."""
+        with self._write(None) as c:
+            c.execute(
+                "INSERT INTO order_attempt_media_refusals"
+                " (fulfilment_id, archive_id, archive_media, limit_bytes, refused_at)"
+                " VALUES (%s, %s, %s, %s, %s)"
+                " ON CONFLICT (fulfilment_id, archive_id, archive_media)"
+                " DO UPDATE SET limit_bytes = EXCLUDED.limit_bytes,"
+                " refused_at = EXCLUDED.refused_at",
+                (fulfilment_id, archive_id, what, limit, at),
+            )
+
+    def media_refused(
+        self, fulfilment_id: str, limit: int, *, conn: Conn | None = None
+    ) -> set[tuple[int, ArchiveCopyMedia]]:
+        """Each ``(archive_id, archive_media)`` of the attempt the import refused at a
+        limit of ``limit`` bytes or more: still too large at ``limit``."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                "SELECT archive_id, archive_media FROM order_attempt_media_refusals"
+                " WHERE fulfilment_id = %s AND limit_bytes >= %s",
+                (fulfilment_id, limit),
+            ).fetchall()
+        return {(r["archive_id"], r["archive_media"]) for r in rows}
+
     def update_attachment(
         self,
         conn: Conn,
