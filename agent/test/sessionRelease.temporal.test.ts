@@ -26,7 +26,6 @@ import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { TranscriptStore } from '../src/sessions/store.js'
 import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
-import { queuePollers } from '../src/temporal/pollers.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
@@ -45,7 +44,7 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
-import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
+import { anyPoller, localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 import { flushTracing, resetTracing, testTracing } from './support/tracing.js'
 import { PgApprovalRecords, PgSessionOwners } from './support/sql/approvalRecords.js'
 import { PgTranscriptRows } from './support/sql/transcriptRows.js'
@@ -306,8 +305,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
   }, 60_000)
 
   async function polled(queue: string, type: 1 | 2): Promise<boolean> {
-    // Every partition (temporal/pollers.ts): a worker can poll only the non-root ones (#7306).
-    return (await queuePollers(env.client, queue, type, Date.now() + 10_000)).length > 0
+    return anyPoller(env.client, queue, type)
   }
   const pollUntil = <T>(read: () => Promise<T> | T, expected: T, timeout = 60_000) => expect.poll(read, { timeout, interval: 100 }).toEqual(expected)
 
