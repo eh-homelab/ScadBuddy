@@ -820,8 +820,6 @@ const turnToolDeps = temporal
       flows: flowRuns,
       servers: turnServers({
         remotePlugins: durableRemotePlugins,
-        // The session's browser options (#7027) for its plugins' routes; a flow has none.
-        sessionBrowser: async (id) => (await sessionRows.get(id))?.browser ?? undefined,
         access: accessResolver,
         // The headless browser's lists (#982), as a classic turn's.
         browserOrigins,

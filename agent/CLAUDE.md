@@ -551,7 +551,8 @@ opens every one and seals it again byte for byte).
     A session's browser options (#7027, `ai_sessions.browser`) go to every remote plugin
     route of its turns as `X-ScadBuddy-Browser` (`forwarder.ts` `BROWSER_HEADER`, their JSON;
     none when the session has none): a classic turn's from `ClaimedSession.browser`, a durable
-    turn's and its kept client's from the session row (`turnServers.ts` `sessionBrowser`), a
+    turn's and its kept client's from the row its owner is read from (`RowSessionOwners`, into
+    `TurnContext.browser`; a listing's from the session the turn holds), never a second read; a
     flow's never. Only the forwarder sets it; a client's own is dropped. The playwright-mcp
     wrapper (`workers/playwright-mcp/`) reads it when an MCP session starts; other plugins
     ignore it.

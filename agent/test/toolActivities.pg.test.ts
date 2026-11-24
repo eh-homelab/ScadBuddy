@@ -33,16 +33,16 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { session } = await m.start(browser, { origin: 'chat', title: 't' })
       const owners = new PgSessionOwners(db.sql)
       expect(await owners.ownerOf(randomUUID())).toBeUndefined()
-      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null })
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null, browser: null })
       await db.sql`UPDATE ai_sessions SET runtime = NULL WHERE id = ${session.id}`
-      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null })
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null, browser: null })
       // The tiers its current turn was sent with (#2320), only while the sender owns it.
       const sent = (by: { kind: string; id: string }, tiers: string[]) =>
         db.sql`UPDATE ai_sessions SET turn_tiers = ${db.sql.json({ by, tiers })} WHERE id = ${session.id}`
       await sent({ kind: 'browser', id: 'browser' }, ['read', 'write', 'admin'])
-      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: ['read', 'write'], turnId: null })
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: ['read', 'write'], turnId: null, browser: null })
       await sent({ kind: 'bearer', id: 'token:old-owner' }, ['read', 'write', 'outward'])
-      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null })
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null, browser: null })
       // The durable turn running now, for its calls' audit rows (#2497).
       const turn = '6a1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
       await db.sql`UPDATE ai_sessions SET durable_turn_id = ${turn} WHERE id = ${session.id}`

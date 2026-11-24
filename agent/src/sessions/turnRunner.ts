@@ -651,7 +651,16 @@ export class TurnRunner {
         try {
           const wanted = new Set([...remotePlugins.map((p) => p.name), ...(http ? [HTTP_SERVER] : [])])
           const listed = await phase('turn tools', () =>
-            this.deps.turnTools!({ session: id, owner: session.owner, signal: AbortSignal.timeout(TURN_TOOLS_LIST_MS) }, wanted),
+            this.deps.turnTools!(
+              {
+                session: id,
+                owner: session.owner,
+                // Its browser options (#7027) from the session this turn already holds: no second read.
+                ...(session.browser ? { browser: session.browser } : {}),
+                signal: AbortSignal.timeout(TURN_TOOLS_LIST_MS),
+              },
+              wanted,
+            ),
           )
           // A server that listed nothing is said so, as one the assembly left out is (its own problems are said above).
           for (const problem of listed.unlisted ?? []) {

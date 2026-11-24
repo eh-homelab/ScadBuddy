@@ -133,6 +133,14 @@ describe('TurnRunner', () => {
     expect(remoteBrowsers).toEqual([options, undefined])
   })
 
+  it("lists its turn tools with the session's browser options it already holds (#7027)", async () => {
+    const { runner, session, principal, listedBrowsers } = await turnRunnerForTest({ turnTools: ['hindsight__recall'] })
+    const options = { locale: 'de-DE' }
+    await runner.assemble({ ...session, browser: options }, principal)
+    await runner.assemble(session, principal)
+    expect(listedBrowsers).toEqual([options, undefined])
+  })
+
   it("runs a Workflow agent's chat on its own model, effort and subagent, and fingerprints them", async () => {
     const { runner, session, principal } = await turnRunnerForTest()
     const plain = await runner.assemble(session, principal)

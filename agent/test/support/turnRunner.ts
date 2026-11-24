@@ -124,6 +124,8 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
   const serverExtras: unknown[] = []
   /** The browser options each assembly gave `remotePlugins`. */
   const remoteBrowsers: unknown[] = []
+  /** The browser options each turn tools' listing was given in its context. */
+  const listedBrowsers: unknown[] = []
   const runner = new TurnRunner({
     httpBodies: () => unusedBodies,
     browserOrigins: new BrowserOrigins(undefined, new MemorySessionOrigins()),
@@ -200,8 +202,9 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     ...(options.turnTools
       ? {
           toolCalls: () => () => Promise.reject(new Error('turnRunnerForTest runs no tool call')),
-          turnTools: () =>
+          turnTools: (context: { browser?: unknown }) =>
             Promise.resolve({
+              ...(void listedBrowsers.push(context.browser), {}),
               tools: options.turnTools!.map((name) => ({ name, description: name, input_schema: { type: 'object' }, may_park: true })),
             }),
         }
@@ -244,5 +247,5 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
       }
     },
   }
-  return { runner, session, principal, gateCalls, paths, access: store.access, appended, serverExtras, remoteBrowsers }
+  return { runner, session, principal, gateCalls, paths, access: store.access, appended, serverExtras, remoteBrowsers, listedBrowsers }
 }
