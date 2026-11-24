@@ -79,6 +79,9 @@ BLOB_WAIT_MS: float = 15_000
 #: How long an opened combobox may take to show its first option before the option the
 #: step wants counts as missing.
 OPTION_WAIT_MS: float = 5_000
+#: How long `ensure_in_my_spools` waits for the My Spools page's "Export slicer profile"
+#: before it counts the filament as having no record (the old fixed settle, #7228).
+RECORD_WAIT_MS: float = 5_000
 #: The title of Vercel's check page (it answers 429; the skill's SKILL.md).
 CHECKPOINT_TITLE: Final = "Vercel Security Checkpoint"
 #: The longest exported file name, in UTF-16 units, the worker reads from the page.
@@ -465,10 +468,17 @@ class ThreeDfpSite:
         logger.info("signed in to 3dfilamentprofiles.com")
 
     async def ensure_in_my_spools(self, tdfp_id: int) -> None:
-        """`3dfp.mjs add`: on the filament's page, click "Add to My Spools" when it is
-        there; a filament already in My Spools has none."""
+        """`3dfp.mjs add`, once per filament (#7228): when the filament's My Spools page
+        offers "Export slicer profile", the owner has a record of it and nothing is added.
+        Only otherwise does it click "Add to My Spools" on the filament's page. 3DFP shows that
+        button every time, and each click adds one more 1000 g record (measured on
+        2026-11-23: one record per fetch)."""
         page = self.page
         try:
+            status = await self._signed_in(f"/my/spools/details/{tdfp_id}", settle_ms=0)
+            if status != 404 and await self._offers_export():
+                logger.info("3DFP filament %d is already in My Spools", tdfp_id)
+                return
             await self._open(f"/filament/details/{tdfp_id}", tdfp_id, settle_ms=4000)
             button = page.get_by_role("button", name="Add to My Spools").first
             if await button.count():
@@ -481,6 +491,17 @@ class ThreeDfpSite:
             raise SiteError(
                 "browser", f"adding 3DFP filament {tdfp_id} failed in the browser"
             ) from None
+
+    async def _offers_export(self) -> bool:
+        """Whether the open My Spools page shows "Export slicer profile" within
+        `RECORD_WAIT_MS`: at once for a filament with a record, after the whole wait for
+        one without (a page with no record has no other mark to wait for)."""
+        button = self.page.get_by_role("button", name="Export slicer profile").first
+        try:
+            await button.wait_for(state="attached", timeout=RECORD_WAIT_MS)
+        except PlaywrightTimeoutError:
+            return False
+        return True
 
     async def export(self, tdfp_id: int, printer_model: str, nozzle: str) -> ExportedFile:
         """`3dfp.mjs export` for one printer model and nozzle (``"0.4"``): on the

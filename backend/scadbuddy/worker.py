@@ -66,7 +66,6 @@ from scadbuddy.crud.print import (
     RemoteFilamentPresets,
     RemoteFilamentSync,
     RemoteFilamentTrays,
-    RemoteHeldPresets,
     RemoteLanImports,
     RemoteNativeSlices,
     RemoteOutcomes,
@@ -1378,14 +1377,10 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         read_run=run_reader(lan, bambuddy_client, links, uploads=uploads),
     )
     # The image's profiles, read once for the dialog's starts and the runs' reuse keys,
-    # with the kept copy of Bambuddy's local presets (#4645).
+    # with ScadBuddy's own filament presets (#7176); no Bambuddy local preset (#7244).
     native = native_slice_starter(
         settings,
-        Profiles.installed(
-            settings.slicer_profiles_dir,
-            held=RemoteHeldPresets(crud),
-            own=RemoteFilamentPresets(crud),
-        ),
+        Profiles.installed(settings.slicer_profiles_dir, own=RemoteFilamentPresets(crud)),
     )
     kinds = bambuddy_kinds_over(
         settings_store=settings_store,

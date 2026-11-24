@@ -21,7 +21,6 @@ from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
     CopiedMedia,
-    LocalDensity,
     MaintenanceDone,
     MaintenanceTask,
 )
@@ -53,9 +52,6 @@ class Projects:
     async def project_exists(self, project_id: int) -> bool:
         self.asked.append(project_id)
         return project_id not in self.deleted
-
-    async def local_densities(self) -> dict[str, LocalDensity]:
-        raise AssertionError("not asked")
 
     async def spool_assignments(self) -> list[SpoolAssignment]:
         raise AssertionError("not asked")

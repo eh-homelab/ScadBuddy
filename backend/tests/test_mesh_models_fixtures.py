@@ -73,6 +73,24 @@ def test_every_readable_fixture_opens_with_its_objects_parts_and_paint(
     assert "module o1()" in compile_scene(scene)
 
 
+@pytest.mark.parametrize("entry", READ, ids=lambda e: e["file"].removesuffix(".3mf"))
+def test_every_part_file_loads_as_trimesh_load_welds_it(
+    entry: dict[str, Any], tmp_path: Path
+) -> None:
+    """`mesh_loader` reads a part file with the streaming reader, not `trimesh.load`
+    (#7397), and welds it as that load's process=True did: the same faces in the same
+    order (the paint codes follow it), the same vertices, closed exactly when it was."""
+    _, scene = opened(entry["file"], tmp_path)
+    load = mesh_loader(tmp_path)
+    for path in sorted({part.mesh for obj in scene.objects for part in obj.parts}):
+        old = trimesh.load(tmp_path / path, file_type="3mf", force="mesh")
+        assert isinstance(old, trimesh.Trimesh)
+        new = load(path)
+        assert np.array_equal(new.faces, old.faces), path
+        assert np.array_equal(new.vertices, old.vertices), path
+        assert new.is_watertight == old.is_watertight, path
+
+
 def carrot_neck(directory: Path, scene: Scene) -> tuple[SceneObject, Any, float, Section]:
     """The small carrot, its mesh, and its neck: the narrowest section where the painted
     leaves meet the body, searched from a little below the lowest painted face to a little

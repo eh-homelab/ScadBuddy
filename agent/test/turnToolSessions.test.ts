@@ -5,7 +5,6 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { ApplicationFailure } from '@temporalio/common'
-import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
@@ -21,6 +20,7 @@ import {
   type ListedTools,
   type TurnToolsDeps,
 } from '../src/temporal/turnTools.js'
+import { turnToolEnv } from './support/turnToolEnv.js'
 
 // #2581: a session keeps one MCP session per remote plugin on the replica its turn runs on, so a stateful plugin (Playwright MCP run --isolated: one browser context per
 // MCP session) keeps its page from one call, and one turn, to the next.
@@ -166,7 +166,7 @@ function replica(options: { plugin?: () => RemotePlugin; idleMs?: number; host?:
   const activities = turnToolActivities(deps)
   const call = turnToolActivity(deps)
   const env = (activityType: string, session: string, workflowId = `session-${session}`) =>
-    new MockActivityEnvironment({
+    turnToolEnv({
       activityId: `tool-${randomUUID()}`,
       activityType,
       workflowExecution: { workflowId, runId: 'run-1' },
