@@ -132,6 +132,7 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
     load_render_store_settings,
 )
+from scadbuddy.library.template_copy import copy_templates
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
@@ -244,6 +245,7 @@ from scadbuddy.workflows.housekeeping import (
     STOREFRONT_DRAFTS_SWEEP,
     STOREFRONT_MAIL_SWEEP,
     SWEEPS,
+    TEMPLATE_COPY_SWEEP,
     TRANSFER_PUTS_SWEEP,
     ensure_schedules,
     library_worker,
@@ -585,6 +587,41 @@ async def _index_outputs_logged(state: AppState, *, stop: threading.Event) -> No
         logger.exception("could not index the saved outputs; the next start retries")
 
 
+async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
+    """One run of the copy of the templates' files to rows (#7317, `copy_templates`),
+    logged. It takes the copy's advisory lock, so one replica copies at a time; a run
+    that does not get it does nothing. A failure is logged, then raised."""
+    refresh = state.catalogue.refresh
+    if refresh is None:
+        return
+    try:
+        result = await asyncio.to_thread(
+            copy_templates, state.catalogue, refresh.rows, refresh, state.projection.pool, stop
+        )
+    except Exception:
+        logger.exception("could not copy the templates to rows; the next sweep or start retries")
+        raise
+    if result is not None:
+        logger.info(
+            "copied the templates to rows",
+            extra={
+                "added": result.added,
+                "refreshed": result.refreshed,
+                "dropped": result.dropped,
+                "unreadable": len(result.unreadable),
+                "incomplete": result.incomplete,
+                "stopped": stop.is_set(),
+            },
+        )
+
+
+async def _copy_templates_logged(state: AppState, *, stop: threading.Event) -> None:
+    """The start's copy (#7317), once and best effort: a failure is logged only. The
+    housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again."""
+    with suppress(Exception):
+        await _copy_templates_once(state, stop)
+
+
 #: How often a long sweep heartbeats: well inside its `HEARTBEAT_TIMEOUT`.
 HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
 
@@ -734,6 +771,18 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def maintain_models_git() -> None:
         await _heartbeating(_maintain_models_git_logged(state))
 
+    @activity.defn(name=TEMPLATE_COPY_SWEEP)
+    async def copy_templates_to_rows() -> None:
+        # #7317: its own stop, as the output copy's: the worker's shutdown ends the run
+        # between batches. Any cancel sets it too, as a timeout's: the thread then ends
+        # and frees the advisory lock.
+        stop = threading.Event()
+        try:
+            await _heartbeating(_copy_templates_once(state, stop), stop)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
+
     @activity.defn(name=ACTIVITY_SWEEP)
     async def sweep_activity() -> None:
         await _heartbeating(_sweep_activity_logged(state))
@@ -834,6 +883,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_preview_slices,
         sweep_lost_slice_starts,
         maintain_models_git,
+        copy_templates_to_rows,
         sweep_activity,
         sweep_print_attachments,
         sweep_entity_orphans,
@@ -2391,6 +2441,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
     adopt_now: asyncio.Task[None] | None = None
+    index_now: asyncio.Task[None] | None = None
+    copy_templates_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -2439,6 +2491,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # missing from the cross-model list meanwhile.
         index_now = asyncio.create_task(
             _index_outputs_logged(state, stop=stop_background), name="index outputs"
+        )
+        # #7317: every template's files copied to its row, and the rows reconciled with
+        # the folders, after `_start_render` made the table and synced the built-ins. The
+        # housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again.
+        copy_templates_now = asyncio.create_task(
+            _copy_templates_logged(state, stop=stop_background), name="copy templates"
         )
         # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
         # VP's, with the sweeps off too.
@@ -2491,7 +2549,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
             await unfollow_backfills()
-        await _join_background(stop_background, backfill, attach_now, adopt_now, index_now)
+        await _join_background(
+            stop_background, backfill, attach_now, adopt_now, index_now, copy_templates_now
+        )
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")

@@ -205,6 +205,14 @@ class TemplateRows:
             found = conn.execute("SELECT template_id, files_stamp, version FROM templates")
             return {row["template_id"]: (row["files_stamp"], row["version"]) for row in found}
 
+    def meta_errors(self) -> dict[str, str]:
+        """Each row's ``meta_error``, by template id, for the rows that have one."""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                "SELECT template_id, meta_error FROM templates WHERE meta_error IS NOT NULL"
+            )
+            return {row["template_id"]: row["meta_error"] for row in found}
+
     def start_run(self) -> int:
         """A new copy run's id. The runs that started more than `RUN_KEPT` ago go."""
         with self._pool.connection() as conn, conn.transaction():

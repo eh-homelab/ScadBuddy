@@ -77,6 +77,8 @@ from scadbuddy.workflows.housekeeping import (
     STOREFRONT_MAIL_TIMEOUT,
     SWEEP_TIMEOUT,
     SWEEPS,
+    TEMPLATE_COPY_SWEEP,
+    TEMPLATE_COPY_TIMEOUT,
     TRANSFER_PUTS_SWEEP,
     TRANSFER_PUTS_TIMEOUT,
     Housekeeping,
@@ -178,6 +180,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         AUTO_IMPORT_SWEEP: AUTO_IMPORT_TIMEOUT,
         RUN_HOLDS_SWEEP: RUN_HOLDS_TIMEOUT,
         ATTEMPT_MEDIA_SWEEP: ATTEMPT_MEDIA_TIMEOUT,
+        TEMPLATE_COPY_SWEEP: TEMPLATE_COPY_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -231,6 +234,15 @@ def test_the_attempt_media_sweep_is_last_on_both_schedules() -> None:
     within the hour, even with the sweeps off, behind its own patch."""
     assert SWEEPS[-1] == PRUNE_SWEEPS[-1] == ATTEMPT_MEDIA_SWEEP
     assert sweep_timeout(ATTEMPT_MEDIA_SWEEP) == ATTEMPT_MEDIA_TIMEOUT
+
+
+def test_the_template_copy_follows_the_git_sweep_on_the_sweeps_schedule() -> None:
+    """#7317 (plan decision 9): the copy of the templates' files to rows runs in each
+    sweep run, right after the models repository's gc, behind its own patch. Sweeps off
+    (`asset_sweep_interval` 0) turns it off, as every sweep."""
+    assert SWEEPS[SWEEPS.index(GIT_SWEEP) + 1] == TEMPLATE_COPY_SWEEP
+    assert TEMPLATE_COPY_SWEEP not in PRUNE_SWEEPS
+    assert sweep_timeout(TEMPLATE_COPY_SWEEP) == timedelta(minutes=15)
 
 
 def test_the_git_sweeps_timeout_covers_its_gc_and_no_more() -> None:
