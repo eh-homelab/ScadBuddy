@@ -1,4 +1,4 @@
-"""A watch on a worker's event loop (#3788).
+"""A watch on a process's event loop: each worker's (#3788) and the API's (#7245).
 
 Every Temporal workflow task and every async activity a worker runs starts on its
 event loop. A loop held by a blocking call times workflow tasks out at 10 s while the

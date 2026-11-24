@@ -28,6 +28,7 @@ from scadbuddy.bambuddy.models import (
     LibraryPlates,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import span, traced_thread
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.store import (
     FolderCycleError,
@@ -115,6 +116,36 @@ def _folder_not_found(folder_id: int | None) -> ApiError:
 FOLDER_CYCLE = "a folder cannot move into itself or a folder under it"
 
 
+def _shaped_folders(folders: list[NativeFolder], files: list[NativeFile]) -> list[Folder]:
+    """The folder tree as Bambuddy shapes it, with each folder's file count and its
+    newest file's change."""
+    counts: dict[int, int] = {}
+    latest: dict[int, datetime] = {}
+    for f in files:
+        if f.folder_id is None:
+            continue
+        counts[f.folder_id] = counts.get(f.folder_id, 0) + 1
+        if f.folder_id not in latest or f.updated_at > latest[f.folder_id]:
+            latest[f.folder_id] = f.updated_at
+    children: dict[int | None, list[NativeFolder]] = {}
+    for folder in folders:
+        children.setdefault(folder.parent_id, []).append(folder)
+
+    def shaped(folder: NativeFolder) -> Folder:
+        changed = latest.get(folder.id)
+        return Folder(
+            id=folder.id,
+            name=folder.name,
+            parent_id=folder.parent_id,
+            file_count=counts.get(folder.id, 0),
+            project_id=None,
+            latest_activity_at=_naive_utc(changed) if changed else None,
+            children=[shaped(c) for c in children.get(folder.id, [])],
+        )
+
+    return [shaped(f) for f in children.get(None, [])]
+
+
 class NativeLibrary:
     def __init__(self, rows: NativeLibraryStore, content: ContentStore, spool: Path) -> None:
         self.rows = rows
@@ -125,7 +156,7 @@ class NativeLibrary:
     async def _file(self, file_id: int) -> NativeFile:
         if not is_native_id(file_id):
             raise _not_found(file_id)
-        found = await asyncio.to_thread(self.rows.file, file_id)
+        found = await traced_thread("native_library.file", self.rows.file, file_id)
         if found is None:
             raise _not_found(file_id)
         return found
@@ -135,46 +166,29 @@ class NativeLibrary:
             return
         if (
             not is_native_id(folder_id)
-            or await asyncio.to_thread(self.rows.folder, folder_id) is None
+            or await traced_thread("native_library.folder", self.rows.folder, folder_id) is None
         ):
             raise _folder_not_found(folder_id)
 
     # reads (`LibraryListingSource`, `LibraryReads`)
 
     async def folders(self) -> list[Folder]:
-        folders = await asyncio.to_thread(self.rows.folders)
-        files = await asyncio.to_thread(self.rows.files, None, every_folder=True)
-        counts: dict[int, int] = {}
-        latest: dict[int, datetime] = {}
-        for f in files:
-            if f.folder_id is None:
-                continue
-            counts[f.folder_id] = counts.get(f.folder_id, 0) + 1
-            if f.folder_id not in latest or f.updated_at > latest[f.folder_id]:
-                latest[f.folder_id] = f.updated_at
-        children: dict[int | None, list[NativeFolder]] = {}
-        for folder in folders:
-            children.setdefault(folder.parent_id, []).append(folder)
-
-        def shaped(folder: NativeFolder) -> Folder:
-            changed = latest.get(folder.id)
-            return Folder(
-                id=folder.id,
-                name=folder.name,
-                parent_id=folder.parent_id,
-                file_count=counts.get(folder.id, 0),
-                project_id=None,
-                latest_activity_at=_naive_utc(changed) if changed else None,
-                children=[shaped(c) for c in children.get(folder.id, [])],
-            )
-
-        return [shaped(f) for f in children.get(None, [])]
+        folders = await traced_thread("native_library.folders", self.rows.folders)
+        files = await traced_thread(
+            "native_library.files", partial(self.rows.files, None, every_folder=True)
+        )
+        with span(
+            "native_library.shape_folders",
+            attributes={"scadbuddy.folders": len(folders), "scadbuddy.files": len(files)},
+        ):
+            return _shaped_folders(folders, files)
 
     async def library_listing(
         self, *, folder_id: int | None, every_folder: bool = False, filename: str | None = None
     ) -> list[LibraryListRow]:
-        files = await asyncio.to_thread(
-            self.rows.files, folder_id, every_folder=every_folder, filename=filename
+        files = await traced_thread(
+            "native_library.files",
+            partial(self.rows.files, folder_id, every_folder=every_folder, filename=filename),
         )
         return [
             LibraryListRow(
@@ -240,17 +254,24 @@ class NativeLibrary:
         stat = await self.content.stat(f.blob_key)
         if stat is None:
             return None
-        # The store's spool is made on its first use (`DownloadCache.private_copy`).
-        await asyncio.to_thread(self.spool.mkdir, parents=True, exist_ok=True)
-        with tempfile.TemporaryFile(dir=self.spool) as copy:
-            async with aclosing(self.content.get(stat.ref)) as chunks:
-                async for chunk in chunks:
-                    await asyncio.to_thread(copy.write, chunk)
-            return await asyncio.to_thread(_member, copy, names)
+        # The whole file is copied to the spool to read one member: a span (#7245).
+        with span("native_library.thumbnail", attributes={"scadbuddy.bytes": stat.ref.size}):
+            # The store's spool is made on its first use (`DownloadCache.private_copy`).
+            await asyncio.to_thread(self.spool.mkdir, parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=self.spool) as copy:
+                async with aclosing(self.content.get(stat.ref)) as chunks:
+                    async for chunk in chunks:
+                        await asyncio.to_thread(copy.write, chunk)
+                return await asyncio.to_thread(_member, copy, names)
 
     async def names(self, ids: list[int]) -> list[tuple[int, NativeFile | None]]:
         native = [i for i in ids if is_native_id(i)]
-        found = {f.id: f for f in await asyncio.to_thread(self.rows.files_by_ids, native)}
+        found = {
+            f.id: f
+            for f in await traced_thread(
+                "native_library.files_by_ids", self.rows.files_by_ids, native
+            )
+        }
         return [(i, found.get(i)) for i in ids]
 
     # writes
@@ -285,10 +306,10 @@ class NativeLibrary:
         """The bytes stored and the row that names them, not yet inserted. The caller
         inserts the row or deletes ``blob_key``: the generic sweep skips the `library` kind;
         `sweep_library` collects only the orphans a crash leaves."""
-        file_id = await asyncio.to_thread(self.rows.next_file_id)
+        file_id = await traced_thread("native_library.next_file_id", self.rows.next_file_id)
         file_type = file_type_of(filename)
         plates, has_thumbnail = (
-            await asyncio.to_thread(_read_upload, data)
+            await traced_thread("native_library.read_upload", _read_upload, data)
             if file_type in ("3mf", "gcode.3mf")
             else ([], False)
         )
@@ -320,7 +341,7 @@ class NativeLibrary:
         the orphans a crash leaves, only later. The folder deleted since its check is the
         FK's refusal, the 404."""
         try:
-            return await asyncio.to_thread(self.rows.insert_file, row)
+            return await traced_thread("native_library.insert_file", self.rows.insert_file, row)
         except ForeignKeyViolation:
             await self.content.delete(row.blob_key)
             raise _folder_not_found(folder_id) from None
@@ -336,7 +357,7 @@ class NativeLibrary:
         stat = await self.content.stat(source.blob_key)
         if stat is None:
             raise _not_found(file_id)
-        new_id = await asyncio.to_thread(self.rows.next_file_id)
+        new_id = await traced_thread("native_library.next_file_id", self.rows.next_file_id)
         key = blob_key(new_id)
         await self.content.link(key, stat.ref, scope=BlobScope(), meta={"file_id": new_id})
         now = datetime.now(UTC)
@@ -369,8 +390,11 @@ class NativeLibrary:
         if not isinstance(folder_id, UnsetType):
             await self._folder_must_exist(folder_id)
         try:
-            row = await asyncio.to_thread(
-                self.rows.update_file, file_id, name=name, folder_id=folder_id, filed=filed
+            row = await traced_thread(
+                "native_library.update_file",
+                partial(
+                    self.rows.update_file, file_id, name=name, folder_id=folder_id, filed=filed
+                ),
             )
         except ForeignKeyViolation:
             raise _folder_not_found(
@@ -386,16 +410,22 @@ class NativeLibrary:
         native = [i for i in ids if is_native_id(i)]
         if not native:
             return []
-        return await asyncio.to_thread(partial(self.rows.trash, native, per_print=per_print))
+        return await traced_thread(
+            "native_library.trash", partial(self.rows.trash, native, per_print=per_print)
+        )
 
     async def restore(self, ids: list[int]) -> list[int]:
         native = [i for i in ids if is_native_id(i)]
-        return await asyncio.to_thread(self.rows.restore, native) if native else []
+        return (
+            await traced_thread("native_library.restore", self.rows.restore, native)
+            if native
+            else []
+        )
 
     async def folder(self, folder_id: int) -> NativeFolder:
         """The folder, or the 404 naming it."""
         found = (
-            await asyncio.to_thread(self.rows.folder, folder_id)
+            await traced_thread("native_library.folder", self.rows.folder, folder_id)
             if is_native_id(folder_id)
             else None
         )
@@ -409,7 +439,7 @@ class NativeLibrary:
         rows = await self.library_listing(folder_id=folder_id)
         own = {
             f.id
-            for f in await asyncio.to_thread(self.rows.files, folder_id)
+            for f in await traced_thread("native_library.files", self.rows.files, folder_id)
             if f.print_subject is not None and f.output_id is None and not f.filed
         }
         return [row for row in rows if row.id in own]
@@ -417,18 +447,22 @@ class NativeLibrary:
     async def subject_of(self, file_id: int) -> str | None:
         """The print subject whose run put live file ``file_id`` here (#4337); ``None``
         for any other file, or none."""
-        row = await asyncio.to_thread(self.rows.file, file_id)
+        row = await traced_thread("native_library.file", self.rows.file, file_id)
         return None if row is None else row.print_subject
 
     async def template_folder(self, name: str) -> NativeFolder:
         """The top-level folder ``name`` the filing uses (`filing.file_output`), found or
         made once however many callers race (#3818 tier A Task 5)."""
-        return await asyncio.to_thread(self.rows.template_folder, name)
+        return await traced_thread(
+            "native_library.template_folder", self.rows.template_folder, name
+        )
 
     async def create_folder(self, name: str, parent_id: int | None) -> NativeFolder:
         await self._folder_must_exist(parent_id)
         try:
-            return await asyncio.to_thread(self.rows.create_folder, name, parent_id)
+            return await traced_thread(
+                "native_library.create_folder", self.rows.create_folder, name, parent_id
+            )
         except ForeignKeyViolation:
             raise _folder_not_found(parent_id) from None
 
@@ -440,8 +474,9 @@ class NativeLibrary:
         if not isinstance(parent_id, UnsetType):
             await self._folder_must_exist(parent_id)
         try:
-            row = await asyncio.to_thread(
-                self.rows.update_folder, folder_id, name=name, parent_id=parent_id
+            row = await traced_thread(
+                "native_library.update_folder",
+                partial(self.rows.update_folder, folder_id, name=name, parent_id=parent_id),
             )
         except FolderCycleError:
             raise ApiError(422, FOLDER_CYCLE, folder_id=folder_id) from None
@@ -458,7 +493,9 @@ class NativeLibrary:
         first (`NativeLibraryStore.delete_folder_tree`)."""
         if not is_native_id(folder_id):
             raise _folder_not_found(folder_id)
-        done = await asyncio.to_thread(self.rows.delete_folder_tree, folder_id)
+        done = await traced_thread(
+            "native_library.delete_folder_tree", self.rows.delete_folder_tree, folder_id
+        )
         if done is None:
             raise _folder_not_found(folder_id)
         return done
@@ -466,7 +503,9 @@ class NativeLibrary:
     async def purge(self, file_id: int, cutoff: datetime) -> bool:
         """Delete a trashed file older than ``cutoff`` and release its blob; False when a
         restore got there first. The object stays while another key names it."""
-        row = await asyncio.to_thread(self.rows.purge_trashed, file_id, cutoff)
+        row = await traced_thread(
+            "native_library.purge_trashed", self.rows.purge_trashed, file_id, cutoff
+        )
         if row is None:
             return False
         await self.content.delete(row.blob_key)
