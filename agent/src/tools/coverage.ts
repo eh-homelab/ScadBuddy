@@ -735,6 +735,48 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Hosted plugins (#6937). The spec gives the assistant no versions tool (2026-11-21 §6.2): an offer always ' +
       "takes the plugin's latest_version (§6.3), which the plugin's own read answers.",
   },
+  // Temporary (#7067, layer 2 of 6): layer 5 adds the inventory_* tools and drops these entries.
+  ...(
+    [
+      'GET /api/v1/inventory/kinds',
+      'POST /api/v1/inventory/kinds',
+      'PATCH /api/v1/inventory/kinds/{kind_id}',
+      'POST /api/v1/inventory/kinds/{kind_id}/archive',
+      'POST /api/v1/inventory/kinds/{kind_id}/restore',
+      'GET /api/v1/inventory/kinds/{kind_id}/schema',
+      'GET /api/v1/inventory/items',
+      'POST /api/v1/inventory/items',
+      'GET /api/v1/inventory/items/{item_id}',
+      'PATCH /api/v1/inventory/items/{item_id}',
+      'POST /api/v1/inventory/items/{item_id}/archive',
+      'POST /api/v1/inventory/items/{item_id}/restore',
+      'GET /api/v1/inventory/items/{item_id}/offers',
+      'GET /api/v1/inventory/suppliers/{supplier_id}/offers',
+      'POST /api/v1/inventory/offers',
+      'PATCH /api/v1/inventory/offers/{offer_id}',
+      'POST /api/v1/inventory/offers/{offer_id}/archive',
+      'GET /api/v1/inventory/offers/{offer_id}/prices',
+      'POST /api/v1/inventory/offers/{offer_id}/prices',
+      'GET /api/v1/inventory/items/{item_id}/lots',
+      'POST /api/v1/inventory/items/{item_id}/lots',
+      'GET /api/v1/inventory/lots/{lot_id}',
+      'PATCH /api/v1/inventory/lots/{lot_id}',
+      'POST /api/v1/inventory/lots/{lot_id}/adjust',
+      'POST /api/v1/inventory/items/{item_id}/use',
+      'POST /api/v1/inventory/items/{item_id}/count',
+      'GET /api/v1/inventory/items/{item_id}/units',
+      'POST /api/v1/inventory/items/{item_id}/units',
+      'GET /api/v1/inventory/units/{unit_id}',
+      'PATCH /api/v1/inventory/units/{unit_id}',
+      'POST /api/v1/inventory/units/{unit_id}/status',
+      'GET /api/v1/inventory/moves',
+      'GET /api/v1/entities/{ref}/property-schema',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      'Inventory phase 2 (#7067, spec §6.4–6.6); its `inventory_*` tools follow in layer 5 of the same stack, which drops these entries.',
+  })),
 ]
 
 /**

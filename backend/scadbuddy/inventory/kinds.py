@@ -222,6 +222,24 @@ class KindStore:
         assert kind is not None
         return kind
 
+    def keys_in_use(self, kind_id: str) -> builtins.list[tuple[str, int]]:
+        """Each property key the items of the kind and its descendants have (archived
+        items too, as `EntityPropertyStore.keys_in_use`), with how many have it, by key."""
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "WITH RECURSIVE down (id, depth) AS ("
+                " SELECT id, 0 FROM item_kinds WHERE id = %s UNION ALL"
+                " SELECT k.id, down.depth + 1 FROM item_kinds k"
+                " JOIN down ON k.parent_id = down.id WHERE down.depth < 100)"
+                " SELECT p.key, count(*) AS n FROM entity_properties p"
+                " JOIN entities e ON e.id = p.entity_id AND e.kind = 'item'"
+                " JOIN items i ON i.id::text = e.ref"
+                " WHERE i.kind_id IN (SELECT id FROM down)"
+                ' GROUP BY p.key ORDER BY p.key COLLATE "C"',
+                (kind_id,),
+            ).fetchall()
+        return [(r["key"], int(r["n"])) for r in rows]
+
     @staticmethod
     def _has_items(conn: Conn, kind_id: str, *, archived_too: bool) -> bool:
         live = "" if archived_too else " AND archived_at IS NULL"

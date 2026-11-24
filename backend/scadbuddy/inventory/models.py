@@ -124,7 +124,7 @@ class ItemInput(BaseModel):
     note: str = Field(default="", max_length=4000)
 
 
-class ItemPatch(BaseModel):
+class InventoryItemPatch(BaseModel):
     """The fields a person changes; an absent field keeps its value. `life_hours`,
     `life_months` and `saleable` null clear it."""
 
@@ -148,7 +148,7 @@ def _blank_none(text: str | None) -> str | None:
     return None if text is None or not text.strip() else text
 
 
-class PricePoint(BaseModel):
+class OfferPricePoint(BaseModel):
     id: UUID
     #: The price of one pack, in `currency`.
     price: Decimal
@@ -171,7 +171,7 @@ class Offer(BaseModel):
     note: str | None
     archived_at: datetime | None
     #: The newest price point by date.
-    latest_price: PricePoint | None
+    latest_price: OfferPricePoint | None
 
 
 class OfferInput(BaseModel):
@@ -447,6 +447,28 @@ class CountInput(BaseModel):
     @classmethod
     def _note(cls, note: str) -> str:
         return _stripped(note, "a note")
+
+
+class LotPatch(BaseModel):
+    """The fields to change; an absent field keeps its value. `unit_cost_minor` makes the
+    lot's cost known now and moves no past move (D14); `location_id` null clears it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    unit_cost_minor: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=6)
+    location_id: UUID | None = None
+    note: str | None = Field(default=None, max_length=4000)
+
+
+class UnitPatch(BaseModel):
+    """The fields to change; an absent field keeps its value. `serial` null or blank
+    clears it, as `location_id` null does."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, max_length=200)
+    serial: str | None = Field(default=None, max_length=200)
+    location_id: UUID | None = None
 
 
 class UnitStatusInput(BaseModel):

@@ -14,7 +14,7 @@ from psycopg.rows import DictRow
 
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.inventory.kinds import KindArchived, KindNotFound
-from scadbuddy.inventory.models import Item, ItemInput, ItemPatch
+from scadbuddy.inventory.models import InventoryItemPatch, Item, ItemInput
 from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
@@ -194,7 +194,7 @@ class ItemStore:
         assert made is not None
         return made
 
-    def update(self, item_id: UUID, patch: ItemPatch, by: Actor) -> Item:
+    def update(self, item_id: UUID, patch: InventoryItemPatch, by: Actor) -> Item:
         """The fields `patch` names. On an imported item (`source` not `manual`) each
         field whose value changes joins `edited_fields`, which a later import skips."""
         fields = patch.model_dump(exclude_unset=True)

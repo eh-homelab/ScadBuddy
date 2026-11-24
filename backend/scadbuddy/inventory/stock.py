@@ -40,6 +40,7 @@ from scadbuddy.inventory.items import FilamentItemRefused, ItemNotFound
 from scadbuddy.inventory.models import (
     AdjustInput,
     Lot,
+    LotPatch,
     Move,
     MoveKind,
     ReceiveLot,
@@ -47,6 +48,7 @@ from scadbuddy.inventory.models import (
     RecostedItem,
     RecostResult,
     Unit,
+    UnitPatch,
     UnitStatusInput,
     UseInput,
 )
@@ -368,6 +370,36 @@ class StockStore:
             )
             return _lot(conn, lot_id)
 
+    def update_lot(self, lot_id: UUID, patch: LotPatch, by: Actor) -> Lot:
+        """The fields `patch` names, in one transaction: a cost as `set_lot_cost` sets it
+        (no past move changes, D14), the location (null clears it) and the note.
+        `LotNotFound`, `LocationNotFound` or `BadQuantity`."""
+        fields = patch.model_dump(exclude_unset=True)
+        cost = fields.get("unit_cost_minor")
+        if cost is not None and cost != _six(cost):
+            raise BadQuantity(str(cost))
+        with self.pool.connection() as conn, conn.transaction():
+            self._lock_lot(conn, lot_id)
+            if cost is not None:
+                conn.execute(
+                    "UPDATE stock_lots SET unit_cost_minor = %s, cost_unknown = false"
+                    " WHERE id = %s",
+                    (cost, lot_id),
+                )
+            if "location_id" in fields:
+                try:
+                    conn.execute(
+                        "UPDATE stock_lots SET location_id = %s WHERE id = %s",
+                        (fields["location_id"], lot_id),
+                    )
+                except psycopg.errors.ForeignKeyViolation:
+                    raise LocationNotFound(str(fields["location_id"])) from None
+            if fields.get("note") is not None:
+                conn.execute(
+                    "UPDATE stock_lots SET note = %s WHERE id = %s", (fields["note"], lot_id)
+                )
+            return _lot(conn, lot_id)
+
     def recost_lot(self, conn: Conn, lot_id: UUID) -> RecostResult:
         """ "Re-cost past uses" (spec §6.6), in the caller's transaction: every `use`,
         `return` and `adjust` move of the lot takes the lot's cost now. Names each order
@@ -599,6 +631,38 @@ class StockStore:
                     " WHERE id = %s",
                     (status, status, status, status, unit_id),
                 )
+            row = conn.execute("SELECT * FROM stock_units WHERE id = %s", (unit_id,)).fetchone()
+        assert row is not None
+        return Unit.model_validate(dict(row))
+
+    def update_unit(self, unit_id: UUID, patch: UnitPatch, by: Actor) -> Unit:
+        """The fields `patch` names, in one transaction: the name, the serial (null or
+        blank clears it) and the location (null clears it). No move. `UnitNotFound`,
+        `SerialExists` or `LocationNotFound`."""
+        fields = patch.model_dump(exclude_unset=True)
+        with self.pool.connection() as conn, conn.transaction():
+            self._lock_unit(conn, unit_id)
+            if fields.get("name") is not None:
+                conn.execute(
+                    "UPDATE stock_units SET name = %s WHERE id = %s", (fields["name"], unit_id)
+                )
+            if "serial" in fields:
+                raw = fields["serial"]
+                serial = raw.strip() if raw is not None and raw.strip() else None
+                try:
+                    conn.execute(
+                        "UPDATE stock_units SET serial = %s WHERE id = %s", (serial, unit_id)
+                    )
+                except psycopg.errors.UniqueViolation:
+                    raise SerialExists(str(serial)) from None
+            if "location_id" in fields:
+                try:
+                    conn.execute(
+                        "UPDATE stock_units SET location_id = %s WHERE id = %s",
+                        (fields["location_id"], unit_id),
+                    )
+                except psycopg.errors.ForeignKeyViolation:
+                    raise LocationNotFound(str(fields["location_id"])) from None
             row = conn.execute("SELECT * FROM stock_units WHERE id = %s", (unit_id,)).fetchone()
         assert row is not None
         return Unit.model_validate(dict(row))
