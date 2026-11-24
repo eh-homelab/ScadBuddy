@@ -76,9 +76,10 @@ uv run --frozen pytest -n auto  # pytest-xdist; drop -n to run serially
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
 PATH. The backend will not start without `SCADBUDDY_DATABASE_URL` (#401: the settings
 live only in Postgres), so every test that builds the app takes the `pg_conninfo`
-fixture (a throwaway schema), and it and the `requires_postgres` tests (the render
+fixture (a throwaway database, cloned from one migrated per pytest process; empty for a
+test marked `pg_empty`), and it and the `requires_postgres` tests (the render
 queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_URL`
-points at a Postgres they can create schemas in, e.g.
+points at a Postgres they can create databases in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
 postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
 Without Docker, a native Postgres 18 works:
