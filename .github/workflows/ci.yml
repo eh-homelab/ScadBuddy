@@ -1603,11 +1603,11 @@ jobs:
       # about 13 GB of the VM; each of the 4 Temporal dev servers held 1.2 to 1.7 GiB
       # and an xdist worker 2.5 GiB; shards 1 to 3 were killed opening a whole
       # MakerWorld fixture (3.5 to 3.9 GiB of anon RSS in the killed worker).
-      # `GOMEMLIMIT` makes the dev servers' Go runtime collect before its heap grows
-      # past it (a soft limit, https://pkg.go.dev/runtime#hdr-Environment_Variables);
-      # the temporal CLI is the Go program these tests start. The whole-fixture
-      # reads take a lock, one at a time per shard (`tests/conftest.py`
-      # `one_whole_read_at_a_time`).
+      # The whole-fixture reads take a lock, one at a time per shard
+      # (`tests/conftest.py` `one_whole_read_at_a_time`). No `GOMEMLIMIT` for the
+      # Temporal dev servers: at 768 MiB (run 45303037684) they stayed at about
+      # 950 MiB, their Go GC ran without end, and shards 4 and 6 took 2567 and 2751 s
+      # against main's 1674 to 1852 s (runs 45268094893, 45252653403).
       - name: pytest
         run: |
           set -euo pipefail
@@ -1635,7 +1635,6 @@ jobs:
           rc=0
           docker run --rm --cidfile "$cid" --network host --shm-size=1g \
             --memory=13g --memory-swap=13g \
-            -e GOMEMLIMIT=768MiB \
             -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -v "$PWD/results:/results" \
             -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test \
