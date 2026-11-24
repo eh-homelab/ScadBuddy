@@ -2642,6 +2642,24 @@ def test_a_cached_library_files_copy_is_spooled_under_the_spool_dir(
 
 
 @respx.mock
+def test_a_library_views_spool_is_under_the_spool_dir(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#7316: a library view's read spools the downloaded 3MF under
+    ``SCADBUDDY_SPOOL_DIR`` too, so none of a read's temporary copies lands on the data
+    volume's cache (an NFS share in prod)."""
+    configure(client)
+    library_file(89, content=scadbuddy_3mf(tmp_path))
+    state: AppState = getattr(app.state, STATE_ATTR)
+    node = tmp_path / "node"
+    state.config = replace(state.config, spool_dir=node)
+
+    assert client.get("/api/v1/print/library/89/preview.glb").status_code == 200
+    assert (node / "library-spool").is_dir()
+    assert not (state.paths.cache / "library-spool").exists()
+
+
+@respx.mock
 def test_a_cached_library_file_that_is_not_its_hash_is_never_served(
     client: TestClient, app: FastAPI
 ) -> None:

@@ -310,6 +310,8 @@ def test_a_private_cache_reads_a_hit_in_place_with_no_copy(tmp_path: Path) -> No
     cache.put(_sha(data), data)
     with cache.read_checked(_sha(data), tmp_path / "spool", what="test") as read:  # type: ignore[union-attr]
         assert os.fstat(read.fileno()).st_ino == cache.path(_sha(data)).stat().st_ino
+        # The check read it through; it is handed back at its start.
+        assert read.tell() == 0
         assert read.read() == data
     assert not (tmp_path / "spool").exists()
 

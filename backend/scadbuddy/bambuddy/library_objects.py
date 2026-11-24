@@ -175,6 +175,7 @@ async def read_library_objects(
     budget: ReadBudget | None = None,
     downloads: DownloadCache | None = None,
     files: LibraryReads | None = None,
+    spool_dir: Path | None = None,
 ) -> LibraryObjects:
     """``file_id``'s objects, their pieces in ``blobs``: kept in ``cache`` by the file's
     hash, else downloaded and read within ``budget`` (the defaults when None). The file
@@ -213,7 +214,13 @@ async def read_library_objects(
     )
     try:
         async with spooled_3mf(
-            client, source, cache, spend, downloads=downloads, file_hash=file.file_hash
+            client,
+            source,
+            cache,
+            spend,
+            downloads=downloads,
+            file_hash=file.file_hash,
+            spool_dir=spool_dir,
         ) as payload:
             if payload is None:
                 reason = "it holds no mesh ScadBuddy can read"
