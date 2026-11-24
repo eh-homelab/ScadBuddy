@@ -13,17 +13,18 @@ trees=("$root/agent/src")
 for d in frontend/src backend/scadbuddy; do
   [ -d "$root/$d" ] && trees+=("$root/$d")
 done
-# A branch is a comparison with a mode (`mode === 'durable'`, `mode != "classic"`) or a case
-# of one (`case 'durable':`), in any quotes. The --include globs leave out the .sql
-# migrations. A comment line (`//`, `/*`, ` *`, `#`) is not a branch, so the comments that
-# still name the old setting pass.
+# A branch is a comparison with a mode (`mode === 'durable'`, `mode != "classic"`,
+# `row["mode"] == "classic"`, `row.get("mode") == "classic"`) or a case of one
+# (`case 'durable':`), in any quotes. The --include globs leave out the .sql migrations. A
+# comment line (`//`, `/*`, ` *`, `#`) is not a branch, so the comments that still name the
+# old setting pass.
 q="['\"\`]"
 code() {
   grep -rnE "$1" "${trees[@]}" --include='*.ts' --include='*.tsx' --include='*.py' \
     --exclude-dir=node_modules --exclude-dir=__pycache__ \
     | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*|#)'
 }
-if code "mode ?[!=]==? ?$q(durable|classic)$q|case $q(durable|classic)$q|sessionModeOf|session_mode"; then
+if code "mode$q?[])]? ?[!=]==? ?$q(durable|classic)$q|case $q(durable|classic)$q|sessionModeOf|session_mode"; then
   echo "a session mode branch is back: every session is an AgentSession" >&2
   fail=1
 fi

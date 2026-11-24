@@ -67,8 +67,11 @@ other() {
   fi
 }
 other fail "a mode branch in the frontend" frontend/src/agent/chat/x.tsx "{session.mode === 'durable' && <Badge />}"
-other fail "a mode branch in the backend" backend/scadbuddy/agent_data/x.py 'if row["mode"] == "classic": pass
-if mode == "durable": pass'
+other fail "a mode branch in the backend" backend/scadbuddy/agent_data/x.py 'if mode == "durable": pass'
+other fail "a subscripted mode" backend/scadbuddy/agent_data/x.py 'if row["mode"] == "classic": pass'
+other fail "a mode read with get" backend/scadbuddy/agent_data/x.py "if row.get('mode') != 'classic': pass"
+other fail "a subscripted mode in TypeScript" frontend/src/agent/chat/x.ts "if (row['mode'] === 'durable') run()"
+other pass "another mode" backend/scadbuddy/agent_data/x.py 'if row["mode"] == "enforce": pass'
 other fail "session_mode in the backend" backend/scadbuddy/agent_data/x.py 'KEY = "session_mode"'
 other pass "a Python comment naming session_mode" backend/scadbuddy/agent_data/x.py '# the session_mode setting is gone'
 other pass "a backend .sql migration naming session_mode" backend/scadbuddy/migrations_agent/x.sql "DELETE FROM ai_settings WHERE key = 'session_mode';"
