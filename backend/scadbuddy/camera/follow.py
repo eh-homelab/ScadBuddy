@@ -39,6 +39,7 @@ class ChangeFollower:
         retry_min: float = RETRY_MIN,
         retry_max: float = RETRY_MAX,
         idle: float = IDLE,
+        resync_first: bool = False,
     ) -> None:
         self._client = client
         self._path = path
@@ -49,7 +50,10 @@ class ChangeFollower:
         self._idle = idle
         self._last_id: str | None = None
         #: A callback failed: the next ``ready`` re-reads, until one ``on_resync`` returns.
-        self._pending = False
+        #: ``resync_first`` sets it at the start: a first stream starts at the newest event
+        #: with no ``resync``, so a change between the caller's first read and that stream
+        #: would be lost.
+        self._pending = resync_first
 
     async def run(self) -> None:
         """Follow the stream until cancelled, opening it again whenever it drops."""

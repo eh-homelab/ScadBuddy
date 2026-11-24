@@ -210,3 +210,16 @@ async def test_follower_resyncs_after_a_failed_change() -> None:
     await until(lambda: resyncs)
     task.cancel()
     assert len(requests) >= 2
+
+
+async def test_follower_resync_first() -> None:
+    hold = asyncio.Event()
+    body = [frame("ready", {"resync": False, "reconnect": False}, "5")]
+    resyncs: list[int] = []
+    task = asyncio.create_task(
+        follower(lambda request: sse(body, hold), [], resyncs, resync_first=True).run()
+    )
+    await until(lambda: resyncs)
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert resyncs == [1]
