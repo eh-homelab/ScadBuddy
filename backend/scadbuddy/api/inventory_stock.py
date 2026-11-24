@@ -150,13 +150,14 @@ async def adjust_lot(lot_id: UUID, body: AdjustInput, inventory: InventoryDep) -
     summary="Use some of an item",
     description=(
         "Takes `qty` FIFO, the named `lot_id` first, one `use` move per lot at that lot's "
-        "cost now (a snapshot). What no lot holds goes on the newest lot, below 0, flagged "
-        "`needs_review`; an item with no lot opens a zero-cost `adjustment` lot of unknown "
-        "cost. `entity` (`kind:ref`, such as `printer:<id>`) names what it was used on."
+        "cost now (a snapshot). A named lot with no stock on hand is 409 `lot_empty`. "
+        "What no lot holds goes on the newest lot, below 0, flagged `needs_review`; an item "
+        "with no lot opens a zero-cost `adjustment` lot of unknown cost. "
+        "`entity` (`kind:ref`, such as `printer:<id>`) names what it was used on."
     ),
     responses=codes(
         (404, "`item_not_found`, `lot_not_found` or `entity_not_found`"),
-        (409, _ITEM_CODES),
+        (409, _ITEM_CODES + " or `lot_empty` (the named lot has no stock)"),
         (422, "`bad_quantity`, " + _ENTITY),
     ),
 )

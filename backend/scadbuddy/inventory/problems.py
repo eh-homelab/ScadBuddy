@@ -24,6 +24,7 @@ from scadbuddy.inventory.stock import (
     BadQuantity,
     ItemNotCounted,
     LocationNotFound,
+    LotEmpty,
     LotNotFound,
     SerialExists,
     UnitInstalled,
@@ -103,6 +104,7 @@ _CODES: tuple[tuple[type[Exception], int, str, str], ...] = (
         "item_not_counted",
         "the item's kind is not counted (tracking `none`): no lots, units or moves",
     ),
+    (LotEmpty, _409, "lot_empty", "the named lot has no stock on hand"),
     (UnitInstalled, _409, "unit_installed", "the unit is fitted in another unit"),
     (SerialExists, _409, "serial_exists", "another unit of the item has that serial"),
     (

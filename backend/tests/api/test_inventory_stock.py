@@ -298,3 +298,15 @@ def test_missing_units_and_move_limits(client: TestClient) -> None:
         got = client.get(f"{API}/moves", params={"limit": limit})
         assert got.status_code == 422, got.text
     assert client.get(f"{API}/moves", params={"limit": 1000}).status_code == 200
+
+
+def test_a_use_of_a_named_empty_lot_is_lot_empty(client: TestClient) -> None:
+    bolt = _item(client)
+    lot = _receive(client, bolt["id"], qty="1")
+    _receive(client, bolt["id"])
+    assert _post(client, f"/items/{bolt['id']}/use", {"qty": "1"}).status_code == 200
+    _code(
+        _post(client, f"/items/{bolt['id']}/use", {"qty": "1", "lot_id": lot["id"]}),
+        409,
+        "lot_empty",
+    )
