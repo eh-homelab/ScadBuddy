@@ -1,5 +1,5 @@
 import type { SpoolDetail } from '../../api/filament'
-import { bigTextMm, DEFAULT_SIZE, type LabelSize, QR_MM, QUIET_MM } from './labelSheet'
+import { BIG_FONT_FAMILY, bigTextMm, DEFAULT_SIZE, type LabelSize, QR_MM, QUIET_MM } from './labelSheet'
 
 /** The box both labels share: black on white in any theme, the QR box and the text column centred top to bottom. */
 const box = (size: LabelSize) => ({
@@ -27,7 +27,7 @@ export function Label({ spool, svg, size = DEFAULT_SIZE, testId = 'label' }: { s
     <div data-testid={testId} className="box-border flex shrink-0 items-center overflow-hidden bg-white text-black" style={box(size)}>
       <div aria-hidden="true" className="shrink-0 [&>svg]:block [&>svg]:size-full" style={{ width: `${QR_MM}mm`, height: `${QR_MM}mm` }} dangerouslySetInnerHTML={{ __html: svg }} />
       <div className="flex min-w-0 flex-1 flex-col leading-tight">
-        <span className="whitespace-nowrap font-bold leading-none tabular-nums" style={{ fontSize: `${numberMm}mm` }}>
+        <span className="whitespace-nowrap font-bold leading-none tabular-nums" style={{ fontSize: `${numberMm}mm`, fontFamily: BIG_FONT_FAMILY }}>
           {number}
         </span>
         <span className="mt-[1mm] truncate text-[3.2mm] font-semibold">{material}</span>
@@ -49,7 +49,7 @@ export function LocationLabel({ code, name, svg, size = DEFAULT_SIZE, testId = '
     <div data-testid={testId} className="box-border flex shrink-0 items-center overflow-hidden bg-white text-black" style={box(size)}>
       <div aria-hidden="true" className="shrink-0 [&>svg]:block [&>svg]:size-full" style={{ width: `${QR_MM}mm`, height: `${QR_MM}mm` }} dangerouslySetInnerHTML={{ __html: svg }} />
       <div className="flex min-w-0 flex-1 flex-col leading-tight">
-        <span className="whitespace-nowrap font-bold leading-none tabular-nums" style={{ fontSize: `${codeMm}mm` }}>
+        <span className="whitespace-nowrap font-bold leading-none tabular-nums" style={{ fontSize: `${codeMm}mm`, fontFamily: BIG_FONT_FAMILY }}>
           {code}
         </span>
         <span className="mt-[1mm] line-clamp-2 break-words text-[3.2mm] font-semibold" title={name}>

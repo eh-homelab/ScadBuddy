@@ -131,6 +131,26 @@ def test_the_big_text_is_measured_to_fill_the_narrowest_column(text: str) -> Non
     assert size == 8 or drawn == pytest.approx(column, rel=1e-3)
 
 
+def test_the_pdf_draws_the_big_text_at_the_size_its_label_column_allows() -> None:
+    # A 40 mm label: _draw_label hands _big_size the narrow 13.5 mm column, not the 50 mm one.
+    template = LabelTemplateChoice(template="custom", width_mm=40, height_mm=30).resolved()
+    long = SpoolLabel(
+        number=123456, material="PLA", colour="Red", brand=None, qr="scadbuddy:spool:y"
+    )
+    column = 40 - 2 * label_pdf.QUIET_MM - label_pdf.QR_MM - label_pdf.PAD_MM
+    want = label_pdf._big_size("#123456", 9, column)
+    assert want < 9
+    text = _streams(render_pdf([long], template, "roll"))
+    sizes = [float(m) for m in re.findall(r"/F\d+ ([\d.]+) Tf", text)]
+    # The page's initial 12 pt font is set first; the number is the first size set for a label.
+    assert any(size == pytest.approx(want * MM, abs=0.01) for size in sizes)
+    # Not the size the 50 mm label's column would give.
+    wide = label_pdf._big_size(
+        "#123456", 9, 50 - 2 * label_pdf.QUIET_MM - label_pdf.QR_MM - label_pdf.PAD_MM
+    )
+    assert wide * MM not in sizes
+
+
 def test_text_outside_latin_1_prints_as_a_question_mark() -> None:
     odd = SpoolLabel(number=4, material="PLA", colour="翡翠", brand=None, qr="scadbuddy:spool:z")
     assert "(??)" in _streams(render_pdf([odd], BY_ID["roll_50x25"], "roll"))

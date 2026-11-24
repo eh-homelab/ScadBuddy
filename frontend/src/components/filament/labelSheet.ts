@@ -20,12 +20,41 @@ export const DEFAULT_SIZE: LabelSize = { widthMm: LABEL_WIDTH_MM, heightMm: LABE
 /** A page's width and height in mm (`label_templates.py` `PAGE_MM`). */
 export const PAGE_MM = { a4: [210, 297], letter: [215.9, 279.4] } as const
 
+/** The big text's font: Helvetica Bold, as the PDF draws it (`label_pdf.py` `BOLD`), so the two measure alike. */
+export const BIG_FONT_FAMILY = 'Helvetica, Arial, sans-serif'
+
+let measuring: CanvasRenderingContext2D | null | undefined
+
+/** The width of `text` in bold at 100 px, or null where no canvas can measure (jsdom, a refused context). */
+function boldWidth100(text: string): number | null {
+  if (measuring === undefined) {
+    try {
+      measuring = document.createElement('canvas').getContext('2d')
+    } catch {
+      measuring = null
+    }
+  }
+  if (!measuring) return null
+  measuring.font = `bold 100px ${BIG_FONT_FAMILY}`
+  const width = measuring.measureText(text).width
+  return width > 0 ? width : null
+}
+
+/** Forget the cached canvas context (tests that swap `getContext`). */
+export const resetMeasuring = (): void => {
+  measuring = undefined
+}
+
 /**
  * The size of a label's big number or code: `cap` mm, smaller when it would overrun the text
- * column beside the QR box (`label_pdf.py` `_big_size`; 22 mm of a 50 mm label's 23.5 mm column).
+ * column beside the QR box. Like `label_pdf.py` `_big_size`, it measures the text in bold (canvas
+ * `measureText`) and takes the size at which it fills the column. Where no canvas can measure, it
+ * falls back to a 0.62-per-character estimate (less 1.5 mm), which can differ from the PDF.
  */
 export function bigTextMm(text: string, cap: number, widthMm: number): number {
   const column = widthMm - 2 * QUIET_MM - QR_MM - 1.5
+  const measured = boldWidth100(text)
+  if (measured !== null) return Math.min(cap, (column * 100) / measured)
   return Math.min(cap, (column - 1.5) / (0.62 * Math.max(1, text.length)))
 }
 
