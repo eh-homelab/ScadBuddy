@@ -286,7 +286,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   AUTO_UPGRADE through a `Versioned*` subclass (`main.LIBRARY_WORKFLOWS`; an unversioned
   worker cannot complete a workflow that declares a behavior), so each stays
   replay-compatible behind `patched`; a new one needs its own behavior or the worker
-  refuses to build. Sweeps off (`asset_sweep_interval` 0) deletes the
+  refuses to build. The output copy (#7255, `OUTPUT_COPY_SWEEP`, after `REAP_SWEEP`,
+  behind its patch, the sweeps' Schedule only) runs `library/output_copy.py`
+  `copy_outputs`, as the API's start does once, so the writes of pods on an older build
+  reach the `outputs` rows at the next housekeeping sweep; its advisory lock makes a
+  second run at once do nothing. Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
@@ -2128,8 +2132,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   schema's defaults as `name=value`) and `ordered`; 50 a page by default. It reads the
   `output_index` table (`library/output_index.py` `OutputIndex`), which `OutputStore`
   writes on save (a failure is logged), rename and delete, and whose rows of a model go
-  when its outputs directory does (`Catalogue._forget_cover` → `OutputStore.forget_indexed`:
-  a model's delete, the orphan sweep and a reused slug); the API's start runs
+  with its outputs directory (`Catalogue._forget_outputs` → `OutputStore.forget_indexed`,
+  before the directory goes: a model's delete, the orphan sweep and a reused slug; it also
+  drops the slug's `outputs` rows, #7255, and a failure there keeps the directory); the
+  API's start runs
   `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
   gone is dropped as it is read. Each output has a `source` (#6371; `OutputMeta.source`

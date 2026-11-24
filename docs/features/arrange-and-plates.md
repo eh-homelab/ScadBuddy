@@ -26,7 +26,8 @@ keep-out) see the repo skill `.claude/skills/h2c-plate-layout`.
 
 ## Data
 
-- Outputs (`output_index`), blob keys `output-<job>-<i>`; library pieces read through
+- Outputs (each one's record is its `outputs` row, #7255; `output_index` stays until
+  #7257), blob keys `output-<job>-<i>`; library pieces read through
   `backend/scadbuddy/render/objects3mf.py`.
 
 ## Tests
