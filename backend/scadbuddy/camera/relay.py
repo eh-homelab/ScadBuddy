@@ -179,7 +179,21 @@ class Relay:
             body = FeedReport(part="relay", state=state).model_dump(mode="json", exclude_none=True)
             try:
                 await self._crud.request("POST", path, json=body)
+            except CrudRefusedError as refused:
+                # A refusal does not pass with time: stop. A later state or resync tries
+                # again, since the API's state is no longer known.
+                self._reported.pop(printer_id, None)
+                logger.warning(
+                    "camera relay: the API refused feed state %s for %s (%s)",
+                    state,
+                    printer_id,
+                    refused.status,
+                )
+                return
             except Exception as error:
+                # The post may have reached the API before it failed (a lost answer): its
+                # state is no longer known, so the next desired state is always posted.
+                self._reported.pop(printer_id, None)
                 logger.warning(
                     "camera relay: feed state %s for %s did not land (%s); retrying",
                     state,
@@ -364,9 +378,10 @@ async def run(settings: RelaySettings, *, stop: asyncio.Event | None = None) -> 
         if follower is not None:
             follower.cancel()
             await asyncio.gather(follower, return_exceptions=True)
-        await relay.aclose()
+        # The hooks first, so no hook starts a sender after the senders stop.
         if hooks is not None:
             hooks.close()
+        await relay.aclose()
         health.close()
         await mtx.aclose()
         await crud.aclose()

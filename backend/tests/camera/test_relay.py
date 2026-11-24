@@ -46,6 +46,11 @@ class FakeApi:
         self.hold = asyncio.Event()
         #: The next feed POSTs that answer 503.
         self.feed_failures = 0
+        #: The next feed POSTs that the API takes, and whose answer is then lost.
+        self.lost_answers = 0
+        #: The next feed POSTs that the API refuses (422).
+        self.feed_refusals = 0
+        self.feed_posts = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix(BASE)
@@ -55,10 +60,17 @@ class FakeApi:
             return httpx.Response(200, headers=CRUD, json=self.sources)
         parts = path.split("/")
         if request.method == "POST" and parts[-1] == "feed":
+            self.feed_posts += 1
+            if self.feed_refusals > 0:
+                self.feed_refusals -= 1
+                return httpx.Response(422, headers=CRUD, json={"detail": "refused"})
             if self.feed_failures > 0:
                 self.feed_failures -= 1
                 return httpx.Response(503, headers=CRUD, json={"detail": "down"})
             self.feeds.append((parts[2], json.loads(request.content)))
+            if self.lost_answers > 0:
+                self.lost_answers -= 1
+                raise httpx.ReadTimeout("answer lost", request=request)
             return httpx.Response(204, headers=CRUD)
         found = [s for s in self.sources if s.get("printer_id") == parts[2]]
         if not found:
@@ -234,8 +246,56 @@ async def test_newer_state_replaces_a_pending_retry() -> None:
     await until(lambda: api.feed_failures == 0)
     await subject.on_hook("p1", "not_ready")
     await subject.flushed()
-    # ``pulling`` failed and waits; ``retrying`` is the latest, and the only one sent.
+    # ``pulling`` failed and is never sent again: ``retrying`` replaced it. A failed post
+    # forgets the state the API took, so ``retrying`` is posted once more.
+    assert api.states("p1") == ["retrying", "retrying"]
+
+
+async def test_waiting_sender_posts_a_newer_state() -> None:
+    api = FakeApi([source("p1")])
+    subject = Relay(api.client(), FakeMtx().client(), retry_min=0.2, retry_max=0.2)
+    await subject.reconcile_all()
+    await subject.flushed()
+    api.feed_failures = 1
+    await subject.on_hook("p1", "ready")
+    await until(lambda: api.feed_failures == 0)
+    api.sources = []
+    await subject.reconcile_all()
+    await subject.flushed()
+    assert api.states("p1") == ["retrying", "stopped"]
+
+
+async def test_lost_answer_does_not_hide_a_state() -> None:
+    api = FakeApi([source("p1")])
+    subject = Relay(api.client(), FakeMtx().client(), retry_min=0.2, retry_max=0.2)
+    await subject.reconcile_all()
+    await subject.flushed()
+    # The API takes ``pulling``, and its answer is lost.
+    api.lost_answers = 1
+    await subject.on_hook("p1", "ready")
+    await until(lambda: api.lost_answers == 0)
+    await subject.on_hook("p1", "not_ready")
+    await subject.flushed()
+    assert api.states("p1")[-1] == "retrying"
+
+
+async def test_refused_report_is_not_retried(caplog: pytest.LogCaptureFixture) -> None:
+    api = FakeApi([source("p1")])
+    subject = relay(api, FakeMtx())
+    await subject.reconcile_all()
+    await subject.flushed()
+    api.feed_refusals = 1
+    posts = api.feed_posts
+    await subject.on_hook("p1", "ready")
+    await subject.flushed()
+    await asyncio.sleep(0.1)
+    assert api.feed_posts == posts + 1
     assert api.states("p1") == ["retrying"]
+    assert "422" in caplog.text
+    # A later report tries again.
+    await subject.on_hook("p1", "ready")
+    await subject.flushed()
+    assert api.states("p1") == ["retrying", "pulling"]
 
 
 async def test_reconcile_reports_runtime_state() -> None:
