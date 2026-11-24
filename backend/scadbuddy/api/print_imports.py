@@ -328,12 +328,12 @@ async def _imported_onto(links: PrintLinkStore, owner: LinkedPrint, target: Prin
     return record is not None and record.subject == target.key
 
 
-async def _require_native_file(library: PrintLibrary, file_id: int) -> None:
-    """The 404 unless ``file_id`` is a file of ScadBuddy's own library that stands (#6394):
-    a trashed file, or any file while that library does not serve, is not one. A run's
-    per-print copy (``print_subject``) is a 422: the sweep trashes it, and its purge would
-    forget the import with the print's attachments (#6394 review). `import_in` checks
-    both again in the import's transaction."""
+async def _require_native_file(library: PrintLibrary, file_id: int) -> LibraryFileSuggestion:
+    """The file; the 404 unless ``file_id`` is a file of ScadBuddy's own library that
+    stands (#6394): a trashed file, or any file while that library does not serve, is
+    not one. A run's per-print copy (``print_subject``) is a 422: the sweep trashes it,
+    and its purge would forget the import with the print's attachments (#6394 review).
+    `import_in` checks both again in the import's transaction."""
     native = await library.serving_native()
     found = (
         await asyncio.to_thread(native.rows.file, file_id)
@@ -345,6 +345,7 @@ async def _require_native_file(library: PrintLibrary, file_id: int) -> None:
         raise _target_refused(error, await _replacement(library, file_id))
     if found.print_subject is not None:
         raise _target_refused(ImportTargetGoneError(file_id, PER_PRINT_COPY))
+    return LibraryFileSuggestion(id=found.id, filename=found.name, folder_id=found.folder_id)
 
 
 async def _replacement(library: PrintLibrary, file_id: int) -> LibraryFileSuggestion | None:
@@ -399,6 +400,22 @@ async def _one_import(links: PrintLinkStore, archive_id: int) -> AsyncIterator[N
             " request again shortly",
             headers={"Retry-After": str(int(IMPORT_LOCK_WAIT_S))},
         ) from None
+
+
+@router.get(
+    "/library-files/{file_id}",
+    response_model=LibraryFileSuggestion,
+    summary="Whether a library file may still be an import's target",
+    description=(
+        "The file of ScadBuddy's own library if an import may target it (#7335): the import's "
+        "own refusals otherwise, so a dialog can notice a deleted or replaced file before the "
+        "import. A file that does not stand, or any file while that library does not serve, "
+        "is a 404 `library-file-gone` whose `replacement` is the live file with the same "
+        "bytes, or null. A run's per-print copy is a 422."
+    ),
+)
+async def get_library_target(file_id: int, library: PrintLibraryDep) -> LibraryFileSuggestion:
+    return await _require_native_file(library, file_id)
 
 
 @router.get(
@@ -702,7 +719,13 @@ async def import_print(
         try:
             owner = await _record(links, auto_imports, client, record, archive, kept)
         except ImportTargetGoneError as error:
-            raise _target_refused(error, await _replacement(library, error.file_id)) from None
+            # A per-print copy stands: it has no replacement to look for.
+            replacement = (
+                None
+                if error.reason == PER_PRINT_COPY
+                else await _replacement(library, error.file_id)
+            )
+            raise _target_refused(error, replacement) from None
     if owner is not None:
         # Only a run's link can come between the check above and the record (imports of
         # one archive wait on `import_lock`), and a run's print is its own.

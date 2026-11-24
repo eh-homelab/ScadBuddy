@@ -101,7 +101,7 @@ paths above. With no arguments the image prints `mount --help`.
 ## Flags
 
 ```
-bambuddy-fs mount [--api <url>] [--token-file <file>] [--background] [--ro] [--all] [--allow-other | --no-allow-other] [--attr-ttl 5s] [--cache-dir <dir>] [--cache-max 2G] [--state-dir <dir>] [--otel-endpoint <url>] [--no-telemetry] [<mountpoint>]
+bambuddy-fs mount [--api <url>] [--token-file <file>] [--background] [--ro] [--write-back] [--all] [--allow-other | --no-allow-other] [--attr-ttl 5s] [--cache-dir <dir>] [--cache-max 2G] [--state-dir <dir>] [--otel-endpoint <url>] [--no-telemetry] [<mountpoint>]
 bambuddy-fs umount [--state-dir <dir>] [<mountpoint>]
 bambuddy-fs status [--state-dir <dir>] [<mountpoint>]
 bambuddy-fs unsent [--state-dir <dir>]
@@ -114,13 +114,14 @@ bambuddy-fs allow-other
 | `--token-file` | A file holding a personal access token, minted in ScadBuddy's Settings → System → Access tokens (ScadBuddy #4975), sent as `Authorization: Bearer` on every call. A `read` token mounts read-only in effect; writes need `write`. Sent over https only. Default `$BAMBUDDY_FS_TOKEN_FILE`; none when unset, which a ScadBuddy that enforces sign-in refuses. |
 | `--background` | Run detached and return once mounted (see "Build and run"). |
 | `--ro` | Every write fails with `EROFS`. |
+| `--write-back` | `close()` returns once the write is queued under `--state-dir`, and the retrier uploads it; `close()` no longer reports a failed upload (see "Write-back"). Off by default. |
 | `--all` | List every file. Without it the mount lists what the library dialog lists by default (unsliced 3MFs). |
 | `--allow-other` | Fail unless FUSE `allow_other` is allowed (other users and processes see the mount). It is on by default whenever `/etc/fuse.conf` has `user_allow_other`, or for root. |
 | `--no-allow-other` | Only the mounting user sees the mount. |
 | `--attr-ttl` | How long a listing is served before it is refreshed in the background, and the kernel's entry and attribute timeout. Default `5s`. |
 | `--cache-dir` | Downloaded contents and files being written, under `<cache-dir>/<API host>[_<port>]/`, so two ScadBuddy instances never share contents (file IDs are each one's own). Default `$XDG_CACHE_HOME/bambuddy-fs`, or `~/.cache/bambuddy-fs`. One mount at a time uses an API's cache (it holds a `lock` there). |
 | `--cache-max` | At most this much downloaded contents is kept in `--cache-dir`, the least recently read removed first: a number of bytes, or with `K`, `M`, `G` or `T` (binary; `2G`, `2GiB` and `2GB` are the same). `0` is no bound. Default `2G`. |
-| `--state-dir` | Writes whose upload failed, under `unsent/` (see "Unsent writes"). Default `$XDG_STATE_HOME/bambuddy-fs`, or `~/.local/state/bambuddy-fs`. |
+| `--state-dir` | Writes not yet sent, under `unsent/`: those whose upload failed and, with `--write-back`, every write until the retrier sends it (see "Unsent writes"). Default `$XDG_STATE_HOME/bambuddy-fs`, or `~/.local/state/bambuddy-fs`. |
 | `--otel-endpoint` | OTLP/HTTP collector base URL for traces and metrics (see "Telemetry"). |
 | `--no-telemetry` | Send no traces or metrics. `--no-tracing` is the same. |
 
@@ -180,6 +181,25 @@ deletes the old one, so the path keeps its name but its file ID changes: Bambudd
 no in-place replace. Truncating to 0 a file being written is allowed. If the upload
 fails, the write is queued (below) and `close()` succeeds.
 
+### Write-back
+
+Without `--write-back`, `close()` waits for the whole upload: a listing of the folder,
+the upload, the library's operation, and the delete of any file it replaces. One close
+on prod took 12.6 s (trace `281daf6651397a6b557dce366e987117`, 2026-11-23, #7286). With
+`--write-back`, `close()` sends nothing: it moves the contents into the unsent queue
+(see "Unsent writes"), fsync'd, and returns. Once the last descriptor on the file is
+closed, the retrier sends it at once, then with the usual backoff if that fails. While
+it waits, the file reads, renames and removes as any queued write does.
+
+The trade-off: a writer never learns at `close()` that an upload failed. A refusal
+(413, say) is no longer `close()`'s `EFBIG`: the retrier moves the write to `refused/`.
+A transient failure is retried until it is sent. The only record of either is the
+unsent queue's: its log lines ("sending an unsent write failed", "the library refused
+an unsent write"), `bambuddy-fs unsent`, the `unsent.retry` spans and the
+`bambuddy_fs.unsent.*` metrics. Only a failure to queue the bytes (a disk error) is
+still `close()`'s `EIO`. Leave it off for a writer that must know its save reached the
+library.
+
 Without `--all`, a file this mount uploaded that the listing does not show (an app's
 `x.3mf.tmp`, say) stays visible until it is renamed, removed or the mount ends, so the
 app can still rename or remove it. Changes made outside the mount to such a file show
@@ -224,7 +244,8 @@ A write whose upload fails for any reason but a refusal of the request itself (s
 "Refused writes") is not dropped: ScadBuddy down or unreachable, a 5xx, a timeout, a 404
 from an older ScadBuddy without the upload route, and also a 401 or 403 (the API key
 lacks a Bambuddy scope) or a 409, which a later attempt may get past once the cause is
-fixed. Its bytes move to
+fixed. With `--write-back` every write takes this path at `close()`, before any upload
+is tried (see "Write-back"). Its bytes move to
 `<state-dir>/unsent/<n>/contents`, beside a `record.json` (folder ID, name, size, when
 it was saved, attempts, last error, and the stored files it replaces), both fsync'd, and
 the log names that directory once.
@@ -253,7 +274,8 @@ queued one once it is itself sent or queued. Two saves of one name never land ou
 order: the later always supersedes the earlier.
 
 A background retrier sends each queued write when no handle has it open: first at
-mount start, then after 15 s doubling to 10 min, with 20% jitter. Read-only mounts
+mount start, then after 15 s doubling to 10 min, with 20% jitter. A write queued under
+`--write-back` is sent as soon as its last handle is released ("Write-back" above). Read-only mounts
 retry too. Records survive an unmount, a crash or `kill -9`, and are reloaded at the
 next mount; a record that cannot be read is logged and left in place. If the queued
 write's folder is gone, it is sent to the top level instead.
@@ -381,6 +403,8 @@ Spans:
 - `fuse.<op>` (INTERNAL) for each FUSE operation that reaches ScadBuddy or does work:
   a lookup or readdir that lists its folder, a read or write that downloads,
   a flush or release that uploads, create, mkdir, rmdir, unlink, rename and a truncate.
+  Under `--write-back`, a flush or release that queues its write instead has
+  `bambuddy_fs.write_back=true`.
   A lookup or getattr answered from the cache has none, and a lookup of a name that is
   not there (`ENOENT`) is not an error.
 - `scadbuddy.<operation>` (CLIENT) for each ScadBuddy API request (`list_library`,
@@ -397,8 +421,9 @@ Metrics: `bambuddy_fs.fuse.operations` and `bambuddy_fs.fuse.operation.duration`
 4xx/5xx, or `timeout`, `canceled` or `transport` with no answer),
 `bambuddy_fs.transfer.bytes` (file contents only, by `direction`, `upload` or
 `download`), the gauges `bambuddy_fs.cache.bytes`,
-`bambuddy_fs.unsent.entries` and `bambuddy_fs.unsent.bytes`, and
-`bambuddy_fs.unsent.uploads` (by `result`).
+`bambuddy_fs.unsent.entries` and `bambuddy_fs.unsent.bytes`,
+`bambuddy_fs.unsent.uploads` (by `result`), and `bambuddy_fs.unsent.queued` (writes
+put in the queue, by `reason`: `write_back` or `upload_failed`).
 
 What is recorded is ids (file, folder, operation), byte counts, operation names, errno
 names, status codes and durations. Never a file or folder name, a path, file contents,

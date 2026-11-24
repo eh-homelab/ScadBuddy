@@ -449,6 +449,28 @@ class SlicePrices:
             ).fetchone()
         return _row(found)
 
+    def listing_last(self, listing_id: str, model_sha256: str) -> PriceRow | None:
+        """A file listing's last firm price (#6710 §7.5): the newest ``done`` row of the
+        file ``model_sha256``, of any colours, the listing's own before another's: two
+        listings of one file share a price (`key_subject`), and its row names only the one
+        that made it. Another listing's only while it is published, so a visitor sees no
+        price of a listing they cannot open. None when the file has none."""
+        read = (
+            f"SELECT {_COLUMNS} FROM storefront_slice_prices"
+            " WHERE model_sha256 = %s AND status = 'done' AND listing_id {}"
+            " AND currency IS NOT NULL AND total_minor IS NOT NULL"
+            " ORDER BY finished_at DESC LIMIT 1"
+        )
+        # Two reads, so each takes the order of `storefront_slice_prices_listing_last`.
+        with self._pool.connection() as conn:
+            found = conn.execute(read.format("= %s"), (model_sha256, listing_id)).fetchone()
+            if found is None:
+                found = conn.execute(
+                    read.format("IN (SELECT id FROM storefront_listings WHERE published)"),
+                    (model_sha256,),
+                ).fetchone()
+        return _row(found)
+
     def fail(self, price_key: str, model_sha256: str, failure: str) -> PriceRow:
         """No price for the variant, and why."""
         with self._pool.connection() as conn:
@@ -1122,8 +1144,10 @@ async def slice_estimate(
 
 def last_answer(row: PriceRow) -> StoreEstimate:
     """A ``done`` row as the instant read answers it when its key is not today's
-    (#6921): the variant's last price, which the page shows marked as updating. Never a
-    cart line's price (`line_prices.py` reads `firm_price` only)."""
+    (#6921): the variant's last price, which the page shows marked as updating. A file
+    listing's price read answers its listing's last row the same way while the colours'
+    own slice runs (#6710, `file_prices.py` `listing_price`). Never a cart line's price
+    (`line_prices.py` reads `firm_price` only)."""
     assert row.currency is not None
     return StoreEstimate(
         source="last",

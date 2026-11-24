@@ -1,5 +1,6 @@
 import { API_BASE, request, uploadForm } from '../../api/client'
 import type { components } from '../../api/schema'
+import { propertyTexts } from '../../lib/filamentSearch'
 
 /**
  * #6950 — the files and links of any entity (`kind:ref`, such as `spool:<id>`):
@@ -12,6 +13,9 @@ export type EntityAttachmentPatch = Schemas['EntityAttachmentPatch']
 export type EntityLink = Schemas['EntityLink']
 export type EntityLinkInput = Schemas['LinkInput']
 export type EntityLinkPatch = Schemas['LinkPatch']
+export type EntityProperty = Schemas['EntityProperty']
+export type PropertyValue = EntityProperty['value']
+export type KindPropertySchema = Schemas['KindPropertySchema']
 
 /** The kinds whose files are written on the order routes (409 `use_order_route`). */
 export const ORDER_KINDS = new Set(['order', 'order_item', 'order_item_fulfilment', 'order_item_revision'])
@@ -57,4 +61,34 @@ export const entityApi = {
   updateLink: (entity: string, id: string, body: EntityLinkPatch) =>
     request<EntityLink>(`${base(entity)}/links/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteLink: (entity: string, id: string) => request<void>(`${base(entity)}/links/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** #7026 — key-value properties: `backend/scadbuddy/api/entity_properties.py`. */
+  properties: (entity: string) =>
+    request<{ properties: EntityProperty[] }>(`${base(entity)}/properties`).then((body) => body.properties),
+  /** A key set to `null` is removed; the whole patch applies or none of it. */
+  setProperties: (entity: string, set: Record<string, PropertyValue | null>) =>
+    request<{ properties: EntityProperty[] }>(`${base(entity)}/properties`, { method: 'PATCH', body: JSON.stringify({ set }) }).then(
+      (body) => body.properties,
+    ),
+  /** Every entity of the kind that has properties: its ref to its keys and values. */
+  kindProperties: (kind: string) =>
+    request<{ properties: Record<string, Record<string, PropertyValue>> }>(`/entity-kinds/${encodeURIComponent(kind)}/properties`).then(
+      (body) => body.properties,
+    ),
+  propertySchema: (kind: string) => request<KindPropertySchema>(`/entity-kinds/${encodeURIComponent(kind)}/property-schema`),
+}
+
+/** #7026 — every entity of `kind`'s property values as search text (`propertyTexts`), by ref. A failed read throws. */
+export async function readKindPropertyTexts(kind: string): Promise<Map<string, string[]>> {
+  const found = await entityApi.kindProperties(kind)
+  return new Map(Object.entries(found).map(([ref, values]) => [ref, propertyTexts(values)]))
+}
+
+/** `readKindPropertyTexts`, but a failed read gives an empty map: the filament search still runs on everything else. */
+export async function loadKindPropertyTexts(kind: string): Promise<Map<string, string[]>> {
+  try {
+    return await readKindPropertyTexts(kind)
+  } catch {
+    return new Map()
+  }
 }

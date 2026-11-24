@@ -218,6 +218,15 @@ NOT_NUDGED = frozenset(
         "printer_labels",
         "render_labels_pdf",
         "import_bambuddy_presets",
+        # #7153: these write the printer or Bambuddy's slot presets, no ScadBuddy row
+        # (`api/printer_slots.py`); the AMS label routes rename a place, so they nudge.
+        "configure_printer_slot",
+        "reset_printer_slot",
+        "refresh_printer_slot",
+        "load_printer_slot",
+        "unload_printer_slot",
+        "set_printer_slot_preset",
+        "clear_printer_slot_preset",
     }
 )
 

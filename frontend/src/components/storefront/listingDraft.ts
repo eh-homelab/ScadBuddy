@@ -711,6 +711,7 @@ export function previewListing(
   }
   return {
     id: 'preview',
+    source: 'template',
     title: draft.title || 'Untitled listing',
     description: draft.description,
     params,

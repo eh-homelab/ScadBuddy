@@ -23,7 +23,10 @@ const spoolLabel = (spool: Spool) => `#${spool.number} ${spool.effective?.colour
 
 function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: LocationNode }) {
   // A tray is the printer's: the registry and Bambuddy name it, so it is not edited here.
-  const tray = node.printer_id != null
+  // An AMS unit's place (#7153, R-7153-8) is the one printer place a person renames here; its
+  // Bambuddy label is set on the printer's card, and archiving it would only make a new one.
+  const unit = node.printer_id != null && node.ams_id != null && node.ams_id !== 255 && node.tray_id == null
+  const tray = node.printer_id != null && !unit
   const archived = node.archived_at != null
   const spools = tree.spoolsAt.get(node.id) ?? []
   return (
@@ -49,7 +52,14 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
         </EntityLink>
         {tray && <span className="text-[12px] text-muted-foreground">AMS tray, read only</span>}
         {archived && <span className="text-[12px] text-muted-foreground">Archived</span>}
-        {!tray && (
+        {unit && (
+          <span className="ml-auto flex gap-1">
+            <Button type="button" size="xs" variant="ghost" aria-label={`Edit ${node.name}`} onClick={() => tree.onEdit(node)}>
+              <PencilIcon /> Edit
+            </Button>
+          </span>
+        )}
+        {!tray && !unit && (
           <span className="ml-auto flex gap-1">
             <Button type="button" size="xs" variant="ghost" aria-label={`Edit ${node.name}`} onClick={() => tree.onEdit(node)}>
               <PencilIcon /> Edit
@@ -80,7 +90,7 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
           locationId={node.id}
           locationName={node.name}
           sensors={tree.sensorsAt.get(node.id) ?? []}
-          canAdd={!tray}
+          canAdd={!tray && !unit}
           onChanged={tree.onSensorsChanged}
         />
       )}

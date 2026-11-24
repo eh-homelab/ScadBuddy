@@ -89,3 +89,23 @@ def test_the_lag_names_both_repositories(client: TestClient) -> None:
     assert (models["branch"], models["pushed_commit"]) == ("models", None)
     assert models["head"] is not None and models["behind"] >= 1
     assert models["oldest_unpushed_at"] is not None
+    assert models["retry_after"] is None
+
+
+def test_a_lasting_refusal_shows_its_cause_and_retry_time(
+    keyed_client: TestClient, settings: Settings
+) -> None:
+    """#7388: the refused head, its short cause and when it is tried again; no token."""
+    keyed_client.put("/api/v1/settings", json={"git_remote_url": URL, "git_remote_token": TOKEN})
+    head = keyed_client.get("/api/v1/settings/git-remote").json()["repositories"][0]["head"]
+    with psycopg.connect(settings.database_url) as conn:
+        conn.execute(
+            "INSERT INTO git_remote_pushes (repository, url, error, refused_commit)"
+            " VALUES ('models', %s, 'the remote refused a.3mf (130.30 MB)', %s)",
+            (URL, head),
+        )
+    status = keyed_client.get("/api/v1/settings/git-remote")
+    models = {repo["repository"]: repo for repo in status.json()["repositories"]}["models"]
+    assert models["error"] == "the remote refused a.3mf (130.30 MB)"
+    assert models["retry_after"] is not None
+    assert TOKEN not in status.text
