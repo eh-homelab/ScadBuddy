@@ -138,6 +138,16 @@ _COVER_READ_ERRORS: tuple[type[Exception], ...] = (OSError, ClientError, *TRANSP
 _MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
 
 
+@dataclass(frozen=True)
+class RoleRead:
+    """What `OutputStore.read_role` read: a path that holds the role's bytes (``None``
+    when there are none) and the sha256 of the blob it came from (``None`` for the
+    file)."""
+
+    path: Path | None
+    sha256: str | None
+
+
 def _object_missing(error: Exception) -> bool:
     """Whether ``error`` says that the object is not there: a 404 or ``NoSuchKey``
     answer. A guard only: both backends raise `BlobMissingError` for a missing object
@@ -1429,8 +1439,21 @@ class OutputStore:
 
     @contextlib.asynccontextmanager
     async def _local_role(self, output_id: str, role: Role) -> AsyncIterator[Path | None]:
+        async with self.read_role(output_id, role) as read:
+            yield read.path
+
+    def read_role(self, output_id: str, role: Role) -> AbstractAsyncContextManager[RoleRead]:
+        """`local_role`, with the sha256 of the blob it read (``None`` for the file). A
+        reader that keeps what it derived passes that sha256 to the write
+        (`OutputRows.write_derived`), so it writes nothing once the key names other
+        bytes."""
+        return self._read_role(output_id, role)
+
+    @contextlib.asynccontextmanager
+    async def _read_role(self, output_id: str, role: Role) -> AsyncIterator[RoleRead]:
         async with AsyncExitStack() as stack:
             path: Path | None = None
+            sha256: str | None = None
             try:
                 key = await asyncio.to_thread(self._blob_key, output_id, role)
             except OutputNotFoundError:
@@ -1439,7 +1462,8 @@ class OutputStore:
                 assert self.bytes is not None
                 suffix = Path(ROLE_FILES[role]).suffix
                 try:
-                    path = await stack.enter_async_context(self.bytes.local_file(key, suffix))
+                    path, ref = await stack.enter_async_context(self.bytes.local_blob(key, suffix))
+                    sha256 = ref.sha256
                 except Exception as error:
                     if not _lost(error):
                         raise
@@ -1447,7 +1471,16 @@ class OutputStore:
             if path is None:
                 path = await asyncio.to_thread(self._role_file, output_id, role)
             # Outside the `try` above: an error of the caller's block is never a lost blob.
-            yield path
+            yield RoleRead(path, sha256)
+
+    def model_sha(self, output_id: str) -> str | None:
+        """The sha256 a reader of the model reads now: the index's of the model blob the
+        row names, ``None`` when the file holds the bytes. Blocking."""
+        try:
+            indexed = self._indexed(output_id, "model")
+        except OutputNotFoundError:
+            return None
+        return None if indexed is None else indexed[1]
 
     def _indexed(self, output_id: str, role: Role) -> tuple[int, str] | None:
         """The size and sha256 of the role's blob from the index; ``None`` when the row
@@ -1791,16 +1824,22 @@ class OutputStore:
         resolved, and the next ask resolves again. An error of the blob read is logged
         once. Only a missing object (`_object_missing`) is kept as no cover, so it is not
         asked again. A refusal (401, 403, other 4xx), a full spool or a transport error is
-        not kept, so the next ask reads again (a key rotation heals)."""
+        not kept, so the next ask reads again (a key rotation heals). What is kept names
+        the sha256 of the model it was read from, so nothing is kept once the model key
+        names other bytes (`OutputRows.keep_plate_cover`)."""
+        # The model the read below asks for: a blob read that fails has no sha256 of its
+        # own.
+        expected = await asyncio.to_thread(self.model_sha, output_id)
         try:
-            async with self.local_role(output_id, "model") as path:
+            async with self.read_role(output_id, "model") as read:
+                path = read.path
                 if path is None:
                     await asyncio.to_thread(self.forget_plate_cover, slug)
                     return None
                 try:
                     png = await asyncio.to_thread(_read_plate_cover, path)
                 except (KeyError, zipfile.BadZipFile):
-                    await self._keep_plate_cover(slug, output_id, None)
+                    await self._keep_plate_cover(slug, output_id, None, read.sha256)
                     return None
                 except OSError:
                     await asyncio.to_thread(self.forget_plate_cover, slug)
@@ -1811,14 +1850,17 @@ class OutputStore:
                 extra={"output_id": output_id, "error": str(error)},
             )
             if _object_missing(error):
-                await self._keep_plate_cover(slug, output_id, None)
+                await self._keep_plate_cover(slug, output_id, None, expected)
             return None
-        await self._keep_plate_cover(slug, output_id, png)
+        await self._keep_plate_cover(slug, output_id, png, read.sha256)
         return png
 
-    async def _keep_plate_cover(self, slug: str, output_id: str, png: bytes | None) -> None:
-        """Keep the cover as its blob and row, or "no cover" as a row alone. A failure is
-        logged: the cover read is still the answer, and the next ask derives again."""
+    async def _keep_plate_cover(
+        self, slug: str, output_id: str, png: bytes | None, model_sha: str | None
+    ) -> None:
+        """Keep the cover as its blob and row, or "no cover" as a row alone, read from
+        the model of ``model_sha`` (``None``: the file). A failure is logged: the cover
+        read is still the answer, and the next ask derives again."""
         if self.bytes is None or self.rows is None:
             return
         rows = self.rows
@@ -1827,7 +1869,9 @@ class OutputStore:
             if png is not None:
                 key = plate_cover_key(output_id)
                 await self.bytes.put(key, png, slug=slug)
-            await asyncio.to_thread(rows.keep_plate_cover, output_id, PLATE_COVER_VERSION, key)
+            await asyncio.to_thread(
+                rows.keep_plate_cover, output_id, PLATE_COVER_VERSION, key, model_sha=model_sha
+            )
         except Exception:
             logger.warning(
                 "could not keep an output's plate cover",
@@ -1847,10 +1891,10 @@ class OutputStore:
                 with contextlib.suppress(ValidationError):
                     return _PLATE_NAMES.validate_python(found[1])
         try:
-            async with self.local_role(output_id, "model") as path:
-                if path is None:
+            async with self.read_role(output_id, "model") as read:
+                if read.path is None:
                     return {}
-                plates = await asyncio.to_thread(plates_of, path)
+                plates = await asyncio.to_thread(plates_of, read.path)
         except (OSError, KeyError, ValueError, zipfile.BadZipFile, ET.ParseError, ClientError):
             return {}
         names = {plate.index: plate.name for plate in plates if plate.name}
@@ -1863,6 +1907,7 @@ class OutputStore:
                     0,
                     PLATE_NAMES_VERSION,
                     {str(index): name for index, name in names.items()},
+                    model_sha=read.sha256,
                 )
             except Exception:
                 logger.warning(
@@ -1888,11 +1933,13 @@ class OutputStore:
         if cached is not None:
             return cached
         warnings = (await asyncio.to_thread(self.get, output_id)).warnings
-        async with self.local_role(output_id, "model") as model:
-            if model is None:
+        async with self.read_role(output_id, "model") as read:
+            if read.path is None:
                 raise FileNotFoundError(f"output {output_id} has no {MODEL_NAME}")
-            analysis = await asyncio.to_thread(analyze_3mf, model, warnings=warnings, plate=plate)
-        await asyncio.to_thread(self._keep_geometry, output_id, plate, analysis)
+            analysis = await asyncio.to_thread(
+                analyze_3mf, read.path, warnings=warnings, plate=plate
+            )
+        await asyncio.to_thread(self._keep_geometry, output_id, plate, analysis, read.sha256)
         return analysis
 
     def _geometry_path(self, output_id: str, plate: int) -> Path:
@@ -1914,8 +1961,11 @@ class OutputStore:
             return None
         return cached if cached.version == ANALYSIS_VERSION else None
 
-    def _keep_geometry(self, output_id: str, plate: int, analysis: GeometryAnalysis) -> None:
-        """The analysis in its row, and in the file cache until #7257. Blocking."""
+    def _keep_geometry(
+        self, output_id: str, plate: int, analysis: GeometryAnalysis, model_sha: str | None
+    ) -> None:
+        """The analysis of the model of ``model_sha`` (``None``: the file) in its row,
+        and in the file cache until #7257. Blocking."""
         if self.rows is not None:
             self.rows.write_derived(
                 output_id,
@@ -1923,6 +1973,7 @@ class OutputStore:
                 plate,
                 str(ANALYSIS_VERSION),
                 analysis.model_dump(mode="json"),
+                model_sha=model_sha,
             )
         # Written aside and renamed, so a concurrent reader never sees half a file. A
         # failed write (no folder: the bytes are only blobs) loses only that cache; the
@@ -1954,12 +2005,27 @@ class OutputStore:
         return _attributed_of(stored, model_version)
 
     def write_attributed(
-        self, output_id: str, plate: int, model_version: str, analysis: GeometryAnalysis
+        self,
+        output_id: str,
+        plate: int,
+        model_version: str,
+        analysis: GeometryAnalysis,
+        *,
+        model_sha: str | None,
     ) -> None:
-        """The attributed analysis in its row, and in its file until #7257. Blocking."""
+        """The attributed analysis of the model of ``model_sha`` (`model_sha`, read
+        before the analysis; ``None``: the file) in its row, and in its file until
+        #7257. Blocking."""
         body = {"model_version": model_version, "analysis": analysis.model_dump(mode="json")}
         if self.rows is not None:
-            self.rows.write_derived(output_id, ATTRIBUTED_KIND, plate, str(ANALYSIS_VERSION), body)
+            self.rows.write_derived(
+                output_id,
+                ATTRIBUTED_KIND,
+                plate,
+                str(ANALYSIS_VERSION),
+                body,
+                model_sha=model_sha,
+            )
         _replace(self._attributed_path(output_id, plate), json.dumps(body, indent=2) + "\n")
 
     def _attributed_path(self, output_id: str, plate: int) -> Path:

@@ -410,6 +410,25 @@ class OutputBytes:
 
     @contextlib.asynccontextmanager
     async def _local_file(self, key: str, suffix: str) -> AsyncIterator[Path]:
+        async with self.local_blob(key, suffix) as (path, _):
+            yield path
+
+    def local_blob(
+        self, key: str, suffix: str
+    ) -> AbstractAsyncContextManager[tuple[Path, BlobRef]]:
+        """`local_file`, with the blob it downloaded: its sha256 is the one of the
+        temporary file's bytes."""
+        return self._local_blob(key, suffix)
+
+    async def touch(self, key: str) -> BlobRef | None:
+        """Mark ``key`` wanted now, so a sweep keeps it through its grace (a claimant
+        does this before it holds a blob, `store/content.py` `sweep_content`). The blob
+        ``key`` names after the touch; ``None`` when a sweep removed it first."""
+        await self.content.touch(key)
+        return await asyncio.to_thread(self.ref, key)
+
+    @contextlib.asynccontextmanager
+    async def _local_blob(self, key: str, suffix: str) -> AsyncIterator[tuple[Path, BlobRef]]:
         ref = await self._ref(key)
         made = asyncio.ensure_future(asyncio.to_thread(self._temporary, suffix))
         try:
@@ -420,6 +439,6 @@ class OutputBytes:
             raise
         try:
             await self._download_to(ref, file)
-            yield path
+            yield path, ref
         finally:
             path.unlink(missing_ok=True)

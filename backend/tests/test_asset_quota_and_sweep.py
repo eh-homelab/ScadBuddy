@@ -548,7 +548,7 @@ async def test_a_failed_model_read_keeps_the_ids_read_before_and_raises(
         ids = await _two_bare_outputs(output, _archive_naming("b" * 64), _archive_naming("c" * 64))
         store, rows = output.store, output.store.rows
         assert rows is not None
-        real = store.local_role
+        real = store.read_role
         seen: list[str] = []
 
         def failing_second(output_id: str, role: Any) -> Any:
@@ -557,7 +557,7 @@ async def test_a_failed_model_read_keeps_the_ids_read_before_and_raises(
                 raise OSError("store went away")
             return real(output_id, role)
 
-        monkeypatch.setattr(store, "local_role", failing_second)
+        monkeypatch.setattr(store, "read_role", failing_second)
         with pytest.raises(OSError, match="store went away"):
             await referenced_asset_ids(store.paths, [], store)
         assert sorted(seen) == sorted(ids)

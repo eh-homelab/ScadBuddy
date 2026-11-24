@@ -852,7 +852,15 @@ def test_the_geometry_of_an_output_is_measured_and_cached(
     rows = client.app.state.scadbuddy.outputs.rows  # type: ignore[attr-defined]
     found = rows.derived(created["id"], "geometry", 1)
     assert found is not None and found[1] == body
-    rows.write_derived(created["id"], "geometry", 1, found[0], {**body, "height_mm": 42})
+    outputs = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
+    rows.write_derived(
+        created["id"],
+        "geometry",
+        1,
+        found[0],
+        {**body, "height_mm": 42},
+        model_sha=outputs.model_sha(created["id"]),
+    )
     assert client.get(f"/api/v1/outputs/{created['id']}/geometry").json()["height_mm"] == 42
 
 

@@ -1636,6 +1636,9 @@ async def get_output_geometry(
     ``plates`` in the result says how many there are. Computed on first ask and cached
     beside the output."""
     await asyncio.to_thread(require_output, outputs, output_id)
+    # The model the analysis is read from, read first: a key that moves since names other
+    # bytes, and the attributed analysis is then not kept.
+    model_sha = await asyncio.to_thread(outputs.model_sha, output_id)
     try:
         analysis = await outputs.geometry(output_id, plate)
     except FileNotFoundError:
@@ -1647,7 +1650,9 @@ async def get_output_geometry(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the 3MF of output {output_id!r} cannot be analysed: {error}",
         ) from None
-    return await _attributed(analysis, outputs, output_id, plate, paths=paths, history=history)
+    return await _attributed(
+        analysis, outputs, output_id, plate, model_sha, paths=paths, history=history
+    )
 
 
 async def _attributed(
@@ -1655,6 +1660,7 @@ async def _attributed(
     outputs: OutputStore,
     output_id: str,
     plate: int,
+    model_sha: str | None,
     *,
     paths: DataPaths,
     history: ModelHistory,
@@ -1701,7 +1707,9 @@ async def _attributed(
         return analysis
     named = await asyncio.to_thread(attribute, analysis, directory)
     if named is not analysis:
-        await asyncio.to_thread(outputs.write_attributed, output_id, plate, version, named)
+        await asyncio.to_thread(
+            outputs.write_attributed, output_id, plate, version, named, model_sha=model_sha
+        )
     return named
 
 

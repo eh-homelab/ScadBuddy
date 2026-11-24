@@ -144,7 +144,12 @@ async def test_geometry_version_mismatch_recomputes(
     first = await store.geometry(meta.id)
     stale = first.model_copy(update={"height_mm": 42.0, "version": ANALYSIS_VERSION - 1})
     store.rows.write_derived(
-        meta.id, "geometry", 1, str(ANALYSIS_VERSION - 1), stale.model_dump(mode="json")
+        meta.id,
+        "geometry",
+        1,
+        str(ANALYSIS_VERSION - 1),
+        stale.model_dump(mode="json"),
+        model_sha=store.model_sha(meta.id),
     )
     (store.directory(meta.id) / GEOMETRY_NAME).unlink()
     calls = _counting(monkeypatch)
@@ -173,7 +178,7 @@ async def test_attributed_round_trip_in_rows(
     store, meta = await _copied(tmp_path, projection, content)
     analysis = await store.geometry(meta.id, 1)
     named = analysis.model_copy(update={"height_mm": 7.0})
-    store.write_attributed(meta.id, 1, "a" * 40, named)
+    store.write_attributed(meta.id, 1, "a" * 40, named, model_sha=store.model_sha(meta.id))
     assert store.rows is not None
     found = store.rows.derived(meta.id, "attributed", 1)
     assert found is not None and found[0] == str(ANALYSIS_VERSION)
@@ -183,7 +188,14 @@ async def test_attributed_round_trip_in_rows(
     assert store.attributed(meta.id, 1, "a" * 40) == named
     assert store.attributed(meta.id, 1, "b" * 40) is None
     # A row of another analysis version is a miss.
-    store.rows.write_derived(meta.id, "attributed", 1, str(ANALYSIS_VERSION - 1), found[1])
+    store.rows.write_derived(
+        meta.id,
+        "attributed",
+        1,
+        str(ANALYSIS_VERSION - 1),
+        found[1],
+        model_sha=store.model_sha(meta.id),
+    )
     assert store.attributed(meta.id, 1, "a" * 40) is None
 
 
@@ -270,15 +282,15 @@ async def _covered(
 
 
 def _model_reads(store: OutputStore, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Every role `local_role` is asked for."""
+    """Every role `read_role` is asked for."""
     asked: list[str] = []
-    real = store.local_role
+    real = store.read_role
 
     def counting(output_id: str, role: Any) -> Any:
         asked.append(role)
         return real(output_id, role)
 
-    monkeypatch.setattr(store, "local_role", counting)
+    monkeypatch.setattr(store, "read_role", counting)
     return asked
 
 

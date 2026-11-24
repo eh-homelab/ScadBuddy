@@ -470,14 +470,14 @@ def test_files_are_sorted_by_name(rows: OutputRows) -> None:
 def test_derived_round_trip_and_version(rows: OutputRows) -> None:
     rows.insert(make_row("o1"))
     assert rows.derived("o1", "geometry", 1) is None
-    rows.write_derived("o1", "geometry", 1, "v1", {"faces": 12})
+    rows.write_derived("o1", "geometry", 1, "v1", {"faces": 12}, model_sha=None)
     assert rows.derived("o1", "geometry", 1) == ("v1", {"faces": 12})
-    rows.write_derived("o1", "geometry", 1, "v2", {"faces": 14})
+    rows.write_derived("o1", "geometry", 1, "v2", {"faces": 14}, model_sha=None)
     assert rows.derived("o1", "geometry", 1) == ("v2", {"faces": 14})
     assert rows.derived("o1", "geometry", 2) is None
     assert rows.derived("o1", "attributed", 1) is None
     # Nothing is written for a row that is gone.
-    rows.write_derived("gone", "geometry", 1, "v1", {})
+    rows.write_derived("gone", "geometry", 1, "v1", {}, model_sha=None)
     assert rows.derived("gone", "geometry", 1) is None
 
 

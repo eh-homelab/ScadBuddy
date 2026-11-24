@@ -22,7 +22,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-import psycopg
 from psycopg import Connection
 from psycopg.errors import DeadlockDetected, SerializationFailure
 from psycopg.rows import DictRow
@@ -146,8 +145,6 @@ class ByteWrite:
     bytes_at: datetime | None = None
     thumbnail_read: str | None = None
     thumbnail_swap: ThumbnailSwap | None = None
-    #: The model key took another object: what was derived from the old one goes.
-    model_moved: bool = False
     #: False: nothing was copied (a ``files/`` entry an output may not hold); only
     #: ``bytes_stamp`` and ``damaged`` are written, and the files keep the bytes.
     copied: bool = True
@@ -308,6 +305,27 @@ def _write_files(
             )
 
 
+#: A derive write's check, on the row ``o``, that the model it read is the one the row
+#: names now: the files hold the bytes (``bytes_at`` NULL), or the index's sha256 of the
+#: row's model key is the one read. Put in with ``%``; a file read gives NULL, which
+#: matches no blob.
+_MODEL_READ = (
+    "(o.bytes_at IS NULL OR EXISTS (SELECT 1 FROM store_blobs b"
+    " WHERE b.key = o.model_blob AND b.sha256 = %s::text))"
+)
+
+
+def _lock_for_derive(conn: Connection[DictRow], output_ids: Sequence[str]) -> None:
+    """Lock the rows FOR SHARE, in output id order, in the caller's transaction, before a
+    derive write checks the model's sha256 in a statement of its own. `drop_derived`
+    takes the row FOR UPDATE: so the check sees the key the drop followed, or the drop
+    waits for the write's commit and deletes what it wrote."""
+    conn.execute(
+        "SELECT 1 FROM outputs WHERE output_id = ANY(%s) ORDER BY output_id FOR SHARE",
+        (list(output_ids),),
+    ).fetchall()
+
+
 def _hold_keys(conn: Connection[DictRow], output_id: str, keys: Sequence[str]) -> None:
     if keys:
         with conn.cursor() as cursor:
@@ -453,12 +471,8 @@ def _write_one(
     _write_files(conn, write.output_id, blobs.files)
     keys = [key for key in (blobs.model, blobs.preview, thumbnail) if key is not None]
     keys += [item.blob_key for item in blobs.files]
-    kept = list(keys)
-    if write.model_moved:
-        # Derived from the old model's bytes: a reader derives them again.
-        conn.execute("DELETE FROM output_derived WHERE output_id = %s", (write.output_id,))
-    else:
-        kept.append(plate_cover_key(write.output_id))
+    # The plate cover's hold stays: `drop_derived` releases it when the model key moved.
+    kept = [*keys, plate_cover_key(write.output_id)]
     conn.execute(
         f"{_RELEASE_BYTES} AND NOT key = ANY(%s)",
         (OUTPUT_HOLDER, [write.output_id], kept),
@@ -678,58 +692,65 @@ class OutputRows:
             ).fetchone()
         return None if found is None else (str(found["version"]), found["data"])
 
-    def write_derived(self, output_id: str, kind: str, plate: int, version: str, data: Any) -> None:
-        """Keep what a reader derived; it replaces the plate's earlier data. Nothing is
-        written when the row is gone."""
-        try:
-            with self._pool.connection() as conn:
-                conn.execute(
-                    "INSERT INTO output_derived (output_id, kind, plate, version, data)"
-                    " SELECT %s, %s, %s, %s, %s"
-                    " WHERE EXISTS (SELECT 1 FROM outputs WHERE output_id = %s)"
-                    " ON CONFLICT (output_id, kind, plate)"
-                    " DO UPDATE SET version = EXCLUDED.version, data = EXCLUDED.data",
-                    (output_id, kind, plate, version, Jsonb(data), output_id),
-                )
-        except psycopg.errors.ForeignKeyViolation:
-            # The row went between the check and the insert.
-            return
+    def write_derived(
+        self,
+        output_id: str,
+        kind: str,
+        plate: int,
+        version: str,
+        data: Any,
+        *,
+        model_sha: str | None,
+    ) -> None:
+        """Keep what a reader derived from the model of ``model_sha`` (``None``: the
+        file); it replaces the plate's earlier data. Nothing is written when the row is
+        gone, or when the model key names other bytes now (`_MODEL_READ`)."""
+        self.write_derived_many(kind, plate, version, [(output_id, data, model_sha)])
 
     def write_derived_many(
-        self, kind: str, plate: int, version: str, items: Sequence[tuple[str, Any]]
+        self,
+        kind: str,
+        plate: int,
+        version: str,
+        items: Sequence[tuple[str, Any, str | None]],
     ) -> None:
-        """`write_derived` of ``(output_id, data)`` for many outputs, in one statement and
-        one transaction (prod commits take 1-2 s each). A row gone meanwhile is left out."""
+        """`write_derived` of ``(output_id, data, model_sha)`` for many outputs, in one
+        transaction (prod commits take 1-2 s each). A row gone meanwhile, or one whose
+        model key names other bytes now, is left out. The rows are locked first
+        (`_lock_for_derive`), so the check of the model's sha256 runs after
+        `drop_derived` of a moved key, or before it starts."""
         if not items:
             return
-        ids = [output_id for output_id, _ in items]
-        data = [Jsonb(value) for _, value in items]
-        for attempt in range(1, _ATTEMPTS + 1):
-            try:
-                with self._pool.connection() as conn:
-                    conn.execute(
-                        "INSERT INTO output_derived (output_id, kind, plate, version, data)"
-                        " SELECT item.output_id, %s, %s, %s, item.data"
-                        " FROM unnest(%s::text[], %s::jsonb[]) AS item (output_id, data)"
-                        " JOIN outputs USING (output_id)"
-                        " ON CONFLICT (output_id, kind, plate)"
-                        " DO UPDATE SET version = EXCLUDED.version, data = EXCLUDED.data",
-                        (kind, plate, version, ids, data),
-                    )
-                return
-            except psycopg.errors.ForeignKeyViolation:
-                # A row went between the join and the insert: the next try leaves it out.
-                if attempt == _ATTEMPTS:
-                    raise
-
-    def keep_plate_cover(self, output_id: str, version: str, key: str | None) -> None:
-        """Keep the output's plate cover (`output_derived` kind ``plate_cover``, plate 0):
-        ``key``, a blob already put under `plate_cover_key`, held by the output in the
-        same transaction; ``None`` when the 3MF has no cover. Nothing is written when the
-        row is gone, and the blob is then held by nothing, so the sweep removes it."""
+        ids = [output_id for output_id, _, _ in items]
+        data = [Jsonb(value) for _, value, _ in items]
+        shas = [sha for _, _, sha in items]
         with self._pool.connection() as conn, conn.transaction():
+            _lock_for_derive(conn, ids)
+            conn.execute(
+                "INSERT INTO output_derived (output_id, kind, plate, version, data)"
+                " SELECT item.output_id, %s, %s, %s, item.data"
+                " FROM unnest(%s::text[], %s::jsonb[], %s::text[])"
+                " AS item (output_id, data, model_sha)"
+                f" JOIN outputs o USING (output_id) WHERE {_MODEL_READ % 'item.model_sha'}"
+                " ON CONFLICT (output_id, kind, plate)"
+                " DO UPDATE SET version = EXCLUDED.version, data = EXCLUDED.data",
+                (kind, plate, version, ids, data, shas),
+            )
+
+    def keep_plate_cover(
+        self, output_id: str, version: str, key: str | None, *, model_sha: str | None
+    ) -> None:
+        """Keep the output's plate cover (`output_derived` kind ``plate_cover``, plate 0),
+        read from the model of ``model_sha`` (``None``: the file): ``key``, a blob already
+        put under `plate_cover_key`, held by the output in the same transaction; ``None``
+        when the 3MF has no cover. Nothing is written when the row is gone, or when the
+        model key names other bytes now; the blob is then held by nothing, so the sweep
+        removes it."""
+        with self._pool.connection() as conn, conn.transaction():
+            _lock_for_derive(conn, [output_id])
             found = conn.execute(
-                "SELECT 1 FROM outputs WHERE output_id = %s FOR SHARE", (output_id,)
+                f"SELECT 1 FROM outputs o WHERE o.output_id = %s AND {_MODEL_READ % '%s'}",
+                (output_id, model_sha),
             ).fetchone()
             if found is None:
                 return
@@ -741,6 +762,22 @@ class OutputRows:
             )
             if key is not None:
                 _hold_keys(conn, output_id, [key])
+
+    def drop_derived(self, output_id: str) -> None:
+        """Delete what readers derived of the output and release its plate cover's hold,
+        in one transaction: the byte copy calls it once the model key took other bytes.
+        It locks the row first (`_lock_for_derive`), so a derive write that read the old
+        bytes either commits before this deletes, or finds the new sha256 and writes
+        nothing."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT 1 FROM outputs WHERE output_id = %s FOR UPDATE", (output_id,)
+            ).fetchone()
+            conn.execute("DELETE FROM output_derived WHERE output_id = %s", (output_id,))
+            conn.execute(
+                "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s AND key = %s",
+                (OUTPUT_HOLDER, output_id, plate_cover_key(output_id)),
+            )
 
     def blob_shas(self, output_ids: Sequence[str]) -> dict[tuple[str, Role], str]:
         """The sha256 of each ``(output_id, role)`` blob the rows name, for rows already
@@ -784,7 +821,7 @@ class OutputRows:
         """One batch of the byte copy, in one transaction. Per write: the blob columns,
         ``bytes_stamp``, ``damaged`` and ``bytes_at``, its ``output_files`` rows
         replaced, a hold of each key, and the holds of byte keys it no longer names
-        released (the plate cover's stays, unless the model moved). A row deleted
+        released (never the plate cover's: `drop_derived` releases it). A row deleted
         meanwhile gets nothing, no hold either. A ``guarded`` write is skipped when a
         live writer moved the row's ``bytes_at`` since the copy read it, and writes the
         thumbnail column and key only under the output's thumbnail lock and only while

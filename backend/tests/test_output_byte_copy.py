@@ -10,6 +10,7 @@ import os
 import threading
 import time
 from collections.abc import AsyncGenerator, Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ from scadbuddy.library.outputs import (
     OutputStore,
 )
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.store.content import ContentStore
+from scadbuddy.store.content import BlobRef, ContentStore
 from scadbuddy.store.index import Pool
 from tests.support.arrange import finished_job
 from tests.support.store import local_content, store_pool
@@ -144,6 +145,12 @@ async def _run(
     stop: threading.Event | None = None,
 ) -> ByteCopyResult | None:
     return await copy_output_bytes(tree.store, tree.rows, content, projection.pool, stop)
+
+
+async def _ref(content: ContentStore, key: str) -> BlobRef:
+    found = await content.stat(key)
+    assert found is not None, key
+    return found.ref
 
 
 async def _blob(content: ContentStore, key: str) -> bytes:
@@ -320,6 +327,57 @@ async def test_byte_copy_marks_bad_file_name_damaged(
     assert uploaded is not None and uploaded["n"] == 0
 
 
+async def test_byte_copy_bad_file_name_needs_nothing_of_the_quota(
+    tree: Tree, content: ContentStore, projection: JobProjection
+) -> None:
+    """An output with a ``files/`` name it may not hold is never copied, so it adds
+    nothing to what the copy needs of the store."""
+    (tree.dir("files") / FILES_DIR / "bad name!").write_bytes(b"x")
+    result = await _run(tree, content, projection)
+    assert result is not None
+    others = [path for path in tree.byte_files() if not path.is_relative_to(tree.dir("files"))]
+    last = tree.rows.last_byte_run()
+    assert last is not None
+    assert last["needed_bytes"] == sum(path.stat().st_size for path in others)
+    assert last["needed_count"] == len(others)
+
+
+async def test_byte_copy_reused_blob_survives_a_sweep_before_the_batch(
+    tree: Tree,
+    content: ContentStore,
+    projection: JobProjection,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blob an earlier run put and nothing holds, older than the sweep's grace: the
+    copy reuses it, and a sweep on another pod before the batch commits does not take
+    it, or the row does not name it."""
+    output_id = tree.id("plain")
+    key = output_blob_key(output_id, "model")
+    blobs = OutputBytes(content)
+    await blobs.put_file(key, tree.dir("plain") / MODEL_NAME, slug=tree.metas["plain"].slug)
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE store_blobs SET touched_at = now() - interval '2 days' WHERE key = %s",
+            (key,),
+        )
+    write_byte_copy = OutputRows.write_byte_copy
+
+    def swept_first(self: OutputRows, writes: Any) -> Any:
+        # Another pod's sweep, with a one-day grace, runs before the batch holds the key.
+        cutoff = content.index.now() - timedelta(days=1)
+        content.index.delete_if_stale(key, cutoff)
+        return write_byte_copy(self, writes)
+
+    monkeypatch.setattr(OutputRows, "write_byte_copy", swept_first)
+    await _run(tree, content, projection)
+    row = tree.rows.get(output_id)
+    assert row is not None
+    if row.bytes_at is not None:
+        assert row.blobs.model == key
+        assert await content.stat(key) is not None
+
+
 async def test_byte_copy_takes_newer_thumbnail_file(
     tree: Tree, content: ContentStore, projection: JobProjection, pool: Pool
 ) -> None:
@@ -412,11 +470,12 @@ async def test_byte_copy_drops_derived_rows_when_the_model_moves(
 ) -> None:
     await _run(tree, content, projection)
     output_id = tree.id("plain")
-    tree.rows.write_derived(output_id, "plate_names", 0, "1", {"1": "old"})
+    model_sha = (await _ref(content, output_blob_key(output_id, "model"))).sha256
+    tree.rows.write_derived(output_id, "plate_names", 0, "1", {"1": "old"}, model_sha=model_sha)
     cover = plate_cover_key(output_id)
     tree.store.bytes = OutputBytes(content)
     await tree.store.bytes.put(cover, b"old cover", slug=tree.metas["plain"].slug)
-    tree.rows.keep_plate_cover(output_id, "1", cover)
+    tree.rows.keep_plate_cover(output_id, "1", cover, model_sha=model_sha)
     # A copy that keeps the model keeps what was derived from it, and its cover's hold.
     path = tree.dir("plain") / THUMBNAIL_NAME
     path.write_bytes(b"another thumbnail")
@@ -434,6 +493,110 @@ async def test_byte_copy_drops_derived_rows_when_the_model_moves(
     assert tree.rows.derived(output_id, "plate_cover", 0) is None
     assert cover not in _holds(pool, output_id)
     assert await _blob(content, output_blob_key(output_id, "model")) == model.read_bytes()
+
+
+async def _derived_from_the_model(tree: Tree, content: ContentStore, output_id: str) -> str:
+    """Rows derived from the output's copied model, and a kept plate cover: the model's
+    sha256."""
+    model_sha = (await _ref(content, output_blob_key(output_id, "model"))).sha256
+    tree.rows.write_derived(output_id, "plate_names", 0, "1", {"1": "old"}, model_sha=model_sha)
+    cover = plate_cover_key(output_id)
+    await OutputBytes(content).put(cover, b"old cover", slug=tree.store.get(output_id).slug)
+    tree.rows.keep_plate_cover(output_id, "1", cover, model_sha=model_sha)
+    return model_sha
+
+
+def _change_model(tree: Tree, name: str) -> None:
+    model = tree.dir(name) / MODEL_NAME
+    model.write_bytes(model.read_bytes() + b"\0")
+    _touch_later(model)
+
+
+async def test_byte_copy_drops_derived_rows_when_a_live_writer_skips_the_batch(
+    tree: Tree,
+    content: ContentStore,
+    projection: JobProjection,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live thumbnail upload moves ``bytes_at`` after the model key moved, so the batch
+    skips the row: the derived rows of the old model still go, and for good."""
+    await _run(tree, content, projection)
+    output_id = tree.id("plain")
+    await _derived_from_the_model(tree, content, output_id)
+    _change_model(tree, "plain")
+    write_byte_copy = OutputRows.write_byte_copy
+
+    def live_upload_first(self: OutputRows, writes: Any) -> Any:
+        assert self.set_blob(output_id, "thumbnail", output_blob_key(output_id, "thumbnail"))
+        return write_byte_copy(self, writes)
+
+    monkeypatch.setattr(OutputRows, "write_byte_copy", live_upload_first)
+    result = await _run(tree, content, projection)
+    assert result is not None and result.copied == 0
+    assert tree.rows.derived(output_id, "plate_names", 0) is None
+    assert tree.rows.derived(output_id, "plate_cover", 0) is None
+    assert plate_cover_key(output_id) not in _holds(pool, output_id)
+    monkeypatch.setattr(OutputRows, "write_byte_copy", write_byte_copy)
+    result = await _run(tree, content, projection)
+    assert result is not None and result.copied == 1
+    assert tree.rows.derived(output_id, "plate_names", 0) is None
+
+
+async def test_derive_of_the_old_model_writes_nothing_after_the_model_moved(
+    tree: Tree, content: ContentStore, projection: JobProjection, pool: Pool
+) -> None:
+    """A reader that read the model before the copy moved its key writes nothing after
+    it; one that read the new model, or the file of a row not copied, writes."""
+    await _run(tree, content, projection)
+    output_id = tree.id("plain")
+    old_sha = await _derived_from_the_model(tree, content, output_id)
+    _change_model(tree, "plain")
+    await _run(tree, content, projection)
+    rows = tree.rows
+    cover = plate_cover_key(output_id)
+    rows.write_derived(output_id, "plate_names", 0, "1", {"1": "stale"}, model_sha=old_sha)
+    rows.write_derived_many("asset_ids", 0, "1", [(output_id, ["stale"], old_sha)])
+    rows.keep_plate_cover(output_id, "1", cover, model_sha=old_sha)
+    rows.write_derived(output_id, "geometry", 1, "1", {"stale": True}, model_sha=None)
+    assert rows.derived(output_id, "plate_names", 0) is None
+    assert rows.derived(output_id, "asset_ids", 0) is None
+    assert rows.derived(output_id, "plate_cover", 0) is None
+    assert rows.derived(output_id, "geometry", 1) is None
+    assert cover not in _holds(pool, output_id)
+    new_sha = (await _ref(content, output_blob_key(output_id, "model"))).sha256
+    rows.write_derived(output_id, "plate_names", 0, "1", {"1": "new"}, model_sha=new_sha)
+    rows.keep_plate_cover(output_id, "1", cover, model_sha=new_sha)
+    assert rows.derived(output_id, "plate_names", 0) == ("1", {"1": "new"})
+    assert cover in _holds(pool, output_id)
+    # A row not copied yet: the file holds the bytes.
+    other = tree.id("arranged")
+    with pool.connection() as conn:
+        conn.execute("UPDATE outputs SET bytes_at = NULL WHERE output_id = %s", (other,))
+    rows.write_derived(other, "plate_names", 0, "1", {"1": "file"}, model_sha=None)
+    assert rows.derived(other, "plate_names", 0) == ("1", {"1": "file"})
+
+
+async def test_byte_copy_first_copy_keeps_derived_rows_and_cover_hold(
+    tree: Tree, content: ContentStore, projection: JobProjection, pool: Pool
+) -> None:
+    """A row not copied before had its derived rows made from the file, and the first
+    copy puts that file: its derived rows and its plate cover's hold stay."""
+    output_id = tree.id("plain")
+    tree.rows.write_derived(output_id, "plate_names", 0, "1", {"1": "plate"}, model_sha=None)
+    tree.rows.write_derived_many("asset_ids", 0, "1", [(output_id, ["a1"], None)])
+    cover = plate_cover_key(output_id)
+    blobs = OutputBytes(content)
+    await blobs.put(cover, b"cover", slug=tree.metas["plain"].slug)
+    tree.rows.keep_plate_cover(output_id, "1", cover, model_sha=None)
+    result = await _run(tree, content, projection)
+    assert result is not None and result.failed == []
+    row = tree.rows.get(output_id)
+    assert row is not None and row.bytes_at is not None
+    assert tree.rows.derived(output_id, "plate_names", 0) == ("1", {"1": "plate"})
+    assert tree.rows.derived(output_id, "asset_ids", 0) == ("1", ["a1"])
+    assert tree.rows.derived(output_id, "plate_cover", 0) == ("1", {"key": cover})
+    assert cover in _holds(pool, output_id)
 
 
 async def test_byte_copy_leaves_no_hold_for_deleted_output(

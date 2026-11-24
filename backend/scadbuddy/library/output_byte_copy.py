@@ -9,10 +9,17 @@ skipped. For every other row, each byte file (``model.3mf``, ``preview.glb``,
 the index's sha256 is read first, then the file is hashed. An equal file is not
 uploaded. A different one is put with a compare-and-swap on that sha256
 (`OutputBytes.replace_file`), so a live writer that moved the key meanwhile keeps its
-blob (a live writer writes the file first, then the blob). Each blob the copy put, and
-every blob of a row not copied before, is read back from the backend
-(`OutputBytes.verify`, Ruling R3). Then the row names the keys, in batches of
-`BATCH_BYTES` outputs, one transaction each (`OutputRows.write_byte_copy`).
+blob (a live writer writes the file first, then the blob). An equal blob that the row
+does not hold yet (an earlier run put it) is touched, so a sweep keeps it until the
+batch holds it. Each blob the copy put, and every blob of a row not copied before, is
+read back from the backend (`OutputBytes.verify`, Ruling R3). Then the row names the
+keys, in batches of `BATCH_BYTES` outputs, one transaction each
+(`OutputRows.write_byte_copy`).
+
+When the model key of a row copied before takes other bytes, what readers derived from
+the old blob goes at once, in a transaction of its own (`OutputRows.drop_derived`), and
+a derive write that read the old blob writes nothing after it. A row not copied before
+keeps its derived rows: they came from the file that the copy put.
 
 The thumbnail is the exception to the plain compare-and-swap: a thumbnail upload is
 blob first (`OutputStore.put_thumbnail`). So the copy puts a changed thumbnail file
@@ -180,8 +187,8 @@ class _Plan:
 
 
 def _sizes(directory: Path) -> list[int]:
-    """The sizes of the folder's byte files, for the quota; ``files/`` entries only when
-    the output may hold them all (otherwise it is not copied). Blocking."""
+    """The sizes of the folder's byte files, for the quota; none when the output holds a
+    ``files/`` entry it may not hold, since it is then not copied. Blocking."""
     sizes: list[int] = []
     for name in (MODEL_NAME, PREVIEW_NAME, THUMBNAIL_NAME):
         try:
@@ -191,7 +198,7 @@ def _sizes(directory: Path) -> list[int]:
     try:
         names = put_names(directory)
     except OutputFileNameError:
-        return sizes
+        return []
     for name in names:
         try:
             sizes.append((directory / FILES_DIR / name).stat().st_size)
@@ -396,11 +403,28 @@ class _Copy:
             raise _FailedError(role, NOT_WHOLE)
         self.result.verified += 1
 
+    async def _reuse(self, blobs: OutputBytes, key: str, sha: str, role: str) -> None:
+        """Keep an equal blob that the row does not hold yet (an earlier run put it, and
+        nothing holds it): touch it, so a sweep on another replica keeps it through its
+        grace until the batch holds it. A sweep that removed it first fails the output,
+        and its row keeps ``bytes_at`` NULL."""
+        ref = await blobs.touch(key)
+        if ref is None or ref.sha256 != sha:
+            raise _FailedError(role, "the blob went before the copy held it")
+
     async def _role(
-        self, blobs: OutputBytes, key: str, path: Path, slug: str, role: str, check: bool
-    ) -> bool | None:
+        self,
+        blobs: OutputBytes,
+        key: str,
+        path: Path,
+        slug: str,
+        role: str,
+        check: bool,
+        held: bool,
+    ) -> tuple[bool, str | None] | None:
         """Copy one byte file to ``key``: ``None`` when the file is missing, else whether
-        the copy moved the key to another object."""
+        the copy moved the key to another object, and the sha256 the key named before
+        (``None``: no blob). ``held``: the row holds ``key`` already."""
         ref = await asyncio.to_thread(blobs.ref, key)
         expected = None if ref is None else ref.sha256
         try:
@@ -410,6 +434,8 @@ class _Copy:
         except OSError as error:
             raise _FailedError(role, str(error)) from error
         moved = False
+        if sha == expected and not held:
+            await self._reuse(blobs, key, sha, role)
         if sha != expected:
             try:
                 landed = await blobs.replace_file(key, path, slug=slug, expected=expected)
@@ -424,7 +450,7 @@ class _Copy:
             moved = landed is not None
         if moved or check:
             await self._verify(blobs, key, role)
-        return moved
+        return moved, expected
 
     async def _thumbnail(
         self, blobs: OutputBytes, work: _Work, read: str | None, check: bool
@@ -442,6 +468,8 @@ class _Copy:
         except OSError as error:
             raise _FailedError("thumbnail", str(error)) from error
         if sha == expected:
+            if read != key:
+                await self._reuse(blobs, key, sha, "thumbnail")
             if check:
                 await self._verify(blobs, key, "thumbnail")
             return key, None
@@ -493,30 +521,46 @@ class _Copy:
             return None
         # A row not copied before has every blob read back, uploaded or not.
         check = row.bytes_at is None
+        # The keys the row names, and so holds: the others a run reuses are touched.
+        held = set(row.blobs.keys())
+        if row.bytes_at is not None:
+            held |= {item.blob_key for item in await asyncio.to_thread(self.rows.files, output_id)}
         damaged: list[dict[str, Any]] = []
         keys: dict[str, str | None] = {}
-        model_moved = False
         try:
             for role in _REQUIRED:
                 key = output_blob_key(output_id, role)
                 name = _ROLE_FILES[role]
-                moved = await self._role(blobs, key, directory / name, work.slug, role, check)
-                if moved is None:
+                copied = await self._role(
+                    blobs, key, directory / name, work.slug, role, check, key in held
+                )
+                if copied is None:
                     damaged.append({"role": role, "error": f"no {name}"})
                     keys[role] = None
                     continue
                 keys[role] = key
-                if role == "model":
-                    model_moved = moved
+                moved, expected = copied
+                if role == "model" and moved and expected is not None and not check:
+                    # Readers read the blob of ``expected``: what they derived from it
+                    # goes now, in a transaction of its own, so a batch that a live
+                    # writer makes the copy skip cannot keep it. A row not copied before
+                    # had its rows derived from the file, which the copy put.
+                    await asyncio.to_thread(self.rows.drop_derived, output_id)
             thumbnail, swap = await self._thumbnail(blobs, work, row.blobs.thumbnail, check)
             files: list[OutputFileBlob] = []
             for n, name in enumerate(names):
                 key = output_file_key(output_id, n)
-                moved = await self._role(
-                    blobs, key, directory / FILES_DIR / name, work.slug, "files", check
+                copied = await self._role(
+                    blobs,
+                    key,
+                    directory / FILES_DIR / name,
+                    work.slug,
+                    "files",
+                    check,
+                    key in held,
                 )
                 ref = await asyncio.to_thread(blobs.ref, key)
-                if moved is None or ref is None:
+                if copied is None or ref is None:
                     raise _FailedError("files", f"{FILES_DIR}/{name} went while it was copied")
                 files.append(OutputFileBlob(name=name, blob_key=key, size=ref.size))
         except _FailedError as failed:
@@ -539,5 +583,4 @@ class _Copy:
             bytes_at=row.bytes_at,
             thumbnail_read=row.blobs.thumbnail,
             thumbnail_swap=swap,
-            model_moved=model_moved,
         )

@@ -1255,10 +1255,11 @@ async def referenced_asset_ids(
     # One span for the scan, with what it read (#7245), as the folder walk has.
     with span("assets.referenced") as current:
         found, read, bare = await asyncio.to_thread(_referenced_in_rows, paths, records, rows)
-        kept: list[tuple[str, list[str]]] = []
+        kept: list[tuple[str, list[str], str | None]] = []
         try:
             for output_id in bare:
-                async with outputs.local_role(output_id, "model") as archive:
+                async with outputs.read_role(output_id, "model") as model:
+                    archive = model.path
                     if archive is None:
                         continue
                     read["archives"] += 1
@@ -1269,7 +1270,7 @@ async def referenced_asset_ids(
                         _skip_damaged(output_id, error)
                         ids = set()
                     found.update(ids)
-                    kept.append((output_id, sorted(ids)))
+                    kept.append((output_id, sorted(ids), model.sha256))
         finally:
             # One write for the whole scan, also when a read raised; a 3MF read here
             # is not read again.
