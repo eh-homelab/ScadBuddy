@@ -730,20 +730,24 @@ class OutputStore:
             current.set_attribute("scadbuddy.bytes", len(data))
             return data
 
-    def provenance(self, output_id: str) -> Provenance | None:
+    async def provenance(self, output_id: str) -> Provenance | None:
         """What the 3MF itself says produced it — the fallback when the record is gone.
-        With rows, an output that has a row is read at its own folder, and the tree is
-        searched only before a copy run finished (#7255)."""
+        The 3MF is the model's blob, else its file (`local_role`, #7256), read in a
+        thread. With no such 3MF, the tree is searched for a folder that holds only a
+        ``model.3mf``, and only before a copy run finished (#7255)."""
         with span("outputs.provenance", attributes={"scadbuddy.output_id": output_id}):
-            if self.rows is not None:
-                slug = self.rows.slug_of(output_id)
-                if slug is not None:
-                    return read_provenance(self.paths.output_dir(slug, output_id) / MODEL_NAME)
-                if self.rows.copied():
-                    return None
-            for path in self.paths.outputs.glob(f"*/{output_id}/{MODEL_NAME}"):
-                return read_provenance(path)
+            async with self.local_role(output_id, "model") as path:
+                if path is not None:
+                    return await asyncio.to_thread(read_provenance, path)
+            return await asyncio.to_thread(self._provenance_in_tree, output_id)
+
+    def _provenance_in_tree(self, output_id: str) -> Provenance | None:
+        """`provenance` of a ``model.3mf`` found by a search of the tree. Blocking."""
+        if self._copied():
             return None
+        for path in self.paths.outputs.glob(f"*/{output_id}/{MODEL_NAME}"):
+            return read_provenance(path)
+        return None
 
     def params(self, output_id: str) -> dict[str, ParamValue]:
         row = self._row_of(output_id)
@@ -1749,7 +1753,7 @@ class OutputStore:
                 if retry_at is None or time.monotonic() < retry_at:
                     return False
                 del self._undrawable[output_id]
-        return (self._find_dir(output_id) / PREVIEW_NAME).is_file()
+        return self.has_role(output_id, "preview")
 
     def remember_undrawable(self, output_id: str, *, retry_after: float | None = None) -> None:
         """``output_id``'s draw came to nothing (#4775): it is not tried again for

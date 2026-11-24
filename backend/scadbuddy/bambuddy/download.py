@@ -9,20 +9,26 @@ Now whatever a file needs to open correctly in Bambu Studio is written when the 
 is **saved**: a file laid out for a printer names that printer and each slot's material
 (#2639), and the template's ``print_settings`` (#770) go into its
 ``project_settings.config`` (``OutputStore.create``, ``render.provenance.stamp``). The
-download is a plain :class:`FileResponse`, so Range and conditional GET work.
+download streams the saved bytes, the blob first, else the file (#7256,
+`api/output_streams.py`): it has a ``Content-Length`` and, for a blob, a strong ``ETag``,
+and it serves no ranges.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+from fastapi.responses import StreamingResponse
 
-from fastapi.responses import FileResponse
-
+from scadbuddy.api.output_streams import attachment, stream_response
+from scadbuddy.library.output_bytes import OutputStream
 from scadbuddy.library.outputs import OutputMeta, download_filename
 
 THREE_MF_MEDIA_TYPE = "model/3mf"
 
 
-def download_3mf(path: Path, meta: OutputMeta) -> FileResponse:
-    """``path``'s 3MF as an attachment, as it was saved."""
-    return FileResponse(path, media_type=THREE_MF_MEDIA_TYPE, filename=download_filename(meta))
+def download_3mf(stream: OutputStream, meta: OutputMeta) -> StreamingResponse:
+    """``stream``'s 3MF as an attachment, as it was saved."""
+    return stream_response(
+        stream,
+        media_type=THREE_MF_MEDIA_TYPE,
+        headers={"content-disposition": attachment(download_filename(meta))},
+    )

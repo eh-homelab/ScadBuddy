@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import tarfile
 import zipfile
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
@@ -72,6 +73,7 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
+from scadbuddy.api.output_streams import attachment, stream_response
 from scadbuddy.api.template_ui import UI_FILE_HEADERS
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.download import download_3mf
@@ -98,20 +100,17 @@ from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.core.tracing import span, traced_thread
+from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.output_index import DEFAULT_LIMIT, AfterNotListedError, OutputQuery
 from scadbuddy.library.outputs import (
     BACK_OFFICE,
-    MODEL_NAME,
     OUTPUT_ID_PATTERN,
-    PREVIEW_NAME,
-    THUMBNAIL_NAME,
     BackfillState,
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
     require_output,
-    thumbnail_file_version,
 )
 from scadbuddy.meshmodel.locate import attribute
 from scadbuddy.operations.claims import ClaimStore
@@ -239,7 +238,7 @@ def _detail(
     failed_before_queueing: bool,
 ) -> OutputDetail:
     params = store.params(meta.id)
-    thumbnail_version = thumbnail_file_version(store.thumbnail_path(meta.id))
+    thumbnail_version = store.thumbnail_version(meta.id)
     return OutputDetail(
         **meta.model_dump(),
         has_thumbnail=thumbnail_version is not None or store.drawable_thumbnail(meta.id),
@@ -1158,7 +1157,7 @@ async def get_output(
     response_model=EditTarget,
     summary="Resolve an edit deep link",
 )
-def get_edit_target(
+async def get_edit_target(
     output_id: OutputIdPath, catalogue: CatalogueDep, outputs: OutputsDep
 ) -> EditTarget:
     """Where ``/edit/{output_id}`` should land, and with which values.
@@ -1168,15 +1167,15 @@ def get_edit_target(
     link keeps working from the file alone.
     """
     try:
-        meta = outputs.get(output_id)
+        meta = await asyncio.to_thread(outputs.get, output_id)
     except OutputNotFoundError:
-        stamped = outputs.provenance(output_id)
+        stamped = await outputs.provenance(output_id)
         if stamped is None:
             raise ApiError(
                 status.HTTP_404_NOT_FOUND,
                 f"no output with id {output_id!r}, and no 3MF left to read it from",
             ) from None
-        require_model(catalogue, stamped.model)
+        await asyncio.to_thread(require_model, catalogue, stamped.model)
         return EditTarget(
             output_id=output_id,
             slug=stamped.model,
@@ -1189,6 +1188,12 @@ def get_edit_target(
     # Every other route through a slug asks the catalogue first. A link is allowed to
     # outlive its output — that is the point of the 3MF fallback — but not its model:
     # answering 200 would send the customizer somewhere it cannot load.
+    return await asyncio.to_thread(_recorded_target, catalogue, outputs, meta)
+
+
+def _recorded_target(catalogue: Catalogue, outputs: OutputStore, meta: OutputMeta) -> EditTarget:
+    """The edit target from the output's record. Blocking."""
+    output_id = meta.id
     require_model(catalogue, meta.slug)
     params = outputs.params(output_id)
     return EditTarget(
@@ -1248,13 +1253,13 @@ def _no_content(result: dict[str, Any] | Operation) -> Response:
     summary="Download the 3MF",
 )
 async def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> Response:
-    meta = require_output(outputs, output_id)
-    path = outputs.directory(output_id) / MODEL_NAME
-    if not path.is_file():
+    meta = await asyncio.to_thread(require_output, outputs, output_id)
+    stream = await outputs.open_role(output_id, "model")
+    if stream is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    # The saved file as it is (#2652): its presets and print settings were written when
-    # it was saved.
-    return download_3mf(path, meta)
+    # The saved bytes as they are (#2652): its presets and print settings were written
+    # when it was saved.
+    return download_3mf(stream, meta)
 
 
 @router.get(
@@ -1271,7 +1276,7 @@ async def get_output_preview(
 ) -> Response:
     """The output's preview mesh, or with ``plate`` that one plate of its 3MF, where the
     file places it: what the print dialog's pane shows for a plate clicked (#2169)."""
-    require_output(outputs, output_id)
+    await asyncio.to_thread(require_output, outputs, output_id)
     if plate is not None:
         payload = await outputs.model_3mf(output_id)
         if payload is None:
@@ -1286,10 +1291,10 @@ async def get_output_preview(
             # #2767: the refusal a library file's plate gives for the same read (library_view.py).
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         return Response(data, media_type=GLB_MEDIA_TYPE)
-    path = outputs.directory(output_id) / PREVIEW_NAME
-    if not path.is_file():
+    stream = await outputs.open_role(output_id, "preview")
+    if stream is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")
-    return FileResponse(path, media_type=GLB_MEDIA_TYPE)
+    return stream_response(stream, media_type=GLB_MEDIA_TYPE, headers={})
 
 
 @router.get(
@@ -1297,18 +1302,17 @@ async def get_output_preview(
     response_class=FileResponse,
     summary="Download one of a pipeline output's extra files",
 )
-def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> FileResponse:
+async def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> Response:
     """An extra file a pipeline wrote (§10): served as a download, never as a page."""
     try:
-        path = outputs.file_path(output_id, name)
+        stream = await outputs.open_file(output_id, name)
     except OutputNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"no file {name!r} on output {output_id}"
         ) from None
-    return FileResponse(
-        path,
-        filename=name,
-        headers=UI_FILE_HEADERS,
+    return stream_response(
+        stream,
+        headers={**UI_FILE_HEADERS, "content-disposition": attachment(name)},
         media_type="image/svg+xml" if name.endswith(".svg") else "application/octet-stream",
     )
 
@@ -1326,16 +1330,19 @@ def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> File
 )
 async def get_output_thumbnail(
     output_id: OutputIdPath, outputs: OutputsDep, config: ConfigDep, events: EventsDep
-) -> FileResponse:
+) -> Response:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
-    path = await asyncio.to_thread(lambda: outputs.directory(output_id) / THUMBNAIL_NAME)
-    if not await asyncio.to_thread(path.is_file):
-        await _draw_thumbnail(outputs, meta, path, config, events)
-    return FileResponse(path, media_type="image/png")
+    stream = await outputs.open_role(output_id, "thumbnail")
+    if stream is None:
+        await _draw_thumbnail(outputs, meta, config, events)
+        stream = await outputs.open_role(output_id, "thumbnail")
+    if stream is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
+    return stream_response(stream, media_type="image/png", headers={})
 
 
 async def _draw_thumbnail(
-    outputs: OutputStore, meta: OutputMeta, path: Path, config: Config, events: EventBus
+    outputs: OutputStore, meta: OutputMeta, config: Config, events: EventBus
 ) -> None:
     """#4775: a thumbnail for an output saved with none (the agent's, a flow's, an order
     quote's), from its preview mesh, as the `iso` view draws it. Lazy, so outputs saved
@@ -1355,7 +1362,10 @@ async def _draw_thumbnail(
     try:
         # Another read drew it, or its draw came to nothing, while this one waited.
         drawn_meanwhile, drawable = await asyncio.to_thread(
-            lambda: (path.is_file(), outputs.drawable_thumbnail(output_id))
+            lambda: (
+                outputs.has_role(output_id, "thumbnail"),
+                outputs.drawable_thumbnail(output_id),
+            )
         )
     except BaseException:
         slots.release()
@@ -1369,7 +1379,7 @@ async def _draw_thumbnail(
     # read stops waiting for it: `wait_for` cannot stop a thread, and a draw past its
     # budget still runs. The shield keeps a cancelled read from cancelling it.
     outputs.draws_running += 1
-    drawing = asyncio.ensure_future(_draw_and_keep(outputs, output_id, path))
+    drawing = asyncio.ensure_future(_draw_and_keep(outputs, output_id))
     _DRAWING.add(drawing)
     gave_up = False
 
@@ -1430,13 +1440,15 @@ RETRY_DRAW_AFTER = 600.0
 _DRAWING: set[asyncio.Future[bool]] = set()
 
 
-async def _draw_and_keep(outputs: OutputStore, output_id: str, path: Path) -> bool:
-    """The `iso` view of the output's preview mesh, drawn in a thread and kept as its
-    thumbnail, file and blob (`put_drawn_thumbnail`), unless one landed first; False,
-    and remembered, when the mesh has nothing to draw."""
-    png = await asyncio.to_thread(
-        draw_view, path.with_name(PREVIEW_NAME), "iso", PLATE_PNG_SIZE, None
-    )
+async def _draw_and_keep(outputs: OutputStore, output_id: str) -> bool:
+    """The `iso` view of the output's preview mesh (its blob's temporary file, else its
+    file), drawn in a thread and kept as its thumbnail, file and blob
+    (`put_drawn_thumbnail`), unless one landed first; False, and remembered, when the
+    mesh has nothing to draw. False, not remembered, when the preview is gone."""
+    async with outputs.local_role(output_id, "preview") as glb:
+        if glb is None:
+            return False
+        png = await asyncio.to_thread(draw_view, glb, "iso", PLATE_PNG_SIZE, None)
     if png is None:
         outputs.remember_undrawable(output_id)
         return False
@@ -1463,34 +1475,36 @@ async def get_output_view(
     camera: ViewCamera,
     size: ViewSize = PLATE_PNG_SIZE,
 ) -> Response:
-    require_output(outputs, output_id)
-    return await preview_view(
-        outputs.directory(output_id) / PREVIEW_NAME,
-        view,
-        size,
-        config=config,
-        owner=f"output {output_id!r}",
-        camera=camera,
-    )
+    await asyncio.to_thread(require_output, outputs, output_id)
+    owner = f"output {output_id!r}"
+    async with outputs.local_role(output_id, "preview") as glb:
+        if glb is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for {owner} is gone")
+        return await preview_view(glb, view, size, config=config, owner=owner, camera=camera)
 
 
-def _model_3mf(outputs: OutputStore, output_id: str) -> Path:
-    path = outputs.directory(output_id) / MODEL_NAME
-    if not path.is_file():
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    return path
+@contextlib.asynccontextmanager
+async def _model_3mf(outputs: OutputStore, output_id: str) -> AsyncIterator[Path]:
+    """A path that holds the output's 3MF while the block runs (`local_role`); a 404
+    when it has none."""
+    async with outputs.local_role(output_id, "model") as path:
+        if path is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
+        yield path
 
 
 @router.get(
     "/outputs/{output_id}/plates", response_model=list[OutputPlate], summary="The 3MF's plates"
 )
-def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> list[OutputPlate]:
+async def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> list[OutputPlate]:
     """What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are
     one plate unless the template asks for more (#289)."""
-    require_output(outputs, output_id)
+    await asyncio.to_thread(require_output, outputs, output_id)
+    async with _model_3mf(outputs, output_id) as path:
+        plates = await asyncio.to_thread(plates_of, path)
     return [
         OutputPlate(index=plate.index, has_thumbnail=plate.thumbnail is not None, name=plate.name)
-        for plate in plates_of(_model_3mf(outputs, output_id))
+        for plate in plates
     ]
 
 
@@ -1500,20 +1514,29 @@ def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> list[Outp
     responses={200: {"content": {"image/png": {}}}},
     summary="A plate's cover image",
 )
-def get_output_plate_thumbnail(
+async def get_output_plate_thumbnail(
     output_id: OutputIdPath, index: int, outputs: OutputsDep
 ) -> Response:
     """The plate's own cover from inside the 3MF, the one Bambu Studio would show."""
-    require_output(outputs, output_id)
-    path = _model_3mf(outputs, output_id)
+    await asyncio.to_thread(require_output, outputs, output_id)
+    async with _model_3mf(outputs, output_id) as path:
+        image = await asyncio.to_thread(_plate_cover, path, index)
+    if image is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"plate {index} of {output_id!r} has no cover")
+    return Response(image, media_type="image/png")
+
+
+def _plate_cover(path: Path, index: int) -> bytes | None:
+    """Plate ``index``'s cover image in the 3MF at ``path``; ``None`` when it has none.
+    Blocking."""
     cover = next(
         (plate.thumbnail for plate in plates_of(path) if plate.index == index and plate.thumbnail),
         None,
     )
     if cover is None:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"plate {index} of {output_id!r} has no cover")
+        return None
     with zipfile.ZipFile(path) as archive:
-        return Response(archive.read(cover), media_type="image/png")
+        return archive.read(cover)
 
 
 @router.get(

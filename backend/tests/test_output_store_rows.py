@@ -133,7 +133,7 @@ async def test_missing_row_after_copy_does_not_glob(
     with pytest.raises(OutputNotFoundError):
         store.directory(unknown)
     assert store.manifest(unknown) == []
-    assert store.provenance(unknown) is None
+    assert await store.provenance(unknown) is None
     # A known output is found with no glob too, and so is its model's list.
     assert store.get(meta.id).id == meta.id
     assert [m.id for m in store.list_for(job.slug)] == [meta.id]
