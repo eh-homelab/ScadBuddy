@@ -1098,6 +1098,29 @@ export function CustomizePage() {
     )
   }
 
+  const backToCurrent = () => {
+    const next = new URLSearchParams(search)
+    next.delete('version')
+    setSearch(next, { replace: true })
+  }
+
+  // #7314 — a link to a version the history does not have: the model itself may be here.
+  if (schemaState.error && version) {
+    return (
+      <PageProblem
+        title="That version is not here"
+        message={`This model has no revision ${version.slice(0, 7)}. The current version may still open.`}
+      >
+        <Button type="button" onClick={backToCurrent}>
+          Back to current
+        </Button>
+        <Button asChild variant="ghost">
+          <Link to="/">Back to models</Link>
+        </Button>
+      </PageProblem>
+    )
+  }
+
   if (schemaState.error || !schema) {
     return (
       <PageProblem title="That model is not here" message={schemaState.error?.message ?? 'The model has no customizer schema.'}>
@@ -1305,11 +1328,7 @@ export function CustomizePage() {
               type="button"
               variant="ghost"
               size="sm"
-              onClick={() => {
-                const next = new URLSearchParams(search)
-                next.delete('version')
-                setSearch(next, { replace: true })
-              }}
+              onClick={backToCurrent}
             >
               Back to current
             </Button>

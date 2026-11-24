@@ -2495,4 +2495,18 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     expect(await screen.findByRole('heading', { name: 'That model is not here' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
+
+  it('says a version that is gone is gone, and opens the current one (#7314)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/versions/:commit/schema', () =>
+        HttpResponse.json({ title: 'Not Found', status: 404, detail: "no revision 'abc1234'" }, { status: 404 }),
+      ),
+    )
+    const { user } = render('/m/name-keychain?version=abc1234')
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByRole('heading', { name: 'That version is not here' })).toBeInTheDocument()
+    await user.click(within(alert).getByRole('button', { name: 'Back to current' }))
+    await firstRender()
+    expect(screen.queryByTestId('version-badge')).not.toBeInTheDocument()
+  })
 })
