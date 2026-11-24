@@ -580,7 +580,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         const present = caller.context.flow === undefined ? findServer(set, tool) : serverOf(set, tool)
         if (!present) return { tier: 'write', declared: 'outward', refused: goneReason(tool) }
         const named = present.server
-        // A flow takes its call's queue from here, since it lists nothing (turn_tools).
+        // A flow takes its call's queue from here, since it lists nothing.
         const queue = pinned(deps, named) ? { task_queue: deps.hostQueue! } : {}
         const offName = `mcp__${named.name}__${present.parts.tool}`
         const off = await refusalOf(named, offName)

@@ -26,6 +26,7 @@ from pydantic import ValidationError
 
 from scadbuddy.bambuddy.project_file import cached_defaults
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.tracing import span
 from scadbuddy.library.outputs import (
     BACK_OFFICE,
     INPUTS_NAME,
@@ -239,6 +240,14 @@ class OutputIndex:
         """Index every saved output with no row, then drop the rows whose output is gone:
         how many were added and dropped. Run again it changes nothing. ``stop`` ends it
         after the output in hand, without the drop."""
+        # It globs every output's meta.json on the NFS share: one span (#7245).
+        with span("output_index.sync") as current:
+            added, dropped = self._sync(store, stop)
+            current.set_attribute("scadbuddy.added", added)
+            current.set_attribute("scadbuddy.dropped", dropped)
+            return added, dropped
+
+    def _sync(self, store: OutputStore, stop: threading.Event | None) -> tuple[int, int]:
         started = self.now()
         known = self._known()
         seen: set[str] = set()

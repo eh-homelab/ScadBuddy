@@ -97,6 +97,22 @@ def test_the_streaming_read_of_a_part_file_agrees_with_trimesh(tmp_path: Path) -
             ours, theirs = welded_part(tmp_path / part.mesh), load(part.mesh)
             assert np.array_equal(ours.faces, theirs.faces), part.mesh
             assert np.allclose(ours.vertices, theirs.vertices), part.mesh
+@pytest.mark.parametrize("entry", READ, ids=lambda e: e["file"].removesuffix(".3mf"))
+def test_every_part_file_loads_as_trimesh_load_welds_it(
+    entry: dict[str, Any], tmp_path: Path
+) -> None:
+    """`mesh_loader` reads a part file with the streaming reader, not `trimesh.load`
+    (#7397), and welds it as that load's process=True did: the same faces in the same
+    order (the paint codes follow it), the same vertices, closed exactly when it was."""
+    _, scene = opened(entry["file"], tmp_path)
+    load = mesh_loader(tmp_path)
+    for path in sorted({part.mesh for obj in scene.objects for part in obj.parts}):
+        old = trimesh.load(tmp_path / path, file_type="3mf", force="mesh")
+        assert isinstance(old, trimesh.Trimesh)
+        new = load(path)
+        assert np.array_equal(new.faces, old.faces), path
+        assert np.array_equal(new.vertices, old.vertices), path
+        assert new.is_watertight == old.is_watertight, path
 
 
 def carrot_neck(directory: Path, scene: Scene) -> tuple[SceneObject, Any, float, Section]:

@@ -281,9 +281,9 @@ def held_presets_activity(
     other activities (`spools/activities.py`); ``store`` and ``load`` are asked at each
     run, as the app's state is set up after its worker's activities are listed. Raises
     on a failed refresh, which the workflow logs; the next tick is the retry. ``after``
-    runs once the copy is current: ScadBuddy's own presets take what it read
-    (`filament/sb_presets.py` `sync_from_held`, #7176), in this activity, so the
-    Schedule's workflow commands do not change."""
+    runs once the copy is current: ScadBuddy's own presets take what it read and the
+    mirror sends them (`filament/preset_mirror.py` `sync_and_mirror`, #7176), in this
+    activity, so the Schedule's workflow commands do not change."""
 
     @activity.defn(name=HELD_ACTIVITY)
     async def held_presets_refresh() -> Outcome:

@@ -164,8 +164,21 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
   string, a number, a boolean or a list of strings.
 - **Schemas document, never restrict.** A kind's property schema (a JSON Schema object) types
   and describes the keys it knows; any other key is stored as given. A known key's value is
-  checked against its subschema. A schema that would refuse a key (`additionalProperties`
-  other than true, `required`, `propertyNames`, `patternProperties`) is refused.
+  checked against its subschema. A schema uses only an allowed subset of Draft 2020-12, so it
+  can refuse no key and run no regex. At the top level: `type` (`"object"`), `properties`,
+  `additionalProperties` (only `true`), `$schema`, `$comment`, `title`, `description`,
+  `examples`. In each key's subschema (an object): `type` (`string`, `number`, `integer`,
+  `boolean`, `array`, or a list of them with `null`), the annotations (`title`,
+  `description`, `$comment`, `default`, `examples`, `deprecated`, `readOnly`, `writeOnly`),
+  `enum`, `const`, the number bounds (`minimum`, `maximum`, `exclusiveMinimum`,
+  `exclusiveMaximum`, `multipleOf`), `minLength`, `maxLength`, `format` (an annotation that
+  checks nothing; never `regex`), `items` (a subschema of type `string`, with no `items`),
+  `minItems`, `maxItems`, `uniqueItems`. `$schema`, when given, is the Draft 2020-12 URI.
+  The values of `enum`, `const`, `default` and `examples` are data, never walked as
+  keywords. A schema with any other keyword is refused, and so is one that leaves a key no
+  value: an `enum` with no member a key can hold, a `const` a key cannot hold (null, an
+  object), a lower bound past its upper bound, or a minimum length or count past the value
+  caps (2000 characters, 50 strings of 500).
 - Where the schema lives: for an entity kind registered in code (`spool`, `spool_type`, …),
   a row of `entity_property_schemas (kind, schema)`, seeded by migration and editable by a
   person. For an item (phase 2), its item kind's `attribute_schema`, which follows the same
@@ -175,7 +188,9 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
   type `mpn`, `gtin` (list: spool and refill), `asin` (list of `marketplace:ASIN`),
   `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool `lot_number`.
 - `source` is `manual` or the import that wrote the key (as for links): a person's write
-  makes it `manual`, and an import never replaces a manual value. Imports that fill
+  makes it `manual`, and an import never replaces a manual value. There is one row per
+  entity and key, never one per source: an import's write to a key whose row is `manual` is
+  skipped, not stored beside it. Imports that fill
   properties (invoice import, label photos, the 3DFP fetch, #7025) come after the first PR.
 - Search: the filament lists and the agent's type and spool search match property values,
   so a scanned GTIN or a lot number finds its type or spool.
@@ -461,8 +476,9 @@ ships first.
   shipping over the new lines; re-spreading over all lines is an explicit choice (§6.7).
 - D16. Only filament suppliers, offers and prices sync to Bambuddy (§6.5).
 - D17. Properties are rows of their own keyed by entity, not a jsonb column per owner
-  table, so one route family, panel and search serve every kind, and a person's value is
-  kept apart from an import's by key (§6.3a). Owner's rule, 2026-11-22: schemas never
+  table, so one route family, panel and search serve every kind, and a person's value
+  wins over an import's for its key: one row per key, which an import skips once it is
+  `manual` (§6.3a). Owner's rule, 2026-11-22: schemas never
   restrict keys.
 
 ## 9. Phases (each one or more PRs, each an issue under one new epic)

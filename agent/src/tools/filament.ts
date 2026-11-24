@@ -11,6 +11,7 @@ import {
   parseSearch,
   SEARCH_ROUTES,
   spoolSearchDoc,
+  spoolTags,
   spoolTrays,
   typeSearchDoc,
   typeSkus,
@@ -30,6 +31,7 @@ const SOURCE = "ScadBuddy's own filament inventory"
 type SpoolCreate = components['schemas']['SpoolCreate-Input']
 type SpoolDraft = components['schemas']['SpoolDraft']
 type SpoolBulkCreate = components['schemas']['SpoolBulkCreate']
+type SpoolBulkUpdate = components['schemas']['SpoolBulkUpdate']
 
 /** A SpoolBuddy device id, as the backend's `DeviceId` accepts it (`filament/models.py`). */
 const DEVICE_ID = z.string().regex(/^[A-Za-z0-9._:-]{1,50}$/)
@@ -519,13 +521,15 @@ const tools: Tool[] = [
     description:
       "Start a fetch of a spool type's slicer presets from 3dfilamentprofiles.com by its `tdfp_id`: " +
       "ScadBuddy's profile-fetch worker exports one Bambu Studio preset per printer model ScadBuddy's printers " +
-      'have and per nozzle in the `profile_fetch_nozzles` setting; ScadBuddy imports them into Bambuddy\'s ' +
-      "local presets and makes them the type's presets for those keys (its other presets stay), with K values " +
+      'have and per nozzle in the `profile_fetch_nozzles` setting; ScadBuddy keeps each as its own preset (a ' +
+      "changed one as a new version of the same preset) and makes them the type's presets for those keys as " +
+      '`sb-<id>` (its other presets stay), copies them to Bambuddy\'s local presets while the setting ' +
+      "`filament_preset_mirror` is on, and reads K values " +
       'where a printer has an exact match, never over a K value a person, the fill or a printer calibration set. Answers at once with the run (`run.id`, `run.status` `running`) and ' +
       '`joined`: true when a fetch of the type was already running, which it joins instead of starting another. ' +
       'Follow it with filament_type_profile_fetch. 422 `no_tdfp_id` when the type has no `tdfp_id` ' +
       '(set it with filament_type_upsert), 422 `no_printer_models` when no printer has a model, 503 when the ' +
-      'fetch could not be started. Writes ScadBuddy and Bambuddy\'s local presets. Approved first.',
+      'fetch could not be started. Writes ScadBuddy, and Bambuddy\'s local presets through the copy. Approved first.',
     input: z.object({ type_id: z.string().uuid().describe("A type's `id` from filament_type_list") }),
     risk: 'outward',
     source: SOURCE,
@@ -693,7 +697,7 @@ const tools: Tool[] = [
     description:
       "Fill a spool type's empty print values from its slicer filament profile (#6714): with `type_id` one type, " +
       'without it every unarchived type. The profile is the type preset for the H2C 0.4 mm nozzle, else any 0.4 mm ' +
-      'one, else the first: a numeric id is a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
+      'one, else the first: `sb-<id>` is a ScadBuddy preset, a numeric id a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
       'empty fields (nozzle and bed temperature ranges from the H2C plates, density, drying temperature and hours ' +
       "from the AMS HT's idle drying values, above an AMS 2 Pro's 65 °C for some; a drying value the type's subtype or " +
       "material already sets is left empty, and only a refresh offers it; the diameter is never empty), never the cost (`cost_hint` is only a " +
@@ -773,7 +777,8 @@ const tools: Tool[] = [
       '`grams_left` from its ledger. ' +
       '`needs_type: true` lists only spools with no type yet, `false` only typed ones. Archived spools only ' +
       'with `include_archived`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
-      "place, tray, type code or type's supplier SKU match it.",
+      "place, tray, type code, type's supplier SKU or open tag's UID or tray UUID (from 4 hex digits; `:` and `-` " +
+      'are left out, so `04:A1:B2` finds tag `04A1B2…`) match it.',
     input: z.object({
       include_archived: z.boolean().default(false),
       needs_type: z.boolean().optional(),
@@ -781,7 +786,13 @@ const tools: Tool[] = [
     }),
     risk: 'read',
     source: SOURCE,
-    routes: ['GET /api/v1/filament/spools', 'GET /api/v1/filament/types', 'GET /api/v1/filament/inventory', ...SEARCH_ROUTES],
+    routes: [
+      'GET /api/v1/filament/spools',
+      'GET /api/v1/filament/types',
+      'GET /api/v1/filament/inventory',
+      'GET /api/v1/filament/tags',
+      ...SEARCH_ROUTES,
+    ],
     handler: async ({ include_archived, needs_type, q }, { backend }) => {
       const spools = await ok(
         backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type } } }),
@@ -789,14 +800,15 @@ const tools: Tool[] = [
       )
       const tokens = parseSearch(q)
       if (!tokens.length) return json(spools)
-      // The type codes, SKUs and trays only add to the search: one that cannot be read leaves its field out.
-      const [types, skus, trays] = await Promise.all([
+      // The type codes, SKUs, trays and tags only add to the search: one that cannot be read leaves its field out.
+      const [types, skus, trays, tags] = await Promise.all([
         orElse(
           ok(backend.GET('/api/v1/filament/types', { params: { query: { include_archived: true } } }), 'list the spool types'),
           [],
         ),
         orElse(typeSkus(backend), new Map<string, string[]>()),
         orElse(spoolTrays(backend), new Map<string, string>()),
+        orElse(spoolTags(backend), new Map<string, string[]>()),
       ])
       const codes = new Map(types.map((type) => [type.id, type.code]))
       return json(
@@ -806,6 +818,7 @@ const tools: Tool[] = [
               typeCode: spool.type_id ? codes.get(spool.type_id) : null,
               skus: spool.type_id ? skus.get(spool.type_id) : undefined,
               tray: trays.get(spool.id),
+              tags: tags.get(spool.id),
             }),
             tokens,
           ),
@@ -853,7 +866,7 @@ const tools: Tool[] = [
       'ledger event. To record a weighing use filament_spool_add_event; to archive use filament_spool_archive. ' +
       'When adding, `quantity` (1 to 100) makes that many identical spools in one request, each with its own number, ' +
       "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
-      'values and its place unless that is a tray, never its number, tag, tray, weight or weight lock; `fields` ' +
+      'values and its place unless that is a tray, never its number, tag, tray, weight, weight lock or `added_full`; `fields` ' +
       'then change the copy. Either answers the list of spools made, and a resend of the same call makes none twice; ' +
       'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
@@ -894,6 +907,7 @@ const tools: Tool[] = [
         // One key per call: a resend after a lost answer makes no second set of spools. A
         // resend reads the copy again, so its key names that draft too (R-7150-8): a changed
         // source is a new request, never a 422 for a key sent with another body.
+        // The draft carries `copy_of` (the copy route answers it), so a copied migrated preset row stays so (R-7150-13).
         const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1 } as SpoolBulkCreate
         const key = copy_of
           ? createHash('sha256').update(`${idempotencyKey(ctx)}\x1f${JSON.stringify(draft)}`).digest('hex')
@@ -1484,7 +1498,9 @@ const tools: Tool[] = [
       'has `changed_since_pull`). Only then, ' +
       'and only after the user agreed to the delete below, call it again with `expect_kept: false` (the default), ' +
       'which reads no Bambuddy and deletes, in one transaction, every spool link, the ' +
-      'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +
+      'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the colour ' +
+      "links, the old Bambuddy's ids of ScadBuddy's filament presets (the mirror then creates each one on the new " +
+      'Bambuddy), the open ' +
       'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then the full ' +
       'pass links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
       'is deleted. After a delete (`kept: false`) a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
@@ -1492,7 +1508,7 @@ const tools: Tool[] = [
       'Either way it asks for a full pass. ' +
       '`confirm_instance` must be the instance the links belong to: filament_sync_status `instance`. Answers the ' +
       'instance, `kept` and the counts deleted (`deleted`: `spools`, `suppliers`, `locations`, `insert_types`, ' +
-      '`filaments`, `intents`, `errors`, `ignored`). 409 `confirm_mismatch` when `confirm_instance` is not the ' +
+      '`filaments`, `colours`, `presets`, `intents`, `errors`, `ignored`). 409 `confirm_mismatch` when `confirm_instance` is not the ' +
       "links' instance, `same_instance` when they belong to the configured Bambuddy, `nothing_to_reset` when no " +
       'instance is recorded, `proof_changed` as above; each deletes nothing. Approved first.',
     input: z.object({
@@ -1687,6 +1703,61 @@ const tools: Tool[] = [
     summarize: ({ spool_ids }) => `Reset the used counter of ${spool_ids.length} ${spool_ids.length === 1 ? 'spool' : 'spools'}`,
     handler: async (body, { backend }) =>
       json(await ok(backend.POST('/api/v1/filament/spools/reset-consumed', { body }), 'reset the used counters')),
+  }),
+
+  defineTool({
+    name: 'filament_spools_bulk_update',
+    label: 'Edit several spools at once',
+    description:
+      'Set the same `patch` on 1 to 500 spools in one request (#7151): any field filament_spool_upsert edits but ' +
+      '`archived` (use filament_spools_bulk_archive). `null` on an override clears it. All or none: when one spool ' +
+      'refuses the patch, nothing changes and the error names that spool by its number. Each changed spool gets its ' +
+      'own `edited` ledger event; a resend changes nothing more. Answers `changed`, `unchanged` (already had the values) and `not_found` (ids with no spool). ' +
+      'Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      spool_ids: z.array(z.string().uuid()).min(1).max(500),
+      patch: z.record(z.string(), z.unknown()).describe('The spool fields to set on each spool'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/bulk-update'],
+    summarize: ({ spool_ids, patch }) =>
+      `Set ${Object.keys(patch).join(', ') || 'nothing'} on ${spool_ids.length} ${spool_ids.length === 1 ? 'spool' : 'spools'}`,
+    handler: async ({ spool_ids, patch }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/spools/bulk-update', { body: { spool_ids, patch } as SpoolBulkUpdate }),
+          'edit the spools',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spools_bulk_archive',
+    label: 'Archive or restore several spools',
+    description:
+      '`archived: true` takes 1 to 500 spools off the lists in one request; `false` puts them back (#7151). Each spool ' +
+      'changed gets its own ledger event, and an archived one loses its open tag binding, as filament_spool_archive does. ' +
+      'Answers `changed`, `unchanged` (already so) and `not_found` (ids with no spool). Only what the user says. Writes ' +
+      "ScadBuddy; with tag sync on (filament_sync.tags), an archived spool's tag is then cleared in Bambuddy.",
+    input: z.object({
+      spool_ids: z.array(z.string().uuid()).min(1).max(500),
+      archived: z.boolean().default(true),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/bulk-archive', 'POST /api/v1/filament/spools/bulk-restore'],
+    summarize: ({ spool_ids, archived }) =>
+      `${archived ? 'Archive' : 'Restore'} ${spool_ids.length} ${spool_ids.length === 1 ? 'spool' : 'spools'}`,
+    handler: async ({ spool_ids, archived }, { backend }) =>
+      json(
+        await ok(
+          archived
+            ? backend.POST('/api/v1/filament/spools/bulk-archive', { body: { spool_ids } })
+            : backend.POST('/api/v1/filament/spools/bulk-restore', { body: { spool_ids } }),
+          `${archived ? 'archive' : 'restore'} the spools`,
+        ),
+      ),
   }),
 
   defineTool({

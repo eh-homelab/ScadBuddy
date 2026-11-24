@@ -1632,7 +1632,8 @@ workers restart.
     data directory as allocated on disk, which is what kubelet holds an emptyDir's
     `sizeLimit` against: alert on that one before eviction (#1785). It is walked at
     most once a minute (#2020), so it can lag a scrape by that much.
-  - Every worker watches its own event loop (#3788). `scadbuddy_event_loop_lag_seconds`
+  - Every worker watches its own event loop (#3788), and so does the API (#7245).
+    `scadbuddy_event_loop_lag_seconds`
     is how late a no-op posted to it ran. A loop held for over a second counts in
     `scadbuddy_event_loop_stalls_total` and logs every thread's stack while it is
     still held (logger `scadbuddy.core.loop_watch`): that is what times workflow tasks
@@ -1995,8 +1996,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   content hash. You install, approve and re-pin a package, and set its items, in
   Settings → Tools & plugins → Packages: its switch, each hook, skill (its commands
   among them) and subagent `on` or `off`, each built-in an allowed package names, and
-  each of its MCP servers with its tools. A change applies from the next call, in classic
-  and durable turns alike; a hook changes from the next turn. See
+  each of its MCP servers with its tools. A change applies from the next call, in every
+  turn; a hook changes from the next turn. See
   [`docs/ai/operating.md` §9](docs/ai/operating.md#9-plugin-packages-297), "Items and
   switches".
 - **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
@@ -2480,16 +2481,18 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   `ProfileFetch` workflow `profile-fetch:<run_id>`. The worker's export activity asks the
   browser service to log in to 3DFP and to export one profile per printer model and nozzle
   from the spool page, and PUTs each file to the CRUD service. Its import activity then asks the API to import the run. The API
-  checks each file, removes its G-code keys, posts the files as one zip to Bambuddy's
-  `POST /local-presets/import`, sets the type's presets for the fetched
-  `(printer model, nozzle)` keys, reads K values from `GET /printers/{id}/kprofiles/`
+  checks each file, removes its G-code keys, keeps each one as the type's ScadBuddy preset
+  of its key (`filament_presets`, a changed file a new version of it, #7176), sets the
+  type's presets for the fetched `(printer model, nozzle)` keys to them (`sb-<id>`), reads
+  K values from `GET /printers/{id}/kprofiles/`
   where one matches exactly, and removes an old K value of a fetched key that the new
   preset does not match (the run's notes name each one; a printer whose K table did not
   answer keeps its values). It writes and removes only K values an earlier fetch set
   (`source` `profile_fetch`): a K value a person, the profile fill or a printer
   calibration set keeps its value and its source, and the run's notes name each one it
-  kept (#6857, plan Decision 127). It then refreshes the kept copy of the local presets (unless the
-  setting `spool_overlay_refresh_seconds` is 0; build Decision 18). The worker
+  kept (#6857, plan Decision 127). After the commit, while the setting
+  `filament_preset_mirror` is on, the mirror copies the written presets to Bambuddy's local
+  presets (`filament/preset_mirror.py`); nothing is imported into Bambuddy. The worker
   never calls Bambuddy and never has a Bambuddy key. The nozzles are the remembered setting
   `profile_fetch_nozzles` (Settings → Printing → Filament; default 0.2, 0.4, 0.6, 0.8). The
   printer models are the models of ScadBuddy's printers.

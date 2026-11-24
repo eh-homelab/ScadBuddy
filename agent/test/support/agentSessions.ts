@@ -35,7 +35,7 @@ import { SqlSweep } from './sql/sweep.js'
 import { PgTurnRows } from './sql/turnRows.js'
 import { SqlTurnRoutes } from './sql/turnRoutes.js'
 import { AgentWorker, workerIdentity } from '../../src/temporal/worker.js'
-import { localTemporal, polledHosts, TEMPORAL_CLI, TEMPORAL_SKIP } from './temporal.js'
+import { anyPoller, localTemporal, polledHosts, TEMPORAL_CLI, TEMPORAL_SKIP } from './temporal.js'
 
 // AgentSession for the session tests (unified runtime spec 2026-10-13 §5, plan Step 6.3): one
 // Temporal dev server per test file, and the workers main.ts runs for a session's turns, in this
@@ -160,21 +160,14 @@ export function agentSessions(): void {
     })
     workers = [tools, host]
     await Promise.all(workers.map((w) => w.running()))
-    // DurableTurns.unready reads the pollers: wait until Temporal lists them.
+    // DurableTurns.unready reads the pollers of every partition: wait until Temporal lists them.
     for (;;) {
       const polled = await Promise.all(
         [
           [SESSION_QUEUE, 1],
           [TASK_QUEUE, 2],
           [hostQueue, 2],
-        ].map(async ([queue, type]) => {
-          const { pollers } = await env.client.workflowService.describeTaskQueue({
-            namespace: 'default',
-            taskQueue: { name: queue as string },
-            taskQueueType: type as number,
-          })
-          return (pollers ?? []).length > 0
-        }),
+        ].map(([queue, type]) => anyPoller(env.client, queue as string, type as number)),
       )
       if (polled.every(Boolean)) break
       await new Promise((resolve) => setTimeout(resolve, 100))

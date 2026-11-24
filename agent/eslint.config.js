@@ -30,6 +30,20 @@ export default tseslint.config(
         'error',
         { prefer: 'type-imports', fixStyle: 'inline-type-imports' },
       ],
+      // A task queue's pollers are read on every partition (#7306, agent/CLAUDE.md
+      // "Poller reads"): only temporal/pollers.ts calls DescribeTaskQueue. A unit test's
+      // stub defines it and never calls it.
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "CallExpression[callee.property.name='describeTaskQueue']",
+          message: 'Read pollers with queuePollers (src/temporal/pollers.ts): DescribeTaskQueue reports one partition (#7306).',
+        },
+      ],
     },
+  },
+  {
+    files: ['src/temporal/pollers.ts'],
+    rules: { 'no-restricted-syntax': 'off' },
   },
 )
