@@ -702,7 +702,7 @@
       "id": 37,
       "type": "timeseries",
       "title": "Last segment age",
-      "description": "Seconds since each recorder's last segment of the printer, set at each lease call (every 5 s), by printer and recorder pod. Past 120 s the leader reports the feed stalled.",
+      "description": "Seconds since each recorder's last segment of the printer, set each tick (every 5 s), by printer and recorder pod. Past 120 s the leader reports the feed stalled.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 16, "y": 79, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },

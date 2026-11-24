@@ -182,8 +182,9 @@ class Relay:
         if state == "stopped":
             self._pull.pop(printer_id, None)
             self._was_ready.discard(printer_id)
-            with suppress(KeyError):
-                PULLING.remove(printer_id)
+            for metric in (PULLING, RECONNECTS):
+                with suppress(KeyError):
+                    metric.remove(printer_id)
             return
         if state == "pulling":
             if self._pull.get(printer_id) == "retrying" and printer_id in self._was_ready:

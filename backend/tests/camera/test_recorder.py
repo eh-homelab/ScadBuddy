@@ -57,12 +57,21 @@ class FakeCamera:
         self.index_down = False
         #: The API's clock against this host's, in seconds; ``None`` sends no ``Date``.
         self.skew: float | None = None
+        #: How stale the ``Date`` header is: uvicorn refreshes it once a second.
+        self.lag = 0.0
+        #: Each call's round trip, in seconds of `wall`.
+        self.latency = 0.0
+        #: This host's wall clock, which the recorders read (`Recorder` ``wall``).
+        self.wall = Wall()
 
     def answer(self, request: httpx.Request) -> httpx.Response:
+        self.wall.now += self.latency / 2
         response = self._answer(request)
         if self.skew is not None:
-            when = datetime.fromtimestamp(time.time() + self.skew, UTC)
+            # As email.utils.formatdate: whole seconds, the fraction dropped.
+            when = datetime.fromtimestamp(int(self.wall.now + self.skew - self.lag), UTC)
             response.headers["Date"] = format_datetime(when, usegmt=True)
+        self.wall.now += self.latency / 2
         return response
 
     def _answer(self, request: httpx.Request) -> httpx.Response:
@@ -165,6 +174,14 @@ class FakeCamera:
         return [s.started_at for _, _, s in self.index]
 
 
+class Wall:
+    def __init__(self) -> None:
+        self.now = 1_800_000_000.25
+
+    def __call__(self) -> float:
+        return self.now
+
+
 class FakeBucket:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
@@ -237,6 +254,7 @@ class Rig:
             segments=self.root,
             tick_seconds=tick_seconds,
             clock=time.monotonic if real_clock else self.clock,
+            wall=api.wall,
             call_budget=0.0,
             retry_min=0.01,
             retry_max=0.02,
@@ -904,4 +922,58 @@ async def test_wanted_names_the_recorded_paths(tmp_path: Path, api: FakeCamera) 
     assert rig.recorder.wanted() == set()
     await rig.recorder.reconcile_all()
     assert rig.recorder.wanted() == {P1}
+    await rig.recorder.aclose()
+
+
+async def test_a_stale_date_on_a_good_clock_is_not_refused(tmp_path: Path, api: FakeCamera) -> None:
+    """uvicorn's Date header can be almost 2 s old: a perfect clock still starts."""
+    rig = Rig(tmp_path, api)
+    api.skew, api.lag, api.latency = 0.0, 1.9, 0.2
+    for fraction in (0.0, 0.05, 0.5, 0.95):
+        api.wall.now = 1_800_000_000 + fraction
+        await rig.recorder.check_clock()
+        assert rig.recorder.clock_ok(), (fraction, rig.recorder.clock_offset)
+    await rig.recorder.aclose()
+
+
+async def test_a_3s_skew_is_refused_at_start(tmp_path: Path, api: FakeCamera) -> None:
+    rig = Rig(tmp_path, api)
+    api.skew, api.latency = -3.0, 0.2
+    with pytest.raises(CameraRefusal, match="clock"):
+        await rig.recorder.check_clock()
+    await rig.recorder.aclose()
+
+
+async def test_one_outlier_sample_does_not_trip_health(tmp_path: Path, api: FakeCamera) -> None:
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    api.skew = 0.0
+    for _ in range(3):
+        await rig.recorder.tick(P1)
+    api.skew = -5.0
+    await rig.recorder.tick(P1)
+    assert rig.recorder.clock_ok()
+    api.skew = 0.0
+    await rig.recorder.tick(P1)
+    await rig.recorder.flushed()
+    assert all("error" not in body for _, body in api.feeds)
+    await rig.recorder.aclose()
+
+
+async def test_clock_error_does_not_repost_a_stopped_printer(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    await rig.recorder.tick(P1)
+    api.printers = []
+    await rig.recorder.reconcile_all()
+    await rig.recorder.flushed()
+    stopped = len(api.feeds)
+    assert api.feeds[-1][1]["state"] == "stopped"
+    rig.recorder._feed.set_error("the recorder's clock is +5.0 s off the API's")
+    await rig.recorder.flushed()
+    assert len(api.feeds) == stopped
     await rig.recorder.aclose()

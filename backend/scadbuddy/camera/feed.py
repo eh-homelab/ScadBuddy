@@ -69,12 +69,13 @@ class FeedSender:
 
     def set_error(self, error: str | None) -> None:
         """Set (or clear, with ``None``) the error every report carries. A change posts each
-        printer's desired state again."""
+        printer's desired state again, but not ``stopped``: that printer is gone."""
         if error == self._error:
             return
         self._error = error
         for printer_id, state in list(self._desired.items()):
-            self.want(printer_id, state)
+            if state != "stopped":
+                self.want(printer_id, state)
 
     async def _send(self, printer_id: str) -> None:
         delay = self._retry_min

@@ -81,12 +81,16 @@ flowchart LR
 - **Clock (spec
   [§6.9](../superpowers/specs/2026-11-23-printer-camera-recording-design.md#69-operation)).**
   Segment times come from the recorders' clocks; print times come from the API's. The
-  recorder compares its clock with the `Date` header of the API's answers (1 s resolution;
-  the API's CRUD listener is uvicorn, which sends `Date` by default, `date_header=True`). At
-  start, after the CRUD service answers, a clock more than 2 s off refuses the start: the
-  recorder logs the offset and exits 2 (`Recorder.check_clock`). After that, each lease
-  answer updates the offset. While it is more than 2 s, `/healthz` answers 503 and every feed
-  report carries an `error` that names the offset (`Recorder._note_clock`,
+  recorder compares its clock with the `Date` header of the API's answers. The API's CRUD
+  listener is uvicorn (`crud/listener.py`, `date_header` left at its default `True`), which
+  writes `Date` in whole seconds and refreshes it once a second ([uvicorn 0.53.0 `server.py` `on_tick`](https://github.com/encode/uvicorn/blob/0.53.0/uvicorn/server.py#L251-L256)). So the API's time at
+  an answer lies in [Date, Date + 2 s), and the recorder takes Date + 1 s against the middle of
+  its own send and receive (`Recorder._sample`): ±1 s plus the call's latency. It decides on
+  the smallest offset of its last three samples, so one slow answer does not count. At start,
+  after the CRUD service answers, it takes three samples; more than 2 s off refuses the
+  start: the recorder logs the offset and exits 2 (`Recorder.check_clock`). After that, each
+  lease call adds a sample. While the offset is more than 2 s, `/healthz` answers 503 and every
+  feed report carries an `error` that names it (`Recorder._note_clock`,
   `FeedSender.set_error`).
 
 ### MediaMTX facts (v1.21.4)

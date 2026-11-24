@@ -1054,16 +1054,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   holds access codes; it gives MediaMTX one RTSPS pull per printer through the control API) and
   `python -m scadbuddy.camera.recorder` (`recorder.py`, CRUD caller `camera`, two pods: leases,
   upload before index, handover from the standby's buffer, the disk cap, the clock check
-  against the API's `Date` header: more than 2 s off refuses the start with exit 2, and later
-  fails `/healthz` and puts an `error` on its feed reports). Both register `scadbuddy_camera_*`
+  against the API's `Date` header: uvicorn refreshes it once a second, so a sample is Date + 1 s
+  against the middle of the call, ±1 s plus latency; the smallest of the last three samples more
+  than 2 s off refuses the start with exit 2 (three samples at start), and later fails
+  `/healthz` and puts an `error` on its feed reports). Both register `scadbuddy_camera_*`
   metrics on prometheus_client's own registry, which `lint-dashboard.sh` reads.
   `process.py` holds the hook server MediaMTX's `curl` hooks call (127.0.0.1:9091), `/healthz`
   and `/metrics` on 9090, and `main_with` (a `CameraRefusal` from `run` exits 2). `/healthz`
   (`healthy`) answers 503 when MediaMTX's control API does not answer within 3 s, when its
   runtime list lacks a path the controller put (`wanted()`: a MediaMTX-only restart), when the
   change follower has stopped, or (recorder) when the clock is off. Before the follower
-  starts it answers 200 when MediaMTX answers and holds the paths: the follower does not count
-  yet. `follow.py` follows the filtered change stream,
+  starts it answers 200 when MediaMTX answers and holds the paths and, in the recorder, the
+  clock is within 2 s: the follower does not count yet. `follow.py` follows the filtered change stream,
   `feed.py` sends feed states, `mediamtx.py` is the control API client, `uploads.py` the bucket
   (`Uploader`, the object key), `mp4.py` the init section parse (`moov/udta` left out of the
   digest). The API side is `store.py` (`CameraStore`: sources, leases, the index, feeds),

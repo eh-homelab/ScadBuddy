@@ -449,12 +449,15 @@ async def test_pulling_gauge_goes_with_a_removed_path() -> None:
     mtx = FakeMtx()
     subject = relay(api, mtx)
     await subject.reconcile_all()
-    await subject.on_hook(printer, "ready")
+    for event in ("ready", "not_ready", "ready"):
+        await subject.on_hook(printer, event)
+    assert _sample("scadbuddy_camera_relay_reconnects_total", printer) == 1
     assert _sample("scadbuddy_camera_relay_pulling", printer) == 1
     api.sources = []
     await subject.reconcile_all()
     assert printer not in mtx.paths
     assert _sample("scadbuddy_camera_relay_pulling", printer) is None
+    assert _sample("scadbuddy_camera_relay_reconnects_total", printer) is None
     await subject.aclose()
 
 

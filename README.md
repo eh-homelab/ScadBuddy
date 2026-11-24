@@ -2750,10 +2750,14 @@ holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 
   the same numbers: `curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list`.
 - **Clock.** Segment times come from the recorders' clocks and print times from the API's
   (spec §6.9), so every node runs NTP. The recorder compares its clock with the API's `Date`
-  header (1 s resolution; the CRUD listener is uvicorn, which sends it by default). More than
-  2 s off at start: it logs the offset and exits 2. Later, at each lease answer: `/healthz`
-  answers 503 and every feed report carries an `error` that names the offset, until it is
-  back within 2 s.
+  header. The CRUD listener is uvicorn (`crud/listener.py`), which writes `Date` in whole
+  seconds and refreshes it once a second ([uvicorn 0.53.0 `server.py` `on_tick`](https://github.com/encode/uvicorn/blob/0.53.0/uvicorn/server.py#L251-L256); uvicorn 0.53.0 is the locked version). So the
+  API's time at an answer lies in [Date, Date + 2 s): the recorder takes Date + 1 s against
+  the middle of its own send and receive, which is right within ±1 s plus the call's
+  latency. The limit stays 2 s, and the recorder decides on the smallest offset of its last
+  three samples. At start it takes three samples; more than 2 s off: it logs the offset and
+  exits 2. Later, each lease call adds a sample: while the offset is more than 2 s,
+  `/healthz` answers 503 and every feed report carries an `error` that names it.
 - **Metrics.** `/metrics` on each controller's 9090: the relay's
   `scadbuddy_camera_relay_pulling` and `scadbuddy_camera_relay_reconnects_total`, the
   recorders' `scadbuddy_camera_segments_indexed_total`, `_upload_lag_seconds`,

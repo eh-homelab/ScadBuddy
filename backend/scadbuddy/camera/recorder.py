@@ -49,6 +49,7 @@ import re
 import shutil
 import sys
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -108,6 +109,8 @@ GAP: Final = timedelta(seconds=1)
 #: The largest offset from the API's clock a recorder accepts (spec §6.9): segment times
 #: come from the recorder's clock, print times from the API's.
 MAX_CLOCK_OFFSET: Final = 2.0
+#: The clock samples the check decides on: the smallest offset of the last three.
+CLOCK_SAMPLES: Final = 3
 #: The most segments one index call takes (`api/crud_camera.py` ``MAX_SEGMENTS``).
 BATCH: Final = 500
 #: How long one lease or index call may retry: well inside a tick.
@@ -135,7 +138,7 @@ LEADER = Gauge(
 LAST_SEGMENT_AGE = Gauge(
     "scadbuddy_camera_last_segment_age_seconds",
     "Seconds since this recorder's last segment of the printer (since the path started, before"
-    " the first one), set at each lease call.",
+    " the first one), set each tick (every 5 s).",
     ["printer"],
 )
 
@@ -215,7 +218,9 @@ class Recorder:
         self._tick_seconds = tick_seconds
         self._clock = clock
         self._wall = wall
-        #: This host's clock minus the API's, from the last answer with a ``Date`` header.
+        #: The last clock samples (this host's clock minus the API's), and the smallest of
+        #: them: the offset the clock check decides on.
+        self._clock_samples: deque[float] = deque(maxlen=CLOCK_SAMPLES)
         self.clock_offset: float | None = None
         self._call_budget = call_budget
         self._put_timeout = put_timeout
@@ -239,9 +244,19 @@ class Recorder:
 
     # Clock (spec §6.9)
 
-    def _offset(self, response: httpx.Response) -> float | None:
-        """This host's clock minus the API's, from the answer's ``Date`` header. The header
-        has 1 s resolution, so the API's time is taken as the middle of its second."""
+    async def _timed(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """One CRUD call, with its clock sample noted (`_note_clock`)."""
+        sent = self._wall()
+        response = await self._crud.request(method, path, **kwargs)
+        self._note_clock(response, sent, self._wall())
+        return response
+
+    @staticmethod
+    def _sample(response: httpx.Response, sent: float, received: float) -> float | None:
+        """This host's clock minus the API's, from one answer's ``Date`` header. uvicorn
+        writes that header in whole seconds and refreshes it once a second, so the API's time
+        at the answer lies in [Date, Date + 2): its centre, Date + 1, is the estimate, against
+        the middle of this host's send and receive. That gives ±1 s plus the call's latency."""
         value = response.headers.get("date")
         if value is None:
             return None
@@ -249,7 +264,7 @@ class Recorder:
             date = parsedate_to_datetime(value)
         except (TypeError, ValueError):
             return None
-        return self._wall() - (date.timestamp() + 0.5)
+        return (sent + received) / 2 - (date.timestamp() + 1.0)
 
     def _clock_error(self) -> str | None:
         if self.clock_ok():
@@ -263,12 +278,15 @@ class Recorder:
         """No offset is known, or it is at most `MAX_CLOCK_OFFSET`."""
         return self.clock_offset is None or abs(self.clock_offset) <= MAX_CLOCK_OFFSET
 
-    def _note_clock(self, response: httpx.Response) -> None:
-        offset = self._offset(response)
-        if offset is None:
+    def _note_clock(self, response: httpx.Response, sent: float, received: float) -> None:
+        """Keep the last `CLOCK_SAMPLES` samples; the offset is the smallest of them, so one
+        slow answer does not trip the check."""
+        sample = self._sample(response, sent, received)
+        if sample is None:
             return
         was = self.clock_ok()
-        self.clock_offset = offset
+        self._clock_samples.append(sample)
+        self.clock_offset = min(self._clock_samples, key=abs)
         error = self._clock_error()
         if error is not None and was:
             logger.warning("camera recorder: %s", error)
@@ -279,10 +297,10 @@ class Recorder:
         self._feed.set_error(error)
 
     async def check_clock(self) -> None:
-        """At start: raise `CameraRefusal` when this host's clock is more than
-        `MAX_CLOCK_OFFSET` off the API's."""
-        response = await self._crud.request("GET", f"{BASE}/printers", budget=self._call_budget)
-        self._note_clock(response)
+        """At start: take `CLOCK_SAMPLES` samples, then raise `CameraRefusal` when this
+        host's clock is more than `MAX_CLOCK_OFFSET` off the API's."""
+        for _ in range(CLOCK_SAMPLES):
+            await self._timed("GET", f"{BASE}/printers", budget=self._call_budget)
         error = self._clock_error()
         if error is not None:
             raise CameraRefusal([error])
@@ -621,13 +639,12 @@ class Recorder:
     async def _lease(
         self, printer_id: str, action: Literal["acquire", "renew", "release"]
     ) -> LeaseAnswer:
-        response = await self._crud.request(
+        response = await self._timed(
             "POST",
             f"{BASE}/printers/{quote(printer_id, safe='')}/lease",
             json={"recorder": self._name, "action": action},
             budget=self._call_budget,
         )
-        self._note_clock(response)
         return LeaseAnswer.model_validate(response.json())
 
     def _leads(self, feed: _Feed) -> bool:

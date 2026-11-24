@@ -153,3 +153,14 @@ def test_a_refusal_from_run_exits_2(
     status = process.main_with(lambda environ: None, object, lambda settings: "INFO", run)
     assert status == 2
     assert "+3.0 s off" in caplog.text
+
+
+async def test_a_path_that_is_not_ready_counts_as_present() -> None:
+    """A printer that is off: MediaMTX lists its path with ``ready: false``."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        items = [{"name": "p1", "ready": False}]
+        return httpx.Response(200, json={"pageCount": 1, "itemCount": 1, "items": items})
+
+    not_ready = MediaMtx("http://mtx", transport=httpx.MockTransport(handle))
+    assert await healthy(not_ready, None, {"p1"})
