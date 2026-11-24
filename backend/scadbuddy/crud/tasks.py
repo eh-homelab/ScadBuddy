@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from urllib.parse import quote
 
-from scadbuddy.crud.client import CrudClient, CrudRefusedError
+from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.tasks.models import Task, TaskOpen
 from scadbuddy.tasks.store import (
@@ -33,6 +33,12 @@ TASK_NOT_OPEN = "task-not-open"
 
 def _part(value: str) -> str:
     return quote(value, safe="")
+
+
+def _behind(error: CrudUnavailableError, task_id: str) -> None:
+    """The run's row still lagged Temporal at the end of the client's budget."""
+    if error.problem.get("reason") == RUN_BEHIND:
+        raise RunBehindError(task_id) from error
 
 
 class RemoteTasks:
@@ -72,10 +78,11 @@ class RemoteTasks:
                 f"{BASE}/{_part(task_id)}/close",
                 json={"state": state, "workflow_run_id": workflow_run_id},
             )
+        except CrudUnavailableError as error:
+            _behind(error, task_id)
+            raise
         except CrudRefusedError as error:
             reason = error.problem.get("reason")
-            if error.status == 409 and reason == RUN_BEHIND:
-                raise RunBehindError(task_id) from error
             if (error.status, reason) in ((409, TASK_NOT_OPEN), (404, TASK_NOT_FOUND)):
                 return None
             raise
@@ -104,10 +111,11 @@ class RemoteTasks:
                     "final": final,
                 },
             )
+        except CrudUnavailableError as error:
+            _behind(error, task_id)
+            raise
         except CrudRefusedError as error:
             reason = error.problem.get("reason")
-            if error.status == 409 and reason == RUN_BEHIND:
-                raise RunBehindError(task_id) from error
             if error.status == 409 and reason == TASK_NOT_OPEN:
                 raise TaskNotOpenError(error.problem["state"]) from error
             if error.status == 404 and reason == TASK_NOT_FOUND:

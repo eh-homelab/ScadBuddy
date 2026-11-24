@@ -454,19 +454,82 @@ async def test_the_runs_own_close_replaces_an_answer(remote: RemoteTasks, store:
     assert store.get(T1) == closed
 
 
-async def test_a_final_write_of_an_execution_the_row_does_not_know_yet_is_a_typed_409(
-    remote: RemoteTasks, http: httpx.AsyncClient
+async def test_a_final_write_of_an_execution_the_row_does_not_know_yet_is_503(
+    remote: RemoteTasks, http: httpx.AsyncClient, store: TaskStore
 ) -> None:
-    await remote.open(_task(T1), workflow_run_id="x")
+    """The row lags Temporal: the client sends it again, and then the activity does."""
+    held = await remote.open(_task(T1), workflow_run_id="x")
     with pytest.raises(RunBehindError):
         await remote.mark_answered(T1, {"ok": True}, None, "newer", final=True)
     with pytest.raises(RunBehindError):
         await remote.close(T1, "expired", workflow_run_id="newer")
-    raw = await http.post(
-        f"{BASE}/{T1}/answered",
-        json={"answer": {}, "by": None, "workflow_run_id": "newer", "final": True},
+    for path, body in (
+        ("answered", {"answer": {}, "by": None, "workflow_run_id": "newer", "final": True}),
+        ("close", {"state": "expired", "workflow_run_id": "newer"}),
+    ):
+        raw = await http.post(f"{BASE}/{T1}/{path}", json=body)
+        assert raw.status_code == 503 and raw.json()["reason"] == "run-behind"
+    assert store.get(T1) == held
+
+
+async def test_the_client_sends_a_final_mark_again_until_the_row_follows(
+    app: FastAPI, store: TaskStore, pg_pool: PgPool
+) -> None:
+    store.open(_task(T1), workflow_run_id="x")
+    tries = []
+
+    async def follow(request: httpx.Request) -> None:
+        tries.append(request.url.path)
+        if len(tries) == 2:
+            with pg_pool.connection() as conn:
+                conn.execute("UPDATE workflow_runs SET workflow_run_id = 'newer'")
+
+    client = CrudClient(
+        "http://api", "projects", ServiceAuth(_Source()), transport=httpx.ASGITransport(app=app)
     )
-    assert raw.status_code == 409 and raw.json()["reason"] == "run-behind"
+    client._http.event_hooks["request"].append(follow)
+    try:
+        marked = await RemoteTasks(client).mark_answered(T1, {"a": 1}, None, "newer", final=True)
+    finally:
+        await client.aclose()
+    assert (marked.state, marked.answer, len(tries)) == ("answered", {"a": 1}, 2)
+
+
+def _final(answer: dict[str, Any], execution: str) -> dict[str, Any]:
+    return {"answer": answer, "by": None, "workflow_run_id": execution, "final": True}
+
+
+async def test_a_final_mark_answers_every_row_it_leaves_or_replaces(
+    http: httpx.AsyncClient, remote: RemoteTasks, store: TaskStore, pg_pool: PgPool
+) -> None:
+    await remote.open(_task(T1), workflow_run_id="x")
+    await remote.mark_answered(T1, {"a": 1}, "alice", "x")
+    another = await http.post(f"{BASE}/{T1}/answered", json=_final({"a": 2}, "x"))
+    assert another.status_code == 200
+    assert (another.json()["answer"], another.json()["answered_by"]) == ({"a": 2}, None)
+    await remote.open(_task(T2), workflow_run_id="x")
+    await remote.close(T2, "expired")
+    expired = await http.post(f"{BASE}/{T2}/answered", json=_final({"a": 1}, "x"))
+    assert expired.status_code == 200
+    assert (expired.json()["state"], expired.json()["answer"]) == ("expired", None)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE workflow_runs SET workflow_run_id = 'y',"
+            " superseded_run_ids = array_append(superseded_run_ids, 'x')"
+        )
+    replaced = await http.post(f"{BASE}/{T1}/answered", json=_final({"a": 3}, "x"))
+    assert replaced.status_code == 200 and replaced.json()["answer"] == {"a": 2}
+    held = store.get(T1)
+    assert held is not None and held.answer == {"a": 2}
+
+
+async def test_a_final_mark_of_an_unknown_task_is_404(
+    http: httpx.AsyncClient, remote: RemoteTasks
+) -> None:
+    raw = await http.post(f"{BASE}/{T1}/answered", json=_final({}, "x"))
+    assert raw.status_code == 404 and raw.json()["reason"] == "task-not-found"
+    with pytest.raises(KeyError):
+        await remote.mark_answered(T1, {}, None, "x", final=True)
 
 
 async def test_the_open_of_a_replaced_execution_is_a_typed_409(
