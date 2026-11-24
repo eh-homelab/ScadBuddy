@@ -35,9 +35,9 @@ import { SSE_KEEPALIVE_MS } from './sessions.js'
 // workflow. A durable entry past its timer whose worker has not resolved it yet is
 // listed `expiring`, and the badge does not count it.
 //
-// GET /api/v1/ai/sessions/{id}/pending-input answers for one session: a classic
-// one from those tables, a durable one by its workflow's `pending_input` Query,
-// the source of truth (503 when its worker does not answer; plan 5b ruling 11).
+// GET /api/v1/ai/sessions/{id}/pending-input answers for one session: the same read
+// narrowed to it, from the same rows, never a Query of its workflow (#7311: a closed
+// workflow, archived after Temporal's retention, cannot be queried).
 //
 // Both are reads, behind guard.ts `uiReadProblem` like the approvals list. An
 // approval carries its scrubbed summary and input hash, never its input; an answer
@@ -116,24 +116,32 @@ export type PendingInputPage = { entries: PendingInputEntry[]; summaries_truncat
  * Every entry `principal` may see (plan 5b ruling 10): for the browser user, all of
  * them. For anyone else, the approvals it may see (all of them with the approval
  * grant; else its own sessions' and its own MCP prepares), and the answers of the
- * sessions it owns. `sessionId` narrows it to one session.
+ * sessions it owns. `sessionId` narrows it to one session; `grant` is whether `principal`
+ * holds the approval grant, where the caller has read it already; `browserAnswers` `all` lists that
+ * session's parked answers to a browser user who does not own it.
  */
 export async function pendingInput(
   sessions: SessionManager,
   principal: Owner = BROWSER_USER,
-  filter: { sessionId?: string; runs?: boolean } = {},
+  filter: { sessionId?: string; runs?: boolean; grant?: boolean; browserAnswers?: 'own' | 'all' } = {},
 ): Promise<PendingInputPage> {
   const browser = principal.kind === 'browser'
-  const grant = !browser && (await sessions.approvals.holdsGrant(principal))
+  const grant = !browser && (filter.grant ?? (await sessions.approvals.holdsGrant(principal)))
   // A flow run's own parked calls are the person's (#2482, spec 2026-10-11 §4.5): in the
   // browser user's aggregate read, the badge's, and in no other principal's.
   const withRuns = browser && filter.runs === true && filter.sessionId === undefined
   const [approvals, { questions: answers, summariesTruncated }, durable, own] = await Promise.all([
-    sessions.approvals.listVisiblePending(principal),
-    sessions.questions.listPending(principal),
+    // Each list is capped, so one session's read asks for that session's rows only.
+    // Both approvals lists check the principal's access (and its grant) themselves, on purpose:
+    // that is the service's own guard (its refusal is sessionPendingInput's 404), and `grant`
+    // here only shapes the projection's filter.
+    filter.sessionId === undefined
+      ? sessions.approvals.listVisiblePending(principal)
+      : sessions.approvals.list(principal, { sessionId: filter.sessionId, pending: true }),
+    sessions.questions.listPending(principal, filter.sessionId),
     sessions.projection.entries({
       ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }),
-      ...(browser ? { ownAnswers: true } : { ownedBy: principal, allApprovals: grant }),
+      ...(browser ? { ownAnswers: filter.browserAnswers !== 'all' } : { ownedBy: principal, allApprovals: grant }),
     }),
     withRuns ? sessions.queue.ownEntries() : Promise.resolve([]),
   ])
@@ -163,9 +171,12 @@ export async function pendingInput(
 }
 
 /**
- * One session's entries, as `principal` may see them, from its workflow's gate
- * (DurableUnavailable when its worker does not answer). Undefined when there is no such
- * session for the principal.
+ * One session's entries, as `principal` may see them: the aggregate read narrowed to the
+ * session, so both lists read the record (`ai_pending_input`, R5) and filter alike. A
+ * decided entry's row is gone from the record, and a session whose workflow closed, or that
+ * Temporal no longer has (archived after its retention), lists what its record holds, never
+ * asking Temporal (#7311). The session's creator sees its parked calls as its owner does.
+ * Undefined when there is no such session for the principal.
  */
 export async function sessionPendingInput(
   sessions: SessionManager,
@@ -178,19 +189,13 @@ export async function sessionPendingInput(
   const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
   const own = canSee(principal, { owner: session.owner, creator: session.creator, offer: null })
   if (principal.kind !== 'browser' && !grant && !own) return undefined
-  // Every session is an AgentSession (plan Step 6.3): its entries are the gate's.
-  if (!sessions.durable) throw new DurableUnavailable("sessions need Temporal, and this agent service has none configured")
-  const parked = await sessions.durable.pendingInput(sessionId)
-  // The record decides (R5): an entry decided there whose workflow has not read it yet is over.
-  const decided = await sessions.projection.decidedOf(parked.map((e) => e.id))
-  const entries = parked.filter((e) => !decided.has(e.id))
-  if (principal.kind === 'browser' || own) return { entries, summaries_truncated: false }
-  // A grant holder that does not own the session sees its approvals only, as in the
-  // aggregate, and none of a flow run's, which are the person's (#2482).
-  // One query for every entry, not one per approval (#2863).
-  const approvals = entries.filter((e) => e.kind === 'approval')
-  const inRun = await sessions.projection.inRunOf(approvals.map((e) => e.id))
-  return { entries: approvals.filter((e) => !inRun.has(e.id)), summaries_truncated: false }
+  try {
+    return await pendingInput(sessions, principal, { sessionId, grant, browserAnswers: session.creator.kind === 'browser' ? 'all' : 'own' })
+  } catch (err) {
+    // The approvals' own check: the session was forgotten, or the grant revoked, since the reads above.
+    if (err instanceof ApprovalError && err.code === 'not_found') return undefined
+    throw err
+  }
 }
 
 /** A response's cap (gate/validate.ts, plan 5b ruling 1). */
@@ -577,14 +582,8 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
     if (problem) return c.json({ detail: problem }, 403)
     if (!deps.sessions) return c.json({ detail: NOT_CONFIGURED }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
-    try {
-      const page = await sessionPendingInput(deps.sessions, browserUser(c), c.req.param('id'))
-      return page ? c.json(page) : c.json({ detail: `no session ${c.req.param('id')}` }, 404)
-    } catch (err) {
-      if (err instanceof DurableUnavailable) return c.json({ detail: err.message, retry: true }, 503)
-      if (err instanceof WorkflowNotFoundError) return c.json({ detail: `session ${c.req.param('id')} has no running workflow` }, 404)
-      throw err
-    }
+    const page = await sessionPendingInput(deps.sessions, browserUser(c), c.req.param('id'))
+    return page ? c.json(page) : c.json({ detail: `no session ${c.req.param('id')}` }, 404)
   })
 
   // Anything over the cap is 413 unread.

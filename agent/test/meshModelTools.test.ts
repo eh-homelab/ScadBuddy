@@ -136,7 +136,7 @@ describe('mesh model tools', () => {
     expect(Object.keys(tool('create_model_from_mesh').shape)).toEqual(expect.arrayContaining(['workspace_path', 'workspace_sha256']))
     const { seen, client } = backend()
     const result = await call('create_model_from_mesh', { name: 'X', workspace_path: 'downloads/x.stl', workspace_sha256: 'a'.repeat(64) }, client)
-    expect(String(firstText(result))).toMatch(/needs the agent database/)
+    expect(String(firstText(result))).toMatch(/started without the workspace store/)
     expect(seen).toEqual([])
   })
 
