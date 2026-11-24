@@ -3,6 +3,7 @@ import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { listPrices, listProducts, patchProduct } from '../../api/filamentPurchasing'
 import { T } from '../../mocks/features/filament/seed'
+import { seedItem, seedOffer } from '../../mocks/features/inventory'
 import { PRODUCT, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
@@ -177,5 +178,18 @@ describe('the supplier page', () => {
     expect(await screen.findByText('Elsewhere')).toBeInTheDocument()
     expect(screen.queryByText('Leave without saving?')).toBeNull()
     expect(patched).toEqual([])
+  })
+
+  it('lists the items it offers besides filament, each with its link (#7067)', async () => {
+    const bearing = seedItem({ kind_id: 'hardware', name: '608 bearing' })
+    const offer = seedOffer({ item_id: bearing.id, supplier_id: SUPPLIER.BAMBU, sku: 'BRG-608', url: 'https://us.store.bambulab.com/products/bearing', pack_size: '10' }, { price: '4.50' })
+    render()
+    await heading('Bambu Lab')
+    const offers = await screen.findByRole('table', { name: 'Other offers' })
+    expect(within(offers).getByRole('link', { name: '608 bearing' })).toHaveAttribute('href', `/inventory/items/${bearing.id}#offer-${offer.id}`)
+    const link = within(offers).getByRole('link', { name: 'us.store.bambulab.com/products/bearing' })
+    expect(link).toHaveAttribute('href', 'https://us.store.bambulab.com/products/bearing')
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    expect(offers).toHaveTextContent('BRG-608')
   })
 })

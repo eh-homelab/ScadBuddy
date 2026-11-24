@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ArrowDownIcon, ArrowUpDownIcon, ArrowUpIcon, Loader2Icon, SlidersHorizontalIcon } from 'lucide-react'
 import { api } from '../api/client'
-import type { Customer, InventoryPart, OrderRow, OrderStatus } from '../api/types'
+import type { Customer, OrderRow, OrderStatus } from '../api/types'
 import { CustomerPicker } from '../components/orders/CustomerPicker'
 import { NEW_CUSTOMER, useCustomerPicker } from '../components/orders/useCustomerPicker'
 import { NEXT_SORT, sortByMargin, type MarginSort } from '../components/orders/marginSort'
@@ -26,6 +26,8 @@ import { formatMoney } from '../lib/money'
 import { DEFAULT_ORDERS_QUERY, isReportFiltered, LOSS_OR_THIN, moreFiltersOn, parseOrdersQuery, REPORT_KEYS, statusesOf, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
 import { applyView, endedSince, HIDE_DAYS, ORDER_VIEWS, readOrdersMemory, storeOrdersMemory, viewOf } from '../lib/orderViews'
 import { useAsync } from '../lib/useAsync'
+import { inventoryPaths } from '../lib/inventoryLinks'
+import { inventoryApi, type Item } from './inventory/api'
 
 const PAGE = 50
 const STATUSES: OrderStatus[] = ['draft', 'quoted', 'accepted', 'in_production', 'ready', 'shipped', 'closed', 'cancelled']
@@ -81,14 +83,24 @@ function reportFilterText(query: OrdersQuery): string {
   return parts.join(', ')
 }
 
-/** #5543, job cost spec §11: the parts at or below their low-stock level, linked to the Parts page. */
-function LowStock({ parts }: { parts: InventoryPart[] }) {
-  if (parts.length === 0) return null
+/** #5543, job cost spec §11: the inventory items at or below their low-stock level (#7067), each linked to its page. */
+function LowStock({ items }: { items: Item[] }) {
+  if (items.length === 0) return null
   return (
     <p role="status" data-testid="low-stock" className="rounded-md border border-warn/40 p-2 text-[13px] text-warn">
-      Low stock: {parts.map((p) => `${p.name} (${p.on_hand})`).join(', ')}.{' '}
-      <Link to="/orders/parts" className="underline underline-offset-4">
-        Parts
+      Low stock:{' '}
+      {items.map((item, at) => (
+        <span key={item.id}>
+          {at > 0 && ', '}
+          <Link to={inventoryPaths.item(item.id)} className="underline-offset-4 hover:underline">
+            {item.name}
+          </Link>{' '}
+          ({item.on_hand})
+        </span>
+      ))}
+      .{' '}
+      <Link to={`${inventoryPaths.list}?low=true`} className="underline underline-offset-4">
+        Inventory
       </Link>
     </p>
   )
@@ -195,7 +207,7 @@ export function OrdersPage() {
   const customers = useAsync(() => api.customers({ includeArchived: true, limit: 500 }), [])
   const list = useAsync(() => api.orders(query, { limit: PAGE }), [key], ['orders'])
   // #5543: a fulfilment takes parts out of stock, so the low parts are read again on an order's change.
-  const lowParts = useAsync(() => api.parts(true), [], ['orders'])
+  const lowItems = useAsync(() => inventoryApi.items({ low: true }), [], ['orders'])
   const [older, setOlder] = useState<{ key: string; items: OrderRow[]; cursor: string | null } | null>(null)
   const [sort, setSort] = useState<MarginSort>('none')
   const [loadingMore, setLoadingMore] = useState(false)
@@ -323,7 +335,7 @@ export function OrdersPage() {
             New order
           </Button>
         </div>
-        <LowStock parts={lowParts.data ?? []} />
+        <LowStock items={lowItems.data ?? []} />
         <OrderViews
           query={query}
           hideDays={memory.hideDays}

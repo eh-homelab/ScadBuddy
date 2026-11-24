@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes, useLocation } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
 import { INVENTORY, inventoryMock, seedItem, seedLot } from '../../mocks/features/inventory'
 import { renderPage } from '../../test/utils'
@@ -90,5 +91,40 @@ describe('InventoryPage (#7067)', () => {
     await user.click(within(form).getByRole('button', { name: 'Add item' }))
     await waitFor(() => expect(screen.getByTestId('where').textContent).toMatch(/^\/inventory\/items\//))
     expect(inventoryMock.bodies.find((b) => b.route === 'createItem')?.body).toMatchObject({ kind_id: 'hardware', name: 'M3 bolt' })
+  })
+
+  it('saves a model rule over the lot items (#5543, moved from the parts page)', async () => {
+    const hook = seedItem({ kind_id: 'hardware', name: 'Silver hook' })
+    const { user } = render()
+    await table()
+    const rules = screen.getByRole('region', { name: 'Model rules' })
+
+    await user.type(within(rules).getByLabelText('Model slug'), 'keychain')
+    await user.click(within(rules).getByRole('button', { name: 'Open rule' }))
+    expect(await within(rules).findByText(/keychain has no rule/)).toBeInTheDocument()
+    await waitFor(() => expect(within(rules).getByRole('button', { name: 'Add line' })).toBeEnabled())
+    await user.click(within(rules).getByRole('button', { name: 'Add line' }))
+    await user.click(within(rules).getByRole('button', { name: 'Save rule' }))
+
+    expect(await within(rules).findByText('Saved.')).toBeInTheDocument()
+    expect((await api.partRule('keychain')).lines).toEqual([{ per_unit: 1, item_id: hook.id, when: [] }])
+
+    // #5549 review: a line added or removed after the save is not saved yet.
+    await user.click(within(rules).getByRole('button', { name: 'Add line' }))
+    expect(within(rules).queryByText('Saved.')).toBeNull()
+  })
+
+  it('never saves the opened rule under a slug typed since (#5549 review)', async () => {
+    const { user } = render()
+    await table()
+    const rules = screen.getByRole('region', { name: 'Model rules' })
+    const field = within(rules).getByLabelText('Model slug')
+    await user.type(field, 'keychain')
+    await user.click(within(rules).getByRole('button', { name: 'Open rule' }))
+    await within(rules).findByText(/keychain has no rule/)
+    await user.clear(field)
+    await user.type(field, 'coaster')
+    expect(within(rules).getByRole('button', { name: 'Save rule' })).toBeDisabled()
+    expect(within(rules).getByText(/Open coaster's rule first/)).toBeInTheDocument()
   })
 })

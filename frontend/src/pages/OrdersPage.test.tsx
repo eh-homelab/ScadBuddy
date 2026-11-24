@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
 import { ORDER_ACCEPTED, ORDER_CLOSED, ORDER_DRAFT, ORDER_MODELS, seedCart } from '../mocks/features/orders/state'
-import { seedPart } from '../mocks/features/orders/parts'
+import { seedItem, seedLot } from '../mocks/features/inventory'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
 import type { OrderRow } from '../api/types'
@@ -54,17 +54,20 @@ describe('OrdersPage (#4249)', () => {
     expect(within(screen.getByTestId(`order-row-${ORDER_ACCEPTED}`)).getByText('Accepted')).toBeInTheDocument()
   })
 
-  it('says which parts are low and links to the Parts page (#5543)', async () => {
-    seedPart({ name: 'Silver hook', pack_size: 100, pack_price_minor: 599, on_hand: 2, low_stock: 5 })
-    seedPart({ name: 'Ring', pack_size: 10, pack_price_minor: 100, on_hand: 50, low_stock: 5 })
+  it('says which items are low and links to them in Inventory (#5543, #7067)', async () => {
+    const hook = seedItem({ kind_id: 'hardware', name: 'Silver hook', low_stock: 5 })
+    seedLot(hook.id, 2, 5.99)
+    const ring = seedItem({ kind_id: 'hardware', name: 'Ring', low_stock: 5 })
+    seedLot(ring.id, 50, 10)
     renderPage(<OrdersPage />, { route: '/orders' })
 
     const banner = await screen.findByTestId('low-stock')
     expect(banner).toHaveTextContent('Low stock: Silver hook (2).')
-    expect(within(banner).getByRole('link', { name: 'Parts' })).toHaveAttribute('href', '/orders/parts')
+    expect(within(banner).getByRole('link', { name: 'Silver hook' })).toHaveAttribute('href', `/inventory/items/${hook.id}`)
+    expect(within(banner).getByRole('link', { name: 'Inventory' })).toHaveAttribute('href', '/inventory?low=true')
   })
 
-  it('shows no low-stock line while no part is low (#5543)', async () => {
+  it('shows no low-stock line while no item is low (#5543)', async () => {
     renderPage(<OrdersPage />, { route: '/orders' })
     await screen.findByRole('table', { name: 'Orders' })
     expect(screen.queryByTestId('low-stock')).not.toBeInTheDocument()

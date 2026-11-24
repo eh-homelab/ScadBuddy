@@ -4,6 +4,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { listSuppliers } from '../../api/filamentPurchasing'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
+import { PartRules } from '../../components/orders/PartRules'
 import { DataTable, type Column } from '../../components/records/DataTable'
 import { inventoryPaths } from '../../lib/inventoryLinks'
 import { useAsync } from '../../lib/useAsync'
@@ -130,6 +131,8 @@ export function InventoryPage() {
             ) : (
               <DataTable label="Items" columns={columns} rows={items.data ?? []} rowKey={(item) => item.id} empty={q || low || kind ? 'No item matches.' : 'No items yet. Add the hooks, nozzles or boxes you buy.'} />
             )}
+            {/* #5543 — moved from the parts page (#7067): the parts each unit of a model uses. */}
+            <PartRules />
           </div>
         </div>
       </div>

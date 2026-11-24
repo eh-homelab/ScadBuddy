@@ -38,7 +38,8 @@ Orders, Storefront, Workflows, Activity and Settings (`src/components/AppShell.t
 | `/m/:slug/prints`, `/prints`, `/prints/:archiveId`, `/prints/queue/:itemId` | `TemplatePrintsPage`, `PrintsPage`, `PrintDetailPage`, `QueueItemPage` | [print history](../features/print-history-and-watcher.md) |
 | `/edit/:outputId` | `EditPage` | [Arrange](../features/arrange-and-plates.md) |
 | `/library/*` | `LibraryPage` | [print library](../features/print-library.md) |
-| `/orders`, `/orders/profit`, `/orders/parts`, `/orders/:id`, `/customers`, `/customers/:id` | orders, profit, parts, customers | [orders](../features/orders-and-quotes.md) |
+| `/orders`, `/orders/profit`, `/orders/:id`, `/customers`, `/customers/:id` | orders, profit, customers; `/orders/parts` redirects to `/inventory?kind=part` (#7067) | [orders](../features/orders-and-quotes.md) |
+| `/inventory`, `/inventory/kinds`, `/inventory/items/:id`, `/inventory/units/:id`, `/inventory/lots/:id` | `src/pages/inventory/`: `InventoryPage` (with the model part rules), `KindsPage`, `ItemPage`, `UnitPage`, `LotPage` (opens its item's page at the lot) (#7067) | — |
 | `/storefront`, `/storefront/listings/:id` | `StorefrontPage`, `StorefrontListingPage` | [storefront](../features/storefront-and-payments.md) |
 | `/workflows`, `/workflows/flows/:id`, `/workflows/runs/:id` | `WorkflowsPage`, `FlowPage`, `WorkflowRunPage` | [flows](../features/flows.md) |
 | `/activity` | `ActivityPage` | [activity](../features/activity.md) |

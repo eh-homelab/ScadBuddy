@@ -2,6 +2,7 @@ import { Suspense, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router'
 import { Skeleton } from '@/components/ui/skeleton'
 import { AppShell } from './components/AppShell'
+import { inventoryPaths } from './lib/inventoryLinks'
 import { lazyRetry } from './lib/lazyRetry'
 import { ActivityPage } from './pages/ActivityPage'
 import { CataloguePage } from './pages/CataloguePage'
@@ -38,7 +39,6 @@ const LibraryPage = lazyRetry(async () => ({ default: (await import('./pages/Lib
 const OrderPage = lazyRetry(async () => ({ default: (await import('./pages/OrderPage')).OrderPage }))
 const OrdersPage = lazyRetry(async () => ({ default: (await import('./pages/OrdersPage')).OrdersPage }))
 const ProfitPage = lazyRetry(async () => ({ default: (await import('./pages/ProfitPage')).ProfitPage }))
-const PartsPage = lazyRetry(async () => ({ default: (await import('./pages/PartsPage')).PartsPage }))
 const PrintDetailPage = lazyRetry(async () => ({ default: (await import('./pages/PrintDetailPage')).PrintDetailPage }))
 const QueueItemPage = lazyRetry(async () => ({ default: (await import('./pages/QueueItemPage')).QueueItemPage }))
 // Two pages of one module, so one chunk.
@@ -152,7 +152,8 @@ export function App() {
         <Route path="x/:code" element={<CodePage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />
-        <Route path="orders/parts" element={<PartsPage />} />
+        {/* #7067, spec §6.11 — the parts page moved into the Inventory, on the Part kind. */}
+        <Route path="orders/parts" element={<Navigate to={inventoryPaths.kind('part')} replace />} />
         <Route path="orders/:id" element={<OrderPage />} />
         <Route path="customers" element={<CustomersPage />} />
         <Route path="customers/:id" element={<CustomerPage />} />

@@ -1,6 +1,7 @@
 import { useId, useState, type FormEvent } from 'react'
 import { api } from '../../api/client'
-import type { InventoryPart, PartRuleLine } from '../../api/types'
+import type { PartRuleLine } from '../../api/types'
+import { usePartItems, type PartChoice } from './partItems'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -10,8 +11,8 @@ import { refusalText } from './refusal'
 /** The Select's value for "no part": a Radix item cannot have an empty value. */
 const NONE = '__none'
 
-/** A part picker over the inventory; `allowNone` offers "None". */
-export function PartSelect({ parts, value, onChange, label, allowNone = false }: { parts: InventoryPart[]; value: string | null; onChange: (id: string | null) => void; label: string; allowNone?: boolean }) {
+/** A part picker over the inventory's lot items; `allowNone` offers "None". */
+export function PartSelect({ parts, value, onChange, label, allowNone = false }: { parts: PartChoice[]; value: string | null; onChange: (id: string | null) => void; label: string; allowNone?: boolean }) {
   return (
     <Select value={value ?? NONE} onValueChange={(next) => onChange(next === NONE ? null : next)}>
       <SelectTrigger aria-label={label} className="w-48">
@@ -34,8 +35,9 @@ export function PartSelect({ parts, value, onChange, label, allowNone = false }:
  * override the item has (in any case), else the default part (or none). A new item of the
  * model copies the parts it gives; items already added keep theirs.
  */
-export function PartRules({ parts }: { parts: InventoryPart[] }) {
+export function PartRules() {
   const id = useId()
+  const parts = usePartItems().data ?? []
   const [slug, setSlug] = useState('')
   const [loaded, setLoaded] = useState<string | null>(null)
   const [lines, setLines] = useState<PartRuleLine[]>([])

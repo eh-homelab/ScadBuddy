@@ -35,7 +35,7 @@ const PAGES = [
   '/orders',
   // The profit report (#5329): its tab is "Profit by model · ScadBuddy".
   '/orders/profit',
-  // The parts inventory (#5543): its tab is "Parts · ScadBuddy".
+  // The old parts inventory (#5543) opens the Inventory on the Part kind (#7067).
   '/orders/parts',
   '/orders/0e5a3c1e-1111-4222-8333-944455556661',
   '/customers',
@@ -105,9 +105,10 @@ test('/prints/queue/260 is the queue item, not a print', async ({ page }) => {
   await expect(page).toHaveTitle(waiting('Bracket.gcode.3mf · ScadBuddy'))
 })
 
-test('/orders/parts is the parts inventory, not an order', async ({ page }) => {
+test('/orders/parts opens the Inventory on the Part kind, not an order (#7067)', async ({ page }) => {
   await page.goto('/orders/parts')
-  await expect(page).toHaveTitle(waiting('Parts · ScadBuddy'))
+  await expect(page).toHaveURL(/\/inventory\?kind=part$/)
+  await expect(page).toHaveTitle(waiting('Inventory · ScadBuddy'))
 })
 
 test('covers every route App.tsx declares', () => {

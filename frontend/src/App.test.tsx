@@ -61,6 +61,8 @@ describe('App routes (#2356)', () => {
     // #7067 — the Inventory area.
     ['/inventory', 'Inventory'],
     ['/inventory/kinds', 'Item kinds'],
+    // #7067 — the old parts page opens the Inventory on the Part kind.
+    ['/orders/parts', 'Inventory'],
   ])('renders %s through its lazy chunk', async (route, heading) => {
     const { App } = await import('./App')
     const done = settled()
