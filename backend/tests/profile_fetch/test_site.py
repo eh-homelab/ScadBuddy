@@ -471,7 +471,7 @@ def _chain_holds_no_secret(error: BaseException) -> None:
 
 async def _crash(page: Page) -> None:
     """Crash the page's renderer with Chromium's ``chrome://crash`` (plan build Decision
-    49). With the pinned 1.64.1 it crashes only a page that is not on an http(s) origin,
+    49). Measured with 1.64.1, it crashes only a page that is not on an http(s) origin,
     so the page leaves for ``about:blank`` first, and only one that has not posted the
     login form (after that post the renderer hung instead). The navigation itself fails;
     Playwright delivers the ``crash`` event with the next call on the page, so the helper
