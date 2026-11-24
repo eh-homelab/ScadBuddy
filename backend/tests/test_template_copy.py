@@ -19,7 +19,7 @@ import psycopg
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from scadbuddy.core.gitrepo import GitError, GitTimeoutError
+from scadbuddy.core.gitrepo import GitError, GitTimeoutError, git_env
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import template_copy
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
@@ -116,6 +116,7 @@ def _expected(world: World, template_id: str) -> TemplateRow | None:
 def _git(world: World, *args: str) -> str:
     completed = subprocess.run(
         ["git", "-C", str(world.catalogue.paths.models), *args],
+        env=git_env(),
         check=True,
         capture_output=True,
         text=True,
