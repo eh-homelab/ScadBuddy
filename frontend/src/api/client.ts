@@ -116,6 +116,7 @@ import type {
   PrintAgain,
   PrintAttachment,
   PrintDetail,
+  LibraryFileSuggestion,
   PrintSources,
   PrintImportRequest,
   AutoImport,
@@ -310,6 +311,13 @@ import type {
   VirtualPrinterDiagnostic,
   KProfileNotes,
   KProfileRemove,
+  AmsLabelSaved,
+  AmsView,
+  SavedSlotPreset,
+  SlotCommandSent,
+  SlotConfigureBody,
+  SlotConfigured,
+  SlotPresetBody,
   KProfileSet,
   KProfileTable,
   KProfileWriteResult,
@@ -2008,6 +2016,13 @@ export const api = {
     request<PrintSources>(`/print-imports/${archiveId}/sources${printer ? '?printer=true' : ''}`),
 
   /**
+   * #7335 — whether a file of ScadBuddy's own library may still be an import's target: the
+   * file, or the import's own refusals (a 404 `library-file-gone` with the `replacement`,
+   * a 422 for a run's per-print copy).
+   */
+  checkImportTarget: (fileId: number) => request<LibraryFileSuggestion>(`/print-imports/library-files/${fileId}`),
+
+  /**
    * #4698 — links an unlinked print to a model. A new model is made first, as an
    * operation; its result is the model, not the import, so the same request goes again
    * with the same key, which links the print to the model the key made.
@@ -2473,6 +2488,30 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ setting_id: key, note }),
     }),
+  /** #7153: a printer's AMS slots and labels, read from Bambuddy's live status. */
+  printerAms: (id: string) => request<AmsView>(`/printers/${seg(id)}/ams`),
+  /**
+   * The slot writes call Bambuddy in the request (R-7153-5); each that reaches the printer reads
+   * its state first and answers a 409 with a `code` when it is unsafe now (R-7153-3).
+   */
+  configureSlot: (id: string, ams: number, tray: number, body: SlotConfigureBody) =>
+    request<SlotConfigured>(`/printers/${seg(id)}/trays/${ams}/${tray}/configure`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  slotCommand: (id: string, ams: number, tray: number, action: SlotCommandSent['action']) =>
+    request<SlotCommandSent>(`/printers/${seg(id)}/trays/${ams}/${tray}/${action}`, { method: 'POST' }),
+  setSlotPreset: (id: string, ams: number, tray: number, body: SlotPresetBody) =>
+    request<SavedSlotPreset>(`/printers/${seg(id)}/trays/${ams}/${tray}/preset`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  clearSlotPreset: (id: string, ams: number, tray: number) =>
+    request<void>(`/printers/${seg(id)}/trays/${ams}/${tray}/preset`, { method: 'DELETE' }),
+  setAmsLabel: (id: string, ams: number, label: string) =>
+    request<AmsLabelSaved>(`/printers/${seg(id)}/ams/${ams}/label`, { method: 'PUT', body: JSON.stringify({ label }) }),
+  clearAmsLabel: (id: string, ams: number) =>
+    request<AmsLabelSaved>(`/printers/${seg(id)}/ams/${ams}/label`, { method: 'DELETE' }),
   /** #4439, #4747: import and link Bambuddy's printers and virtual printers; idempotent. */
   syncPrintersFromBambuddy: (dryRun = false) =>
     request<PrinterSyncResult>(`/printers/sync-bambuddy?dry_run=${dryRun}`, { method: 'POST' }),

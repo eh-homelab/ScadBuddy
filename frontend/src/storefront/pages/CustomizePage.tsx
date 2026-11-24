@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import {
   ActionKey,
@@ -15,14 +15,13 @@ import {
 } from '../api/client'
 import { Estimate } from '../components/Estimate'
 import { ListingView } from '../components/ListingView'
-import { clashText } from '../colours'
 import { clearChoices, loadChoices, saveChoices } from '../customizeState'
 import { useDraftChanged } from '../draftCount'
 import { keepOffered, listingUnavailable, valueProblem } from '../params'
 import { POLL, type PollTiming } from '../poll'
-
-// three.js is most of the viewer: its own chunk, fetched once there is a render to show.
-const Preview = lazy(async () => ({ default: (await import('../../components/Preview')).Preview }))
+import { changedListing, hasNumber, passing, refusalText, sleep } from '../refusals'
+import { Preview } from '../viewer'
+import { FileCustomize } from './FileCustomize'
 
 /** The most of one design a visitor may order (`AddListingItem.quantity`, `le=100`). */
 const MAX_QUANTITY = 100
@@ -38,10 +37,6 @@ const DEBOUNCE_MS = 900
 /** The longest the page waits on a `Retry-After` before its one retry of a refused render. */
 const RETRY_RENDER_CAP_MS = 60_000
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 /**
  * Whether a render has ended. A done one ends once it names its preview: until the shop
  * has its files at hand it names none, and the page reads it again (#6120).
@@ -56,34 +51,9 @@ function onScreen(render: StoreRender): StoreRender {
   return render.status === 'done' && render.preview_url === null ? { ...render, status: 'running' } : render
 }
 
-/** A poll that failed for a reason that passes: the network, a limit, a busy shop. */
-function passing(error: unknown): error is StoreError {
-  return error instanceof StoreError && (error.status === 0 || error.status === 429 || error.status >= 500)
-}
-
-function inSeconds(error: StoreError): string {
-  if (error.retryAfter === null) return 'in a minute'
-  return error.retryAfter === 1 ? 'in 1 second' : `in ${error.retryAfter} seconds`
-}
-
-/** What a visitor reads when a render or an add of `listing` is refused. */
-function refusalText(error: unknown, listing: Listing | undefined): string {
-  if (!(error instanceof StoreError)) return errorText(error)
-  if (error.slug === 'render_limited') return `You have made a lot of previews. Try again ${inSeconds(error)}.`
-  if (error.slug === 'render_queue_full') return `The shop is busy making other previews. Try again ${inSeconds(error)}.`
-  if (error.slug === 'rate_limited') return `Your connection has sent a lot of requests. Try again ${inSeconds(error)}.`
-  // #6258: the colours given share no allowed material: the text names the parts.
-  if (error.slug === 'listing_colours_clash') return clashText(listing, error.parts)
-  return errorText(error)
-}
-
 /** A render the shop refused for now, that one retry after `Retry-After` may get. */
 function retryable(error: unknown): error is StoreError {
   return error instanceof StoreError && (error.slug === 'render_limited' || error.slug === 'render_queue_full')
-}
-
-function changedListing(error: unknown): boolean {
-  return error instanceof StoreError && error.slug === 'listing_changed'
 }
 
 /**
@@ -101,11 +71,6 @@ function previewJob(preview: VariantPreview): StoreRender {
     preview_url: preview.url,
     error: null,
   }
-}
-
-/** Whether a price has a number to show: a firm one, or the last one (#6921). */
-function hasNumber(estimate: StoreEstimate): boolean {
-  return (estimate.source === 'slice' || estimate.source === 'last') && estimate.price_minor != null
 }
 
 /** A done render and the choices it was made of (`choicesKey`). */
@@ -157,6 +122,11 @@ export function CustomizePage({
   debounceMs?: number
 }) {
   const [listing, setListing] = useState<Listing>()
+  /**
+   * #6710: a listing of a library file. Its page (`FileCustomize`) renders nothing: it is
+   * never `listing`, so the render effect below never sees it.
+   */
+  const [file, setFile] = useState<Listing>()
   const [loadError, setLoadError] = useState<string | null>(null)
   const [values, setValues] = useState<Record<string, ParamValue>>({})
   /** The latest render while it runs; the viewer shows its progress until one is done. */
@@ -223,6 +193,10 @@ export function CustomizePage({
     store.listing(id).then(
       (answer) => {
         if (!live) return
+        if (answer.source === 'library_file') {
+          setFile(answer)
+          return
+        }
         const saved = loadChoices(id)
         setListing(answer)
         setValues(saved ? keepOffered(answer, saved.values) : {})
@@ -507,6 +481,7 @@ export function CustomizePage({
       </section>
     )
   }
+  if (file) return <FileCustomize key={file.id} initial={file} timing={timing} wait={wait} now={now} debounceMs={debounceMs} />
   if (!listing) return <p className="sf-hint">Loading the design…</p>
 
   return (

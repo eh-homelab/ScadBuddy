@@ -65,6 +65,20 @@ describe('the Locations tab', () => {
     await waitFor(async () => expect(within(await place(L.SHELF_A)).getAllByText('Shelf B').length).toBeGreaterThan(0))
   })
 
+  it('renames an AMS unit place (#7153), while its trays stay read only', async () => {
+    const { user } = renderPage(<LocationsTab />)
+    await user.click(within(await place(L.AMS_A)).getByRole('button', { name: 'Edit H2C AMS-A' }))
+    const name = await screen.findByLabelText('Name')
+    await user.clear(name)
+    await user.type(name, 'Left rack')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved')
+    await waitFor(async () => expect((await listLocations()).flatMap(function all(n): typeof n[] {
+      return [n, ...(n.children ?? []).flatMap(all)]
+    }).find((n) => n.id === L.AMS_A)?.name).toBe('Left rack'))
+    expect(within(await place(L.AMS_A1)).queryByRole('button', { name: /Edit/ })).toBeNull()
+  })
+
   it('adds a place under another', async () => {
     const { user } = renderPage(<LocationsTab />)
     await tree()

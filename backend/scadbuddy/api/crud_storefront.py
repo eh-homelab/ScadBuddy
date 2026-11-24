@@ -40,7 +40,9 @@ visitor's own render of them while it is held. It starts no render and no slice.
 Area ``file-prices`` (#6710, `orders/storefront/file_prices.py`): ``POST
 …/listings/{id}/price`` takes a visitor's colours on a file listing (``ListingPriceBody``;
 any other body is 422 ``price_body_invalid``) and answers the slice price of its held copy,
-or starts that slice: a read that claims one counts as one render.
+or starts that slice: a read that claims one counts as one render. ``GET
+…/listings/{id}/preview/{plate}.glb`` streams the plate's GLB that publish held, each mesh
+with its slot (404 ``listing_not_found`` or ``preview_not_found``).
 
 Area ``drafts`` (`orders/storefront/drafts.py`): ``GET …/draft`` is the visitor's draft
 order, or ``null`` when it has none; ``POST …/draft/items`` adds a listing at the visitor's
@@ -113,7 +115,7 @@ from typing import Annotated, Any, Final
 from urllib.parse import urlsplit
 
 from fastapi import Depends, Path, Query, Request, Response, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.api.deps import AppState, PathsDep, ReadBudgetDep, StateDep
@@ -150,6 +152,7 @@ from scadbuddy.orders.storefront.drafts import (
     request_sent,
     requests_disabled,
 )
+from scadbuddy.orders.storefront.file_listings import held_preview
 from scadbuddy.orders.storefront.file_prices import listing_price
 from scadbuddy.orders.storefront.intake import draft_preview
 from scadbuddy.orders.storefront.listings import (
@@ -333,7 +336,7 @@ async def listing(
 ) -> PublicListing:
     """One published listing; 404 ``listing_not_found`` for an unpublished or unknown one."""
     content = public_content(state)
-    found = await asyncio.to_thread(published_listing, orders.listings, listing_id)
+    found = await asyncio.to_thread(published_listing, orders.listings, listing_id, source=None)
     filaments = await asyncio.to_thread(_filaments, orders)
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
     return await public_listing(content, found, filaments, snapshot.runtime.storefront_materials)
@@ -472,8 +475,9 @@ async def listing_price_route(
     listing_id: str, request: Request, state: StateDep, visitor: Visitor, client: StoreClient
 ) -> StoreEstimate:
     """The price of a visitor's colours on a file listing (#6710 §7.5): the slice price of
-    its held copy, ``pending`` while it is worked out, or ``none``. A read that claims a
-    new slice counts as one render (429 ``render_limited`` over the limits)."""
+    its held copy, or ``none``. While it is worked out, ``last``: the last firm price of the
+    file, of any colours, with a ``retry_after``; ``pending`` when there is none. A read
+    that claims a new slice counts as one render (429 ``render_limited`` over the limits)."""
     body = await _body(
         request,
         ListingPriceBody,
@@ -482,6 +486,33 @@ async def listing_price_route(
     )
     return await listing_price(
         state, visitor, client, listing_id, body.listing_updated_at, body.colours
+    )
+
+
+@router.get(
+    "/listings/{listing_id}/preview/{plate}.glb",
+    name="crud_storefront_listing_preview",
+    response_class=StreamingResponse,
+    responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
+)
+async def listing_preview_route(
+    listing_id: str,
+    plate: Annotated[int, Path(ge=1, le=9999)],
+    state: StateDep,
+    orders: OrdersDep,
+    _visitor: Visitor,
+    _client: StoreClient,
+) -> StreamingResponse:
+    """A file listing's held preview of ``plate`` (#6710 §6.3), streamed from the store:
+    each mesh names its slot, so the page colours it with no render. 404
+    ``listing_not_found`` or ``preview_not_found``."""
+    stat = await held_preview(state, orders.listings, listing_id, plate)
+    content = state.store.content
+    assert content is not None
+    return StreamingResponse(
+        content.get(stat.ref),
+        media_type=GLB_MEDIA_TYPE,
+        headers={"Content-Length": str(stat.ref.size)},
     )
 
 

@@ -10,6 +10,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { ChoiceSelect, LabeledInput, LoadingLines } from './form'
 import { Spinner } from '../ui/spinner'
 import { VirtualPrintersPanel } from './VirtualPrinters'
+import { PrinterAmsSlots } from './PrinterAmsSlots'
 import { PrinterKProfiles } from './PrinterKProfiles'
 
 /**
@@ -231,6 +232,7 @@ function PrinterItem({
 
           {/* #7154: the printer's K-profiles, through the Bambuddy printer it links. */}
           {!virtual && bambuddy != null && <PrinterKProfiles row={row} />}
+          {!virtual && bambuddy != null && <PrinterAmsSlots row={row} />}
 
           <div className="flex items-center gap-2">
             <Button

@@ -40,6 +40,11 @@ const NATIVE_ID_BASE = 1_000_000_000
 /** The 404 of an import onto a file that is gone (backend `api/print_imports.py`, #7335). */
 const LIBRARY_FILE_GONE = 'https://scadbuddy.dev/problems/print-imports/library-file-gone'
 
+/** The live file a gone-file 404 names, if it names one. */
+function replacementOf(caught: ApiError): LibraryFileSuggestion | null {
+  return (caught.problem['replacement'] as LibraryFileSuggestion | null | undefined) ?? null
+}
+
 /** A library file in the library page, chosen. */
 function libraryFilePath(fileId: number): string {
   return `/library?file=${fileId}`
@@ -214,6 +219,9 @@ function ImportForm({
   // A gone file is never swapped for the next suggestion: the person chooses again.
   const file = gone ? null : (pickedFile ?? suggestedFiles[0] ?? null)
 
+  // The newest read of the suggestions: a reply of an older one that lands later is dropped.
+  const latestRead = useRef(0)
+
   const markGone = useCallback(
     (lost: LibraryFileSuggestion, replacement: LibraryFileSuggestion | null) => {
       setGoneIds((ids) => new Set(ids).add(lost.id))
@@ -221,8 +229,11 @@ function ImportForm({
       setPickedFile(null)
       setError(null)
       // Without the printer: that read reaches it. A failed read leaves the list without the gone file.
+      const read = ++latestRead.current
       void api.getPrintSources(archive.id).then(
-        (again) => setFreshFiles(again.suggested_library_files),
+        (again) => {
+          if (read === latestRead.current) setFreshFiles(again.suggested_library_files)
+        },
         () => undefined,
       )
     },
@@ -242,8 +253,10 @@ function ImportForm({
     let current = true
     const check = () => {
       if (document.visibilityState === 'hidden') return
-      api.getLibraryFile(checked.id).catch((caught: unknown) => {
-        if (current && caught instanceof ApiError && caught.status === 404) markGone(checked, null)
+      api.checkImportTarget(checked.id).catch((caught: unknown) => {
+        if (current && caught instanceof ApiError && caught.problem.type === LIBRARY_FILE_GONE) {
+          markGone(checked, replacementOf(caught))
+        }
       })
     }
     window.addEventListener('focus', check)
@@ -278,7 +291,7 @@ function ImportForm({
       onImported(await api.importPrint(archive.id, body))
     } catch (caught) {
       if (mode === FILE && file && caught instanceof ApiError && caught.problem.type === LIBRARY_FILE_GONE) {
-        markGone(file, (caught.problem['replacement'] as LibraryFileSuggestion | null | undefined) ?? null)
+        markGone(file, replacementOf(caught))
       } else {
         setError(errorText(caught))
       }

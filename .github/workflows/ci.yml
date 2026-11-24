@@ -56,6 +56,10 @@ on:
   merge_group:
   push:
     branches: [main]
+    # A docs-only push to main runs nothing: its PR already ran `markdown`, the
+    # one job a docs-only change needs (select-lanes.sh `docs_only`).
+    paths-ignore:
+      - "docs/**/*.md"
   # Weekly, and on demand, so every template's verify.sh runs against the image
   # even in a week when nothing merged (#229). The template checks are the
   # reason; the rest of CI rides along because it is cheap and it is the same
@@ -113,6 +117,7 @@ jobs:
       run_agent_durable: ${{ steps.lanes.outputs.agent_durable }}
       run_rust: ${{ steps.lanes.outputs.rust }}
       run_image: ${{ steps.lanes.outputs.image }}
+      docs_only: ${{ steps.lanes.outputs.docs_only }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -182,6 +187,8 @@ jobs:
       # push, the schedule, a dispatch, or a diff that cannot be read selects every
       # lane. `CI Summary` re-derives the same answer from its own checkout, so a
       # skipped lane job is accepted only where this change really does not need it.
+      # `docs_only`: every changed path is docs/**/*.md. Then the lint, frontend,
+      # agent, models, freshness and Go jobs skip too; only `markdown` checks it.
       - name: Select the lanes this change needs
         id: lanes
         env:
@@ -198,6 +205,8 @@ jobs:
   # ── Things that need neither half of the tree ───────────────────────────────
   lint:
     name: Workflow and Dockerfile lint
+    needs: layout
+    if: ${{ needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -444,10 +453,29 @@ jobs:
   # runs took 19 minutes, and runs 44807121481 and 44768125590 were cancelled in
   # the Build step after every test file had passed. Lint, typecheck and build
   # took about 1 minute each there, so this job now takes about 5.
+  # ── Markdown lint ───────────────────────────────────────────────────────────
+  #
+  # markdownlint-cli2 over docs/**/*.md with `.markdownlint-cli2.jsonc` (the
+  # style rules are off; it checks structure). Runs on every change: on a
+  # docs-only change (`docs_only`) it is the only check that runs.
+  markdown:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: markdownlint-cli2
+        run: npx --yes markdownlint-cli2@0.20.0
+
   frontend:
     name: Frontend lint, typecheck, build
     needs: layout
-    if: ${{ needs.layout.outputs.frontend == 'true' }}
+    if: ${{ needs.layout.outputs.frontend == 'true' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -515,7 +543,7 @@ jobs:
   frontend-unit:
     name: Frontend unit tests (${{ matrix.shard }}/3)
     needs: layout
-    if: ${{ needs.layout.outputs.frontend == 'true' }}
+    if: ${{ needs.layout.outputs.frontend == 'true' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -575,7 +603,7 @@ jobs:
   frontend-e2e:
     name: Frontend Playwright (${{ matrix.shard }}/3)
     needs: layout
-    if: ${{ needs.layout.outputs.frontend == 'true' && needs.layout.outputs.e2e == 'true' }}
+    if: ${{ needs.layout.outputs.frontend == 'true' && needs.layout.outputs.e2e == 'true' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     # A shard is a third of the 533 s suite plus the webServer's build (typecheck
     # and vite, about a minute) and the browser install: about five minutes. 15 is
@@ -747,7 +775,7 @@ jobs:
   agent:
     name: Agent lint, typecheck, test, build, image
     needs: layout
-    if: ${{ needs.layout.outputs.agent == 'true' }}
+    if: ${{ needs.layout.outputs.agent == 'true' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -1589,17 +1617,84 @@ jobs:
       # committed timings (the step above copied them), which the split reads, and
       # ends as this shard's own tests timed on this runner, for
       # `backend-pytest-split` to merge.
+      #
+      # Memory (#6978). A hosted ubuntu-latest runner of a public repo has 4 vCPU and
+      # 16 GB RAM (https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories).
+      # A shard whose memory filled the VM lost its runner mid-step, and the job kept
+      # no log. `--memory` with an equal `--memory-swap` caps the container (its
+      # /dev/shm included) at 13 GiB with no swap, below the VM's RAM (about 1.3 GiB
+      # more is used outside the container): past it the kernel kills a process inside
+      # the container, xdist reports that worker's test as crashed, and the job ends
+      # with its log. The sampler prints the VM's memory, the container's (now, its
+      # peak, its shmem) and the largest processes every 30 s; the kernel's OOM lines
+      # follow the run. Measured on run 45276569396 (12 GiB cap): a passing shard used
+      # about 13 GB of the VM; each of the 4 Temporal dev servers held 1.2 to 1.7 GiB
+      # and an xdist worker 2.5 GiB; shards 1 to 3 were killed opening a whole
+      # MakerWorld fixture (3.5 to 3.9 GiB of anon RSS in the killed worker).
+      # The whole-fixture reads take a lock, one at a time per shard
+      # (`tests/conftest.py` `one_whole_read_at_a_time`), and read each part file with
+      # ScadBuddy's streaming reader: `trimesh.load` of the olive bottle's 228 MB part
+      # took 2.9 GB, and that test peaked at 5.0 to 6.7 GB alone (2.2 to 2.5 GB now); on run
+      # 45318737267 it filled the 13 GiB cap on shards 1 to 3. No `GOMEMLIMIT` for the
+      # Temporal dev servers: at 768 MiB (run 45303037684) they stayed at about
+      # 950 MiB, their Go GC ran without end, and shards 4 and 6 took 2567 and 2751 s
+      # against main's 1674 to 1852 s (runs 45268094893, 45252653403).
       - name: pytest
-        run: >-
-          docker run --rm --network host --shm-size=1g
-          -v "$PWD/test-fixtures:/app/test-fixtures:ro"
-          -v "$PWD/results:/results"
-          -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
-          -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
-          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
-          --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration
-          --store-durations --clean-durations --durations-path=/results/durations.json
-          --junitxml=/results/junit.xml --durations=20
+        run: |
+          set -euo pipefail
+          cid="$RUNNER_TEMP/pytest.cid"
+          peak="$RUNNER_TEMP/pytest.peak"
+          (
+            set +e  # the container's cgroup goes away under it at the end
+            # The sleep runs in the background, so a TERM ends the wait at once and the
+            # trap ends the sleep with the sampler: nothing outlives the kill below.
+            trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+            cg="" n=0
+            while :; do
+              sleep 2 & nap=$!
+              wait "$nap"
+              if [ -z "$cg" ] && [ -s "$cid" ]; then
+                cg=$(find /sys/fs/cgroup -maxdepth 3 -type d -name "*$(cat "$cid")*" -print -quit)
+              fi
+              # Read first, then write: `cat … > "$peak"` truncates it before `cat` runs, and
+              # the cgroup goes away before `docker run --rm` returns.
+              if [ -n "$cg" ] && v=$(cat "$cg/memory.peak" 2>/dev/null) && [ -n "$v" ]; then
+                echo "$v" > "$peak"
+              fi
+              n=$((n + 1))
+              [ $((n % 15)) -eq 0 ] || continue
+              line="memory: $(free -m | awk '/^Mem:/ {printf "vm used %d avail %d MiB", $3, $7} /^Swap:/ {printf ", swap used %d MiB", $3}')"
+              if [ -n "$cg" ] && [ -r "$cg/memory.current" ]; then
+                cur=$(cat "$cg/memory.current" 2>/dev/null) p=$(cat "$peak" 2>/dev/null)
+                shm=$(awk '$1 == "shmem" {print $2}' "$cg/memory.stat" 2>/dev/null)
+                line+=" | container $(( ${cur:-0} >> 20 )) peak $(( ${p:-0} >> 20 )) shmem $(( ${shm:-0} >> 20 )) MiB"
+              fi
+              echo "$line"
+              ps -eo rss=,pid=,args= --sort=-rss | head -n 5 | awk '{printf "  %6d MiB %7d %s\n", $1 / 1024, $2, substr($0, index($0, $3), 100)}'
+            done
+          ) &
+          sampler=$!
+          rc=0
+          docker run --rm --cidfile "$cid" --network host --shm-size=1g \
+            --memory=13g --memory-swap=13g \
+            -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
+            -v "$PWD/results:/results" \
+            -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test \
+            -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures \
+            -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto \
+            --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration \
+            --store-durations --clean-durations --durations-path=/results/durations.json \
+            --junitxml=/results/junit.xml --durations=20 || rc=$?
+          kill "$sampler" 2>/dev/null || true
+          wait "$sampler" 2>/dev/null || true
+          p=$(cat "$peak" 2>/dev/null || true)
+          echo "container memory peak: $(( ${p:-0} >> 20 )) MiB of 13312"
+          if kernel=$(sudo dmesg 2>&1); then
+            grep -iE 'out of memory|oom-kill|killed process' <<<"$kernel" || echo "no OOM kill in the kernel log"
+          else
+            echo "the kernel log could not be read: $kernel"
+          fi
+          exit "$rc"
 
       # The intake sandbox's confinement (#6133, spec 2026-11-13 §7), proved on every
       # run: the step above runs as root under Docker's default seccomp and AppArmor
@@ -1837,7 +1932,7 @@ jobs:
   models:
     name: Template verify scripts
     needs: layout
-    if: ${{ needs.layout.outputs.models == 'true' }}
+    if: ${{ needs.layout.outputs.models == 'true' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1975,11 +2070,14 @@ jobs:
   #
   # go.work, the root vendor/ and the modules under tools/go/. Never path-gated:
   # `go-select` reads this change's paths the way the `models` job does, and the
-  # `go` job always runs, checking nothing and saying so when no Go changed.
-  # Both are asserted by `CI Summary`. A push, the schedule, a dispatch, or a
+  # `go` job runs whenever `go-select` does, checking nothing and saying so when
+  # no Go changed. Both skip on a docs-only change (`docs_only`); otherwise both
+  # are asserted by `CI Summary`. A push, the schedule, a dispatch, or a
   # diff that cannot be computed checks everything.
   go-select:
     name: Select Go work
+    needs: layout
+    if: ${{ needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -2294,11 +2392,14 @@ jobs:
   # a real pass — the vacuous-green trap.
   freshness:
     name: API spec determinism and diff
-    # NOT `needs: layout`. This job re-derives which trees exist from its own
-    # checkout, for the same reason `CI Summary` does: a job gated on an
-    # upstream job's outputs turns that job's failure into empty strings, every
-    # step skipping, and a green result that asserted nothing.
-    if: ${{ github.event_name == 'pull_request' }}
+    # This job re-derives which trees exist from its own checkout, for the same
+    # reason `CI Summary` does: a job gated on an upstream job's outputs turns
+    # that job's failure into empty strings, every step skipping, and a green
+    # result that asserted nothing. It needs `layout` only for `docs_only`, at
+    # the job level: a failed `layout` skips this job, and `CI Summary` reds on
+    # both, because it re-derives `docs_only` itself.
+    needs: layout
+    if: ${{ github.event_name == 'pull_request' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -2711,7 +2812,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, freshness, go-client]
+    needs: [layout, lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -2736,6 +2837,7 @@ jobs:
         env:
           LAYOUT_RESULT: ${{ needs.layout.result }}
           LINT_RESULT: ${{ needs.lint.result }}
+          MARKDOWN_RESULT: ${{ needs.markdown.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           FRONTEND_UNIT_RESULT: ${{ needs.frontend-unit.result }}
           FRONTEND_E2E_RESULT: ${{ needs.frontend-e2e.result }}
@@ -2809,6 +2911,10 @@ jobs:
           need_agent_durable=false
           if [ "$has_agent_durable" = true ] && [ "$(lane agent_durable)" = true ]; then need_agent_durable=true; fi
           need_rust=$(lane rust)
+          # A docs-only change (every path docs/**/*.md) needs only `markdown`.
+          not_docs=true
+          if [ "$(lane docs_only)" = true ]; then not_docs=false; fi
+          need() { if [ "$1" = true ] && [ "$not_docs" = true ]; then echo true; else echo false; fi; }
 
           # `app` is reported, not asserted: it gates STEPS inside the image
           # job, not a job of its own. It needs no assertion — when the API
@@ -2822,35 +2928,37 @@ jobs:
           echo "Lanes this change needs: $(paste -sd' ' <<<"$lanes")"
           echo "Job results:"
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
-          assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
-          assert "Frontend lint, typecheck, build"        "$FRONTEND_RESULT" "$has_frontend"
-          assert "Frontend unit tests (every shard)"      "$FRONTEND_UNIT_RESULT" "$has_frontend"
-          assert "Frontend Playwright (every shard)"      "$FRONTEND_E2E_RESULT" "$has_e2e"
-          assert "Frontend Playwright shards cover the suite" "$FRONTEND_E2E_SPLIT_RESULT" "$has_e2e"
-          assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
+          assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     "$not_docs"
+          assert "Markdown lint"                          "$MARKDOWN_RESULT" true
+          assert "Frontend lint, typecheck, build"        "$FRONTEND_RESULT" "$(need "$has_frontend")"
+          assert "Frontend unit tests (every shard)"      "$FRONTEND_UNIT_RESULT" "$(need "$has_frontend")"
+          assert "Frontend Playwright (every shard)"      "$FRONTEND_E2E_RESULT" "$(need "$has_e2e")"
+          assert "Frontend Playwright shards cover the suite" "$FRONTEND_E2E_SPLIT_RESULT" "$(need "$has_e2e")"
+          assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$(need "$has_agent")"
           assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$need_agent_durable"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$need_image"
           assert "Profile-fetch image build and driver tests" "$PROFILE_FETCH_IMAGE_RESULT" "$need_image"
           assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$need_backend"
           assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$need_backend"
-          assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
-          # Always required: the `go` job runs on every commit and reports "No Go
-          # changes" itself when `go-select` found none, so a skip is a failure.
-          assert "Select Go work"                         "$GO_SELECT_RESULT" true
-          assert "Go modules"                             "$GO_RESULT"       true
+          assert "Template verify scripts"                "$MODELS_RESULT"   "$(need "$has_models")"
+          # Required on every change but a docs-only one: the `go` job reports "No
+          # Go changes" itself when `go-select` found none, so a skip is a failure.
+          assert "Select Go work"                         "$GO_SELECT_RESULT" "$not_docs"
+          assert "Go modules"                             "$GO_RESULT"       "$not_docs"
           # Required when this change touches Rust (select-lanes.sh).
           assert "Rust workers"                           "$RUST_RESULT"     "$need_rust"
           assert "Slicer image build and smoke"           "$SLICER_IMAGE_RESULT" "$need_rust"
 
           # `freshness` is PR-only — it diffs the API against the PR's base and
           # comments on the PR, and a push to main has neither. It is therefore
-          # REQUIRED on a pull_request and legitimately skipped on a push, and
-          # it is never path-gated: a skip that this job counts as satisfied is
+          # REQUIRED on a pull_request and legitimately skipped on a push. Its
+          # one path gate is `docs_only`, re-derived above, not read from
+          # `layout`: a skip that this job counts as satisfied is
           # indistinguishable from a real pass, which is the whole reason the
           # third argument exists.
           is_pr=false
           if [ "$EVENT_NAME" = "pull_request" ]; then is_pr=true; fi
-          assert "API spec determinism and diff"         "$FRESHNESS_RESULT" "$is_pr"
+          assert "API spec determinism and diff"         "$FRESHNESS_RESULT" "$(need "$is_pr")"
           # Its mirror: the Go client checked on the commit itself, required off a PR.
           not_pr=true
           if [ "$is_pr" = true ]; then not_pr=false; fi
@@ -2876,7 +2984,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
+    needs: [lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

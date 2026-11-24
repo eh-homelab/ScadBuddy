@@ -778,7 +778,7 @@ resolves to a principal through `authenticate(request) → principal { id, tiers
 |---|---|---|
 | browser user | the UI's own chat or session | `outward` (approves in the UI) |
 | bearer token | `/mcp` in `bearer` mode, minted in Settings, stored hashed | per token |
-| OIDC subject | `/mcp` in `oidc` mode (#262), scopes `scadbuddy:read|write|outward` | per scope |
+| OIDC subject | `/mcp` in `oidc` mode (#262), scopes `scadbuddy:read\|write\|outward` | per scope |
 | `anonymous` | `/mcp` in `disabled` mode | **full access (`outward`) by default**; an operator can lower the cap in Settings |
 | flow | analyzer (#284) or plugin hook (#297) session | the skill's declared `permissions` |
 
