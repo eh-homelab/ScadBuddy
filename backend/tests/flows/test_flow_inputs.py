@@ -210,6 +210,17 @@ def test_a_pattern_whose_counted_repeats_fit_is_accepted(pattern: str) -> None:
     assert schema_problems(_patterned(pattern)) == []
 
 
+@pytest.mark.parametrize("stored", [False, True])
+def test_an_array_items_pattern_whose_counted_repeats_are_too_large_is_refused(
+    stored: bool,
+) -> None:
+    """#7512: an array's ``items`` pattern goes through the same bound as a string's."""
+    prop = {"type": "array", "items": {"type": "string", "pattern": "^a{10001}$", "maxLength": 64}}
+    assert schema_problems({"type": "object", "properties": {"s": prop}}, stored=stored) == [
+        f"s: a pattern repeats at most {MAX_PATTERN_SIZE} times, nested counts multiplied"
+    ]
+
+
 @pytest.mark.parametrize(
     "prop",
     [

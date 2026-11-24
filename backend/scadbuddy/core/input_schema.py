@@ -16,7 +16,9 @@ The subset keeps one Python type and one form control per input:
 The API runs every ``pattern`` on the values it checks, so a pattern is bounded
 (`MAX_PATTERN`), its counted repeats too (`MAX_PATTERN_SIZE`, #7394), needs a ``maxLength``
 (`MAX_PATTERNED_LENGTH`) and runs with a deadline (`PATTERN_TIMEOUT_S`, `PATTERNS_BUDGET_S`;
-#2661).
+#2661). A stored schema is checked again at each run's start (``stored=True``), so a flow
+stored before a bound existed and over it fails each run until it is registered again
+within the bound.
 """
 
 from __future__ import annotations
