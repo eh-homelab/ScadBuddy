@@ -108,8 +108,8 @@ from scadbuddy.filament.bb_sync_results import InProcessFilamentSync, adopt_inst
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
+from scadbuddy.filament.preset_mirror import sync_and_mirror
 from scadbuddy.filament.print_uses import PoolPrintUses
-from scadbuddy.filament.sb_presets import sync_from_held
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
 from scadbuddy.filament.sensors import PoolSensorNotifications
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
@@ -2089,7 +2089,9 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         held_presets_activity(
             lambda: HeldPresetStore(state.projection.pool),
             lambda: state.settings_store.load(),
-            lambda held: sync_from_held(state.settings_store.pool, state.store.blobs, held),
+            lambda held: sync_and_mirror(
+                state.settings_store.pool, state.store.blobs, held, state.settings_store.load
+            ),
         ),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,

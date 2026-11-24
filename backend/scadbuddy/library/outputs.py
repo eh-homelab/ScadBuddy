@@ -1503,7 +1503,7 @@ def reap_orphan_holds(
     this: holds orphaned by a model's whole deletion stay until a person drops them."""
     with span("outputs.reap_orphan_holds") as current:
         released = _reap_orphan_holds(refs, store, grace)
-        current.set_attribute("scadbuddy.outputs", released)
+        current.set_attribute("scadbuddy.released", released)
         return released
 
 

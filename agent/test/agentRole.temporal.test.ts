@@ -34,6 +34,7 @@ import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { wireRuntimeSync } from '../src/sessions/runtimeSync.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
+import { queuePollers } from '../src/temporal/pollers.js'
 import { FilePayloadStore, subjectDataConverter } from '../src/temporal/payloadCodec.js'
 import { dropPayloadKey, type PgPayloadKeys } from './support/sql/payloadKeys.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from '../src/temporal/session/affinity.js'
@@ -166,8 +167,8 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
 
   /** The identities polling `queue` (1 workflow, 2 activity) now. */
   async function pollers(queue: string, type: 1 | 2): Promise<string[]> {
-    const { pollers } = await env.client.workflowService.describeTaskQueue({ namespace: env.client.options.namespace, taskQueue: { name: queue }, taskQueueType: type })
-    return (pollers ?? []).flatMap((p) => (p.identity ? [p.identity] : []))
+    // Every partition (temporal/pollers.ts): a worker can poll only the non-root ones (#7306).
+    return (await queuePollers(env.client, queue, type, Date.now() + 10_000)).flatMap((p) => (p.identity ? [p.identity] : []))
   }
 
   async function agentProcess(role: 'api' | 'worker'): Promise<AgentProcess> {
