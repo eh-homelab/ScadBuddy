@@ -18,7 +18,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from scadbuddy.core.gitrepo import GitError
+from scadbuddy.core.gitrepo import GitError, GitTimeoutError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import template_copy
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
@@ -338,3 +338,35 @@ def test_copy_takes_the_write_lock_per_batch(world: World, monkeypatch: pytest.M
     # One hold per batch, and one for the drop.
     assert len(taken) == len(IDS) + 1
     assert not history._lock.locked()
+
+
+def test_a_write_lock_timeout_in_a_batch_is_incomplete_and_the_run_goes_on(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Task 5 review B-M1: a `GitTimeoutError` on the write lock (a long save on another
+    # replica) costs that batch only. The run copies the other batches, drops nothing and
+    # ends `incomplete`.
+    _empty(world)
+    monkeypatch.setattr(template_copy, "BATCH", 1)
+    history = world.history
+    assert history is not None
+    lock = history.write_lock
+    tries: list[int] = []
+
+    @contextmanager
+    def first_times_out() -> Iterator[None]:
+        tries.append(1)
+        if len(tries) == 1:
+            raise GitTimeoutError("the models lock was held past git_timeout")
+        with lock():
+            yield
+
+    monkeypatch.setattr(history, "write_lock", first_times_out)
+    result = _copy(world)
+
+    assert result.incomplete is True
+    assert result.added == len(IDS) - 1
+    assert len(world.rows.ids()) == len(IDS) - 1
+    last = world.rows.last_run()
+    assert last is not None
+    assert last["incomplete"] is True and last["finished_at"] is None

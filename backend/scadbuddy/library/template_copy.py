@@ -14,7 +14,8 @@ the walk's HEAD, with each template's own last commit. Then, under the lock, it 
 row whose template the walk did not see and that is not there now.
 
 A listing or stat error other than a missing entry (an NFS ``ESTALE``, ``EIO``), a
-missing ``models/``, or a walk that saw no template while rows exist makes the run
+missing ``models/``, a batch whose read or git call failed (the write lock past
+``git_timeout`` too), or a walk that saw no template while rows exist makes the run
 ``incomplete``: it drops nothing and sets no ``finished_at``. A stop leaves the run with
 no ``finished_at`` too. One replica copies at a time, under a session advisory lock.
 Synchronous: a caller on the loop uses a thread.
@@ -254,8 +255,8 @@ class _Copy:
         walk_head: str | None,
         known: dict[str, tuple[str, str | None]],
     ) -> bool:
-        """Read and write ``batch``'s rows under the write lock. False when a read
-        failed: the batch's rows are left as they were."""
+        """Read and write ``batch``'s rows under the write lock. False when a read or a
+        git call failed: the batch's rows are left as they were."""
         try:
             with self._locked():
                 head = None if self.history is None else self.history.head()
@@ -264,7 +265,9 @@ class _Copy:
                     read_versions = self._current(batch, read_versions, walk_head, head)
                 written, gone = self.refresh.read(batch, read_versions, head)
                 self.rows.put(written, gone)
-        except OSError:
+        except (OSError, GitError):
+            # A read error, or the write lock past `git_timeout` (a long save on another
+            # replica): this batch only. A Postgres error fails the run.
             logger.exception("could not read the templates' rows", extra={"templates": batch})
             return False
         for row in written:
@@ -317,7 +320,7 @@ class _Copy:
                     if template_id not in seen and not self.catalogue.exists(template_id)
                 ]
                 self.rows.put([], gone)
-        except OSError:
+        except (OSError, GitError):
             logger.exception("could not check the templates no walk saw; dropped no row")
             return False
         self.result.dropped += len(gone)
