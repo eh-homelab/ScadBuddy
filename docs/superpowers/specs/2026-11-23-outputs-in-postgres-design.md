@@ -203,11 +203,24 @@ Each phase ships as one or more PRs, each releasable on its own.
    go into Bambuddy's library (owner direction, 2026-11-23). `local` is allowed for
    development and tests. Prod runs `s3`.
 5. **The copy reconciles; it does not only fill.** Each run compares every folder with
-   its row and overwrites the row when the folder's `meta.json` (or another record
-   file) is newer than the row's `copied_at`. It runs again after each phase's
-   roll-out, when no old pod remains (check the pod images first), so a rename or a
-   backfill change that an old pod wrote during the roll-out reaches the row. "A second
-   run changes nothing" holds only when no folder changed between runs.
+   its row. It reads the folder again and refreshes the row when the folder's
+   `files_stamp` differs from the row's. The stamp is a sha256 of the sorted name, size
+   and `mtime_ns` of the record files (`meta.json`, `params.json`, `inputs.json`,
+   `record.json`, `manifest.json`, `bom.json`, `arranged_from.json`, `backfill.json`;
+   `library/output_copy.py` `files_stamp`), so no NFS clock is compared with the
+   database's. A save writes no stamp, so the next run reads that folder once. Live
+   writers (a save, a rename, a backfill change) set `copied_at` to the database's
+   clock. Before it reads a batch, the copy takes a mark from that clock. Its writes are
+   guarded by the mark (`OutputRows.write_copy`): a refresh is `UPDATE … WHERE copied_at
+   < mark`, and a new row is `INSERT … ON CONFLICT DO NOTHING`, so a live write wins.
+   After each batch commits, `undo_copy` deletes each row it wrote at that mark whose
+   `meta.json` is gone; the run's end checks the rows it inserted once more. A row whose
+   folder the walk did not see is dropped only when its `copied_at` is before the run's
+   start. When a listing or a stat fails (ESTALE, EIO), the run drops nothing. The copy
+   runs at every start. It runs again after each phase's roll-out, when no old pod
+   remains (check the pod images first), so a rename or a backfill change that an old
+   pod wrote during the roll-out reaches the row. "A second run changes nothing" holds
+   only when no folder changed between runs.
 6. **The row is the record, so a failed row write fails the save.** The write order in
    `create` is: put the blobs (phase 2), then one transaction that inserts the row and
    its `blob_refs` holds. In phase 1 the files are still written first. If the

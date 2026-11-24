@@ -100,9 +100,11 @@ _INSERT = (
     " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
-#: A save's row replaces a row the copy wrote (it has a stamp): the copy may have read
-#: the save's folder before the save wrote its row.
-_DROP_COPIED = "DELETE FROM outputs WHERE output_id = %s AND files_stamp IS NOT NULL"
+#: A save's row replaces a row the copy wrote (it has a stamp) of the same folder: the
+#: copy may have read the save's folder before the save wrote its row. A row of another
+#: slug stays, so a second save of an id (`orders/quote.py` makes them with uuid5) under
+#: another model still fails on the key.
+_DROP_COPIED = "DELETE FROM outputs WHERE output_id = %s AND slug = %s AND files_stamp IS NOT NULL"
 
 #: The copy's new row. A row a save wrote meanwhile wins.
 _COPY_INSERT = (
@@ -163,15 +165,21 @@ class OutputRows:
         return [_row(item) for item in found]
 
     def insert(self, row: OutputRow, conn: Connection[DictRow] | None = None) -> None:
-        """Add a save's row. It replaces a row the copy wrote; another save's row with
-        that id is an error. With ``conn``, inside its transaction."""
+        """Add a save's row. It replaces a row the copy wrote of the same slug; any other
+        row with that id is an error. With ``conn``, inside its transaction."""
         if conn is not None:
-            conn.execute(_DROP_COPIED, (row.output_id,))
+            conn.execute(_DROP_COPIED, (row.output_id, row.slug))
             conn.execute(_INSERT, _values(row))
             return
         with self._pool.connection() as own, own.transaction():
-            own.execute(_DROP_COPIED, (row.output_id,))
+            own.execute(_DROP_COPIED, (row.output_id, row.slug))
             own.execute(_INSERT, _values(row))
+
+    def drop_copied(self, output_id: str, slug: str) -> None:
+        """Delete the row the copy wrote of the folder ``<slug>/<output_id>``; a row a
+        save wrote (no stamp) stays. A failed save calls it after it removed its folder."""
+        with self._pool.connection() as conn:
+            conn.execute(_DROP_COPIED, (output_id, slug))
 
     def clock(self) -> datetime:
         """The database's clock now, as every ``copied_at`` is: the copy's mark."""

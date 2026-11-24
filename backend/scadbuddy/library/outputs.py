@@ -845,6 +845,16 @@ class OutputStore:
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             self._dirs.pop(meta.id, None)
+            # The start's copy may have read this folder and written its row before the
+            # insert failed: with the folder gone, that row would name no output. Only a
+            # row with the copy's stamp goes (`OutputRows.drop_copied`). A failure here
+            # must not hide the insert's own error; the next copy drops such a row.
+            try:
+                self.rows.drop_copied(meta.id, meta.slug)
+            except Exception:
+                logger.exception(
+                    "could not delete the copy's row of a failed save", extra={"id": meta.id}
+                )
             raise
 
     def _next_created_at(self, slug: str) -> datetime:

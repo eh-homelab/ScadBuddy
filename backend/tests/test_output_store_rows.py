@@ -18,7 +18,7 @@ import pytest
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.output_index import OutputIndex
-from scadbuddy.library.output_rows import OutputRows
+from scadbuddy.library.output_rows import OutputRow, OutputRows
 from scadbuddy.library.outputs import (
     BACKFILL_NAME,
     META_NAME,
@@ -165,6 +165,28 @@ async def test_create_fails_and_cleans_up_when_row_insert_fails(
     with pytest.raises(psycopg.errors.UniqueViolation):
         store.create(job, output_id=taken)
     assert not store.paths.output_dir(job.slug, taken).exists()
+    # The other save's row stays: the clean-up deletes only a row the copy wrote.
+    assert rows_of(store).get(taken) is not None
+
+
+async def test_a_failed_save_leaves_no_row_the_copy_wrote(
+    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The copy read the save's folder and wrote its row, then the save's own insert
+    failed: the save removes its folder, and the copy's row goes with it."""
+    store, _, job = saved
+    rows = rows_of(store)
+
+    def failing(row: OutputRow, conn: object = None) -> None:
+        rows.write_copy([replace(row, files_stamp="stamp")], [], rows.clock())
+        raise psycopg.OperationalError("the connection was lost")
+
+    monkeypatch.setattr(rows, "insert", failing)
+    output_id = "c" * 32
+    with pytest.raises(psycopg.OperationalError):
+        store.create(job, output_id=output_id)
+    assert not store.paths.output_dir(job.slug, output_id).exists()
+    assert rows.get(output_id) is None
 
 
 async def test_rename_updates_row(saved: tuple[OutputStore, OutputMeta, Job]) -> None:

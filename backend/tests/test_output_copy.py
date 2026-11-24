@@ -462,7 +462,9 @@ def test_a_row_written_during_the_run_is_not_dropped(
     projection: JobProjection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A save on another pod whose folder the walk did not list keeps its row."""
+    """A save on another pod whose folder the walk did not list keeps its row: its
+    ``copied_at`` is after the run's start, so `OutputRows.ids_copied_before` leaves it
+    out of the rows to drop (the drop's own guard is tested in test_output_rows.py)."""
     paths, _, metas = files
     store, rows = _stores(paths, projection)
     new_id = "e" * 32
@@ -478,6 +480,38 @@ def test_a_row_written_during_the_run_is_not_dropped(
     assert result is not None
     assert result.dropped == 0
     assert rows.get(new_id) is not None
+
+
+def test_a_folder_removed_after_its_batch_loses_the_copys_row(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live delete removes the row, then the folder. When the copy's insert commits
+    between the two, and its batch's check ran while the folder was still there, the
+    run's end checks the folders of the rows it inserted again and undoes the row."""
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    undo = rows.undo_copy
+    calls = 0
+
+    def hooked(output_ids: Any, mark: Any) -> set[str]:
+        nonlocal calls
+        calls += 1
+        got = undo(output_ids, mark)
+        if calls == 1:
+            # The batch's check is done: the delete's folder removal ends now.
+            shutil.rmtree(paths.output_dir(metas[0].slug, metas[0].id))
+        return got
+
+    monkeypatch.setattr(rows, "undo_copy", hooked)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert rows.get(metas[0].id) is None
+    assert rows.get(metas[1].id) is not None
+    assert result.copied == 1
+    last = rows.last_run()
+    assert last is not None and last["copied"] == 1
 
 
 def test_a_stop_mid_batch_writes_what_it_read(

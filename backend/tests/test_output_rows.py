@@ -3,6 +3,7 @@ rows. The tables come first; the row store's tests follow."""
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -222,6 +223,49 @@ def test_write_copy_skips_rows_written_after_its_mark(rows: OutputRows) -> None:
         got = rows.get(output_id)
         assert got is not None and got.meta.name == "live"
     assert rows.get("deleted") is None
+
+
+def _copied(output_id: str, slug: str = "cube") -> OutputRow:
+    """A row as the copy writes it: with a stamp of the files it read."""
+    return dataclasses.replace(make_row(output_id, slug), files_stamp="stamp")
+
+
+def test_a_save_under_another_slug_does_not_replace_the_copys_row(rows: OutputRows) -> None:
+    """Ids can repeat across models (`orders/quote.py` makes them with uuid5): a save
+    replaces the copy's row of its own folder only, never one of another model."""
+    rows.write_copy([_copied("o1", "cube")], [], rows.clock())
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        rows.insert(make_row("o1", "ball"))
+    assert rows.slug_of("o1") == "cube"
+    rows.insert(make_row("o1", "cube", name="saved"))
+    got = rows.get("o1")
+    assert got is not None and got.meta.name == "saved" and got.files_stamp is None
+
+
+def test_undo_copy_keeps_a_row_a_writer_touched_after_the_mark(rows: OutputRows) -> None:
+    mark = rows.clock()
+    rows.write_copy([_copied("touched"), _copied("left")], [], mark)
+    rows.update_meta("touched", make_row("touched", name="live").meta)
+    assert rows.undo_copy(["touched", "left"], mark) == {"left"}
+    got = rows.get("touched")
+    assert got is not None and got.meta.name == "live"
+
+
+def test_drop_unseen_keeps_a_row_a_writer_touched_after_the_start(rows: OutputRows) -> None:
+    rows.insert(make_row("touched"))
+    rows.insert(make_row("left"))
+    started = rows.clock()
+    rows.update_meta("touched", make_row("touched", name="live").meta)
+    assert rows.drop_unseen(["touched", "left"], started) == 1
+    assert rows.existing(["touched", "left"]) == {"touched"}
+
+
+def test_drop_copied_deletes_only_the_copys_row_of_that_slug(rows: OutputRows) -> None:
+    rows.write_copy([_copied("copied"), _copied("elsewhere", "ball")], [], rows.clock())
+    rows.insert(make_row("saved"))
+    for output_id in ("copied", "elsewhere", "saved"):
+        rows.drop_copied(output_id, "cube")
+    assert rows.existing(["copied", "elsewhere", "saved"]) == {"elsewhere", "saved"}
 
 
 def test_attach_backfill_keeps_a_record_and_clears_the_backfill(rows: OutputRows) -> None:

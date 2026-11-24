@@ -12,7 +12,12 @@ the files.
 Live writers on other pods run during the copy. Each one sets ``copied_at`` to the
 database's clock. The copy takes a mark from that clock before it reads a batch, and
 writes a row only where no writer touched it since the mark (`OutputRows.write_copy`),
-so it never undoes a rename, never brings back a deleted row and never fails a save.
+so it never undoes a rename and never fails a save. A refresh never brings back a
+deleted row: it only updates. A new row can: a live delete removes the row and then the
+folder, and the copy's insert can commit between the two. So the copy checks each
+inserted row's ``meta.json`` after its batch, and once more at the run's end, and
+undoes the row when the file is gone. A delete whose folder removal is still going at
+the run's end leaves the row until the next run, which drops it with its folder gone.
 
 One replica copies at a time, under a session advisory lock. Synchronous, like
 `OutputRows`: a caller on the loop uses a thread.
@@ -190,6 +195,9 @@ class _Batch:
         self.new: list[OutputRow] = []
         self.changed: list[OutputRow] = []
         self.folders: dict[str, Path] = {}
+        #: Each row this run inserted and kept, with its folder, by its batch's mark: what
+        #: `recheck` looks at again at the run's end.
+        self.inserted: dict[datetime, dict[str, Path]] = {}
 
     def start(self) -> None:
         """Take the mark, before the batch's first read."""
@@ -213,8 +221,19 @@ class _Batch:
         undone = self.rows.undo_copy(gone, mark)
         self.result.copied += len(added - undone)
         self.result.refreshed += len(refreshed - undone)
+        kept = {i: self.folders[i] for i in added - undone}
+        if kept:
+            self.inserted[mark] = kept
         self.mark = None
         self.new, self.changed, self.folders = [], [], {}
+
+    def recheck(self) -> None:
+        """At the run's end: undo each row this run inserted whose ``meta.json`` went
+        since its batch's check (a live delete's folder removal that ended late)."""
+        for mark, folders in self.inserted.items():
+            gone = [i for i in sorted(folders) if not _has_meta(folders[i])]
+            self.result.copied -= len(self.rows.undo_copy(gone, mark))
+        self.inserted = {}
 
 
 def _copy(store: OutputStore, rows: OutputRows, stop: threading.Event | None) -> CopyResult:
@@ -228,6 +247,7 @@ def _copy(store: OutputStore, rows: OutputRows, stop: threading.Event | None) ->
     for slug, directory in walk:
         if stop is not None and stop.is_set():
             batch.write()
+            batch.recheck()
             return result
         output_id = directory.name
         seen.add(output_id)
@@ -245,6 +265,7 @@ def _copy(store: OutputStore, rows: OutputRows, stop: threading.Event | None) ->
         result.damaged.extend(damaged)
         batch.add(dataclasses.replace(row, files_stamp=stamp), directory, known=known)
     batch.write()
+    batch.recheck()
     stale = rows.ids_copied_before(started) - seen
     if not walk.complete:
         # A listing that failed part-way may have missed folders that are there.
