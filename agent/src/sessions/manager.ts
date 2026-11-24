@@ -596,7 +596,7 @@ export type SendOptions = {
   /**
    * The flow run and step that send this turn (#2481), set only by the sessions tools
    * from a flow activity's own context (ToolContext.flowTurn): a durable turn carries
-   * it, so the run's grant may cover its calls. A classic turn ignores it. Such a turn is offered
+   * it, so the run's grant may cover its calls. Such a turn is offered
    * no background built-in (#5870, `turn_flow`).
    */
   flow?: FlowTurn
@@ -927,7 +927,7 @@ export class SessionManager {
   durableTurns: DurableTurns | undefined
   /**
    * This replica's warm Claude Code processes (warm.ts, spec 2026-10-13 §5.3):
-   * one per classic session, serving its turns until it no longer matches
+   * one per session, serving its turns until it no longer matches
    * them, goes idle, or is evicted (a handoff, done, an archive, a credential,
    * plugin or package change on any replica: warmEvict.ts; main.ts hears it on the change stream).
    */
@@ -945,8 +945,8 @@ export class SessionManager {
   /** Assembles each turn's query options (turnRunner.ts). */
   private readonly runner: TurnRunner
   /**
-   * What a turn on this replica's warm processes needs (turnCore.ts): a classic turn's, and
-   * an AgentSession's `session_turn` (temporal/session/turnHost.ts), so both run alike.
+   * What a turn on this replica's warm processes needs (turnCore.ts): an AgentSession's
+   * `session_turn` (sessions/turnHost.ts).
    */
   readonly turnCore: TurnCoreDeps
 

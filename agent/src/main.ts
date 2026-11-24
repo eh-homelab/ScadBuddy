@@ -1319,7 +1319,7 @@ async function stop(): Promise<void> {
   // and at 15 s it stops regardless: inside the turns' 17 s budget. The session host worker stops
   // with it, with the turns' 17 s as its grace; the pinned host worker only once they end (below).
   // AgentSession turns get
-  // the classic turns' grace (TurnHost.stop); one still running then is cut and fails
+  // TURN_DRAIN_MS as their grace (TurnHost.stop); one still running then is cut and fails
   // ShuttingDown, so its workflow places it on another replica, and one that ended in the grace
   // keeps its end. The warm processes are closed only once those have ended (stopTurns `others`).
   const hostedTurns = turnHost?.stop({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
@@ -1334,7 +1334,7 @@ async function stop(): Promise<void> {
   // its pinned calls. It runs beside shutdown() below, which closes the tabs first, so its bridge.tab
   // calls end at once ("gone"). Its stop ends within PINNED_SHUTDOWN_FORCE_MS (8 s) of the drain, and
   // shutdown()'s 10 s deadline starts later, so the last step below, which awaits it, never closes
-  // the session-event publisher under a pinned call still in its grace (a classic Monitor's
+  // the session-event publisher under a pinned call still in its grace (a Monitor's
   // appendEvent). The server's own close does not wait for it.
   const pinnedStopped = hostWorkers ? stopAfter(hostWorkers.pinned, drained) : undefined
   await drained
