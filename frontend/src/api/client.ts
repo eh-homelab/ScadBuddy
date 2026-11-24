@@ -116,6 +116,7 @@ import type {
   PrintAgain,
   PrintAttachment,
   PrintDetail,
+  LibraryFileSuggestion,
   PrintSources,
   PrintImportRequest,
   AutoImport,
@@ -1990,6 +1991,13 @@ export const api = {
    */
   getPrintSources: (archiveId: number, { printer = false } = {}) =>
     request<PrintSources>(`/print-imports/${archiveId}/sources${printer ? '?printer=true' : ''}`),
+
+  /**
+   * #7335 — whether a file of ScadBuddy's own library may still be an import's target: the
+   * file, or the import's own refusals (a 404 `library-file-gone` with the `replacement`,
+   * a 422 for a run's per-print copy).
+   */
+  checkImportTarget: (fileId: number) => request<LibraryFileSuggestion>(`/print-imports/library-files/${fileId}`),
 
   /**
    * #4698 — links an unlinked print to a model. A new model is made first, as an
