@@ -17,7 +17,7 @@ from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
-from scadbuddy.core.settings_cache import SETTINGS_CHANNEL, settings_written
+from scadbuddy.core.settings_cache import SETTINGS_CHANNEL, SettingsCache, settings_written
 from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import (
     DEFAULT_PLATE,
@@ -30,9 +30,13 @@ from scadbuddy.library.settings_store import (
     StoredSettings,
 )
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.printers import store as printer_store
+from scadbuddy.printers.models import PrinterCreate
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.operation_models import InsertOp, OperationInput
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
+from tests.printers.conftest import KEK
 
 
 @pytest.fixture
@@ -279,6 +283,125 @@ async def test_nothing_is_cached_without_a_listener(
     assert not store.cache.live
     other.save(SettingsPatch(public_url="https://later.example"))
     assert store.get(PUBLIC_URL) == "https://later.example"
+
+
+#: A plain setting the printer registry writes (`printers/store.py`
+#: `PRINTER_LISTED_SETTINGS`).
+_SKIP_LAN: Setting[list[str] | None] = Setting("print_auto_import_skip_lan_printers")
+
+
+def _skip_lan(settings: Settings, ids: list[str]) -> None:
+    with psycopg.connect(settings.database_url, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO settings (name, value) VALUES ('print_auto_import_skip_lan_printers', %s)",
+            [Jsonb(ids)],
+        )
+
+
+async def test_a_printer_delete_drops_the_cache_after_its_commit(
+    store: SettingsStore, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    printers = PrinterStore(store.pool, KEK)
+    printer = printers.create(PrinterCreate(serial="01P00A000000001", name="One")).id
+    _skip_lan(settings, [printer])
+    async with _listening(settings.database_url, store):
+        assert store.get(_SKIP_LAN) == [printer]
+        forget = printer_store._forget_settings
+
+        def forget_then_read(conn: Any, printer_id: str) -> None:
+            forget(conn, printer_id)
+            # Another request reads before the delete commits: it sees the old rows.
+            assert store.get(_SKIP_LAN) == [printer]
+
+        monkeypatch.setattr(printer_store, "_forget_settings", forget_then_read)
+        printers.delete(printer)
+        # Blocking the loop: no notification heard, so only the registry's drop helps.
+        assert store.get(_SKIP_LAN) == []
+
+
+async def test_a_printer_merge_drops_the_cache_after_its_commit(
+    store: SettingsStore, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    printers = PrinterStore(store.pool, KEK)
+    synthetic = printers.ensure_bambuddy(7, serial=None, name="Seven", model=None).id
+    kept = printers.create(PrinterCreate(serial="01P00A000000001", name="One")).id
+    _skip_lan(settings, [synthetic])
+    async with _listening(settings.database_url, store):
+        assert store.get(_SKIP_LAN) == [synthetic]
+
+        def read(conn: Any, gone: str, into: str) -> None:
+            # Another request reads before the merge commits: it sees the old rows.
+            assert store.get(_SKIP_LAN) == [synthetic]
+
+        monkeypatch.setattr(
+            printer_store, "PRINTER_REFERENCES", (*printer_store.PRINTER_REFERENCES, read)
+        )
+        printers.link_bambuddy(kept, 7)
+        assert store.get(_SKIP_LAN) == [kept]
+
+
+async def test_a_write_while_the_listener_reconnects_is_never_served_stale(
+    store: SettingsStore, other: SettingsStore, settings: Settings
+) -> None:
+    """`on_state(False)`, a write whose notification nobody hears, then `on_connect`:
+    the cache never answers the entry from before the gap."""
+    listener = PgListener(settings.database_url, check_interval=0.2, backoff=0.1)
+    store.follow(listener)
+    cache = store.cache
+    states: asyncio.Queue[bool] = asyncio.Queue()
+    listener.on_state(states.put_nowait)
+    task = asyncio.create_task(listener.run())
+    try:
+        assert await asyncio.wait_for(states.get(), 10) is True
+        await asyncio.sleep(0)
+        assert cache.live
+        assert store.get(PUBLIC_URL) == "https://env.example"
+        pid = listener.backend_pid
+        assert pid is not None
+        with psycopg.connect(settings.database_url, autocommit=True) as conn:
+            conn.execute("SELECT pg_terminate_backend(%s)", [pid])
+        assert await asyncio.wait_for(states.get(), 10) is False
+        assert not cache.live
+        # Written while nothing listens: its notification is lost.
+        other.save(SettingsPatch(public_url="https://gap.example"))
+        assert store.get(PUBLIC_URL) == "https://gap.example"
+        assert await asyncio.wait_for(states.get(), 10) is True
+        await asyncio.sleep(0)
+        assert cache.live
+        assert listener.connects == 2
+        assert store.get(PUBLIC_URL) == "https://gap.example"
+        assert store.load().public_url == "https://gap.example"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+def test_a_read_begun_before_a_reconnect_keeps_nothing() -> None:
+    """A read that began while live, across a drop and a reconnect, keeps nothing: its
+    rows may predate a write whose notification was lost."""
+    cache: SettingsCache[str] = SettingsCache()
+    channels: dict[str, Any] = {}
+    states: list[Any] = []
+
+    class Listener:
+        def listen(self, channel: str, *, on_notify: Any, on_connect: Any) -> None:
+            channels[channel] = on_connect
+
+        def on_state(self, callback: Any) -> None:
+            states.append(callback)
+
+    cache.follow(Listener())  # type: ignore[arg-type]
+    channels[SETTINGS_CHANNEL](False)
+    _, generation = cache.fresh()
+    assert generation is not None
+    at = cache.clock()
+    for callback in states:
+        callback(False)
+    assert cache.fresh() == (None, None)
+    channels[SETTINGS_CHANNEL](True)
+    cache.keep(generation, at, "read before the gap")
+    assert cache.fresh()[0] is None
 
 
 def test_the_trigger_notifies_the_channel_the_cache_listens_on(settings: Settings) -> None:
