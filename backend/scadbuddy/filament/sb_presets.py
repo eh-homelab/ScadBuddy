@@ -623,8 +623,9 @@ class PresetImport(BaseModel):
     adopted: int
     #: ``bambuddy`` presets that took a new version (`refresh_bambuddy`).
     updated: int
-    #: Bambuddy local ids that bindings still name after the import (`bound_bb_ids`): ids
-    #: Bambuddy no longer holds, or whose detail is no filament preset (#7244 review).
+    #: Bambuddy local ids that bindings still name after the import (`bound_bb_ids`), for
+    #: any cause: for example an id Bambuddy no longer holds, a detail that is no filament
+    #: preset, or a preset whose adopt failed (#7244 review, #7435).
     unresolved: int = 0
 
 
