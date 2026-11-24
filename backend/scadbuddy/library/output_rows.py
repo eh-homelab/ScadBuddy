@@ -340,12 +340,16 @@ class OutputRows:
 
     def set_blob(self, output_id: str, role: Role, key: str) -> bool:
         """Name ``key`` as the blob of the output's ``role`` and hold it, in one
-        transaction. False when the row is gone: then no hold is written."""
+        transaction. False when the row is gone: then no hold is written. It moves
+        ``bytes_at`` only on a row already in blobs, so the byte copy's guard skips it; on
+        a row with no ``bytes_at`` the files still hold the bytes, and it stays NULL."""
         if role not in ROLES:
             raise ValueError(f"not a byte role: {role!r}")
         with self._pool.connection() as conn, conn.transaction():
             cursor = conn.execute(
-                f"UPDATE outputs SET {role}_blob = %s WHERE output_id = %s", (key, output_id)
+                f"UPDATE outputs SET {role}_blob = %s, bytes_at = CASE WHEN bytes_at IS NOT"
+                " NULL THEN clock_timestamp() END WHERE output_id = %s",
+                (key, output_id),
             )
             if not cursor.rowcount:
                 return False

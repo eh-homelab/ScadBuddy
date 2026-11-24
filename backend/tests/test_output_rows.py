@@ -404,11 +404,40 @@ def test_insert_with_blobs_writes_columns_files_and_holds(
 
 
 def test_insert_failure_writes_no_hold(rows: OutputRows, projection: JobProjection) -> None:
-    rows.insert(make_row("o1", "ball"))
+    """A save that fails after it dropped the copy's row undoes the drop: the copy's row
+    and its holds stay, and the save writes no file row and no hold."""
+    rows.write_copy([_copied("o1")], [], rows.clock())
+    copied = _blobs("o1", "a.stl")
+    rows.write_bytes([ByteWrite("o1", copied, "stamp", None)])
+    # Two `files/` entries of one name: `_write_files` fails on the key, after the drop.
+    clash = dataclasses.replace(
+        _blobs("o1", "b.stl"),
+        files=(
+            OutputFileBlob(name="b.stl", blob_key=output_file_key("o1", 0), size=1),
+            OutputFileBlob(name="b.stl", blob_key=output_file_key("o1", 1), size=1),
+        ),
+    )
     with pytest.raises(psycopg.errors.UniqueViolation):
-        rows.insert(dataclasses.replace(make_row("o1", "cube"), blobs=_blobs("o1", "a.stl")))
-    assert _holds(projection, "o1") == set()
-    assert rows.files("o1") == []
+        rows.insert(dataclasses.replace(make_row("o1"), blobs=clash))
+    got = rows.get("o1")
+    assert got is not None and got.files_stamp == "stamp"
+    assert _holds(projection, "o1") == set(copied.keys())
+    assert [f.name for f in rows.files("o1")] == ["a.stl"]
+
+
+def test_set_blob_moves_bytes_at_only_on_a_row_in_blobs(rows: OutputRows) -> None:
+    rows.insert(dataclasses.replace(make_row("blobbed"), blobs=_blobs("blobbed")))
+    before = rows.get("blobbed")
+    assert before is not None and before.bytes_at is not None
+    assert rows.set_blob("blobbed", "thumbnail", output_blob_key("blobbed", "thumbnail"))
+    after = rows.get("blobbed")
+    assert after is not None and after.bytes_at is not None
+    assert after.bytes_at > before.bytes_at
+    # A plain row's bytes are still in its files: NULL keeps meaning that.
+    rows.insert(make_row("plain"))
+    assert rows.set_blob("plain", "thumbnail", output_blob_key("plain", "thumbnail"))
+    plain = rows.get("plain")
+    assert plain is not None and plain.bytes_at is None
 
 
 def test_set_blob_on_deleted_row_writes_no_hold(

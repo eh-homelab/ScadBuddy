@@ -1481,10 +1481,10 @@ def _remove_unheld_directories(bare: list[Path], holding: set[str], grace: timed
 def reap_orphan_holds(
     refs: BlobRefs, store: OutputStore, *, grace: timedelta = ORPHAN_HOLD_GRACE
 ) -> int:
-    """Release every `output` hold older than ``grace`` whose output has no meta.json
-    (#1007): a save that failed between holding its Parts and writing meta.json, or a
-    hold taken after a delete's release, leaves holds that nothing else ever drops.
-    Returns how many outputs' holds it released. Each released output's directory, if
+    """Release every `output` hold (the Parts and byte blobs) older than ``grace`` whose
+    output has no meta.json (#1007): a save that failed between holding its Parts and
+    byte blobs and writing meta.json, or a hold taken after a delete's release, leaves
+    holds that nothing else ever drops. Returns how many outputs' holds it released. Each released output's directory, if
     one is left with no meta.json, goes too (`_remove_orphan_directory`, #1815), as
     does an output directory with no meta.json and no hold at all, past the same grace
     (#5448: a save that claimed its id and stopped before it held its Parts).
@@ -1570,8 +1570,8 @@ def _reap_orphan_holds(refs: BlobRefs, store: OutputStore, grace: timedelta) -> 
     if orphans or unknown:
         # One line to spot an unexpected mass release (#1806 review).
         logger.warning(
-            "released the Parts of %d orphaned outputs (%d held past the grace; %d of"
-            " unknown template kept)",
+            "released the Parts and byte blobs of %d orphaned outputs (%d held past the"
+            " grace; %d of unknown template kept)",
             len(orphans),
             len(held),
             unknown,
