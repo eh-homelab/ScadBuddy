@@ -4116,10 +4116,10 @@ uv run python -m scadbuddy.store.verify_bambuddy
 ```
 
 Expected: a Markdown table on stdout; exit 0; every uploaded file deleted (stderr `files_cleaned`). Paste the table into `tests/bambuddy/recordings/README.md` under a new heading "Blob store (#426), measured <date> against <version>", with the recorded `store-file-*.json` files listed in its table. Then, by hand, and record each in the same section:
-  - Upload 500 files to `ScadBuddy verify/Work` (run the script's 40-upload loop ×12) and open Bambuddy's library UI on that folder and on the inbox: note load time and whether the tree stays usable ("whether a `Work/` folder with hundreds of files degrades Bambuddy's library UI", §6.3). Delete them afterwards from the UI.
-  - "The maximum plates per 3MF Bambu Studio opens" (§6.3): generate `dollhouse-kit` pieces onto 6, 12, 24 and 48 plates with the multi-plate writer (`render/bambu3mf.py`) and open each in Bambu Studio; record the largest that opens.
-  - If `file_hash` is a sha256, or if a re-upload of identical bytes answers with `duplicate_of` and no new file, note it: `ContentStore._store` could then skip ScadBuddy's own dedupe query. If an upload into a missing folder is not a 404, change the `error.status != 404` check in `BambuddyContentBackend.upload` to the measured status and its test's response to match.
-  - If any 403 appears with the Manage-Library-only key, the scope in `bambuddy/client.py` for that call is wrong: fix it there and in `bambuddy/errors.py`'s docstring.
+- Upload 500 files to `ScadBuddy verify/Work` (run the script's 40-upload loop ×12) and open Bambuddy's library UI on that folder and on the inbox: note load time and whether the tree stays usable ("whether a `Work/` folder with hundreds of files degrades Bambuddy's library UI", §6.3). Delete them afterwards from the UI.
+- "The maximum plates per 3MF Bambu Studio opens" (§6.3): generate `dollhouse-kit` pieces onto 6, 12, 24 and 48 plates with the multi-plate writer (`render/bambu3mf.py`) and open each in Bambu Studio; record the largest that opens.
+- If `file_hash` is a sha256, or if a re-upload of identical bytes answers with `duplicate_of` and no new file, note it: `ContentStore._store` could then skip ScadBuddy's own dedupe query. If an upload into a missing folder is not a 404, change the `error.status != 404` check in `BambuddyContentBackend.upload` to the measured status and its test's response to match.
+- If any 403 appears with the Manage-Library-only key, the scope in `bambuddy/client.py` for that call is wrong: fix it there and in `bambuddy/errors.py`'s docstring.
 
 - [ ] **Step 2: Docs**
 
