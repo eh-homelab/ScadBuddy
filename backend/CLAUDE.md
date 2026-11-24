@@ -2297,8 +2297,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   colour of, `listings.py` `_offered_file`) and `previews` (edge paths
   `/api/store/v1/listings/{id}/preview/{plate}.glb`); `GET …/listings/{id}/preview/{plate}.glb`
   (`file_listings.py` `held_preview`) streams the plate's held GLB, and the edge relays it. A
-  render, a variant and the prepare run still take a template listing only
-  (`published_listing`'s `source`). Its price read and cart line are `file_prices.py` (#6710 §7.5, §7.6):
+  render, a variant and the prepare run still take a template listing only. A visitor's
+  call of a published listing that sells the other source (the shop switched it since the
+  page read it) is 409 `listing_changed` (`published_listing`'s `source`), so the page
+  offers "Load the latest version"; an unpublished or unknown one is 404
+  `listing_not_found`, and the held preview of a template listing too. Its price read and cart line are `file_prices.py` (#6710 §7.5, §7.6):
   `POST …/listings/{id}/price` (area `file-prices`; edge `/api/store/v1/listings/{id}/price`,
   counted as a read) takes `ListingPriceBody` (a listing colour per offered slot, one
   material, `file_choice`; a support slot takes the snapshot's lock) and answers
