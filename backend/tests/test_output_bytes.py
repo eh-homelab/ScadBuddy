@@ -100,9 +100,10 @@ async def test_put_folder_refuses_a_name_an_output_may_not_hold(
     root = _folder(tmp_path / "o1")
     (root / "files" / ".hidden").write_bytes(b"x")
     (root / "files" / "sub").mkdir()
+    (root / "files" / "link.stl").symlink_to(root / "files" / "a.stl")
     with pytest.raises(OutputFileNameError) as raised:
         await blobs.put_folder(root, "o1", "cube")
-    assert raised.value.names == (".hidden", "sub")
+    assert raised.value.names == (".hidden", "link.stl", "sub")
     assert ".hidden" in str(raised.value) and "sub" in str(raised.value)
     # The check comes before any put.
     assert blobs.ref(output_blob_key("o1", "model")) is None
@@ -242,6 +243,44 @@ async def test_local_file_cancelled_during_download_leaves_no_file(
     gate.set()
     if reopened:
         await asyncio.to_thread(opened.wait, 5)
+    assert _spooled(content) == []
+
+
+async def test_local_file_cancelled_while_temporary_runs_leaves_no_file(
+    blobs: OutputBytes, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = output_blob_key("o1", "model")
+    await blobs.put(key, b"3mf bytes", slug="cube")
+    reached = threading.Event()
+    gate = threading.Event()
+    made = threading.Event()
+    original = blobs._temporary
+
+    def gated(suffix: str) -> tuple[Any, Path]:
+        reached.set()
+        gate.wait(5)
+        try:
+            return original(suffix)
+        finally:
+            made.set()
+
+    monkeypatch.setattr(blobs, "_temporary", gated)
+
+    async def reader() -> None:
+        async with blobs.local_file(key, ".3mf"):
+            pass
+
+    task = asyncio.create_task(reader())
+    assert await asyncio.to_thread(reached.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gate.set()
+    assert await asyncio.to_thread(made.wait, 5)
+    for _ in range(100):
+        if not _spooled(content):
+            break
+        await asyncio.sleep(0.01)
     assert _spooled(content) == []
 
 

@@ -101,7 +101,7 @@ async def _rest(first: bytes, chunks: AsyncGenerator[bytes]) -> AsyncGenerator[b
         await chunks.aclose()
 
 
-def _put_names(directory: Path) -> list[str]:
+def put_names(directory: Path) -> list[str]:
     """Every ``files/`` name, sorted: a name's index is its key's. `OutputFileNameError`
     when an entry is not a regular file or has a name an output may not hold."""
     folder = directory / FILES_DIR
@@ -118,6 +118,14 @@ def _put_names(directory: Path) -> list[str]:
     if bad:
         raise OutputFileNameError(directory, bad)
     return names
+
+
+def _discard_temporary(made: asyncio.Future[tuple[BinaryIO, Path]]) -> None:
+    if made.cancelled() or made.exception() is not None:
+        return
+    file, path = made.result()
+    file.close()
+    path.unlink(missing_ok=True)
 
 
 class OutputBytes:
@@ -163,7 +171,7 @@ class OutputBytes:
         for name in (MODEL_NAME, PREVIEW_NAME):
             if not await asyncio.to_thread((directory / name).is_file):
                 raise FileNotFoundError(directory / name)
-        names = await asyncio.to_thread(_put_names, directory)
+        names = await asyncio.to_thread(put_names, directory)
         model = output_blob_key(output_id, "model")
         preview = output_blob_key(output_id, "preview")
         await self._put_file(model, directory / MODEL_NAME, slug)
@@ -238,7 +246,13 @@ class OutputBytes:
     @contextlib.asynccontextmanager
     async def _local_file(self, key: str, suffix: str) -> AsyncIterator[Path]:
         ref = await self._ref(key)
-        file, path = await asyncio.to_thread(self._temporary, suffix)
+        made = asyncio.ensure_future(asyncio.to_thread(self._temporary, suffix))
+        try:
+            file, path = await asyncio.shield(made)
+        except BaseException:
+            # A cancel while the thread makes the file: remove it once it is made.
+            made.add_done_callback(_discard_temporary)
+            raise
         try:
             await self._download_to(ref, file)
             yield path
