@@ -102,8 +102,9 @@ def open_task(body: TaskOpen, tasks: TasksDep) -> Task:
 
 @router.post("/tasks/{task_id}/close", name="crud_projects_close_task")
 def close_task(task_id: str, body: CloseWrite, tasks: TasksDep) -> Task:
-    """`TaskStore.close`. A task already in the asked state answers its row, so a retry
-    after a lost answer is the same request; another state is 409 ``task-not-open``."""
+    """`TaskStore.close_or_current`. A task already in the asked state answers its row, so
+    a retry after a lost answer is the same request; another state is 409
+    ``task-not-open``."""
     _uuid("task id", task_id)
     held = tasks.store.close_or_current(task_id, body.state)
     if held is None:
