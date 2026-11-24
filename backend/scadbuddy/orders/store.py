@@ -2471,13 +2471,15 @@ class OrderStore:
             )
 
     def attempts_missing_media(
-        self, created_after: datetime, checked_before: datetime
+        self, created_after: datetime, checked_before: datetime, limit: int
     ) -> list[str]:
         """The attempts made after ``created_after`` and not read for media since
         ``checked_before`` that still lack a medium (spec 2026-11-05 §4.6): one of their
         archives has no finish photo or no timelapse copy on the attempt or on its item (a
-        copy from before #5268). A settled run's attempt with no archive copied yet counts
-        too, as its outcome may have been missed. Least lately read first."""
+        copy from before #5268), and the import did not refuse it as too large at ``limit``
+        bytes (the upload limit) or more (#7281 review). A settled run's attempt with no
+        archive copied yet counts too, as its outcome may have been missed. Least lately
+        read first."""
         with self._read(None) as c:
             rows = c.execute(
                 "SELECT f.id FROM order_item_fulfilments f"
@@ -2490,9 +2492,12 @@ class OrderStore:
                 "   WHERE NOT EXISTS (SELECT 1 FROM entity_attachments e"
                 "    WHERE e.subject IN ('order_item_fulfilment:' || f.id,"
                 "     'order_item:' || f.order_item_id)"
-                "    AND e.archive_id = a.id AND e.archive_media = m.media)))"
+                "    AND e.archive_id = a.id AND e.archive_media = m.media)"
+                "   AND NOT EXISTS (SELECT 1 FROM order_attempt_media_refusals r"
+                "    WHERE r.fulfilment_id = f.id AND r.archive_id = a.id"
+                "    AND r.archive_media = m.media AND r.limit_bytes >= %(limit)s)))"
                 " ORDER BY f.media_checked_at NULLS FIRST, f.created_at, f.id",
-                {"after": created_after, "before": checked_before},
+                {"after": created_after, "before": checked_before, "limit": limit},
             ).fetchall()
         return [row["id"] for row in rows]
 
@@ -3248,6 +3253,40 @@ class OrderStore:
                 "SELECT DISTINCT archive_id, archive_media FROM entity_attachments"
                 " WHERE subject IN (%s, %s) AND archive_id IS NOT NULL",
                 (fulfilment_subject(fulfilment_id), item_subject(item_id)),
+            ).fetchall()
+        return {(r["archive_id"], r["archive_media"]) for r in rows}
+
+    def record_media_refusal(
+        self,
+        fulfilment_id: str,
+        archive_id: int,
+        what: ArchiveCopyMedia,
+        limit: int,
+        at: datetime,
+    ) -> None:
+        """The import refused the attempt's ``what`` of ``archive_id`` at ``limit`` bytes
+        (#7281 review): it skips it while the limit is no higher."""
+        with self._write(None) as c:
+            c.execute(
+                "INSERT INTO order_attempt_media_refusals"
+                " (fulfilment_id, archive_id, archive_media, limit_bytes, refused_at)"
+                " VALUES (%s, %s, %s, %s, %s)"
+                " ON CONFLICT (fulfilment_id, archive_id, archive_media)"
+                " DO UPDATE SET limit_bytes = EXCLUDED.limit_bytes,"
+                " refused_at = EXCLUDED.refused_at",
+                (fulfilment_id, archive_id, what, limit, at),
+            )
+
+    def media_refused(
+        self, fulfilment_id: str, limit: int, *, conn: Conn | None = None
+    ) -> set[tuple[int, ArchiveCopyMedia]]:
+        """Each ``(archive_id, archive_media)`` of the attempt the import refused at a
+        limit of ``limit`` bytes or more: still too large at ``limit``."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                "SELECT archive_id, archive_media FROM order_attempt_media_refusals"
+                " WHERE fulfilment_id = %s AND limit_bytes >= %s",
+                (fulfilment_id, limit),
             ).fetchall()
         return {(r["archive_id"], r["archive_media"]) for r in rows}
 

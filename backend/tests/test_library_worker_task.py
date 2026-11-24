@@ -323,6 +323,8 @@ async def test_a_failing_sweep_fails_its_activity(
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
+        # #7234: the attempt media sweep's upload limit.
+        settings=SimpleNamespace(media_upload_max_bytes=1 << 20),
         uploads=None,
         history=SimpleNamespace(maintain=_broken(OSError("the volume is gone"))),
         print_runs=SimpleNamespace(client=object(), task_queue="bambuddy"),
@@ -446,11 +448,12 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
     state.refs = None
 
     # #7234: the order attempts' missed media, one read and a Temporal start per attempt.
-    async def slow_media(*args: object) -> int:
+    async def slow_media(*args: object, **kwargs: object) -> int:
         await asyncio.sleep(0.1)
         return 0
 
     monkeypatch.setattr(main, "sweep_media", slow_media)
+    state.settings = SimpleNamespace(media_upload_max_bytes=1 << 20)
     # #5298: the CRUD routes' idempotency replies past their 24 h, one delete.
     monkeypatch.setattr(main, "_prune_crud_requests", lambda state: time.sleep(0.1))
 
