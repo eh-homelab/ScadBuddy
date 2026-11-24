@@ -1,6 +1,6 @@
-"""`GET /outputs/copy-status` (#7255): the last run of the start's copy of the saved
-outputs' files to rows. The tests' apps skip the start's copy (`app_output_copy_off`),
-so each test writes the runs it reads."""
+"""`GET /outputs/copy-status` (#7255): the last run of the copy of the saved outputs' files
+to rows, at an API start or in a housekeeping sweep. The tests' apps skip the start's
+copy (`app_output_copy_off`), so each test writes the runs it reads."""
 
 from __future__ import annotations
 

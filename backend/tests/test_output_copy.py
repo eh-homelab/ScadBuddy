@@ -1,6 +1,7 @@
-"""The copy of the saved outputs' files into rows at every API start (#7255,
-outputs-in-Postgres spec 2026-11-23 §6.1, §6.3, §6.5): it fills, refreshes, drops,
-lists what it cannot read, runs on one replica at a time and stops when told."""
+"""The copy of the saved outputs' files into rows at every API start and in every
+housekeeping sweep (#7255, outputs-in-Postgres spec 2026-11-23 §6.1, §6.3, §6.5): it
+fills, refreshes, drops, lists what it cannot read, runs on one replica at a time and
+stops when told."""
 
 from __future__ import annotations
 
@@ -586,6 +587,36 @@ def test_an_outputs_folder_that_reads_empty_is_an_incomplete_run(
     assert result.incomplete is True
     last = rows.last_run()
     assert last is not None and last["incomplete"] is True and last["finished_at"] is None
+
+
+def test_a_first_run_with_no_outputs_folder_does_not_end_the_fallback(
+    tmp_path: Path, projection: JobProjection
+) -> None:
+    """A first run that finds no outputs folder (a volume not mounted) is a failed walk,
+    not an empty, complete one: the fallback to the files stays."""
+    paths = DataPaths(tmp_path / "data")
+    assert not paths.outputs.exists()
+    store, rows = _stores(paths, projection)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.incomplete is True
+    assert rows.copied() is False
+    last = rows.last_run()
+    assert last is not None and last["incomplete"] is True and last["finished_at"] is None
+
+
+def test_a_first_run_with_an_empty_outputs_folder_finishes(
+    tmp_path: Path, projection: JobProjection
+) -> None:
+    """A fresh install: the outputs folder is there and empty, and there is no row. The
+    run finishes, so the fallback ends."""
+    paths = DataPaths(tmp_path / "data")
+    paths.outputs.mkdir(parents=True)
+    store, rows = _stores(paths, projection)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.incomplete is False
+    assert rows.copied() is True
 
 
 def test_a_complete_run_is_not_incomplete(

@@ -4,6 +4,7 @@ an older build during a roll-out reach the rows by the next sweep."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from types import SimpleNamespace
@@ -74,7 +75,7 @@ async def test_a_failed_sweep_is_logged_and_fails_its_activity(
     with caplog.at_level(logging.ERROR, logger="scadbuddy.main"), pytest.raises(OSError):
         await ActivityEnvironment().run(_sweep(_state()))
     assert [r.getMessage() for r in caplog.records] == [
-        "could not copy the saved outputs to rows; the next sweep retries"
+        "could not copy the saved outputs to rows; the next sweep or start retries"
     ]
 
 
@@ -104,5 +105,26 @@ async def test_a_failed_start_copy_is_logged_and_not_raised(
     with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
         await main._copy_outputs_logged(_state(), stop=threading.Event())
     assert [r.getMessage() for r in caplog.records] == [
-        "could not copy the saved outputs to rows; the next sweep retries"
+        "could not copy the saved outputs to rows; the next sweep or start retries"
     ]
+
+
+async def test_a_cancelled_sweep_stops_its_walk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sweep cancelled by its timeout, not only by the worker's shutdown, sets its stop:
+    the walk's thread ends between folders and frees the advisory lock."""
+    started = threading.Event()
+    stops: list[threading.Event] = []
+
+    def copy(*args: Any) -> None:
+        stops.append(args[3])
+        started.set()
+        args[3].wait(5)
+
+    monkeypatch.setattr(main, "copy_outputs", copy)
+    env = ActivityEnvironment()
+    run = asyncio.create_task(env.run(_sweep(_state())))
+    await asyncio.to_thread(started.wait, 5)
+    env.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    assert stops[0].is_set()

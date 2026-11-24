@@ -595,7 +595,9 @@ async def _copy_outputs_once(state: AppState, stop: threading.Event) -> None:
             copy_outputs, state.outputs, rows, state.projection.pool, stop
         )
     except Exception:
-        logger.exception("could not copy the saved outputs to rows; the next sweep retries")
+        logger.exception(
+            "could not copy the saved outputs to rows; the next sweep or start retries"
+        )
         raise
     if result is not None:
         logger.info(
@@ -735,9 +737,14 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     @activity.defn(name=OUTPUT_COPY_SWEEP)
     async def copy_outputs_to_rows() -> None:
         # #7255: its own stop, as `sweep_assets`': the worker's shutdown ends the walk
-        # between folders.
+        # between folders. Any cancel sets it too, as a timeout's: the thread then ends and
+        # frees the advisory lock.
         stop = threading.Event()
-        await _heartbeating(_copy_outputs_once(state, stop), stop)
+        try:
+            await _heartbeating(_copy_outputs_once(state, stop), stop)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
 
     @activity.defn(name=FLOWS_SWEEP)
     async def sweep_flow_runs() -> None:

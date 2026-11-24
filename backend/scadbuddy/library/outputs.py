@@ -876,10 +876,11 @@ class OutputStore:
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             self._dirs.pop(meta.id, None)
-            # The start's copy may have read this folder and written its row before the
-            # insert failed: with the folder gone, that row would name no output. Only a
-            # row with the copy's stamp goes (`OutputRows.drop_copied`). A failure here
-            # must not hide the insert's own error; the next copy drops such a row.
+            # A copy run (the start's or a sweep's) may have read this folder and written
+            # its row before the insert failed: with the folder gone, that row would name
+            # no output. Only a row with the copy's stamp goes (`OutputRows.drop_copied`).
+            # A failure here must not hide the insert's own error; the next copy drops
+            # such a row.
             try:
                 self.rows.drop_copied(meta.id, meta.slug)
             except Exception:

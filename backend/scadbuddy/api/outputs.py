@@ -1115,15 +1115,16 @@ def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
 
 
 class OutputCopyStatus(BaseModel):
-    """The last run of the start's copy of the saved outputs' files to rows (#7255)."""
+    """The last run of the copy of the saved outputs' files to rows (#7255): at an API start,
+    or in a housekeeping sweep."""
 
     started_at: datetime
     #: ``None`` while the run goes on, when it stopped before its end, or when it is
     #: ``incomplete``.
     finished_at: datetime | None
-    #: The run walked to its end but may have missed folders (a listing failed, or the
-    #: outputs folder read empty while rows exist). It does not end the fallback to the
-    #: files; the next run tries again.
+    #: The run walked to its end but may have missed folders (a listing failed, the
+    #: outputs folder read empty while rows exist, or a first run found no outputs
+    #: folder). It does not end the fallback to the files; the next run tries again.
     incomplete: bool
     copied: int
     refreshed: int
@@ -1141,9 +1142,10 @@ class OutputCopyStatus(BaseModel):
     summary="The last copy of the outputs' files to rows",
 )
 async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
-    """The last run of the copy that each API start runs (#7255): when it started and
-    finished, what it copied, refreshed and dropped, the folders it could not copy and
-    the side files it left out. 404 before any run."""
+    """The last run of the copy of the outputs' files to rows (#7255), at an API start or in
+    a housekeeping sweep: when it started and finished, what it copied, refreshed and
+    dropped, the folders it could not copy and the side files it left out. 404 before any
+    run."""
     rows = outputs.rows
     last = None if rows is None else await asyncio.to_thread(rows.last_run)
     if last is None:

@@ -1,5 +1,6 @@
 """The copy of the saved outputs' files into ``outputs`` rows (#7255, outputs-in-Postgres
-spec 2026-11-23 §6.1, §6.3, §6.5), run at every API start.
+spec 2026-11-23 §6.1, §6.3, §6.5), run at every API start and in every housekeeping sweep
+(`workflows/housekeeping.py` `OUTPUT_COPY_SWEEP`).
 
 It reconciles; it does not only fill. Each run walks ``data/outputs/<slug>/<id>/``: a
 folder with no row gets one, a row whose stamp of the record files differs from the
@@ -8,8 +9,8 @@ with no readable ``meta.json`` gets no row and goes on the run's "not copied" li
 side file that cannot be read is left out of the row and named on the "damaged" list.
 The first run that finishes makes `OutputRows.copied` true, which ends the fallback to
 the files. A run whose walk may have missed folders (a listing failed with ESTALE or
-EIO, or the outputs folder read empty while rows exist) does not finish: it is recorded
-as ``incomplete``, so the fallback stays.
+EIO, the outputs folder read empty while rows exist, or a first run found no outputs
+folder) does not finish: it is recorded as ``incomplete``, so the fallback stays.
 
 Live writers on other pods run during the copy. Each one sets ``copied_at`` to the
 database's clock. The copy takes a mark from that clock before it reads a batch, and
@@ -111,10 +112,13 @@ def files_stamp(directory: Path) -> str:
 class _Walk:
     """Every output folder under ``root``, as ``(slug, folder)``. ``complete`` turns
     false when a listing or a stat fails with anything but a missing entry (ESTALE, EIO):
-    the walk may then have missed folders that are there."""
+    the walk may then have missed folders that are there. With ``root_required`` (the
+    first run, while the fallback stands) a missing ``root`` fails it too: a volume not
+    mounted is no empty install."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, root_required: bool = False) -> None:
         self.root = root
+        self.root_required = root_required
         self.complete = True
 
     def _failed(self, path: Path, error: OSError) -> None:
@@ -136,7 +140,9 @@ class _Walk:
     def _list(self, path: Path) -> list[Path]:
         try:
             return sorted(path.iterdir())
-        except FileNotFoundError:
+        except FileNotFoundError as error:
+            if self.root_required and path == self.root:
+                self._failed(path, error)
             return []
         except OSError as error:
             self._failed(path, error)
@@ -276,7 +282,7 @@ def _copy(store: OutputStore, rows: OutputRows, stop: threading.Event | None) ->
     result = CopyResult()
     seen: set[str] = set()
     batch = _Batch(rows, result)
-    walk = _Walk(store.paths.outputs)
+    walk = _Walk(store.paths.outputs, root_required=not rows.copied())
     for slug, directory in walk:
         if stop is not None and stop.is_set():
             batch.write()
