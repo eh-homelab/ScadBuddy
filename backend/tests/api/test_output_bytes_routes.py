@@ -580,8 +580,9 @@ def test_versioned_thumbnail_and_preview_are_immutable(
     url = f"/api/v1/outputs/{output_id}/{'thumbnail' if role == 'thumbnail' else 'preview.glb'}"
     version = outputs.role_version(output_id, role)  # type: ignore[arg-type]
     assert version is not None
-    if role == "thumbnail":
-        assert version == outputs.thumbnail_version(output_id)
+    # The detail names the version a page puts in the URL.
+    detail = client.get(f"/api/v1/outputs/{output_id}").json()
+    assert detail[f"{role}_version"] == version
     current = client.get(url, params={"v": version})
     assert current.status_code == 200, current.text
     assert current.headers["cache-control"] == IMMUTABLE_CACHE_CONTROL

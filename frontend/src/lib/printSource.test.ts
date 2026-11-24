@@ -32,6 +32,14 @@ describe('printSource', () => {
     expect(remember).toHaveBeenCalledWith('name-keychain', { filament_plan: [] })
   })
 
+  it("names the output's preview version in the mesh URL, never in a plate's (#7256)", () => {
+    const id = 'a'.repeat(32)
+    const versioned = { kind: 'output', output: { ...OUTPUT.output, preview_version: '0123abcd' } } as const
+    expect(sourceApi(versioned).previewUrl(1, false)).toBe(`/api/v1/outputs/${id}/preview.glb?v=0123abcd`)
+    expect(sourceApi(versioned).previewUrl(2, true)).toBe(`/api/v1/outputs/${id}/preview.glb?plate=2`)
+    expect(sourceApi(OUTPUT).previewUrl(1, false)).toBe(`/api/v1/outputs/${id}/preview.glb`)
+  })
+
   it('routes a library file to the library calls', async () => {
     const run = vi.spyOn(api, 'runLibraryPrint').mockResolvedValue(queuedResult)
     const remember = vi.spyOn(api, 'putLibraryChoices').mockResolvedValue({ filament_plan: [] })

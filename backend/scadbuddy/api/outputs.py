@@ -150,6 +150,9 @@ class OutputSummary(OutputMeta):
     #: draw replaces it, so a page can put it in the URL and fetch the new one. None
     #: while there is no file, also when ``has_thumbnail`` says one would be drawn.
     thumbnail_version: str | None = None
+    #: Which mesh `/outputs/{id}/preview.glb` serves, as ``thumbnail_version`` for the
+    #: thumbnail: its ``v``. None while there is no preview.
+    preview_version: str | None = None
     #: Every copy of ``model.3mf`` ScadBuddy has put in Bambuddy's file library (#316),
     #: in upload order, read from `BambuddyUploadStore` (#455). One per (folder,
     #: target): a project's folder keeps the file each of its prints came from.
@@ -243,6 +246,7 @@ def _detail(
         **meta.model_dump(),
         has_thumbnail=thumbnail_version is not None or store.drawable_thumbnail(meta.id),
         thumbnail_version=thumbnail_version,
+        preview_version=store.role_version(meta.id, "preview"),
         params=params,
         inputs=store.inputs(meta.id, params),
         bom=store.bom(meta.id),
@@ -1249,7 +1253,8 @@ def _no_content(result: dict[str, Any] | Operation) -> Response:
 #: The ``v`` of a byte route that may be cached for good.
 VERSION_QUERY = (
     "The version of the bytes asked for: the output's `thumbnail_version` for its "
-    "thumbnail. When it is the current one, the answer is cached as `immutable`."
+    "thumbnail, its `preview_version` for its preview. When it is the current one, "
+    "the answer is cached as `immutable`."
 )
 
 
