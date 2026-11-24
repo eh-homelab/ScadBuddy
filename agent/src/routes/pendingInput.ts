@@ -117,13 +117,13 @@ export type PendingInputPage = { entries: PendingInputEntry[]; summaries_truncat
  * them. For anyone else, the approvals it may see (all of them with the approval
  * grant; else its own sessions' and its own MCP prepares), and the answers of the
  * sessions it owns. `sessionId` narrows it to one session; `grant` is whether `principal`
- * holds the approval grant, where the caller has read it already; `allAnswers` lists that
+ * holds the approval grant, where the caller has read it already; `browserAnswers` `all` lists that
  * session's parked answers to a browser user who does not own it.
  */
 export async function pendingInput(
   sessions: SessionManager,
   principal: Owner = BROWSER_USER,
-  filter: { sessionId?: string; runs?: boolean; grant?: boolean; allAnswers?: boolean } = {},
+  filter: { sessionId?: string; runs?: boolean; grant?: boolean; browserAnswers?: 'own' | 'all' } = {},
 ): Promise<PendingInputPage> {
   const browser = principal.kind === 'browser'
   const grant = !browser && (filter.grant ?? (await sessions.approvals.holdsGrant(principal)))
@@ -141,7 +141,7 @@ export async function pendingInput(
     sessions.questions.listPending(principal, filter.sessionId),
     sessions.projection.entries({
       ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }),
-      ...(browser ? { ownAnswers: filter.allAnswers !== true } : { ownedBy: principal, allApprovals: grant }),
+      ...(browser ? { ownAnswers: filter.browserAnswers !== 'all' } : { ownedBy: principal, allApprovals: grant }),
     }),
     withRuns ? sessions.queue.ownEntries() : Promise.resolve([]),
   ])
@@ -190,7 +190,7 @@ export async function sessionPendingInput(
   const own = canSee(principal, { owner: session.owner, creator: session.creator, offer: null })
   if (principal.kind !== 'browser' && !grant && !own) return undefined
   try {
-    return await pendingInput(sessions, principal, { sessionId, grant, allAnswers: session.creator.kind === 'browser' })
+    return await pendingInput(sessions, principal, { sessionId, grant, browserAnswers: session.creator.kind === 'browser' ? 'all' : 'own' })
   } catch (err) {
     // The approvals' own check: the session was forgotten, or the grant revoked, since the reads above.
     if (err instanceof ApprovalError && err.code === 'not_found') return undefined
