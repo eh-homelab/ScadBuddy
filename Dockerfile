@@ -706,10 +706,13 @@ RUN [ "$TARGETARCH" = amd64 ] \
     || { echo "ERROR: the profile-fetch image is built for amd64 only, not '${TARGETARCH}'." >&2; exit 1; }
 
 # xvfb and xauth for `xvfb-run` (headed Chromium, Decision 5), tini to reap what a
-# crashed browser leaves behind, as in the other stages.
+# crashed browser leaves behind, as in the other stages. libatomic1 because the Node
+# driver bundled with Playwright 1.65 links it, and `playwright install` runs that driver
+# before `--with-deps` installs anything (measured on PR #7117's profile-fetch build:
+# "libatomic.so.1: cannot open shared object file", exit 127).
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tini xvfb xauth \
+    && apt-get install -y --no-install-recommends ca-certificates tini xvfb xauth libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=profile-fetch-deps /opt/venv /opt/venv
