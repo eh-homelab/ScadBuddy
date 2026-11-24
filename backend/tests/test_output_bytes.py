@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import threading
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
@@ -15,9 +16,11 @@ import pytest
 
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes, OutputFileNameError, usable
 from scadbuddy.library.output_rows import OutputFileBlob, output_blob_key, output_file_key
+from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobRef, ContentStore
-from scadbuddy.store.index import Pool
-from tests.support.store import flip_first_byte, local_content, store_pool
+from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.store.s3 import S3ContentBackend
+from tests.support.store import flip_first_byte, local_content, moto_s3, record_reads, store_pool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -36,6 +39,12 @@ async def content(tmp_path: Path, pool: Pool) -> AsyncGenerator[ContentStore]:
         yield store
     finally:
         await store.aclose()
+
+
+@pytest.fixture
+def s3_settings() -> Iterator[S3Settings]:
+    with moto_s3() as settings:
+        yield settings
 
 
 @pytest.fixture
@@ -165,6 +174,51 @@ async def test_stream_raises_corrupt_small_blob_before_first_chunk(
     await flip_first_byte(content, key)
     with pytest.raises(BlobCorruptError):
         await blobs.stream(key)
+
+
+async def test_stream_raises_corrupt_blob_of_exactly_prefetch(
+    blobs: OutputBytes, content: ContentStore
+) -> None:
+    key = output_blob_key("o1", "model")
+    await blobs.put(key, b"x" * _PREFETCH, slug="cube")
+    await flip_first_byte(content, key)
+    # A blob of exactly the prefetch is checked whole before `stream` returns.
+    with pytest.raises(BlobCorruptError):
+        await blobs.stream(key)
+
+
+async def test_put_folder_on_s3_reads_its_files_off_the_loop(
+    s3_settings: S3Settings, pool: Pool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = S3ContentBackend(s3_settings, multipart_threshold=5 << 20, part_size=5 << 20)
+    content = ContentStore(backend, BlobIndex(pool))
+    content.spool = tmp_path / "spool"
+    folder = _folder(tmp_path / "o1")
+    big = os.urandom(11 << 20)
+    (folder / "model.3mf").write_bytes(big)
+    parts: list[str] = []
+    multipart = backend._multipart
+
+    async def counted(client: Any, key: str, data: Any, kind: str) -> None:
+        parts.append(key)
+        await multipart(client, key, data, kind)
+
+    monkeypatch.setattr(backend, "_multipart", counted)
+    reads = record_reads(monkeypatch, folder)
+    blobs = OutputBytes(content)
+    try:
+        await blobs.put_folder(folder, "o1", "cube")
+        monkeypatch.undo()
+        # The model is past the threshold, so it went up in parts; the rest whole.
+        assert len(parts) == 1
+        assert await blobs.read(output_blob_key("o1", "model")) == big
+        assert await blobs.read(output_blob_key("o1", "preview")) == b"glb"
+        assert await blobs.read(output_file_key("o1", 1)) == b"bb"
+    finally:
+        await content.aclose()
+    assert reads
+    # No read of an output's file ran on the loop's thread.
+    assert not any(reads)
 
 
 async def test_stream_holds_last_chunk_when_blob_corrupt(

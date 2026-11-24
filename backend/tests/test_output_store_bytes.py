@@ -4,17 +4,21 @@ is the fallback when the row names none or the blob is lost."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import logging
+import threading
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
+from botocore.exceptions import EndpointConnectionError
 
+import scadbuddy.library.outputs as outputs_module
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.output_bytes import OutputBytes
+from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes
 from scadbuddy.library.output_rows import (
     OUTPUT_HOLDER,
     ByteWrite,
@@ -32,9 +36,11 @@ from scadbuddy.library.outputs import (
     OutputStore,
     thumbnail_file_version,
 )
+from scadbuddy.library.outputs import _open_regular as open_regular
 from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
+from scadbuddy.store.content_models import StoreFullError
 from scadbuddy.store.index import Pool
 from tests.support.arrange import finished_job
 from tests.support.store import flip_first_byte, local_content, store_pool
@@ -222,23 +228,125 @@ async def test_open_role_reads_file_while_bytes_at_null(
 
 
 async def test_file_stream_closes_its_file_unread(
-    tmp_path: Path, projection: JobProjection, content: ContentStore
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, meta = await _saved(tmp_path, projection, content)
+    files: list[BinaryIO] = []
+
+    def recorded(path: Path) -> tuple[BinaryIO, int] | None:
+        opened = open_regular(path)
+        if opened is not None:
+            files.append(opened[0])
+        return opened
+
+    monkeypatch.setattr(outputs_module, "_open_regular", recorded)
     stream = await store.open_role(meta.id, "model")
     assert stream is not None and stream.sha256 is None
     assert stream.size == (store.directory(meta.id) / MODEL_NAME).stat().st_size
-    assert stream._on_close is not None
-    closed: list[bool] = []
-    on_close = stream._on_close
-
-    async def recorded() -> None:
-        await on_close()
-        closed.append(True)
-
-    stream._on_close = recorded
+    assert len(files) == 1 and not files[0].closed
     await stream.aclose()
-    assert closed == [True]
+    assert files[0].closed
+
+
+async def test_file_stream_cancelled_during_open_closes_its_file(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, meta = await _saved(tmp_path, projection, content)
+    started = threading.Event()
+    release = threading.Event()
+    files: list[BinaryIO] = []
+
+    def slow(path: Path) -> tuple[BinaryIO, int] | None:
+        opened = open_regular(path)
+        assert opened is not None
+        files.append(opened[0])
+        started.set()
+        release.wait(10)
+        return opened
+
+    monkeypatch.setattr(outputs_module, "_open_regular", slow)
+    task = asyncio.create_task(store.open_role(meta.id, "model"))
+    await asyncio.to_thread(started.wait, 10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(files) == 1 and not files[0].closed
+    release.set()
+    for _ in range(200):
+        if files[0].closed:
+            break
+        await asyncio.sleep(0.01)
+    # The descriptor the thread opened is closed once the thread returns.
+    assert files[0].closed
+
+
+async def test_open_role_falls_back_when_blob_of_exactly_prefetch_corrupt(
+    copied: tuple[OutputStore, OutputMeta], content: ContentStore
+) -> None:
+    store, meta = copied
+    assert store.bytes is not None
+    key = output_blob_key(meta.id, "model")
+    await store.bytes.put(key, b"x" * _PREFETCH, slug=meta.slug)
+    await flip_first_byte(content, key)
+    (store.directory(meta.id) / MODEL_NAME).write_bytes(b"file bytes")
+    assert await _read(store, meta.id) == b"file bytes"
+
+
+def _unreachable(after: list[bytes]) -> Any:
+    """A `ContentStore.get` that gives ``after`` and then loses the connection."""
+
+    def get(ref: Any) -> AsyncGenerator[bytes]:
+        async def chunks() -> AsyncGenerator[bytes]:
+            for chunk in after:
+                yield chunk
+            raise EndpointConnectionError(endpoint_url="http://s3.invalid")
+
+        return chunks()
+
+    return get
+
+
+async def test_transport_error_in_prefetch_falls_back_to_file(
+    copied: tuple[OutputStore, OutputMeta],
+    content: ContentStore,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, meta = copied
+    model = store.directory(meta.id) / MODEL_NAME
+    model.write_bytes(b"file bytes")
+    monkeypatch.setattr(content, "get", _unreachable([b"part"]))
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+        assert await _read(store, meta.id) == b"file bytes"
+        assert await store.model_3mf(meta.id) == b"file bytes"
+        async with store.local_role(meta.id, "model") as path:
+            assert path == model
+        async with await store.open_file(meta.id, "a.stl") as stream:
+            assert b"".join([chunk async for chunk in stream.chunks]) == b"a stl"
+    assert "blob" in caplog.text
+
+
+async def test_transport_error_past_prefetch_ends_stream_short(
+    copied: tuple[OutputStore, OutputMeta],
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, meta = copied
+    monkeypatch.setattr(content, "get", _unreachable([b"x" * _PREFETCH, b"y", b"z"]))
+    stream = await store.open_role(meta.id, "model")
+    assert stream is not None and stream.sha256 is not None
+    got = 0
+    async with stream:
+        with pytest.raises(EndpointConnectionError):
+            async for chunk in stream.chunks:
+                got += len(chunk)
+    assert got < _PREFETCH + 2
 
 
 async def test_local_role_gives_blob_temp_file(
@@ -526,7 +634,7 @@ async def test_save_put_failure_removes_folder_and_row(
     assert _holds(pool, output_id) == set()
 
 
-async def test_put_thumbnail_writes_file_then_blob(
+async def test_put_thumbnail_puts_blob_then_file(
     copied: tuple[OutputStore, OutputMeta],
     content: ContentStore,
     pool: Pool,
@@ -537,19 +645,104 @@ async def test_put_thumbnail_writes_file_then_blob(
     seen: list[bytes] = []
     put = content.put
 
-    async def file_first(*args: Any, **kwargs: Any) -> Any:
-        # The file holds the new bytes before the blob is put (the byte copy's order).
+    async def blob_first(*args: Any, **kwargs: Any) -> Any:
+        # The file holds the old bytes while the blob is put.
         seen.append(thumbnail.read_bytes())
         return await put(*args, **kwargs)
 
-    monkeypatch.setattr(content, "put", file_first)
+    monkeypatch.setattr(content, "put", blob_first)
     await store.put_thumbnail(meta.id, b"new png")
-    assert seen == [b"new png"]
+    assert seen == [b"thumbnail png"]
     assert thumbnail.read_bytes() == b"new png"
     assert await _read(store, meta.id, "thumbnail") == b"new png"
     key = output_blob_key(meta.id, "thumbnail")
     assert key in _holds(pool, meta.id)
     assert store.thumbnail_version(meta.id) == hashlib.sha256(b"new png").hexdigest()[:16]
+
+
+@pytest.mark.parametrize("error", [StoreFullError("no room"), OSError("the store went away")])
+async def test_put_thumbnail_failed_put_changes_nothing(
+    copied: tuple[OutputStore, OutputMeta],
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    store, meta = copied
+    assert store.rows is not None
+    before = store.rows.get(meta.id)
+    version = store.thumbnail_version(meta.id)
+
+    async def refused(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(content, "put", refused)
+    with pytest.raises(type(error)):
+        await store.put_thumbnail(meta.id, b"new png")
+    monkeypatch.undo()
+    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
+    assert thumbnail.read_bytes() == b"thumbnail png"
+    assert await _read(store, meta.id, "thumbnail") == b"thumbnail png"
+    after = store.rows.get(meta.id)
+    assert after is not None and before is not None
+    assert (after.blobs, after.bytes_at) == (before.blobs, before.bytes_at)
+    assert store.thumbnail_version(meta.id) == version
+
+
+async def test_put_thumbnail_calls_at_once_leave_file_and_blob_alike(
+    copied: tuple[OutputStore, OutputMeta],
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, meta = copied
+    put = content.put
+    first_put = asyncio.Event()
+    second_done = asyncio.Event()
+
+    async def out_of_order(kind: Any, data: Any, **kwargs: Any) -> Any:
+        if data == b"first":
+            first_put.set()
+            # The first call's put lands after the second call is done.
+            await second_done.wait()
+        return await put(kind, data, **kwargs)
+
+    monkeypatch.setattr(content, "put", out_of_order)
+    first = asyncio.create_task(store.put_thumbnail(meta.id, b"first"))
+    await first_put.wait()
+    await store.put_thumbnail(meta.id, b"second")
+    second_done.set()
+    await first
+    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
+    assert await _read(store, meta.id, "thumbnail") == b"first"
+    assert thumbnail.read_bytes() == b"first"
+
+
+async def test_put_thumbnail_step_of_an_older_put_keeps_the_newer_file(
+    copied: tuple[OutputStore, OutputMeta],
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, meta = copied
+    put = content.put
+    first_landed = asyncio.Event()
+    second_done = asyncio.Event()
+
+    async def first_waits(kind: Any, data: Any, **kwargs: Any) -> Any:
+        ref = await put(kind, data, **kwargs)
+        if data == b"first":
+            first_landed.set()
+            # The first call's put landed first; its file step runs after the second's.
+            await second_done.wait()
+        return ref
+
+    monkeypatch.setattr(content, "put", first_waits)
+    first = asyncio.create_task(store.put_thumbnail(meta.id, b"first"))
+    await first_landed.wait()
+    await store.put_thumbnail(meta.id, b"second")
+    second_done.set()
+    await first
+    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
+    assert await _read(store, meta.id, "thumbnail") == b"second"
+    assert thumbnail.read_bytes() == b"second"
 
 
 async def test_put_thumbnail_without_blob_store_writes_file(
@@ -579,3 +772,67 @@ async def test_put_drawn_thumbnail_keeps_upload(
     assert await store.put_drawn_thumbnail(meta.id, b"drawn again") is False
     assert await _read(store, meta.id, "thumbnail") == b"uploaded"
     assert (store.directory(meta.id) / THUMBNAIL_NAME).read_bytes() == b"uploaded"
+
+
+async def test_put_drawn_thumbnail_failed_put_keeps_the_drawn_file(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    meta = await store.save(job, name="first", files_dir=files)
+
+    async def refused(*args: Any, **kwargs: Any) -> Any:
+        raise StoreFullError("no room")
+
+    monkeypatch.setattr(content, "replace", refused)
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+        assert await store.put_drawn_thumbnail(meta.id, b"drawn") is True
+    assert "thumbnail" in caplog.text
+    monkeypatch.undo()
+    assert (store.directory(meta.id) / THUMBNAIL_NAME).read_bytes() == b"drawn"
+    # The row names no blob, so readers take the drawn file.
+    assert store.rows is not None
+    row = store.rows.get(meta.id)
+    assert row is not None and row.blobs.thumbnail is None
+    assert await _read(store, meta.id, "thumbnail") == b"drawn"
+    assert output_blob_key(meta.id, "thumbnail") not in _holds(pool, meta.id)
+
+
+async def test_save_commit_failure_after_puts_discards_folder_and_row(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    assert store.rows is not None
+
+    def refused(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the insert failed")
+
+    monkeypatch.setattr(store.rows, "insert", refused)
+    output_id = "e" * 32
+    with pytest.raises(RuntimeError, match="the insert failed"):
+        await store.save(job, name="first", files_dir=files, output_id=output_id)
+    assert not paths.output_dir(job.slug, output_id).exists()
+    assert store.rows.get(output_id) is None
+    assert _holds(pool, output_id) == set()
+    # The blobs were put, and nothing holds them: the content sweep takes them.
+    keys = [
+        output_blob_key(output_id, "model"),
+        output_blob_key(output_id, "preview"),
+        output_file_key(output_id, 0),
+        output_file_key(output_id, 1),
+    ]
+    for key in keys:
+        assert await content.stat(key) is not None
+    with pool.connection() as conn:
+        held = conn.execute("SELECT key FROM blob_refs WHERE key = ANY(%s)", (keys,)).fetchall()
+    assert held == []

@@ -41,7 +41,12 @@ from scadbuddy.library.output_bytes import FILES_DIR as FILES_DIR
 from scadbuddy.library.output_bytes import MODEL_NAME as MODEL_NAME
 from scadbuddy.library.output_bytes import PREVIEW_NAME as PREVIEW_NAME
 from scadbuddy.library.output_bytes import THUMBNAIL_NAME as THUMBNAIL_NAME
-from scadbuddy.library.output_bytes import OutputBytes, OutputStream
+from scadbuddy.library.output_bytes import (
+    TRANSPORT_ERRORS,
+    OutputBytes,
+    OutputStream,
+    in_thread_closing,
+)
 from scadbuddy.library.output_rows import OUTPUT_HOLDER as OUTPUT_HOLDER
 from scadbuddy.library.output_rows import OutputBlobs, Role, output_blob_key
 from scadbuddy.library.slugs import InvalidSlugError, slugify
@@ -94,9 +99,10 @@ ROLE_FILES: dict[Role, str] = {
     "thumbnail": THUMBNAIL_NAME,
 }
 #: A blob the row names that the store cannot give whole: the reader takes the file. A
-#: stream raises it before its first chunk only for a missing blob or a corrupt blob of at
-#: most `output_bytes._PREFETCH` bytes; a larger corrupt blob raises it mid-stream.
-_LOST = (BlobMissingError, BlobCorruptError)
+#: stream raises it before its first chunk only for a missing blob, a corrupt blob of at
+#: most `output_bytes._PREFETCH` bytes, or a transport error during that prefetch; a larger
+#: corrupt blob, or a transport error past the prefetch, raises it mid-stream.
+_LOST: tuple[type[Exception], ...] = (BlobMissingError, BlobCorruptError, *TRANSPORT_ERRORS)
 #: How much of a file a stream reads at a time.
 _FILE_CHUNK = 1024 * 1024
 
@@ -345,8 +351,10 @@ def _open_regular(path: Path) -> tuple[BinaryIO, int] | None:
 
 async def _file_stream(path: Path) -> OutputStream | None:
     """The file's bytes as a stream, ``None`` when there is no regular file. The file is
-    opened in a thread before this returns; the stream's close closes it."""
-    opened = await asyncio.to_thread(_open_regular, path)
+    opened in a thread before this returns; a cancel meanwhile closes it once the thread
+    returns. The stream's close closes it: in a thread, which a cancelled caller's close
+    runs only when that close is shielded (Task 6's routes shield their ``aclose``)."""
+    opened = await in_thread_closing(lambda: _open_regular(path), _close_regular)
     if opened is None:
         return None
     file, size = opened
@@ -356,6 +364,11 @@ async def _file_stream(path: Path) -> OutputStream | None:
         chunks=_file_chunks(file),
         _on_close=lambda: asyncio.to_thread(file.close),
     )
+
+
+def _close_regular(opened: tuple[BinaryIO, int] | None) -> None:
+    if opened is not None:
+        opened[0].close()
 
 
 def _warn_lost(output_id: str, role: str, key: str, error: Exception) -> None:
@@ -491,6 +504,10 @@ class OutputStore:
         self._undrawable_lock = threading.Lock()
         #: The row `reading` read for this thread, as ``(output_id, row)``.
         self._held = threading.local()
+        #: Each output's thumbnail lock and how many calls hold or wait for it
+        #: (`_thumbnail_lock`).
+        self._thumbnail_locks: dict[str, tuple[threading.Lock, int]] = {}
+        self._thumbnail_locks_lock = threading.Lock()
 
     def _changed(self, slug: str) -> None:
         if self.on_change is None:
@@ -862,7 +879,10 @@ class OutputStore:
         are one transaction. With no blob store (`local`, `bambuddy`) or no rows, it puts
         nothing. A failed put or commit removes the folder (`discard`) and raises again,
         a `StoreFullError` among them; the blobs it put are held by nothing, so the sweep
-        removes them."""
+        removes them. A cancel during the puts stops the save at once, with no discard:
+        the folder stays with no ``meta.json``, and the hold reaper removes it and its
+        holds later (#1007). A cancel during `prepare` or `commit` cannot stop their
+        thread, which may still finish the output."""
         prepared = await asyncio.to_thread(
             self.prepare,
             job,
@@ -1666,17 +1686,49 @@ class OutputStore:
         _replace_bytes(self.thumbnail_path(output_id), png)
 
     async def put_thumbnail(self, output_id: str, png: bytes) -> None:
-        """``png`` as the thumbnail: the file first (`write_thumbnail`), then its blob,
-        named in the row and held (#7256; the byte copy depends on that order). With no
-        blob store or no row yet, the file only; the byte copy takes it later."""
-        await asyncio.to_thread(self.write_thumbnail, output_id, png)
+        """``png`` as the thumbnail: its blob first, then the file and the row's key in
+        one step (`_keep_thumbnail`, #7256). A failed put changes nothing and raises
+        (`StoreFullError` among them). With no blob store or no row yet, the file only;
+        the byte copy takes it later."""
         slug = await asyncio.to_thread(self._blob_slug, output_id)
         if slug is None:
+            await asyncio.to_thread(self.write_thumbnail, output_id, png)
             return
-        assert self.bytes is not None and self.rows is not None
+        assert self.bytes is not None
         key = output_blob_key(output_id, "thumbnail")
-        await self.bytes.put(key, png, slug=slug)
-        await asyncio.to_thread(self.rows.set_blob, output_id, "thumbnail", key)
+        ref = await self.bytes.put(key, png, slug=slug)
+        await asyncio.to_thread(self._keep_thumbnail, output_id, png, key, ref.sha256)
+
+    def _keep_thumbnail(self, output_id: str, png: bytes, key: str, sha256: str) -> None:
+        """Write the file and name ``key`` in the row, under the output's thumbnail lock,
+        only while ``key`` still holds this put's bytes (``sha256``). When a later put
+        moved the key on, that put's own step writes its file, so the file and the blob
+        are one image whatever order the puts and steps run in. Blocking."""
+        assert self.bytes is not None and self.rows is not None
+        with self._thumbnail_lock(output_id):
+            current = self.bytes.ref(key)
+            if current is None or current.sha256 != sha256:
+                return
+            self.write_thumbnail(output_id, png)
+            self.rows.set_blob(output_id, "thumbnail", key)
+
+    @contextlib.contextmanager
+    def _thumbnail_lock(self, output_id: str) -> Iterator[None]:
+        """The output's own thumbnail lock, dropped from the store when no call holds or
+        waits for it."""
+        with self._thumbnail_locks_lock:
+            lock, users = self._thumbnail_locks.get(output_id, (threading.Lock(), 0))
+            self._thumbnail_locks[output_id] = (lock, users + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with self._thumbnail_locks_lock:
+                lock, users = self._thumbnail_locks[output_id]
+                if users == 1:
+                    del self._thumbnail_locks[output_id]
+                else:
+                    self._thumbnail_locks[output_id] = (lock, users - 1)
 
     def _blob_slug(self, output_id: str) -> str | None:
         """The output's slug when its bytes go to the blob store too; ``None`` with no
@@ -1725,7 +1777,9 @@ class OutputStore:
 
     async def put_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
         """`write_drawn_thumbnail`, then, when the file was this draw's, its blob, only
-        when no blob has the key: an upload that landed first stays, file and blob."""
+        when no blob has the key: an upload that landed first stays, file and blob. A
+        failed put is logged and the drawn file stays the thumbnail (True): the row names
+        no new blob, so readers take the file, and the byte copy puts it later."""
         if not await asyncio.to_thread(self.write_drawn_thumbnail, output_id, png):
             return False
         slug = await asyncio.to_thread(self._blob_slug, output_id)
@@ -1733,8 +1787,15 @@ class OutputStore:
             return True
         assert self.bytes is not None and self.rows is not None
         key = output_blob_key(output_id, "thumbnail")
-        if await self.bytes.put_if_absent(key, png, slug=slug):
-            await asyncio.to_thread(self.rows.set_blob, output_id, "thumbnail", key)
+        try:
+            if await self.bytes.put_if_absent(key, png, slug=slug):
+                await asyncio.to_thread(self.rows.set_blob, output_id, "thumbnail", key)
+        except Exception:
+            logger.warning(
+                "could not put a drawn thumbnail's blob; its file stays",
+                extra={"output_id": output_id},
+                exc_info=True,
+            )
         return True
 
     def _write_meta(self, directory: Path, meta: OutputMeta) -> None:

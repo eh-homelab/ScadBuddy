@@ -27,6 +27,10 @@ from pathlib import Path
 from types import TracebackType
 from typing import BinaryIO, Self
 
+import aiohttp
+from botocore.exceptions import ConnectionError as BotoConnectionError
+from botocore.exceptions import HTTPClientError
+
 from scadbuddy.library.output_rows import (
     OutputBlobs,
     OutputFileBlob,
@@ -97,8 +101,60 @@ class OutputStream:
         await self.aclose()
 
 
-#: A blob this small is checked whole before `OutputBytes.stream` returns.
+#: A blob of at most this many bytes is checked whole before `OutputBytes.stream` returns.
 _PREFETCH = 1 << 20
+#: A file put of at most this many bytes is read whole in a thread, when the backend
+#: names no `multipart_threshold` of its own (the S3 backend's default).
+_WHOLE_PUT = 64 << 20
+
+#: The store did not answer, or its answer broke off: botocore's connection errors
+#: (`EndpointConnectionError`, `ConnectTimeoutError`) and HTTP client errors
+#: (`ReadTimeoutError`, `ConnectionClosedError`, `ResponseStreamingError`), and aiohttp's
+#: errors and timeouts while the body streams. A reader counts one before its first byte
+#: as a lost blob and reads the file.
+TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
+    BotoConnectionError,
+    HTTPClientError,
+    aiohttp.ClientError,
+    TimeoutError,
+)
+
+
+async def in_thread_closing[T](call: Callable[[], T], close: Callable[[T], None]) -> T:
+    """``call()`` in a thread. When the caller is cancelled while the thread runs,
+    ``close`` runs on the thread's result once it returns, so an opened file is never
+    left for the garbage collector."""
+    made = asyncio.ensure_future(asyncio.to_thread(call))
+    try:
+        return await asyncio.shield(made)
+    except BaseException:
+
+        def closed(done: asyncio.Future[T]) -> None:
+            if not done.cancelled() and done.exception() is None:
+                close(done.result())
+
+        made.add_done_callback(closed)
+        raise
+
+
+def _close_opened(opened: bytes | BinaryIO) -> None:
+    if not isinstance(opened, bytes):
+        opened.close()
+
+
+def _read_for_put(path: Path, whole: int) -> bytes | BinaryIO:
+    """The file's bytes when it holds at most ``whole`` bytes, else the file, open at its
+    start, for the caller to close. Blocking."""
+    file = path.open("rb")
+    kept = False
+    try:
+        if os.fstat(file.fileno()).st_size > whole:
+            kept = True
+            return file
+        return file.read()
+    finally:
+        if not kept:
+            file.close()
 
 
 async def _held(
@@ -177,11 +233,18 @@ class OutputBytes:
         )
 
     async def _put_file(self, key: str, path: Path, slug: str) -> BlobRef:
-        file = await asyncio.to_thread(path.open, "rb")
+        """Put the file. No read of it runs on the loop: botocore reads a file body on
+        the loop (its checksum and its signature), so a file of at most the backend's
+        `multipart_threshold` is read whole in a thread and put as bytes, and a larger
+        one goes up in parts, each read in a thread (`S3ContentBackend._multipart`)."""
+        whole = int(getattr(self.content.backend, "multipart_threshold", _WHOLE_PUT))
+        data = await in_thread_closing(lambda: _read_for_put(path, whole), _close_opened)
+        if isinstance(data, bytes):
+            return await self.put(key, data, slug=slug)
         try:
-            return await self.put(key, file, slug=slug)
+            return await self.put(key, data, slug=slug)
         finally:
-            await asyncio.to_thread(file.close)
+            await asyncio.to_thread(data.close)
 
     async def put_folder(self, directory: Path, output_id: str, slug: str) -> OutputBlobs:
         """Put the folder's bytes, a file at a time and never read whole: ``model.3mf``
@@ -220,19 +283,23 @@ class OutputBytes:
         return ref
 
     async def stream(self, key: str) -> OutputStream:
-        """The blob's bytes. Up to `_PREFETCH` bytes are read before this returns. So a
-        missing blob, and a corrupt blob of at most `_PREFETCH` bytes, raise here
-        (`BlobMissingError`, `BlobCorruptError`), never in the middle of a response. A
-        larger corrupt blob raises at the end of its stream, and the last chunk is held
-        back until the check passes. The caller closes the stream
-        (`OutputStream.aclose`), read or not."""
+        """The blob's bytes. Up to `_PREFETCH` bytes and one chunk more are read before
+        this returns. So a missing blob, and a corrupt blob of at most `_PREFETCH` bytes,
+        raise here (`BlobMissingError`, `BlobCorruptError`), never in the middle of a
+        response; so does a `TRANSPORT_ERRORS` error during that read. A larger corrupt
+        blob raises at the end of its stream, and the last chunk is held back until the
+        check passes; a transport error past the prefetch raises from the chunks, so the
+        response ends short. The caller closes the stream (`OutputStream.aclose`), read
+        or not."""
         ref = await self._ref(key)
         source = self.content.get(ref)
         read: list[bytes] = []
         size = 0
         ended = False
         try:
-            while size < _PREFETCH:
+            # `<=`: one more read past exactly `_PREFETCH` bytes ends the source and runs
+            # its sha256 check, so a blob of that size is checked whole here too.
+            while size <= _PREFETCH:
                 try:
                     chunk = await anext(source)
                 except StopAsyncIteration:

@@ -224,9 +224,11 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                     source=request.get("source", BACK_OFFICE),
                 )
         except Exception as error:
-            # Not on cancellation: the write's thread cannot be stopped and may still
-            # finish, and an output written without its holds loses its Parts at the
-            # next sweep.
+            # Not on cancellation: the prepare or commit thread cannot be stopped and may
+            # still finish the output, and an output written without its holds loses its
+            # Parts at the next sweep. A cancel during the puts stops the save at once and
+            # leaves a folder with no meta.json, which the hold reaper removes with its
+            # holds (#1007).
             try:
                 await asyncio.to_thread(release_parts, state.refs, output_id)
             except psycopg.Error:
@@ -304,7 +306,15 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                 "this request's upload is no longer held; send it again",
             ) from None
         meta = await asyncio.to_thread(require_output, state.outputs, output_id)
-        await state.outputs.put_thumbnail(output_id, png)
+        try:
+            await state.outputs.put_thumbnail(output_id, png)
+        except StoreFullError as error:
+            # Ruling R2, as `create_run`: the blob goes first, so the refused put changed
+            # neither the file nor the row.
+            raise ApiError(
+                status.HTTP_507_INSUFFICIENT_STORAGE,
+                f"the blob store has no room for this thumbnail: {error}",
+            ) from None
         # #4822: an open History page shows the old image, or "No preview", until told.
         emit(state.events, OutputEvent(kind="output.updated", output_id=meta.id, slug=meta.slug))
         return {}

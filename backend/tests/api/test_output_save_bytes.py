@@ -5,21 +5,25 @@ outputs-in-Postgres spec 2026-11-23 §6.6), and a store with no room fails the s
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import scadbuddy.library.output_operations as output_operations
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.output_rows import OUTPUT_HOLDER
+from scadbuddy.library.outputs import THUMBNAIL_NAME, hold_parts
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
+from scadbuddy.store.content_models import StoreFullError
 from scadbuddy.store.index import Pool
-from tests.api.conftest import wait_for_job
+from tests.api.conftest import PNG_BYTES, wait_for_job
 from tests.support.operations import press
-from tests.support.store import store_pool
+from tests.support.store import record_reads, store_pool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -98,11 +102,64 @@ def test_save_on_s3_names_its_blobs(s3_client: TestClient, model: str, pool: Poo
     assert {row.blobs.model, row.blobs.preview} <= held
 
 
+def test_save_on_s3_reads_its_files_off_the_loop(
+    s3_client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = _finished_job(s3_client, model)
+    reads = record_reads(monkeypatch, paths.outputs)
+    saved = s3_client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
+    )
+    monkeypatch.undo()
+    assert saved.status_code == 201, saved.text
+    assert reads
+    # No read of the output's files ran on the loop's thread.
+    assert not any(reads)
+
+
+def test_thumbnail_store_full_is_507_and_changes_nothing(
+    s3_client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = s3_client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(s3_client, model)},
+        headers=press(),
+    )
+    assert saved.status_code == 201, saved.text
+    output_id = saved.json()["id"]
+    state = _state(s3_client)
+    assert state.store.content is not None
+
+    async def refused(*args: Any, **kwargs: Any) -> Any:
+        raise StoreFullError("no room")
+
+    monkeypatch.setattr(state.store.content, "put", refused)
+    response = s3_client.put(
+        f"/api/v1/outputs/{output_id}/thumbnail",
+        files={"file": ("capture.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert response.status_code == 507, response.text
+    assert "the blob store has no room for this thumbnail" in response.json()["detail"]
+    assert not (paths.output_dir(model, output_id) / THUMBNAIL_NAME).exists()
+
+
 def test_save_store_full_is_507_and_cleans_up(
-    s3_client: TestClient, model: str, paths: DataPaths, pool: Pool
+    s3_client: TestClient,
+    model: str,
+    paths: DataPaths,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     job_id = _finished_job(s3_client, model)
     state = _state(s3_client)
+    held_before: list[list[tuple[str, str]]] = []
+
+    def recorded(*args: Any, **kwargs: Any) -> None:
+        hold_parts(*args, **kwargs)
+        held_before.append(_output_holds(pool))
+
+    monkeypatch.setattr(output_operations, "hold_parts", recorded)
     assert state.outputs.bytes is not None and state.store.content is not None
     # Every put past this cap is refused; the render's own blobs are in already.
     state.store.content.max_total_bytes = 1
@@ -115,5 +172,6 @@ def test_save_store_full_is_507_and_cleans_up(
     assert not outputs.is_dir() or list(outputs.iterdir()) == []
     assert state.outputs.rows is not None
     assert state.outputs.rows.for_slug(model) == []
-    # Neither the Parts' holds nor any byte hold is left.
+    # The save held its Parts before the puts; neither they nor any byte hold is left.
+    assert len(held_before) == 1 and held_before[0] != []
     assert _output_holds(pool) == []
