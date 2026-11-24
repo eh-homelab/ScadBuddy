@@ -1191,8 +1191,8 @@ def _ids_in_archive(archive: Path) -> set[str]:
     for none at all, which is right for "Edit in ScadBuddy" and wrong here -- a
     damaged or foreign-version stamp must still keep what it names. So the root
     model's raw text is matched, as a JSON record's is. An archive that cannot be
-    read as a 3MF raises `DamagedArchiveError`, an OSError. The folder walk then skips
-    the whole sweep; the rows' scan skips that output only.
+    read as a 3MF raises `DamagedArchiveError`, an OSError. The folder walk and the
+    rows' scan skip that output only (`_skip_damaged`).
     """
     try:
         with zipfile.ZipFile(archive) as opened:
@@ -1203,6 +1203,15 @@ def _ids_in_archive(archive: Path) -> set[str]:
         raise DamagedArchiveError(
             f"cannot read {archive} for the asset ids it names: {error}"
         ) from None
+
+
+def _skip_damaged(output_id: str, error: DamagedArchiveError) -> None:
+    """Log the output whose 3MF can never be read. The sweep goes on without it, so one
+    damaged output does not stop every sweep (#7256)."""
+    logger.warning(
+        "skipped an output whose 3MF cannot be read for its asset ids",
+        extra={"output_id": output_id, "error": str(error)},
+    )
 
 
 def stopped(stop: threading.Event | None) -> bool:
@@ -1234,10 +1243,11 @@ async def referenced_asset_ids(
 
     A source that exists but cannot be read raises OSError: a sweep that cannot see
     every reference must not remove anything, so the caller skips the whole sweep
-    rather than guessing. One exception, in the rows' scan only: a 3MF that can never
-    be read as a 3MF (`DamagedArchiveError`) skips its own output, logged, so that one
-    damaged output does not stop every sweep (#7256). The ids read before a raise are
-    still kept. Every read runs in a thread.
+    rather than guessing. One exception: a 3MF that can never be read as a 3MF
+    (`DamagedArchiveError`) skips its own output, logged, so that one damaged output
+    does not stop every sweep (#7256). The rows' scan keeps an empty ``asset_ids`` row
+    for it, so it is read, and logged, once. The ids read before a raise are still
+    kept. Every read runs in a thread.
     """
     rows = outputs.rows if outputs is not None else None
     if outputs is None or rows is None or not await asyncio.to_thread(rows.copied):
@@ -1255,12 +1265,9 @@ async def referenced_asset_ids(
                     try:
                         ids = await asyncio.to_thread(_ids_in_archive, archive)
                     except DamagedArchiveError as error:
-                        # It can never be read: it must not stop every sweep.
-                        logger.warning(
-                            "skipped an output whose 3MF cannot be read for its asset ids",
-                            extra={"output_id": output_id, "error": str(error)},
-                        )
-                        continue
+                        # A 3MF is never rewritten: it names nothing now or later.
+                        _skip_damaged(output_id, error)
+                        ids = set()
                     found.update(ids)
                     kept.append((output_id, sorted(ids)))
         finally:
@@ -1331,7 +1338,10 @@ def _referenced_in_tree(paths: DataPaths, records: Iterable[Mapping[str, Any]]) 
             archive = directory / "model.3mf"
             if not (directory / "params.json").is_file() and archive.is_file():
                 read["archives"] += 1
-                found.update(_ids_in_archive(archive))
+                try:
+                    found.update(_ids_in_archive(archive))
+                except DamagedArchiveError as error:
+                    _skip_damaged(directory.name, error)
         found.update(_template_ids(paths, read))
         for document in records:
             found.update(_ids_in(json.dumps(document).encode()))

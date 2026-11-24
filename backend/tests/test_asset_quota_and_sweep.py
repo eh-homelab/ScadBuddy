@@ -383,12 +383,22 @@ def test_a_stamp_provenance_cannot_parse_still_keeps_its_asset(
     assert meta.id in _referenced(paths)
 
 
-def test_a_3mf_that_cannot_be_opened_fails_the_collection(paths: DataPaths) -> None:
-    output = paths.output_dir("demo", "a" * 32)
-    output.mkdir(parents=True)
-    (output / "model.3mf").write_bytes(b"PK\x03\x04 truncated")
-    with pytest.raises(OSError, match=r"model\.3mf"):
-        _referenced(paths)
+def test_a_3mf_that_cannot_be_opened_skips_only_its_output(
+    paths: DataPaths, store: AssetStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#7256 Task 8 review B-M3: before the copy into rows, the folder walk skips a
+    damaged 3MF with one warning, as the rows' scan does, and does not stop the sweep."""
+    meta = store.put(svg(1), "a.svg")
+    damaged = paths.output_dir("demo", "a" * 32)
+    damaged.mkdir(parents=True)
+    (damaged / "model.3mf").write_bytes(b"PK\x03\x04 truncated")
+    good = paths.output_dir("demo", "b" * 32)
+    good.mkdir(parents=True)
+    write_3mf(good / "model.3mf", {"label": meta.id})
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.assets"):
+        assert meta.id in _referenced(paths)
+    skipped = [r for r in caplog.records if getattr(r, "output_id", None) == "a" * 32]
+    assert len(skipped) == 1 and skipped[0].levelno == logging.WARNING
 
 
 @pytest.mark.requires_postgres
@@ -487,10 +497,15 @@ def _archive_naming(asset_id: str) -> bytes:
 
 @pytest.mark.requires_postgres
 async def test_an_unreadable_3mf_skips_only_its_output(
-    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    pg_conninfo: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#7256 Task 8 amendment: a 3MF that cannot be read as a 3MF skips only its own
-    output, logged. The pass goes on, and the ids it read are kept."""
+    output, logged. The pass goes on, and the ids it read are kept. Review B-M2: the
+    damaged output keeps an empty ``asset_ids`` row, so the next sweep reads no blob for
+    it and logs no warning again."""
     in_archive = "b" * 64
     async with blob_output(tmp_path / "o", pg_conninfo) as output:
         good, bad = await _two_bare_outputs(
@@ -505,9 +520,22 @@ async def test_an_unreadable_3mf_skips_only_its_output(
             assets_module.ASSET_IDS_VERSION,
             [in_archive],
         )
-        assert rows.derived(bad, "asset_ids", 0) is None
+        assert rows.derived(bad, "asset_ids", 0) == (assets_module.ASSET_IDS_VERSION, [])
         skipped = [r for r in caplog.records if getattr(r, "output_id", None) == bad]
         assert len(skipped) == 1 and skipped[0].levelno == logging.WARNING
+        gets: list[Any] = []
+        real_get = output.content.get
+
+        def counting_get(ref: Any, *args: Any, **kwargs: Any) -> Any:
+            gets.append(ref)
+            return real_get(ref, *args, **kwargs)
+
+        monkeypatch.setattr(output.content, "get", counting_get)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.library.assets"):
+            assert in_archive in await referenced_asset_ids(output.store.paths, [], output.store)
+        assert gets == []  # the second sweep read no 3MF
+        assert not [r for r in caplog.records if getattr(r, "output_id", None) == bad]
 
 
 @pytest.mark.requires_postgres
