@@ -1,6 +1,7 @@
 import os from 'node:os'
 import type { Client } from '@temporalio/client'
 import { TASK_QUEUE } from '../temporal/names.js'
+import { type QueueDescriber, queuePollers } from '../temporal/pollers.js'
 import { deleteUpstreamSession, type SessionLedger } from './forwarder.js'
 import { loadEnabledPlugins, type PluginStoreLike } from './registry.js'
 import type { Resolver } from '../http/egress.js'
@@ -143,16 +144,10 @@ export async function endOwnSessions(ledger: PluginSessionRows, self: string, de
   return rows.length
 }
 
-/** The replicas whose agent-tools worker polls, from DescribeTaskQueue; a poller's identity is `<pid>@<host>`. */
-export async function pollingReplicas(client: Pick<Client, 'workflowService' | 'options' | 'withDeadline'>): Promise<Set<string>> {
-  const { pollers } = await client.withDeadline(Date.now() + DESCRIBE_DEADLINE_MS, () =>
-    client.workflowService.describeTaskQueue({
-      namespace: client.options.namespace,
-      taskQueue: { name: TASK_QUEUE },
-      taskQueueType: WORKFLOW_TASK_QUEUE,
-    }),
-  )
-  return new Set((pollers ?? []).flatMap((p) => (p.identity ? [p.identity.replace(/^\d+@/, '')] : [])))
+/** The replicas whose agent-tools worker polls, from DescribeTaskQueue on every partition (temporal/pollers.ts); a poller's identity is `<pid>@<host>`. */
+export async function pollingReplicas(client: QueueDescriber): Promise<Set<string>> {
+  const pollers = await queuePollers(client, TASK_QUEUE, WORKFLOW_TASK_QUEUE, Date.now() + DESCRIBE_DEADLINE_MS)
+  return new Set(pollers.flatMap((p) => (p.identity ? [p.identity.replace(/^\d+@/, '')] : [])))
 }
 
 export type SweepRunDeps = SweepDeps & {

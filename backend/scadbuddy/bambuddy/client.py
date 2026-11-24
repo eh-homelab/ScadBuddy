@@ -79,7 +79,6 @@ from scadbuddy.bambuddy.models import (
     MaintenanceHistoryEntry,
     MoveResult,
     PresetCatalogue,
-    PresetImport,
     PresetRef,
     PresetValues,
     Printer,
@@ -262,6 +261,7 @@ Operation = Literal[
     "slice.start",
     "slicer.local_preset",
     "slicer.local_preset.create",
+    "slicer.local_preset.update",
     "slicer.local_presets",
     "slicer.local_presets.import",
     "slicer.preset_values",
@@ -844,19 +844,24 @@ class BambuddyClient:
         )
         return LocalPreset.model_validate(response.json())
 
-    async def import_local_presets(self, zip_bytes: bytes) -> PresetImport:
-        """``POST /api/v1/local-presets/import``: one zip of presets, sent as the multipart
-        part ``file`` named ``profiles.zip``. Bambuddy gates it like the create call
-        (:meth:`create_local_preset`), so a refusal names the same scope (#6625)."""
+    async def update_local_preset(
+        self, preset_id: int, name: str, setting: Mapping[str, Any]
+    ) -> LocalPreset:
+        """``PUT /api/v1/local-presets/{id}``: the preset rewritten in place under the same
+        id, its name and its document (``routes/local_presets.py`` ``update_local_preset``,
+        which merges ``setting`` over the OrcaSlicer base its ``inherits`` names and moves
+        ``updated_at``; read 2026-11-23). ScadBuddy's mirror of its own presets (#7176).
+        Gated as the create is (``Permission.SETTINGS_UPDATE``); a preset deleted in
+        Bambuddy is a 404."""
         response = await self._send(
-            "POST",
-            "/local-presets/import",
+            "PUT",
+            f"/local-presets/{preset_id}",
             scope=Scope.MANAGE_LIBRARY,
-            operation="slicer.local_presets.import",
-            what="import local presets",
-            files={"file": ("profiles.zip", zip_bytes, "application/zip")},
+            operation="slicer.local_preset.update",
+            what=f"update local preset {preset_id}",
+            json={"name": name, "setting": dict(setting)},
         )
-        return PresetImport.model_validate(response.json())
+        return LocalPreset.model_validate(response.json())
 
     async def k_profiles(self, printer_id: int, nozzle_diameter: str) -> list[KProfile]:
         """``GET /api/v1/printers/{id}/kprofiles/?nozzle_diameter=``: the K table the

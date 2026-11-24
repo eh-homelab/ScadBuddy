@@ -1195,6 +1195,7 @@ export const settings: Settings = {
   print_auto_import_skip_lan_printers: [],
   // #6868: an empty spool adds its type to the shopping list; stored only, on by default.
   filament_shopping_auto_add_empty: true,
+  filament_preset_mirror: true,
   // #7156: off holds Bambuddy's auto-add of unknown RFID spools off; stored only, on by default.
   filament_auto_add_unknown_rfid: true,
   // #6905 — how long the sync's pass history is kept; stored only, null is 30 days.

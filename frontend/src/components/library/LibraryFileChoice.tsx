@@ -24,6 +24,7 @@ export function LibraryFileChoice({
   onChoose,
   keep,
   emptyHint,
+  refreshKey = 0,
 }: {
   /** The search field's id. */
   id: string
@@ -33,10 +34,12 @@ export function LibraryFileChoice({
   keep: (hit: LibrarySearchHit) => boolean
   /** What to say while nothing is chosen, suggested or searched for. */
   emptyHint: string
+  /** A new value searches again: the library changed under the hits (#7335). */
+  refreshKey?: number
 }) {
   const [query, setQuery] = useState('')
   const q = useDebounced(query.trim(), 250)
-  const found = useAsync(() => (q === '' ? Promise.resolve(null) : api.searchLibrary({ q, all: true })), [q])
+  const found = useAsync(() => (q === '' ? Promise.resolve(null) : api.searchLibrary({ q, all: true })), [q, refreshKey])
   const hits = (found.data?.files ?? [])
     .filter(keep)
     .slice(0, SEARCH_SHOWN)

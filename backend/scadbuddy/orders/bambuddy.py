@@ -441,6 +441,16 @@ class BambuddyShelf:
                 return Shelved(found.id, found.filename)
         return None
 
+    async def stands(self, file_id: int, sha256: str) -> bool:
+        try:
+            found = await self.client.library_file(file_id)
+        except ApiError as error:
+            if error.status == 404:
+                return False
+            raise
+        # A row that states no hash stands while it is there (`Shelf.stands`).
+        return found.file_hash is None or found.file_hash.lower() == sha256
+
     async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
         # Streamed from the content store into the one spool `upload_raw` keeps.
         async def write(sink: Sink) -> None:

@@ -4,7 +4,7 @@ import { api } from '../../../api/client'
 import { getResetPreview, getSyncStatus, listSyncPasses, resetSyncLinks } from '../../../api/filament'
 import { describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
-import { leaveOnlyColourLinks, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
+import { leaveOnlyColourLinks, leaveOnlyPresetLinks, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
@@ -430,6 +430,18 @@ describe('Filament (#6262)', () => {
       expect(items.map((item) => item.textContent)).toEqual(['5 colour links'])
       await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
       expect(await within(filament).findByText('5 links reset. A full pass now links the new Bambuddy.')).toBeInTheDocument()
+    })
+
+    it('names the filament preset links when presets are the only links (#7176)', async () => {
+      linkOtherBambuddy()
+      leaveOnlyPresetLinks()
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      const items = within(within(dialog).getByRole('list', { name: 'What the reset deletes' })).getAllByRole('listitem')
+      expect(items.map((item) => item.textContent)).toEqual(['3 filament preset links'])
+      await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
+      expect(await within(filament).findByText('3 links reset. A full pass now links the new Bambuddy.')).toBeInTheDocument()
     })
 
     it('warns that an untagged spool can end up twice when the Bambuddy is another one', async () => {
