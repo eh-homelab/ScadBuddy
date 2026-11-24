@@ -17,6 +17,7 @@ describe('KnownTag (#7273)', () => {
     const weight = await screen.findByLabelText('Gross weight (g)')
     const openSpool = screen.getByRole('link', { name: 'Open spool' })
     expect(openSpool).toHaveAttribute('href', filamentLinks.spool(spoolId(3)))
+    // Without a scan session there is no NFC to write with.
     expect(screen.getByRole('button', { name: 'Write tag' })).toBeDisabled()
     const order = [card, filament, weight, openSpool]
     for (let at = 1; at < order.length; at += 1) {

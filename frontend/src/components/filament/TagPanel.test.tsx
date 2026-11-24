@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { getSpool, unbindTag } from '../../api/filament'
 import { spoolId, TAG } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { renderPage } from '../../test/utils'
 import { TagPanel } from './TagPanel'
 
@@ -16,6 +17,11 @@ async function render(number: number, locked?: boolean) {
 }
 
 describe('TagPanel', () => {
+  it('links to the phone page to read or write the tag', async () => {
+    await render(4)
+    expect(screen.getByRole('link', { name: 'Read or write with a phone' })).toHaveAttribute('href', filamentLinks.scan)
+  })
+
   it('shows the open tag and takes it off', async () => {
     const { user, onChanged } = await render(4)
     expect(screen.getByText(/A1B2C3D4/)).toBeInTheDocument()

@@ -100,8 +100,7 @@ function Unsupported({ embedded }: { embedded: boolean }) {
 
 /** Screens 1 to 3. */
 function Scanner() {
-  const session = useRef<NfcSession | null>(null)
-  session.current ??= new NfcSession()
+  const [session] = useState(() => new NfcSession())
   const [scanning, setScanning] = useState(false)
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -111,7 +110,8 @@ function Scanner() {
   const nextKey = useRef(0)
 
   useEffect(() => {
-    const nfc = session.current!
+    const nfc = session
+    // The session never changes (`useState`'s initialiser), so this runs once.
     const off = nfc.onReading((reading: Reading) => {
       postTagRead({ uid: reading.uid || null, tag_type: null, records: reading.records }).then(
         (result) => {
@@ -131,14 +131,14 @@ function Scanner() {
       nfc.stop()
       setScanning(false)
     }
-  }, [])
+  }, [session])
 
   async function start() {
     if (scanning || starting) return
     setStarting(true)
     setError(null)
     try {
-      await session.current!.start()
+      await session.start()
       setScanning(true)
     } catch (cause) {
       setError(scanRefusal(cause))
@@ -157,6 +157,19 @@ function Scanner() {
       const uid = now.find((one) => one.key === key)?.uid
       return now.map((one) => (one.key === key || (uid && one.uid === uid) ? { ...one, result } : one))
     })
+  /**
+   * A checked write answers for the tag it wrote: every read of that UID takes the answer and
+   * the records it holds now. A spool written onto a tag this session has not read yet adds
+   * that tag to the list.
+   */
+  const written = (uid: string, records: WireRecord[], result: TagReadResult) => {
+    if (entries.some((one) => one.uid === uid)) {
+      setEntries((now) => now.map((one) => (one.uid === uid ? { ...one, records, result } : one)))
+      return
+    }
+    const key = (nextKey.current += 1)
+    setEntries((now) => [{ key, at: new Date(), uid, records, result, held: {} }, ...now])
+  }
   const opened = entries.find((one) => one.key === openKey) ?? null
 
   return (
@@ -170,7 +183,15 @@ function Scanner() {
         {announcement}
       </p>
       {opened && (
-        <ReadView key={opened.key} entry={opened} onChange={(change) => update(opened.key, change)} onResult={(result) => answer(opened.key, result)} />
+        <ReadView
+          key={opened.key}
+          entry={opened}
+          session={session}
+          onChange={(change) => update(opened.key, change)}
+          onResult={(result) => answer(opened.key, result)}
+          onWritten={written}
+          onAnnounce={setAnnouncement}
+        />
       )}
       <section aria-labelledby="scan-reads" className="flex flex-col gap-2">
         <h2 id="scan-reads" className="font-medium">
@@ -218,11 +239,36 @@ function Scanner() {
   )
 }
 
-/** The opened read: screen 2, screen 3, or a tag with no serial number. */
-function ReadView({ entry, onChange, onResult }: { entry: Entry; onChange: (change: Partial<Entry>) => void; onResult: (result: TagReadResult) => void }) {
+/** The opened read: screen 2 (with "Write tag", screens 5 and 6), screen 3, or a tag with no serial number. */
+function ReadView({
+  entry,
+  session,
+  onChange,
+  onResult,
+  onWritten,
+  onAnnounce,
+}: {
+  entry: Entry
+  session: NfcSession
+  onChange: (change: Partial<Entry>) => void
+  onResult: (result: TagReadResult) => void
+  onWritten: (uid: string, records: WireRecord[], result: TagReadResult) => void
+  onAnnounce: (text: string) => void
+}) {
   const { result } = entry
   if (result.next === 'open_spool' && result.spool) {
-    return <KnownTag spool={result.spool} held={entry.held} onHeld={(held) => onChange({ held })} onSpool={(spool) => onResult({ ...result, spool })} />
+    return (
+      <KnownTag
+        spool={result.spool}
+        tag={result.tag}
+        session={session}
+        held={entry.held}
+        onHeld={(held) => onChange({ held })}
+        onSpool={(spool) => onResult({ ...result, spool })}
+        onWritten={onWritten}
+        onAnnounce={onAnnounce}
+      />
+    )
   }
   if (result.next === 'bind_or_create') {
     return (

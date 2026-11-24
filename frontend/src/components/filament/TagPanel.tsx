@@ -1,6 +1,9 @@
+import { SmartphoneNfcIcon } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Link } from 'react-router'
 import { ApiError } from '../../api/client'
 import { bindTag, getTag, scanTag, unbindTag, type SpoolDetail, type TagBind } from '../../api/filament'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { useAsync } from '../../lib/useAsync'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -34,6 +37,7 @@ interface Props {
  * (Decision 3). The override box is for a Bambu tag that belongs to a different filament
  * than this spool: it needs a tray UUID, and it sends `override: true`, which makes the
  * binding keep this spool's own filament (the AMS percentage never changes its grams left).
+ * "Read or write with a phone" opens the scan page (#7273), which reads and writes tags through Web NFC.
  */
 export function TagPanel({ spool, onChanged }: Props) {
   const [uid, setUid] = useState('')
@@ -169,6 +173,11 @@ export function TagPanel({ spool, onChanged }: Props) {
       <div className="flex flex-wrap items-center gap-2">
         <Button type="button" size="sm" variant="outline" disabled={scanning} onClick={() => void scanForTag()}>
           Scan a tag
+        </Button>
+        <Button asChild size="sm" variant="ghost">
+          <Link to={filamentLinks.scan}>
+            <SmartphoneNfcIcon /> Read or write with a phone
+          </Link>
         </Button>
         {scanning && (
           <>

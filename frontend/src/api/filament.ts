@@ -214,6 +214,30 @@ export type DecodedSpool = Schemas['DecodedSpool']
  */
 export const postTagRead = (body: TagReadIn) => request<TagReadResult>(`${BASE}/tags/reads`, json('POST', body))
 
+export type TagBackup = Schemas['TagBackup']
+export type TagBackupIn = Schemas['TagBackupIn']
+export type TagRecords = Schemas['TagRecords']
+export type TagRecordsIn = Schemas['TagRecordsIn']
+export type TagWrittenIn = Schemas['TagWrittenIn']
+
+/** Keeps what a tag holds just before a write (G7); the write names the `backup_id`. */
+export const createTagBackup = (body: TagBackupIn) => request<Schemas['TagBackupMade']>(`${BASE}/tags/backups`, json('POST', body))
+
+/** A tag's backups, newest first (the first page, up to 50). */
+export const listTagBackups = (tagId: string) => request<TagBackup[]>(`${BASE}/tags/${seg(tagId)}/backups`)
+
+/** The records that put the spool on the tag just read and backed up; the server picks the format (G2). */
+export const spoolTagRecords = (spoolId: string, body: TagRecordsIn) =>
+  request<TagRecords>(`${BASE}/spools/${seg(spoolId)}/tag-records`, json('POST', body))
+
+/** Checks a write against its read-back and binds the tag to the spool. */
+export const spoolTagWritten = (spoolId: string, body: TagWrittenIn) =>
+  request<TagReadResult>(`${BASE}/spools/${seg(spoolId)}/tag-written`, json('POST', body))
+
+/** A backup's records, to write back; `body` names a fresh `restore` backup of the tag as just read. */
+export const restoreTagBackup = (tagId: string, backupId: string, body: TagRecordsIn) =>
+  request<TagRecords>(`${BASE}/tags/${seg(tagId)}/backups/${seg(backupId)}/restore`, json('POST', body))
+
 // -- NTAG through SpoolBuddy (#6264) --------------------------------------------------
 
 export type ScanResult = Schemas['ScanResult']

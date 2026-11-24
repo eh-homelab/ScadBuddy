@@ -113,13 +113,17 @@ export class NfcSession {
   private reader: NDEFReader | null = null
   private scan: AbortController | null = null
   private readonly listeners = new Set<(reading: Reading) => void>()
+  private readonly waiters = new Set<(reading: Reading) => void>()
   private readonly errorListeners = new Set<() => void>()
+  private claims = 0
   private readonly onReadingErrorEvent = () => {
     for (const listener of [...this.errorListeners]) listener()
   }
   private readonly onReadingEvent = (event: Event) => {
     const { serialNumber, message } = event as NDEFReadingEvent
     const reading: Reading = { uid: serialNumber, records: message.records.map(toWire) }
+    for (const waiter of [...this.waiters]) waiter(reading)
+    if (this.claims > 0) return
     for (const listener of [...this.listeners]) listener(reading)
   }
 
@@ -167,6 +171,20 @@ export class NfcSession {
     return () => this.errorListeners.delete(listener)
   }
 
+  /**
+   * While a claim holds, taps reach only `nextReading`, not `onReading`'s listeners: one
+   * consumer at a time, so the taps of a write do not also post reads. Returns the release.
+   */
+  claim(): () => void {
+    this.claims += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.claims -= 1
+    }
+  }
+
   /** The next tap while the scan runs; rejects with `signal`'s reason when it aborts first. */
   nextReading(signal?: AbortSignal): Promise<Reading> {
     return new Promise((resolve, reject) => {
@@ -182,10 +200,12 @@ export class NfcSession {
         done()
         reject(signal!.reason)
       }
-      const off = this.onReading((reading) => {
+      const waiter = (reading: Reading) => {
         done()
         resolve(reading)
-      })
+      }
+      const off = () => this.waiters.delete(waiter)
+      this.waiters.add(waiter)
       signal?.addEventListener('abort', aborted)
     })
   }

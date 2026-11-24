@@ -1694,6 +1694,15 @@ export function holderOf(tagId: string): FilamentSpool | null {
   return row ? view(row) : null
 }
 
+/** A spool by its id, as the spool routes answer it. */
+export function spoolViewOf(spoolId: string): FilamentSpool | null {
+  const row = findSpool(spoolId)
+  return row ? view(row) : null
+}
+
+/** The tag by its id. */
+export const tagOf = (tagId: string): S['Tag'] | undefined => tagById(tagId)
+
 /** `catalog.find_by_key`: the id of the row whose name or alias has `name`'s key (a subtype's within `material`). */
 export const findByKey = (kind: Aliased, name: string, material: string | null = null) => keyHolder(kind, name, material, undefined, false)?.id ?? null
 

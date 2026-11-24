@@ -99,7 +99,7 @@ describe('the scan page (#7273)', () => {
     const card = await screen.findByRole('region', { name: 'Spool #3' })
     expect(within(card).getByText(/^PLA/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Open spool' })).toHaveAttribute('href', filamentLinks.spool(spoolId(3)))
-    expect(screen.getByRole('button', { name: 'Write tag' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Write tag' })).toBeEnabled()
     expect(screen.getByText('Filament label')).toBeInTheDocument()
     expect(screen.getByText('Spool label')).toBeInTheDocument()
     expect(await screen.findByLabelText('Gross weight (g)')).toBeInTheDocument()
@@ -200,6 +200,28 @@ describe('the scan page (#7273)', () => {
     await user.type(await screen.findByLabelText('Gross weight (g)'), '1050')
     await user.click(screen.getByRole('button', { name: 'Save weight' }))
     expect(await within(card).findByText('800 g left')).toBeInTheDocument()
+  })
+
+  it('writes the tag of a known spool', async () => {
+    const { user } = open()
+    await user.click(screen.getByRole('button', { name: 'Scan' }))
+    await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+    stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+    await screen.findByRole('region', { name: 'Spool #3' })
+    await user.click(screen.getByRole('button', { name: 'Write tag' }))
+    await screen.findByText('Hold the tag to the phone. One tap does all three; keep it still.')
+    stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+    const steps = screen.getByRole('list', { name: 'Steps' })
+    const readBack = within(steps).getByText('Read back').closest('li')!
+    await waitFor(() => expect(readBack).toHaveAttribute('aria-current', 'step'))
+    const written = stub.writes[0]!
+    stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: written.map((one) => ({ recordType: one.recordType, mediaType: one.mediaType, data: one.data as Uint8Array })) })
+    expect(await screen.findByText('Written and checked.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Last read' })).toHaveTextContent('Written and checked: spool #3'))
+    // The write's taps are not reads.
+    expect(within(screen.getByRole('list', { name: "This session's reads" })).getAllByRole('listitem')).toHaveLength(1)
+    const tag = (await listTags()).find((one) => one.tag_uid === '04A1B2C3D4E5F6')!
+    expect(tag.kind).toBe('ntag_openspool')
   })
 
   it('says why NFC was refused', async () => {
