@@ -31,7 +31,7 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.density import DensityTable
 from scadbuddy.slicing.profiles import Profiles
 from tests.conftest import PgPool
-from tests.filament.test_profile_fill import BASE, TREE, local_preset
+from tests.filament.test_profile_fill import BASE, TREE
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -401,7 +401,7 @@ async def test_a_type_without_presets_or_a_profile_is_left_alone_with_a_reason(
 
     assert found["BARE"].reason == "the type has no slicer preset"
     assert "OFDSrzZ8" in (found["UNKNOWN"].reason or "")
-    assert "no Bambuddy is linked" in (found["LOCAL"].reason or "")
+    assert "ScadBuddy no longer reads" in (found["LOCAL"].reason or "")
     assert not any(one.written for one in found.values())
     row = types.get(bare)
     assert row is not None
@@ -409,22 +409,18 @@ async def test_a_type_without_presets_or_a_profile_is_left_alone_with_a_reason(
 
 
 @respx.mock
-async def test_a_local_preset_is_read_once_for_every_type_that_names_it(
+async def test_a_bambuddy_local_preset_is_not_read_while_linked(
     filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
 ) -> None:
-    route = respx.get(f"{API}/local-presets/2").mock(
-        return_value=httpx.Response(200, json=local_preset())
-    )
-    one, two = _type(types, pg_pool, code="ONE"), _type(types, pg_pool, code="TWO")
+    """ScadBuddy reads no Bambuddy local preset (#7244), with a Bambuddy linked too."""
+    route = respx.get(f"{API}/local-presets/2").mock(return_value=httpx.Response(404))
+    one = _type(types, pg_pool, code="ONE")
     _presets(types, one, ("H2C", "0.4", "2"))
-    _presets(types, two, ("H2C", "0.4", "2"))
 
-    done = await filler.fill(LINKED, [one, two], actor=ACTOR)
+    (done,) = await filler.fill(LINKED, [one], actor=ACTOR)
 
-    assert route.call_count == 1
-    assert [d.source.origin if d.source else None for d in done] == ["bambuddy_local"] * 2
-    assert done[0].filled["density_g_cm3"] == Decimal("1.275")
-    assert done[0].cost_hint == "30"
+    assert route.call_count == 0 and done.source is None and not done.written
+    assert "ScadBuddy no longer reads" in (done.reason or "")
 
 
 async def test_a_refresh_answers_the_diff_and_writes_nothing(

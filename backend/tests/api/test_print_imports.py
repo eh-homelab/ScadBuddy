@@ -1027,6 +1027,46 @@ def test_a_library_target_is_a_native_file_that_stands(
 
 
 @respx.mock
+def test_a_replaced_library_target_names_the_file_that_took_its_place(
+    native_api: TestClient, tmp_path: Path
+) -> None:
+    """#7335: a file trashed and added again (the same bytes, a new id) is a 404 that says
+    so in words a person understands and names the live copy, never a per-print one."""
+    client = native_api
+    configure(client)
+    bambuddy()
+    path = _three_mf(tmp_path / "demo_elan.3mf")
+    old = _upload(client, path)
+    assert client.portal is not None
+    client.portal.call(_native(client).trash, [old.id])
+    with path.open("rb") as data:
+        client.portal.call(
+            partial(_native(client).upload, path.name, data, None, print_subject="output:abc")
+        )
+    copy = _upload(client, path)
+
+    replaced = import_print(client, {"source": {"kind": "archive"}, "library_file_id": old.id})
+    missing = import_print(
+        client, {"source": {"kind": "archive"}, "library_file_id": 1_999_999_999}
+    )
+
+    assert replaced.status_code == 404
+    body = replaced.json()
+    assert body["type"] == "https://scadbuddy.dev/problems/print-imports/library-file-gone"
+    assert body["detail"] == (
+        f"library file {old.id} was deleted or replaced in ScadBuddy's library:"
+        " choose the file again"
+    )
+    assert body["replacement"] == {
+        "id": copy.id,
+        "filename": "demo_elan.3mf",
+        "folder_id": None,
+    }
+    assert missing.status_code == 404
+    assert missing.json()["replacement"] is None
+
+
+@respx.mock
 def test_a_run_s_per_print_copy_is_never_a_target(native_api: TestClient, tmp_path: Path) -> None:
     """#6394 review: the sweep trashes a per-print copy, and its purge would forget the
     import and the print's attachments, so the import is refused up front."""

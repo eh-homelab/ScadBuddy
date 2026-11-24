@@ -1,6 +1,7 @@
 """The spool refresh on its own Schedule (#3818 tier A, plan 2026-10-18 Task 6b): off the
-hot path, on the ``library`` queue. Since #6262 Task 12 it keeps Bambuddy's local presets
-and pulls Bambuddy's spools; the spool providers and their overlay are gone."""
+hot path, on the ``library`` queue. Since #6262 Task 12 it pulls Bambuddy's spools; the
+spool providers and their overlay are gone. Since #7244 a new run keeps no copy of
+Bambuddy's local presets (``spool-refresh-held-gone``)."""
 
 from __future__ import annotations
 
@@ -63,7 +64,7 @@ def _queue() -> str:
 
 
 def fakes(
-    *, held_fails: bool = False, capture_fails: bool = False, rfid_fails: bool = False
+    *, pull_fails: bool = False, capture_fails: bool = False, rfid_fails: bool = False
 ) -> tuple[list[object], list[str]]:
     calls: list[str] = []
 
@@ -83,14 +84,15 @@ def fakes(
 
     @activity.defn(name=HELD_ACTIVITY)
     async def held() -> str:
+        # Registered so that a new run that still called it would show in ``calls``.
         calls.append("held")
-        if held_fails:
-            raise RuntimeError("Bambuddy is down")
-        return "refreshed"
+        return "skipped"
 
     @activity.defn(name=FILAMENT_PULL_ACTIVITY)
     async def pull() -> str:
         calls.append("pull")
+        if pull_fails:
+            raise RuntimeError("Bambuddy is down")
         return "pulled"
 
     @activity.defn(name=CAPTURE_ACTIVITY)
@@ -110,10 +112,10 @@ def fakes(
     return [names, refresh, seen, held, pull, capture, rfid], calls
 
 
-async def test_a_run_keeps_the_presets_then_pulls(client: Client) -> None:
+async def test_a_run_pulls_then_captures_then_reconciles(client: Client) -> None:
     """#6262 Task 12: no provider is listed or refreshed, and no tray recorded (the
-    overlay is gone); Bambuddy's local presets are kept (#4645), then its spools pulled
-    (#6261)."""
+    overlay is gone). #7244: no copy of Bambuddy's local presets is kept; Bambuddy's
+    spools are pulled (#6261), then the backstop and the RFID reconcile run."""
     activities, calls = fakes()
     queue = _queue()
     async with Worker(client, task_queue=queue, workflows=[SpoolRefresh], activities=activities):  # type: ignore[arg-type]
@@ -121,20 +123,20 @@ async def test_a_run_keeps_the_presets_then_pulls(client: Client) -> None:
             SpoolRefresh.run, id=f"spools-{uuid.uuid4().hex}", task_queue=queue
         )
     assert outcome == {}
-    assert calls == ["held", "pull", "capture", "rfid"]
+    assert calls == ["pull", "capture", "rfid"]
 
 
 async def test_a_failed_step_never_stops_the_next(client: Client) -> None:
     """Nothing is retried within the run: the next tick is the retry, as it is for the
     sweeps."""
-    activities, calls = fakes(held_fails=True)
+    activities, calls = fakes(pull_fails=True)
     queue = _queue()
     async with Worker(client, task_queue=queue, workflows=[SpoolRefresh], activities=activities):  # type: ignore[arg-type]
         outcome = await client.execute_workflow(
             SpoolRefresh.run, id=f"spools-{uuid.uuid4().hex}", task_queue=queue
         )
     assert outcome == {}
-    assert calls == ["held", "pull", "capture", "rfid"]
+    assert calls == ["pull", "capture", "rfid"]
 
 
 async def test_a_failed_backstop_still_completes_the_run(client: Client) -> None:
@@ -145,7 +147,7 @@ async def test_a_failed_backstop_still_completes_the_run(client: Client) -> None
             SpoolRefresh.run, id=f"spools-{uuid.uuid4().hex}", task_queue=queue
         )
     assert outcome == {}
-    assert calls == ["held", "pull", "capture", "rfid"]
+    assert calls == ["pull", "capture", "rfid"]
 
 
 async def test_a_failed_tag_push_still_completes_the_run(client: Client) -> None:
@@ -156,7 +158,7 @@ async def test_a_failed_tag_push_still_completes_the_run(client: Client) -> None
             SpoolRefresh.run, id=f"spools-{uuid.uuid4().hex}", task_queue=queue
         )
     assert outcome == {}
-    assert calls == ["held", "pull", "capture", "rfid"]
+    assert calls == ["pull", "capture", "rfid"]
 
 
 async def test_the_backstop_activity_answers_captured_or_failed(
@@ -181,9 +183,11 @@ async def test_the_backstop_activity_answers_captured_or_failed(
 
 
 async def test_the_retired_activities_answer_as_an_open_run_expects() -> None:
-    """A run opened before ``spool-providers-gone`` still calls them on the new code: no
-    providers, so no refresh, and no trays to record."""
-    providers, refresh, seen = spool_activities()
+    """A run opened before ``spool-providers-gone`` (or ``spool-refresh-held-gone``) still
+    calls them on the new code: no copy of the presets kept, no providers, so no refresh,
+    and no trays to record."""
+    held, providers, refresh, seen = spool_activities()
+    assert await held() == "skipped"
     assert await providers() == []
     assert await refresh("bambuddy") == "skipped"
     assert await seen() is None

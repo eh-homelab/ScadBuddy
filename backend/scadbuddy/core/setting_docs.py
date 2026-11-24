@@ -403,7 +403,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " weight reading."
             " Bambuddy's usage rows are booked while spools or weights pulls."
             " Tags moves tag bindings; a new Bambuddy spool takes its tags whatever this says."
-            " Presets moves Bambuddy's filament preset into a spool's presets."
+            " Presets moves Bambuddy's filament preset into a spool's presets; while it"
+            " pulls, each pull also makes the presets your spools and types name by"
+            " Bambuddy's id ScadBuddy's own, and gives a preset taken from Bambuddy a new"
+            " version when Bambuddy changed it. With presets off or"
+            " sb_to_bb nothing imports them; Import presets from Bambuddy now does it once,"
+            " whatever this says."
             " With spools off, no spool is created or linked, so weights, presets, suppliers"
             " per spool and a spool's location move only on spools linked earlier."
             " A kind switched to pull later takes what Bambuddy changed while it was off."
@@ -412,15 +417,18 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "spool_overlay_refresh_seconds": SettingDoc(
             "Pull from Bambuddy every",
-            "How often Bambuddy's spools are pulled and its local presets kept, on a schedule"
-            " of their own so a print never waits on Bambuddy. The same run reconciles each"
-            " printer's report with the filament ledger (the capture backstop) and reads the"
-            " Home Assistant sensors. A sensor's alert notification does not wait for it:"
-            " it goes out within about a minute of the reading that starts or stops the"
-            " alert, whatever this says. It is also"
-            " how often the Bambuddy sync runs a full pass of what ScadBuddy sends to"
-            " Bambuddy. 0 turns the pull, the presets and the backstop off, and stops the"
-            " sync's timer: the sync then runs only after a filament change or Sync now."
+            "How often Bambuddy's spools are pulled, on a schedule of their own so a print"
+            " never waits on Bambuddy. Only while Filament sync's presets pulls, the pull"
+            " makes the presets your spools and types name by Bambuddy's id ScadBuddy's"
+            " own; ScadBuddy keeps no"
+            " copy of them and slices none of them. The same run"
+            " reconciles each printer's report with the filament ledger (the capture"
+            " backstop) and reads the Home Assistant sensors. A sensor's alert notification"
+            " does not wait for it: it goes out within about a minute of the reading that"
+            " starts or stops the alert, whatever this says. It is also how often the"
+            " Bambuddy sync runs a full pass of what ScadBuddy sends to Bambuddy. 0 turns the"
+            " pull, the presets import and the backstop off, and stops the sync's timer: the"
+            " sync then runs only after a filament change or Sync now."
             " A change applies to the pull at the next start, and to the sync after its"
             " next pass.",
         ),
@@ -470,6 +478,16 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "On, a spool whose filament reaches 0 g, or that is archived, adds its type to the"
             " shopping list, with a note that names the spool. Nothing is added while an item"
             " for that type is still to buy. It orders nothing.",
+        ),
+        "filament_preset_mirror": SettingDoc(
+            "Copy presets to Bambuddy",
+            "On, each filament preset ScadBuddy holds is copied to Bambuddy's local presets after"
+            " a fetch and on each refresh of the kept presets, and kept up to date there."
+            " Bambuddy needs the copy to set an AMS slot from a spool and to show the preset on"
+            " its own spools. Off, Bambuddy keeps the copies it has, and new presets stay in"
+            " ScadBuddy only. A failed copy is noted on the preset and never stops a fetch."
+            " Bambuddy refuses every copy while its own auth is on: an API key cannot write"
+            " presets there.",
         ),
         "filament_sync_pass_ttl_days": SettingDoc(
             "Keep sync history for (days)",

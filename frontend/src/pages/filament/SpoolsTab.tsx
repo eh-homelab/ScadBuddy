@@ -2,7 +2,7 @@ import { CalendarClockIcon, Columns3Icon, DownloadIcon, ListFilterIcon, RefreshC
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
-import { getInventory, getSummary, listLocations, listSpools, listTypes, syncAmsWeights, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
+import { getInventory, getSummary, listLocations, listSpools, listTags, listTypes, syncAmsWeights, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
 import { BulkBar, type Place } from '../../components/filament/BulkBar'
 import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { trayChecks, type TrayCheck } from '../../components/filament/CheckTray'
@@ -49,7 +49,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { downloadBlob } from '../../lib/embed'
-import { loadTypeSkus, spoolSearchDoc, traysBySpool } from '../../lib/filamentSearch'
+import { loadTypeSkus, spoolSearchDoc, tagsBySpool, traysBySpool } from '../../lib/filamentSearch'
 import { toast } from '../../lib/toast'
 import { syncText } from './syncText'
 import { cn } from '@/lib/utils'
@@ -158,6 +158,8 @@ export function SpoolsTab() {
   /** #6894: the tray each spool is in, and each type's SKUs, for the search; read after the list. */
   const [trayNames, setTrayNames] = useState<ReadonlyMap<string, string>>(new Map())
   const [skus, setSkus] = useState<ReadonlyMap<string, string[]>>(new Map())
+  /** #7151: each spool's open tag keys, so the search finds a spool by its tag. */
+  const [tagKeys, setTagKeys] = useState<ReadonlyMap<string, string[]>>(new Map())
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -197,6 +199,13 @@ export function SpoolsTab() {
       },
       () => {},
     )
+    // Without the tags a search still runs on everything but them.
+    listTags().then(
+      (found) => {
+        if (live) setTagKeys(tagsBySpool(found))
+      },
+      () => {},
+    )
     return () => {
       live = false
     }
@@ -221,9 +230,10 @@ export function SpoolsTab() {
         typeCode: spool.type_id ? typeCodes.get(spool.type_id) : null,
         skus: spool.type_id ? skus.get(spool.type_id) : undefined,
         tray: trayNames.get(spool.id),
+        tags: tagKeys.get(spool.id),
       })
     return sortSpools(filterSpools(data.spools, q, data.trays, searchDoc), q.sort)
-  }, [data, q, typeCodes, skus, trayNames])
+  }, [data, q, typeCodes, skus, trayNames, tagKeys])
   const groups = useMemo(() => groupSpools(shown, q.group, typeCodes), [shown, q.group, typeCodes])
   const chosen = shown.filter((spool) => selected.has(spool.id))
 
@@ -282,7 +292,7 @@ export function SpoolsTab() {
       <div className="flex flex-wrap items-center gap-2">
         <FilamentSearchBox
           label="Search spools"
-          placeholder="Search: #87, brand, colour, hex, SKU, place  /"
+          placeholder="Search: #87, brand, colour, hex, SKU, place, tag  /"
           value={q.q ?? ''}
           onChange={(text) => update({ q: text || undefined })}
           className="w-full sm:w-80"

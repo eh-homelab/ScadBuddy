@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
@@ -42,6 +41,7 @@ from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.projection import JobProjection
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.support.recent_runs import assert_hears, record_recent_runs
+from tests.support.waits import until
 
 #: Well inside this, or it is not "at once".
 PROMPTLY = 5.0
@@ -59,10 +59,7 @@ def _sample(metrics: Metrics, name: str, **labels: str) -> float:
 
 
 async def _until(predicate: Callable[[], bool], timeout: float = PROMPTLY) -> None:
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        assert time.monotonic() < deadline, "timed out"
-        await asyncio.sleep(0.01)
+    await until(predicate, timeout, what="timed out")
 
 
 async def _next(subscription: Subscription, timeout: float = PROMPTLY) -> Event:

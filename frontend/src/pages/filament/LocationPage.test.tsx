@@ -74,6 +74,29 @@ describe('the location page', () => {
     expect(screen.queryByRole('button', { name: 'New spool from this tray' })).toBeNull()
   })
 
+  it('takes the spool out of a tray, and then offers a new spool from it (#7151)', async () => {
+    const { user } = open(L.AMS_A1)
+    expect(await screen.findByRole('link', { name: /S-4/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Take the spool out of this tray' }))
+    expect(await screen.findByRole('button', { name: 'New spool from this tray' })).toBeInTheDocument()
+    expect((await getLocation(L.AMS_A1)).spools).toHaveLength(0)
+    expect((await listSpools()).find((one) => one.id === spoolId(4))!.location_id).toBeNull()
+  })
+
+  it('says why a tray could not let its spool go', async () => {
+    server.use(http.delete('*/api/v1/printers/:printer/trays/:ams/:tray/spool', () => HttpResponse.json({ detail: 'no printer x' }, { status: 404 })))
+    const { user } = open(L.AMS_A1)
+    await user.click(await screen.findByRole('button', { name: 'Take the spool out of this tray' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('no printer x')
+    expect(screen.getByRole('link', { name: /S-4/ })).toBeInTheDocument()
+  })
+
+  it('offers no unassign on a place that is not a tray', async () => {
+    open(L.SHELF_A)
+    expect(await screen.findByRole('heading', { level: 1 })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Take the spool out of this tray' })).toBeNull()
+  })
+
   it('shows Archived for an archived place', async () => {
     const found = await getLocation(L.SHELF_A)
     server.use(http.get('*/api/v1/filament/locations/:id', () => HttpResponse.json({ ...found, archived_at: '2026-11-01T00:00:00Z' })))
