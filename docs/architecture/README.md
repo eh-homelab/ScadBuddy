@@ -292,8 +292,9 @@ document's claim and the code. These specs and docs were not changed in this PR.
 **README, `CLAUDE.md` and the Dockerfile**
 
 - `Dockerfile:3`, `:15-16` "ONE image", the agent the one exception; root `CLAUDE.md`
-  "all three images" / `build-image.yml` publishes six
-  (`.github/workflows/build-image.yml:54`, `:217`, `:329`, `:433`, `:544`, `:657`).
+  "all three images" / `build-image.yml` publishes more
+  (`.github/workflows/build-image.yml:54`, `:217`, `:329`, `:433`, `:544`, `:657`; after
+  `67d7ff6`, also the `playwright-mcp` job, #7027, at `build-image.yml:542`).
 - `README.md:2693-2698` four manifests pinned / up to eleven files and six images
   (`.github/workflows/deploy.reusable.yml:116-158`); the README never names the
   `scadbuddy-sandbox` image.

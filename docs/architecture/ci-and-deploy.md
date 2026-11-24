@@ -21,7 +21,7 @@ amd64 only:
 | `agent-durable` (`Dockerfile:377`) | `ghcr.io/eh-homelab/scadbuddy-agent-durable` | `python -m scadbuddy_durable` (`Dockerfile:439`) | `agent-durable` (`build-image.yml:329`) |
 | `slicer` (`Dockerfile:555`) | `ghcr.io/eh-homelab/scadbuddy-slicer` | `scadbuddy-slicer` (`Dockerfile:609`) | `slicer` (`build-image.yml:544`) |
 | `profile-fetch` (`Dockerfile:654`) | `ghcr.io/eh-homelab/scadbuddy-profile-fetch` | `tini` then the browser service by default (`Dockerfile:728-729`); the worker's Deployment runs `python -m scadbuddy.profile_fetch` ([processes.md](processes.md#profile-fetch-worker-and-browser)) | `profile-fetch` (`build-image.yml:657`) |
-| `playwright-mcp` (#7027; after `67d7ff6`) | `ghcr.io/eh-homelab/scadbuddy-playwright-mcp` | `tini -s -- node /opt/scadbuddy-playwright-mcp/server.mjs`: `@playwright/mcp` with each MCP session's context built from the `X-ScadBuddy-Browser` header (`workers/playwright-mcp/`) | `playwright-mcp` |
+| `playwright-mcp` (#7027; after `67d7ff6`) | `ghcr.io/eh-homelab/scadbuddy-playwright-mcp` | `tini -s -- node /opt/scadbuddy-playwright-mcp/server.mjs`: `@playwright/mcp` with each MCP session's context built from the `X-ScadBuddy-Browser` header (`workers/playwright-mcp/`) | `playwright-mcp` (`build-image.yml:542` after `67d7ff6`) |
 
 `openscad-lsp` (`Dockerfile:767`) and `libraries` (`Dockerfile:829`) are internal stages
 copied into `app`; `test` (`Dockerfile:1007`) is the CI image. Only `build` gates the
