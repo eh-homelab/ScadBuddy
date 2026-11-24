@@ -23,6 +23,7 @@ import tarfile
 import tempfile
 import threading
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -211,7 +212,16 @@ class ModelHistory(GitRepo):
         track; a failed commit may have changed files all the same."""
         ids = _ids_of(paths)
         if self.template_rows is not None and ids:
-            self.template_rows.refresh_locked(ids, path="no_commit")
+            self._guarded(ids, partial(self.template_rows.refresh_locked, ids, path="no_commit"))
+
+    def _guarded(self, models: Sequence[str] | None, call: Callable[[], Any]) -> Any:
+        """``call`` to the rows hook, which must not raise; one that does is logged,
+        never let replace a commit's own outcome (#7317, review B-M2)."""
+        try:
+            return call()
+        except Exception:
+            logger.exception("the template rows hook raised", extra={"templates": models})
+            return None
 
     def _also_record(self, change: HeadChange) -> Callable[[Any], None] | None:
         """The rows of the templates ``change`` touched, written in the transaction
@@ -219,7 +229,10 @@ class ModelHistory(GitRepo):
         known (``models`` None): the copy run catches those."""
         if self.template_rows is None or change.models is None:
             return None
-        return self.template_rows.for_commit(change.models, change.commit)
+        found: Callable[[Any], None] | None = self._guarded(
+            change.models, partial(self.template_rows.for_commit, change.models, change.commit)
+        )
+        return found
 
     def _landed_alone(self, commit: str) -> None:
         """With no coordinator, the rows of ``commit`` in a transaction of their own,
@@ -231,7 +244,7 @@ class ModelHistory(GitRepo):
         except GitError:
             logger.exception("could not list what a commit touched", extra={"commit": commit})
             return
-        self.template_rows.refresh_locked(models, path="commit")
+        self._guarded(models, partial(self.template_rows.refresh_locked, models, path="commit"))
 
     def _touched_by(self, commit: str | None) -> list[str]:
         """The templates ``commit`` changed, when anyone is listening for it."""

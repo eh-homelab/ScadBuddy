@@ -290,3 +290,44 @@ def test_last_commits_since_names_only_the_later_commits(tmp_path: Path) -> None
         "builtin:tag": fourth,
     }
     assert history.last_commits_since(fourth or "", ids) == {}
+
+
+def test_a_hook_that_raises_for_a_commit_never_fails_it(tmp_path: Path, conninfo: str) -> None:
+    """Review B-M2 (#7317): the commit has landed, so a hook bug is logged, never raised."""
+    hook = FakeHook(mode="hook_raises")
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    created = history.commit("Add demo", "demo")
+    assert created is not None and history.head() == created
+    assert _head(conninfo) == created
+
+
+def test_a_hook_that_raises_without_a_coordinator_never_fails_the_commit(tmp_path: Path) -> None:
+    hook = FakeHook(mode="hook_raises")
+    root = tmp_path / "models"
+    history = _history(root, None, hook)
+    _write(root, "demo")
+    created = history.commit("Add demo", "demo")
+    assert created is not None and history.head() == created
+
+
+def test_a_hook_that_raises_with_no_commit_keeps_the_answer(tmp_path: Path, conninfo: str) -> None:
+    hook = FakeHook(mode="hook_raises")
+    history, first = _seeded(tmp_path, conninfo, hook)
+    assert history.commit("Touch other", "other") is None
+    assert history.restore("other", first) == first
+
+
+def test_a_hook_that_raises_keeps_a_failed_commits_own_error(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = FakeHook(mode="hook_raises")
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo", "sphere(1);")
+
+    def refuse(*_args: object, **_kwargs: object) -> str | None:
+        raise GitError("the commit failed")
+
+    monkeypatch.setattr(history, "_commit_locked", refuse)
+    with pytest.raises(GitError, match="the commit failed"):
+        history.commit("Add demo", "demo")
