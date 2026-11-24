@@ -156,7 +156,7 @@ from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.presets import drop_migrated, effective_k_values, own_k_values, own_presets
-from scadbuddy.filament.sb_presets import by_bb_id_on
+from scadbuddy.filament.sb_presets import by_bb_id_on, links_elsewhere_on
 from scadbuddy.filament.spools import FilamentSpoolStore, TagKeysClashError
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -385,9 +385,7 @@ def links_elsewhere(store: Filament, configured: str) -> bool:
     the pull then takes nothing, or it would write another Bambuddy's values onto linked
     spools (#6845 R-6845-5). One statement on a pooled connection, with no transaction
     block of its own: `LocalBbPull._check` runs it on every body."""
-    with store.spools.pool.connection() as conn:
-        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
-    return state is not None and state["instance"] not in (None, configured)
+    return links_elsewhere_on(store.spools.pool, configured)
 
 
 def pull(
@@ -1020,7 +1018,8 @@ def _bb_presets(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
     type gives its presets (F27, `drop_migrated`). A Bambuddy local preset ScadBuddy
     holds (`filament/sb_presets.py`, #7176) is written as its ``sb-`` ref, and a row
     holding that ref holds Bambuddy's last value; one it does not hold yet is written as
-    Bambuddy's id, which the kept presets' refresh then adopts (`adopt_held`).
+    Bambuddy's id, which the same activity's presets import then adopts (`adopt_held`,
+    while ``filament_sync.presets`` pulls, #7244).
 
     The spool's row is locked first (after the pull's advisory lock and any tags, the
     pull's order), as `FilamentSpoolStore.set_presets` locks it, so a person's edit in

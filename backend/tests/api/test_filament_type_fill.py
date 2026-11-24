@@ -20,7 +20,7 @@ from scadbuddy.filament.profile_fill import TypeFiller
 from scadbuddy.filament.spools import FilamentSpoolStore
 from tests.api.test_filament_purchasing import _invoice_body
 from tests.api.test_send import API, configure
-from tests.filament.test_profile_fill import TREE, local_preset
+from tests.filament.test_profile_fill import TREE
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -108,7 +108,7 @@ def test_a_later_preset_change_does_not_refill(client: TestClient) -> None:
 @respx.mock
 def test_the_bulk_route_fills_every_type_and_reports_each(client: TestClient) -> None:
     configure(client)
-    respx.get(f"{API}/local-presets/2").mock(return_value=httpx.Response(200, json=local_preset()))
+    read = respx.get(f"{API}/local-presets/2").mock(return_value=httpx.Response(404))
     respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[]))
     local = _type(client, code="LOCAL")
     client.put(
@@ -121,9 +121,10 @@ def test_the_bulk_route_fills_every_type_and_reports_each(client: TestClient) ->
     done = client.post(f"{TYPES}/fill-from-profile", json={})
     assert done.status_code == 200, done.text
     found = {one["code"]: one for one in done.json()}
-    assert found["LOCAL"]["filled"] == {"nozzle_temp_min": 220, "density_g_cm3": "1.275"}
-    assert found["LOCAL"]["source"]["origin"] == "bambuddy_local"
-    assert found["LOCAL"]["cost_hint"] == "30"
+    # A Bambuddy local preset is not read (#7244): the type is left, saying why.
+    assert found["LOCAL"]["filled"] == {} and found["LOCAL"]["source"] is None
+    assert "ScadBuddy no longer reads" in found["LOCAL"]["reason"]
+    assert read.call_count == 0
     assert found["BARE"]["reason"] == "the type has no slicer preset"
     assert client.get(f"{TYPES}/{bare['id']}").json()["density_g_cm3"] is None
 

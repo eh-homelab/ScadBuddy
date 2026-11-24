@@ -24,6 +24,7 @@ def _quick(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(site, "BOT_CHECK_SECONDS", 1.0)
     monkeypatch.setattr(site, "STEP_TIMEOUT_MS", 3_000)
     monkeypatch.setattr(site, "LOGIN_WAIT_MS", 1_500)
+    monkeypatch.setattr(site, "RECORD_WAIT_MS", 500)
     monkeypatch.setattr(site, "DEFAULTS_WAIT_MS", 1_000)
     monkeypatch.setattr(site, "SAVE_WAIT_MS", 2_000)
 
