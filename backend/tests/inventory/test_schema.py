@@ -50,29 +50,37 @@ def _item(pool: PgPool, name: str, kind: str = "hardware") -> str:
     return str(row["id"])
 
 
-def _lot(pool: PgPool, item_id: str) -> str:
+def _insert(pool: PgPool, table: str, row: dict[str, Any]) -> str:
+    names = ", ".join(row)
+    marks = ", ".join(["%s"] * len(row))
     with pool.connection() as conn:
-        row = conn.execute(
-            "INSERT INTO stock_lots (item_id, received_qty, on_hand, unit_cost_minor, origin,"
-            " created_by) VALUES (%s, 10, 10, 25, 'manual', %s) RETURNING id",
-            (item_id, ACTOR),
+        got = conn.execute(
+            f"INSERT INTO {table} ({names}) VALUES ({marks}) RETURNING id",
+            tuple(row.values()),
         ).fetchone()
-    assert row is not None
-    return str(row["id"])
+    assert got is not None
+    return str(got["id"])
 
 
-def _unit(pool: PgPool, item_id: str) -> str:
-    with pool.connection() as conn:
-        row = conn.execute(
-            "INSERT INTO stock_units (item_id, cost_minor, origin, created_by)"
-            " VALUES (%s, 1000, 'manual', %s) RETURNING id",
-            (item_id, ACTOR),
-        ).fetchone()
-    assert row is not None
-    return str(row["id"])
+def _lot(pool: PgPool, item_id: str, **cols: Any) -> str:
+    row = {
+        "item_id": item_id,
+        "received_qty": 10,
+        "on_hand": 10,
+        "unit_cost_minor": 25,
+        "origin": "manual",
+        "created_by": ACTOR,
+        **cols,
+    }
+    return _insert(pool, "stock_lots", row)
 
 
-def _move(pool: PgPool, item_id: str, **cols: Any) -> None:
+def _unit(pool: PgPool, item_id: str, **cols: Any) -> str:
+    row = {"item_id": item_id, "cost_minor": 1000, "origin": "manual", "created_by": ACTOR, **cols}
+    return _insert(pool, "stock_units", row)
+
+
+def _move(pool: PgPool, item_id: str, **cols: Any) -> str:
     row = {
         "item_id": item_id,
         "kind": "use",
@@ -82,19 +90,53 @@ def _move(pool: PgPool, item_id: str, **cols: Any) -> None:
         "actor": ACTOR,
         **cols,
     }
-    names = ", ".join(row)
-    marks = ", ".join(["%s"] * len(row))
-    with pool.connection() as conn:
-        conn.execute(
-            f"INSERT INTO stock_moves ({names}) VALUES ({marks})",
-            tuple(row.values()),
-        )
+    return _insert(pool, "stock_moves", row)
 
 
 def _supplier(pool: PgPool, name: str = "Bolt Depot") -> str:
     with pool.connection() as conn:
         row = conn.execute(
             "INSERT INTO filament_suppliers (name) VALUES (%s) RETURNING id", (name,)
+        ).fetchone()
+    assert row is not None
+    return str(row["id"])
+
+
+def _price_point(pool: PgPool, offer_id: str, **cols: Any) -> str:
+    row = {
+        "offer_id": offer_id,
+        "price": "12.5000",
+        "currency": "USD",
+        "on_date": "2026-11-23",
+        "source": "manual",
+        **cols,
+    }
+    return _insert(pool, "offer_price_points", row)
+
+
+def _invoice_line(pool: PgPool, supplier_id: str) -> str:
+    with pool.connection() as conn:
+        invoice = conn.execute(
+            "INSERT INTO filament_invoices (supplier_id, invoice_date, currency, subtotal, total)"
+            " VALUES (%s, '2026-11-23', 'USD', 10, 10) RETURNING id",
+            (supplier_id,),
+        ).fetchone()
+        assert invoice is not None
+        line = conn.execute(
+            "INSERT INTO filament_invoice_lines (invoice_id, position, description, quantity,"
+            " unit_price, line_subtotal, line_tax, line_total, allocated_cost)"
+            " VALUES (%s, 1, 'M3 nuts', 1, 10, 10, 0, 10, 10) RETURNING id",
+            (invoice["id"],),
+        ).fetchone()
+    assert line is not None
+    return str(line["id"])
+
+
+def _printer(pool: PgPool) -> str:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (gen_random_uuid(), 'TEST7067', 'H2C')"
+            " RETURNING id"
         ).fetchone()
     assert row is not None
     return str(row["id"])
@@ -173,3 +215,140 @@ def test_an_offer_sku_is_unique_per_item_not_per_supplier(pg_pool: PgPool) -> No
     with pg_pool.connection() as conn:
         conn.execute("UPDATE supplier_offers SET archived_at = now() WHERE id = %s", (first,))
     _offer(pg_pool, supplier, red, "BUNDLE-1")
+
+
+def test_the_lookup_indexes_exist(pg_pool: PgPool) -> None:
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT indexname, indexdef FROM pg_indexes WHERE tablename IN"
+            " ('stock_units', 'stock_moves')"
+        ).fetchall()
+    defs = {r["indexname"]: r["indexdef"] for r in rows}
+    assert "(item_id)" in defs["stock_units_item"]
+    assert "(unit_id) WHERE (unit_id IS NOT NULL)" in defs["stock_moves_unit"]
+    assert "(entity_id) WHERE (entity_id IS NOT NULL)" in defs["stock_moves_entity"]
+
+
+def test_a_price_point_source_matches_its_line(pg_pool: PgPool) -> None:
+    supplier = _supplier(pg_pool)
+    offer = _offer(pg_pool, supplier, _item(pg_pool, "M3 nut"), "NUT-M3")
+    line = _invoice_line(pg_pool, supplier)
+
+    _price_point(pg_pool, offer, source="invoice", invoice_line_id=line)
+    _price_point(pg_pool, offer, source="manual")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _price_point(pg_pool, offer, source="invoice")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _price_point(pg_pool, offer, source="manual", invoice_line_id=line)
+
+
+def test_a_price_point_takes_any_iso_currency(pg_pool: PgPool) -> None:
+    offer = _offer(pg_pool, _supplier(pg_pool), _item(pg_pool, "M3 nut"), "NUT-M3")
+
+    _price_point(pg_pool, offer, currency="EUR")
+    _price_point(pg_pool, offer, currency="JPY")
+    for bad in ("usd", "US"):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _price_point(pg_pool, offer, currency=bad)
+
+
+def test_a_move_is_reversed_at_most_once(pg_pool: PgPool) -> None:
+    item = _item(pg_pool, "M3 nut")
+    lot = _lot(pg_pool, item)
+    use = _move(pg_pool, item, lot_id=lot)
+    back = {"kind": "return", "qty": 2, "amount_minor": 50, "reverses_move_id": use}
+
+    _move(pg_pool, item, lot_id=lot, **back)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _move(pg_pool, item, lot_id=lot, **back)
+
+
+def test_only_a_return_reverses_a_move(pg_pool: PgPool) -> None:
+    item = _item(pg_pool, "M3 nut")
+    lot = _lot(pg_pool, item)
+    use = _move(pg_pool, item, lot_id=lot)
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _move(pg_pool, item, lot_id=lot, kind="adjust", reverses_move_id=use)
+
+
+def test_a_move_cost_is_not_negative(pg_pool: PgPool) -> None:
+    item = _item(pg_pool, "M3 nut")
+    lot = _lot(pg_pool, item)
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _move(pg_pool, item, lot_id=lot, qty=2, unit_cost_minor=-25, amount_minor=-50)
+
+
+def test_a_lot_cost_currency_is_an_iso_code(pg_pool: PgPool) -> None:
+    item = _item(pg_pool, "M3 nut")
+
+    _lot(pg_pool, item, cost_currency="EUR")
+    _lot(pg_pool, item)
+    for bad in ("eur", "EU", ""):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            _lot(pg_pool, item, cost_currency=bad)
+
+
+def test_a_unit_serial_is_unique_per_item(pg_pool: PgPool) -> None:
+    nozzle = _item(pg_pool, "0.4 nozzle", kind="nozzle")
+    hotend = _item(pg_pool, "Hotend", kind="hotend")
+
+    _unit(pg_pool, nozzle)
+    _unit(pg_pool, nozzle)
+    _unit(pg_pool, nozzle, serial="SN1")
+    _unit(pg_pool, hotend, serial="SN1")
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _unit(pg_pool, nozzle, serial="SN1")
+
+
+def test_a_blank_serial_or_source_ref_is_refused(pg_pool: PgPool) -> None:
+    nozzle = _item(pg_pool, "0.4 nozzle", kind="nozzle")
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _unit(pg_pool, nozzle, serial="")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _insert(
+            pg_pool,
+            "items",
+            {"kind_id": "hardware", "name": "M3 nut", "source": "bambu_store", "source_ref": ""},
+        )
+
+
+def test_an_item_name_is_unique_per_kind_among_unarchived(pg_pool: PgPool) -> None:
+    first = _item(pg_pool, "M3 Nut")
+    _item(pg_pool, "M3 nut", kind="ams_part")
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _item(pg_pool, "m3 NUT")
+
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE items SET archived_at = now() WHERE id = %s", (first,))
+    _item(pg_pool, "m3 NUT")
+
+
+def test_deleting_a_printer_clears_unit_printer_id(pg_pool: PgPool) -> None:
+    printer = _printer(pg_pool)
+    unit = _unit(pg_pool, _item(pg_pool, "H2C", kind="printer"), printer_id=printer)
+
+    with pg_pool.connection() as conn:
+        conn.execute("DELETE FROM printers WHERE id = %s", (printer,))
+        row = conn.execute("SELECT printer_id FROM stock_units WHERE id = %s", (unit,)).fetchone()
+    assert row is not None
+    assert row["printer_id"] is None
+
+
+def test_kind_checks(pg_pool: PgPool) -> None:
+    def kind(**cols: Any) -> None:
+        _insert(
+            pg_pool, "item_kinds", {"id": "bearing", "name": "Bearing", "tracking": "lot", **cols}
+        )
+
+    for bad in ({"id": "Bearing"}, {"id": "9mm"}, {"tracking": "count"}, {"parent_id": "bearing"}):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            kind(**bad)
+    kind()
+
+    nozzle = _item(pg_pool, "0.4 nozzle", kind="nozzle")
+    unit = _unit(pg_pool, nozzle)
+    with pytest.raises(psycopg.errors.CheckViolation), pg_pool.connection() as conn:
+        conn.execute("UPDATE stock_units SET installed_in_unit_id = id WHERE id = %s", (unit,))

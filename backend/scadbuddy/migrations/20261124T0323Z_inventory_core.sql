@@ -40,7 +40,7 @@ CREATE TABLE items (
     life_months integer CHECK (life_months > 0),
     saleable boolean,
     source text NOT NULL DEFAULT 'manual',
-    source_ref text,
+    source_ref text CHECK (source_ref <> ''),
     edited_fields text[] NOT NULL DEFAULT '{}',
     note text NOT NULL DEFAULT '' CHECK (length(note) <= 4000),
     archived_at timestamptz,
@@ -97,7 +97,7 @@ CREATE TABLE stock_lots (
     on_hand numeric(20,6) NOT NULL,
     unit_cost_minor numeric(20,6) NOT NULL CHECK (unit_cost_minor >= 0),
     cost_unknown boolean NOT NULL DEFAULT false,
-    cost_currency text,
+    cost_currency text CHECK (cost_currency ~ '^[A-Z]{3}$'),
     origin text NOT NULL
         CHECK (origin IN ('invoice_line', 'production_run', 'opening', 'adjustment', 'manual')),
     invoice_line_id uuid REFERENCES filament_invoice_lines (id),
@@ -115,7 +115,7 @@ CREATE INDEX stock_lots_fifo ON stock_lots (item_id, received_at, id);
 CREATE TABLE stock_units (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     item_id uuid NOT NULL REFERENCES items (id),
-    serial text,
+    serial text CHECK (serial <> ''),
     name text NOT NULL DEFAULT '',
     location_id uuid REFERENCES filament_locations (id),
     status text NOT NULL DEFAULT 'in_stock'
@@ -138,11 +138,12 @@ CREATE TABLE stock_units (
     created_by jsonb NOT NULL
 );
 CREATE UNIQUE INDEX stock_units_serial ON stock_units (item_id, serial) WHERE serial IS NOT NULL;
+CREATE INDEX stock_units_item ON stock_units (item_id);
 
 -- §6.6 A move of stock, on one lot or one unit. `qty` is signed. Its cost is a snapshot
 -- taken when it is written (D14): a later lot cost change moves no past move. A shortfall
--- move takes the newest lot's cost and sets `needs_review`. A return names the use it
--- reverses, at most once. `order_id` and `order_item_id` have no foreign key: a move
+-- move takes the newest lot's cost and sets `needs_review`. Only a return names a move it
+-- reverses, and each move is reversed at most once. `order_id` and `order_item_id` have no foreign key: a move
 -- outlives a deleted draft, as `part_stock_moves` did.
 CREATE TABLE stock_moves (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -154,7 +155,7 @@ CREATE TABLE stock_moves (
         'receive', 'use', 'return', 'adjust', 'produce', 'transfer', 'sell', 'retire', 'scrap'
     )),
     qty numeric(20,6) NOT NULL CHECK (qty <> 0),
-    unit_cost_minor numeric(20,6) NOT NULL,
+    unit_cost_minor numeric(20,6) NOT NULL CHECK (unit_cost_minor >= 0),
     amount_minor numeric(20,6) NOT NULL,
     cost_unknown boolean NOT NULL DEFAULT false,
     needs_review boolean NOT NULL DEFAULT false,
@@ -167,6 +168,7 @@ CREATE TABLE stock_moves (
     entity_id uuid REFERENCES entities (id),
     actor jsonb NOT NULL,
     CONSTRAINT stock_moves_one_holder CHECK ((lot_id IS NULL) <> (unit_id IS NULL)),
+    CONSTRAINT stock_moves_reverses_return CHECK (reverses_move_id IS NULL OR kind = 'return'),
     -- Rounded to the column's six places: a fractional quantity at a fractional cost has
     -- up to twelve, and `amount_minor` stores six.
     CONSTRAINT stock_moves_amount CHECK (amount_minor = round(qty * unit_cost_minor, 6))
@@ -174,6 +176,9 @@ CREATE TABLE stock_moves (
 CREATE INDEX stock_moves_item ON stock_moves (item_id, at);
 CREATE INDEX stock_moves_order_item ON stock_moves (order_item_id) WHERE order_item_id IS NOT NULL;
 CREATE INDEX stock_moves_lot ON stock_moves (lot_id);
+CREATE INDEX stock_moves_unit ON stock_moves (unit_id) WHERE unit_id IS NOT NULL;
+-- The entities sweep skips an entity that a move names (R-P2-4).
+CREATE INDEX stock_moves_entity ON stock_moves (entity_id) WHERE entity_id IS NOT NULL;
 
 -- §6.4 The built-in kinds (the plan's Ruling 1). People add more.
 INSERT INTO item_kinds (id, name, parent_id, tracking, uom, life_basis, saleable, builtin) VALUES
