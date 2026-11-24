@@ -4,7 +4,7 @@ import { api } from '../../../api/client'
 import { getResetPreview, getSyncStatus, listSyncPasses, resetSyncLinks } from '../../../api/filament'
 import { describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
-import { leaveOnlyColourLinks, leaveOnlyPresetLinks, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
+import { leaveOnlyColourLinks, leaveOnlyPresetLinks, leaveUnresolvedPresets, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
@@ -949,7 +949,15 @@ describe("Import Bambuddy's presets (#7244)", () => {
     expect(await within(filament).findByText("Imported: 2 new presets from Bambuddy, 1 preset updated to Bambuddy's version.")).toBeInTheDocument()
     await user.click(button)
     expect(await within(filament).findByText("Nothing to import: no spool or type names a Bambuddy preset, and none taken from Bambuddy changed since.")).toBeInTheDocument()
-    expect(calls).toBe(2)
+    // A binding Bambuddy can no longer fill is said, never "nothing to import".
+    leaveUnresolvedPresets(1)
+    await user.click(button)
+    expect(
+      await within(filament).findByText(
+        'Nothing imported. 1 Bambuddy preset that spools or types name could not be imported: Bambuddy no longer holds it, or it is not a filament preset. Choose a ScadBuddy preset for those spools and types.',
+      ),
+    ).toBeInTheDocument()
+    expect(calls).toBe(3)
     // The import saves nothing of the form: the direction stays as it was.
     expect(mockSettings().filament_sync).toMatchObject({ presets: 'sb_to_bb' })
   })

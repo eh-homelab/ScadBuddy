@@ -172,12 +172,21 @@ function SyncRows({ form }: { form: BackendSettings }) {
 
 /** #7244 — what the presets import found, in a sentence. */
 function importLine(done: PresetImport): string {
-  if (done.adopted === 0 && done.updated === 0) return "Nothing to import: no spool or type names a Bambuddy preset, and none taken from Bambuddy changed since."
+  const unresolved = done.unresolved ?? 0
+  if (done.adopted === 0 && done.updated === 0 && unresolved === 0)
+    return "Nothing to import: no spool or type names a Bambuddy preset, and none taken from Bambuddy changed since."
   const parts = [
     done.adopted > 0 && `${plural(done.adopted, 'new preset', 'new presets')} from Bambuddy`,
     done.updated > 0 && `${plural(done.updated, 'preset', 'presets')} updated to Bambuddy's version`,
   ].filter(Boolean)
-  return `Imported: ${parts.join(', ')}.`
+  const imported = parts.length > 0 ? `Imported: ${parts.join(', ')}.` : 'Nothing imported.'
+  if (unresolved === 0) return imported
+  const one = unresolved === 1
+  return (
+    `${imported} ${plural(unresolved, 'Bambuddy preset', 'Bambuddy presets')} that spools or types name could not be imported: ` +
+    `Bambuddy no longer holds ${one ? 'it' : 'them'}, or ${one ? 'it is' : 'they are'} not a filament preset. ` +
+    'Choose a ScadBuddy preset for those spools and types.'
+  )
 }
 
 /** What the presets import says when the server refuses it, in plain words. */

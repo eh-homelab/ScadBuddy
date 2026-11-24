@@ -68,6 +68,13 @@ let onlyPresets = false
 
 /** #7244 — whether the presets import ran: the next one finds nothing new. */
 let presetsImported = false
+/** #7244 — Bambuddy ids that bindings still name after an import (`unresolved`). */
+let unresolvedPresets = 0
+
+/** #7244 — the next imports find `count` bound Bambuddy ids they cannot import. */
+export function leaveUnresolvedPresets(count: number) {
+  unresolvedPresets = count
+}
 
 /**
  * #6905 — `GET /api/v1/filament/sync/passes`: the pass history, newest first. The seed holds
@@ -124,6 +131,7 @@ export function reset() {
   unreadable = false
   onlyColours = false
   presetsImported = false
+  unresolvedPresets = 0
   onlyPresets = false
   passes = seedPasses()
 }
@@ -254,7 +262,9 @@ export const handlers = [
     if (!configured()) return conflict('no Bambuddy URL is configured; set one in Settings', 'no_bambuddy')
     if (linksInstance() !== null && linksInstance() !== configured())
       return conflict('the Bambuddy links belong to another Bambuddy; reset them first', 'instance_changed')
-    const done: S['PresetImport'] = presetsImported ? { adopted: 0, updated: 0 } : { adopted: 2, updated: 1 }
+    const done: S['PresetImport'] = presetsImported
+      ? { adopted: 0, updated: 0, unresolved: unresolvedPresets }
+      : { adopted: 2, updated: 1, unresolved: unresolvedPresets }
     presetsImported = true
     return HttpResponse.json(done)
   }),

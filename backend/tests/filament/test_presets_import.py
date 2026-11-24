@@ -177,7 +177,8 @@ async def test_a_one_time_import_reads_bambuddy_itself(pg_pool: PgPool, tmp_path
             done = await import_presets(pg_pool, blobs, LivePresets(client))
         assert router.calls.call_count == 4
         assert all(route.call_count == 1 for route in reads.values())
-    assert done == PresetImport(adopted=1, updated=1)
+    # Bambuddy deleted 11 between the list and its read: its binding is still to fix.
+    assert done == PresetImport(adopted=1, updated=1, unresolved=1)
     [(ref, _)] = _bindings(pg_pool, waiting)
     assert sb_id(ref) is not None
     assert _bindings(pg_pool, gone) == [("11", None)]
@@ -249,25 +250,34 @@ async def test_the_start_asks_no_other_bambuddy_than_the_links_one(
     assert _bindings(pg_pool, bound) == [("9", None)]
 
 
-async def test_the_start_leaves_the_adopt_to_the_replica_that_holds_its_lock(
+async def test_the_start_waits_while_another_replica_holds_its_lock(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
-    """One replica adopts: another that finds `ADOPT_LOCK` held reads nothing (#7244
-    review)."""
+    """One replica adopts: another that finds `ADOPT_LOCK` held reads nothing, and tries
+    again, so it adopts once the holder ended without doing so (#7244 review)."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
     bound = _type(pg_pool, "PLA-L")
     _bind(pg_pool, bound, "9")
+    nine = _held(9, "Nine", "2026-11-23T01:00:00")
+    listing = {"filament": [nine.model_dump(mode="json", exclude={"setting"})]}
     assert isinstance(pg_pool.conninfo, str)
     held = try_lock_on(pg_pool.conninfo, ADOPT_LOCK)
     assert held is not None
-    try:
-        with respx.mock() as router:
-            await adopt_at_start(
-                pg_pool, lambda: LocalBlobStore(tmp_path), lambda: SETTINGS, retry_s=0
-            )
+    with respx.mock() as router:
+        router.get(f"{BB}/api/v1/local-presets/").respond(json=listing)
+        router.get(f"{BB}/api/v1/local-presets/9").respond(json=nine.model_dump(mode="json"))
+        waiting = asyncio.create_task(
+            adopt_at_start(pg_pool, lambda: blobs, lambda: SETTINGS, retry_s=0.05)
+        )
+        try:
+            await asyncio.sleep(0.5)
+            assert not waiting.done()
             assert router.calls.call_count == 0
-    finally:
-        held.close()
-    assert _bindings(pg_pool, bound) == [("9", None)]
+        finally:
+            held.close()
+        await asyncio.wait_for(waiting, 30)
+    [(ref, _)] = _bindings(pg_pool, bound)
+    assert sb_id(ref) is not None
 
 
 class _Clock:

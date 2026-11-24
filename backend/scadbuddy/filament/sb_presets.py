@@ -623,6 +623,9 @@ class PresetImport(BaseModel):
     adopted: int
     #: ``bambuddy`` presets that took a new version (`refresh_bambuddy`).
     updated: int
+    #: Bambuddy local ids that bindings still name after the import (`bound_bb_ids`): ids
+    #: Bambuddy no longer holds, or whose detail is no filament preset (#7244 review).
+    unresolved: int = 0
 
 
 async def import_presets(
@@ -648,7 +651,8 @@ async def import_presets(
             failed = failed or error
     if failed is not None:
         raise failed
-    return PresetImport(**counts)
+    left = await asyncio.to_thread(bound_bb_ids, pool)
+    return PresetImport(**counts, unresolved=len(left))
 
 
 async def import_from_bambuddy(
@@ -697,7 +701,8 @@ async def adopt_at_start(
     means something only on the Bambuddy that issued it. A failed try is logged and tried
     again every ``retry_s`` until one ends; ids Bambuddy no longer holds are logged and left,
     each an error the print dialog shows. One replica does it: each try takes the session
-    try-lock `ADOPT_LOCK`, and a replica that finds it held leaves the step to its holder.
+    try-lock `ADOPT_LOCK`; a replica that finds it held tries again every ``retry_s`` while
+    bindings still name Bambuddy ids, so it takes over from a holder that ended first.
     Never raises."""
     while True:
         held = None
@@ -708,8 +713,11 @@ async def adopt_at_start(
             conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
             held = await acquire_lock(conninfo, ADOPT_LOCK)
             if held is None:
+                # Another replica adopts; try again later, so a holder that ends before it
+                # is done leaves the step to this one (#7244 review).
                 logger.info("another replica adopts the bound Bambuddy local presets")
-                return
+                await asyncio.sleep(retry_s)
+                continue
             settings = await asyncio.to_thread(load)
             if not settings.bambuddy_url:
                 logger.warning(

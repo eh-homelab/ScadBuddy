@@ -47,8 +47,8 @@ def test_the_presets_import_runs_with_presets_set_to_push(client: TestClient) ->
         assert bound.status_code == 200, bound.text
         first = client.post(IMPORT)
         assert first.status_code == 200, first.text
-        assert first.json() == {"adopted": 1, "updated": 0}
+        assert first.json() == {"adopted": 1, "updated": 0, "unresolved": 0}
         again = client.post(IMPORT)
-        assert again.json() == {"adopted": 0, "updated": 0}
+        assert again.json() == {"adopted": 0, "updated": 0, "unresolved": 0}
     (row,) = client.get(f"{TYPES}/{made['id']}").json()["presets"]
     assert row["slicer_filament"].startswith("sb-")
