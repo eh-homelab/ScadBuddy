@@ -1,6 +1,5 @@
-import type { Client } from '@temporalio/client'
+import { type QueueDescriber, queuePollers } from '../pollers.js'
 import { ApplicationFailure } from '@temporalio/common'
-import { seenAtMs } from '../../sessions/durable.js'
 import type { WarmSessions } from '../../sessions/warm.js'
 import { TASK_QUEUE } from '../names.js'
 import { replicaOfIdentity } from '../worker.js'
@@ -90,26 +89,21 @@ export const HOST_FRESH_MS = 70_000
 const DESCRIBE_DEADLINE_MS = 10_000
 const ACTIVITY_TASK_QUEUE = 2
 
-export type HostLister = Pick<Client, 'workflowService' | 'options' | 'withDeadline'>
+export type HostLister = QueueDescriber
 
 /**
- * The session host queues a turn can be placed on now, from DescribeTaskQueue: each replica
- * whose `agent-tools` worker polls (a poller's identity names it, temporal/worker.ts
- * `workerIdentity`), whose own `agent-sessions.<replica>` is polled too, both within
- * `freshMs`. A replica that does not host sessions polls the first and not the second.
+ * The session host queues a turn can be placed on now, from DescribeTaskQueue on every
+ * partition (temporal/pollers.ts `queuePollers`): each replica whose `agent-tools` worker polls
+ * (a poller's identity names it, temporal/worker.ts `workerIdentity`), whose own
+ * `agent-sessions.<replica>` is polled too, both within `freshMs`. A replica that does not host
+ * sessions polls the first and not the second.
  */
 export async function liveHostQueues(client: HostLister, freshMs = HOST_FRESH_MS): Promise<Set<string>> {
   const now = Date.now()
-  const fresh = async (queue: string): Promise<string[]> => {
-    const { pollers } = await client.withDeadline(now + DESCRIBE_DEADLINE_MS, () =>
-      client.workflowService.describeTaskQueue({
-        namespace: client.options.namespace,
-        taskQueue: { name: queue },
-        taskQueueType: ACTIVITY_TASK_QUEUE,
-      }),
+  const fresh = async (queue: string): Promise<string[]> =>
+    (await queuePollers(client, queue, ACTIVITY_TASK_QUEUE, now + DESCRIBE_DEADLINE_MS)).flatMap((p) =>
+      p.identity && now - p.seenAtMs < freshMs ? [p.identity] : [],
     )
-    return (pollers ?? []).flatMap((p) => (p.identity && now - seenAtMs(p.lastAccessTime) < freshMs ? [p.identity] : []))
-  }
   const replicas = new Set((await fresh(TASK_QUEUE)).map(replicaOfIdentity))
   const live = new Set<string>()
   for (const replica of replicas) {
