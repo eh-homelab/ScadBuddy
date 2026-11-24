@@ -19,6 +19,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
+from scadbuddy.core.gitrepo import GitError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
 from scadbuddy.library.history import ModelHistory
@@ -381,6 +382,26 @@ def test_a_write_that_fails_for_a_commit_is_counted_and_the_head_stands(
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         found = conn.execute("SELECT head FROM models_repo_head WHERE id").fetchone()
     assert found is not None and found[0] == head
+
+
+def test_a_create_whose_commit_fails_leaves_no_row(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review B-I1 of Task 4 (#7317): the no-commit refresh reads the folder before the
+    create's undo removes it; the row must go with the folder."""
+    history = world.history
+    assert history is not None
+
+    def broken(*_: object, **__: object) -> None:
+        raise GitError("git commit failed")
+
+    monkeypatch.setattr(history, "_commit_action", broken)
+
+    with pytest.raises(GitError):
+        world.catalogue.create("ghost", SOURCE, ModelMeta(name="Ghost"))
+
+    assert not world.catalogue.exists("ghost")
+    assert world.rows.get("ghost") is None
 
 
 def test_the_built_in_media_refresh_runs_under_the_write_lock(

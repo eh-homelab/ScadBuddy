@@ -1423,6 +1423,9 @@ class Catalogue:
                 self.history.commit(f"Add {slug}", slug)
             except (GitError, OSError):
                 _remove_tree(directory)
+                # The no-commit refresh read the folder before it went: refresh again,
+                # under the lock, so the row goes too (#7317, Task 4 review B-I1).
+                self._refresh_undone(slug)
                 raise
         self.notify_change(slug)
         return self.record(slug)
@@ -2204,6 +2207,21 @@ class Catalogue:
                     self.refresh.refresh_locked([slug], path="no_commit")
         self.notify_change(slug)
         return self.record(slug)
+
+    def _refresh_undone(self, slug: str) -> None:
+        """Refresh ``slug``'s row under the write lock after a write undid its files.
+        Never raises: the write's own error is what the caller raises. A failure is
+        logged; the next copy run repairs the row."""
+        if self.refresh is None or not self._has_history:
+            return
+        assert self.history is not None
+        try:
+            with self.history.write_lock():
+                self.refresh.refresh_locked([slug], path="no_commit")
+        except Exception:
+            logger.exception(
+                "could not refresh an undone template's row", extra={"templates": [slug]}
+            )
 
     def _overlay_write_lock(self) -> AbstractContextManager[Any]:
         """The lock every write to a built-in's added media takes: the history's
