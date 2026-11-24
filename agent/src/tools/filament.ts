@@ -1493,7 +1493,7 @@ const tools: Tool[] = [
       'belongs to it, and the answer has `kept: true` and zero counts. When no spool is linked, ScadBuddy\'s filament ' +
       "presets prove it the same way (it then also reads Bambuddy's local presets: each linked preset id there, none " +
       "older than Bambuddy's time of the mirror's last write, #7343). When it cannot prove that (Bambuddy could " +
-      'not be read, or it is another Bambuddy, or every linked spool ScadBuddy could compare (a time on both sides) was edited in Bambuddy since the last pull so ' +
+      'not be read, or it is another Bambuddy, or every linked spool (with no spool linked, every linked filament preset) ScadBuddy could compare (a time on both sides) was edited in Bambuddy since ScadBuddy last saw it so ' +
       'none matches what ScadBuddy saw and the proof has nothing to stand on), it answers 409 `proof_changed` and ' +
       'deletes nothing; tell the user which case it is if you know (the dry run `GET /filament/sync/reset-links` ' +
       'has `changed_since_pull`). Only then, ' +

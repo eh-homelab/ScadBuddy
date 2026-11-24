@@ -2688,7 +2688,8 @@ async def _listing(
         "spool ScadBuddy could compare (a time on both sides) was edited in "
         "Bambuddy since the last pull, so none matches exactly and ScadBuddy cannot prove "
         "it is the same Bambuddy; only the delete is "
-        "then offered. The "
+        "then offered. With no spool linked it says the same of the linked filament "
+        "presets, each timed by the mirror's last write (#7343). The "
         "counts are approximate: they are read without a lock, so a pass that runs "
         "meanwhile can change them. The answer of the `POST` gives the counts it deleted."
     ),

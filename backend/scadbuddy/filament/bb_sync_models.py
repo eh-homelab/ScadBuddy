@@ -553,7 +553,9 @@ class LinksResetPreview(BaseModel, extra="forbid"):
     links have a time on both sides (Decision 199): every linked spool with a time on both
     sides (untimed links are skipped) was edited in Bambuddy since the
     last pull, so none matches exactly and the proof has nothing to stand on
-    (`bb_sync_results.changed_since_pull`, #6845 review)."""
+    (`bb_sync_results.changed_since_pull`, #6845 review). With no spool linked, both hold
+    over ScadBuddy's linked filament presets instead, each timed by Bambuddy's
+    ``updated_at`` of the mirror's last write (#7343, `bb_sync_results._proof_of`)."""
 
     instance: str | None
     configured_instance: str | None

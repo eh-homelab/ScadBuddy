@@ -783,11 +783,14 @@ def _preset_links(conn: Conn, instance: str | None) -> dict[int, datetime | None
 
 def wants_preset_listing(store: Filament) -> bool:
     """Whether the proof of the same Bambuddy stands on the presets (#7343): no spool is
-    linked, and a preset holds a Bambuddy id. Then the reset reads Bambuddy's presets."""
+    linked, and a preset holds a Bambuddy id of the links' Bambuddy (`_preset_links`).
+    Then the reset reads Bambuddy's presets."""
     with store.spools.transaction() as conn:
         row = conn.execute(
             "SELECT NOT EXISTS (SELECT 1 FROM filament_bb_links)"
-            " AND EXISTS (SELECT 1 FROM filament_presets WHERE bb_preset_id IS NOT NULL) AS w"
+            " AND EXISTS (SELECT 1 FROM filament_presets p WHERE p.bb_preset_id IS NOT NULL"
+            " AND (p.bb_instance IS NULL OR p.bb_instance ="
+            " (SELECT instance FROM filament_bb_sync_state LIMIT 1))) AS w"
         ).fetchone()
     return bool(row is not None and row["w"])
 
@@ -829,8 +832,10 @@ def _proof_of(
     presets' links of ``instance`` (``presets``, its filament local presets, #7343) under
     the same rule. A preset's time is Bambuddy's ``updated_at`` of the mirror's last write
     (`preset_mirror._mirrored`): Bambuddy's ``onupdate=func.now()``, so another Bambuddy
-    would need a preset under the same id written at the same recorded time. A preset sent before
-    the mirror kept that time has none, so it is only checked to be there."""
+    would need a preset under the same id written at the same recorded time. A preset with
+    no time (sent before the mirror kept one, and not yet stamped from the kept copy,
+    `sb_presets.stamp_mirrored`) is only checked to be there, and counts against the rule
+    that at least half the links are timed on both sides."""
     links = {
         row["bb_spool_id"]: row["bb_updated_at"]
         for row in conn.execute("SELECT bb_spool_id, bb_updated_at FROM filament_bb_links")

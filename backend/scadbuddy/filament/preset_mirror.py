@@ -160,16 +160,18 @@ def _mirrored(
         record_instance_on(conn, instance)
 
 
-def _untracked(pool: ConnectionPool[Conn], ids: Collection[int]) -> tuple[int, ...]:
-    """Those of Bambuddy's ``ids`` that no ScadBuddy preset holds."""
+def _untracked(pool: ConnectionPool[Conn], ids: Collection[int], instance: str) -> tuple[int, ...]:
+    """Those of Bambuddy ``instance``'s ``ids`` that no ScadBuddy preset holds there (an
+    id of another Bambuddy names another preset)."""
     if not ids:
         return ()
     with pool.connection() as conn:
         held = {
             row["bb_preset_id"]
             for row in conn.execute(
-                "SELECT bb_preset_id FROM filament_presets WHERE bb_preset_id = ANY(%s)",
-                (sorted(ids),),
+                "SELECT bb_preset_id FROM filament_presets WHERE bb_preset_id = ANY(%s)"
+                " AND coalesce(bb_instance, %s) = %s",
+                (sorted(ids), instance, instance),
             )
         }
     return tuple(sorted(set(ids) - held))
@@ -207,8 +209,9 @@ class _Listing:
         self, name: str, doc: dict[str, Any], floor: int
     ) -> tuple[int | None, list[int]]:
         """The one preset named ``name`` with an id above ``floor`` whose document is
-        ``doc`` (else ``None``), and every id of that name above ``floor``. One
-        ``GET /local-presets/{id}`` per such id.
+        ``doc`` (else ``None``), and, when none holds ``doc``, every id of that name above
+        ``floor`` (empty when one or more hold it: those are copies of this document, not
+        of an older version). One ``GET /local-presets/{id}`` per such id.
 
         Bambuddy's ``POST`` keeps the document as sent and its ``GET`` answers it as kept,
         so a lost create of ``doc`` reads back equal to ``doc``: ``create_local_preset``
@@ -230,7 +233,7 @@ class _Listing:
                 detail = await self._client.local_preset(preset.id)
                 if detail.setting == doc:
                     found.append(preset.id)
-        return (found[0] if len(found) == 1 else None), above
+        return (found[0] if len(found) == 1 else None), ([] if found else above)
 
     async def floor(self) -> int:
         """The highest id listed or made in this run, 0 for none."""
@@ -259,7 +262,7 @@ async def _send(
         if bb_id is None:
             # None holds this document: a copy of an older version the lost create made
             # stays in Bambuddy, which the preset's note names (#7343).
-            stray = await asyncio.to_thread(_untracked, pool, above)
+            stray = await asyncio.to_thread(_untracked, pool, above, instance)
     if bb_id is not None:
         try:
             put = await client.update_local_preset(bb_id, row["name"], doc)

@@ -663,3 +663,42 @@ async def test_a_lost_create_left_behind_a_newer_version_is_named_on_the_preset(
     assert row["mirror_error"] is not None
     assert "42" in row["mirror_error"]
     assert "41" not in row["mirror_error"]
+
+
+@respx.mock
+async def test_copies_of_the_document_sent_and_other_bambuddys_ids_are_named_right(
+    pg_pool: PgPool, tmp_path: Path, client: BambuddyClient
+) -> None:
+    """#7343 review: two copies above the floor that both hold the document sent are not
+    named as an older version's (none is chosen, the preset is created again, no note); an
+    id another Bambuddy's preset holds does not hide an untracked copy on this one."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    store = FilamentPresetStore(pg_pool, lambda: blobs)
+    doc = {"name": "Dup"}
+    made = await _make(pg_pool, blobs, doc)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_presets SET mirror_create_floor = 40 WHERE id = %s", (made,))
+    listed(_preset_json(41, "Dup"), _preset_json(42, "Dup"))
+    detail(41, "Dup", doc)
+    detail(42, "Dup", doc)
+    create = respx.post(f"{API}/local-presets/").mock(
+        side_effect=[
+            httpx.Response(200, json=_preset_json(43, "Dup")),
+            httpx.Response(200, json=_preset_json(53, "Other")),
+        ]
+    )
+    assert await mirror_with(client, pg_pool, store, HERE) == 1
+    row = _row(pg_pool, made)
+    assert (row["bb_preset_id"], row["mirror_error"]) == (43, None)
+
+    # Preset 51 on this Bambuddy is untracked; another Bambuddy's preset holds id 51 there.
+    other = await _make(pg_pool, blobs, {"name": "Other", "v": 2})
+    await _make(pg_pool, blobs, {"name": "Elsewhere"}, source="bambuddy", bb_id=51, instance=OLD)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_presets SET mirror_create_floor = 50 WHERE id = %s", (other,))
+    listed(_preset_json(51, "Other"))
+    detail(51, "Other", {"name": "Other", "v": 1})
+    assert await mirror_with(client, pg_pool, store, HERE) == 1
+    assert create.call_count == 2
+    note = _row(pg_pool, other)["mirror_error"]
+    assert note is not None and "51" in note

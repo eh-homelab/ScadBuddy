@@ -937,7 +937,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   as `bb_updated_at`, `wants_preset_listing`, #7343), a reset with `expect_kept: true` reads them
   again and, while that holds, deletes nothing, records the configured instance and answers
   `kept: true` (and `configured_instance`); else 409 `proof_changed`, nothing written. The dry run's `changed_since_pull` is
-  true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered. `expect_kept: false` deletes
+  true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered; with no spool linked, the same over the linked filament presets (#7343). A mirrored preset sent before the mirror kept Bambuddy's time takes the kept copy's at the next refresh (`sb_presets.stamp_mirrored`), only while the links' Bambuddy is the configured one. `expect_kept: false` deletes
   without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward).
   Every pass is also a row of `filament_bb_sync_passes` (#6905, `bb_sync_passes.py`):
   `record_pass` inserts it in the state row's transaction, keyed by the worker's `pass_id` so a

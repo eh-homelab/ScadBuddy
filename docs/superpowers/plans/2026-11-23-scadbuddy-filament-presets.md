@@ -155,13 +155,17 @@ Without a Bambuddy URL the mirror does nothing.
   Bambuddy's `POST` or `PUT` answers as `bb_updated_at` (Bambuddy's column is
   `onupdate=func.now()`, `backend/app/models/local_preset.py` line 40 at
   maziggy/bambuddy@b7d894b5, and both routes `db.refresh` before they answer). Ids alone
-  would prove nothing (any Bambuddy numbers its presets from 1), and a preset mirrored
-  before this change has no time, so it is only checked to be there and cannot prove alone;
-  it gets one at its next send. A failed preset read is `bambuddy_unreadable`, as a failed
+  would prove nothing (any Bambuddy numbers its presets from 1). A preset mirrored before
+  this change has no time; the next kept-preset refresh gives it the kept copy's
+  `updated_at` of its id (`sb_presets.stamp_mirrored`), only while the links' Bambuddy is
+  the configured one (the copy's), its current document sent and no time kept, so the
+  proof never takes a time from a Bambuddy it has not proved. Until then an untimed link
+  counts against the half rule. A failed preset read is `bambuddy_unreadable`, as a failed
   spool read is. The delete stays possible, so the dialog, the agent tool and the skill also
   say that a delete of preset links on the same Bambuddy makes it hold every preset twice.
-- **R-7343-2 (a lost create left behind).** When `made_after` matches nothing, the ids of the
-  preset's name above the floor that no ScadBuddy preset holds are named in the preset's
+- **R-7343-2 (a lost create left behind).** When no preset above the floor holds the
+  document sent, the ids of the preset's name above the floor that no ScadBuddy preset holds
+  on that Bambuddy are named in the preset's
   `mirror_error` once the create succeeds. It is a note, not a failure: the preset counts
   as sent, and the next successful send clears it. ScadBuddy deletes nothing in Bambuddy.
 - **R-7343-3 (`IMPORT_MIRROR_TIMEOUT`).** The comment counts every call: one listing, one

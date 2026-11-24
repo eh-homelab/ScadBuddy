@@ -379,3 +379,50 @@ async def test_a_scadbuddy_owned_preset_is_never_read_back(pg_pool: PgPool, tmp_
     assert await refresh_bambuddy(pg_pool, blobs, held) == 0
     store = FilamentPresetStore(pg_pool, lambda: blobs)
     assert json.dumps((await store.documents([made]))[made]) == json.dumps(doc)
+
+
+#: The configured Bambuddy, and another one the links may name after a URL change.
+HERE, OLD = "a1b2c3d4e5f6", "0ld0ld0ld0ld"
+
+
+async def _mirrored_unstamped(pool: PgPool, blobs: LocalBlobStore, instance: str) -> int:
+    """A ScadBuddy preset the mirror sent as Bambuddy preset 60 before it kept
+    Bambuddy's time of the write (#7343)."""
+    doc = _doc("Sent")
+    key, sha256 = await keep_document(blobs, document_bytes(doc))
+    with pool.connection() as conn, conn.transaction():
+        made = create_on(
+            conn,
+            name="Sent",
+            source="3dfp",
+            key=key,
+            sha256=sha256,
+            doc=doc,
+            made_by="t",
+            bb_preset_id=60,
+            bb_instance=instance,
+        )
+        conn.execute("UPDATE filament_presets SET mirrored_sha256 = sha256 WHERE id = %s", (made,))
+    return made
+
+
+@pytest.mark.parametrize(("links", "stamped"), [(None, True), (HERE, True), (OLD, False)])
+async def test_a_mirrored_preset_with_no_time_takes_the_kept_copys(
+    pg_pool: PgPool, tmp_path: Path, links: str | None, stamped: bool
+) -> None:
+    """#7343: a preset the mirror sent before it kept Bambuddy's time takes the kept
+    copy's ``updated_at`` of its id, so a later reset can prove the same Bambuddy from
+    the presets. Only while the links' Bambuddy is the one the copy was read from: after
+    a URL change (links of ``OLD``) nothing is stamped."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    held = HeldPresetStore(pg_pool)
+    made = await _mirrored_unstamped(pg_pool, blobs, HERE)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (links,))
+    await held.keep(_held(60, "Sent", "2026-11-23T01:00:00"))
+
+    await sb_presets.sync_from_held(pg_pool, blobs, held, HERE)
+
+    got = FilamentPresetStore(pg_pool, lambda: blobs).get(made)
+    assert got is not None
+    assert got.bb_updated_at == ("2026-11-23T01:00:00" if stamped else None)

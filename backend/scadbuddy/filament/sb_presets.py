@@ -77,6 +77,11 @@ class FilamentPreset(BaseModel):
     #: The Bambuddy ``bb_preset_id`` belongs to (`bb_sync_nudge.instance_for`); ``None``
     #: for a row from before it was kept, taken for the configured one's.
     bb_instance: str | None
+    #: Bambuddy's ``updated_at`` of ``bb_preset_id``, as it sent it: for a ``bambuddy``
+    #: preset when its document was last taken (`refresh_bambuddy`); for a ``3dfp`` or
+    #: ``manual`` one, of the mirror's last write (`preset_mirror._mirrored`, or the kept
+    #: copy's for a write before that, `stamp_mirrored`), which the links' reset compares
+    #: to prove the same Bambuddy (#7343).
     bb_updated_at: str | None
     mirrored_sha256: str | None
     mirror_error: str | None
@@ -557,6 +562,40 @@ async def refresh_bambuddy(
     return changed
 
 
+async def stamp_mirrored(
+    pool: ConnectionPool[Conn], held: HeldPresetStore, instance: str | None
+) -> int:
+    """Give each preset the mirror sent before it kept Bambuddy's time of its write (#7343:
+    a ``3dfp`` or ``manual`` preset of ``instance`` with a Bambuddy id, its current
+    document sent, and no ``bb_updated_at``) the kept copy's ``updated_at`` of its id; how
+    many took one. The copy is read from ``instance``, so only while the links' Bambuddy
+    is that one too (none recorded, or ``instance``): after a URL change nothing is
+    stamped, and the reset's proof (`bb_sync_results._proof_of`) never compares a time the
+    new URL's Bambuddy gave. A time is only ever compared to prove the same Bambuddy."""
+    if instance is None:
+        return 0
+    stamps = {i: s for i, s in (await held.stamps()).items() if s is not None}
+    if not stamps:
+        return 0
+
+    def write() -> int:
+        with pool.connection() as conn, conn.transaction():
+            done = 0
+            for bb_id, stamp in sorted(stamps.items()):
+                done += conn.execute(
+                    "UPDATE filament_presets SET bb_updated_at = %(stamp)s"
+                    " WHERE bb_preset_id = %(id)s AND bb_instance = %(instance)s"
+                    " AND source IN ('3dfp', 'manual') AND bb_updated_at IS NULL"
+                    " AND mirrored_sha256 = sha256"
+                    " AND NOT EXISTS (SELECT 1 FROM filament_bb_sync_state"
+                    " WHERE instance IS DISTINCT FROM %(instance)s AND instance IS NOT NULL)",
+                    {"stamp": stamp, "id": bb_id, "instance": instance},
+                ).rowcount
+            return done
+
+    return await asyncio.to_thread(write)
+
+
 async def sync_from_held(
     pool: ConnectionPool[Conn],
     blobs: BlobStore,
@@ -564,14 +603,15 @@ async def sync_from_held(
     instance: str | None = None,
 ) -> None:
     """`refresh_bambuddy`, then `adopt_held` (its presets marked as ``instance``'s, the
-    Bambuddy the copy was read from): what the kept copy's refresh runs after it
-    (`filament/preset_mirror.py` `sync_and_mirror`). Each step fails alone, logged by
-    type, so a failure never fails the refresh."""
+    Bambuddy the copy was read from), then `stamp_mirrored`: what the kept copy's refresh
+    runs after it (`filament/preset_mirror.py` `sync_and_mirror`). Each step fails alone,
+    logged by type, so a failure never fails the refresh."""
     steps: tuple[Callable[[], Awaitable[int]], ...] = (
         lambda: refresh_bambuddy(pool, blobs, held, instance),
         lambda: adopt_held(pool, blobs, held, instance),
+        lambda: stamp_mirrored(pool, held, instance),
     )
-    for name, step in zip(("refresh_bambuddy", "adopt_held"), steps, strict=True):
+    for name, step in zip(("refresh_bambuddy", "adopt_held", "stamp_mirrored"), steps, strict=True):
         try:
             await step()
         except Exception as error:
