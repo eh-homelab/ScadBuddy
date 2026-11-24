@@ -46,7 +46,7 @@ from scadbuddy.workflows.commands import (
 from tests.api.conftest import follow_operation
 from tests.support.operations import press
 
-#: Unique per run: the session's Temporal outlives each test's database schema.
+#: Unique per run: the session's Temporal outlives each test's database.
 PRESS_1, PRESS_2, PRESS_3, PRESS_4, PRESS_5, PRESS_6, PRESS_7 = (uuid.uuid4().hex for _ in range(7))
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]

@@ -3,9 +3,11 @@ import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
 import { command } from './command.js'
+import { PROPERTY_RULES, propertiesNotSet, propertyChanges, propertySet, setPropertiesAfter } from './entities.js'
 import { linkingTools, type LinkKind } from './filamentLinks.js'
 import {
   catalogNames,
+  kindPropertyTexts,
   matchesSearch,
   orElse,
   parseSearch,
@@ -318,7 +320,7 @@ const tools: Tool[] = [
       'The spool types, by code. A type is a product: what a maker sells under one code (brand, material, ' +
       'subtype, colour `#RRGGBBAA`, label weight, print values a spool inherits, `cost_per_kg`, `filament_id` of ' +
       'its price book row). Archived types only with `include_archived`. `q` keeps the types whose code, brand, ' +
-      'material, subtype, colour name, hex or supplier SKU match it.',
+      'material, subtype, colour name, hex, supplier SKU or a property value (a GTIN, an MPN) match it.',
     input: z.object({ include_archived: z.boolean().default(false), q: searchQuery }),
     risk: 'read',
     source: SOURCE,
@@ -330,8 +332,14 @@ const tools: Tool[] = [
       )
       const tokens = parseSearch(q)
       if (!tokens.length) return json(types)
-      const [names, skus] = await Promise.all([catalogNames(backend), orElse(typeSkus(backend), new Map<string, string[]>())])
-      return json(types.filter((type) => matchesSearch(typeSearchDoc(type, names, skus.get(type.id)), tokens)))
+      const [names, skus, properties] = await Promise.all([
+        catalogNames(backend),
+        orElse(typeSkus(backend), new Map<string, string[]>()),
+        orElse(kindPropertyTexts(backend, 'spool_type'), new Map<string, string[]>()),
+      ])
+      return json(
+        types.filter((type) => matchesSearch(typeSearchDoc(type, names, skus.get(type.id), { properties: properties.get(type.id) }), tokens)),
+      )
     },
   }),
 
@@ -365,7 +373,10 @@ const tools: Tool[] = [
       "clears it) is the type's filament id on 3dfilamentprofiles.com, which filament_type_fetch_profiles " +
       "fetches its slicer presets by. `drying_temp_c` (whole °C) and `drying_hours` (a decimal) are the type's " +
       "drying values, the default of a drying of its spools (filament_spool_add_event). 409 when an unarchived type has the " +
-      'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
+      'code; 422 when a minimum temperature is above its maximum. `properties` (#7026) are set on the type after it ' +
+      'is saved, and the answer carries them; if they are refused, the error says the type was saved and they were ' +
+      `not. An edit with only \`properties\` leaves the type itself untouched. ${PROPERTY_RULES} Only what the user ` +
+      'says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
       fields: z
@@ -396,26 +407,39 @@ const tools: Tool[] = [
         .default({})
         .describe('The type fields to set'),
       archived: z.boolean().optional(),
+      properties: propertySet.optional().describe("The type's properties to set after the type is saved; `null` removes a key"),
     }),
     risk: 'write',
     source: SOURCE,
-    routes: ['POST /api/v1/filament/types', 'PATCH /api/v1/filament/types/{type_id}'],
-    summarize: ({ type_id, fields }) =>
-      type_id ? `Edit spool type ${type_id}` : `Add spool type ${String(fields['code'] ?? '')}`.trim(),
-    handler: async ({ type_id, fields, archived }, { backend }) => {
+    routes: [
+      'POST /api/v1/filament/types',
+      'PATCH /api/v1/filament/types/{type_id}',
+      'PATCH /api/v1/entities/{ref}/properties',
+      'GET /api/v1/filament/types/{type_id}',
+    ],
+    summarize: ({ type_id, fields, properties }) =>
+      (type_id ? `Edit spool type ${type_id}` : `Add spool type ${String(fields['code'] ?? '')}`.trim()) + propertyChanges(properties),
+    handler: async ({ type_id, fields, archived, properties }, { backend }) => {
+      let row
       if (type_id === undefined) {
         if (archived !== undefined) throw new ToolError('archived needs a type_id')
-        return json(await ok(backend.POST('/api/v1/filament/types', { body: fields as never }), 'add a spool type'))
-      }
-      return json(
-        await ok(
+        row = await ok(backend.POST('/api/v1/filament/types', { body: fields as never }), 'add a spool type')
+      } else if (properties !== undefined && archived === undefined && Object.keys(fields).length === 0) {
+        // Properties only: no row PATCH, which would move the type's `updated_at` and so its sync time.
+        const set = await setPropertiesAfter(backend, `spool_type:${type_id}`, properties)
+        row = await ok(backend.GET('/api/v1/filament/types/{type_id}', { params: { path: { type_id } } }), `read spool type ${type_id}`)
+        return json({ ...row, properties: set })
+      } else {
+        row = await ok(
           backend.PATCH('/api/v1/filament/types/{type_id}', {
             params: { path: { type_id } },
             body: archived === undefined ? fields : { ...fields, archived },
           }),
           `edit spool type ${type_id}`,
-        ),
-      )
+        )
+      }
+      if (properties === undefined) return json(row)
+      return json({ ...row, properties: await setPropertiesAfter(backend, `spool_type:${row.id}`, properties, `spool type ${row.id}`) })
     },
   }),
 
@@ -778,8 +802,8 @@ const tools: Tool[] = [
       '`grams_left` from its ledger. ' +
       '`needs_type: true` lists only spools with no type yet, `false` only typed ones. Archived spools only ' +
       'with `include_archived`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
-      "place, tray, type code, type's supplier SKU or open tag's UID or tray UUID (from 4 hex digits; `:` and `-` " +
-      'are left out, so `04:A1:B2` finds tag `04A1B2…`) match it.',
+      "place, tray, type code, type's supplier SKU, one of the spool's property values (a lot) or open tag's UID or " +
+      'tray UUID (from 4 hex digits; `:` and `-` are left out, so `04:A1:B2` finds tag `04A1B2…`) match it.',
     input: z.object({
       include_archived: z.boolean().default(false),
       needs_type: z.boolean().optional(),
@@ -801,8 +825,8 @@ const tools: Tool[] = [
       )
       const tokens = parseSearch(q)
       if (!tokens.length) return json(spools)
-      // The type codes, SKUs, trays and tags only add to the search: one that cannot be read leaves its field out.
-      const [types, skus, trays, tags] = await Promise.all([
+      // The type codes, SKUs, trays, tags and properties only add to the search: one that cannot be read leaves its field out.
+      const [types, skus, trays, tags, properties] = await Promise.all([
         orElse(
           ok(backend.GET('/api/v1/filament/types', { params: { query: { include_archived: true } } }), 'list the spool types'),
           [],
@@ -810,6 +834,7 @@ const tools: Tool[] = [
         orElse(typeSkus(backend), new Map<string, string[]>()),
         orElse(spoolTrays(backend), new Map<string, string>()),
         orElse(spoolTags(backend), new Map<string, string[]>()),
+        orElse(kindPropertyTexts(backend, 'spool'), new Map<string, string[]>()),
       ])
       const codes = new Map(types.map((type) => [type.id, type.code]))
       return json(
@@ -820,6 +845,7 @@ const tools: Tool[] = [
               skus: spool.type_id ? skus.get(spool.type_id) : undefined,
               tray: trays.get(spool.id),
               tags: tags.get(spool.id),
+              properties: properties.get(spool.id),
             }),
             tokens,
           ),
@@ -871,12 +897,16 @@ const tools: Tool[] = [
       'then change the copy. Either answers the list of spools made, and a resend of the same call makes none twice; ' +
       'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
-      'material. Only what the user says. Writes ScadBuddy only.',
+      'material. `properties` (#7026) are set on the spool, or on each spool made, after it is saved, and the answer carries them; if they ' +
+      'are refused, the error says the spool was saved and they were not. An edit with only `properties` leaves ' +
+      `the spool itself untouched. ${PROPERTY_RULES} Only what the user says. ` +
+      'Writes ScadBuddy only.',
     input: z.object({
       spool_id: z.string().uuid().optional().describe("A spool's `id`; omit to add"),
       fields: z.record(z.string(), z.unknown()).default({}).describe('The spool fields to set'),
       quantity: z.number().int().min(1).max(100).optional().describe('When adding: how many identical spools to make'),
       copy_of: z.string().uuid().optional().describe("When adding: the `id` of a spool to copy"),
+      properties: propertySet.optional().describe("The spool's properties to set after the spool is saved; `null` removes a key"),
     }),
     risk: 'write',
     source: SOURCE,
@@ -885,18 +915,31 @@ const tools: Tool[] = [
       'PATCH /api/v1/filament/spools/{spool_id}',
       'POST /api/v1/filament/spools/bulk',
       'GET /api/v1/filament/spools/{spool_id}/copy',
+      'PATCH /api/v1/entities/{ref}/properties',
+      'GET /api/v1/filament/spools/{spool_id}',
     ],
-    summarize: ({ spool_id, quantity, copy_of }) =>
-      spool_id
+    summarize: ({ spool_id, quantity, copy_of, properties }) =>
+      (spool_id
         ? `Edit spool ${spool_id}`
-        : `Add ${quantity && quantity > 1 ? `${quantity} spools` : 'a spool'}${copy_of ? ` copied from ${copy_of}` : ''}`,
-    handler: async ({ spool_id, fields, quantity, copy_of }, ctx) => {
+        : `Add ${quantity && quantity > 1 ? `${quantity} spools` : 'a spool'}${copy_of ? ` copied from ${copy_of}` : ''}`) +
+      propertyChanges(properties),
+    handler: async ({ spool_id, fields, quantity, copy_of, properties }, ctx) => {
       const { backend } = ctx
       if (spool_id !== undefined && (quantity !== undefined || copy_of !== undefined)) {
         throw new ToolError('`quantity` and `copy_of` are for adding a spool; leave out `spool_id`')
       }
+      if (spool_id !== undefined && properties !== undefined && Object.keys(fields).length === 0) {
+        // Properties only: no row PATCH, as for a type (an empty one could still move the row's sync time).
+        const set = await setPropertiesAfter(backend, `spool:${spool_id}`, properties)
+        const row = await ok(backend.GET('/api/v1/filament/spools/{spool_id}', { params: { path: { spool_id } } }), `read spool ${spool_id}`)
+        return json({ ...row, properties: set })
+      }
+      const withProperties = async (row: { id: string }) =>
+        properties === undefined
+          ? row
+          : { ...row, properties: await setPropertiesAfter(backend, `spool:${row.id}`, properties, `spool ${row.id}`) }
       if (spool_id === undefined && quantity === undefined && copy_of === undefined) {
-        return json(await ok(backend.POST('/api/v1/filament/spools', { body: fields as SpoolCreate }), 'add a spool'))
+        return json(await withProperties(await ok(backend.POST('/api/v1/filament/spools', { body: fields as SpoolCreate }), 'add a spool')))
       }
       if (spool_id === undefined) {
         const draft: SpoolDraft = copy_of
@@ -913,23 +956,42 @@ const tools: Tool[] = [
         const key = copy_of
           ? createHash('sha256').update(`${idempotencyKey(ctx)}\x1f${JSON.stringify(draft)}`).digest('hex')
           : idempotencyKey(ctx)
-        return json(
-          await ok(
-            backend.POST('/api/v1/filament/spools/bulk', {
-              body,
-              headers: { 'Idempotency-Key': key },
-            }),
-            'add the spools',
-          ),
+        const rows = await ok(
+          backend.POST('/api/v1/filament/spools/bulk', {
+            body,
+            headers: { 'Idempotency-Key': key },
+          }),
+          'add the spools',
         )
+        if (properties === undefined) return json(rows)
+        // One at a time, stopping at the first failure (a refused value is refused for the rest
+        // too); the error names every spool made, so none is left without its properties unseen.
+        const out = []
+        for (const row of rows) {
+          try {
+            out.push({ ...row, properties: await setPropertiesAfter(backend, `spool:${row.id}`, properties) })
+          } catch (e) {
+            const done = out.map((r) => r.id)
+            const left = rows.slice(done.length).map((r) => `spool:${r.id}`)
+            throw propertiesNotSet(
+              `${rows.length} spools were saved (${rows.map((r) => r.id).join(', ')}); ` +
+                (done.length > 0 ? `the properties were set on ${done.join(', ')} but not on ` : 'the properties were not set on ') +
+                `${left.join(', ')} (set them with entity_property_set on each, not this tool again)`,
+              e,
+            )
+          }
+        }
+        return json(out)
       }
       return json(
-        await ok(
-          backend.PATCH('/api/v1/filament/spools/{spool_id}', {
-            params: { path: { spool_id } },
-            body: fields,
-          }),
-          `edit spool ${spool_id}`,
+        await withProperties(
+          await ok(
+            backend.PATCH('/api/v1/filament/spools/{spool_id}', {
+              params: { path: { spool_id } },
+              body: fields,
+            }),
+            `edit spool ${spool_id}`,
+          ),
         ),
       )
     },
@@ -1659,35 +1721,98 @@ const tools: Tool[] = [
       "type's, else its subtype's, else its material's, else the Settings default); `null` records none. " +
       "`kind: consumed_reset` (no grams, temp_c or hours) starts the spool's used counter (`consumed_g`) again from 0 g; the " +
       'grams left stay. Only what the user says. Writes ScadBuddy only; a reset reaches Bambuddy at the next sync when weights ' +
-      'sync to it.',
+      'sync to it. `reading_g` (a weighing only, instead of `grams`) is the scale reading with the spool: the filament ' +
+      "is the reading less the spool's empty weight, and the answer carries `insert_weight` (#7280). With `reading_g`, the " +
+      'tool first reads the offer. There is an offer when the spool is new and unused, the reading is above its label ' +
+      'weight, and the derived weight (reading less label weight) is at most the label weight. `insert_weight.offer` says ' +
+      "what the insert's empty weight would become (`derived_g`, `new_empty_weight_g`, `current_empty_weight_g`, " +
+      '`current_basis`, `sample_count`). When there is an offer and `accept_insert_weight` is left out, the tool books ' +
+      'nothing (`event: null`): tell the person the numbers and that makers overfill by about 10-30 g, so the estimate is ' +
+      'slightly heavy, then call again with the same `reading_g` and `accept_insert_weight` true or false. ' +
+      '`checked_by_default` is advice only: pass `true` only when the user says to take it. `true` changes the insert in ' +
+      'ScadBuddy only and runs before the weighing, so the weighing uses the new empty weight; `false` books with the ' +
+      'current empty weight. With no offer, the weighing is booked at once, and `true` is refused with nothing booked.',
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried', 'consumed_reset']),
       source: z.enum(['person', 'scale']).default('person'),
       grams: z.number().min(0).optional(),
+      reading_g: z.number().positive().max(100000).optional().describe('Scale reading with the spool, in grams (weighed only)'),
+      accept_insert_weight: z.boolean().optional().describe("After an offer: true takes its empty weight for the insert, false declines it (needs reading_g)"),
       temp_c: z.number().int().min(0).nullable().optional().describe("Left out: the spool's drying default"),
       hours: z.string().nullable().optional().describe("A decimal, e.g. `8`; left out: the spool's drying default"),
       note: z.string().optional(),
     }),
     risk: 'write',
     source: SOURCE,
-    routes: ['POST /api/v1/filament/spools/{spool_id}/events'],
-    summarize: ({ spool_id, kind, grams }) =>
+    routes: [
+      'POST /api/v1/filament/spools/{spool_id}/events',
+      'GET /api/v1/filament/spools/{spool_id}/insert-weight-offer',
+      'POST /api/v1/filament/spools/{spool_id}/insert-weight',
+    ],
+    summarize: ({ spool_id, kind, grams, reading_g, accept_insert_weight }) =>
       kind === 'weighed'
-        ? `Record ${grams ?? '?'} g on spool ${spool_id}`
+        ? reading_g !== undefined
+          ? `Record a reading of ${reading_g} g on spool ${spool_id}${accept_insert_weight ? ' and take its insert weight' : ''}`
+          : `Record ${grams ?? '?'} g on spool ${spool_id}`
         : kind === 'consumed_reset'
           ? `Reset the used counter of spool ${spool_id}`
           : `Record a drying of spool ${spool_id}`,
-    handler: async ({ spool_id, ...body }, { backend }) =>
-      json(
-        await ok(
-          backend.POST('/api/v1/filament/spools/{spool_id}/events', {
-            params: { path: { spool_id } },
-            body,
+    handler: async ({ spool_id, reading_g, accept_insert_weight, ...body }, { backend }) => {
+      const path = { spool_id }
+      if (reading_g === undefined) {
+        if (accept_insert_weight) throw new ToolError('accept_insert_weight needs reading_g')
+        return json(
+          await ok(
+            backend.POST('/api/v1/filament/spools/{spool_id}/events', { params: { path }, body }),
+            `record on spool ${spool_id}`,
+          ),
+        )
+      }
+      if (body.kind !== 'weighed') throw new ToolError('reading_g is for a weighing (kind: weighed)')
+      if (body.grams !== undefined) throw new ToolError('give reading_g or grams, not both')
+      const check = await ok(
+        backend.GET('/api/v1/filament/spools/{spool_id}/insert-weight-offer', {
+          params: { path, query: { reading_g } },
+        }),
+        `check the insert weight of spool ${spool_id}`,
+      )
+      if (check.offer && accept_insert_weight === undefined) {
+        return json({
+          event: null,
+          filament_g: null,
+          insert_weight: check,
+          insert_weight_accepted: null,
+          next:
+            'Nothing was booked. Tell the person the offer, then call again with the same reading_g and ' +
+            'accept_insert_weight true or false.',
+        })
+      }
+      let filament_g = check.filament_g
+      let accepted: components['schemas']['InsertWeightAccepted'] | null = null
+      if (accept_insert_weight) {
+        if (!check.offer) throw new ToolError(`no insert weight offer: ${check.reason ?? 'none'}; nothing was booked`)
+        accepted = await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/insert-weight', {
+            params: { path },
+            body: { reading_g },
           }),
-          `record on spool ${spool_id}`,
-        ),
-      ),
+          `take the insert weight of spool ${spool_id}`,
+        )
+        filament_g = accepted.filament_g
+      }
+      if (filament_g === null) throw new ToolError('no empty weight known for this spool; pass grams')
+      const event = await ok(
+        backend.POST('/api/v1/filament/spools/{spool_id}/events', {
+          params: { path },
+          body: { ...body, grams: filament_g },
+        }),
+        accepted
+          ? `record on spool ${spool_id} (the insert's empty weight was already set; a retry with the same reading is safe)`
+          : `record on spool ${spool_id}`,
+      )
+      return json({ event, filament_g, insert_weight: check, insert_weight_accepted: accepted })
+    },
   }),
 
   defineTool({
@@ -2020,8 +2145,8 @@ const tools: Tool[] = [
       "(`source` `bambuddy`) that Bambuddy edited since takes Bambuddy's document as a new version. Every spool or type " +
       'preset that still names a Bambuddy local preset id names a ScadBuddy preset (`sb-<id>`) instead: the one already ' +
       "made for that id, else a new one made from Bambuddy's document. Answers `{adopted, updated, unresolved}`: how many " +
-      'presets it made, how many took a new version, and how many Bambuddy ids bindings still name (Bambuddy no longer ' +
-      'holds them, or they are not filament presets; those spools and types need a ScadBuddy preset). 409 when no Bambuddy is configured, and 409 `instance_changed` while ' +
+      'presets it made, how many took a new version, and how many Bambuddy ids bindings still name, for any cause (for ' +
+      'example, Bambuddy no longer holds them, or they are not filament presets; those spools and types need a ScadBuddy preset). 409 when no Bambuddy is configured, and 409 `instance_changed` while ' +
       'the links belong to another Bambuddy (filament_sync_reset_links first). Writes ScadBuddy only, never Bambuddy.',
     input: z.object({}),
     risk: 'write',

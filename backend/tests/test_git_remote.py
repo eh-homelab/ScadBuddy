@@ -3,6 +3,7 @@ it lands, never with the credential on a command line, and the lag recorded."""
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 import threading
 import time
@@ -19,14 +20,17 @@ from scadbuddy.core.gitrepo import (
     PUSH_USERNAME_ENV,
     GitError,
     GitRepo,
+    GitTimeoutError,
     git_env,
 )
 from scadbuddy.core.settings import check_value
 from scadbuddy.git_remote.push import (
+    REFUSED_BACKOFF,
     SCRUBBED,
     PushError,
     RemotePush,
     RemoteTarget,
+    explain,
     scrub,
 )
 from scadbuddy.git_remote.store import PushRecord, PushRecords
@@ -91,7 +95,9 @@ class MemoryRecords:
         now = _now()
         self.rows[repository] = PushRecord(repository, url, commit, now, now, None)
 
-    def failed(self, repository: str, url: str, error: str) -> None:
+    def failed(
+        self, repository: str, url: str, error: str, refused_commit: str | None = None
+    ) -> None:
         old = self.rows.get(repository)
         kept = old if old is not None and old.url == url else None
         self.rows[repository] = PushRecord(
@@ -101,7 +107,13 @@ class MemoryRecords:
             None if kept is None else kept.pushed_at,
             _now(),
             error,
+            refused_commit,
         )
+
+    def age(self, repository: str, by: timedelta) -> None:
+        """The last attempt ``by`` earlier than it was."""
+        old = self.rows[repository]
+        self.rows[repository] = dataclasses.replace(old, attempted_at=old.attempted_at - by)
 
 
 def _now() -> datetime:
@@ -272,6 +284,168 @@ def test_scrub_removes_the_token() -> None:
     assert len(scrub("x" * 5000, None)) == 2000
 
 
+def test_scrub_removes_a_credential_in_a_url() -> None:
+    """Whatever URL git echoes, its user and password never reach the record."""
+    text = scrub("fatal: unable to access 'https://me:hunter2@git.example/r.git/'", None)
+    assert "hunter2" not in text and "me:" not in text
+    assert f"https://{SCRUBBED}@git.example/r.git/" in text
+
+
+# ── why a push failed (#7388) ─────────────────────────────────────────────────
+
+#: GitHub's answer to the models repository on prod, 2026-11-24 (#7388), with the
+#: lines git prints around it.
+GITHUB_SIZE_REFUSAL = """\
+remote: error: Trace: 3f1c2a
+remote: error: See https://gh.io/lfs for more information.
+remote: error: File flexi-fidget-multicolor/meshes/o1-p1.3mf is 130.30 MB; this exceeds \
+GitHub's file size limit of 100.00 MB
+remote: error: GH001: Large files detected. You may want to try Git Large File Storage.
+remote: warning: File brick-santa-figurine/meshes/o1-p2.3mf is 79.15 MB; this is larger \
+than GitHub's recommended maximum file size of 50.00 MB
+To https://github.com/example/history.git
+ ! [remote rejected] abc123 -> models (pre-receive hook declined)
+error: failed to push some refs to 'https://github.com/example/history.git'
+"""
+
+
+def test_a_size_refusal_names_the_file_and_lasts() -> None:
+    cause, lasting = explain(GITHUB_SIZE_REFUSAL)
+    assert lasting is True
+    assert cause == (
+        "the remote refused flexi-fidget-multicolor/meshes/o1-p1.3mf (130.30 MB):"
+        " over its file size limit"
+    )
+
+
+@pytest.mark.parametrize(
+    ("stderr", "cause"),
+    [
+        (
+            """To /srv/remote.git
+ ! [rejected]        abc -> models (non-fast-forward)
+error: failed to push some refs to '/srv/remote.git'
+hint: Updates were rejected because the tip of your current branch is behind""",
+            "the remote refused it: [rejected] abc -> models (non-fast-forward)",
+        ),
+        (
+            """remote: error: GH013: Repository rule violations found for refs/heads/models.
+To https://github.com/example/history.git
+ ! [remote rejected] abc -> models (push declined due to repository rule violations)
+error: failed to push some refs to 'https://github.com/example/history.git'""",
+            "the remote refused it: GH013: Repository rule violations found for refs/heads/models.",
+        ),
+        (
+            """remote: Invalid username or token.
+fatal: Authentication failed for 'https://github.com/example/history.git/'""",
+            "the remote refused it: Authentication failed for"
+            " 'https://github.com/example/history.git/'",
+        ),
+        (
+            """remote: Permission to example/history.git denied to someone.
+fatal: unable to access 'https://github.com/example/history.git/': The requested URL \
+returned error: 403""",
+            "the remote refused it: unable to access"
+            " 'https://github.com/example/history.git/': The requested URL returned error: 403",
+        ),
+    ],
+)
+def test_a_refusal_no_retry_can_fix_lasts(stderr: str, cause: str) -> None:
+    assert explain(stderr) == (cause, True)
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "fatal: unable to access 'https://git.example/r.git/': Could not resolve host: git.example",
+        "fatal: unable to access 'https://git.example/r.git/': Failed to connect to"
+        " git.example port 443 after 3 ms: Connection refused",
+        "error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502\n"
+        "send-pack: unexpected disconnect while reading sideband packet\n"
+        "fatal: the remote end hung up unexpectedly",
+        "",
+    ],
+)
+def test_a_transport_failure_does_not_last(stderr: str) -> None:
+    _cause, lasting = explain(stderr)
+    assert lasting is False
+
+
+def test_a_refused_head_is_not_pushed_again(
+    repo: GitRepo, remote: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A remote on another history (git: "fetch first") refuses every try: once, then
+    not until the head moves
+    or the backoff ends. The refusal stays in the lag, with when it is tried again."""
+    other = GitRepo(tmp_path / "other")
+    other.ensure_repo()
+    other.push(str(remote), write_commit(other, "b.txt", "elsewhere\n"), "refs/heads/models")
+    head = write_commit(repo, "a.txt", "one\n")
+    records = MemoryRecords()
+    push = pusher(repo, records, RemoteTarget(url=str(remote), username="me", token=TOKEN))
+    tries: list[str] = []
+    real = repo.push
+
+    def counted(url: str, commit: str, ref: str, **kwargs: Any) -> None:
+        tries.append(commit)
+        real(url, commit, ref, **kwargs)
+
+    monkeypatch.setattr(repo, "push", counted)
+    with pytest.raises(PushError):
+        push.push("models")
+    record = records.get("models")
+    assert record is not None and record.refused_commit == head
+    # The sweep's next runs: no push, no new error, and the sweep itself passes.
+    assert push.push("models") is False
+    assert push.push_all() == []
+    assert tries == [head]
+    [lag] = push.lag()
+    assert lag.error is not None and lag.error.startswith("the remote refused it: ")
+    assert "[rejected]" in lag.error.splitlines()[0] and TOKEN not in lag.error
+    assert lag.retry_after == record.attempted_at + REFUSED_BACKOFF
+    # Past the backoff: tried once more.
+    records.age("models", REFUSED_BACKOFF)
+    with pytest.raises(PushError):
+        push.push("models")
+    assert tries == [head, head]
+    # A new head is tried at once.
+    newer = write_commit(repo, "a.txt", "two\n")
+    with pytest.raises(PushError):
+        push.push("models")
+    assert tries == [head, head, newer]
+
+
+def test_a_transport_failure_is_tried_at_every_sweep(
+    repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head = write_commit(repo, "a.txt", "one\n")
+    records = MemoryRecords()
+    push = pusher(repo, records, RemoteTarget(url="https://git.example/r.git"))
+    tries: list[str] = []
+
+    def timing_out(url: str, commit: str, ref: str, **kwargs: Any) -> None:
+        tries.append(commit)
+        raise GitTimeoutError("git push timed out after 120s")
+
+    monkeypatch.setattr(repo, "push", timing_out)
+    for _ in range(2):
+        with pytest.raises(PushError):
+            push.push_all()
+    assert tries == [head, head]
+    record = records.get("models")
+    assert record is not None and record.refused_commit is None
+    [lag] = push.lag()
+    assert lag.error == "git push timed out after 120s" and lag.retry_after is None
+
+
+def test_a_refusal_at_another_remote_holds_nothing_back(repo: GitRepo, remote: Path) -> None:
+    head = write_commit(repo, "a.txt", "one\n")
+    records = MemoryRecords()
+    records.failed("models", "https://old.example/r.git", "refused", head)
+    assert pusher(repo, records, RemoteTarget(url=str(remote))).push("models") is True
+    assert remote_ref(remote, "refs/heads/models") == head
+
+
 def test_no_remote_pushes_nothing(repo: GitRepo) -> None:
     push = pusher(repo, MemoryRecords(), None)
     push.watch()
@@ -401,3 +575,20 @@ def test_the_records_keep_what_landed_through_a_failure(pg_pool: PgPool) -> None
     records.pushed("models", "https://b.example/r.git", "c2")
     record = records.get("models")
     assert record is not None and (record.pushed_commit, record.error) == ("c2", None)
+
+
+@pytest.mark.requires_postgres
+def test_the_records_keep_a_refused_head_until_another_attempt(pg_pool: PgPool) -> None:
+    """#7388: the head the remote refused for good, cleared by any later outcome."""
+    records = PushRecords(pg_pool)
+    url = "https://a.example/r.git"
+    records.failed("models", url, "too big", "c1")
+    record = records.get("models")
+    assert record is not None and (record.refused_commit, record.error) == ("c1", "too big")
+    records.failed("models", url, "timed out")
+    record = records.get("models")
+    assert record is not None and (record.refused_commit, record.error) == (None, "timed out")
+    records.failed("models", url, "too big", "c1")
+    records.pushed("models", url, "c2")
+    record = records.get("models")
+    assert record is not None and (record.refused_commit, record.error) == (None, None)

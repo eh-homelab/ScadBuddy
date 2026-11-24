@@ -22,7 +22,7 @@ their partial indexes on ``upper(name)``, which an archive frees; a clash there 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -78,6 +78,8 @@ class CatalogSpec:
     patch: type[BaseModel]
     out: type[BaseModel]
     names: NameTable | None = None
+    #: Fields of ``out`` that are SQL expressions over the row, not columns.
+    computed: Mapping[str, str] = field(default_factory=dict)
 
 
 CATALOGS: dict[str, CatalogSpec] = {
@@ -123,7 +125,17 @@ CATALOGS: dict[str, CatalogSpec] = {
         m.InsertMaterial,
     ),
     "insert-types": CatalogSpec(
-        "filament_insert_types", m.InsertTypeCreate, m.InsertTypePatch, m.InsertType
+        "filament_insert_types",
+        m.InsertTypeCreate,
+        m.InsertTypePatch,
+        m.InsertType,
+        computed={
+            # R-7280-3; `insert_weights.is_placeholder` is the same rule.
+            "placeholder": "(empty_weight_basis = 'placeholder'"
+            " OR ltrim(coalesce(note, '')) ILIKE 'placeholder weight%%')",
+            "derived_count": "(SELECT count(*) FROM filament_insert_weight_readings r"
+            " WHERE r.insert_type_id = filament_insert_types.id)::int",
+        },
     ),
     "colours": CatalogSpec("filament_colours", m.ColourCreate, m.ColourPatch, m.Colour),
     "location-kinds": CatalogSpec(
@@ -223,7 +235,11 @@ def _spec(kind: str) -> CatalogSpec:
 
 def _columns(spec: CatalogSpec) -> str:
     # Column names come from the declared models, never from a request.
-    columns = [name for name in spec.out.model_fields if name != "aliases"]
+    columns = [
+        f"{spec.computed[name]} AS {name}" if name in spec.computed else name
+        for name in spec.out.model_fields
+        if name != "aliases"
+    ]
     if spec.names is not None:
         n = spec.names
         columns.append(
@@ -453,6 +469,13 @@ class CatalogStore:
         columns = [n for n in sent if n != "archived"]
         sets = [f"{name} = %s" for name in columns]
         values: list[Any] = [getattr(patch, name) for name in columns]
+        if (
+            kind == "insert-types"
+            and "empty_weight_g" in columns
+            and "empty_weight_basis" not in columns
+        ):
+            # A person's weight is a measured one (#7280 D6).
+            sets.append("empty_weight_basis = 'person'")
         archived = getattr(patch, "archived", None) if "archived" in sent else None
         if archived is not None:
             sets.append(
@@ -541,3 +564,8 @@ class CatalogStore:
     def archive(self, kind: str, row_id: UUID, archived: bool) -> BaseModel | None:
         """Take a row off the lists (``True``) or put it back; ``None`` for no such row."""
         return self.update(kind, row_id, _spec(kind).patch.model_validate({"archived": archived}))
+
+
+def read_on(conn: Conn, kind: str, row_id: UUID) -> BaseModel | None:
+    """A catalog row as the store reads it, on ``conn``; ``None`` for no such row."""
+    return CatalogStore._read(conn, _spec(kind), row_id)

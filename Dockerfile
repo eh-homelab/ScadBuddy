@@ -87,6 +87,7 @@ RUN apt-get update \
         fonts-lobstertwo \
         fonts-noto-core \
         git \
+        git-lfs \
         libpq5 \
         python3 \
         python3-venv \
@@ -903,6 +904,8 @@ ENV OPENSCAD_VERSION=${OPENSCAD_VERSION}
 # pipe in a RUN trips hadolint's DL4006, and `SHELL -o pipefail` for one command
 # is the worse trade. `sort -V` reads and writes files here instead.
 ARG MIN_GIT_VERSION=2.37
+# The models repository's meshes (#7314): without it every mesh commit and export fails.
+RUN git lfs version
 RUN git --version > /tmp/git-version \
     && actual="$(sed -n 's/^git version //p' /tmp/git-version)" \
     && actual="${actual%% *}" \
