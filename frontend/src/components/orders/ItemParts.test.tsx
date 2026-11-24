@@ -13,7 +13,7 @@ describe('item parts (#5543)', () => {
 
   it('names each part an order is short of', async () => {
     const hook = seedPart({ name: 'Silver hook', pack_size: 100, pack_price_minor: 599, on_hand: 1 })
-    await api.setItemParts(ORDER_ACCEPTED, ITEM_APPROVED, [{ part_id: hook.id, per_unit: 2 }])
+    await api.setItemParts(ORDER_ACCEPTED, ITEM_APPROVED, [{ item_id: hook.id, per_unit: 2 }])
     const parts = await api.orderParts(ORDER_ACCEPTED)
 
     renderPage(<PartsShort parts={parts} />)
@@ -38,13 +38,13 @@ describe('item parts (#5543)', () => {
 
     await waitFor(() => expect(onChanged).toHaveBeenCalled())
     const parts = await api.orderParts(ORDER_ACCEPTED)
-    expect(parts.items.find((i) => i.item_id === ITEM_APPROVED)?.parts).toEqual([{ part_id: hook.id, per_unit: 1, used: 0 }])
+    expect(parts.items.find((i) => i.item_id === ITEM_APPROVED)?.parts).toEqual([{ item_id: hook.id, part_id: hook.id, per_unit: 1, used: 0 }])
   })
 
   it('fixes a fulfilled item’s parts', async () => {
     const hook = seedPart({ name: 'Silver hook', pack_size: 100, pack_price_minor: 599 })
     renderPage(
-      <ItemPartsEditor orderId={ORDER_ACCEPTED} item={{ id: ITEM_APPROVED, quantity: 2, status: 'fulfilled' }} rows={[{ part_id: hook.id, per_unit: 1, used: 2 }]} editable={false} onChanged={() => {}} />,
+      <ItemPartsEditor orderId={ORDER_ACCEPTED} item={{ id: ITEM_APPROVED, quantity: 2, status: 'fulfilled' }} rows={[{ item_id: hook.id, part_id: hook.id, per_unit: 1, used: 2 }]} editable={false} onChanged={() => {}} />,
     )
     expect(await screen.findByText(/1 × Silver hook a unit/)).toHaveTextContent('2 taken from stock')
     expect(screen.queryByRole('button', { name: 'Edit parts' })).not.toBeInTheDocument()
@@ -53,7 +53,7 @@ describe('item parts (#5543)', () => {
 
   it("a fulfilment takes the parts as the item's parts cost, and an unfulfil gives them back", async () => {
     const hook = seedPart({ name: 'Silver hook', pack_size: 100, pack_price_minor: 599, on_hand: 10 })
-    await api.setItemParts(ORDER_ACCEPTED, ITEM_APPROVED, [{ part_id: hook.id, per_unit: 1 }])
+    await api.setItemParts(ORDER_ACCEPTED, ITEM_APPROVED, [{ item_id: hook.id, per_unit: 1 }])
 
     const attempt = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 2, outcome: 'succeeded' })
     await api.acceptFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, attempt.id)

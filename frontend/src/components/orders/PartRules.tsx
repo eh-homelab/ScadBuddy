@@ -117,8 +117,8 @@ export function PartRules({ parts }: { parts: InventoryPart[] }) {
                   value={String(line.per_unit)}
                   onChange={(e) => edit(index, { per_unit: Math.max(1, Number(e.target.value) || 1) })}
                 />
-                <PartSelect parts={parts} value={line.part_id ?? null} onChange={(part_id) => edit(index, { part_id })} label={`Line ${index + 1} part`} allowNone />
-                <Button size="xs" variant="ghost" onClick={() => edit(index, { when: [...(line.when ?? []), { colour: '#000000', part_id: parts[0]?.id ?? '' }] })} disabled={parts.length === 0}>
+                <PartSelect parts={parts} value={line.item_id ?? null} onChange={(item_id) => edit(index, { item_id })} label={`Line ${index + 1} part`} allowNone />
+                <Button size="xs" variant="ghost" onClick={() => edit(index, { when: [...(line.when ?? []), { colour: '#000000', item_id: parts[0]?.id ?? '' }] })} disabled={parts.length === 0}>
                   Add colour
                 </Button>
                 <Button size="xs" variant="ghost" aria-label={`Remove line ${index + 1}`} onClick={() => change((all) => all.filter((_, i) => i !== index))}>
@@ -135,7 +135,7 @@ export function PartRules({ parts }: { parts: InventoryPart[] }) {
                     onChange={(e) => edit(index, { when: (line.when ?? []).map((x, i) => (i === wi ? { ...x, colour: e.target.value } : x)) })}
                   />
                   <span>use</span>
-                  <PartSelect parts={parts} value={w.part_id || null} onChange={(part) => part && edit(index, { when: (line.when ?? []).map((x, i) => (i === wi ? { ...x, part_id: part } : x)) })} label={`Line ${index + 1} colour ${wi + 1} part`} />
+                  <PartSelect parts={parts} value={w.item_id || null} onChange={(part) => part && edit(index, { when: (line.when ?? []).map((x, i) => (i === wi ? { ...x, item_id: part } : x)) })} label={`Line ${index + 1} colour ${wi + 1} part`} />
                   <Button size="xs" variant="ghost" onClick={() => edit(index, { when: (line.when ?? []).filter((_, i) => i !== wi) })}>
                     Remove colour
                   </Button>
@@ -144,7 +144,7 @@ export function PartRules({ parts }: { parts: InventoryPart[] }) {
             </div>
           ))}
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" onClick={() => change((all) => [...all, { per_unit: 1, part_id: parts[0]?.id ?? null, when: [] }])} disabled={parts.length === 0}>
+            <Button size="sm" variant="outline" onClick={() => change((all) => [...all, { per_unit: 1, item_id: parts[0]?.id ?? null, when: [] }])} disabled={parts.length === 0}>
               Add line
             </Button>
             <Button size="sm" onClick={() => void save()} disabled={busy || stale}>

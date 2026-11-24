@@ -2126,7 +2126,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   Job cost phase 6, parts (#5543, §11; since #7067 a part is an inventory item whose kind
   tracks lots): `orders/parts.py` (`PartStore`: the `model_part_rules` and `order_item_parts`
   rows, over `item_id`; `part_id` is read the same for one release), routes `api/parts.py`
-  (`/parts…`, `GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`).
+  (`GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`, the rule routes). The
+  part-row routes (`/parts`, `/parts/{id}`, its `stock`, `adjust` and `moves`) are aliases
+  of the inventory for one release (`inventory/part_alias.py` `PartAliases`): a part is an
+  item of kind `hardware`, its pack and price its newest offer and price point. A part with
+  no supplier has no offer: it reads as a pack of 1 at 0, a pack edit is 422, and Add stock
+  takes the body's price and writes no price point (R-P2-25).
   `Lifecycle.add_item` copies the model's rule; `accept_fulfilment` or `fulfil_items` making an
   item `fulfilled` takes its parts from the lots (`StockStore.take`, the part items locked
   first in `item_id` order; `parts.used`), and `unfulfil_item` gives each use back to its lot

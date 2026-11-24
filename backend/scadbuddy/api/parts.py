@@ -1,24 +1,30 @@
 """`/api/v1/parts` and an order's parts (#5543, job cost spec 2026-11-05 §11): the parts
 inventory, the rule a model gives its items, and the parts each line item uses.
 
-A part's own writes (`POST /parts`, `PATCH`, `…/stock`, `…/adjust`) each run in one
-transaction under the part's row lock and write a stock line. An item's parts are set
-through the lifecycle (the order's lock, an `order_events` row); they leave stock when the
-item is fulfilled and come back when it is unfulfilled (`orders/lifecycle.py`). Only this
-process reads or writes the tables (#5295): the assistant's tools call these routes.
+Since #7067 a part is an inventory item, and the part routes (`GET`/`POST /parts`, `PATCH`,
+`…/stock`, `…/adjust`, `…/moves`) are aliases of `/inventory` (`inventory/part_alias.py`):
+each keeps its path, method and answer, and goes after one release (spec §6.11). An item's
+parts are set through the lifecycle (the order's lock, an `order_events` row); they leave
+the lots when the item is fulfilled and come back when it is unfulfilled
+(`orders/lifecycle.py`). Only this process reads or writes the tables (#5295): the
+assistant's tools call these routes.
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
 """
 
 import asyncio
-from typing import Annotated
+from collections.abc import Callable
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Path, Query, status
 
 from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.api.orders import _run, check_path
 from scadbuddy.core.problems import ApiError
+from scadbuddy.inventory.component import InventoryDep
+from scadbuddy.inventory.part_alias import PartHasNoOffer
+from scadbuddy.inventory.stock import BadQuantity
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
@@ -43,6 +49,8 @@ from scadbuddy.orders.problems import PROBLEMS
 
 router = APIRouter(tags=["parts"])
 
+_ALIAS = "Alias of `/inventory/…`; goes after one release (#7067, spec §6.11). "
+
 #: A model's slug, as a line item's reference names it (a built-in's with its prefix).
 Slug = Annotated[str, Path(max_length=MAX_MODEL_ID_LENGTH, pattern=MODEL_ID_PATTERN)]
 
@@ -60,19 +68,49 @@ def _exists(error: PartExistsError) -> ApiError:
     )
 
 
+def _unprocessable(field: str, message: str) -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        message,
+        errors=[{"loc": ["body", field], "msg": message}],
+    )
+
+
+async def _alias[T](call: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """An alias call off the event loop, its refusal as the old routes answered it."""
+    try:
+        return await asyncio.to_thread(call, *args, **kwargs)
+    except PartNotFoundError as error:
+        raise _not_found(error) from None
+    except PartExistsError as error:
+        raise _exists(error) from None
+    except StockTooLargeError as error:
+        raise _unprocessable("packs", str(error)) from None
+    except PartHasNoOffer:
+        raise _unprocessable(
+            "supplier", "a part with no supplier has no pack to change: name its supplier"
+        ) from None
+    except BadQuantity as error:
+        raise _unprocessable(
+            "pack_price_minor", f"a quantity or cost too large to keep: {error}"
+        ) from None
+
+
 @router.get(
     "/parts",
     response_model=list[InventoryPart],
     summary="The parts inventory",
     description=(
-        "Every part, by name: its pack, its unit cost (the weighted average of what is on "
-        "hand, a decimal string in minor units), what is on hand (below zero when more was "
-        "used than recorded) and `low` when that is at or below its `low_stock` level "
-        "(0 never warns). With `low`, only the low ones."
+        _ALIAS + "Every part (an unarchived item of a kind under `part`), by name: its pack (its "
+        "offer's; a part with no supplier has no offer and reads as a pack of 1 at 0), its "
+        "unit cost (the weighted average of the lots on hand, a decimal string in minor "
+        "units; with none on hand the pack price over its size), what is on hand (below "
+        "zero when more was used than recorded) and `low` when that is at or below its "
+        "`low_stock` level (0 never warns). With `low`, only the low ones."
     ),
 )
-async def list_parts(orders: OrdersDep, low: bool = False) -> list[InventoryPart]:
-    parts = await asyncio.to_thread(orders.lifecycle.parts.parts)
+async def list_parts(inventory: InventoryDep, low: bool = False) -> list[InventoryPart]:
+    parts = await _alias(inventory.parts.parts)
     return [p for p in parts if p.low] if low else parts
 
 
@@ -82,22 +120,21 @@ async def list_parts(orders: OrdersDep, low: bool = False) -> list[InventoryPart
     status_code=status.HTTP_201_CREATED,
     summary="Add a part",
     description=(
-        "Priced in the shop's `orders_currency`. Its unit cost starts at the pack's price "
-        "over its size. `on_hand` above 0 is recorded as an `adjust` line. 409 "
-        "`part_exists` when another part has the name, in any case."
+        _ALIAS
+        + "An item of kind `hardware`. With a `supplier`, an offer at that supplier (matched "
+        "by name in any case, else made) with the pack and a price point in the shop's "
+        "`orders_currency`; with none, no offer, and the `link` becomes a `purchase` link. "
+        "`on_hand` above 0 is received as a `manual` lot at the pack's price over its size. "
+        "409 `part_exists` when another part has the name, in any case. 422 for a pack "
+        "price past what a price point holds."
     ),
 )
 async def create_part(
-    body: PartInput, orders: OrdersDep, settings: SettingsStoreDep
+    body: PartInput, inventory: InventoryDep, settings: SettingsStoreDep
 ) -> InventoryPart:
     by = current_actor()
     currency = settings.snapshot().runtime.orders_currency
-    try:
-        return await asyncio.to_thread(
-            orders.lifecycle.parts.create, body, currency=currency, by=by
-        )
-    except PartExistsError as error:
-        raise _exists(error) from None
+    return await _alias(inventory.parts.create, body, currency=currency, by=by)
 
 
 @router.patch(
@@ -105,18 +142,17 @@ async def create_part(
     response_model=InventoryPart,
     summary="Edit a part",
     description=(
-        'Only what is sent changes. The pack is what the next "Add stock" records: the '
-        "unit cost stays, unless nothing is on hand, when it becomes the new pack's."
+        _ALIAS
+        + "Only what is sent changes. A new `supplier` moves the part to a new offer at that "
+        "supplier (the old one is archived; its pack and price move with it); a blank one "
+        "archives the offer. A new pack price is a new price point in the part's currency. "
+        "The unit cost is the lots' and does not move. 422 for a pack edit on a part with "
+        "no supplier (it has no offer to hold the pack)."
     ),
 )
-async def patch_part(part_id: str, body: PartPatch, orders: OrdersDep) -> InventoryPart:
+async def patch_part(part_id: str, body: PartPatch, inventory: InventoryDep) -> InventoryPart:
     check_path(part_id)
-    try:
-        return await asyncio.to_thread(orders.lifecycle.parts.update, part_id, body)
-    except PartNotFoundError as error:
-        raise _not_found(error) from None
-    except PartExistsError as error:
-        raise _exists(error) from None
+    return await _alias(inventory.parts.update, part_id, body, current_actor())
 
 
 @router.post(
@@ -124,27 +160,19 @@ async def patch_part(part_id: str, body: PartPatch, orders: OrdersDep) -> Invent
     response_model=InventoryPart,
     summary="Add stock: packs bought",
     description=(
-        "`packs` of the part's pack join the stock, at `pack_price_minor` each when sent "
-        "(it becomes the part's pack price). The unit cost becomes the weighted average of "
-        "the stock on hand and the new packs (their own cost when nothing is on hand). "
-        "Orders already fulfilled keep their cost. On the part's stock line as `add`. 422 when "
-        "the packs come to more than 1,000,000 units, or would leave more than 1,000,000,000 "
-        "on hand."
+        _ALIAS
+        + "`packs` of the part's pack received as one `manual` lot at `packs` times the pack "
+        "price, in the part's currency: `pack_price_minor` when sent (a new price point of "
+        "the offer), else the offer's latest. A part with no supplier has no offer: a pack "
+        "of 1 at the `pack_price_minor` sent, and no price point; with none sent, the lot's "
+        "cost is unknown. A part priced in another currency than the shop's receives a lot "
+        "of unknown cost. Orders already fulfilled keep their cost. 422 when the packs come "
+        "to more than 1,000,000 units, or would leave more than 1,000,000,000 on hand."
     ),
 )
-async def add_stock(part_id: str, body: StockAdd, orders: OrdersDep) -> InventoryPart:
+async def add_stock(part_id: str, body: StockAdd, inventory: InventoryDep) -> InventoryPart:
     check_path(part_id)
-    by = current_actor()
-    try:
-        return await asyncio.to_thread(orders.lifecycle.parts.add_stock, part_id, body, by)
-    except PartNotFoundError as error:
-        raise _not_found(error) from None
-    except StockTooLargeError as error:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            str(error),
-            errors=[{"loc": ["body", "packs"], "msg": str(error)}],
-        ) from None
+    return await _alias(inventory.parts.add_stock, part_id, body, current_actor())
 
 
 @router.post(
@@ -152,33 +180,30 @@ async def add_stock(part_id: str, body: StockAdd, orders: OrdersDep) -> Inventor
     response_model=InventoryPart,
     summary="Correct a part's count",
     description=(
-        "The count on the shelf, with a note saying why it differs. The unit cost stays. "
-        "On the part's stock line as `adjust`, with the difference."
+        _ALIAS + "The count on the shelf, with a note saying why it differs: the item is counted "
+        "(`POST /inventory/items/{id}/count`), one `adjust` move per lot it changes, at "
+        "each lot's cost."
     ),
 )
-async def adjust_stock(part_id: str, body: StockAdjust, orders: OrdersDep) -> InventoryPart:
+async def adjust_stock(part_id: str, body: StockAdjust, inventory: InventoryDep) -> InventoryPart:
     check_path(part_id)
-    by = current_actor()
-    try:
-        return await asyncio.to_thread(orders.lifecycle.parts.adjust, part_id, body, by)
-    except PartNotFoundError as error:
-        raise _not_found(error) from None
+    return await _alias(inventory.parts.adjust, part_id, body.on_hand, body.note, current_actor())
 
 
 @router.get(
     "/parts/{part_id}/moves",
     response_model=list[StockMove],
     summary="A part's stock line",
-    description="Every change to the part's stock, newest first: `add`, `adjust`, `use`, `return`.",
+    description=(
+        _ALIAS + "Every change to the part's lots, newest first: `add` (a receive), `adjust`, "
+        "`use`, `return`. `amount_minor` is null for a move of unknown cost."
+    ),
 )
 async def part_moves(
-    part_id: str, orders: OrdersDep, limit: Annotated[int, Query(ge=1, le=500)] = 200
+    part_id: str, inventory: InventoryDep, limit: Annotated[int, Query(ge=1, le=500)] = 200
 ) -> list[StockMove]:
     check_path(part_id)
-    part = await asyncio.to_thread(orders.lifecycle.parts.part, part_id)
-    if part is None:
-        raise _not_found(PartNotFoundError(part_id))
-    return await asyncio.to_thread(orders.lifecycle.parts.moves, part_id, limit=limit)
+    return await _alias(inventory.parts.moves, part_id, limit=limit)
 
 
 @router.get(

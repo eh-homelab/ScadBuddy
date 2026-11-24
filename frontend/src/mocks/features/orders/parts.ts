@@ -113,13 +113,13 @@ export function fillFromRule(order: Order, item: OrderItem): void {
   const have = new Set(item.colours.map((c) => c.colour.toLowerCase()))
   const found = new Map<string, number>()
   for (const line of rule.lines) {
-    const chosen = (line.when ?? []).find((w) => have.has(w.colour.toLowerCase()))?.part_id ?? line.part_id ?? null
+    const chosen = (line.when ?? []).find((w) => have.has(w.colour.toLowerCase()))?.item_id ?? line.item_id ?? null
     if (chosen) found.set(chosen, (found.get(chosen) ?? 0) + line.per_unit)
   }
   if (found.size === 0) return
-  const rows = [...found].map(([part_id, per_unit]) => ({ part_id, per_unit, used: 0 }))
+  const rows = [...found].map(([item_id, per_unit]) => ({ item_id, part_id: item_id, per_unit, used: 0 }))
   parts.items.set(item.id, rows)
-  event(order, 'item.parts_set', { item_id: item.id, parts: rows.map(({ part_id, per_unit }) => ({ part_id, per_unit })), from_rule: true })
+  event(order, 'item.parts_set', { item_id: item.id, parts: rows.map(({ item_id, per_unit }) => ({ item_id, per_unit })), from_rule: true })
 }
 
 /** `Lifecycle._use_parts`: out of stock, each use at the part's unit cost now; no cost entry
@@ -130,7 +130,7 @@ export function useParts(order: Order, item: OrderItem): void {
   let minor = 0
   let unknown = false
   for (const row of rows) {
-    const p = find(row.part_id)
+    const p = find(row.item_id)
     const count = row.per_unit * item.quantity
     const amount = p.unit_cost * count
     if (p.currency === order.currency) minor += amount
@@ -147,7 +147,7 @@ export function returnParts(order: Order, item: OrderItem): void {
   const rows = (parts.items.get(item.id) ?? []).filter((r) => r.used > 0)
   if (rows.length === 0) return
   for (const row of rows) {
-    const p = find(row.part_id)
+    const p = find(row.item_id)
     const taken = [...parts.moves].reverse().find((m) => m.kind === 'use' && m.order_item_id === item.id && m.part_id === p.id)
     if (taken) p.unit_cost = average(p, row.used, Number(taken.unit_cost_after_minor) * row.used)
     move(p, 'return', row.used, { amount_minor: taken?.amount_minor ?? null, order_id: order.id, order_item_id: item.id })
@@ -165,7 +165,7 @@ export function partsCostOf(itemId: string): { minor: number; unknown: boolean }
 /** One unit of the item's parts at today's unit costs, in `currency`. */
 export function partsUnitOf(itemId: string, currency: string): number {
   return (parts.items.get(itemId) ?? []).reduce((sum, row) => {
-    const p = parts.parts.find((x) => x.id === row.part_id)
+    const p = parts.parts.find((x) => x.id === row.item_id)
     return p && p.currency === currency ? sum + row.per_unit * p.unit_cost : sum
   }, 0)
 }
@@ -249,8 +249,8 @@ export const handlers = [
     const { lines } = (await request.json()) as { lines: PartRuleLine[] }
     try {
       for (const line of lines) {
-        if (line.part_id) find(line.part_id)
-        for (const w of line.when ?? []) find(w.part_id)
+        if (line.item_id) find(line.item_id)
+        for (const w of line.when ?? []) find(w.item_id)
       }
     } catch (error) {
       return refusedPart(request, error)
@@ -270,7 +270,7 @@ export const handlers = [
     const needed = new Map<string, number>()
     for (const item of items) {
       if (item.status === 'fulfilled' || item.status === 'cancelled') continue
-      for (const row of parts.items.get(item.id) ?? []) needed.set(row.part_id, (needed.get(row.part_id) ?? 0) + row.per_unit * item.quantity)
+      for (const row of parts.items.get(item.id) ?? []) needed.set(row.item_id, (needed.get(row.item_id) ?? 0) + row.per_unit * item.quantity)
     }
     const needs = [...needed].map(([id, n]) => {
       const p = answer(find(id))
@@ -285,8 +285,8 @@ export const handlers = [
     })
   }),
   http.put('/api/v1/orders/:id/items/:item/parts', async ({ request, params }) => {
-    const body = (await request.json()) as { parts: { part_id: string; per_unit: number }[] }
-    const ids = body.parts.map((p) => p.part_id)
+    const body = (await request.json()) as { parts: { item_id: string; per_unit: number }[] }
+    const ids = body.parts.map((p) => p.item_id)
     if (new Set(ids).size !== ids.length) return fieldProblem(request, 'parts', 'Value error, a part is named twice: give it one row with its count')
     return transition(request, () => {
       const order = lock(String(params.id))
@@ -298,7 +298,7 @@ export const handlers = [
       for (const id of ids) {
         if (!parts.parts.some((p) => p.id === id)) throw new Refused('part_not_found', `no part '${id}'`)
       }
-      const rows = body.parts.map((p) => ({ ...p, used: 0 }))
+      const rows = body.parts.map((p) => ({ ...p, part_id: p.item_id, used: 0 }))
       parts.items.set(found.id, rows)
       event(order, 'item.parts_set', { item_id: found.id, parts: body.parts })
       return rows

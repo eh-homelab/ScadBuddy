@@ -11,20 +11,19 @@ own cost); it writes no cost entry (the plan's Pre-flight 5). It locks the order
 then the items in `item_id` order, so two writers never wait on each other in opposite
 orders.
 
-`PartStore`'s part rows (`parts`, `create`, `add_stock`, ...) read the `parts` table, which
-the parts migration renamed (#7067 Task 6). Task 9 makes the `/parts` routes aliases of
-`/inventory` and removes them.
+The `/parts` routes are aliases of the inventory (`inventory/part_alias.py`, #7067 Task 9);
+the models here are their bodies and answers. Every text a body takes refuses a NUL byte,
+which Postgres `text` refuses (R-P2-16).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from datetime import datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from psycopg import errors
 from psycopg.types.json import Jsonb
 from pydantic import (
     AfterValidator,
@@ -37,14 +36,15 @@ from pydantic import (
     field_validator,
 )
 
+from scadbuddy.inventory.models import Text
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.models import Actor, Colour, ColourSlot, Money
 from scadbuddy.orders.store import Conn, OrderStore
 
 #: The most of one part one unit of an item may use.
 MAX_PER_UNIT = 1000
-#: The most units one stock change may move (an "Add stock" is refused past it, its packs
-#: times the pack size; ``StockTooLargeError``), and the most packs one "Add stock" records.
+#: The most units one "Add stock" may move (its packs times the pack size;
+#: ``StockTooLargeError``), and the most packs one "Add stock" records.
 MAX_COUNT = 1_000_000
 MAX_PACKS = 10_000
 #: The most a part may hold on hand: well inside ``integer``, whatever adds come in turn.
@@ -55,15 +55,6 @@ UNIT_COST = Decimal("0.000001")
 #: Why a part's stock moved: a pack bought, a count corrected, an item's fulfilment took
 #: it, or its unfulfil gave it back.
 MoveKind = Literal["add", "adjust", "use", "return"]
-
-_PART = (
-    "id, name, supplier, link, currency, pack_size, pack_price_minor, unit_cost_minor,"
-    " on_hand, low_stock, created_at, updated_at"
-)
-_MOVE = (
-    "id, part_id, kind, delta, on_hand_after, unit_cost_after_minor, amount_minor, note,"
-    " order_id, order_item_id, created_by, created_at"
-)
 
 
 class PartNotFoundError(Exception):
@@ -91,10 +82,10 @@ class PartExistsError(Exception):
 class PartPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str | None = Field(default=None, min_length=1, max_length=200)
-    supplier: str | None = Field(default=None, max_length=200)
+    name: Text | None = Field(default=None, min_length=1, max_length=200)
+    supplier: Text | None = Field(default=None, max_length=200)
     #: Where to buy it again; shown as a link, so only http(s).
-    link: str | None = Field(default=None, max_length=2000, pattern=r"^(https?://\S+)?$")
+    link: Text | None = Field(default=None, max_length=2000, pattern=r"^(https?://\S+)?$")
     pack_size: int | None = Field(default=None, ge=1, le=MAX_COUNT)
     pack_price_minor: Money | None = Field(default=None, ge=0, le=10**12)
     low_stock: int | None = Field(default=None, ge=0, le=MAX_COUNT)
@@ -103,14 +94,16 @@ class PartPatch(BaseModel):
 class PartInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, max_length=200)
-    supplier: str = Field(default="", max_length=200)
-    link: str = Field(default="", max_length=2000, pattern=r"^(https?://\S+)?$")
+    name: Text = Field(min_length=1, max_length=200)
+    supplier: Text = Field(default="", max_length=200)
+    link: Text = Field(default="", max_length=2000, pattern=r"^(https?://\S+)?$")
     pack_size: int = Field(ge=1, le=MAX_COUNT)
-    #: The pack's price with tax, in the shop's currency.
+    #: The pack's price with tax, in the shop's currency (past what a price point holds:
+    #: 422).
     pack_price_minor: Money = Field(ge=0, le=10**12)
     low_stock: int = Field(default=0, ge=0, le=MAX_COUNT)
-    #: The count already on the shelf; recorded as an ``adjust`` move when above zero.
+    #: The count already on the shelf; received as a `manual` lot at the pack price over
+    #: its size when above zero.
     on_hand: int = Field(default=0, ge=0, le=MAX_COUNT)
 
 
@@ -147,13 +140,13 @@ class InventoryPart(BaseModel):
 
 class StockAdd(BaseModel):
     """Packs bought: ``packs`` of the part's pack, at ``pack_price_minor`` each when sent (it
-    becomes the part's pack price), else at the part's."""
+    becomes the part's pack price when the part has an offer), else at the part's."""
 
     model_config = ConfigDict(extra="forbid")
 
     packs: int = Field(default=1, ge=1, le=MAX_PACKS)
     pack_price_minor: Money | None = Field(default=None, ge=0, le=10**12)
-    note: str = Field(default="", max_length=1000)
+    note: Text = Field(default="", max_length=1000)
 
 
 class StockAdjust(BaseModel):
@@ -161,8 +154,8 @@ class StockAdjust(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    on_hand: int = Field(ge=-MAX_COUNT, le=MAX_COUNT)
-    note: str = Field(min_length=1, max_length=1000)
+    on_hand: int = Field(ge=0, le=MAX_COUNT)
+    note: Text = Field(min_length=1, max_length=1000)
 
 
 class StockMove(BaseModel):
@@ -348,23 +341,7 @@ def order_parts(store: OrderStore, parts: PartStore, order_id: str) -> OrderPart
     )
 
 
-# -- arithmetic -------------------------------------------------------------------------------
-
-
-def average(on_hand: int, unit_cost: Decimal, count: int, amount: int | Decimal) -> Decimal:
-    """The unit cost once ``count`` units costing ``amount`` in all join ``on_hand`` units at
-    ``unit_cost``: their weighted average. With nothing on hand (or less than nothing), the
-    new units' own cost."""
-    incoming = Decimal(amount) / count
-    if on_hand <= 0:
-        return incoming.quantize(UNIT_COST, rounding=ROUND_HALF_UP)
-    total = Decimal(on_hand) * unit_cost + Decimal(amount)
-    return (total / (on_hand + count)).quantize(UNIT_COST, rounding=ROUND_HALF_UP)
-
-
-def use_amount(unit_cost: Decimal, count: int) -> Money:
-    """``count`` units' cost in whole minor units, rounded once, half up."""
-    return int((unit_cost * count).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+# -- the rule -----------------------------------------------------------------------------
 
 
 def rule_parts(lines: Iterable[PartRuleLine], colours: Iterable[ColourSlot]) -> list[ItemPart]:
@@ -390,26 +367,6 @@ class PartStore:
         self.store = store
 
     # reads
-
-    def parts(self, *, conn: Conn | None = None) -> list[InventoryPart]:
-        with self.store._read(conn) as c:
-            rows = c.execute(f"SELECT {_PART} FROM parts ORDER BY lower(name), id").fetchall()
-        return [InventoryPart.model_validate(r) for r in rows]
-
-    def part(self, part_id: str, *, conn: Conn | None = None) -> InventoryPart | None:
-        with self.store._read(conn) as c:
-            row = c.execute(f"SELECT {_PART} FROM parts WHERE id = %s", (part_id,)).fetchone()
-        return None if row is None else InventoryPart.model_validate(row)
-
-    def moves(self, part_id: str, *, limit: int = 200) -> list[StockMove]:
-        """The part's newest moves first."""
-        with self.store._read(None) as c:
-            rows = c.execute(
-                f"SELECT {_MOVE} FROM part_stock_moves WHERE part_id = %s"
-                " ORDER BY created_at DESC, id DESC LIMIT %s",
-                (part_id, limit),
-            ).fetchall()
-        return [StockMove.model_validate(r) for r in rows]
 
     def rule(self, slug: str, *, conn: Conn | None = None) -> PartRule:
         """The model's rule; one with no lines when none was saved."""
@@ -454,120 +411,6 @@ class PartStore:
                 (wanted,),
             ).fetchall()
         return [dict(r) for r in rows]
-
-    # part writes, each in its own transaction under the part's lock
-
-    def create(self, body: PartInput, *, currency: str, by: Actor) -> InventoryPart:
-        """``PartExistsError`` when another part has the name, in any case: from the check,
-        or from ``parts_name`` when a create of the same name commits between the two."""
-        try:
-            return self._create(body, currency=currency, by=by)
-        except errors.UniqueViolation:
-            raise PartExistsError(self._named(body.name)) from None
-
-    def update(self, part_id: str, body: PartPatch) -> InventoryPart:
-        """Only what is sent changes. The pack is what the next "Add stock" records, so the
-        unit cost stays, unless nothing is on hand to average: then it is the new pack's.
-        A name another part has is ``PartExistsError``, as in ``create``."""
-        try:
-            return self._update(part_id, body)
-        except errors.UniqueViolation:
-            raise PartExistsError(self._named(body.name or "")) from None
-
-    def _named(self, name: str) -> str:
-        """The id of the part with ``name`` in any case, read after the refused write."""
-        with self.store._read(None) as c:
-            row = c.execute(
-                "SELECT id FROM parts WHERE lower(name) = lower(%s)", (name,)
-            ).fetchone()
-        return "" if row is None else str(row["id"])
-
-    def _create(self, body: PartInput, *, currency: str, by: Actor) -> InventoryPart:
-        unit = (Decimal(body.pack_price_minor) / body.pack_size).quantize(
-            UNIT_COST, rounding=ROUND_HALF_UP
-        )
-        with self.store.transaction() as conn:
-            self._name_free(conn, body.name, None)
-            row = conn.execute(
-                "INSERT INTO parts (name, supplier, link, currency, pack_size, pack_price_minor,"
-                " unit_cost_minor, low_stock) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
-                f" RETURNING {_PART}",
-                (
-                    body.name,
-                    body.supplier,
-                    body.link,
-                    currency,
-                    body.pack_size,
-                    body.pack_price_minor,
-                    unit,
-                    body.low_stock,
-                ),
-            ).fetchone()
-            assert row is not None
-            part = InventoryPart.model_validate(row)
-            if body.on_hand > 0:
-                part = self.move(
-                    conn, part, "adjust", body.on_hand, by, note="Count when the part was added"
-                )
-        return part
-
-    def _update(self, part_id: str, body: PartPatch) -> InventoryPart:
-        with self.store.transaction() as conn:
-            part = self._lock(conn, part_id)
-            if body.name is not None:
-                self._name_free(conn, body.name, part.id)
-            fields = body.model_dump(exclude_none=True)
-            if not fields:
-                return part
-            merged = part.model_copy(update=fields)
-            unit = part.unit_cost_minor
-            if part.on_hand <= 0 and ("pack_size" in fields or "pack_price_minor" in fields):
-                unit = (Decimal(merged.pack_price_minor) / merged.pack_size).quantize(
-                    UNIT_COST, rounding=ROUND_HALF_UP
-                )
-            row = conn.execute(
-                "UPDATE parts SET name = %s, supplier = %s, link = %s, pack_size = %s,"
-                " pack_price_minor = %s, low_stock = %s, unit_cost_minor = %s,"
-                f" updated_at = now() WHERE id = %s RETURNING {_PART}",
-                (
-                    merged.name,
-                    merged.supplier,
-                    merged.link,
-                    merged.pack_size,
-                    merged.pack_price_minor,
-                    merged.low_stock,
-                    unit,
-                    part.id,
-                ),
-            ).fetchone()
-            assert row is not None
-        return InventoryPart.model_validate(row)
-
-    def add_stock(self, part_id: str, body: StockAdd, by: Actor) -> InventoryPart:
-        with self.store.transaction() as conn:
-            part = self._lock(conn, part_id)
-            price = (
-                part.pack_price_minor if body.pack_price_minor is None else body.pack_price_minor
-            )
-            if price != part.pack_price_minor:
-                conn.execute(
-                    "UPDATE parts SET pack_price_minor = %s WHERE id = %s", (price, part.id)
-                )
-                part = part.model_copy(update={"pack_price_minor": price})
-            count = body.packs * part.pack_size
-            if count > MAX_COUNT or part.on_hand + count > MAX_ON_HAND:
-                raise StockTooLargeError(
-                    f"{body.packs} packs of {part.pack_size} is {count} units: one stock change"
-                    f" moves at most {MAX_COUNT}, and a part holds at most {MAX_ON_HAND}"
-                )
-            return self.move(
-                conn, part, "add", count, by, amount_minor=body.packs * price, note=body.note
-            )
-
-    def adjust(self, part_id: str, body: StockAdjust, by: Actor) -> InventoryPart:
-        with self.store.transaction() as conn:
-            part = self._lock(conn, part_id)
-            return self.move(conn, part, "adjust", body.on_hand - part.on_hand, by, note=body.note)
 
     def set_rule(self, slug: str, body: PartRuleInput, by: Actor) -> PartRule:
         """Every item the rule names must exist and track lots; ``PartNotFoundError``
@@ -635,70 +478,3 @@ class PartStore:
             "UPDATE order_item_parts SET used = %s WHERE order_item_id = %s AND item_id = %s",
             (used, order_item_id, item_id),
         )
-
-    def move(
-        self,
-        conn: Conn,
-        part: InventoryPart,
-        kind: MoveKind,
-        delta: int,
-        by: Actor,
-        *,
-        amount_minor: int | None = None,
-        unit_cost: Decimal | None = None,
-        note: str = "",
-        order_id: str | None = None,
-        order_item_id: str | None = None,
-    ) -> InventoryPart:
-        """Move ``part``'s stock by ``delta`` (its row lock held) and write the line. An
-        ``add`` averages its ``amount_minor`` in, a ``return`` its units at ``unit_cost``
-        (the cost they were taken at, unrounded); a ``use`` or an ``adjust`` keeps the
-        unit cost."""
-        unit = part.unit_cost_minor
-        if kind == "add" and delta > 0 and amount_minor is not None:
-            unit = average(part.on_hand, part.unit_cost_minor, delta, amount_minor)
-        elif kind == "return" and delta > 0 and unit_cost is not None:
-            unit = average(part.on_hand, part.unit_cost_minor, delta, unit_cost * delta)
-        row = conn.execute(
-            "UPDATE parts SET on_hand = on_hand + %s, unit_cost_minor = %s, updated_at = now()"
-            f" WHERE id = %s RETURNING {_PART}",
-            (delta, unit, part.id),
-        ).fetchone()
-        assert row is not None
-        moved = InventoryPart.model_validate(row)
-        conn.execute(
-            "INSERT INTO part_stock_moves (part_id, kind, delta, on_hand_after,"
-            " unit_cost_after_minor, amount_minor, note, order_id, order_item_id, created_by)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (
-                part.id,
-                kind,
-                delta,
-                moved.on_hand,
-                moved.unit_cost_minor,
-                amount_minor,
-                note,
-                order_id,
-                order_item_id,
-                Jsonb(by.model_dump(mode="json")),
-            ),
-        )
-        return moved
-
-    # helpers
-
-    def _lock(self, conn: Conn, part_id: str) -> InventoryPart:
-        row = conn.execute(
-            f"SELECT {_PART} FROM parts WHERE id = %s FOR UPDATE", (part_id,)
-        ).fetchone()
-        if row is None:
-            raise PartNotFoundError(part_id)
-        return InventoryPart.model_validate(row)
-
-    def _name_free(self, conn: Conn, name: str, own_id: str | None) -> None:
-        row = conn.execute(
-            "SELECT id FROM parts WHERE lower(name) = lower(%s) AND id IS DISTINCT FROM %s",
-            (name, own_id),
-        ).fetchone()
-        if row is not None:
-            raise PartExistsError(row["id"])

@@ -83,7 +83,7 @@ describe('PartsPage (#5543)', () => {
     await user.click(within(rules).getByRole('button', { name: 'Save rule' }))
 
     expect(await within(rules).findByText('Saved.')).toBeInTheDocument()
-    expect((await api.partRule('keychain')).lines).toEqual([{ per_unit: 1, part_id: hook.id, when: [] }])
+    expect((await api.partRule('keychain')).lines).toEqual([{ per_unit: 1, item_id: hook.id, when: [] }])
 
     // #5549 review: a line added or removed after the save is not saved yet.
     await user.click(within(rules).getByRole('button', { name: 'Add line' }))
@@ -126,7 +126,7 @@ describe('PartsPage (#5543)', () => {
     await user.type(within(panel).getByLabelText('Link address'), 'https://example.com/hook')
     await user.click(within(panel).getByRole('button', { name: 'Add link' }))
     expect(await within(panel).findByRole('link', { name: 'example.com' })).toBeInTheDocument()
-    expect(entityMock.links.get(`part:${hook.id}`)).toHaveLength(1)
+    expect(entityMock.links.get(`item:${hook.id}`)).toHaveLength(1)
 
     await user.click(within(panel).getByRole('button', { name: 'Close' }))
     expect(screen.queryByRole('region', { name: 'Silver hook: files and links' })).not.toBeInTheDocument()

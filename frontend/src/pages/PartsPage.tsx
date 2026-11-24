@@ -145,8 +145,8 @@ function PartFiles({ part, onClose }: { part: InventoryPart; onClose: () => void
         </Button>
       </div>
       <div className="grid gap-6 lg:grid-cols-2">
-        <AttachmentsPanel entity={`part:${part.id}`} />
-        <LinksPanel entity={`part:${part.id}`} />
+        <AttachmentsPanel entity={`item:${part.id}`} />
+        <LinksPanel entity={`item:${part.id}`} />
       </div>
     </section>
   )

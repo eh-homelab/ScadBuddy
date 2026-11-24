@@ -268,6 +268,14 @@ class StockStore:
         with no cost opens at 0 with its cost unknown too."""
         # The shop's currency is a settings read on a connection of its own: take it first.
         shop = self._shop_currency()
+        with self.pool.connection() as conn, conn.transaction():
+            return self.receive_in(conn, item_id, body, by, shop=shop)
+
+    def receive_in(
+        self, conn: Conn, item_id: UUID, body: ReceiveLot, by: Actor, *, shop: str
+    ) -> Lot:
+        """`receive_lot` in the caller's transaction, with the shop's currency read by the
+        caller (`shop`)."""
         currency = body.currency or shop
         given: Decimal | None = body.unit_cost_minor
         if given is None and body.total_cost_minor is not None:
@@ -280,10 +288,10 @@ class StockStore:
             cost, unknown = given, False
         else:
             cost, unknown = Decimal(0), True
-        with self.pool.connection() as conn, conn.transaction():
-            item = _item(conn, item_id, "lot", lock=True)
-            _positive(item["uom"], body.qty)
-            try:
+        item = _item(conn, item_id, "lot", lock=True)
+        _positive(item["uom"], body.qty)
+        try:
+            with conn.transaction():
                 row = conn.execute(
                     "INSERT INTO stock_lots (item_id, location_id, received_qty, on_hand,"
                     " unit_cost_minor, cost_unknown, cost_currency, foreign_unit_cost_minor,"
@@ -303,21 +311,22 @@ class StockStore:
                         Jsonb(by.model_dump(mode="json")),
                     ),
                 ).fetchone()
-            except psycopg.errors.ForeignKeyViolation:
-                raise LocationNotFound(str(body.location_id)) from None
-            assert row is not None
-            _move(
-                conn,
-                item_id=item_id,
-                lot_id=row["id"],
-                kind="receive",
-                qty=body.qty,
-                unit_cost=cost,
-                cost_unknown=unknown,
-                by=by,
-                at=row["received_at"],
-            )
-            return _lot(conn, row["id"])
+        except psycopg.errors.ForeignKeyViolation:
+            raise LocationNotFound(str(body.location_id)) from None
+        assert row is not None
+        _move(
+            conn,
+            item_id=item_id,
+            lot_id=row["id"],
+            kind="receive",
+            qty=body.qty,
+            unit_cost=cost,
+            cost_unknown=unknown,
+            reason=body.note,
+            by=by,
+            at=row["received_at"],
+        )
+        return _lot(conn, row["id"])
 
     def adjust_lot(self, lot_id: UUID, body: AdjustInput, by: Actor) -> Lot:
         """A count of one lot: one `adjust` move of the difference at the lot's cost,
