@@ -313,12 +313,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `<server>__<tool>` turn tool (a remote plugin's, `scadbuddy_http__http_request`;
   #2320, behind `patched("flow-turn-tools-2320")`) that the agent's `turn_tool_tier`
   tiers and names the queue of, as the run's starter;
-  `flow_activities.py`, `flow_models.py`,
+  `flow_activities.py` (the run's row, and the `flow_task_open`, `flow_task_answered` and
+  `flow_task_close` of a prompt's task), `flow_models.py`,
   `projects_worker.py`, on the `projects` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), versioned AUTO_UPGRADE in its own
   Deployment (#4146, `client.projects_deployment`, never pinned; unversioned in-process),
   so a run moves to each new build and a change must replay
-  `tests/fixtures/project_workflow_histories/`. A run whose start names a host function
+  `tests/fixtures/project_workflow_histories/`. `wait_for_human` and `prompt` (#7364, "Tasks"
+  below) wait with no default limit (`_wait_s`, `OPEN_WAIT`); `WAIT_OPEN_PATCH` keeps the old
+  timer of a recorded `wait_for_human`, one patch id per call. A rule that a later build adds
+  to what `prompt` takes goes behind a patch (`_prompt_task`). A run whose start names a host function
   (`FlowStart.host_functions`) its worker lacks waits after `flow_record` for a build
   that has it (`project.offers_host_functions`). A flow's payloads are sealed per run
   (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
@@ -335,7 +339,25 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   /workflow-runs/{id}`: key, then workflow, then row), `sweep.py` (the housekeeping
   sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
-  (0 is never).
+  (0 is never). `operations.py` has the answers: `flow_answer` (a text) and `task_answer` (a
+  prompt's, #7364). `store.py` moves a run's tasks in the transaction of the run's own write:
+  an end cancels the open ones, a Reset makes them match (`TaskStore.cancel_for_run_in`,
+  `match_waiting_in`, `reopen_in`).
+- Tasks (#7364): `backend/scadbuddy/tasks/`, the typed questions that flows ask (`prompt`);
+  the rules a person sees are in `docs/features/flows.md` "Questions to a person".
+  `models.py` (`TaskOpen` checks what a flow gives; `TaskQuestion` is a `Task` without its
+  answer), `schema.py` (`prompt_schema_problems`: `core/input_schema.py` with `formats`),
+  `validate.py` (`validate_answer`: its problems never quote a value), `store.py`
+  (`TaskStore`, the table `tasks`), `component.py` (`TASKS`, `TasksDep`). Routes
+  `api/tasks.py`: `GET /tasks`, `GET /tasks/{id}` and `POST /tasks/{id}/answer`
+  (`browser_only`, `PERSON_ENDPOINTS`; the answer sealed into the operation). The projects
+  worker's area `tasks` is `api/crud_tasks.py` (`…/projects/tasks`, its `/{id}/close` and
+  `/{id}/answered`), client `crud/tasks.py` `RemoteTasks`; the area is in the worker's
+  `PROJECTS_CRUD_AREAS`. Event `task.changed` (`core/events.py` `TaskChanged`), realtime
+  topics `tasks`, `task:<id>` and `tasks:<place>`. A run's own mark (`final`) wins over the
+  operation's. Lock order: the run's row, then the task's, then the event log; a task write
+  inside a run's write comes before the run's own event (`cancel_for_run_in`). Nothing logs
+  a schema, a context or an answer.
 - `backend/scadbuddy/agent_data/` — the agent's settings, Claude credentials and payload data
   keys behind the CRUD service (#5299 step 4, D5; #5342), for `api/crud_agent_secrets.py`
   (class `crud.agent`, areas `settings`, `credentials`, `payload-keys`): `credentials.py` is
@@ -592,7 +614,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   feature registers its kinds by exporting `OPERATION_KINDS` (a `KindsBuild`) from its
   `scadbuddy/<feature>/operations.py`, found like components, never by editing a list.
   Each worker serves only its queue's kinds: the Bambuddy kinds are
-  `bambuddy/operations.py` (queue `bambuddy`); `library/operations.py` (queue
+  `bambuddy/operations.py` (queue `bambuddy`); the flows' are `flows/operations.py` (queue
+  `projects`); `library/operations.py` (queue
   `library`, #1054) exports the library pins with a model's lifecycle
   and edits (`library/model_operations.py` `model_kinds`: create, import, patch,
   duplicate, delete, source, README, thumbnail, sibling files, restore and upstream; an
@@ -1161,7 +1184,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   worker's): no database (#5298), the KEK, and a credential exchanged for
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; it refuses to
   start without the KEK or a proof, and ignores `SCADBUDDY_DATABASE_URL` with a warning
-  (`core/settings.py` `NoDatabaseSettings`).
+  (`core/settings.py` `NoDatabaseSettings`). It waits for its CRUD areas
+  (`PROJECTS_CRUD_AREAS`: `flows`, `operations`, `payload-keys`, `tasks`).
 - MakerWorld import (#6119, #1254): `api/makerworld.py` (`/makerworld/status`, `/resolve`,
   `/import`) calls Bambuddy's own MakerWorld routes with the API's key
   (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The

@@ -354,6 +354,15 @@ same way, `vite.config.ts`).
   and the Spools tab button "Sync weights from AMS". Type proposals (#6701): `TypeProposals` ("Create types") shows on the Needs-type filter, over
   `GET /filament/type-proposals` and its confirm; the mocks group the seed's untyped spools (#6 is one
   group, #7 lacks a label weight).
+- A flow run's questions (#7364): `components/flows/PendingCard.tsx` draws `TaskCard` for an
+  entry with a `task` (a `prompt`) and the text answer for a `wait_for_human`, on the run's
+  page and the order's (`OrderFlowRuns`). The card's key is the run's execution and the task's
+  id, so a Reset gives a new form. `TaskCard` reads the task again on `task:<id>`
+  (`lib/flows.ts` `taskTopic`) and shows the newer of its read and the page's. Both answer
+  forms are `USER_ONLY`. `SchemaForm` draws a form from a schema, for an answer (`answer`) and
+  for Start run; `inputsForm.tsx` `useInputs` holds the fields, `lib/flowInputs.ts` the parse:
+  an answer leaves out a blank field, Start run sends a cleared text. Mocks:
+  `src/mocks/features/tasks.ts` (the task of `run-prompt`). e2e `e2e/workflows.spec.ts`.
 - "Needs you" (#6399): `lib/needsYou.ts` is every request that waits on the person in one list
   (the agent's pending input, `attention.ts` `WaitingEntry`; the flow grants of
   `GET /api/v1/flow-grant-requests`; the tab's pairing requests, from `AgentLink`'s
