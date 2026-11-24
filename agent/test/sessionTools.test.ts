@@ -96,6 +96,42 @@ describe('the sessions_* tools', () => {
     for (const kind of ['start', 'send', 'fork']) expect(seen[kind], kind).toEqual([true, true, undefined, undefined])
   })
 
+  it("passes a new session's browser options to start, and shows them in its view (#7027)", async () => {
+    const BROWSER = { user_agent: 'Mozilla/5.0 Test', viewport: { width: 1280, height: 800 }, locale: 'en-GB' }
+    const seen: unknown[] = []
+    const record = {
+      id: S, title: 'x', origin: 'mcp', owner: { kind: 'bearer', id: 'token:a', label: 'a' }, offer: null, status: 'idle',
+      parentId: null, mode: 'durable', turns: 0, costUsd: 0, budgetUsd: 1, turnActive: false,
+      createdAt: '2026-11-23T00:00:00.000Z', updatedAt: '2026-11-23T00:00:00.000Z', archivedAt: null, browser: BROWSER,
+    }
+    const sessions = {
+      keepsBackgroundTools: async () => true,
+      start: async (_owner: unknown, options: Record<string, unknown>) => {
+        seen.push(options.browser)
+        return { session: record }
+      },
+    }
+    const ctx = {
+      ...services(),
+      sessions: sessions as never,
+      principal: { id: 'token:a', kind: 'bearer' as const, tiers: ['read', 'write'] as ('read' | 'write')[] },
+      progress: async () => {},
+      signal: new AbortController().signal,
+    }
+    const tool = sessionTools.find((t) => t.name === 'sessions_start')!
+    const result = await runTool(tool, { title: 'x', browser: BROWSER }, ctx)
+    expect(result.isError).toBeFalsy()
+    expect(seen).toEqual([BROWSER])
+    expect((firstText(result) as { session: { browser: unknown } }).session.browser).toEqual(BROWSER)
+    await runTool(tool, { title: 'x' }, ctx)
+    expect(seen[1]).toBeUndefined()
+    // The shape only: an unknown key or a fractional width is refused here, the bounds by the API.
+    for (const browser of [{ colour: 'red' }, { viewport: { width: 1280.5, height: 800 } }, { viewport: { width: 1280 } }]) {
+      expect((await runTool(tool, { title: 'x', browser }, ctx)).isError, JSON.stringify(browser)).toBe(true)
+    }
+    expect(seen).toHaveLength(2)
+  })
+
   it('hand off only to principal ids that can exist (PR #715 review)', () => {
     for (const to of [
       'browser',

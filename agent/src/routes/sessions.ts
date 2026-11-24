@@ -12,6 +12,7 @@ import {
 import { type Owner, ownerSeenBy, SESSION_MODES, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
 import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { ID_MAX, LOOKUP_TYPES, type LookupType, type ResourceRef } from '../sessions/touched.js'
+import { SessionBrowserInput } from '../sessions/browserOptions.js'
 import { browserUser } from '../auth/browserSession.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
@@ -35,9 +36,11 @@ import { ready, type RouteModule } from './module.js'
 //                                                 whose tool calls touched that resource (#931,
 //                                                 sessions/touched.ts ResourceRef: a `model`
 //                                                 matches anything of the model)
-//   POST /api/v1/ai/sessions                      {title?, prompt?} → 201 {session, turn_id?};
+//   POST /api/v1/ai/sessions                      {title?, prompt?, browser?} → 201 {session, turn_id?};
 //                                                 429 past the owner's new-session limit
-//                                                 (sessions/manager.ts MAX_NEW_SESSIONS)
+//                                                 (sessions/manager.ts MAX_NEW_SESSIONS); 422
+//                                                 `invalid_browser` for browser options the API
+//                                                 refused (#7027)
 //   GET  /api/v1/ai/sessions/:id                  one session, with `queue`: the messages queued to
 //                                                 run after its turn, oldest first (#6386)
 //   GET  /api/v1/ai/sessions/:id/resources        {resources}: what its tool calls created,
@@ -95,7 +98,7 @@ import { ready, type RouteModule } from './module.js'
 //                                                 Audited, refusals included.
 //
 // Error bodies are `{ detail }`, the backend's FastAPI shape; a SessionError's
-// status is used as it is (404, 403, 409, 429, 400).
+// status is used as it is (404, 403, 409, 422, 429, 400).
 
 export type SessionRouteDeps = {
   sessions: SessionManager | undefined
@@ -117,6 +120,8 @@ export type SessionView = {
   offered_to_you: boolean
   status: SessionRecord['status']
   parent_id: string | null
+  /** What its browser reports (#7027): its own options or its parent's; null for the defaults. */
+  browser: SessionRecord['browser']
   /** Always `durable` (plan Step 6.3). */
   mode: SessionRecord['mode']
   turns: number
@@ -146,6 +151,7 @@ export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>
     offered_to_you: s.offer !== null && sameOwner(viewer, s.offer.to),
     status: s.status,
     parent_id: s.parentId,
+    browser: s.browser,
     mode: s.mode,
     turns: s.turns,
     cost_usd: s.costUsd,
@@ -163,6 +169,8 @@ const StartBody = z.strictObject({
   prompt: z.string().min(1).max(MESSAGE_MAX).optional(),
   /** Taken and ignored (plan Step 6.3): every session is an AgentSession. */
   mode: z.enum(SESSION_MODES).optional(),
+  /** Its browser options (#7027): the shape here, the bounds the API's (422 `invalid_browser`). */
+  browser: SessionBrowserInput.optional(),
 })
 const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
 /** A queued message's new words (#6386). */
@@ -325,6 +333,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         origin: 'chat',
         ...(body.value.title ? { title: body.value.title } : {}),
         ...(body.value.prompt ? { prompt: body.value.prompt } : {}),
+        ...(body.value.browser ? { browser: body.value.browser } : {}),
       })
       return c.json(
         {

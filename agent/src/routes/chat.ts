@@ -33,7 +33,8 @@ import { ready, type RouteModule } from './module.js'
 //                            SNAPSHOT_MS), so a session started elsewhere, over
 //                            /mcp or on another tab or replica, shows up live
 //   user.message           → SessionManager.start (no sessionId: a new `chat`
-//                            session) or .send; the page context rides along
+//                            session, with the frame's `browser` options, #7027)
+//                            or .send (which ignores `browser`); the page context rides along
 //                            for the model only (manager.ts SendOptions); the
 //                            images it names by id (#1941) are read from the
 //                            attachment store first, and moved into the
@@ -482,7 +483,13 @@ export class ChatConnection {
           if (!message.sessionId) {
             // `mode` is taken and ignored: every session is an AgentSession (plan Step 6.3).
             const { session } = await otelContext.with(parent, () =>
-              this.sessions.start(this.principal, { origin: 'chat', prompt: message.text, context, ...images }),
+              this.sessions.start(this.principal, {
+                origin: 'chat',
+                prompt: message.text,
+                context,
+                ...images,
+                ...(message.browser ? { browser: message.browser } : {}),
+              }),
             )
             await this.claim(session.id, attached)
             this.pairTab(session.id)

@@ -7,7 +7,7 @@ import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { type Tier, TIERS } from '../auth/principal.js'
 import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
-import type { SessionRows } from '../sessions/rows.js'
+import type { SessionBrowser, SessionRows } from '../sessions/rows.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { canonicalJson, withApprovalLine } from '../approvals/service.js'
 import {
@@ -59,9 +59,12 @@ import { type WorkspaceFiles, withWorkspaceSize } from '../workspace/store.js'
 export interface SessionOwners {
   /**
    * The owner, the tiers its current turn was sent with (`ai_sessions.turn_tiers`, #2320),
-   * and that turn (`durable_turn_id`), which its calls' audit rows carry as a classic turn's do.
+   * and that turn (`durable_turn_id`), which its calls' audit rows carry as a classic turn's do;
+   * and its browser options (`ai_sessions.browser`, #7027) from the same row, for its plugins' routes.
    */
-  ownerOf(sessionId: string): Promise<(Owner & { turnTiers?: readonly Tier[] | null; turnId?: string | null }) | undefined>
+  ownerOf(
+    sessionId: string,
+  ): Promise<(Owner & { turnTiers?: readonly Tier[] | null; turnId?: string | null; browser?: SessionBrowser | null }) | undefined>
 }
 
 /** A session's owner from its row (sessions/rows.ts `SessionRows.get`). */
@@ -72,7 +75,9 @@ export class RowSessionOwners implements SessionOwners {
     this.#rows = rows
   }
 
-  async ownerOf(sessionId: string): Promise<(Owner & { turnTiers: readonly Tier[] | null; turnId: string | null }) | undefined> {
+  async ownerOf(
+    sessionId: string,
+  ): Promise<(Owner & { turnTiers: readonly Tier[] | null; turnId: string | null; browser: SessionBrowser | null }) | undefined> {
     // An id that is no UUID is no session: a throw.
     if (!isUuid(sessionId)) throw new Error(`session ${JSON.stringify(sessionId)} is not a session id`)
     const row = await this.#rows.get(sessionId)
@@ -82,7 +87,14 @@ export class RowSessionOwners implements SessionOwners {
     const sent = row.turn_tiers as { by?: { kind?: string; id?: string }; tiers?: unknown } | null
     const mine = sent?.by?.kind === row.owner_kind && sent.by.id === row.owner_id && Array.isArray(sent.tiers)
     const turnTiers = mine ? TIERS.filter((t) => (sent.tiers as unknown[]).includes(t)) : null
-    return { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers, turnId: row.durable_turn_id }
+    return {
+      kind: row.owner_kind,
+      id: row.owner_id,
+      label: row.owner_label,
+      turnTiers,
+      turnId: row.durable_turn_id,
+      browser: row.browser ?? null,
+    }
   }
 }
 
@@ -338,7 +350,7 @@ export function toolActivities(tools: readonly Tool[], deps: ToolActivityDeps): 
 export async function durableSession(
   what: string,
   sessions: SessionOwners,
-): Promise<{ session: string; owner: Owner; turnTiers?: readonly Tier[]; turnId?: string }> {
+): Promise<{ session: string; owner: Owner; turnTiers?: readonly Tier[]; turnId?: string; browser?: SessionBrowser }> {
   const { workflowExecution } = Context.current().info
   const session = sessionOf(workflowExecution?.workflowId)
   // A lookup that throws (the database is away) is left to the activity's retries.
@@ -349,8 +361,8 @@ export async function durableSession(
       UNKNOWN_SESSION,
     )
   }
-  const { turnTiers, turnId, ...who } = owner
-  return { session, owner: who, ...(turnTiers ? { turnTiers } : {}), ...(turnId ? { turnId } : {}) }
+  const { turnTiers, turnId, browser, ...who } = owner
+  return { session, owner: who, ...(turnTiers ? { turnTiers } : {}), ...(turnId ? { turnId } : {}), ...(browser ? { browser } : {}) }
 }
 
 /** Who a call runs as, in which session if any, and the id its gate entry is recorded under. */

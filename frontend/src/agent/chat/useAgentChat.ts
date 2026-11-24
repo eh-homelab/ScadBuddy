@@ -5,6 +5,7 @@ import {
   type AttachmentRef,
   type ClientMessage,
   type PageContext,
+  type SessionBrowserInput,
 } from './protocol'
 import { TAB_ID } from '../tabId'
 import { answerBody, decisionBody, respond, type RespondBody, type RespondError } from '../respond'
@@ -54,8 +55,8 @@ export interface AgentChat {
   state: ChatState
   /** Sends a user turn to the active session, or starts a new one. */
   /** `images`: pasted, dropped or attached images for the model, uploaded first (#1866, #1941). */
-  /** `mode` (plan 5d) applies only to a message that starts a new chat; absent, the agent's default. */
-  send: (text: string, context: PageContext, images?: AttachmentRef[]) => void
+  /** `browser` (#7027) goes only with a message that starts a new chat; empty, the agent's defaults apply. */
+  send: (text: string, context: PageContext, images?: AttachmentRef[], browser?: SessionBrowserInput) => void
   /** Answers an approval. Nothing outward proceeds until this is called (§8.2). */
   decide: (sessionId: string, approvalId: string, approve: boolean) => void
   /** #940 — answers the agent's question: one answer per question, in order. */
@@ -133,7 +134,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     }
   }, [factory])
 
-  const send = useCallback((text: string, context: PageContext, images?: AttachmentRef[]) => {
+  const send = useCallback((text: string, context: PageContext, images?: AttachmentRef[], browser?: SessionBrowserInput) => {
     const trimmed = text.trim()
     if (!trimmed || !transport.current) return
     const activeId = latest.current.activeId
@@ -146,6 +147,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         text: trimmed,
         context,
         ...(images?.length ? { images } : {}),
+        ...(!activeId && browser && Object.keys(browser).length ? { browser } : {}),
         ...(traceparent ? { traceparent } : {}),
       }),
     )
