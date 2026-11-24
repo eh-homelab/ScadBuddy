@@ -78,11 +78,15 @@ class FeedSender:
                 self.want(printer_id, state)
 
     def forget(self, printer_id: str) -> None:
-        """Drop the printer's desired state: a state still waiting is not posted again. A
-        recorder calls it when it no longer leads the printer, so a former leader does not
-        overwrite the new leader's report."""
+        """Drop the printer's desired state and cancel its sender, with any post it has in
+        flight: a state still waiting is not posted again. A recorder calls it when it no
+        longer leads the printer, so a former leader does not overwrite the new leader's
+        report. A post the API already took before the cancel can still land."""
         self._desired.pop(printer_id, None)
         self._reported.pop(printer_id, None)
+        sender = self._senders.pop(printer_id, None)
+        if sender is not None:
+            sender.cancel()
 
     async def _send(self, printer_id: str) -> None:
         delay = self._retry_min
@@ -127,7 +131,8 @@ class FeedSender:
     async def flushed(self) -> None:
         """Wait until every desired feed state has landed."""
         while pending := [t for t in self._senders.values() if not t.done()]:
-            await asyncio.gather(*pending)
+            # `asyncio.wait`, not `gather`: a sender `forget` cancels must not raise here.
+            await asyncio.wait(pending)
 
     async def aclose(self) -> None:
         """Stop the senders."""
