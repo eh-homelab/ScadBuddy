@@ -60,15 +60,19 @@ def test_a_download_is_the_saved_file_and_asks_bambuddy_nothing(
     assert not bambuddy.called
 
 
-def test_the_saved_file_is_served_in_ranges(client: TestClient, model: str) -> None:
-    """A FileResponse, so a download can resume."""
+def test_a_range_gets_the_whole_saved_file(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#7256: the 3MF is streamed from the blob store with no ranges (`stream_response`),
+    so a ``Range`` header gets the whole file, and the answer says so."""
     configure(client, printer_id=1)
     output_id = make_output(client, model)
 
     response = client.get(f"/api/v1/outputs/{output_id}/model.3mf", headers={"Range": "bytes=0-3"})
 
-    assert response.status_code == 206
-    assert response.content == b"PK\x03\x04"
+    assert response.status_code == 200
+    assert response.headers["accept-ranges"] == "none"
+    assert response.content == _stored(paths, model, output_id)
 
 
 def test_the_templates_print_settings_are_saved_into_the_file(
