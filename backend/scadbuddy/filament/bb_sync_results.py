@@ -770,7 +770,8 @@ PresetListing = Sequence[LocalPreset] | None
 
 def _preset_links(conn: Conn, instance: str | None) -> dict[int, datetime | None]:
     """The presets' links a delete of ``instance``'s links drops (`_reset_counts`), each
-    Bambuddy id with Bambuddy's time of the mirror's last write (``bb_updated_at``)."""
+    Bambuddy id with Bambuddy's ``updated_at`` as ScadBuddy last took it (``bb_updated_at``):
+    the mirror's last write, or for a preset imported from Bambuddy, its last import."""
     return {
         row["bb_preset_id"]: _stamp(row["bb_updated_at"])
         for row in conn.execute(
@@ -830,9 +831,11 @@ def _proof_of(
     """`same_bambuddy` and `changed_since_pull` for the links as they stand: by the spool
     links when there are any (``listing``, the configured Bambuddy's spools), else by the
     presets' links of ``instance`` (``presets``, its filament local presets, #7343) under
-    the same rule. A preset's time is Bambuddy's ``updated_at`` of the mirror's last write
-    (`preset_mirror._mirrored`): Bambuddy's ``onupdate=func.now()``, so another Bambuddy
-    would need a preset under the same id written at the same recorded time. A preset with
+    the same rule. A preset's time is Bambuddy's ``updated_at`` as ScadBuddy last took it: the
+    mirror's last write (`preset_mirror._mirrored`), or for a preset imported from Bambuddy,
+    its last import (`sb_presets.import_presets`, `refresh_bambuddy`). Either is Bambuddy's
+    ``onupdate=func.now()``, so another Bambuddy would need a preset under the same id
+    written at the same recorded time. A preset with
     no time (sent before the mirror kept one, and not written by the mirror since) is only
     checked to be there, and counts against the rule that at least half the links are timed
     on both sides."""

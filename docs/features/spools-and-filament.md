@@ -127,8 +127,8 @@ none is recorded, so a site whose only links are presets has one too. After the 
 URL changes the mirror waits, as the filament sync does, until the links are reset
 (`POST /filament/sync/reset-links`): a reset that finds the same Bambuddy (proved by the
 spool links, or, with no spool linked, by the presets: each linked id listed by the new
-URL's Bambuddy, none older than the `updated_at` Bambuddy answered the mirror's last write
-with, #7343) moves the ids to the new URL, and
+URL's Bambuddy, none older than Bambuddy's `updated_at` as ScadBuddy last took it: the mirror's last
+write, or for a preset imported from Bambuddy, its last import, #7343) moves the ids to the new URL, and
 one that deletes the links drops them (the dry run's and the answer's `presets` count), so
 each preset is created on the new Bambuddy (on the same Bambuddy, a second copy, which the
 reset dialog says);

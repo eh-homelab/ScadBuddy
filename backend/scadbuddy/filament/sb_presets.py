@@ -143,6 +143,8 @@ class FilamentPreset(BaseModel):
     #: reset compares to prove the same Bambuddy (#7343).
     bb_updated_at: str | None
     mirrored_sha256: str | None
+    #: Why the mirror's last send failed, or, after a successful send, a note that is no
+    #: failure: the untracked copy a lost create left in Bambuddy (`preset_mirror._mirrored`).
     mirror_error: str | None
     mirror_error_at: datetime | None
     created_at: datetime

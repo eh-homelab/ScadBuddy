@@ -26,6 +26,7 @@ from scadbuddy.filament.preset_mirror import (
 from scadbuddy.filament.rfid_push import try_lock_on
 from scadbuddy.filament.sb_presets import (
     FilamentPresetStore,
+    adopt_held,
     bambuddy_refs_on,
     create_on,
     document_bytes,
@@ -36,6 +37,7 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.store.local import LocalBlobStore
 from tests.conftest import PgPool
 from tests.filament.test_bambuddy_pull import _filament
+from tests.filament.test_sb_presets import MemoryPresets, _bind, _held, _type
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -619,6 +621,43 @@ async def test_presets_that_do_not_prove_the_same_bambuddy_offer_the_delete_only
         reset_links(_filament(pg_pool), OLD, HERE, ([], []), presets=presets, expect_kept=True)
     assert refused.value.code == "proof_changed"
     assert _instance(pg_pool) == OLD
+
+
+@pytest.mark.parametrize(
+    ("listed_at", "proven"),
+    [(STAMP, (True, False)), ("2026-11-23T09:00:00", (False, True))],
+)
+async def test_a_preset_imported_from_bambuddy_proves_it_by_its_import_time(
+    pg_pool: PgPool, tmp_path: Path, listed_at: str, proven: tuple[bool, bool]
+) -> None:
+    """#7347 review: a ``bambuddy`` preset is never written by the mirror; its time is
+    Bambuddy's ``updated_at`` as its import took it. Listed at that time it proves the
+    same Bambuddy; edited in Bambuddy since, it proves nothing, as for a mirrored one."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    held = MemoryPresets()
+    await held.keep(_held(7, "Imported", STAMP))
+    _bind(pg_pool, _type(pg_pool, "PLA-I"), "7")
+    assert await adopt_held(pg_pool, blobs, held, OLD) == 1
+    with pg_pool.connection() as conn:
+        row = conn.execute("SELECT id, source, bb_updated_at FROM filament_presets").fetchone()
+    assert row is not None
+    assert (row["source"], row["bb_updated_at"]) == ("bambuddy", STAMP)
+    assert _instance(pg_pool) == OLD
+    presets = _catalogue(_stamped(7, "Imported", listed_at))
+
+    preview = reset_preview(_filament(pg_pool), HERE, ([], []), presets=presets)
+    assert (preview.same_bambuddy, preview.changed_since_pull) == proven
+    if proven[0]:
+        done = reset_links(
+            _filament(pg_pool), OLD, HERE, ([], []), presets=presets, expect_kept=True
+        )
+        assert done.kept is True
+        assert (_row(pg_pool, row["id"])["bb_instance"], _instance(pg_pool)) == (HERE, HERE)
+    else:
+        with pytest.raises(ResetRefusedError) as refused:
+            reset_links(_filament(pg_pool), OLD, HERE, ([], []), presets=presets, expect_kept=True)
+        assert refused.value.code == "proof_changed"
+        assert _instance(pg_pool) == OLD
 
 
 async def test_untimed_preset_links_prove_nothing(pg_pool: PgPool, tmp_path: Path) -> None:

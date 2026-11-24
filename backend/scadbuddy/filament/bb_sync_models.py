@@ -555,7 +555,8 @@ class LinksResetPreview(BaseModel, extra="forbid"):
     last pull, so none matches exactly and the proof has nothing to stand on
     (`bb_sync_results.changed_since_pull`, #6845 review). With no spool linked, both hold
     over ScadBuddy's linked filament presets instead, each timed by Bambuddy's
-    ``updated_at`` of the mirror's last write (#7343, `bb_sync_results._proof_of`)."""
+    ``updated_at`` as ScadBuddy last took it: the mirror's last write, or for a preset
+    imported from Bambuddy, its last import (#7343, `bb_sync_results._proof_of`)."""
 
     instance: str | None
     configured_instance: str | None

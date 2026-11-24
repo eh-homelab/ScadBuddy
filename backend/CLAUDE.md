@@ -934,8 +934,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   when it is the links' own Bambuddy at a new URL (`bb_sync_results.same_bambuddy`: every
   linked BB id there, none older than its link's `bb_updated_at`, one exactly that, at
   least half the links timed on both sides; with no spool linked, the presets' links by the
-  same rule over Bambuddy's local presets and the `updated_at` the mirror's last write kept
-  as `bb_updated_at`, `wants_preset_listing`, #7343), a reset with `expect_kept: true` reads them
+  same rule over Bambuddy's local presets and each preset's `bb_updated_at` (Bambuddy's `updated_at`
+  as ScadBuddy last took it: the mirror's last write, or for a preset imported from Bambuddy,
+  its last import), `wants_preset_listing`, #7343), a reset with `expect_kept: true` reads them
   again and, while that holds, deletes nothing, records the configured instance and answers
   `kept: true` (and `configured_instance`); else 409 `proof_changed`, nothing written. The dry run's `changed_since_pull` is
   true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered; with no spool linked, the same over the linked filament presets (#7343). A mirrored preset sent before the mirror kept Bambuddy's time has none until its next mirror write (R-7343-5). `expect_kept: false` deletes
