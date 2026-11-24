@@ -1737,7 +1737,8 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
         "is also bound to that spool, as `POST /spools/{id}/tags` does. `next` says what the "
         "page does: `open_spool` when a spool holds the tag, `bind_or_create` for a tag no "
         "spool holds, `none` for a reading with no UID. 404 for an unknown `bind_spool_id`, "
-        "422 `no_uid` for a bind with no UID, 409 when the two keys name two tags."
+        "422 `no_uid` for a bind with no UID, 409 when the two keys name two tags (a phone "
+        "sends only a UID, so this route never answers it)."
     ),
 )
 async def read_tag(
@@ -1761,9 +1762,8 @@ async def read_tag(
 
     try:
         result = await asyncio.to_thread(run)
-    except tags.SpoolNotFoundError:
-        assert body.bind_spool_id is not None
-        raise _no_spool(body.bind_spool_id) from None
+    except tags.SpoolNotFoundError as exc:
+        raise _no_spool(exc.spool_id) from None
     except tags.BindWithoutUidError as exc:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code=exc.code) from None
     except _SPOOL_REFUSED as exc:

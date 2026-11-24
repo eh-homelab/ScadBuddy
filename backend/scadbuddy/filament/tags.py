@@ -11,7 +11,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from scadbuddy.filament import models as m
-from scadbuddy.filament.spools import Conn, FilamentDefaults, FilamentSpoolStore, _NoSpoolError
+from scadbuddy.filament.spools import Conn, FilamentDefaults, FilamentSpoolStore, NoSpoolError
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 
@@ -20,6 +20,7 @@ class SpoolNotFoundError(LookupError):
 
     def __init__(self, spool_id: UUID) -> None:
         super().__init__(f"no spool {spool_id}")
+        self.spool_id = spool_id
 
 
 class BindWithoutUidError(ValueError):
@@ -98,12 +99,15 @@ def seen_on(conn: Conn, read: TagRead) -> tuple[UUID | None, UUID | None]:
 
 
 def _find(conn: Conn, uid: str | None, tray: str | None) -> UUID | None:
-    row = conn.execute(
-        "SELECT id FROM filament_tags WHERE tag_uid = %s OR tray_uuid = %s LIMIT 1",
-        (uid, tray),
-    ).fetchone()
-    found: UUID | None = None if row is None else row["id"]
-    return found
+    """The tag the tray UUID names, else the one the UID names (as `holder_by_keys`)."""
+    for column, key in (("tray_uuid", tray), ("tag_uid", uid)):
+        if key is None:
+            continue
+        row = conn.execute(f"SELECT id FROM filament_tags WHERE {column} = %s", (key,)).fetchone()
+        if row is not None:
+            found: UUID = row["id"]
+            return found
+    return None
 
 
 def _mark(conn: Conn, tag_id: UUID, read: TagRead) -> None:
@@ -143,7 +147,7 @@ def read_on(
                 actor,
                 marks_origin=marks_origin,
             )
-        except _NoSpoolError:
+        except NoSpoolError:
             raise SpoolNotFoundError(bind_spool_id) from None
         holder = bind_spool_id
     spool = None if holder is None else FilamentSpoolStore.read(conn, holder, defaults=defaults)

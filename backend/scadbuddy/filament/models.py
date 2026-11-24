@@ -1879,8 +1879,8 @@ class DecodedSpool(BaseModel):
     subtype: str | None = None
     brand: str | None = None
     colour_name: str | None = None
-    rgba: str | None = None
-    extra_colours: list[str] | None = None
+    rgba: Rgba | None = None
+    extra_colours: list[Rgba] | None = None
     diameter_mm: Decimal | None = None
     density_g_cm3: Decimal | None = None
     nozzle_temp_min: int | None = None

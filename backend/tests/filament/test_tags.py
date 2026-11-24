@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
 from scadbuddy.filament import tags
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import FilamentInventory
-from scadbuddy.filament.models import Material, SpoolCreate
-from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
+from scadbuddy.filament.models import Material, NdefRecord, SpoolCreate
+from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore, TagKeysClashError
 from scadbuddy.filament.tags import TagRead
 from scadbuddy.spools.models import SeenTray
 from tests.conftest import PgPool
@@ -138,4 +138,76 @@ def test_the_inventory_finds_a_tray_holder_through_the_same_lookup(pg_pool: PgPo
         by_keys = tags.holder_by_keys(conn, _TRAY, None)
         found = FilamentInventory.holder_on(conn, UUID(int=1), seen)
     assert by_keys == spool and found == (spool, "tag")
-    assert FilamentInventory is not None
+
+
+def test_a_read_naming_two_tags_is_a_key_clash(pg_pool: PgPool) -> None:
+    # The phone route sends a UID only, so only an agent or AMS read can name two tags.
+    store = FilamentSpoolStore(pg_pool)
+    store.bind_tag(_spool(store, pg_pool), tray_uuid=_TRAY, kind="bambu_mifare", actor="ann")
+    store.bind_tag(_spool(store, pg_pool), tag_uid="04AA", kind="other", actor="ann")
+    with pytest.raises(TagKeysClashError):
+        tags.read(
+            store,
+            TagRead(source="agent", uid="04aa", tray_uuid=_TRAY),
+            actor="ann",
+            defaults=DEFAULTS,
+        )
+
+
+def test_an_ams_read_skips_the_mark_on_a_locked_tag_without_waiting(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    store.bind_tag(_spool(store, pg_pool), tray_uuid=_TRAY, kind="bambu_mifare", actor="ann")
+    with pg_pool.connection() as holder, holder.transaction():
+        holder.execute("SELECT 1 FROM filament_tags WHERE tray_uuid = %s FOR UPDATE", (_TRAY,))
+        with store.transaction() as conn:
+            conn.execute("SET LOCAL lock_timeout = '2s'")
+            tag_id, spool = tags.seen_on(conn, TagRead(source="ams", uid=None, tray_uuid=_TRAY))
+        assert spool is not None
+    assert _tag(pg_pool, tag_id)["last_seen_at"] is None
+
+
+def test_an_ams_read_prefers_the_tray_tag_when_the_keys_name_two(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    store.bind_tag(_spool(store, pg_pool), tray_uuid=_TRAY, kind="bambu_mifare", actor="ann")
+    store.bind_tag(_spool(store, pg_pool), tag_uid="04AA", kind="other", actor="ann")
+    with store.transaction() as conn:
+        tag_id, _ = tags.seen_on(conn, TagRead(source="ams", uid="04AA", tray_uuid=_TRAY))
+    assert _tag(pg_pool, tag_id)["tray_uuid"] == _TRAY
+
+
+def test_the_records_are_stored_on_the_tag(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    record = NdefRecord(record_type="mime", media_type="application/json", data_hex="7B7D")
+    result = tags.read(
+        store,
+        TagRead(source="phone", uid="04AA", records=(record,)),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert result.tag is not None
+    stored = _tag(pg_pool, result.tag.id)["last_seen_records"]
+    assert stored[0]["record_type"] == "mime" and stored[0]["data_hex"] == "7b7d"
+
+
+def test_an_ams_read_cannot_bind(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    with pytest.raises(ValueError, match="never binds"):
+        tags.read(
+            store,
+            TagRead(source="ams", uid="04AA"),
+            actor="ann",
+            bind_spool_id=uuid4(),
+            defaults=DEFAULTS,
+        )
+
+
+def test_a_bind_with_no_uid_is_refused_before_the_spool_is_looked_up(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    with pytest.raises(tags.BindWithoutUidError):
+        tags.read(
+            store,
+            TagRead(source="phone", uid=None),
+            actor="ann",
+            bind_spool_id=uuid4(),
+            defaults=DEFAULTS,
+        )

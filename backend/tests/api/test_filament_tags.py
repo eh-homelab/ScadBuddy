@@ -49,3 +49,8 @@ def test_a_bind_to_an_unknown_spool_is_404(client: TestClient) -> None:
 def test_records_past_888_bytes_are_refused(client: TestClient) -> None:
     big = {"record_type": "mime", "media_type": "application/json", "data_hex": "00" * 889}
     assert client.post(READS, json={"uid": "04a2", "records": [big]}).status_code == 422
+
+
+def test_an_unknown_spool_with_no_uid_is_422_before_404(client: TestClient) -> None:
+    got = client.post(READS, json={"uid": None, "records": [], "bind_spool_id": str(uuid4())})
+    assert got.status_code == 422 and got.json()["code"] == "no_uid"
