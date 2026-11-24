@@ -25,6 +25,7 @@ from scadbuddy.intake_worker.runner import CheckCrashedError, run_check
 from scadbuddy.intake_worker.wire import MAX_PREVIEW_BYTES
 from tests.intake_worker.test_check import box_stl
 from tests.intake_worker.test_runner import _job, _png, _state, needs_confinement
+from tests.support.waits import until
 
 ID = "ab" * 16
 #: The RPC token both processes read from `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE`.
@@ -136,10 +137,7 @@ def sleeper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 async def _until(condition: Callable[[], bool], what: str, limit: float = 20.0) -> None:
-    deadline = time.monotonic() + limit
-    while not condition():
-        assert time.monotonic() < deadline, what
-        await asyncio.sleep(0.02)
+    await until(condition, limit, interval=0.02, what=what)
 
 
 def _pid(pidfile: Path) -> int:

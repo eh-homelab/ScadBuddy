@@ -216,6 +216,13 @@ class TrayTagClashError(ValueError):
         super().__init__("the tray's tag is on another spool; that spool is the tray's")
 
 
+class TrayColourError(ValueError):
+    """Create from slot (#7150): the tray's stored colour is not ``#RRGGBBAA``."""
+
+    def __init__(self, colour: str) -> None:
+        super().__init__(f"the tray's colour {colour[:16]!r} is not #RRGGBBAA")
+
+
 def tray_fingerprint(material: str | None, colour: str | None) -> str:
     """``MATERIAL|#RRGGBBAA``: what a person saw in the tray when they placed a spool
     there. The material upper-cased and stripped; the colour as `normalise_rgba` writes
@@ -730,7 +737,13 @@ class FilamentInventory:
         material name and alias, added when no row has it), its ``#RRGGBBAA``, and its RFID
         keys as the spool's tag; then `link_on`'s steps. No type, label weight or grams.
         `TrayTagClashError` when the tray's tag is on an unarchived spool (that spool is
-        the tray's), checked before anything is written."""
+        the tray's), and `TrayColourError` when its colour is not ``#RRGGBBAA``, both
+        checked before anything is written."""
+        if seen.rgba is not None:
+            try:
+                normalise_rgba(seen.rgba)
+            except ValueError:
+                raise TrayColourError(seen.rgba) from None
         _tray_lock(conn, printer_id, ams_id, tray_id)
         self._no_tag_clash(conn, seen, None)
         material = resolve_or_add(

@@ -162,6 +162,7 @@ from scadbuddy.filament.spools import (
     ResetBeforeLinkError,
     SpoolBambuddyLinkedError,
     SpoolBulkRefusedError,
+    SpoolCopySourceError,
     SpoolInUseError,
     SpoolTrayPlaceError,
     SpoolTypelessError,
@@ -1103,14 +1104,17 @@ BULK_ROUTE = "POST /filament/spools/bulk"
     description=(
         "`quantity` (1 to 100) spools of one `spool` body, in one transaction (#7150): each "
         "gets its own number and its own `created` event (`grams_left` is each one's first "
-        "reading), its move to `location_id`, and its own `presets` and `k_values`. Answers "
-        "the spools in number order. Needs an `Idempotency-Key` (428 without one): a retry "
+        "reading), its move to `location_id`, and its own `presets` and `k_values`. "
+        "`copy_of` names the spool a copy's draft came from: a preset row that matches one "
+        "of that spool's `migrated` rows stays `migrated`, and no client marks a row so "
+        "itself (R-7150-13). Answers the spools in number order. Needs an "
+        "`Idempotency-Key` (428 without one): a retry "
         "with the same key answers the first result and writes nothing, and the key with "
         "another body is a 422. 422 for a bad field, a row it names that does not exist, an "
         "effective minimum temperature above its maximum, two preset or K rows of one key, "
-        "or a place that does not exist, is archived, is an AMS unit's or is a printer's "
-        "tray (a tray takes one spool, through its own link). Nothing is written on a "
-        "refusal."
+        "a place that does not exist, is archived, is an AMS unit's or is a printer's tray "
+        "(a tray takes one spool, through its own link), or a `copy_of` that names no "
+        "spool. Nothing is written on a refusal."
     ),
 )
 async def bulk_create_spools(
@@ -1150,7 +1154,13 @@ async def bulk_create_spools(
 
     try:
         done = await asyncio.to_thread(write)
-    except (*_SPOOL_REFUSED, SpoolTrayPlaceError, MoveTargetError, CatalogRefError) as exc:
+    except (
+        *_SPOOL_REFUSED,
+        SpoolTrayPlaceError,
+        SpoolCopySourceError,
+        MoveTargetError,
+        CatalogRefError,
+    ) as exc:
         raise _refused(exc) from None
     return JSONResponse(done.body, status_code=done.status)
 
@@ -1163,9 +1173,9 @@ async def bulk_create_spools(
         "The body `POST /filament/spools/bulk` takes, less its `quantity`, filled from the "
         "spool (#7150): its type, its own overrides, its note, its own presets and K values, "
         "and its place unless that is a printer's tray or archived. It leaves out what stays "
-        "the first spool's own: its number, tags, tray, ledger (so no `grams_left`) and "
-        "weight lock. An archived spool can be copied. Writes nothing; 404 for no such "
-        "spool."
+        "the first spool's own: its number, tags, tray, ledger (so no `grams_left`), "
+        "weight lock and `added_full`. `copy_of` is the spool's id, for the bulk create. An "
+        "archived spool can be copied. Writes nothing; 404 for no such spool."
     ),
 )
 async def copy_spool(filament: FilamentDep, spool_id: UUID) -> m.SpoolDraft:

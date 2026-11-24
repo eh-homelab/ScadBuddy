@@ -97,7 +97,9 @@ Anti-goals (a failure even if it works)
   `meta`, `params`, `inputs`, `record`, `manifest`, `bom`, `arranged_from`, `backfill`
   as jsonb, `has_plate_cover` boolean (the 3MF has `plate_1.png`, found once at
   create), and one blob key column per byte role (`model_blob`, `preview_blob`,
-  `thumbnail_blob`, null when absent). Indexes as `output_index` has (created, slug).
+  `thumbnail_blob`, null when absent), `copied_at` (when a writer last wrote the row;
+  §6.5 compares the folder's files with it) and `damaged` (jsonb, the missing byte
+  roles, empty when none; §6.3). Indexes as `output_index` has (created, slug).
   The last-print overlay stays in `output_last_prints`.
 - `output_files`: `(output_id, name)` → blob key, size, for the `files/` folder.
 - `output_derived`: `(output_id, kind, plate)` → `version`, `data` jsonb, for the
@@ -110,8 +112,11 @@ Anti-goals (a failure even if it works)
 - A new `BlobKind` `output` (`store/content_models.py`). Key
   `output-<output_id>-<role>` (and `output-<output_id>-file-<n>` for `files/`).
 - Each output holds its blobs in `blob_refs` as `(OUTPUT_HOLDER, output_id)`, the same
-  holder its manifest parts already use (`hold_parts`). Delete releases them; the
-  existing sweep removes unheld blobs.
+  holder its manifest parts already use (`hold_parts`). Delete releases them. The
+  sweep removes unheld blobs only for kinds in `SWEPT_KINDS`
+  (`store/content_models.py`), which holds `piece`, `snapshot`, `slice`, `workspace`
+  and `media` today. Phase 2 adds `output` to it. Without that, the blobs of a failed
+  save stay in the store.
 - Readers that need bytes get bytes (`content.read` / streamed `get`). A reader that
   needs a path (the slicer, `zipfile` on a large 3MF, `analyze_3mf`) gets a temporary
   local file from one helper, on the pod's local disk (not NFS), removed after use.
@@ -172,7 +177,8 @@ Each phase ships as one or more PRs, each releasable on its own.
 - Prod commit latency of 1–2 s: one transaction per create, never per file.
 - The blob store has a quota check on put (seen in the upload trace); existing outputs'
   bytes count against it.
-- `docs/architecture/data.md` and README:247 ("outputs live on the backed-up volume")
+- `docs/architecture/data.md` and README.md lines 246-247 (the "**State** lives in `/data` …: models (a git repository),
+  outputs, downloaded fonts and caches. Back up the volume." bullet)
   change with phase 3.
 
 ## 6. Decisions from the builder check (author's calls; the owner may change them)
@@ -213,7 +219,7 @@ Each phase ships as one or more PRs, each releasable on its own.
    its `blob_refs` holds. In phase 1 the files are still written first. If the
    transaction fails, the save fails, and the files written for it are removed, as
    `create` already does for a failure part way through. Blobs whose transaction
-   failed are unheld, and the existing sweep removes them. One transaction per save
+   failed are unheld, and the sweep removes them once `output` is in `SWEPT_KINDS` (§4.3). One transaction per save
    keeps the cost to one commit at the 1–2 s latency.
 
 ## 7. Left to the builder
