@@ -344,7 +344,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
   // classic stores (rows an earlier release left) and the durable projection; a durable
   // entry past its timer is `expiring`.
   it('lists durable entries from the projection beside classic ones, never their input, and marks an overdue one expiring', async () => {
-    const { m, session, turn } = await setUp()
+    const { m, session, turn, ids, post } = await setUp()
     // A classic approval an earlier release left, on a session of its own.
     const { session: old } = await m.start(browser, { origin: 'chat', title: 'old' })
     await db.sql`UPDATE ai_sessions SET runtime = NULL, status = 'waiting_approval' WHERE id = ${old.id}`
@@ -401,10 +401,6 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     const gone = await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })
     expect(gone.status).toBe(200)
     expect(((await gone.json()) as { entries: { id: string }[] }).entries.map((e) => e.id)).toEqual(mine.map((e) => e.id))
-    // A decided entry's row leaves the record, so it is listed nowhere.
-    await db.sql`DELETE FROM ai_pending_input WHERE request_id = ${`durable:${durable}:run-1:toolu_late`}`
-    const after = await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })
-    expect(((await after.json()) as { entries: { id: string }[] }).entries.map((e) => e.id)).toEqual([`durable:${durable}:run-1:toolu_live`])
     // With no Temporal configured, the record still answers.
     const bare = manager({ sql: db.sql, paths: await tempPaths(), run: parks })
     withoutTemporal(bare)
@@ -421,6 +417,13 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     const bareRead = await noTemporal.request(`/api/v1/ai/sessions/${session.id}/pending-input`, { headers: READ })
     expect(bareRead.status).toBe(200)
     expect(((await bareRead.json()) as { entries: unknown[] }).entries).toHaveLength(3)
+    // A decided entry leaves both lists: its decision removes its row (R5).
+    expect((await post(ids.approval, { kind: 'approval', decision: 'deny' })).status).toBe(200)
+    expect(await ended(ids.approval)).toMatchObject({ outcome: 'denied' })
+    const open = [ids.attention, ids.question].sort()
+    const left = await app.request(`/api/v1/ai/sessions/${session.id}/pending-input`, { headers: READ })
+    expect(((await left.json()) as { entries: { id: string }[] }).entries.map((e) => e.id).sort()).toEqual(open)
+    expect((await pendingInput(m)).entries.filter((e) => e.session_id === session.id).map((e) => e.id).sort()).toEqual(open)
     await m.interrupt(session.id, browser)
     await turn.done
   })
