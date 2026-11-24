@@ -54,15 +54,15 @@ export class SqlQuestions implements QuestionRoutes {
     return row
   }
 
-  async pending(principal: Owner): Promise<PendingRow[]> {
+  async pending(principal: Owner, sessionId?: string): Promise<PendingRow[]> {
     const rows = await this.#sql.unsafe<(Omit<PendingRow, 'created_at' | 'expires_at'> & { created_at: Date; expires_at: Date | null })[]>(
       `SELECT q.id, q.session_id, q.kind, q.tool, q.tool_use_id, q.questions, q.attention_reason, q.on_timeout, q.summary,
               q.created_at, q.expires_at
        FROM ai_questions q JOIN ai_sessions s ON s.id = q.session_id
        WHERE s.owner_kind = $1 AND (s.owner_id = $2 OR s.owner_kind = 'browser')
-         AND q.outcome IS NULL AND ${IS_DONE}
+         AND ($3::uuid IS NULL OR q.session_id = $3::uuid) AND q.outcome IS NULL AND ${IS_DONE}
        ORDER BY q.created_at DESC, q.id DESC LIMIT 501`,
-      [principal.kind, principal.id],
+      [principal.kind, principal.id, sessionId ?? null],
     )
     return rows.map((r) => ({ ...r, created_at: r.created_at.toISOString(), expires_at: r.expires_at?.toISOString() ?? null }))
   }

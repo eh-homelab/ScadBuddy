@@ -96,13 +96,14 @@ def read(
 def priced(
     crud: CrudCaller, listing: dict[str, Any], colours: dict[int, str], *, token: str = TOKEN_A
 ) -> dict[str, Any]:
-    """The price once it is no longer being worked out."""
+    """The price once it is no longer being worked out (neither ``pending`` nor the
+    listing's ``last`` price while the colours' own slice runs)."""
     deadline = time.monotonic() + 60
     while True:
         r = read(crud, listing, colours, token=token)
         assert r.status_code == 200, r.text
         answer: dict[str, Any] = r.json()
-        if answer["source"] != "pending":
+        if answer["source"] not in ("pending", "last"):
             return answer
         assert time.monotonic() < deadline, "the price was never worked out"
         time.sleep(0.2)
@@ -177,6 +178,81 @@ def test_the_price_is_a_slice_of_the_held_copy(
         None,
     )
     assert (row["slot_filaments"], row["listing_id"]) == ([pla_red, pla_blue], listed["id"])
+
+
+def test_new_colours_show_the_listings_last_price_while_theirs_is_worked_out(
+    crud: CrudCaller, listed: dict[str, Any], pla_red: str, pla_blue: str
+) -> None:
+    """Always show a price (#6710 §7.5): colours never priced answer the listing's last
+    firm price, of any colours, as ``last`` with a ``retry_after``, while their own slice
+    runs; then their own price."""
+    first = priced(crud, listed, {0: pla_red, 1: pla_blue})
+    assert first["source"] == "slice"
+    r = read(crud, listed, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    last = r.json()
+    assert last["source"] == "last"
+    assert (last["price_minor"], last["currency"]) == (first["price_minor"], first["currency"])
+    assert last["retry_after"] is not None and last["retry_after"] > 0
+    own = priced(crud, listed, {0: pla_blue, 1: pla_red})
+    assert own["source"] == "slice" and own["price_key"] != first["price_key"]
+
+
+def test_a_second_listing_of_the_file_shows_the_files_last_price(
+    crud: CrudCaller,
+    listed: dict[str, Any],
+    keychain: NativeFile,
+    pla_red: str,
+    pla_blue: str,
+) -> None:
+    """Two listings of one file share a price (`key_subject`), and its row names the one
+    that made it: the other listing's last price is that row's too, until it has its own."""
+    # Four slices: the default limit of renders is not what this test is about.
+    assert crud.api.put("/api/v1/settings", json={"storefront_renders_per_minute": 50}).is_success
+    first = priced(crud, listed, {0: pla_red, 1: pla_blue})
+    second = publish(crud.api, create(crud.api, body(keychain, [pla_red, pla_blue]))["id"])
+    assert priced(crud, second, {0: pla_red, 1: pla_blue}) == first
+    r = read(crud, second, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    assert (r.json()["source"], r.json()["price_key"]) == ("last", first["price_key"])
+    own = priced(crud, second, {0: pla_blue, 1: pla_red})
+    newer = priced(crud, listed, {0: pla_red, 1: pla_red})
+    assert newer["source"] == "slice"
+    # The listing's own row comes before a newer one of another listing.
+    r = read(crud, second, {0: pla_blue, 1: pla_blue})
+    assert r.status_code == 200, r.text
+    assert (r.json()["source"], r.json()["price_key"]) == ("last", own["price_key"])
+
+
+def test_an_unpublished_listings_price_is_never_anothers_last_price(
+    crud: CrudCaller,
+    listed: dict[str, Any],
+    keychain: NativeFile,
+    pla_red: str,
+    pla_blue: str,
+) -> None:
+    """A visitor sees no price of a listing they cannot open."""
+    priced(crud, listed, {0: pla_red, 1: pla_blue})
+    second = publish(crud.api, create(crud.api, body(keychain, [pla_red, pla_blue]))["id"])
+    assert crud.api.post(f"{LISTINGS}/{listed['id']}/unpublish").status_code == 200
+    r = read(crud, second, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "pending"
+
+
+def test_a_listing_with_no_price_yet_answers_pending(
+    crud: CrudCaller, listed: dict[str, Any], tmp_path: Path, pla_red: str, pla_blue: str
+) -> None:
+    """The last price is the listing's own, of the file it sells now: another file's price,
+    or none at all, gives ``pending``."""
+    priced(crud, listed, {0: pla_red, 1: pla_blue})
+    other = upload(crud.api, two_colours(tmp_path / "other.3mf", top="#00AA00"))
+    moved = publish(
+        crud.api, save(crud.api, listed, library_file={"id": other.id, "library": "native"})["id"]
+    )
+    r = read(crud, moved, {0: pla_red, 1: pla_blue})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "pending"
 
 
 def test_a_read_that_claims_a_slice_counts_as_a_render(

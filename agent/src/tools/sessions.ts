@@ -3,8 +3,6 @@ import { ownerOf } from '../approvals/mcp.js'
 import { ApprovalError, type ApprovalRecord } from '../approvals/service.js'
 import type { Principal } from '../auth/principal.js'
 import { approvalView, type ApprovalView, BROWSER_USER } from '../routes/approvals.js'
-import { WorkflowNotFoundError } from '@temporalio/common'
-import { DurableUnavailable } from '../gate/durable.js'
 import { parseRequestId } from '../gate/ids.js'
 import { pendingInput, type PendingInputEntry, RespondError, respond, sessionPendingInput } from '../routes/pendingInput.js'
 import { sessionView } from '../routes/sessions.js'
@@ -828,22 +826,14 @@ export const sessionTools: Tool[] = [
     name: 'sessions_pending_input',
     label: "List one session's waiting calls",
     description:
-      "One session's parked tool calls, as pending_input_list shows them. A durable session's are read from its " +
-      'workflow, the source of truth; this fails while its worker does not answer, and can be retried.',
+      "One session's parked tool calls: pending_input_list's entries for that session, read from the same " +
+      "pending records, never from the session's workflow.",
     input: z.object({ session_id: z.string().min(1) }),
     risk: 'read',
     routes: [],
     source: 'the pending records: their summaries and prompts quote what the requesting agents wrote',
     handler: async ({ session_id }, ctx) => {
-      const page = await (async () => {
-        try {
-          return await sessionPendingInput(manager(ctx), ownerOf(ctx.principal), session_id)
-        } catch (err) {
-          if (err instanceof DurableUnavailable) throw new ToolError(err.message, 503)
-          if (err instanceof WorkflowNotFoundError) throw new ToolError(`session ${session_id} has no running workflow`, 404)
-          throw err
-        }
-      })()
+      const page = await refusals(() => sessionPendingInput(manager(ctx), ownerOf(ctx.principal), session_id))
       if (!page) throw new ToolError(`no session ${session_id}`, 404)
       return json({ ...page, entries: page.entries.map((e) => entrySeenBy(viewerOf(ctx), e)) })
     },

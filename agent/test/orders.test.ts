@@ -1257,6 +1257,11 @@ describe('pricing tools (#4250)', () => {
 
   it("reads an attempt's archives and copies one's finish photo with a key (#4253 §8.2)", async () => {
     expect([tool('order_attempt_archives').risk, tool('order_attempt_copy').risk]).toEqual(['read', 'write'])
+    // #7237: the media are imported with no click; the read names what is attached and starts the import.
+    expect(tool('order_attempt_archives').description).toMatch(/`finished_attachment_id`.*`timelapse_attachment_id`.*starts the import/s)
+    expect(tool('order_item_fulfil').description).toContain('order_attempt_archives shows them once attached')
+    expect(tool('order_attempt_copy').description).not.toContain('pull it off')
+    expect(z.object(tool('order_attempt_copy').shape).safeParse({ order_id: ORDER, item_id: ITEM, fulfilment_id: 'f1', archive_id: 81, what: 'file' }).success).toBe(false)
     const keys: (string | null)[] = []
     let body: unknown
     const FILE = { id: 'a1', role: 'finished', kind: 'image' }

@@ -269,6 +269,7 @@ def _seed_old_shape(conn: psycopg.Connection[Any], linked: str, lan: str) -> Non
     )
 
 
+@pytest.mark.pg_empty
 def test_the_contract_migration_rewrites_every_bambuddy_key(pg_conninfo: str) -> None:
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn, MIGRATIONS[: _before(CONTRACT)])
@@ -333,6 +334,7 @@ def test_the_contract_migration_rewrites_every_bambuddy_key(pg_conninfo: str) ->
     assert rack_columns == (0,)
 
 
+@pytest.mark.pg_empty
 def test_the_leftovers_migration_drops_every_bambuddy_key_an_old_pod_wrote(
     pg_conninfo: str,
 ) -> None:
@@ -392,6 +394,7 @@ def test_the_leftovers_migration_drops_every_bambuddy_key_an_old_pod_wrote(
     }
 
 
+@pytest.mark.pg_empty
 def test_the_leftovers_migration_merges_the_algorithm_and_its_version_apart(
     pg_conninfo: str, tmp_path: Path
 ) -> None:
@@ -445,6 +448,7 @@ def test_the_leftovers_migration_merges_the_algorithm_and_its_version_apart(
     assert saved["printer_rack_algorithm_versions"] == {LINKED: 1_700_000_000_001}
 
 
+@pytest.mark.pg_empty
 def test_the_leftovers_migration_keeps_a_stored_default(pg_conninfo: str) -> None:
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn, MIGRATIONS[: _before(LEFTOVERS)])
@@ -468,6 +472,7 @@ def test_the_leftovers_migration_keeps_a_stored_default(pg_conninfo: str) -> Non
     assert "printer_id" not in stored
 
 
+@pytest.mark.pg_empty
 def test_the_contract_migration_drops_a_default_no_registry_printer_links(
     pg_conninfo: str,
 ) -> None:
@@ -479,6 +484,7 @@ def test_the_contract_migration_drops_a_default_no_registry_printer_links(
     assert "printer_id" not in names and "default_printer" not in names
 
 
+@pytest.mark.pg_empty
 def test_the_project_target_migration_keeps_every_row(pg_conninfo: str) -> None:
     migration = MIGRATIONS_DIR / "20261101T1910Z_project_print_targets_registry.sql"
     with psycopg.connect(pg_conninfo) as conn:
@@ -493,6 +499,7 @@ def test_the_project_target_migration_keeps_every_row(pg_conninfo: str) -> None:
     assert rows == [(1, 3, None), (2, 0, None)]
 
 
+@pytest.mark.pg_empty
 def test_the_rack_migration_backfills_the_registry_printer(pg_conninfo: str) -> None:
     migration = MIGRATIONS_DIR / "20261101T1911Z_rack_nozzle_registry_printer.sql"
     with psycopg.connect(pg_conninfo) as conn:

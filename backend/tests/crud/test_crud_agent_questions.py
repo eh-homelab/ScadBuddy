@@ -175,8 +175,13 @@ def test_a_summary_is_listed_and_dismissed_once(agent: Agent, tables: PgPool) ->
     turn = _placed(tables, session)
     body = _done(session, turn)
     agent.post("/questions/done", body)
-    [listed] = agent.post("/questions/pending", {"kind": "browser", "id": "browser"})["questions"]
+    who = {"kind": "browser", "id": "browser"}
+    [listed] = agent.post("/questions/pending", who)["questions"]
     assert listed["id"] == body["id"] and listed["summary"] == "Rendered the box."
+    for only, found in ((session, [body["id"]]), (str(uuid.uuid4()), [])):
+        one = agent.post(f"/questions/pending?session_id={only}", who)["questions"]
+        assert [q["id"] for q in one] == found
+    assert agent.status("/questions/pending?session_id=nope", who) == 422
     entry = agent.get("/questions/entry", id=body["id"])["entry"]
     assert entry["outcome"] is None and entry["session_id"] == session
     dismiss = {

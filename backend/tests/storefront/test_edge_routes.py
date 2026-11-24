@@ -825,8 +825,10 @@ def test_an_item_id_that_is_not_one_never_reaches_the_crud_side(
 ) -> None:
     before = len(crud_mock.calls)
     r = edge.delete(f"/api/store/v1/draft/items/{item_id}", headers={"Origin": PUBLIC_URL})
-    # ".." leaves the path whole: ``DELETE /draft`` is no route, so the edge's 404.
-    assert r.status_code == 404
+    # The client removes the ".." segment (RFC 3986 §5.2.4), as a browser does: httpx 0.28.1
+    # sends ``DELETE /api/store/v1/draft``. ``GET /draft`` is a route, so Starlette can answer
+    # 405 (#7438). The edge never sees ".." as an id; `ITEM_ID` refuses the other ids.
+    assert r.status_code in ((404, 405) if item_id == ".." else (404,))
     assert len(crud_mock.calls) == before
 
 
@@ -2152,6 +2154,52 @@ def test_a_variant_key_that_is_not_one_never_reaches_the_crud_side(
     before = len(crud_mock.calls)
     r = edge.get(f"/api/store/v1/variants/{key}/preview.glb")
     assert r.status_code == 404
+    assert len(crud_mock.calls) == before
+
+
+# -- a file listing's held preview (#6710 §6.3) -------------------------------------------
+
+
+def test_a_file_listings_preview_is_streamed(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.get(
+        f"/api/v1/internal/crud/storefront/listings/{LISTING_ID}/preview/2.glb"
+    ).respond(200, content=b"glTF-bytes", headers={**CRUD, "Content-Type": "model/gltf-binary"})
+    r = edge.get(f"/api/store/v1/listings/{LISTING_ID}/preview/2.glb")
+    assert r.status_code == 200 and r.content == b"glTF-bytes"
+    assert r.headers["content-type"] == "model/gltf-binary"
+    assert r.headers["content-length"] == str(len(b"glTF-bytes"))
+    sent = route.calls.last.request
+    assert len(sent.headers[VISITOR_HEADER]) == 43 and sent.headers[CLIENT_HEADER] == CLIENT[0]
+
+
+def test_a_missing_preview_is_the_crud_sides_404(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    missing = {**NOT_FOUND, "type": f"{STOREFRONT_PROBLEMS}preview_not_found"}
+    crud_mock.get(f"/api/v1/internal/crud/storefront/listings/{LISTING_ID}/preview/1.glb").respond(
+        404, json=missing, headers=CRUD
+    )
+    r = edge.get(f"/api/store/v1/listings/{LISTING_ID}/preview/1.glb")
+    assert r.status_code == 404
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}preview_not_found"
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["not-an-id/preview/1.glb", f"{LISTING_ID}/preview/0.glb", f"{LISTING_ID}/preview/x.glb"],
+)
+def test_a_preview_path_that_is_not_one_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    path: str,
+) -> None:
+    before = len(crud_mock.calls)
+    r = edge.get(f"/api/store/v1/listings/{path}")
+    assert r.status_code in (404, 422)
     assert len(crud_mock.calls) == before
 
 

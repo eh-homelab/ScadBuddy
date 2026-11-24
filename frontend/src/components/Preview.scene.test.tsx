@@ -183,6 +183,33 @@ describe('Preview scene (#364)', () => {
     expect(scene.canvas.getAttribute('data-see-through')).toBe('0.35,0.50')
   })
 
+  it('colours each mesh by its slot from slotColours, and leaves a mesh with no slot as it is (#6710)', () => {
+    const shared = new THREE.MeshStandardMaterial({ color: '#808080' })
+    const part = (slot?: number) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), shared)
+      mesh.userData.scadbuddy_colour = '#808080'
+      if (slot !== undefined) mesh.userData.scadbuddy_slot = slot
+      return mesh
+    }
+    const drawn = new THREE.Group()
+    const [body, top, loose] = [part(0), part(1), part()]
+    drawn.add(body, top, loose)
+    const loaded = new THREE.Group()
+    loaded.clone = () => drawn
+    const url = '/api/store/v1/listings/l4/preview/1.glb'
+    scene.meshes.set(url, loaded)
+    const colourOf = (mesh: THREE.Mesh) => (mesh.material as THREE.MeshStandardMaterial).color.getHexString(THREE.SRGBColorSpace)
+
+    const { rerender } = render(
+      <Preview unit="mm" job={job('a', box([0, 0, 0], [10, 10, 10]), { preview_url: url })} rendering={false} slotColours={{ 0: '#1B6CA8FF', 1: '#E8532FFF' }} />,
+    )
+    expect([colourOf(body), colourOf(top), colourOf(loose)]).toEqual(['1b6ca8', 'e8532f', '808080'])
+    expect(loose.material).toBe(shared)
+
+    rerender(<Preview unit="mm" job={job('a', box([0, 0, 0], [10, 10, 10]), { preview_url: url })} rendering={false} slotColours={{ 0: '#C0502AFF', 1: '#E8532FFF' }} />)
+    expect(colourOf(body)).toBe('c0502a')
+  })
+
   it("measures a plate shown alone in model space, whatever offset the drawn clone's parent still holds (#3026 review)", () => {
     // The plate picked alone after a framed multi-plate render: its drawn clone is mounted
     // under the offset group, whose world matrix still holds the last render's offset

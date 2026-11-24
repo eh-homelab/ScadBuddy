@@ -117,7 +117,12 @@ export class DurableGate {
     }
   }
 
-  /** The session's parked calls, from its workflow (the source of truth). */
+  /**
+   * The parked calls as the session's open workflow holds them, by its `pending_input` Query.
+   * The record (`ai_pending_input`, R5) is the source of truth, and the pending-input reads
+   * list from it (routes/pendingInput.ts); a closed workflow cannot be queried once Temporal
+   * archives it (#7311).
+   */
   async pendingInput(sessionId: string): Promise<PendingInputEntry[]> {
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
     return this.#call(this.#timeoutMs, () => handle.query<PendingInputEntry[]>(PENDING_INPUT_QUERY))

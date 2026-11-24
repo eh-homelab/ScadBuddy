@@ -82,6 +82,16 @@ describe('parseServerEvent', () => {
     expect(result.ok).toBe(false)
   })
 
+  // #7323: an older agent still sends the retired session mode; the panel drops it, never the frame.
+  it.each([
+    ['session.started', { v: 1, type: 'session.started', sessionId: 's1', origin: 'chat', owner, mode: 'classic', modeFallback: 'Temporal did not answer' }],
+    ['sessions.snapshot', { v: 1, type: 'sessions.snapshot', sessions: [{ sessionId: 's1', title: 't', origin: 'mcp', owner, status: 'idle', mode: 'durable' }] }],
+  ])("accepts %s with an older agent's mode, and drops it", (_type, raw) => {
+    const result = parseServerEvent(raw)
+    expect(result.ok).toBe(true)
+    expect(JSON.stringify(result.ok && result.value)).not.toMatch(/"mode/)
+  })
+
   it('names the version it refuses', () => {
     expect(parseServerEvent({ v: 7, type: 'error', message: 'x' })).toEqual({
       ok: false,

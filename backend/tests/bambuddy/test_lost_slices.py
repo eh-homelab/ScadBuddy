@@ -224,7 +224,7 @@ async def test_bambuddy_unreachable_keeps_the_lost_start_for_the_next_sweep(
     # Bambuddy failing stops this lost start's look at once: one read, one warning,
     # not one per job beside it (#3013 review).
     assert len(bambuddy.read) == 1
-    assert len(caplog.records) == 1
+    assert len([r for r in caplog.records if r.name == lost_slices.__name__]) == 1
 
 
 async def test_a_job_bambuddy_refuses_alone_does_not_stop_the_look_beside_it() -> None:

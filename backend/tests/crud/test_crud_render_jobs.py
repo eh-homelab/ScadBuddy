@@ -78,6 +78,14 @@ async def _accept(remote: RemoteJobProjection, job: Job, **kwargs: object) -> Jo
     )
 
 
+async def _seed(projection: JobProjection, job: Job) -> Job:
+    """A test's job row, written by the API's own projection: a test of another route
+    does not pay an accept's 2 s read bound in its setup (#7402)."""
+    return await asyncio.to_thread(
+        lambda: projection.accept(job, "key-1", workflow_id="render-key-1", run_id="run-1")
+    )
+
+
 async def test_an_accept_sent_twice_writes_one_row_one_event_one_activity_row(
     jobs: RemoteJobProjection, projection: JobProjection
 ) -> None:
@@ -135,7 +143,7 @@ def _finish(remote: RemoteJobProjection, job: Job, key: str) -> dict[str, bool]:
 async def test_a_finish_sent_twice_answers_true_twice_and_announces_once(
     jobs: RemoteJobProjection, projection: JobProjection
 ) -> None:
-    job = await _accept(jobs, _job())
+    job = await _seed(projection, _job())
     started = await asyncio.to_thread(jobs.mark_started, job.id)
     assert started is not None and started.state == "running"
     assert await asyncio.to_thread(jobs.mark_started, job.id) is None
@@ -166,7 +174,7 @@ async def test_the_workers_finish_is_true_only_for_the_call_that_moved_the_row(
     jobs: RemoteJobProjection, projection: JobProjection
 ) -> None:
     """A retried activity's finish answers False, so the worker counts a settle once."""
-    job = await _accept(jobs, _job())
+    job = await _seed(projection, _job())
     done = job.model_copy(update={"state": "done", "finished_at": datetime.now(UTC)})
     assert await asyncio.to_thread(jobs.finish, done)
     assert not await asyncio.to_thread(jobs.finish, done)
@@ -176,7 +184,7 @@ async def test_the_workers_finish_is_true_only_for_the_call_that_moved_the_row(
 async def test_a_finish_to_an_unfinished_state_is_a_422(
     jobs: RemoteJobProjection, projection: JobProjection
 ) -> None:
-    job = await _accept(jobs, _job())
+    job = await _seed(projection, _job())
     with pytest.raises(CrudRefusedError) as refused:
         await asyncio.to_thread(jobs.finish, job.model_copy(update={"state": "running"}))
     assert refused.value.status == 422
@@ -203,7 +211,7 @@ async def test_a_500_from_the_accept_route_does_not_pass(
 async def test_claims_steps_and_reads_reach_the_row(
     jobs: RemoteJobProjection, projection: JobProjection
 ) -> None:
-    job = await _accept(jobs, _job())
+    job = await _seed(projection, _job())
     await asyncio.to_thread(jobs.set_claims, job.id, 3)
     steps = [StepInfo(name="render", state="running", done=1, total=2)]
     await asyncio.to_thread(jobs.set_steps, job.id, steps)
@@ -219,7 +227,7 @@ async def test_a_slow_route_makes_a_project_write_raise_inside_its_attempt(
     """A route that answers in 6 s: the write's 5 s request timeout ends it, and no try
     starts after its budget, so it raises before `PROJECT_TIMEOUT` (10 s) cuts the
     attempt short."""
-    job = await _accept(jobs, _job())
+    job = await _seed(projection, _job())
 
     def slow(*_: object) -> None:
         time.sleep(6)

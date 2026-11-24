@@ -221,6 +221,25 @@ describe('the label template (#7157)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('A place label needs an address')
   })
 
+  it('keeps the PDF button disabled while the places load', async () => {
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.post('*/api/v1/filament/printer-labels', async () => {
+        await gate
+        return HttpResponse.json({ base_url: 'https://sb.example', labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }], no_report: [] })
+      }),
+    )
+    renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
+    expect(screen.getByRole('button', { name: 'Download PDF' })).toBeDisabled()
+    expect(screen.getByText('Loading labels…')).toBeInTheDocument()
+    release()
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByRole('button', { name: 'Download PDF' })).toBeEnabled()
+  })
+
   it('holds the PDF of place labels drawn at the page’s own address, and says why', async () => {
     const noBase = () => HttpResponse.json({ filament_label_template: { template: 'roll_50x25', width_mm: null, height_mm: null }, filament_label_base_url: null, public_url: null })
     server.use(http.get('*/api/v1/settings', noBase))

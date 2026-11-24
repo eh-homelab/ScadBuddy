@@ -21,6 +21,8 @@ from scadbuddy.render.pg_store import (
     migrate,
 )
 
+pytestmark = pytest.mark.pg_empty
+
 #: The positional list as it stood before #491, in order.
 _LEGACY = MIGRATIONS[: len(LEGACY_VERSIONS)]
 
@@ -1108,9 +1110,4 @@ def test_the_attempt_media_migration_backfills_the_archive_copies(pg_conninfo: s
                 "UPDATE entity_attachments SET archive_id = 82,"
                 " archive_media = 'finished_photo' WHERE id = 'second'"
             )
-        assert (
-            conn.execute(
-                "SELECT timelapse_scanned_at, media_checked_at FROM order_item_fulfilments"
-            ).fetchall()
-            == []
-        )
+        assert conn.execute("SELECT media_checked_at FROM order_item_fulfilments").fetchall() == []

@@ -56,6 +56,10 @@ on:
   merge_group:
   push:
     branches: [main]
+    # A docs-only push to main runs nothing: its PR already ran `markdown`, the
+    # one job a docs-only change needs (select-lanes.sh `docs_only`).
+    paths-ignore:
+      - "docs/**/*.md"
   # Weekly, and on demand, so every template's verify.sh runs against the image
   # even in a week when nothing merged (#229). The template checks are the
   # reason; the rest of CI rides along because it is cheap and it is the same
@@ -113,6 +117,7 @@ jobs:
       run_agent_durable: ${{ steps.lanes.outputs.agent_durable }}
       run_rust: ${{ steps.lanes.outputs.rust }}
       run_image: ${{ steps.lanes.outputs.image }}
+      docs_only: ${{ steps.lanes.outputs.docs_only }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -182,6 +187,8 @@ jobs:
       # push, the schedule, a dispatch, or a diff that cannot be read selects every
       # lane. `CI Summary` re-derives the same answer from its own checkout, so a
       # skipped lane job is accepted only where this change really does not need it.
+      # `docs_only`: every changed path is docs/**/*.md. Then the lint, frontend,
+      # agent, models, freshness and Go jobs skip too; only `markdown` checks it.
       - name: Select the lanes this change needs
         id: lanes
         env:
@@ -198,6 +205,8 @@ jobs:
   # ── Things that need neither half of the tree ───────────────────────────────
   lint:
     name: Workflow and Dockerfile lint
+    needs: layout
+    if: ${{ needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -444,10 +453,29 @@ jobs:
   # runs took 19 minutes, and runs 44807121481 and 44768125590 were cancelled in
   # the Build step after every test file had passed. Lint, typecheck and build
   # took about 1 minute each there, so this job now takes about 5.
+  # ── Markdown lint ───────────────────────────────────────────────────────────
+  #
+  # markdownlint-cli2 over docs/**/*.md with `.markdownlint-cli2.jsonc` (the
+  # style rules are off; it checks structure). Runs on every change: on a
+  # docs-only change (`docs_only`) it is the only check that runs.
+  markdown:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: markdownlint-cli2
+        run: npx --yes markdownlint-cli2@0.20.0
+
   frontend:
     name: Frontend lint, typecheck, build
     needs: layout
-    if: ${{ needs.layout.outputs.frontend == 'true' }}
+    if: ${{ needs.layout.outputs.frontend == 'true' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -515,11 +543,15 @@ jobs:
   frontend-unit:
     name: Frontend unit tests (${{ matrix.shard }}/3)
     needs: layout
-    if: ${{ needs.layout.outputs.frontend == 'true' }}
+    if: ${{ needs.layout.outputs.frontend == 'true' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      # At most 2 shards at once (#7510): every workflow shares the organization's
+      # concurrent hosted-job limit (about 20 on GitHub Free, #7509), so a CI run that
+      # holds fewer slots leaves room for review jobs. The other shards wait for a slot.
+      max-parallel: 2
       matrix:
         shard: [1, 2, 3]
     defaults:
@@ -575,7 +607,7 @@ jobs:
   frontend-e2e:
     name: Frontend Playwright (${{ matrix.shard }}/3)
     needs: layout
-    if: ${{ needs.layout.outputs.frontend == 'true' && needs.layout.outputs.e2e == 'true' }}
+    if: ${{ needs.layout.outputs.frontend == 'true' && needs.layout.outputs.e2e == 'true' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     # A shard is a third of the 533 s suite plus the webServer's build (typecheck
     # and vite, about a minute) and the browser install: about five minutes. 15 is
@@ -583,6 +615,10 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      # At most 2 shards at once (#7510): every workflow shares the organization's
+      # concurrent hosted-job limit (about 20 on GitHub Free, #7509), so a CI run that
+      # holds fewer slots leaves room for review jobs. The other shards wait for a slot.
+      max-parallel: 2
       matrix:
         shard: [1, 2, 3]
     defaults:
@@ -747,7 +783,7 @@ jobs:
   agent:
     name: Agent lint, typecheck, test, build, image
     needs: layout
-    if: ${{ needs.layout.outputs.agent == 'true' }}
+    if: ${{ needs.layout.outputs.agent == 'true' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -1205,7 +1241,7 @@ jobs:
 
           # The database is required (#401). The service container is on the
           # runner, reached through the host gateway; the app migrates the
-          # default schema, which the pytest step's per-test schemas never touch.
+          # test database itself, which the pytest step's per-test databases never touch.
           # Temporal is reached the same way.
           docker run -d --name scadbuddy-ci -p 18080:8080 \
             --add-host=host.docker.internal:host-gateway \
@@ -1491,6 +1527,10 @@ jobs:
     timeout-minutes: 55
     strategy:
       fail-fast: false
+      # At most 4 shards at once (#7510): every workflow shares the organization's
+      # concurrent hosted-job limit (about 20 on GitHub Free, #7509), so a CI run that
+      # holds fewer slots leaves room for review jobs. The other shards wait for a slot.
+      max-parallel: 4
       matrix:
         group: [1, 2, 3, 4, 5, 6, 7, 8]
     services:
@@ -1499,6 +1539,8 @@ jobs:
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
+          # Every test clones a database and drops it, and none outlives the job.
+          POSTGRES_INITDB_ARGS: "-c fsync=off -c full_page_writes=off -c synchronous_commit=off"
         ports:
           - 5432:5432
         options: >-
@@ -1904,7 +1946,7 @@ jobs:
   models:
     name: Template verify scripts
     needs: layout
-    if: ${{ needs.layout.outputs.models == 'true' }}
+    if: ${{ needs.layout.outputs.models == 'true' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2042,11 +2084,14 @@ jobs:
   #
   # go.work, the root vendor/ and the modules under tools/go/. Never path-gated:
   # `go-select` reads this change's paths the way the `models` job does, and the
-  # `go` job always runs, checking nothing and saying so when no Go changed.
-  # Both are asserted by `CI Summary`. A push, the schedule, a dispatch, or a
+  # `go` job runs whenever `go-select` does, checking nothing and saying so when
+  # no Go changed. Both skip on a docs-only change (`docs_only`); otherwise both
+  # are asserted by `CI Summary`. A push, the schedule, a dispatch, or a
   # diff that cannot be computed checks everything.
   go-select:
     name: Select Go work
+    needs: layout
+    if: ${{ needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -2361,11 +2406,14 @@ jobs:
   # a real pass — the vacuous-green trap.
   freshness:
     name: API spec determinism and diff
-    # NOT `needs: layout`. This job re-derives which trees exist from its own
-    # checkout, for the same reason `CI Summary` does: a job gated on an
-    # upstream job's outputs turns that job's failure into empty strings, every
-    # step skipping, and a green result that asserted nothing.
-    if: ${{ github.event_name == 'pull_request' }}
+    # This job re-derives which trees exist from its own checkout, for the same
+    # reason `CI Summary` does: a job gated on an upstream job's outputs turns
+    # that job's failure into empty strings, every step skipping, and a green
+    # result that asserted nothing. It needs `layout` only for `docs_only`, at
+    # the job level: a failed `layout` skips this job, and `CI Summary` reds on
+    # both, because it re-derives `docs_only` itself.
+    needs: layout
+    if: ${{ github.event_name == 'pull_request' && needs.layout.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -2778,7 +2826,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, freshness, go-client]
+    needs: [layout, lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -2803,6 +2851,7 @@ jobs:
         env:
           LAYOUT_RESULT: ${{ needs.layout.result }}
           LINT_RESULT: ${{ needs.lint.result }}
+          MARKDOWN_RESULT: ${{ needs.markdown.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           FRONTEND_UNIT_RESULT: ${{ needs.frontend-unit.result }}
           FRONTEND_E2E_RESULT: ${{ needs.frontend-e2e.result }}
@@ -2876,6 +2925,10 @@ jobs:
           need_agent_durable=false
           if [ "$has_agent_durable" = true ] && [ "$(lane agent_durable)" = true ]; then need_agent_durable=true; fi
           need_rust=$(lane rust)
+          # A docs-only change (every path docs/**/*.md) needs only `markdown`.
+          not_docs=true
+          if [ "$(lane docs_only)" = true ]; then not_docs=false; fi
+          need() { if [ "$1" = true ] && [ "$not_docs" = true ]; then echo true; else echo false; fi; }
 
           # `app` is reported, not asserted: it gates STEPS inside the image
           # job, not a job of its own. It needs no assertion — when the API
@@ -2889,35 +2942,37 @@ jobs:
           echo "Lanes this change needs: $(paste -sd' ' <<<"$lanes")"
           echo "Job results:"
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
-          assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
-          assert "Frontend lint, typecheck, build"        "$FRONTEND_RESULT" "$has_frontend"
-          assert "Frontend unit tests (every shard)"      "$FRONTEND_UNIT_RESULT" "$has_frontend"
-          assert "Frontend Playwright (every shard)"      "$FRONTEND_E2E_RESULT" "$has_e2e"
-          assert "Frontend Playwright shards cover the suite" "$FRONTEND_E2E_SPLIT_RESULT" "$has_e2e"
-          assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
+          assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     "$not_docs"
+          assert "Markdown lint"                          "$MARKDOWN_RESULT" true
+          assert "Frontend lint, typecheck, build"        "$FRONTEND_RESULT" "$(need "$has_frontend")"
+          assert "Frontend unit tests (every shard)"      "$FRONTEND_UNIT_RESULT" "$(need "$has_frontend")"
+          assert "Frontend Playwright (every shard)"      "$FRONTEND_E2E_RESULT" "$(need "$has_e2e")"
+          assert "Frontend Playwright shards cover the suite" "$FRONTEND_E2E_SPLIT_RESULT" "$(need "$has_e2e")"
+          assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$(need "$has_agent")"
           assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$need_agent_durable"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$need_image"
           assert "Profile-fetch image build and driver tests" "$PROFILE_FETCH_IMAGE_RESULT" "$need_image"
           assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$need_backend"
           assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$need_backend"
-          assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
-          # Always required: the `go` job runs on every commit and reports "No Go
-          # changes" itself when `go-select` found none, so a skip is a failure.
-          assert "Select Go work"                         "$GO_SELECT_RESULT" true
-          assert "Go modules"                             "$GO_RESULT"       true
+          assert "Template verify scripts"                "$MODELS_RESULT"   "$(need "$has_models")"
+          # Required on every change but a docs-only one: the `go` job reports "No
+          # Go changes" itself when `go-select` found none, so a skip is a failure.
+          assert "Select Go work"                         "$GO_SELECT_RESULT" "$not_docs"
+          assert "Go modules"                             "$GO_RESULT"       "$not_docs"
           # Required when this change touches Rust (select-lanes.sh).
           assert "Rust workers"                           "$RUST_RESULT"     "$need_rust"
           assert "Slicer image build and smoke"           "$SLICER_IMAGE_RESULT" "$need_rust"
 
           # `freshness` is PR-only — it diffs the API against the PR's base and
           # comments on the PR, and a push to main has neither. It is therefore
-          # REQUIRED on a pull_request and legitimately skipped on a push, and
-          # it is never path-gated: a skip that this job counts as satisfied is
+          # REQUIRED on a pull_request and legitimately skipped on a push. Its
+          # one path gate is `docs_only`, re-derived above, not read from
+          # `layout`: a skip that this job counts as satisfied is
           # indistinguishable from a real pass, which is the whole reason the
           # third argument exists.
           is_pr=false
           if [ "$EVENT_NAME" = "pull_request" ]; then is_pr=true; fi
-          assert "API spec determinism and diff"         "$FRESHNESS_RESULT" "$is_pr"
+          assert "API spec determinism and diff"         "$FRESHNESS_RESULT" "$(need "$is_pr")"
           # Its mirror: the Go client checked on the commit itself, required off a PR.
           not_pr=true
           if [ "$is_pr" = true ]; then not_pr=false; fi
@@ -2943,7 +2998,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
+    needs: [lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
