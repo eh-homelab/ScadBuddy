@@ -348,6 +348,8 @@ def test_an_offer_round_trips_with_its_prices(client: TestClient) -> None:
     assert made.status_code == 201, made.text
     offer = made.json()
     assert offer["latest_price"] is None
+    # R-P2-40: decimals are normalized, as an item's are.
+    assert offer["pack_size"] == "100"
 
     assert [o["id"] for o in client.get(f"{API}/items/{item['id']}/offers").json()["offers"]] == [
         offer["id"]
@@ -368,6 +370,9 @@ def test_an_offer_round_trips_with_its_prices(client: TestClient) -> None:
     )
     assert price.status_code == 201, price.text
     assert (price.json()["currency"], price.json()["source"]) == ("EUR", "manual")
+    assert price.json()["price"] == "4.99"
+    listed = client.get(f"{API}/items/{item['id']}/offers").json()["offers"][0]
+    assert (listed["pack_size"], listed["latest_price"]["price"]) == ("100", "4.99")
     prices = client.get(f"{API}/offers/{offer['id']}/prices").json()["prices"]
     assert [p["id"] for p in prices] == [price.json()["id"]]
     assert (
