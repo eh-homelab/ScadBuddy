@@ -1,7 +1,9 @@
 """The camera recorders' CRUD routes (plan 2026-11-23 camera recording, phase 1): under
-``/api/v1/internal/crud/camera/``, for the ``camera`` credential only (`crud_router`). Area
-``printers``. No route returns an access code (`api/crud_camera_relay.py` does).
+``/api/v1/internal/crud/camera/``, for the ``camera`` credential only (`crud_router`). Areas
+``printers`` and ``changes``. No route returns an access code (`api/crud_camera_relay.py` does).
 
+- ``GET …/changes``: the change stream, only ``CAMERA_KINDS`` (`keep_camera`), with the agent
+  stream's frames and ``Last-Event-ID`` replay (`api/crud_agent_changes.py`);
 - ``GET …/printers`` and ``…/printers/{printer_id}``: the printers that qualify
   (`CameraStore.sources`); 404 ``not_recorded`` for one that does not;
 - ``POST …/printers/{printer_id}/segments``: index uploaded segments, in at most
@@ -16,21 +18,28 @@ The lease and the index use the API process clock, never a time from the request
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from fastapi import status
+from fastapi import Header, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import StateDep
+from scadbuddy.agent_changes.hub import Change, ChangeHub
+from scadbuddy.api.crud_agent_changes import HubDep, change_stream
+from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.camera.models import CameraSource, FeedReport, LeaseAnswer, SegmentIn
 from scadbuddy.camera.store import CameraStore, NotLeaderError
-from scadbuddy.core.events import CameraFeedEvent, emit
+from scadbuddy.core.events import PG_CHANNEL, CameraFeedEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.printers.component import PRINTERS
 
 MAX_SEGMENTS = 500
+#: The ``scadbuddy_events`` kinds the camera callers' streams carry. ``camera.reconnect`` is
+#: sent from phase 3; the filter names it now.
+CAMERA_KINDS = frozenset({"printer.changed", "camera.reconnect"})
 
 router = crud_router("camera")
 
@@ -49,9 +58,35 @@ class LeaseAsk(BaseModel):
     action: Literal["acquire", "renew", "release"]
 
 
+def keep_camera(change: Change) -> bool:
+    """Only the event log's ``CAMERA_KINDS``: no other channel, no other kind."""
+    if change.channel != PG_CHANNEL:
+        return False
+    try:
+        return json.loads(change.payload).get("kind") in CAMERA_KINDS
+    except (ValueError, AttributeError):
+        return False
+
+
+async def camera_changes(
+    request: Request, state: AppState, hub: ChangeHub, last_event_id: str | None
+) -> StreamingResponse:
+    return await change_stream(request, state, hub, last_event_id, keep=keep_camera)
+
+
 def camera_store(state: StateDep) -> CameraStore:
     printers = state.components.get(PRINTERS)
     return CameraStore(printers.store.pool, printers.store)
+
+
+@router.get("/changes", name="crud_camera_changes")
+async def changes(
+    request: Request,
+    state: StateDep,
+    hub: HubDep,
+    last_event_id: Annotated[str | None, Header()] = None,
+) -> StreamingResponse:
+    return await camera_changes(request, state, hub, last_event_id)
 
 
 @router.get("/printers", name="crud_camera_printers")

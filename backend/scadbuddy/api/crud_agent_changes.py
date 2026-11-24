@@ -23,7 +23,7 @@ one more is 429.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Annotated
 
 from fastapi import Header, Request, status
@@ -31,9 +31,9 @@ from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
 from scadbuddy.agent_changes.component import CHANGES
-from scadbuddy.agent_changes.hub import START, ChangeHub, StreamsFullError, frames
+from scadbuddy.agent_changes.hub import START, Change, ChangeHub, StreamsFullError, frames
 from scadbuddy.api.components import component_dep
-from scadbuddy.api.deps import StateDep
+from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -69,6 +69,19 @@ async def changes(
     hub: HubDep,
     last_event_id: Annotated[str | None, Header()] = None,
 ) -> StreamingResponse:
+    return await change_stream(request, state, hub, last_event_id, keep=None)
+
+
+async def change_stream(
+    request: Request,
+    state: AppState,
+    hub: ChangeHub,
+    last_event_id: str | None,
+    *,
+    keep: Callable[[Change], bool] | None,
+) -> StreamingResponse:
+    """The stream of ``hub``'s changes that ``keep`` accepts (all when None); the agent's
+    route and the camera routes share it."""
     log = state.events
     if not isinstance(log, PgNotifyEventBus):
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "this process has no event log")
@@ -78,7 +91,7 @@ async def changes(
     # Read before the stream subscribes, so every live event comes after its place.
     start = await log.newest() or START if last_event_id is None else None
     try:
-        stream = hub.open(key)
+        stream = hub.open(key, keep)
     except StreamsFullError as error:
         raise ApiError(status.HTTP_429_TOO_MANY_REQUESTS, str(error)) from None
 

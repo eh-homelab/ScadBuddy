@@ -39,6 +39,13 @@ check late and so needed a guard for a transaction open longer than that check (
 row's ``logged_at`` too old); this stream needs none while the lock holds. A writer of
 ``events`` that does not take the lock breaks this replay.
 
+**Filtered streams.** A stream may carry a ``keep`` filter (`ChangeStream.keep`), applied in
+:meth:`ChangeStream.offer` and in replay, so a replay never returns a change that live
+delivery drops. A live change it drops moves no place. A replay moves the place past every
+event it scans, kept or not, and counts every scanned event against :data:`REPLAY_MAX`.
+Frame ids stay the ids of logged events, so they stay monotonic, and a ``Last-Event-ID`` is
+always a kept event's id.
+
 **Bounds.** At most :data:`STREAMS_PER_CREDENTIAL` streams per service credential and peer
 address (`api/crud_agent_changes.py` `stream_key`) and :data:`STREAMS_MAX` in all are open at
 once; another is refused 429. The process's shutdown ends
@@ -126,15 +133,21 @@ class StreamsFullError(Exception):
 class ChangeStream:
     """One open stream's queue. Fed on the event loop, read by its :func:`frames`."""
 
-    def __init__(self, key: str, limit: int = QUEUE_MAX) -> None:
+    def __init__(
+        self, key: str, limit: int = QUEUE_MAX, keep: Callable[[Change], bool] | None = None
+    ) -> None:
         self.key = key
         self._limit = limit
+        #: Which changes this stream carries, live and in replay; None keeps every one.
+        self.keep = keep
         self._items: deque[Item] = deque()
         self._wake = asyncio.Event()
         #: Times its reader fell behind past the queue's bound (tests, logs).
         self.overflows = 0
 
     def offer(self, item: Item) -> None:
+        if isinstance(item, Change) and self.keep is not None and not self.keep(item):
+            return
         if self._items and self._items[0] is END:
             return  # told to end: nothing after it is read, and nothing may push it out
         if isinstance(item, _End):
@@ -199,14 +212,14 @@ class ChangeHub:
 
         return heard
 
-    def open(self, key: str) -> ChangeStream:
+    def open(self, key: str, keep: Callable[[Change], bool] | None = None) -> ChangeStream:
         if self._closed:
             raise StreamsFullError("the process is shutting down")
         if len(self._streams) >= self._total:
             raise StreamsFullError(f"{self._total} change streams are open")
         if sum(1 for s in self._streams if s.key == key) >= self._per_credential:
             raise StreamsFullError(f"this credential has {self._per_credential} streams open")
-        stream = ChangeStream(key, self._queue_max)
+        stream = ChangeStream(key, self._queue_max, keep)
         self._streams.add(stream)
         return stream
 
@@ -276,7 +289,9 @@ class _Place:
     replayed: set[str]
 
 
-async def _replay(log: Log, last_id: str | None) -> tuple[list[bytes], _Place, bool]:
+async def _replay(
+    log: Log, last_id: str | None, keep: Callable[[Change], bool] | None = None
+) -> tuple[list[bytes], _Place, bool]:
     """The frames of the log after ``last_id``, the place after them, and whether the agent
     must resync instead (its place unknown, pruned past, or too far behind)."""
     if not _placeable(last_id):
@@ -302,9 +317,10 @@ async def _replay(log: Log, last_id: str | None) -> tuple[list[bytes], _Place, b
         for logged in page.events:
             place.last_id = logged.event.id
             place.replayed.add(logged.event.id)
-            frames.append(
-                frame("change", {"c": PG_CHANNEL, "p": encode_event(logged.event)}, logged.event.id)
-            )
+            payload = encode_event(logged.event)
+            if keep is not None and not keep(Change(PG_CHANNEL, payload, logged.event.id)):
+                continue  # a filtered stream's place still moves past it, but no frame goes out
+            frames.append(frame("change", {"c": PG_CHANNEL, "p": payload}, logged.event.id))
         after = page.events[-1].seq
 
 
@@ -326,7 +342,7 @@ async def frames(
     it, so none moves the place back (read here when not given)."""
     reconnect = last_event_id is not None
     if reconnect:
-        replayed, place, resync = await _replay(log, last_event_id)
+        replayed, place, resync = await _replay(log, last_event_id, stream.keep)
         for chunk in replayed:
             yield chunk
     else:
@@ -340,7 +356,7 @@ async def frames(
         elif isinstance(item, _End):
             return
         elif isinstance(item, _Gap):
-            replayed, gap_place, resync = await _replay(log, place.last_id)
+            replayed, gap_place, resync = await _replay(log, place.last_id, stream.keep)
             for chunk in replayed:
                 yield chunk
             place = gap_place

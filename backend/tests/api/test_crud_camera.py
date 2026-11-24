@@ -153,9 +153,9 @@ def test_relay_feed_is_the_relay_part(
     assert len(events) == 1
 
 
-def test_areas_list_printers(client: TestClient) -> None:
+def test_areas_list_printers_and_changes(client: TestClient) -> None:
     for caller in ("camera", "camera-relay"):
         response = client.get(
             f"/api/v1/internal/crud/{caller}/areas", headers=bearer_of(client, caller)
         )
-        assert response.json() == {"areas": ["printers"]}
+        assert response.json() == {"areas": ["printers", "changes"]}

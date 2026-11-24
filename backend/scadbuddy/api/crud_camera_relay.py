@@ -1,9 +1,10 @@
 """The camera relay's CRUD routes (plan 2026-11-23 camera recording, phase 1): under
 ``/api/v1/internal/crud/camera-relay/``, for the ``camera-relay`` credential only
-(`crud_router`). Area ``printers``. These are the only routes that return a printer's
-access code: a plain string in the JSON, which the relay gives to MediaMTX and nothing
-else. The code is never logged.
+(`crud_router`). Areas ``printers`` and ``changes``. These are the only routes that return a
+printer's access code: a plain string in the JSON, which the relay gives to MediaMTX and
+nothing else. The code is never logged.
 
+- ``GET …/changes``: the same filtered change stream as the ``camera`` caller's;
 - ``GET …/printers`` and ``…/printers/{printer_id}``: the qualifying printers with their
   codes; 404 ``not_recorded`` for one that does not qualify;
 - ``POST …/printers/{printer_id}/feed``: the relay's feed state; 204.
@@ -12,10 +13,13 @@ else. The code is never logged.
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated
 
-from fastapi import status
+from fastapi import Header, Request, status
+from fastapi.responses import StreamingResponse
 
-from scadbuddy.api.crud_camera import camera_store, report_feed
+from scadbuddy.api.crud_agent_changes import HubDep
+from scadbuddy.api.crud_camera import camera_changes, camera_store, report_feed
 from scadbuddy.api.deps import StateDep
 from scadbuddy.camera.models import CameraSource, FeedReport
 from scadbuddy.camera.store import CameraStore
@@ -36,6 +40,16 @@ def _with_codes(store: CameraStore, printer_id: str | None) -> list[RelaySource]
         )
         for s in store.sources_with_codes(printer_id)
     ]
+
+
+@router.get("/changes", name="crud_camera_relay_changes")
+async def changes(
+    request: Request,
+    state: StateDep,
+    hub: HubDep,
+    last_event_id: Annotated[str | None, Header()] = None,
+) -> StreamingResponse:
+    return await camera_changes(request, state, hub, last_event_id)
 
 
 @router.get("/printers", name="crud_camera_relay_printers")
