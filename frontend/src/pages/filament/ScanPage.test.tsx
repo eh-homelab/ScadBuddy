@@ -74,7 +74,8 @@ describe('the scan page (#7273)', () => {
     const { user } = open()
     await user.click(screen.getByRole('button', { name: 'Scan' }))
     const on = await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
-    expect(on).toHaveAttribute('aria-pressed', 'true')
+    // The label says it is on; a toggle state would claim a second tap turns it off.
+    expect(on).not.toHaveAttribute('aria-pressed')
     stub.tap({ serialNumber: '04:a2:00:11:22:33:44', records: [] })
     const reads = await screen.findByRole('list', { name: "This session's reads" })
     expect(await within(reads).findByText('New tag')).toBeInTheDocument()
@@ -149,12 +150,64 @@ describe('the scan page (#7273)', () => {
     expect(tag.spool_number).toBe(6)
   })
 
+  it('announces each read', async () => {
+    const { user } = open()
+    const status = screen.getByRole('status', { name: 'Last read' })
+    expect(status).toHaveTextContent('')
+    await user.click(screen.getByRole('button', { name: 'Scan' }))
+    await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+    stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+    await waitFor(() => expect(status).toHaveTextContent('Read 04:a1:b2:c3:d4:e5:f6: spool #3'))
+    stub.tap({ serialNumber: '04:a2:00:11:22:33:45', records: [] })
+    await waitFor(() => expect(status).toHaveTextContent('Read 04:a2:00:11:22:33:45: new tag'))
+  })
+
+  it('says when a tag could not be read', async () => {
+    const { user } = open()
+    await user.click(screen.getByRole('button', { name: 'Scan' }))
+    await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+    stub.tapError()
+    expect(await screen.findByRole('alert')).toHaveTextContent('This tag could not be read. Hold it to the phone again.')
+  })
+
+  it('gives every read of a tag the bind, so an older read offers no second spool', async () => {
+    const { user } = open()
+    await user.click(screen.getByRole('button', { name: 'Scan' }))
+    await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+    const tag = { serialNumber: '04:55:44:33:22:11:00', records: [{ recordType: 'mime', mediaType: 'application/json', data: OPENSPOOL_PLA }] }
+    stub.tap(tag)
+    const reads = await screen.findByRole('list', { name: "This session's reads" })
+    await within(reads).findByText('New tag')
+    stub.tap(tag)
+    await waitFor(() => expect(within(reads).getAllByRole('listitem')).toHaveLength(2))
+    await user.click(await screen.findByRole('button', { name: 'Create a spool from this tag' }))
+    const card = await screen.findByRole('region', { name: /^Spool #\d+$/ })
+    const name = card.getAttribute('aria-label')!
+    // The older read of the same tag shows the spool too, not "Create" again.
+    await waitFor(() => expect(within(reads).queryByText('New tag')).toBeNull())
+    await user.click(within(reads).getAllByRole('button')[1]!)
+    expect(await screen.findByRole('region', { name })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Create a spool from this tag' })).toBeNull()
+  })
+
+  it('shows the new grams on the card after a weighing', async () => {
+    const { user } = open()
+    await user.click(screen.getByRole('button', { name: 'Scan' }))
+    await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+    stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+    const card = await screen.findByRole('region', { name: 'Spool #3' })
+    expect(within(card).getByText('930 g left')).toBeInTheDocument()
+    await user.type(await screen.findByLabelText('Gross weight (g)'), '1050')
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await within(card).findByText('800 g left')).toBeInTheDocument()
+  })
+
   it('says why NFC was refused', async () => {
     stub.failScan(new DOMException('', 'NotAllowedError'))
     const { user } = open()
     await user.click(screen.getByRole('button', { name: 'Scan' }))
     expect(await screen.findByRole('alert')).toHaveTextContent("Allow NFC for this site in Chrome's settings, then tap Scan again.")
-    expect(screen.getByRole('button', { name: 'Scan' })).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByRole('button', { name: 'Scan' })).not.toHaveAttribute('aria-pressed')
   })
 
   it('says a tag with no serial number cannot be kept', async () => {

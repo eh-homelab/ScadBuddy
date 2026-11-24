@@ -1,5 +1,5 @@
 import { screen, waitFor } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { getSpool, listSpoolEvents } from '../../../api/filament'
 import { spoolId } from '../../../mocks/features/filament/seed'
 import { renderPage } from '../../../test/utils'
@@ -30,6 +30,31 @@ describe('WeightField (#7273)', () => {
     await user.type(field, '432')
     await user.click(screen.getByRole('button', { name: 'Save weight' }))
     await waitFor(async () => expect(await lastWeighing(spool.id)).toMatchObject({ grams_after: 432, source: 'person' }))
+  })
+
+  it.each(['1e3', '0x10', '1,243', '-5', '12 kg'])('refuses %s as a weight', async (typed) => {
+    const spool = await getSpool(spoolId(6))
+    const before = (await listSpoolEvents(spool.id)).length
+    const { user } = renderPage(<WeightField spool={spool} />)
+    await user.type(await screen.findByLabelText('Filament weight (g)'), typed)
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Enter the weight in grams, such as 1243.')
+    expect(await listSpoolEvents(spool.id)).toHaveLength(before)
+  })
+
+  it('hands the spool, read again, to the page after a save, and keeps its live region mounted', async () => {
+    const spool = await getSpool(spoolId(3))
+    const saved = vi.fn()
+    const { user } = renderPage(<WeightField spool={spool} onSaved={saved} />)
+    const field = await screen.findByLabelText('Gross weight (g)')
+    const live = screen.getByRole('status', { name: 'Weight saved' })
+    expect(live).toHaveTextContent('')
+    await user.type(field, '1050')
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    await waitFor(() => expect(live).toHaveTextContent('Saved'))
+    expect(screen.getByRole('status', { name: 'Weight saved' })).toBe(live)
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce())
+    expect(saved.mock.calls[0]![0]).toMatchObject({ id: spool.id, grams_left: 800 })
   })
 
   it('refuses a weight below the empty spool', async () => {

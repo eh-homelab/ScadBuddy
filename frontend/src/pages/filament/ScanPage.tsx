@@ -25,6 +25,10 @@ interface Entry {
 const timeOf = (at: Date) => at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 const outcomeOf = (result: TagReadResult) =>
   result.spool ? `Spool #${result.spool.number}` : result.next === 'none' ? 'No serial number' : 'New tag'
+/** What the live region says of a read, for a person who cannot see the list change. */
+const announcementOf = (uid: string, result: TagReadResult) =>
+  uid ? `Read ${uid}: ${outcomeOf(result).replace(/^\w/, (first) => first.toLowerCase())}` : 'Read a tag with no serial number'
+const UNREADABLE = 'This tag could not be read. Hold it to the phone again.'
 
 function scanRefusal(cause: unknown): string {
   if (cause instanceof DOMException && cause.name === 'NotAllowedError') return "Allow NFC for this site in Chrome's settings, then tap Scan again."
@@ -103,6 +107,7 @@ function Scanner() {
   const [error, setError] = useState<string | null>(null)
   const [entries, setEntries] = useState<Entry[]>([])
   const [openKey, setOpenKey] = useState<number | null>(null)
+  const [announcement, setAnnouncement] = useState('')
   const nextKey = useRef(0)
 
   useEffect(() => {
@@ -114,12 +119,15 @@ function Scanner() {
           setEntries((now) => [{ key, at: new Date(), uid: reading.uid, records: reading.records, result, held: {} }, ...now])
           setOpenKey(key)
           setError(null)
+          setAnnouncement(announcementOf(reading.uid, result))
         },
         (cause: unknown) => setError(`ScadBuddy could not look up the tag: ${cause instanceof ApiError ? cause.detail : 'try the tag again'}.`),
       )
     })
+    const offError = nfc.onReadingError(() => setError(UNREADABLE))
     return () => {
       off()
+      offError()
       nfc.stop()
       setScanning(false)
     }
@@ -140,6 +148,15 @@ function Scanner() {
   }
 
   const update = (key: number, change: Partial<Entry>) => setEntries((now) => now.map((one) => (one.key === key ? { ...one, ...change } : one)))
+  /**
+   * A new answer for one read (a bind, a weighing) is the answer for every read of the same tag
+   * this session: an older read of it must not offer "Create" again, nor show old grams.
+   */
+  const answer = (key: number, result: TagReadResult) =>
+    setEntries((now) => {
+      const uid = now.find((one) => one.key === key)?.uid
+      return now.map((one) => (one.key === key || (uid && one.uid === uid) ? { ...one, result } : one))
+    })
   const opened = entries.find((one) => one.key === openKey) ?? null
 
   return (
@@ -149,7 +166,12 @@ function Scanner() {
           {error}
         </p>
       )}
-      {opened && <ReadView key={opened.key} entry={opened} onChange={(change) => update(opened.key, change)} />}
+      <p role="status" aria-label="Last read" className="sr-only">
+        {announcement}
+      </p>
+      {opened && (
+        <ReadView key={opened.key} entry={opened} onChange={(change) => update(opened.key, change)} onResult={(result) => answer(opened.key, result)} />
+      )}
       <section aria-labelledby="scan-reads" className="flex flex-col gap-2">
         <h2 id="scan-reads" className="font-medium">
           This session's reads
@@ -178,7 +200,6 @@ function Scanner() {
       <div className="sticky bottom-0 mt-auto -mx-4 bg-gradient-to-t from-background from-70% to-transparent px-4 pt-6 pb-[max(1rem,env(safe-area-inset-bottom))]">
         <button
           type="button"
-          aria-pressed={scanning}
           disabled={starting}
           onClick={() => void start()}
           className={cn(
@@ -198,10 +219,10 @@ function Scanner() {
 }
 
 /** The opened read: screen 2, screen 3, or a tag with no serial number. */
-function ReadView({ entry, onChange }: { entry: Entry; onChange: (change: Partial<Entry>) => void }) {
+function ReadView({ entry, onChange, onResult }: { entry: Entry; onChange: (change: Partial<Entry>) => void; onResult: (result: TagReadResult) => void }) {
   const { result } = entry
   if (result.next === 'open_spool' && result.spool) {
-    return <KnownTag spool={result.spool} held={entry.held} onHeld={(held) => onChange({ held })} />
+    return <KnownTag spool={result.spool} held={entry.held} onHeld={(held) => onChange({ held })} onSpool={(spool) => onResult({ ...result, spool })} />
   }
   if (result.next === 'bind_or_create') {
     return (
@@ -211,7 +232,7 @@ function ReadView({ entry, onChange }: { entry: Entry; onChange: (change: Partia
         result={result}
         held={entry.held}
         onHeld={(held) => onChange({ held })}
-        onBound={(next) => onChange({ result: next })}
+        onBound={onResult}
       />
     )
   }

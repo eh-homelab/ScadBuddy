@@ -113,6 +113,10 @@ export class NfcSession {
   private reader: NDEFReader | null = null
   private scan: AbortController | null = null
   private readonly listeners = new Set<(reading: Reading) => void>()
+  private readonly errorListeners = new Set<() => void>()
+  private readonly onReadingErrorEvent = () => {
+    for (const listener of [...this.errorListeners]) listener()
+  }
   private readonly onReadingEvent = (event: Event) => {
     const { serialNumber, message } = event as NDEFReadingEvent
     const reading: Reading = { uid: serialNumber, records: message.records.map(toWire) }
@@ -128,6 +132,7 @@ export class NfcSession {
       const Reader = (window as unknown as { NDEFReader: NDEFReaderConstructor }).NDEFReader
       this.reader = new Reader()
       this.reader.addEventListener('reading', this.onReadingEvent)
+      this.reader.addEventListener('readingerror', this.onReadingErrorEvent)
     }
     return this.reader
   }
@@ -154,6 +159,12 @@ export class NfcSession {
   onReading(listener: (reading: Reading) => void): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
+  }
+
+  /** A tag the reader saw but could not read (`readingerror`: no NDEF message it understands, or the tag moved away). */
+  onReadingError(listener: () => void): () => void {
+    this.errorListeners.add(listener)
+    return () => this.errorListeners.delete(listener)
   }
 
   /** The next tap while the scan runs; rejects with `signal`'s reason when it aborts first. */

@@ -61,6 +61,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { listBack } from '../../components/filament/spoolsQuery'
 import { EntityLink } from '../../components/filament/EntityLink'
+import { DECIMAL } from '../../components/filament/spoolWeight'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { parseRgba } from '../../lib/rgba'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
@@ -239,7 +240,6 @@ function draftOfCopy(copy: SpoolDraft): Draft {
 const MOST_SPOOLS = 100
 
 const INTEGER = /^\d+$/
-const DECIMAL = /^\d+(\.\d+)?$/
 
 /** The spool's own columns a draft makes (`null`: the type's value), or why it cannot be saved. */
 function bodyOf(draft: Draft): SpoolPatch | string {

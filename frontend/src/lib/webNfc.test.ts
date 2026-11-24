@@ -76,6 +76,19 @@ describe('NfcSession', () => {
     expect(stub.scanning).toBe(false)
   })
 
+  it('hands a tag it could not read to the error listeners', async () => {
+    const session = new NfcSession()
+    let errors = 0
+    const off = session.onReadingError(() => (errors += 1))
+    await session.start()
+    stub.tapError()
+    expect(errors).toBe(1)
+    off()
+    stub.tapError()
+    expect(errors).toBe(1)
+    session.stop()
+  })
+
   it('writes with overwrite and never makes a tag read-only', async () => {
     const NDEFReader = (window as unknown as { NDEFReader: { prototype: { makeReadOnly: () => Promise<void>; write: () => Promise<void> } } }).NDEFReader
     const readOnly = vi.spyOn(NDEFReader.prototype, 'makeReadOnly')

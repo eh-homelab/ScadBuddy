@@ -1,4 +1,4 @@
-import { PlusIcon, SearchIcon } from 'lucide-react'
+import { LinkIcon, PlusIcon, SearchIcon } from 'lucide-react'
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { ApiError } from '../../../api/client'
@@ -90,6 +90,8 @@ export function NewTag({ uid, records, result, onBound, held, onHeld }: NewTagPr
   const [error, setError] = useState<string | null>(null)
   const [spools, setSpools] = useState<Spool[] | null>(null)
   const [search, setSearch] = useState('')
+  /** The spool "Create" made when its bind failed: the next tap binds it, and makes none. */
+  const [made, setMade] = useState<Spool | null>(null)
 
   useEffect(() => {
     let live = true
@@ -114,18 +116,22 @@ export function NewTag({ uid, records, result, onBound, held, onHeld }: NewTagPr
   }
 
   async function create() {
-    if (!result.draft) return
+    if (!result.draft && !made) return
     setBusy(true)
     setError(null)
+    let spool = made
     try {
-      const made = await createSpool(result.draft)
-      try {
-        await bind(made.id)
-      } catch (cause) {
-        setError(`Spool #${made.number} was made, but the tag was not bound to it: ${reasonOf(cause, 'try binding it below')}.`)
-      }
+      spool ??= await createSpool(result.draft!)
     } catch (cause) {
       setError(reasonOf(cause, 'ScadBuddy could not make the spool. Try again.'))
+      setBusy(false)
+      return
+    }
+    try {
+      await bind(spool.id)
+    } catch (cause) {
+      setMade(spool)
+      setError(`Spool #${spool.number} was made, but the tag was not bound to it: ${reasonOf(cause, 'the bind failed')}. Tap "Bind to spool #${spool.number}" to try again.`)
     } finally {
       setBusy(false)
     }
@@ -147,7 +153,11 @@ export function NewTag({ uid, records, result, onBound, held, onHeld }: NewTagPr
     <div className="flex flex-col gap-5">
       {result.decoded ? <DecodedFields decoded={result.decoded} /> : <p className="text-muted-foreground">The tag holds no spool data ScadBuddy can read.</p>}
       <PhotoButtons spool={null} held={held} onHeld={onHeld} />
-      {result.draft ? (
+      {made ? (
+        <Button type="button" className="h-12 text-base" disabled={busy} onClick={() => void create()}>
+          <LinkIcon /> Bind to spool #{made.number}
+        </Button>
+      ) : result.draft ? (
         <Button type="button" className="h-12 text-base" disabled={busy} onClick={() => void create()}>
           <PlusIcon /> Create a spool from this tag
         </Button>

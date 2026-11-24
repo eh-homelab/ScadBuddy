@@ -33,12 +33,23 @@ export function SpoolCard({ spool }: { spool: Spool }) {
  * #7273 screen 2 — a tag a spool holds: its card, the two label photos, the weight, then
  * "Open spool" and "Write tag" (Task 6 enables the write).
  */
-export function KnownTag({ spool, held, onHeld }: { spool: Spool; held?: HeldPhotos; onHeld?: (held: HeldPhotos) => void }) {
+export function KnownTag({
+  spool,
+  held,
+  onHeld,
+  onSpool,
+}: {
+  spool: Spool
+  held?: HeldPhotos
+  onHeld?: (held: HeldPhotos) => void
+  /** The spool read again after a change on this screen (a weighing). */
+  onSpool?: (spool: Spool) => void
+}) {
   return (
     <div className="flex flex-col gap-5">
       <SpoolCard spool={spool} />
       <PhotoButtons spool={{ id: spool.id, type_id: spool.type_id }} held={held} onHeld={onHeld} />
-      <WeightField key={spool.id} spool={spool} />
+      <WeightField key={spool.id} spool={spool} onSaved={onSpool} />
       <div className="grid grid-cols-2 gap-3">
         <Button asChild variant="outline" className="h-11">
           <Link to={filamentLinks.spool(spool.id)}>

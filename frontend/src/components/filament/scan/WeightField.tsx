@@ -1,7 +1,8 @@
 import { ScaleIcon } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import { ApiError } from '../../../api/client'
-import { addSpoolEvent, listCatalog, type Spool } from '../../../api/filament'
+import { addSpoolEvent, getSpool, listCatalog, type Spool } from '../../../api/filament'
+import { DECIMAL } from '../spoolWeight'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
@@ -13,7 +14,7 @@ const grams = (value: number) => Math.round(value).toLocaleString('en-US').repla
  * types the gross weight and the field works out the filament; without it, they type the
  * filament's own weight. "Save weight" books a person's weighing of the net grams.
  */
-export function WeightField({ spool }: { spool: Spool }) {
+export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool: Spool) => void }) {
   const id = useId()
   const insertId = spool.effective?.insert_type_id ?? spool.insert_type_id
   const [empty, setEmpty] = useState<number | null | undefined>(insertId ? undefined : null)
@@ -36,13 +37,18 @@ export function WeightField({ spool }: { spool: Spool }) {
 
   if (empty === undefined) return <p className="text-muted-foreground">Loading…</p>
 
-  const value = text.trim() === '' ? null : Number(text)
-  const net = value === null || !Number.isFinite(value) ? null : empty === null ? value : value - empty
+  const typed = text.trim()
+  const value = DECIMAL.test(typed) ? Number(typed) : null
+  const net = value === null ? null : empty === null ? value : value - empty
 
   async function save() {
     setSaved(false)
-    if (net === null) {
+    if (typed === '') {
       setError('Type the weight first.')
+      return
+    }
+    if (net === null) {
+      setError('Enter the weight in grams, such as 1243.')
       return
     }
     if (net < 0) {
@@ -54,6 +60,11 @@ export function WeightField({ spool }: { spool: Spool }) {
     try {
       await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', grams: Math.round(net) })
       setSaved(true)
+      // The card shows the grams left: the spool read again carries the new ones.
+      getSpool(spool.id).then(
+        (fresh) => onSaved?.(fresh),
+        () => {},
+      )
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'ScadBuddy could not save the weight. Try again.')
     } finally {
@@ -101,7 +112,9 @@ export function WeightField({ spool }: { spool: Spool }) {
           {error}
         </p>
       )}
-      {saved && <p aria-live="polite">Saved</p>}
+      <p role="status" aria-label="Weight saved">
+        {saved ? 'Saved' : ''}
+      </p>
     </form>
   )
 }

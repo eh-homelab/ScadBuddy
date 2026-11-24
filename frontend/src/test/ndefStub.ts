@@ -12,6 +12,8 @@ export interface StubReading {
  */
 export interface NdefStub {
   tap(reading: StubReading): void
+  /** A tag the reader saw but could not read (`readingerror`). */
+  tapError(): void
   writes: NDEFRecordInit[][]
   failNextWrite(error: DOMException): void
   failScan(error: DOMException): void
@@ -90,6 +92,13 @@ export function installNdefStub(): NdefStub {
         }) as unknown as NDEFReadingEvent
         reader.onreading?.(event)
         reader.dispatchEvent(event as unknown as Event)
+      }
+    },
+    tapError() {
+      for (const reader of live()) {
+        const event = new Event('readingerror')
+        reader.onreadingerror?.(event)
+        reader.dispatchEvent(event)
       }
     },
     writes,
