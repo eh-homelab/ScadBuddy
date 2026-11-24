@@ -14,13 +14,14 @@ import psycopg
 import pytest
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.models import Folder, LibraryListRow
 from scadbuddy.core.components import Components, Core
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.print_library.component import COMPONENT, PRINT_LIBRARY, PrintLibrary
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryListingSource, LibraryReads
-from scadbuddy.print_library.store import NativeFile
+from scadbuddy.print_library.store import NativeFile, NativeListedFile, Unset
 from scadbuddy.rows.component import COMPONENT as ROWS_COMPONENT
 from scadbuddy.store.content import ContentStore
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
@@ -181,6 +182,117 @@ async def test_a_listing_by_filename_holds_only_that_name(
     listed = await native.library_listing(folder_id=folder.id, filename=three_mf.name)
     assert [r.id for r in listed] == [named.id]
     assert await native.library_listing(folder_id=folder.id, filename="none.3mf") == []
+
+
+async def _a_library(native: NativeLibrary, three_mf: Path) -> list[NativeFile]:
+    """Nested folders, files at the top and in folders, a renamed file (a later
+    ``updated_at``), a per-print file and a trashed one."""
+    top = native.rows.create_folder("A", None)
+    child = native.rows.create_folder("B", top.id)
+    native.rows.create_folder("Empty", None)
+    made = [
+        await upload(native, three_mf),
+        await upload(native, three_mf, folder_id=top.id),
+        await upload(native, three_mf, folder_id=child.id),
+        await upload(native, three_mf, folder_id=child.id),
+    ]
+    native.rows.update_file(made[2].id, name="renamed.3mf", folder_id=Unset, filed=None)
+    with three_mf.open("rb") as data:
+        await native.upload("run.3mf", data, child.id, print_subject="job-1")
+    trashed = await upload(native, three_mf, folder_id=top.id)
+    native.rows.trash([trashed.id])
+    return native.rows.files(None, every_folder=True)
+
+
+def _flat(folders: list[Folder]) -> list[Folder]:
+    return [x for f in folders for x in (f, *_flat(f.children))]
+
+
+async def test_folders_count_and_date_each_folder_as_its_live_files_do(
+    native: NativeLibrary, three_mf: Path
+) -> None:
+    """#7346: the counts and newest times are the ones the full rows give."""
+    live = await _a_library(native, three_mf)
+    shaped = {f.id: f for f in _flat(await native.folders())}
+    assert [f.name for f in await native.folders()] == ["A", "Empty"]
+    for folder in native.rows.folders():
+        in_it = [f for f in live if f.folder_id == folder.id]
+        newest = max((f.updated_at for f in in_it), default=None)
+        assert (shaped[folder.id].file_count, shaped[folder.id].latest_activity_at) == (
+            len(in_it),
+            newest.astimezone(UTC).replace(tzinfo=None) if newest else None,
+        )
+    assert {f.name: f.file_count for f in shaped.values()} == {"A": 1, "B": 3, "Empty": 0}
+    counted = native.rows.folder_files()
+    assert counted[None].count == 1 and sum(c.count for c in counted.values()) == len(live)
+
+
+async def test_folders_load_no_file_rows(
+    native: NativeLibrary, three_mf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7346: one GROUP BY, not every live file read and validated."""
+    await _a_library(native, three_mf)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("folders() loaded file rows")
+
+    monkeypatch.setattr(native.rows, "files", forbidden)
+    monkeypatch.setattr(native.rows, "listed_files", forbidden)
+    monkeypatch.setattr(NativeFile, "model_validate", forbidden)
+    monkeypatch.setattr(NativeListedFile, "model_validate", forbidden)
+    assert {f.name: f.file_count for f in _flat(await native.folders())} == {
+        "A": 1,
+        "B": 3,
+        "Empty": 0,
+    }
+
+
+async def test_the_listing_is_what_the_full_rows_give(
+    native: NativeLibrary, three_mf: Path
+) -> None:
+    """#7346: the light rows list each file as its full row did."""
+    live = await _a_library(native, three_mf)
+    expected = [
+        LibraryListRow(
+            id=f.id,
+            filename=f.name,
+            file_type=f.file_type,
+            folder_id=f.folder_id,
+            file_size=f.size,
+            thumbnail_path="native" if f.has_thumbnail else None,
+            print_count=0,
+            created_at=f.created_at.astimezone(UTC).replace(tzinfo=None),
+            is_external=False,
+            per_print=f.print_subject is not None,
+            file_hash=f.sha256,
+        )
+        for f in live
+    ]
+    assert await native.library_listing(folder_id=None, every_folder=True) == expected
+    child = live[2].folder_id
+    assert await native.library_listing(folder_id=child) == [
+        r for r in expected if r.folder_id == child
+    ]
+    assert await native.library_listing(folder_id=None) == [
+        r for r in expected if r.folder_id is None
+    ]
+    assert any(r.per_print for r in expected)
+
+
+async def test_the_listing_reads_no_plates(
+    native: NativeLibrary, three_mf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7346: the listing's rows are light rows, selected without the plates jsonb."""
+    await _a_library(native, three_mf)
+    rows = native.rows.listed_files(None, every_folder=True)
+    assert rows and all(not hasattr(r, "plates") for r in rows)
+    assert "plates" not in NativeListedFile.model_fields
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the listing loaded a full row")
+
+    monkeypatch.setattr(NativeFile, "model_validate", forbidden)
+    assert len(await native.library_listing(folder_id=None, every_folder=True)) == len(rows)
 
 
 async def test_a_file_reads_as_bambuddys_model(native: NativeLibrary, three_mf: Path) -> None:

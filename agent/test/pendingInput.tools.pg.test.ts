@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from './support/database.js'
 import type { Owner } from '../src/sessions/protocol.js'
+import { BROWSER_USER } from '../src/routes/approvals.js'
+import { sessionPendingInput } from '../src/routes/pendingInput.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool } from '../src/tools/registry.js'
 import { firstText, services } from './helpers/mcp.js'
@@ -82,12 +84,27 @@ describe.skipIf(!TEST_DATABASE_URL)(`the pending-input read tools${TEST_DATABASE
   })
 
   it("sessions_pending_input reads one session as the caller may see it, and hides one it may not", async () => {
-    const { call, durable, m } = await setUp()
-    // A session's read asks its workflow; with no Temporal configured it fails as retryable.
+    const { call, durable, ids, m } = await setUp()
+    // A session's read is its record's, as pending_input_list's, so it needs no Temporal (#7311).
     withoutTemporal(m)
     const owned = await call(agentB, 'sessions_pending_input', { session_id: durable })
-    expect(owned.isError).toBe(true)
-    expect(JSON.stringify(owned.content)).toMatch(/Temporal/)
+    expect(owned.isError ?? false, JSON.stringify(owned.content)).toBe(false)
+    expect((firstText(owned) as Page).entries.map((e) => e.id).sort()).toEqual([ids.approval, ids.answer].sort())
+    // The browser user sees its approval and not its answer, which is not the user's to give.
+    const mine = await sessionPendingInput(m, BROWSER_USER, durable)
+    expect(mine?.entries.map((e) => e.id)).toEqual([ids.approval])
+    // A grant holder that does not own it sees its approval only, as in the aggregate.
+    const granted = firstText(await call(agentA, 'sessions_pending_input', { session_id: durable })) as Page
+    expect(granted.entries.map((e) => e.id)).toEqual([ids.approval])
+    // Handed to the browser user, agentB still sees what its session parked, as the workflow's
+    // read gave its creator; a `done` summary was never in that read, and is its owner's alone.
+    await db.sql`UPDATE ai_sessions SET owner_kind = 'browser', owner_id = 'browser', owner_label = 'You' WHERE id = ${durable}`
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary)
+      VALUES (gen_random_uuid(), ${durable}, gen_random_uuid(), 'request_user_attention', 't3', '[]', 'attention', 'done', 'x')`
+    const created = firstText(await call(agentB, 'sessions_pending_input', { session_id: durable })) as Page
+    expect(created.entries.map((e) => e.id).sort()).toEqual([ids.approval, ids.answer].sort())
+    expect((await sessionPendingInput(m, BROWSER_USER, durable))?.entries).toHaveLength(3)
     const stranger = { kind: 'bearer', id: 'token:c', label: 'Agent C' } as const
     const hidden = await call(stranger, 'sessions_pending_input', { session_id: durable })
     expect(JSON.stringify(hidden.content)).toMatch(/no session/)

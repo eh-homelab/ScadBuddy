@@ -86,6 +86,15 @@ def test_the_kind_read_returns_every_entitys_map(client: TestClient) -> None:
     assert found[two.split(":")[1]] == {"b": "x"}
 
 
+def test_a_patch_that_only_removes_on_a_bare_entity_is_empty(client: TestClient) -> None:
+    entity = _spool_type(client)
+    removed = _patch(client, entity, {"td": None, "mpn": None})
+    assert removed.status_code == 200, removed.text
+    assert removed.json() == {"properties": []}
+    found = client.get("/api/v1/entity-kinds/spool_type/properties").json()["properties"]
+    assert entity.split(":")[1] not in found
+
+
 def test_a_kind_with_no_properties_reads_empty(client: TestClient) -> None:
     got = client.get("/api/v1/entity-kinds/supplier/properties")
     assert got.status_code == 200, got.text
@@ -127,3 +136,15 @@ def test_a_good_schema_types_a_key_and_counts_keys_in_use(client: TestClient) ->
         "/api/v1/entity-kinds/Spool/property-schema", json={"schema": good}, headers=press()
     )
     _code(other, 422, "unknown_entity_kind")
+
+
+def test_an_items_schema_is_set_on_its_kind(client: TestClient) -> None:
+    refused = client.put(
+        "/api/v1/entity-kinds/item/property-schema",
+        json={"schema": {"type": "object", "properties": {}}},
+        headers=press(),
+    )
+    _code(refused, 409, "schema_owned_by_item_kind")
+    assert "attribute_schema" in refused.json()["detail"]
+    read = client.get("/api/v1/entity-kinds/item/property-schema")
+    _code(read, 409, "schema_owned_by_item_kind")

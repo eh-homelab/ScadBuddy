@@ -31,6 +31,7 @@ from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.guard import PREFIX, CrudCaller, crud_router
+from scadbuddy.library.settings_store import OPERATION_RETENTION_SECONDS
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import Queue
 from scadbuddy.operations.store import Operation
@@ -88,7 +89,7 @@ def operations_router(caller: CrudCaller) -> APIRouter:
                 f"Operations of kind {body.kind} are not this caller's.",
                 reason=OTHER_CALLERS_KIND,
             )
-        seconds = (await asyncio.to_thread(settings.load)).operation_retention_seconds
+        seconds = await asyncio.to_thread(settings.get, OPERATION_RETENTION_SECONDS)
         held = await ops.store.insert(
             body.op_id,
             kind=body.kind,

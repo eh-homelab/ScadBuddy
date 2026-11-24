@@ -65,17 +65,20 @@ def entry(conn: Connection[Any], question_id: str) -> dict[str, Any] | None:
     return row
 
 
-def pending(conn: Connection[Any], kind: str, principal: str) -> list[dict[str, Any]]:
-    """The undismissed ``done`` summaries of the sessions ``principal`` owns, newest first, one
-    past the cap (so the caller can say there were more)."""
+def pending(
+    conn: Connection[Any], kind: str, principal: str, session_id: str | None = None
+) -> list[dict[str, Any]]:
+    """The undismissed ``done`` summaries of the sessions ``principal`` owns (or of that one of
+    them), newest first, one past the cap (so the caller can say there were more)."""
     return conn.execute(
         "SELECT q.id::text AS id, q.session_id::text AS session_id, q.kind, q.tool, q.tool_use_id,"
         " q.questions, q.attention_reason, q.on_timeout, q.summary, q.created_at, q.expires_at"
         " FROM ai_questions q JOIN ai_sessions s ON s.id = q.session_id"
         " WHERE s.owner_kind = %(k)s AND (s.owner_id = %(i)s OR s.owner_kind = 'browser')"
+        " AND (%(sid)s::uuid IS NULL OR q.session_id = %(sid)s::uuid)"
         f" AND q.outcome IS NULL AND {DONE}"
         " ORDER BY q.created_at DESC, q.id DESC LIMIT %(limit)s",
-        {"k": kind, "i": principal, "limit": PENDING_CAP + 1},
+        {"k": kind, "i": principal, "sid": session_id, "limit": PENDING_CAP + 1},
     ).fetchall()
 
 

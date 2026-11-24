@@ -175,7 +175,7 @@ export function hasUnknownMaterial(spool: Spool): boolean {
 /**
  * The spools `q` keeps. `lowStock` reads the server's `low_stock` (F3); `loaded` reads
  * `trays`, the places that are a printer's tray. `q.q` searches what `searchDoc` gives
- * for each spool (#6894: its type's code and SKUs and its tray on the tab), else the spool's own fields.
+ * for each spool (#6894: its type's code and SKUs and its tray on the tab; #7026: its property values), else the spool's own fields.
  */
 export function filterSpools(
   spools: readonly Spool[],

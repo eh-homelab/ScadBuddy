@@ -150,6 +150,7 @@ from scadbuddy.core.events import (
 )
 from scadbuddy.core.origins import origin_allowed as origin_allowed
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN
+from scadbuddy.library.settings_store import PUBLIC_URL
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 
 logger = logging.getLogger(__name__)
@@ -555,7 +556,7 @@ async def refuse_foreign_origin(websocket: WebSocket, state: AppState, what: str
     sockets, so this is all that keeps another site's page off every socket (the
     realtime one, #266; the language servers', #1317). Call it before taking a permit."""
     origin = websocket.headers.get("origin")
-    public_url = await asyncio.to_thread(lambda: state.settings_store.load().public_url)
+    public_url = await asyncio.to_thread(state.settings_store.get, PUBLIC_URL)
     if origin_allowed(origin, public_url, state.settings.allowed_origin_list):
         return False
     logger.warning(

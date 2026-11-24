@@ -118,3 +118,12 @@ def bad_property_value(key: str, reason: str) -> ApiError:
 
 def bad_property_schema(reason: str) -> ApiError:
     return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "bad_property_schema", reason)
+
+
+def schema_owned_by_item_kind() -> ApiError:
+    return problem(
+        status.HTTP_409_CONFLICT,
+        "schema_owned_by_item_kind",
+        "an item's properties follow its item kind's attribute_schema, so set the schema "
+        "on the kind",
+    )

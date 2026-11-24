@@ -4,16 +4,18 @@
 # the base (checkout with fetch-depth: 2); a merge_group reads its commit against
 # QUEUE_BASE. Exits non-zero when there is no diff to read: a push, the schedule,
 # a dispatch, or a diff that cannot be computed. The caller then checks everything.
+# --no-renames: a rename prints its old path too, so a file moved out of a tree
+# (backend/x.py to docs/x.md) still selects that tree's lanes.
 set -euo pipefail
 case "${EVENT_NAME:-}" in
   pull_request)
     git rev-parse -q --verify 'HEAD^2' >/dev/null
-    git diff --name-only 'HEAD^1' HEAD
+    git diff --name-only --no-renames 'HEAD^1' HEAD
     ;;
   merge_group)
     test -n "${QUEUE_BASE:-}"
     git fetch -q --depth=1 origin "$QUEUE_BASE"
-    git diff --name-only "$QUEUE_BASE" HEAD
+    git diff --name-only --no-renames "$QUEUE_BASE" HEAD
     ;;
   *)
     exit 1

@@ -10,8 +10,8 @@ All line numbers are for `main` at `67d7ff6` (2026-11-21).
 
 ## Images
 
-One `Dockerfile` builds every image. `build-image.yml` publishes eight of its stages to
-GHCR, amd64 only (six at `67d7ff6`; the camera pair came with #7328):
+One `Dockerfile` builds every image. `build-image.yml` publishes these stages to GHCR,
+amd64 only:
 
 | Dockerfile stage | Image | Entry | Job |
 |---|---|---|---|
@@ -21,11 +21,12 @@ GHCR, amd64 only (six at `67d7ff6`; the camera pair came with #7328):
 | `agent-durable` (`Dockerfile:377`) | `ghcr.io/eh-homelab/scadbuddy-agent-durable` | `python -m scadbuddy_durable` (`Dockerfile:439`) | `agent-durable` (`build-image.yml:329`) |
 | `slicer` (`Dockerfile:555`) | `ghcr.io/eh-homelab/scadbuddy-slicer` | `scadbuddy-slicer` (`Dockerfile:609`) | `slicer` (`build-image.yml:544`) |
 | `profile-fetch` (`Dockerfile:654`) | `ghcr.io/eh-homelab/scadbuddy-profile-fetch` | `tini` then the browser service by default (`Dockerfile:728-729`); the worker's Deployment runs `python -m scadbuddy.profile_fetch` ([processes.md](processes.md#profile-fetch-worker-and-browser)) | `profile-fetch` (`build-image.yml:657`) |
+| `playwright-mcp` (#7027; after `67d7ff6`) | `ghcr.io/eh-homelab/scadbuddy-playwright-mcp` | `tini -s -- node /opt/scadbuddy-playwright-mcp/server.mjs`: `@playwright/mcp` with each MCP session's context built from the `X-ScadBuddy-Browser` header (`workers/playwright-mcp/`) | `playwright-mcp` (`build-image.yml:542` after `67d7ff6`) |
 | `camera-relay`, `camera-recorder` (after `67d7ff6`, #7328) | `ghcr.io/eh-homelab/scadbuddy-camera-relay`, `ghcr.io/eh-homelab/scadbuddy-camera-recorder` | `tini` then the controller; each pod runs the image a second time as `mediamtx` ([processes.md](processes.md#camera-relay-and-recorders)) | `camera` (one leg per image) |
 
 `openscad-lsp` (`Dockerfile:767`) and `libraries` (`Dockerfile:829`) are internal stages
 copied into `app`; `test` (`Dockerfile:1007`) is the CI image. Only `build` gates the
-workflow: the other six jobs are `continue-on-error` (for example `build-image.yml:221`).
+workflow: every other job is `continue-on-error` (for example `build-image.yml:221`).
 
 The Go CLIs are published by `build-go-image.yml`, one image per `tools/go/*` module with
 a `main.go` (`build-go-image.yml:46`, `:133`): today only `scadbuddy-bambuddy-fs`. Nothing
@@ -96,8 +97,9 @@ Summary**, which needs every job except `lfs-fixtures` and `dispatch-review`
 |---|---|---|---|
 | layout | `layout` (`:99`) | reads the changed paths and picks the lanes | root `CLAUDE.md` |
 | lint | `lint` (`:199`) | actionlint, hadolint, shellcheck, the `lint-*.sh` scripts and every `.github/scripts/*.test.sh`, including the deploy workflow's shell tests (`:317`, `:322`) | root `CLAUDE.md` "Workflow/Dockerfile lint" |
+| markdown | `markdown` (`:457`) | markdownlint-cli2 over `docs/**/*.md` (`.markdownlint-cli2.jsonc`); on a docs-only change (`docs_only`, `select-lanes.sh`) the only job that checks it | root `CLAUDE.md` "CI and caching rules" |
 | frontend | `frontend` (`:447`), `frontend-unit` (`:515`), `frontend-e2e` (`:575`), `frontend-e2e-split` (`:696`) | typecheck, vitest, Playwright shards | [`frontend/CLAUDE.md`](../../frontend/CLAUDE.md) |
-| agent | `agent` (`:747`) | the agent's tests; builds the `agent` (`:850`) and `sandbox` (`:899`) targets | [`agent/CLAUDE.md`](../../agent/CLAUDE.md) |
+| agent | `agent` (`:747`) | the agent's tests; builds the `agent` (`:850`), `sandbox` (`:899`) and `playwright-mcp` (#7027) targets | [`agent/CLAUDE.md`](../../agent/CLAUDE.md) |
 | agent_durable | `agent-durable` (`:936`) | builds the `agent-durable` target (`:1012`) | [`agent-durable/CLAUDE.md`](../../agent-durable/CLAUDE.md) |
 | image | `image` (`:1045`) | builds `test` and `runtime`, backend checks, a container smoke test, the real-backend e2e | [`backend/CLAUDE.md`](../../backend/CLAUDE.md) |
 | backend | `lfs-fixtures` (`:1411`), `backend-pytest` (`:1443`), `backend-pytest-split` (`:1693`) | pytest in groups against Postgres and Temporal | [`backend/CLAUDE.md`](../../backend/CLAUDE.md) |

@@ -224,7 +224,7 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   there. It is used on the hosted runners in `ci.yml` and `build-image.yml`.
 - Node major is pinned in both the Dockerfile and `ci.yml` (`24`); change them
   together, LTS (even) majors only. That covers the Dockerfile's `frontend` and three
-  `agent*` stages and the `frontend`, `frontend-unit`, `agent` and `freshness` jobs.
+  `agent*` stages and the `markdown`, `frontend`, `frontend-unit`, `agent` and `freshness` jobs.
   `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
   the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
 - `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
@@ -274,11 +274,12 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   for its `docker-content-digest`, both with `Authorization: Bearer $T`.
 
 - Go (#2686): `ci.yml`'s `go-select` (`.github/scripts/select-go.sh`, tested by
-  `select-go.test.sh`) decides whether a change touched Go, and the `go` job always
+  `select-go.test.sh`) decides whether a change touched Go, and the `go` job
   runs `go-module-ci.yml` with that answer (gofmt over the tree, then vet, build and
   `test -race` per module, the client's module-mode vendor build, the `go work vendor`
   drift check, and each CLI image built and run once). Both are in `CI Summary`'s
-  `needs`, so `go` is required: a skip is a failure, a "no Go changes" run a pass. The
+  `needs`, so `go` is required on every change but a docs-only one: a skip is a
+  failure there, a "no Go changes" run a pass. The
   `freshness` job also regenerates the Go client when the API or the client changed and
   pushes it to a same-repo PR with the `RUNNER_APP` token.
 - Python and Rust lanes: `layout` reads the change's paths (`.github/scripts/changed-paths.sh`,
@@ -291,6 +292,12 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   where the lane was needed is a failure. A push, the schedule, a dispatch, the
   Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test
   that opens a file outside its tree) needs its path in that lane's pattern.
+- Docs-only changes: when every changed path is `docs/**/*.md`, `select-lanes.sh` prints
+  `docs_only=true`, and the `lint`, `frontend*`, `agent`, `models`, `freshness`,
+  `go-select` and `go` jobs skip too; `CI Summary` re-derives it. The `markdown` job
+  (markdownlint-cli2 0.20.0 over `docs/**/*.md`, config `.markdownlint-cli2.jsonc`, style
+  rules off) runs on every change. A docs-only push to `main` starts neither `ci.yml`
+  nor `build-image.yml` (`paths-ignore`), so it builds and deploys nothing.
 - `build-go-image.yml` publishes each `tools/go/*` CLI (every one with a `main.go`
   must have a Dockerfile) as `ghcr.io/eh-homelab/scadbuddy-<module>` on a push to main
   touching Go, a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,

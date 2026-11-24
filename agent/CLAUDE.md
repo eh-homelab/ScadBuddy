@@ -257,7 +257,8 @@ skips without one), and its render is checked `verify.sh`-style on the saved out
 3MF; replies with suggestions are scored on their citations (`evals/citations.ts`,
 #1924).
 `.github/scripts/lint-one-runtime.sh` (the `lint` job) fails on a second turn path: a session
-mode branch in `agent/src`, `frontend/src` or `backend/scadbuddy` (`.ts`, `.tsx`, `.py`), the SDK's `query` imported outside `harness/run.ts` and
+mode branch in `agent/src`, `frontend/src` or `backend/scadbuddy` (`.ts`, `.tsx`, `.py`), a name of the session mode that is gone (its
+`retired` list, #7323), the SDK's `query` imported outside `harness/run.ts` and
 `harness/testConnection.ts`, or `agent-durable/` importing or depending on the Claude Agent
 SDK or naming `DurableSession` (plan Step 8.1).
 
@@ -404,8 +405,9 @@ opens every one and seals it again byte for byte).
     Comparable tokens are stored hashed instead.
   - Poller reads (#7306): every read of a task queue's pollers goes through
     `src/temporal/pollers.ts` `queuePollers`; tests use `test/support/temporal.ts`
-    `anyPoller` or `pollerIdentities`. ESLint's `no-restricted-syntax` refuses a
-    `describeTaskQueue(` call anywhere else (`eslint.config.js`). DescribeTaskQueue reports one
+    `anyPoller` or `pollerIdentities`. ESLint's `no-restricted-syntax` refuses any
+    reference to `describeTaskQueue` anywhere else, except an object literal's key (a test
+    stub's) (`eslint.config.js`, `test/lintRules.test.ts`). DescribeTaskQueue reports one
     partition's pollers, and a worker can poll only the non-root ones, so it asks the root and
     `/_sys/<queue>/1..3`. `TASK_QUEUE_PARTITIONS` (4) must equal the server's
     `matching.numTaskqueueReadPartitions`: Temporal's default is
@@ -548,6 +550,14 @@ opens every one and seals it again byte for byte).
     source for each request's header; a refused refresh marks the grant for "Sign in again". Claude Code renames tool-name characters outside
     `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
     colliding tools are hidden. Unlisted plugin tools are `outward`.
+    A session's browser options (#7027, `ai_sessions.browser`) go to every remote plugin
+    route of its turns as `X-ScadBuddy-Browser` (`forwarder.ts` `BROWSER_HEADER`, their JSON;
+    none when the session has none): a classic turn's from `ClaimedSession.browser`, a durable
+    turn's and its kept client's from the row its owner is read from (`RowSessionOwners`, into
+    `TurnContext.browser`; a listing's from the session the turn holds), never a second read; a
+    flow's never. Only the forwarder sets it; a client's own is dropped. The playwright-mcp
+    wrapper (`workers/playwright-mcp/`) reads it when an MCP session starts; other plugins
+    ignore it.
   - Customer messages (#5660, spec `2026-11-08-order-notify-customer-design.md`):
     `src/orders/messaging.ts` `pluginMessaging` opens the backend setting
     `orders_customer_messaging`'s source (a remote plugin, or a package's http MCP server,

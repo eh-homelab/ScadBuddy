@@ -422,5 +422,9 @@
   {
     "id": "20261123T1756Z_plugin_package_pending_kind_strict",
     "sha256": "d02cf935d30aa1490dec3939b81843b5db7bbb5beccc83f84ad4778fe5053510"
+  },
+  {
+    "id": "20261123T2221Z_session_browser",
+    "sha256": "16d384f0d93e8c05ddb2f229109b7244d6a84413f86c3b3be06bb03eed22c274"
   }
 ]

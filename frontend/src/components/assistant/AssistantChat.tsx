@@ -58,6 +58,8 @@ import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
 import { Tip } from './Tip'
+import { browserOptions, browserProblem, EMPTY_BROWSER, type BrowserDraft } from '../../agent/chat/browserDraft'
+import { NewChatBrowserNotice, NewChatBrowserPanel, NewChatBrowserToggle } from './NewChatBrowser'
 
 function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -83,7 +85,6 @@ function patchOf(view: AiSessionView): SessionPatch {
     updatedAt: view.updated_at,
     costUsd: view.cost_usd,
     budgetUsd: view.budget_usd,
-    ...(view.mode ? { mode: view.mode } : {}),
     ...(view.archived === undefined ? {} : { archived: view.archived }),
     ...(view.offer === undefined ? {} : { offer: view.offer }),
   }
@@ -247,7 +248,19 @@ export function AssistantChat({
   // turn is still on its way, so nothing is sent until it has started.
   const queued = active?.queued ?? []
   const queueFull = queued.length >= QUEUE_MAX
-  const holdSend = state.awaitingStart || (busy && (!active || queueFull))
+  // #7027 — a new chat's browser options, sent with its first message. Kept through a refused
+  // start (the agent's `invalid_browser` notice), so they can be fixed; cleared once a chat is on screen.
+  const [newChatBrowser, setNewChatBrowser] = useState<BrowserDraft>(EMPTY_BROWSER)
+  const [browserOpen, setBrowserOpen] = useState(false)
+  const browserPanelId = useId()
+  const browserNoticeId = useId()
+  const browserHeld = !active && !browserOpen && browserProblem(newChatBrowser) !== null
+  useEffect(() => {
+    if (!state.activeId) return
+    setNewChatBrowser(EMPTY_BROWSER)
+    setBrowserOpen(false)
+  }, [state.activeId])
+  const holdSend = state.awaitingStart || (busy && (!active || queueFull)) || (!active && browserProblem(newChatBrowser) !== null)
   const streaming = active?.items.some((i) => i.kind === 'assistant' && !i.done) ?? false
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
   const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && !i.attention) ?? false
@@ -452,7 +465,12 @@ export function AssistantChat({
     speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
     const images = attachedNow.current.map((a) => ({ kind: 'attachment' as const, id: a.id }))
-    chat.send(text, pageContext(pathname, { tools, dialogs, page }), images.length ? images : undefined)
+    chat.send(
+      text,
+      pageContext(pathname, { tools, dialogs, page }),
+      images.length ? images : undefined,
+      active ? undefined : browserOptions(newChatBrowser),
+    )
     writeDraft('')
     writeAttached([])
     setImageErrors([])
@@ -1013,6 +1031,7 @@ export function AssistantChat({
                 <AttachedThumb blob={a.image.preview.blob} alt={a.name} />
                 <Tip content={`Remove ${a.name}`}>
                   <Button
+                    type="button"
                     variant="secondary"
                     size="icon-xs"
                     aria-label={`Remove ${a.name}`}
@@ -1033,6 +1052,7 @@ export function AssistantChat({
             </p>
             {owned && (
               <Button
+                type="button"
                 size="sm"
                 variant="outline"
                 data-agent-user-only=""
@@ -1100,7 +1120,7 @@ export function AssistantChat({
           <div className="mr-auto flex items-center gap-2">
             <SpeakRepliesToggle />
             {speech.speaking && (
-              <Button size="sm" variant="ghost" onClick={speech.stop}>
+              <Button type="button" size="sm" variant="ghost" onClick={speech.stop}>
                 Stop speaking
               </Button>
             )}
@@ -1113,6 +1133,15 @@ export function AssistantChat({
                   ? `${QUEUE_MAX} messages are waiting. Remove one, or wait for one to run.`
                   : 'Sent now, it waits and runs after this turn.'}
             </span>
+          )}
+          {!active && (
+            <NewChatBrowserToggle
+              value={newChatBrowser}
+              open={browserOpen}
+              onOpenChange={setBrowserOpen}
+              panelId={browserPanelId}
+              disabled={!canSend || state.awaitingStart}
+            />
           )}
           <input
             ref={filePicker}
@@ -1133,6 +1162,7 @@ export function AssistantChat({
             content={`Attach images (PNG, JPEG, GIF or WebP; up to ${IMAGES_MAX}). You can also paste or drop them here.`}
           >
             <Button
+              type="button"
               size="sm"
               variant="ghost"
               disabled={!canSend || attached.length >= IMAGES_MAX}
@@ -1143,10 +1173,24 @@ export function AssistantChat({
             </Button>
           </Tip>
           <MicButton dictation={dictation} disabled={!canSend} embedded={embedded} describedBy={voiceNoteId} />
-          <Button type="submit" size="sm" disabled={!draft.trim() || holdSend || !canSend || preparing > 0}>
+          <Button
+            type="submit"
+            size="sm"
+            disabled={!draft.trim() || holdSend || !canSend || preparing > 0}
+            aria-describedby={browserHeld ? browserNoticeId : undefined}
+          >
             {busy && !holdSend ? 'Queue' : 'Send'}
           </Button>
         </div>
+        {!active && browserOpen && (
+          <NewChatBrowserPanel
+            id={browserPanelId}
+            value={newChatBrowser}
+            onChange={setNewChatBrowser}
+            disabled={!canSend || state.awaitingStart}
+          />
+        )}
+        {browserHeld && <NewChatBrowserNotice id={browserNoticeId} value={newChatBrowser} />}
         <VoiceDisclosure id={voiceNoteId} />
       </form>
     </div>

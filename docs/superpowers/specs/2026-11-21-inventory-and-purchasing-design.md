@@ -178,7 +178,11 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
   keywords. A schema with any other keyword is refused, and so is one that leaves a key no
   value: an `enum` with no member a key can hold, a `const` a key cannot hold (null, an
   object), a lower bound past its upper bound, or a minimum length or count past the value
-  caps (2000 characters, 50 strings of 500).
+  caps (2000 characters, 50 strings of 500). The caps hold even where the key's `type` makes
+  the bound inert: `{"type": "number", "minLength": 5000}` is refused, because
+  `check_schema` (`backend/scadbuddy/entities/properties.py`, through `_check_bounds`)
+  checks `minLength` and `minItems` whatever the type; `maxLength` and `maxItems` past the
+  caps are not refused.
 - Where the schema lives: for an entity kind registered in code (`spool`, `spool_type`, …),
   a row of `entity_property_schemas (kind, schema)`, seeded by migration and editable by a
   person. For an item (phase 2), its item kind's `attribute_schema`, which follows the same
@@ -205,6 +209,12 @@ for its units), `builtin` bool, `archived_at`. Built-in kinds seeded by migratio
 `filament`, `printer`, `part` (with children `nozzle`, `hotend`, `belt`, `build_plate`,
 `ams_part`, `hardware`), `consumable` (`desiccant`, `packaging`, `lubricant`),
 `equipment` (`dry_bin`, `tool`), `printed_part`, `assembly`, `service`. People add more.
+
+Amendment (owner, 2026-11-23, ruling on the phase 2 plan
+`docs/superpowers/plans/2026-11-23-inventory-phase-2-item-core.md`): `tracking` has a
+fourth value, `none` ("not counted"). A `none` kind's items have offers and prices but
+never lots, units or moves, and any move on such an item is refused. `service` is a
+`none` kind.
 
 **Items** (`items`): what a thing is, the catalog entry.
 `id`, `kind_id`, `name`, `manufacturer`, `compatible_with text[]` (printer

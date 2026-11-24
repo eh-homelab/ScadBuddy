@@ -87,6 +87,7 @@ RUN apt-get update \
         fonts-lobstertwo \
         fonts-noto-core \
         git \
+        git-lfs \
         libpq5 \
         python3 \
         python3-venv \
@@ -368,6 +369,52 @@ USER 10001:10001
 EXPOSE 8090 3128
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/sandbox/main.js"]
+
+# ── playwright-mcp: the agent's browser, one context per MCP session (#7027) ───
+# Microsoft's @playwright/mcp image, with our server (workers/playwright-mcp/server.mjs)
+# in place of its cli.js: each MCP session's context takes its user agent, viewport and
+# locale from the X-ScadBuddy-Browser header. The base image has Chromium
+# (/ms-playwright) and the CLI, but no index.js, so the package is installed here at
+# the same version. The tag, its digest and package.json's `@playwright/mcp` move
+# together: the check below fails the build when the base image's /app/package.json
+# version is not the installed package's, or its Chromium is not the installed
+# playwright-core's revision. Dependabot's docker update moves this FROM alone, so that
+# check fails its PR on purpose: whoever finishes the PR bumps
+# workers/playwright-mcp/package.json's `@playwright/mcp` to the same version and
+# regenerates its package-lock.json (`npm install --package-lock-only --ignore-scripts`)
+# in the same PR. Same args as the CLI's Deployment (parseArgs in options.mjs);
+# options.test.mjs is copied so CI runs it in the image.
+# DL3026: Microsoft publishes this image on mcr.microsoft.com, not Docker Hub or GHCR;
+# it is pinned here by digest, and CI's hosted runners pull it directly.
+# hadolint ignore=DL3026
+FROM mcr.microsoft.com/playwright/mcp:v0.0.86@sha256:2dfc17e08e8db54678ec965ce9ffb4100be0aa68135774d761bac9035ceb6668 AS playwright-mcp
+
+# Root while installing, so node (1000) cannot change the server's files.
+USER 0
+WORKDIR /opt/scadbuddy-playwright-mcp
+COPY workers/playwright-mcp/package.json workers/playwright-mcp/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && npm cache clean --force \
+    && node -e " \
+      const fs = require('fs'); \
+      const base = require('/app/package.json').version; \
+      const ours = require('@playwright/mcp/package.json').version; \
+      if (base !== ours) throw new Error('base image @playwright/mcp ' + base + ' != installed ' + ours); \
+      const browsers = require(require.resolve('playwright-core/package.json').replace('package.json', 'browsers.json')).browsers; \
+      const dir = '/ms-playwright/chromium-' + browsers.find((b) => b.name === 'chromium').revision; \
+      if (!fs.existsSync(dir)) throw new Error(dir + ' is not in the base image'); \
+      console.log('@playwright/mcp ' + ours + ', ' + dir); \
+    "
+COPY workers/playwright-mcp/options.mjs workers/playwright-mcp/server.mjs workers/playwright-mcp/options.test.mjs workers/playwright-mcp/browser-vectors.json ./
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+# The base image's user `node`, by number so runAsNonRoot can check it.
+USER 1000:1000
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "node", "/opt/scadbuddy-playwright-mcp/server.mjs"]
 
 # ── agent-durable: ScadBuddy's Python agent parts (spec 2026-10-13 §14.4) ─────
 # Its Deployment of its own, trusted like `agent` (#1030). The Python turn is retired
@@ -1029,6 +1076,8 @@ ENV OPENSCAD_VERSION=${OPENSCAD_VERSION}
 # pipe in a RUN trips hadolint's DL4006, and `SHELL -o pipefail` for one command
 # is the worse trade. `sort -V` reads and writes files here instead.
 ARG MIN_GIT_VERSION=2.37
+# The models repository's meshes (#7314): without it every mesh commit and export fails.
+RUN git lfs version
 RUN git --version > /tmp/git-version \
     && actual="$(sed -n 's/^git version //p' /tmp/git-version)" \
     && actual="${actual%% *}" \
@@ -1212,6 +1261,9 @@ COPY deploy/camera /app/deploy/camera
 # The slice_plate vectors the Rust workers test against too (workers/rust/vectors,
 # #3821): tests/slicing reads them from the repo layout, so they sit beside the backend.
 COPY workers/rust/vectors /app/workers/rust/vectors
+# The session browser options' vectors (#7027), which the playwright-mcp wrapper tests
+# against too: tests/crud reads them from the repo layout.
+COPY workers/playwright-mcp/browser-vectors.json /app/workers/playwright-mcp/browser-vectors.json
 
 # The fakes the tests load from the repo layout (fake_lan.py's PRINTER_PY,
 # test_bambuddy_recorder.py's RECORDER_PY), beside the backend. Last, so a change to a
