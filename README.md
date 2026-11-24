@@ -2680,7 +2680,10 @@ holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 
   `deploy/camera/`. The recorder image sets `TZ=UTC`. MediaMTX names segment files in local
   time, and the recorder refuses any other `TZ` (`RecorderSettings.check_environment`).
   `build-image.yml` job `camera` publishes both (amd64); `ci.yml` job `camera-image` builds and
-  checks both. `deploy.reusable.yml` does not pin them yet.
+  checks both. `deploy.reusable.yml` does not pin them yet. When a pin comes, it must move the
+  relay's image only when the relay's code or MediaMTX changes, not with each ScadBuddy release
+  (spec §6.1): each relay restart is a gap of about 10 to 30 s in every printer's recording
+  (the spec's estimate, §6.9).
 - **Two containers per pod.** Each pod runs its image twice: MediaMTX
   (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`) and the controller (the default command,
   `python -m scadbuddy.camera.relay` or `python -m scadbuddy.camera.recorder`). The controller
@@ -2693,9 +2696,11 @@ holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 
   for the recorders. It is the only part that holds printers' access codes, in memory only;
   it gives them to MediaMTX through the control API, never through a file.
 - **`scadbuddy-camera-recorder`.** Two replicas with pod anti-affinity, so one node's loss
-  leaves the standby. Roll one pod at a time (`maxSurge: 0`, `maxUnavailable: 1`) and keep
-  a PodDisruptionBudget with `minAvailable: 1`: the standby holds what the index has not
-  reached, so one pod down leaves no gap. ServiceAccount `scadbuddy-camera` (CRUD caller
+  leaves the standby. Roll one pod at a time (`maxSurge: 0`, `maxUnavailable: 1`), with the
+  readiness probe below and `minReadySeconds: 30`, and keep a PodDisruptionBudget with
+  `minAvailable: 1`: the standby holds what the index has not reached, so one pod down leaves
+  no gap. Without the readiness probe, Kubernetes counts a new recorder available at once and
+  stops the other one before the new one holds any video. ServiceAccount `scadbuddy-camera` (CRUD caller
   `camera`). Both containers mount one `emptyDir` at `/segments` with `sizeLimit` =
   `SCADBUDDY_CAMERA_DISK_MAX_BYTES` + 25% (2.5 GiB for the default 2 GiB): the recorder's cap
   counts finished segments only, and MediaMTX writes one open segment per printer beside
@@ -2748,6 +2753,18 @@ holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 
   a probe could miss that one probe, and one failure restarts nothing. The probe restarts the
   controller's container only, so give the MediaMTX container an `exec` probe of its own, with
   the same numbers: `curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list`.
+  Each controller also answers `/readyz` on 9090: 503 until the change follower runs, a full
+  reconcile has put the API's paths in MediaMTX, and `/healthz` would answer 200. The
+  recorder adds one rule: every recorded printer has delivered a segment since the process
+  started, or has delivered none for 120 s (`STALL_SECONDS`; a printer that is off sends no
+  video to any recorder, and must not stop a rollout). The relay does not wait for its pulls:
+  a printer that is off must not take the relay out of its Service. Use it as the
+  controller's readiness probe with the same numbers (`periodSeconds: 10`,
+  `timeoutSeconds: 4`, `failureThreshold: 3`). On the recorder Deployment, set
+  `minReadySeconds: 30`: Kubernetes then waits 30 s after the new pod is ready before it stops
+  the other one. In that time an old leader whose upload lag is under 30 s indexes past the new
+  pod's first segment, so the new pod's buffer holds the segment that contains the index's
+  end, even when the old leader cannot flush at SIGTERM.
 - **Clock.** Segment times come from the recorders' clocks and print times from the API's
   (spec §6.9), so every node runs NTP. The recorder compares its clock with the API's `Date`
   header. The CRUD listener is uvicorn (`crud/listener.py`), which writes `Date` in whole

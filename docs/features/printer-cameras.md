@@ -78,6 +78,29 @@ flowchart LR
   API back. A liveness probe on `/healthz`
   restarts the controller's container only; MediaMTX's container needs its own probe
   (README ["Printer cameras (#7328)"](../../README.md#printer-cameras-7328)).
+- **Readiness and rolling updates.** Each controller also answers `/readyz` on 9090
+  (`serve_health`'s `ready` check). It answers 503 until the change follower runs, a full
+  reconcile has put the API's paths in MediaMTX (`Relay.ready`, `Recorder.ready`), and
+  `/healthz` would answer 200. The recorder is ready only when every recorded printer has
+  delivered a segment since the process started, or has delivered none for 120 s
+  (`STALL_SECONDS`): a printer that is off sends no video to any recorder, so it must not
+  stop a rollout. The relay does not wait for its pulls, so a printer that is off does not
+  take the relay out of its Service.
+
+  This is what makes a rolling update of the recorders gapless. The Deployment rolls one pod
+  at a time (`maxSurge: 0`, `maxUnavailable: 1`). With a liveness probe only, Kubernetes
+  counts a new pod available at once and stops the other pod, which may be the leader, before
+  the new pod holds any video. With the readiness probe, the old pod stops only after the new
+  one records every printer that sends video, and `minReadySeconds: 30` adds 30 s more. In that
+  time an old leader whose upload lag is under 30 s indexes past the new pod's first segment.
+  So when the new pod takes the lease, its buffer holds the segment that contains the index's
+  end (spec D14), even when the old leader cannot flush at SIGTERM. The probe numbers are in the
+  README.
+- **Deleted printers.** The lease and feed routes answer 404 `printer_not_found` for a printer
+  that was deleted (their rows need the printer's row). The feed senders stop on a 4xx, and a
+  recorder that gets a 404 on a lease call leads that printer no more. A recorder that stops
+  leading drops the feed state it has not posted yet (`FeedSender.forget`), so it does not
+  overwrite the new leader's report.
 - **Clock (spec
   [§6.9](../superpowers/specs/2026-11-23-printer-camera-recording-design.md#69-operation)).**
   Segment times come from the recorders' clocks; print times come from the API's. The
@@ -107,7 +130,7 @@ The hooks need `curl`, so the camera images take the release binary on
 ## Code
 
 - Processes: `backend/scadbuddy/camera/relay.py`, `recorder.py`, shared `process.py` (hook
-  server, `/healthz`, `main_with`), `follow.py`, `feed.py`, `mediamtx.py` (control API
+  server, `/healthz`, `/readyz`, `main_with`), `follow.py`, `feed.py`, `mediamtx.py` (control API
   client), `uploads.py` (bucket), `mp4.py` (init section parse), `settings.py`
   (`RelaySettings`, `RecorderSettings`).
 - API side: `backend/scadbuddy/camera/store.py` (`CameraStore`), `models.py`,
@@ -138,7 +161,7 @@ The hooks need `curl`, so the camera images take the release binary on
 ## Tests
 
 - Backend: `backend/tests/camera/` (relay, recorder, follower, uploads, mp4, store,
-  settings, `/healthz` in `test_process.py`), `backend/tests/api/test_crud_camera.py`,
+  settings, `/healthz` and `/readyz` in `test_process.py`), `backend/tests/api/test_crud_camera.py`,
   `test_crud_camera_changes.py`.
 - Real MediaMTX: `backend/tests/camera/test_e2e_mediamtx.py`. ffmpeg publishes a stream, and
   real MediaMTX processes on the `deploy/camera/` configs run the relay and two recorders with
@@ -157,5 +180,8 @@ The hooks need `curl`, so the camera images take the release binary on
 - After MediaMTX's container restarts alone, recording stops until the controller's probe
   fails enough times to restart it (3 failures, 10 s apart, in the README's probe numbers).
 - No retention: nothing is deleted until phase 5.
+- A relay restart is a gap of about 10 to 30 s in every printer's recording (the spec's
+  estimate, §6.9). So the relay's image is not rolled with ScadBuddy's releases: it changes
+  only when the relay's code or MediaMTX changes (spec §6.1). No deploy pin exists for it yet.
 - Deployment lives in eh-homelab/clusters; the issue that asks for it is drafted with the
   phase 1 PR.

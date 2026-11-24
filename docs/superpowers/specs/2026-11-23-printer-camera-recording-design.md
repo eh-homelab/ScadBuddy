@@ -35,6 +35,11 @@ Why:
   (`/app/backend/tests/unit/services/test_virtual_printer.py:4409` in the Bambuddy image,
   read 2026-11-23).
 - The shop runs the H2C now and plans the H3C (inventory spec §3). Both are RTSPS models.
+- The H2C's RTSPS port 322 presents the same TLS certificate as MQTT port 8883: DER sha256
+  `81ebfc1fa4d01310d253f667533456dbe80e493219934971951d456620fab32c` on both, measured
+  2026-11-24 from the dev host with `openssl s_client -connect 172.16.0.187:<port> | openssl
+  x509 -outform DER | sha256sum`. So the relay's `sourceFingerprint` (the LAN link's stored
+  `cert_sha256`) matches.
 - **Resolution: 1080p**, from the H2C's own LAN report (`ipcam.resolution`,
   `.claude/skills/h2c-print-from-scadbuddy/evals/decode-mapping-from-printer-report/files/printer-report-boys1.json:952`).
 - **Not measured yet:** the H2C stream's codec, frame rate, bitrate, keyframe
