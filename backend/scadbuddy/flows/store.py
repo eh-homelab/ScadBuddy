@@ -899,14 +899,13 @@ class FlowStore:
             ).fetchone()
             if row is not None:
                 return True
-            existing = conn.execute(
-                f"SELECT {_DECISION} FROM workflow_run_decisions WHERE request_id = %s",
-                (decision.request_id,),
+            # In SQL: jsonb writes some numbers (1e23) another way than they came.
+            held = conn.execute(
+                "SELECT outcome = %s AND response = %s::jsonb AS same"
+                " FROM workflow_run_decisions WHERE request_id = %s",
+                (decision.outcome, Jsonb(decision.response), decision.request_id),
             ).fetchone()
-        if existing is None:
-            return False
-        held = Decision.model_validate(existing)
-        return (held.outcome, held.response) == (decision.outcome, decision.response)
+        return held is not None and bool(held["same"])
 
     def _get_decision(self, request_id: str) -> Decision | None:
         with self._pool.connection() as conn:

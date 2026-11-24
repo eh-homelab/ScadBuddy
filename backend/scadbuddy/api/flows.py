@@ -112,6 +112,7 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.models import PrinterRow
+from scadbuddy.tasks.component import TasksComponent, TasksDep
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
 from scadbuddy.workflows.flow_models import HopRecord
@@ -137,6 +138,8 @@ FLOW_UNMIGRATED = "https://scadbuddy.dev/problems/flow-unmigrated"
 FLOW_INPUTS = "https://scadbuddy.dev/problems/flow-inputs"
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
 BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-browser-only"
+#: The call is a prompt's: its typed answer goes to its task's route (#7364).
+ANSWER_IS_A_TASK = "https://scadbuddy.dev/problems/flow-answer-is-a-task"
 ENTRY_BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-entry-browser-only"
 GRANT_INVALID = "https://scadbuddy.dev/problems/flow-grant-invalid"
 GRANT_STATE = "https://scadbuddy.dev/problems/flow-grant-state"
@@ -1233,6 +1236,15 @@ def _grant_browser_only() -> None:
     _browser_only("Only a person approves or declines a run's grant.", GRANT_BROWSER_ONLY)
 
 
+async def _asks_a_task(tasks: TasksComponent, call_id: str) -> bool:
+    """Whether the call is a prompt's: its task, opened before it parks, has its id."""
+    try:
+        uuid.UUID(call_id)
+    except ValueError:
+        return False
+    return await asyncio.to_thread(tasks.store.get, call_id) is not None
+
+
 @router.post(
     "/workflow-runs/{run_id}/answer",
     response_model=Decided,
@@ -1245,9 +1257,19 @@ async def answer_flow_run(
     response: Response,
     ops: OperationsDep,
     flows: FlowsDep,
+    tasks: TasksDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Decided | JSONResponse:
     _browser_only()
+    if await _asks_a_task(tasks, body.call_id):
+        # Its answer is checked against the task's schema there, and never reaches the run
+        # from here.
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "That question takes a typed answer. Answer its task instead.",
+            type_=ANSWER_IS_A_TASK,
+            task_id=body.call_id,
+        )
     if flows.keys is None:
         raise _unavailable()
     try:

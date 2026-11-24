@@ -344,6 +344,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Ruling 6); the route refuses an agent-authored request.',
   },
   {
+    operation: 'POST /api/v1/tasks/{task_id}/answer',
+    reason:
+      "A flow prompt's typed answer (#7364) is the browser user's, as a flow's other answers are; the route " +
+      'refuses an agent-authored request.',
+  },
+  ...(['GET /api/v1/tasks', 'GET /api/v1/tasks/{task_id}'] as const).map((operation) => ({
+    operation,
+    reason:
+      "The questions flows ask a person (#7364), for the screens that show and answer them. The assistant reads " +
+      "what a run waits on with get_flow_run, and only a person answers.",
+  })),
+  {
     operation: 'POST /api/v1/workflow-runs/{run_id}/decide',
     reason:
       "A flow's outward calls are approved by the browser user on the Workflows page only (spec §6.6, plan 6 " +

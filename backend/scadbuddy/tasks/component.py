@@ -5,7 +5,8 @@ use, as it does for orders, printers and entities. `ROWS` closes it."""
 
 from __future__ import annotations
 
-from typing import Annotated
+import asyncio
+from typing import Annotated, Any
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -16,6 +17,7 @@ from scadbuddy.api.deps import transactional_events
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.rows.component import ROWS
+from scadbuddy.tasks.models import Task
 from scadbuddy.tasks.store import TaskStore
 
 
@@ -31,6 +33,12 @@ class TasksComponent:
         """The store, its pool opened on first use (an open pool ignores it)."""
         self._pool.open(wait=False)
         return self._store
+
+    async def mark_answered(
+        self, task_id: str, answer: dict[str, Any] | None, by: str | None
+    ) -> Task:
+        """`TaskStore.mark_answered`, as `RemoteTasks` has it, for the in-process worker."""
+        return await asyncio.to_thread(self.store.mark_answered, task_id, answer, by)
 
 
 TASKS: Key[TasksComponent] = Key("tasks")

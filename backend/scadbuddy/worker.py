@@ -94,6 +94,7 @@ from scadbuddy.crud.render import (
     RemoteRenderSettingsSource,
     RemoteStoreFolders,
 )
+from scadbuddy.crud.tasks import RemoteTasks
 from scadbuddy.filament.bb_pull_run import FilamentPullActivities
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.print_uses import print_use_hook
@@ -1670,6 +1671,7 @@ async def run_projects_worker(
                 keys,
                 approval_key(settings),
                 api=lambda: api_client(settings.api_internal_url, credential),
+                tasks=RemoteTasks(crud),
             )
         }
         # The API ends its kinds' records and counts them (#2295, #5298); the dashboards

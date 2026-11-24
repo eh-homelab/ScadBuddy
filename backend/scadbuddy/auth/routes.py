@@ -85,6 +85,8 @@ PERSON_ENDPOINTS = frozenset(
         "scadbuddy.api.flows.get_flow_run_proposal",
         "scadbuddy.api.flows.approve_flow_grant",
         "scadbuddy.api.flows.decline_flow_grant",
+        # A prompt's typed answer (#7364), as a flow's answer.
+        "scadbuddy.api.tasks.answer_task",
         "scadbuddy.api.flow_triggers.approve_flow_trigger_grant",
         "scadbuddy.api.flow_triggers.decline_flow_trigger_grant",
         # Sign-out, the person's sessions and the login's configuration.

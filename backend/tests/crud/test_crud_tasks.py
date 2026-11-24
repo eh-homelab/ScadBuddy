@@ -307,7 +307,11 @@ async def test_answering_a_missing_task_raises_a_key_error(
     assert raw.status_code == 404 and raw.json()["reason"] == "task-not-found"
 
 
-@pytest.mark.parametrize("bad", ["t1", str(uuid.uuid4()).upper(), f"{uuid.uuid4()}\n"])
+@pytest.mark.parametrize(
+    "bad",
+    ["t1", str(uuid.uuid4()).upper(), f"{uuid.uuid4()}\n"],
+    ids=["not-a-uuid", "upper-case", "newline"],  # the same in every xdist worker
+)
 async def test_an_id_that_is_not_a_uuid_is_422(
     http: httpx.AsyncClient, store: TaskStore, bad: str
 ) -> None:

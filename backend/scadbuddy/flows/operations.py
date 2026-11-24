@@ -37,6 +37,11 @@ The answer text never reaches the operation's history in the clear (#2221): the 
 seals it under the run's own payload key (`seal_answer`), so the operation's input and
 its `operations` row carry `answer_sealed`, and forgetting the run (`forget.py`) makes
 them unreadable with the rest of the run's payloads.
+
+`task_answer` (#7364) is `flow_answer` for a prompt, whose call id is its task's id and
+whose answer is an object the route checked against the task's schema. Its task is marked
+only once the Update landed; a mark that fails fails the attempt, and the next one resends
+the same Update and marks again. Neither kind's result holds the answer.
 """
 
 from __future__ import annotations
@@ -44,9 +49,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 from fastapi import status
@@ -85,6 +91,8 @@ from scadbuddy.flows.store import (
     ResetSupersededError,
 )
 from scadbuddy.operations.kinds import KindsBuild, OperationKind
+from scadbuddy.tasks.models import Task, TaskState
+from scadbuddy.tasks.store import TaskNotOpenError
 from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
 from scadbuddy.workflows.flow_models import Hop, HopAction, HopRecord
 from scadbuddy.workflows.payload_codec import PayloadKeys, dedup_iv
@@ -95,7 +103,11 @@ if TYPE_CHECKING:
 
 FLOW_ANSWER = "flow_answer"
 FLOW_DECIDE = "flow_decide"
+#: A person's typed answer to a prompt's task (#7364).
+TASK_ANSWER = "task_answer"
 STALE_ENTRY = "https://scadbuddy.dev/problems/stale-entry"
+#: A task takes no answer: its `state` says why (#7364).
+TASK_NOT_OPEN = "https://scadbuddy.dev/problems/tasks/not-open"
 ALREADY_RESOLVED = "https://scadbuddy.dev/problems/already-resolved"
 RUN_CLOSED = "https://scadbuddy.dev/problems/flow-run-closed"
 FLOW_RESET = "flow_reset"
@@ -201,6 +213,28 @@ def _resolved() -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, "That was answered already.", type_=ALREADY_RESOLVED)
 
 
+def task_not_open(state: TaskState) -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT, f"The task is {state}.", type_=TASK_NOT_OPEN, state=state
+    )
+
+
+class _TakenError(Exception):
+    """Another answer holds the call: on record, or (`by_run`) the run already has one."""
+
+    def __init__(self, *, by_run: bool) -> None:
+        super().__init__("another answer holds the call")
+        self.by_run = by_run
+
+
+class AnswerMarks(Protocol):
+    """Where a task is marked answered: `RemoteTasks`, or the API's own `TasksComponent`."""
+
+    async def mark_answered(
+        self, task_id: str, answer: dict[str, Any] | None, by: str | None
+    ) -> Task: ...
+
+
 def _not_parent() -> ApiError:
     return ApiError(
         status.HTTP_403_FORBIDDEN,
@@ -293,13 +327,16 @@ def _before_floor(floor: int) -> ApiError:
     )
 
 
-def _wanted(
-    kind: str, request: dict[str, Any], answer: str | None = None
-) -> tuple[str, dict[str, Any]]:
+def _call_id(request: dict[str, Any]) -> str:
+    """The parked call a request is for: a task's id is its prompt's call id."""
+    return str(request["task_id"] if "task_id" in request else request["call_id"])
+
+
+def _wanted(kind: str, request: dict[str, Any], answer: Any = None) -> tuple[str, dict[str, Any]]:
     """The outcome and response a request asks for, as its row records them; `answer`
-    is an answer request's text, opened."""
+    is an answer request's text (a task's: its object), opened."""
     if kind == "answer":
-        return "answered", {"answer": str(answer)}
+        return "answered", {"answer": answer}
     reason = request.get("reason")
     return (
         "approved" if bool(request["approved"]) else "denied",
@@ -307,7 +344,7 @@ def _wanted(
     )
 
 
-def _same(existing: Decision, kind: str, request: dict[str, Any], answer: str | None) -> bool:
+def _same(existing: Decision, kind: str, request: dict[str, Any], answer: Any) -> bool:
     """Whether a recorded row is the decision `request` asks for (a resend), not another."""
     outcome, response = _wanted(kind, request, answer)
     return existing.kind == kind and existing.outcome == outcome and existing.response == response
@@ -319,6 +356,7 @@ def flow_kinds(
     hash_key: bytes | None,
     *,
     api: Callable[[], httpx.AsyncClient | None] | None = None,
+    tasks: AnswerMarks | None = None,
 ) -> list[OperationKind]:
     """The kinds over `store`, opening answers with `keys`; the `projects` worker serves
     them. `hash_key` makes an approval's input hash (`approval_hash.py`); None records
@@ -327,9 +365,11 @@ def flow_kinds(
     facts, as `flow_grant_check` reads them); None, and every narrowing asks the person.
     A person's approval of a `print_output` call that names a registry printer reads
     that printer through it too (#4445), and one of a `hosted_plugin_publish` call that
-    sends no `draft` reads the draft's digest (#7199); None, and that approval is refused."""
+    sends no `draft` reads the draft's digest (#7199); None, and that approval is refused.
+    `tasks` marks the task a `task_answer` answered."""
 
-    async def answer_of(request: dict[str, Any]) -> str:
+    async def answer_of(request: dict[str, Any]) -> Any:
+        """An answer's text, or a task answer's object."""
         if "answer" in request:
             # Sent before answers were sealed (#2221), still running after the upgrade.
             return str(request["answer"])
@@ -338,7 +378,8 @@ def flow_kinds(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
                 "Flows need ScadBuddy's secret key file (SCADBUDDY_SECRET_KEY_FILE).",
             )
-        return await open_answer(keys, str(request["run_id"]), str(request["answer_sealed"]))
+        text = await open_answer(keys, str(request["run_id"]), str(request["answer_sealed"]))
+        return json.loads(text) if "task_id" in request else text
 
     async def check(kind: str, request: dict[str, Any]) -> dict[str, Any]:
         run = await store.get_run(str(request["run_id"]))
@@ -346,7 +387,7 @@ def flow_kinds(
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
         if run.status in TERMINAL:
             raise ApiError(status.HTTP_409_CONFLICT, "The run has ended.", type_=RUN_CLOSED)
-        call_id = str(request["call_id"])
+        call_id = _call_id(request)
         try:
             described = await activity.client().get_workflow_handle(run.workflow_id).describe()
         except RPCError as err:
@@ -362,7 +403,8 @@ def flow_kinds(
         if existing is not None and existing.responder.startswith("grant:"):
             # Let through by the run's grant (#2481): never listed, so not a person's.
             raise _stale()
-        if existing is not None:
+        # A task's is compared by `record_decision`, so `run_task_answer` sees one that lost.
+        if existing is not None and "task_id" not in request:
             answer = await answer_of(request) if kind == "answer" else None
             if not _same(existing, kind, request, answer):
                 raise _resolved()
@@ -422,7 +464,7 @@ def flow_kinds(
             request_id=str(checked["request_id"]),
             run_id=str(request["run_id"]),
             workflow_run_id=str(checked["workflow_run_id"]),
-            call_id=str(request["call_id"]),
+            call_id=_call_id(request),
             responder="browser",
             **fields,
         )
@@ -430,10 +472,13 @@ def flow_kinds(
     async def check_answer(request: dict[str, Any]) -> dict[str, Any]:
         return await check("answer", request)
 
-    async def run_answer(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+    async def give(request: dict[str, Any], checked: dict[str, Any]) -> Decision:
+        """Record the answer and tell the harness; the decision, once its Update landed.
+        `_TakenError` when another answer holds the call."""
         outcome, response = _wanted("answer", request, await answer_of(request))
         decision = _decision(request, checked, kind="answer", outcome=outcome, response=response)
-        await record(request, checked, decision)
+        if not await store.record_decision(decision):
+            raise _TakenError(by_run=False)
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         try:
             await client.provide_callback_result(
@@ -446,12 +491,43 @@ def flow_kinds(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, "The run cannot take that answer."
                 ) from None
             if err.error_type == "CallbackAlreadyResolved":
-                raise _resolved() from None
+                raise _TakenError(by_run=True) from None
             raise _stale() from None
         except BaseException as err:
             if not await settle(checked, decision.request_id, err):
                 raise
+        return decision
+
+    async def run_answer(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        try:
+            decision = await give(request, checked)
+        except _TakenError:
+            raise _resolved() from None
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": "answered"}
+
+    async def run_task_answer(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """The result is in the operation's record and its history, so it holds no answer:
+        the route reads the task."""
+        assert tasks is not None
+        task_id = str(request["task_id"])
+        try:
+            decision = await give(request, checked)
+        except _TakenError as err:
+            if err.by_run or await landed(checked, str(checked["request_id"])):
+                # The run has another answer. The winner's own mark fills it in.
+                try:
+                    await tasks.mark_answered(task_id, None, None)
+                except TaskNotOpenError as held:
+                    raise task_not_open(held.state) from None
+                except KeyError:
+                    raise _stale() from None
+            raise task_not_open("answered") from None
+        try:
+            await tasks.mark_answered(task_id, decision.response["answer"], request.get("by"))
+        except (TaskNotOpenError, KeyError):
+            # The run took the answer, and its end closed the task (or it was forgotten).
+            activity.logger.info("the task %s ended before it was marked answered", task_id)
+        return {"run_id": decision.run_id, "task_id": task_id, "outcome": "answered"}
 
     async def parked_hash(checked: dict[str, Any], call_id: str, shown: Any) -> str | None:
         """The input hash of the call as it is parked (#2318): an outward agent tool's
@@ -907,6 +983,15 @@ def flow_kinds(
             name=FLOW_ANSWER, check=check_answer, run=run_answer, run_attempts=3, queue="projects"
         ),
         OperationKind(
+            name=TASK_ANSWER,
+            check=check_answer,
+            run=run_task_answer,
+            run_attempts=3,
+            queue="projects",
+            # A resend is the same request, signed in as before or not.
+            unkeyed=frozenset({"by"}),
+        ),
+        OperationKind(
             name=FLOW_DECIDE, check=check_decide, run=run_decide, run_attempts=3, queue="projects"
         ),
         OperationKind(
@@ -925,6 +1010,7 @@ def flow_kinds(
 def _kinds(core: Core, components: Components) -> list[OperationKind]:
     from scadbuddy.flows.component import FLOWS
     from scadbuddy.flows.keys import approval_key
+    from scadbuddy.tasks.component import TASKS
     from scadbuddy.workflows.flow_routes import api_client
 
     flows = components.get(FLOWS)
@@ -933,6 +1019,7 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
         flows.keys,
         approval_key(core.settings),
         api=lambda: api_client(core.settings.api_internal_url, flows.api_auth),
+        tasks=components.get(TASKS),
     )
 
 

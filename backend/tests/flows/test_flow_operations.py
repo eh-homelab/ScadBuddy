@@ -4,12 +4,13 @@ harness is told. A decision the harness refuses, or whose Update Temporal never 
 deleted again; one whose Update landed stands, even when its reply was lost (#2247)."""
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from temporal_agent_harness.harness.agent_client import AgentClient
+from temporal_agent_harness.harness.agent_client import AgentClient, CallbackResultError
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
@@ -22,11 +23,15 @@ from scadbuddy.flows.operations import (
     FLOW_ANSWER,
     FLOW_DECIDE,
     STALE_ENTRY,
+    TASK_ANSWER,
+    TASK_NOT_OPEN,
     flow_kinds,
     request_id,
     seal_answer,
 )
 from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.tasks.models import TaskState
+from scadbuddy.tasks.store import TaskNotOpenError
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, ProjectionWrite
 from scadbuddy.workflows.flows_client import harness_plugins
 from tests.flows.flows_support import HASH_KEY, Flows, Keys, define, script
@@ -41,8 +46,8 @@ from tests.flows.harness_probe import (
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
 
-def kinds(flows: Flows) -> dict[str, OperationKind]:
-    return {kind.name: kind for kind in flow_kinds(flows.remote, Keys(), HASH_KEY)}
+def kinds(flows: Flows, tasks: Any = None) -> dict[str, OperationKind]:
+    return {kind.name: kind for kind in flow_kinds(flows.remote, Keys(), HASH_KEY, tasks=tasks)}
 
 
 async def operate(flows: Flows, kind: OperationKind, request: dict[str, Any]) -> dict[str, Any]:
@@ -374,3 +379,192 @@ async def test_an_approval_that_landed_but_whose_reply_was_lost_stands(
     assert (await operate(flows, decide, request))["outcome"] == "approved"
     decision = await flows.store.get_decision(request_id(run, call_id))
     assert decision is not None and decision.outcome == "approved"
+
+
+class Marks:
+    """`RemoteTasks.mark_answered` as the task operation calls it (#7364)."""
+
+    def __init__(self, *fails: Exception) -> None:
+        self.fails = list(fails)
+        self.made: list[tuple[str, Any, str | None]] = []
+
+    async def mark_answered(self, task_id: str, answer: Any, by: str | None) -> Any:
+        if self.fails:
+            raise self.fails.pop(0)
+        self.made.append((task_id, answer, by))
+
+
+async def task_request(run: Run, call_id: str, answer: Any) -> dict[str, Any]:
+    sealed = await seal_answer(Keys(), run.id, json.dumps(answer))
+    return {"run_id": run.id, "task_id": call_id, "answer_sealed": sealed, "by": "jane"}
+
+
+def _as_text(monkeypatch: pytest.MonkeyPatch, error: BaseException | None = None) -> None:
+    """The parked `wait_for_human` takes a text, so a typed answer reaches it as one; then
+    `error`, as if the reply were lost."""
+    original = AgentClient.provide_callback_result
+
+    async def typed(self: AgentClient, tool_id: str, *, result: Any, update_id: Any) -> Any:
+        text = {"answer": json.dumps(result["answer"])}
+        ack = await original(self, tool_id, result=text, update_id=update_id)
+        if error is not None:
+            raise error
+        return ack
+
+    monkeypatch.setattr(AgentClient, "provide_callback_result", typed)
+
+
+def _resolved_before(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def resolved(self: AgentClient, *args: Any, **kwargs: Any) -> Any:
+        raise CallbackResultError("no", error_type="CallbackAlreadyResolved")
+
+    monkeypatch.setattr(AgentClient, "provide_callback_result", resolved)
+
+
+async def test_a_task_answer_the_run_cannot_take_is_422_and_marks_nothing(flows: Flows) -> None:
+    run, call_id = await parked(flows)
+    marks = Marks()
+    request = await task_request(run, call_id, {"a": 1})
+    with pytest.raises(ApiError) as err:
+        await operate(flows, kinds(flows, marks)[TASK_ANSWER], request)
+    assert err.value.status == 422
+    assert marks.made == []
+    assert await flows.store.get_decision(request_id(run, call_id)) is None
+
+
+async def test_a_task_answer_that_landed_with_its_reply_lost_is_marked(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, call_id = await two_questions(flows)
+    lost = RPCError("update deadline exceeded", RPCStatusCode.DEADLINE_EXCEEDED, b"")
+    _as_text(monkeypatch, lost)
+    marks = Marks()
+    request = await task_request(run, call_id, {"a": 1})
+    result = await operate(flows, kinds(flows, marks)[TASK_ANSWER], request)
+    # Never the answer: the result is in the operation's history and its record.
+    assert result == {"run_id": run.id, "task_id": call_id, "outcome": "answered"}
+    assert marks.made == [(call_id, {"a": 1}, "jane")]
+
+
+async def test_a_task_answer_whose_mark_failed_is_marked_by_the_retry(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, call_id = await two_questions(flows)
+    _as_text(monkeypatch)
+    marks = Marks(RuntimeError("the API is away"))
+    task_answer = kinds(flows, marks)[TASK_ANSWER]
+    # A number jsonb writes another way is still the same answer.
+    request = await task_request(run, call_id, {"a": 1e23})
+    env = ActivityEnvironment(client=flows.client)
+    checked = await env.run(task_answer.check, request)
+    with pytest.raises(RuntimeError):
+        await env.run(task_answer.run, request, checked)
+    await _moved_on(flows, run, call_id)
+    # The retry of the run, and a new request with the same answer.
+    assert (await env.run(task_answer.run, request, checked))["outcome"] == "answered"
+    assert (await operate(flows, task_answer, request))["outcome"] == "answered"
+    assert marks.made == [(call_id, {"a": 1e23}, "jane")] * 2
+
+
+async def test_a_task_answer_whose_mark_failed_is_marked_after_the_run_ended(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, call_id = await parked(flows)
+    _as_text(monkeypatch)
+    marks = Marks(RuntimeError("the API is away"))
+    task_answer = kinds(flows, marks)[TASK_ANSWER]
+    request = await task_request(run, call_id, {"a": 1})
+    env = ActivityEnvironment(client=flows.client)
+    checked = await env.run(task_answer.check, request)
+    with pytest.raises(RuntimeError):
+        await env.run(task_answer.run, request, checked)
+    done = await flows.finished(run.id)
+    assert done.status == "succeeded"
+    assert (await env.run(task_answer.run, request, checked))["outcome"] == "answered"
+    assert marks.made == [(call_id, {"a": 1}, "jane")]
+
+
+async def test_a_task_answer_that_lost_to_one_that_landed_marks_no_answer(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The winner's mark failed for good: the task must not stay open."""
+    run, call_id = await two_questions(flows)
+    _as_text(monkeypatch)
+    failing = kinds(flows, Marks(RuntimeError("the API is away")))[TASK_ANSWER]
+    with pytest.raises(RuntimeError):
+        await operate(flows, failing, await task_request(run, call_id, {"a": 1}))
+    marks = Marks()
+    other = await task_request(run, call_id, {"a": 2})
+    with pytest.raises(ApiError) as err:
+        await operate(flows, kinds(flows, marks)[TASK_ANSWER], other)
+    assert (err.value.status, err.value.type) == (409, TASK_NOT_OPEN)
+    assert err.value.extensions == {"state": "answered"}
+    assert marks.made == [(call_id, None, None)]
+    decision = await flows.store.get_decision(request_id(run, call_id))
+    assert decision is not None and decision.response == {"answer": {"a": 1}}
+
+
+async def test_a_task_answer_that_lost_to_one_still_unsent_marks_nothing(flows: Flows) -> None:
+    run, call_id = await parked(flows)
+    left = Decision(
+        request_id=request_id(run, call_id),
+        run_id=run.id,
+        workflow_run_id=run.workflow_run_id,
+        call_id=call_id,
+        kind="answer",
+        outcome="answered",
+        response={"answer": {"a": 1}},
+        responder="browser",
+    )
+    assert await flows.store.record_decision(left)
+    marks = Marks()
+    request = await task_request(run, call_id, {"a": 2})
+    with pytest.raises(ApiError) as err:
+        await operate(flows, kinds(flows, marks)[TASK_ANSWER], request)
+    assert (err.value.status, err.value.type) == (409, TASK_NOT_OPEN)
+    assert marks.made == []
+
+
+async def test_a_task_answer_the_call_was_resolved_before_marks_no_answer(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, call_id = await parked(flows)
+    _resolved_before(monkeypatch)
+    request = await task_request(run, call_id, {"a": 1})
+    marks = Marks(RuntimeError("the API is away"))
+    task_answer = kinds(flows, marks)[TASK_ANSWER]
+    env = ActivityEnvironment(client=flows.client)
+    checked = await env.run(task_answer.check, request)
+    # A mark that fails is retried here too.
+    with pytest.raises(RuntimeError):
+        await env.run(task_answer.run, request, checked)
+    with pytest.raises(ApiError) as err:
+        await env.run(task_answer.run, request, checked)
+    assert (err.value.status, err.value.type) == (409, TASK_NOT_OPEN)
+    assert marks.made == [(call_id, None, None)]
+    assert await flows.store.get_decision(request_id(run, call_id)) is None
+
+
+@pytest.mark.parametrize("state", ["cancelled", "expired", None])
+async def test_a_task_that_ended_while_its_answer_landed_is_left_as_it_is(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, state: TaskState | None
+) -> None:
+    """The run has the answer: its end closed the task first, or the run was forgotten."""
+    run, call_id = await two_questions(flows)
+    _as_text(monkeypatch)
+    marks = Marks(KeyError(call_id) if state is None else TaskNotOpenError(state))
+    request = await task_request(run, call_id, {"a": 1})
+    result = await operate(flows, kinds(flows, marks)[TASK_ANSWER], request)
+    assert result["outcome"] == "answered"
+
+
+@pytest.mark.parametrize("state", ["cancelled", "expired"])
+async def test_a_task_answer_resolved_before_on_a_task_that_ended_says_its_state(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, state: TaskState
+) -> None:
+    run, call_id = await parked(flows)
+    _resolved_before(monkeypatch)
+    task_answer = kinds(flows, Marks(TaskNotOpenError(state)))[TASK_ANSWER]
+    with pytest.raises(ApiError) as err:
+        await operate(flows, task_answer, await task_request(run, call_id, {"a": 1}))
+    assert (err.value.status, err.value.extensions) == (409, {"state": state})
