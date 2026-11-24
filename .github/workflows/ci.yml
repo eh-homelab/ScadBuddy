@@ -1589,17 +1589,84 @@ jobs:
       # committed timings (the step above copied them), which the split reads, and
       # ends as this shard's own tests timed on this runner, for
       # `backend-pytest-split` to merge.
+      #
+      # Memory (#6978). A hosted ubuntu-latest runner of a public repo has 4 vCPU and
+      # 16 GB RAM (https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories).
+      # A shard whose memory filled the VM lost its runner mid-step, and the job kept
+      # no log. `--memory` with an equal `--memory-swap` caps the container (its
+      # /dev/shm included) at 13 GiB with no swap, below the VM's RAM (about 1.3 GiB
+      # more is used outside the container): past it the kernel kills a process inside
+      # the container, xdist reports that worker's test as crashed, and the job ends
+      # with its log. The sampler prints the VM's memory, the container's (now, its
+      # peak, its shmem) and the largest processes every 30 s; the kernel's OOM lines
+      # follow the run. Measured on run 45276569396 (12 GiB cap): a passing shard used
+      # about 13 GB of the VM; each of the 4 Temporal dev servers held 1.2 to 1.7 GiB
+      # and an xdist worker 2.5 GiB; shards 1 to 3 were killed opening a whole
+      # MakerWorld fixture (3.5 to 3.9 GiB of anon RSS in the killed worker).
+      # The whole-fixture reads take a lock, one at a time per shard
+      # (`tests/conftest.py` `one_whole_read_at_a_time`), and read each part file with
+      # ScadBuddy's streaming reader: `trimesh.load` of the olive bottle's 228 MB part
+      # took 2.9 GB, and that test peaked at 5.0 to 6.7 GB alone (2.2 to 2.5 GB now); on run
+      # 45318737267 it filled the 13 GiB cap on shards 1 to 3. No `GOMEMLIMIT` for the
+      # Temporal dev servers: at 768 MiB (run 45303037684) they stayed at about
+      # 950 MiB, their Go GC ran without end, and shards 4 and 6 took 2567 and 2751 s
+      # against main's 1674 to 1852 s (runs 45268094893, 45252653403).
       - name: pytest
-        run: >-
-          docker run --rm --network host --shm-size=1g
-          -v "$PWD/test-fixtures:/app/test-fixtures:ro"
-          -v "$PWD/results:/results"
-          -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
-          -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
-          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
-          --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration
-          --store-durations --clean-durations --durations-path=/results/durations.json
-          --junitxml=/results/junit.xml --durations=20
+        run: |
+          set -euo pipefail
+          cid="$RUNNER_TEMP/pytest.cid"
+          peak="$RUNNER_TEMP/pytest.peak"
+          (
+            set +e  # the container's cgroup goes away under it at the end
+            # The sleep runs in the background, so a TERM ends the wait at once and the
+            # trap ends the sleep with the sampler: nothing outlives the kill below.
+            trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+            cg="" n=0
+            while :; do
+              sleep 2 & nap=$!
+              wait "$nap"
+              if [ -z "$cg" ] && [ -s "$cid" ]; then
+                cg=$(find /sys/fs/cgroup -maxdepth 3 -type d -name "*$(cat "$cid")*" -print -quit)
+              fi
+              # Read first, then write: `cat … > "$peak"` truncates it before `cat` runs, and
+              # the cgroup goes away before `docker run --rm` returns.
+              if [ -n "$cg" ] && v=$(cat "$cg/memory.peak" 2>/dev/null) && [ -n "$v" ]; then
+                echo "$v" > "$peak"
+              fi
+              n=$((n + 1))
+              [ $((n % 15)) -eq 0 ] || continue
+              line="memory: $(free -m | awk '/^Mem:/ {printf "vm used %d avail %d MiB", $3, $7} /^Swap:/ {printf ", swap used %d MiB", $3}')"
+              if [ -n "$cg" ] && [ -r "$cg/memory.current" ]; then
+                cur=$(cat "$cg/memory.current" 2>/dev/null) p=$(cat "$peak" 2>/dev/null)
+                shm=$(awk '$1 == "shmem" {print $2}' "$cg/memory.stat" 2>/dev/null)
+                line+=" | container $(( ${cur:-0} >> 20 )) peak $(( ${p:-0} >> 20 )) shmem $(( ${shm:-0} >> 20 )) MiB"
+              fi
+              echo "$line"
+              ps -eo rss=,pid=,args= --sort=-rss | head -n 5 | awk '{printf "  %6d MiB %7d %s\n", $1 / 1024, $2, substr($0, index($0, $3), 100)}'
+            done
+          ) &
+          sampler=$!
+          rc=0
+          docker run --rm --cidfile "$cid" --network host --shm-size=1g \
+            --memory=13g --memory-swap=13g \
+            -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
+            -v "$PWD/results:/results" \
+            -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test \
+            -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures \
+            -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto \
+            --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration \
+            --store-durations --clean-durations --durations-path=/results/durations.json \
+            --junitxml=/results/junit.xml --durations=20 || rc=$?
+          kill "$sampler" 2>/dev/null || true
+          wait "$sampler" 2>/dev/null || true
+          p=$(cat "$peak" 2>/dev/null || true)
+          echo "container memory peak: $(( ${p:-0} >> 20 )) MiB of 13312"
+          if kernel=$(sudo dmesg 2>&1); then
+            grep -iE 'out of memory|oom-kill|killed process' <<<"$kernel" || echo "no OOM kill in the kernel log"
+          else
+            echo "the kernel log could not be read: $kernel"
+          fi
+          exit "$rc"
 
       # The intake sandbox's confinement (#6133, spec 2026-11-13 §7), proved on every
       # run: the step above runs as root under Docker's default seccomp and AppArmor
