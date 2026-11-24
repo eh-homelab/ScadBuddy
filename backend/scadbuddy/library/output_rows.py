@@ -100,10 +100,24 @@ _INSERT = (
     " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
-#: A save's row replaces a row the copy wrote (it has a stamp) of the same folder: the
-#: copy may have read the save's folder before the save wrote its row. A row of another
-#: slug stays, so a second save of an id (`orders/quote.py` makes them with uuid5) under
-#: another model still fails on the key.
+#: A save's row. It takes over a row the copy wrote (it has a stamp) of the same folder:
+#: the copy may have read the save's folder before the save wrote its row. When the
+#: copy's batch has not committed yet, the statement waits for it and then takes the row
+#: over, so the save never fails on the copy's row (#7360). A row of another slug, or a
+#: row a save wrote, is not taken: the statement changes no row, and `insert` then fails
+#: on the key. So a second save of an id (`orders/quote.py` makes them with uuid5) under
+#: another model still fails.
+_SAVE_UPSERT = (
+    _INSERT + " ON CONFLICT (output_id) DO UPDATE SET meta = EXCLUDED.meta,"
+    " params = EXCLUDED.params, inputs = EXCLUDED.inputs, record = EXCLUDED.record,"
+    " manifest = EXCLUDED.manifest, bom = EXCLUDED.bom,"
+    " arranged_from = EXCLUDED.arranged_from, backfill = EXCLUDED.backfill,"
+    " has_plate_cover = EXCLUDED.has_plate_cover, created_at = EXCLUDED.created_at,"
+    " files_stamp = NULL, copied_at = clock_timestamp()"
+    " WHERE outputs.files_stamp IS NOT NULL AND outputs.slug = EXCLUDED.slug"
+)
+
+#: The copy's row of the folder ``<slug>/<id>``: a failed save deletes it.
 _DROP_COPIED = "DELETE FROM outputs WHERE output_id = %s AND slug = %s AND files_stamp IS NOT NULL"
 
 #: The copy's new row. A row a save wrote meanwhile wins.
@@ -165,15 +179,23 @@ class OutputRows:
         return [_row(item) for item in found]
 
     def insert(self, row: OutputRow, conn: Connection[DictRow] | None = None) -> None:
-        """Add a save's row. It replaces a row the copy wrote of the same slug; any other
-        row with that id is an error. With ``conn``, inside its transaction."""
+        """Add a save's row. It takes over a row the copy wrote of the same slug, also one
+        the copy has not committed yet; any other row with that id is a `UniqueViolation`.
+        With ``conn``, inside its transaction."""
         if conn is not None:
-            conn.execute(_DROP_COPIED, (row.output_id, row.slug))
-            conn.execute(_INSERT, _values(row))
+            self._insert_in(conn, row)
             return
         with self._pool.connection() as own, own.transaction():
-            own.execute(_DROP_COPIED, (row.output_id, row.slug))
-            own.execute(_INSERT, _values(row))
+            self._insert_in(own, row)
+
+    @staticmethod
+    def _insert_in(conn: Connection[DictRow], row: OutputRow) -> None:
+        values = _values(row)
+        if conn.execute(_SAVE_UPSERT, values).rowcount:
+            return
+        # Another row holds the id: the plain insert raises its `UniqueViolation`. (If
+        # that row went meanwhile, the insert adds the save's row.)
+        conn.execute(_INSERT, values)
 
     def drop_copied(self, output_id: str, slug: str) -> None:
         """Delete the row the copy wrote of the folder ``<slug>/<output_id>``; a row a
