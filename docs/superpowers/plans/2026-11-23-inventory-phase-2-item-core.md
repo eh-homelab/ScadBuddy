@@ -38,10 +38,10 @@ scope addition of 2026-11-23 on #7067 adds `saleable`.
   (invoice_line_id IS NOT NULL)`) and `filament_shopping_items` exist
   (`backend/scadbuddy/migrations/20261117T2042Z_filament_suppliers.sql:8-142`).
   `SuppliersStore` takes a `shop_currency` callable (`backend/scadbuddy/filament/suppliers.py:127`).
-- The Bambuddy supplier sync reads only `filament_supplier_products` and the spool's
-  invoice (`backend/scadbuddy/filament/bb_sync_plan.py:347-366`, `_supplier_links`
-  l.522-540). So a supplier with only `supplier_offers` rows never reaches Bambuddy (D16)
-  if phase 2 leaves that code alone.
+- `_suppliers()` (`backend/scadbuddy/filament/bb_sync_plan.py`) plans every
+  `filament_suppliers` row with no filter. `_supplier_links` (l.522-540) reads only
+  products and the invoice. So a supplier made for item offers, or by the parts migration,
+  would reach Bambuddy unless R-P2-8 filters it. Task 3 adds that filter.
 - Parts: `parts`, `part_stock_moves`, `model_part_rules`, `order_item_parts`
   (`backend/scadbuddy/migrations/20261107T0015Z_parts_inventory.sql:6-66`). `parts.id` is
   `text DEFAULT gen_random_uuid()::text`; each part has its own `currency`; `unit_cost_minor`
@@ -85,7 +85,10 @@ scope addition of 2026-11-23 on #7067 adds `saleable`.
   `backend/scadbuddy/migrations/`, later than every file on main when made. Never edit a
   merged one (root CLAUDE.md "Migrations (#491)").
 - Phase 2 changes no filament table's schema and no filament code path
-  (`filament/*.py`, `bb_sync_*`) (spec §6.5 "Phase 2 changes no filament table"). New
+  (`filament/*.py`, `bb_sync_*`) (spec §6.5 "Phase 2 changes no filament table"), with one
+  exception: R-P2-8. `_suppliers()` in `bb_sync_plan.py` gains a filter in Task 3 (a supplier
+  is kept only if it is linked, has a filament product, has a filament invoice, or has an
+  open create intent). New
   foreign keys TO `filament_suppliers`, `filament_locations` and `filament_invoice_lines`
   are allowed.
 - Kinds and attribute schemas are rows; no allowlist of kinds or keys in code (spec §4).
@@ -107,7 +110,7 @@ scope addition of 2026-11-23 on #7067 adds `saleable`.
   shortfall takes the newest lot's cost and sets `needs_review` (spec §6.6).
 - Offers are for non-filament items only until phase 3 (D12). SKU unique per
   `(supplier_id, upper(sku), item_id)` among the unarchived (D13).
-- Nothing in phase 2 sends an item, offer or price to Bambuddy (D16).
+- Nothing in phase 2 sends an item, offer or price to Bambuddy (D16). R-P2-8 makes this true.
 - Entity wire form `kind:ref`; new kinds `item`, `lot`, `unit` (uuid ids).
 - Agent tool risks: reads `read`; every inventory write `write` (as `part_stock_add`,
   `orders.ts:1609`); `inventory_lot_recost` is `write` too (Ruling 8).
@@ -325,12 +328,13 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 
 **Files:**
 - Create: `backend/scadbuddy/inventory/offers.py`
-- Test: `backend/tests/inventory/test_offers.py`, `backend/tests/filament/test_bb_sync_plan.py` (one case; find the module that tests `_supplier_links` with `grep -l _supplier_links backend/tests`)
+- Modify: `backend/scadbuddy/filament/bb_sync_plan.py` (`_suppliers`: the R-P2-8 filter)
+- Test: `backend/tests/inventory/test_offers.py`, `backend/tests/filament/test_bb_sync_plan.py` (the cases below; find the module that tests `_supplier_links` with `grep -l _supplier_links backend/tests`)
 
 **Interfaces:**
 - Produces: `Offer(BaseModel)`: `id, supplier_id, supplier_name, item_id, item_name, sku, url, pack_size: Decimal, pack_uom, note, archived_at, latest_price: PricePoint | None`; `PricePoint`: `id, price: Decimal, currency, on_date, source, invoice_line_id`; `OfferInput`, `OfferPatch`, `PriceInput (price, on_date, currency defaults to the shop's)`. `class OfferStore(pool, shop_currency: Callable[[], str])`: `for_item(item_id)`, `for_supplier(supplier_id)`, `by_sku(supplier_id, sku) -> list[Offer]` (every item a bundle SKU covers, D13), `create`, `update`, `archive`, `add_price(offer_id, body) -> PricePoint`, `prices(offer_id)`. Errors `OfferExists`, `OfferNotFound`, `SupplierNotFound`, `FilamentItemRefused` (an offer for an item of a `filament` kind, D12).
 
-- [ ] **Step 1: Write the failing tests**: Review Focus 5 (bundle SKU allowed, `OfferExists` for a repeat on one item, case-insensitive); `by_sku` returns both bundle items; an offer for an archived supplier raises `SupplierNotFound`; `add_price` with `source` absent is `manual`; a price point in any ISO currency is stored with its currency (R-7067-11; spec §6.5 has the column); `latest_price` carries it. In the BB sync test: a supplier with only a `supplier_offers` row is in no spool's supplier links.
+- [ ] **Step 1: Write the failing tests**: Review Focus 5 (bundle SKU allowed, `OfferExists` for a repeat on one item, case-insensitive); `by_sku` returns both bundle items; an offer for an archived supplier raises `SupplierNotFound`; `add_price` with `source` absent is `manual`; a price point in any ISO currency is stored with its currency (R-7067-11; spec §6.5 has the column); `latest_price` carries it. In the BB sync test: `_suppliers()` leaves out a supplier with only offers, and one made by the parts migration; it keeps a supplier that is linked, has a product, has an invoice, or has an open create intent; once a probe 404 drops a link, a supplier with none of those is not made again (intended, D16).
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_offers.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same plus the BB sync test file — Expected: PASS.
@@ -381,8 +385,8 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 - Create: `backend/scadbuddy/api/inventory.py` (kinds, items, offers),
   `backend/scadbuddy/api/inventory_stock.py` (lots, units, moves),
   `backend/scadbuddy/inventory/problems.py`
-- Modify: `backend/scadbuddy/api/entity_properties.py` (`GET /entities/{ref}/property-schema`;
-  `PUT /entity-kinds/item/property-schema` → 409), `backend/scadbuddy/main.py` (routers),
+- Modify: `backend/scadbuddy/api/entity_properties.py` (`GET /entities/{ref}/property-schema`; layer 1 already maps `GET` and `PUT
+  /entity-kinds/item/property-schema` to 409 (R-P2-5/6), so Task 5 does not add them), `backend/scadbuddy/main.py` (routers),
   `agent/src/tools/coverage.ts` (temporary entries, Pre-flight 7)
 - Test: `backend/tests/api/test_inventory.py`, `backend/tests/api/test_inventory_stock.py`,
   `backend/tests/api/test_entity_properties.py` (two cases)
@@ -399,7 +403,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   - `GET /entities/{ref}/property-schema` → `KindPropertySchema` of the entity's effective schema (`schema_for`), for every kind.
   - Problems (`inventory/problems.py`): 404 `kind_not_found`, `item_not_found`, `offer_not_found`, `lot_not_found`, `unit_not_found`, `supplier_not_found`; 409 `kind_exists`, `kind_in_use`, `item_exists`, `offer_exists`, `wrong_tracking`, `item_not_counted`, `unit_installed`, `filament_item_refused`, `schema_owned_by_item_kind`; 422 `kind_cycle`, `bad_quantity`, `bad_property_schema`.
 
-- [ ] **Step 1: Write the failing tests** with the app `client` fixture of `tests/api/test_entity_links.py`: one round trip per family (kinds, items, offers, lots, units, moves); each problem code above at least once; `GET /entities/item:<id>/property-schema` returns the merged kind schema; `PUT /entity-kinds/item/property-schema` → 409 `schema_owned_by_item_kind`; `PATCH /entities/item:<id>/properties` with a value the kind types wrong → 422 `bad_property_value`; `POST /inventory/kinds` with `"attribute_schema": {"type":"object","required":["mpn"]}` → 422 `bad_property_schema` and `GET` shows no kind.
+- [ ] **Step 1: Write the failing tests** with the app `client` fixture of `tests/api/test_entity_links.py`: one round trip per family (kinds, items, offers, lots, units, moves); each problem code above at least once; `GET /entities/item:<id>/property-schema` returns the merged kind schema; `PATCH /entities/item:<id>/properties` with a value the kind types wrong → 422 `bad_property_value`; `POST /inventory/kinds` with `"attribute_schema": {"type":"object","required":["mpn"]}` → 422 `bad_property_schema` and `GET` shows no kind.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/api/test_inventory.py tests/api/test_inventory_stock.py tests/api/test_entity_properties.py -q` — Expected: FAIL (404).
 - [ ] **Step 3: Implement** the routes and problems; add the coverage entries (reason: "Inventory phase 2 (#7067, spec §6.4–6.6); its `inventory_*` tools follow in layer 5 of the same stack, which drops these entries").
 - [ ] **Step 4: Run** the tests, `uv run --frozen pytest tests/auth -q` (route coverage), and `cd agent && pnpm exec vitest run test/coverage.test.ts` — Expected: PASS.
@@ -422,7 +426,7 @@ The migration, in one file, in this order:
 3. Suppliers (Ruling 5): for each distinct non-empty `parts.supplier`, the unarchived
    `filament_suppliers` row with that `upper(name)`, else a new row (name only). One
    `supplier_offers` row per part with a supplier: `sku` = `'PART-' || left(item_id::text, 8)`
-   (parts have no SKU; a person edits it), `url` = `parts.link` or NULL, `pack_size` =
+   (parts have no SKU; a person edits it), `url` = `parts.link`, and an empty `''` link becomes NULL (the column has a CHECK `^https?://`), `pack_size` =
    `parts.pack_size`. One `offer_price_points` row per offer: `price` =
    `pack_price_minor / 10^exponent` in `parts.currency`, `on_date` = `parts.updated_at::date`,
    `source = 'manual'` (Ruling 4). The exponent comes from the part's currency as
