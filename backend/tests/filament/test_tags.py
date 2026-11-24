@@ -15,6 +15,8 @@ from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.models import (
     Material,
     NdefRecord,
+    NfcJobIn,
+    NfcJobResultIn,
     SpoolCreate,
     TagBackup,
     TagBackupIn,
@@ -413,9 +415,17 @@ def test_valid_backup_refuses_another_uid_an_old_backup_and_another_reason(
         tags.valid_backup(conn, old["id"], "04AA", "spool_write")
 
 
+def _armed_job(store: FilamentSpoolStore, kind: str = "write") -> UUID:
+    records = [NdefRecord(record_type="mime", data_hex="7B7D")] if kind == "write" else None
+    job = tags.create_job(
+        store, NfcJobIn.model_validate({"kind": kind, "records": records}), actor="agent"
+    )
+    return tags.claim_job(store, job.id, actor="ann").id
+
+
 def test_an_agent_backup_must_match_its_job(pg_pool: PgPool) -> None:
     store = FilamentSpoolStore(pg_pool)
-    job = uuid4()
+    job = _armed_job(store)
     made = tags.back_up(
         store,
         TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job),
@@ -425,6 +435,85 @@ def test_an_agent_backup_must_match_its_job(pg_pool: PgPool) -> None:
         assert tags.valid_backup(conn, made.id, "04AA", "agent_write", job_id=job).id == made.id
         with pytest.raises(tags.BackupMismatchError):
             tags.valid_backup(conn, made.id, "04AA", "agent_write", job_id=uuid4())
+
+
+def test_an_agent_backup_needs_an_armed_write_job(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    pending = tags.create_job(
+        store,
+        NfcJobIn(kind="write", records=[NdefRecord(record_type="mime", data_hex="00")]),
+        actor="agent",
+    ).id
+    for job in (pending, _armed_job(store, "read"), uuid4()):
+        with pytest.raises(tags.JobNotArmedError):
+            tags.back_up(
+                store,
+                TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job),
+                actor="agent",
+            )
+    assert _count(pg_pool, "filament_tag_backups") == 0
+    assert _count(pg_pool, "filament_tags") == 0
+
+
+def test_a_job_goes_pending_armed_done(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = tags.create_job(store, NfcJobIn(kind="read"), actor="agent")
+    assert job.state == "pending" and job.created_by == "agent" and job.armed_by is None
+    assert [j.id for j in tags.pending_jobs(store)] == [job.id]
+    armed = tags.claim_job(store, job.id, actor="ann")
+    assert armed.state == "armed" and armed.armed_by == "ann"
+    with pytest.raises(tags.JobNotPendingError):
+        tags.claim_job(store, job.id, actor="bob")
+    done = tags.finish_job(
+        store, job.id, NfcJobResultIn(uid="04aa", records=[]), actor="ann", defaults=DEFAULTS
+    )
+    assert done.state == "done" and done.result is not None
+    assert done.result["next"] == "bind_or_create" and done.result["uid"] == "04aa"
+    assert tags.get_job(store, job.id) == done
+    with pytest.raises(tags.JobNotArmedError):
+        tags.finish_job(store, job.id, NfcJobResultIn(error="x"), actor="ann", defaults=DEFAULTS)
+    assert tags.get_job(store, uuid4()) is None
+
+
+def test_expire_jobs_ends_open_jobs_past_their_time(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    pending = tags.create_job(store, NfcJobIn(kind="read"), actor="agent").id
+    armed = _armed_job(store)
+    later = tags.create_job(store, NfcJobIn(kind="read"), actor="agent").id
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_nfc_jobs SET expires_at = now() - interval '1 second'"
+            " WHERE id = ANY(%s)",
+            ([pending, armed],),
+        )
+    with store.transaction() as conn:
+        tags.expire_jobs(conn)
+    with pg_pool.connection() as conn:
+        rows = conn.execute("SELECT id, state FROM filament_nfc_jobs").fetchall()
+    assert {r["id"]: r["state"] for r in rows} == {
+        pending: "expired",
+        armed: "expired",
+        later: "pending",
+    }
+
+
+def test_a_write_job_checks_the_read_back(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    backup = tags.back_up(
+        store, TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job), actor="ann"
+    )
+    read_back = [NdefRecord(record_type="mime", data_hex="7b7d")]
+    done = tags.finish_job(
+        store,
+        job,
+        NfcJobResultIn(uid="04AA", records=read_back, backup_id=backup.id),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert done.state == "done" and done.result is not None
+    assert done.result["backup_id"] == str(backup.id)
+    assert _tag(pg_pool, backup.tag_id)["last_seen_records"][0]["data_hex"] == "7b7d"
 
 
 def test_the_job_id_goes_with_agent_write_only() -> None:

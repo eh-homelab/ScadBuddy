@@ -271,7 +271,8 @@ def _backup_of(row: dict[str, Any]) -> m.TagBackup:
 
 
 def back_up(spools: FilamentSpoolStore, body: m.TagBackupIn, *, actor: str) -> m.TagBackup:
-    """Keep what a tag holds, before a write. The tag is found or made by its UID."""
+    """Keep what a tag holds, before a write. The tag is found or made by its UID. An
+    ``agent_write`` backup needs its job to be an armed ``write`` (`JobNotArmedError`)."""
     uid = clean_tag_uid(body.uid)
     if uid is None:
         raise NoUidError()
@@ -280,6 +281,15 @@ def back_up(spools: FilamentSpoolStore, body: m.TagBackupIn, *, actor: str) -> m
     # agent's job for an `agent_write`.
     source: m.TagSource = "agent" if body.reason == "agent_write" else "phone"
     with spools.transaction() as conn:
+        if body.reason == "agent_write":
+            # Before `seen_on`: a job's lock comes before its tag's, as in `finish_job`.
+            expire_jobs(conn)
+            job = conn.execute(
+                "SELECT kind, state FROM filament_nfc_jobs WHERE id = %s FOR SHARE",
+                (body.job_id,),
+            ).fetchone()
+            if job is None or job["kind"] != "write" or job["state"] != "armed":
+                raise JobNotArmedError()
         tag_id, _ = seen_on(conn, TagRead(source=source, uid=uid, records=tuple(body.records)))
         row = conn.execute(
             "INSERT INTO filament_tag_backups (tag_id, uid, records, reason, job_id, actor)"
@@ -478,3 +488,151 @@ def restore_records(
             raise BackupMismatchError()
     records = [m.NdefRecord.model_validate(r) for r in old["records"]]
     return m.TagRecords(format=format_of(records), records=records)
+
+
+class NfcJobNotFoundError(LookupError):
+    """No such NFC job."""
+
+
+class JobNotPendingError(ValueError):
+    """Only a pending NFC job can be armed."""
+
+    code = "job_not_pending"
+
+    def __init__(self) -> None:
+        super().__init__("the NFC job is not pending: another page armed it, or it ended")
+
+
+class JobNotArmedError(ValueError):
+    """Only an armed NFC job takes a result, and only an armed write job a backup."""
+
+    code = "job_not_armed"
+
+    def __init__(self) -> None:
+        super().__init__("no armed NFC job of this kind: it is pending, ended or unknown")
+
+
+_JOB_COLUMNS: Final = (
+    "id, kind, records, created_by, state, result, created_at, expires_at, armed_by"
+)
+
+
+def _job_of(row: dict[str, Any]) -> m.NfcJob:
+    return m.NfcJob.model_validate(row)
+
+
+def expire_jobs(conn: Conn) -> None:
+    """End every open job whose time is up. Every job function runs it first."""
+    conn.execute(
+        "UPDATE filament_nfc_jobs SET state = 'expired'"
+        " WHERE state IN ('pending', 'armed') AND expires_at <= now()"
+    )
+
+
+def create_job(spools: FilamentSpoolStore, body: m.NfcJobIn, *, actor: str) -> m.NfcJob:
+    """Queue a job for the phone page; it waits ``ttl_s`` seconds for a person to arm it
+    and finish it."""
+    records = None if body.records is None else Jsonb([r.model_dump() for r in body.records])
+    with spools.transaction() as conn:
+        expire_jobs(conn)
+        row = conn.execute(
+            "INSERT INTO filament_nfc_jobs (kind, records, created_by, expires_at)"
+            " VALUES (%s, %s, %s, now() + make_interval(secs => %s))"
+            f" RETURNING {_JOB_COLUMNS}",
+            (body.kind, records, actor, body.ttl_s),
+        ).fetchone()
+    assert row is not None
+    return _job_of(row)
+
+
+def pending_jobs(spools: FilamentSpoolStore) -> list[m.NfcJob]:
+    """The jobs no page armed yet, oldest first."""
+    with spools.transaction() as conn:
+        expire_jobs(conn)
+        rows = conn.execute(
+            f"SELECT {_JOB_COLUMNS} FROM filament_nfc_jobs WHERE state = 'pending'"
+            " ORDER BY created_at, id"
+        ).fetchall()
+    return [_job_of(r) for r in rows]
+
+
+def get_job(spools: FilamentSpoolStore, job_id: UUID) -> m.NfcJob | None:
+    with spools.transaction() as conn:
+        expire_jobs(conn)
+        row = conn.execute(
+            f"SELECT {_JOB_COLUMNS} FROM filament_nfc_jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+    return None if row is None else _job_of(row)
+
+
+def _locked_job(conn: Conn, job_id: UUID) -> m.NfcJob:
+    row = conn.execute(
+        f"SELECT {_JOB_COLUMNS} FROM filament_nfc_jobs WHERE id = %s FOR UPDATE", (job_id,)
+    ).fetchone()
+    if row is None:
+        raise NfcJobNotFoundError()
+    return _job_of(row)
+
+
+def _set_job(conn: Conn, job_id: UUID, state: m.NfcJobState, result: dict[str, Any]) -> m.NfcJob:
+    row = conn.execute(
+        f"UPDATE filament_nfc_jobs SET state = %s, result = %s WHERE id = %s"
+        f" RETURNING {_JOB_COLUMNS}",
+        (state, Jsonb(result), job_id),
+    ).fetchone()
+    assert row is not None
+    return _job_of(row)
+
+
+def claim_job(spools: FilamentSpoolStore, job_id: UUID, *, actor: str) -> m.NfcJob:
+    """Arm a pending job for the page whose person tapped Arm. `JobNotPendingError` for a
+    job in any other state, so one page runs it; `NfcJobNotFoundError` for no such job."""
+    with spools.transaction() as conn:
+        expire_jobs(conn)
+        job = _locked_job(conn, job_id)
+        if job.state != "pending":
+            raise JobNotPendingError()
+        row = conn.execute(
+            "UPDATE filament_nfc_jobs SET state = 'armed', armed_by = %s WHERE id = %s"
+            f" RETURNING {_JOB_COLUMNS}",
+            (actor, job_id),
+        ).fetchone()
+    assert row is not None
+    return _job_of(row)
+
+
+def finish_job(
+    spools: FilamentSpoolStore,
+    job_id: UUID,
+    body: m.NfcJobResultIn,
+    *,
+    actor: str,
+    defaults: FilamentDefaults,
+) -> m.NfcJob:
+    """End an armed job with what the page got from the tag. `NfcJobNotFoundError` for no
+    such job, `JobNotArmedError` for a job that is not armed. A read goes through `read_on`. A write
+    needs its own ``agent_write`` backup (`BackupMismatchError`), and is done only when the
+    read-back equals the records the job sent."""
+    with spools.transaction() as conn:
+        expire_jobs(conn)
+        job = _locked_job(conn, job_id)
+        if job.state != "armed":
+            raise JobNotArmedError()
+        if body.error is not None:
+            return _set_job(conn, job_id, "failed", {"error": body.error})
+        records = [r.model_dump() for r in body.records]
+        reading = TagRead(source="agent", uid=body.uid, records=tuple(body.records))
+        if job.kind == "read":
+            found = read_on(conn, reading, actor=actor, defaults=defaults)
+            result = found.model_dump(mode="json") | {"uid": body.uid, "records": records}
+            return _set_job(conn, job_id, "done", result)
+        if body.backup_id is None or body.uid is None:
+            raise BackupMismatchError()
+        valid_backup(conn, body.backup_id, body.uid, "agent_write", job_id=job_id)
+        result = {"uid": body.uid, "records": records, "backup_id": str(body.backup_id)}
+        if not same_records(job.records or [], body.records):
+            return _set_job(
+                conn, job_id, "failed", {"error": str(ReadBackMismatchError())} | result
+            )
+        seen_on(conn, reading)
+        return _set_job(conn, job_id, "done", result)

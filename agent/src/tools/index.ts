@@ -20,6 +20,7 @@ import { hostedPluginTools } from './hostedPlugins.js'
 import { inspectTools } from './inspect.js'
 import { libraryTools } from './libraries.js'
 import { meshModelTools } from './meshModels.js'
+import { nfcTools } from './nfc.js'
 import { orderTools } from './orders.js'
 import { outputTools } from './outputs.js'
 import { printTools } from './print.js'
@@ -73,6 +74,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...traySpoolTools,
   ...filamentTools,
   ...filamentPurchasingTools,
+  ...nfcTools,
   ...printerTools,
   ...browserTools,
   ...delegationTools,

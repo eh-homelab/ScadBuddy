@@ -779,6 +779,9 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_sync_run',
   // #6773: the links' reset deletes (or, #6845, keeps) the sync's links and asks for a pass, no recorded kind.
   'filament_sync_reset_links',
+  // #7273: a tag and an NFC job are no recorded resource kind.
+  'nfc_read',
+  'nfc_write',
   'filament_spool_ntag_write',
   'filament_spool_ntag_confirm',
   'filament_spool_ntag_cancel',

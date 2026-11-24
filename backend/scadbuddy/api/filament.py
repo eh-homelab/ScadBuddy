@@ -31,7 +31,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
@@ -1782,7 +1782,8 @@ async def read_tag(
         "Keeps what a tag holds (its `uid` and NDEF `records`) just before a write, and makes "
         "the tag when ScadBuddy has not seen it. `reason` is `spool_write`, `agent_write` (with "
         "the NFC job's `job_id`; no other reason takes one) or `restore`. The answer is the "
-        "`backup_id` the write names. 422 `no_uid` for a UID that cleans to nothing."
+        "`backup_id` the write names. 422 `no_uid` for a UID that cleans to nothing. 409 "
+        "`job_not_armed` for an `agent_write` whose job is not an armed `write` job."
     ),
 )
 async def back_up_tag(
@@ -1792,6 +1793,8 @@ async def back_up_tag(
         made = await asyncio.to_thread(tags.back_up, filament.spools, body, actor=actor(caller))
     except tags.NoUidError as exc:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code=exc.code) from None
+    except tags.JobNotArmedError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None
     return m.TagBackupMade(backup_id=made.id)
@@ -1944,6 +1947,108 @@ async def restore_tag_backup(
         ) from None
     except tags.BackupMismatchError as exc:
         raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+
+
+def _no_job(job_id: UUID) -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, f"no NFC job {job_id}")
+
+
+@router.post(
+    "/nfc-jobs",
+    response_model=m.NfcJob,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ask the phone page to read or write a tag",
+    description=(
+        "Queues a tag read or write for the /filament/scan page (#7273 G4). `kind` is `read` "
+        "(no `records`) or `write` (the NDEF `records` to write, 888 bytes at most). The job "
+        "waits `ttl_s` seconds (default and most 600) for a person to arm it and tap a tag, "
+        "then it is `expired`."
+    ),
+)
+async def create_nfc_job(filament: FilamentDep, caller: CallerDep, body: m.NfcJobIn) -> m.NfcJob:
+    return await asyncio.to_thread(tags.create_job, filament.spools, body, actor=actor(caller))
+
+
+@router.get(
+    "/nfc-jobs",
+    response_model=list[m.NfcJob],
+    summary="List the pending NFC jobs",
+    description=(
+        "The jobs no page armed yet, oldest first, for the phone page to show. `state` must be "
+        "`pending`."
+    ),
+)
+async def list_nfc_jobs(filament: FilamentDep, state: Literal["pending"]) -> list[m.NfcJob]:
+    return await asyncio.to_thread(tags.pending_jobs, filament.spools)
+
+
+@router.get(
+    "/nfc-jobs/{job_id}",
+    response_model=m.NfcJob,
+    summary="Read an NFC job",
+    description=(
+        "One job: its `state` (`pending`, `armed`, `done`, `failed` or `expired`) and, once it "
+        "ended, its `result`. 404 for none."
+    ),
+)
+async def get_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
+    found = await asyncio.to_thread(tags.get_job, filament.spools, job_id)
+    if found is None:
+        raise _no_job(job_id)
+    return found
+
+
+@router.post(
+    "/nfc-jobs/{job_id}/claim",
+    response_model=m.NfcJob,
+    summary="Arm an NFC job",
+    description=(
+        "The phone page arms a pending job when its person taps Arm; only one page can. 404 "
+        "for no job, 409 `job_not_pending` for a job that is not pending."
+    ),
+)
+async def claim_nfc_job(filament: FilamentDep, caller: CallerDep, job_id: UUID) -> m.NfcJob:
+    try:
+        return await asyncio.to_thread(tags.claim_job, filament.spools, job_id, actor=actor(caller))
+    except tags.NfcJobNotFoundError:
+        raise _no_job(job_id) from None
+    except tags.JobNotPendingError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+
+
+@router.post(
+    "/nfc-jobs/{job_id}/result",
+    response_model=m.NfcJob,
+    summary="End an armed NFC job",
+    description=(
+        "What the phone page got from the tag. An `error` fails the job and nothing else is "
+        "read. A `read` job records the reading as `POST /tags/reads` does (`source` "
+        "`agent`); its `result` is that answer with the `uid` and `records`. A `write` job "
+        "names its `agent_write` backup as `backup_id`, and `records` is the read-back: the "
+        "job is `done` when it equals the records sent, else `failed`. 404 for no job, 409 "
+        "`job_not_armed` for a job that is not armed, 409 `backup_mismatch` for a backup that "
+        "does not cover this write."
+    ),
+)
+async def finish_nfc_job(
+    filament: FilamentDep, caller: CallerDep, job_id: UUID, body: m.NfcJobResultIn
+) -> m.NfcJob:
+    try:
+        return await asyncio.to_thread(
+            lambda: tags.finish_job(
+                filament.spools,
+                job_id,
+                body,
+                actor=actor(caller),
+                defaults=filament.spools.defaults(),
+            )
+        )
+    except tags.NfcJobNotFoundError:
+        raise _no_job(job_id) from None
+    except (tags.JobNotArmedError, tags.BackupMismatchError) as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
 
 
 @router.get(

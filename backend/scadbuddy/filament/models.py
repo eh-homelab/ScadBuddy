@@ -1854,6 +1854,11 @@ class NdefRecord(_In):
         return value.lower()
 
 
+def _check_fits(records: Sequence[NdefRecord]) -> None:
+    if sum(len(r.data_hex) // 2 for r in records) > MAX_RECORD_BYTES:
+        raise ValueError(f"the records hold more than {MAX_RECORD_BYTES} bytes")
+
+
 class _FitsOneTag(_In):
     """A body whose NDEF ``records`` must fit one tag."""
 
@@ -1861,8 +1866,7 @@ class _FitsOneTag(_In):
 
     @model_validator(mode="after")
     def _fits(self) -> Self:
-        if sum(len(r.data_hex) // 2 for r in self.records) > MAX_RECORD_BYTES:
-            raise ValueError(f"the records hold more than {MAX_RECORD_BYTES} bytes")
+        _check_fits(self.records)
         return self
 
 
@@ -1931,6 +1935,57 @@ class TagWrittenIn(_In):
     backup_id: UUID
     sent: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
     read_back: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
+
+
+NfcJobKind = Literal["read", "write"]
+NfcJobState = Literal["pending", "armed", "done", "failed", "expired"]
+
+
+class NfcJobIn(_In):
+    """A tag read or write an agent asks for (#7273 G4). The phone page runs it when a person
+    arms it. A ``write`` needs the ``records`` to write; a ``read`` takes none."""
+
+    kind: NfcJobKind
+    records: Annotated[list[NdefRecord], Field(min_length=1, max_length=MAX_RECORDS)] | None = None
+    #: How long the job waits for a person, in seconds (#7273 R7).
+    ttl_s: Annotated[int, Field(ge=1, le=600)] = 600
+
+    @model_validator(mode="after")
+    def _records(self) -> Self:
+        if (self.kind == "write") != (self.records is not None):
+            raise ValueError("a `write` job needs `records`, and a `read` job takes none")
+        _check_fits(self.records or [])
+        return self
+
+
+class NfcJob(BaseModel):
+    id: UUID
+    kind: NfcJobKind
+    records: list[NdefRecord] | None
+    created_by: str
+    state: NfcJobState
+    result: dict[str, Any] | None
+    created_at: datetime
+    expires_at: datetime
+    armed_by: str | None
+
+
+class NfcJobResultIn(_In):
+    """What the phone page got from the tag for an armed job. For a write, ``records`` is the
+    read-back and ``backup_id`` the `agent_write` backup it took first. An ``error`` fails the
+    job, and nothing else is read."""
+
+    uid: Annotated[str, Field(max_length=64)] | None = None
+    records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)] = Field(
+        default_factory=list
+    )
+    backup_id: UUID | None = None
+    error: Annotated[str, Field(max_length=500)] | None = None
+
+    @model_validator(mode="after")
+    def _fits(self) -> Self:
+        _check_fits(self.records)
+        return self
 
 
 class DecodedSpool(BaseModel):

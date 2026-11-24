@@ -1,10 +1,11 @@
 """The phone tag routes (#7273): `POST /tags/reads`, `POST /tags/backups`,
-`GET /tags/{id}/backups`, `POST /spools/{id}/tag-records`, `POST /spools/{id}/tag-written` and
-`POST /tags/{id}/backups/{id}/restore`."""
+`GET /tags/{id}/backups`, `POST /spools/{id}/tag-records`, `POST /spools/{id}/tag-written`,
+`POST /tags/{id}/backups/{id}/restore` and the agent's NFC jobs (`/nfc-jobs`)."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from uuid import uuid4
 
 import psycopg
@@ -96,7 +97,7 @@ def test_an_agent_write_backup_needs_a_job_id(client: TestClient) -> None:
     assert other.status_code == 422
     ok = client.post(
         BACKUPS,
-        json={"uid": "04aa", "records": [], "reason": "agent_write", "job_id": str(uuid4())},
+        json={"uid": "04aa", "records": [], "reason": "agent_write", "job_id": _armed(client)},
     )
     assert ok.status_code == 201, ok.text
 
@@ -387,7 +388,7 @@ def test_an_opentag3d_write_marks_its_origin_and_kind(client: TestClient) -> Non
 def test_a_backup_of_another_reason_covers_no_spool_write(client: TestClient, reason: str) -> None:
     spool = _spool(client)
     sent, _ = _write(client, spool["id"])
-    job = {"job_id": str(uuid4())} if reason == "agent_write" else {}
+    job = {"job_id": _armed(client)} if reason == "agent_write" else {}
     made = client.post(BACKUPS, json={"uid": "04AA", "records": [], "reason": reason, **job})
     assert made.status_code == 201, made.text
     backup = made.json()["backup_id"]
@@ -412,3 +413,190 @@ def test_a_restore_refuses_records_that_are_not_the_fresh_backups(client: TestCl
         json={"uid": "04AA", "records": [_REC], "backup_id": fresh},
     )
     assert got.status_code == 409 and got.json()["code"] == "backup_mismatch"
+
+
+JOBS = "/api/v1/filament/nfc-jobs"
+_OTHER = {"record_type": "mime", "media_type": "application/json", "data_hex": "5b5d"}
+
+
+def _armed(client: TestClient, kind: str = "write") -> str:
+    body: dict[str, object] = {"kind": kind}
+    if kind == "write":
+        body["records"] = [_REC]
+    made = client.post(JOBS, json=body)
+    assert made.status_code == 201, made.text
+    job_id: str = made.json()["id"]
+    claimed = client.post(f"{JOBS}/{job_id}/claim")
+    assert claimed.status_code == 200, claimed.text
+    return job_id
+
+
+def _agent_backup(client: TestClient, job_id: str) -> str:
+    made = client.post(
+        BACKUPS,
+        json={"uid": "04AA", "records": [_OTHER], "reason": "agent_write", "job_id": job_id},
+    )
+    assert made.status_code == 201, made.text
+    backup: str = made.json()["backup_id"]
+    return backup
+
+
+def test_a_read_job_runs_through_the_read_function(client: TestClient) -> None:
+    job = client.post(JOBS, json={"kind": "read"}).json()
+    assert job["state"] == "pending" and job["records"] is None and job["created_by"]
+    pending = client.get(JOBS, params={"state": "pending"}).json()
+    assert [j["id"] for j in pending] == [job["id"]]
+    armed = client.post(f"{JOBS}/{job['id']}/claim").json()
+    assert armed["state"] == "armed" and armed["armed_by"]
+    assert client.get(JOBS, params={"state": "pending"}).json() == []
+    done = client.post(f"{JOBS}/{job['id']}/result", json={"uid": "04AA", "records": [_REC]})
+    assert done.status_code == 200, done.text
+    result = done.json()["result"]
+    assert done.json()["state"] == "done" and result["next"] == "bind_or_create"
+    assert result["uid"] == "04AA" and result["records"][0]["data_hex"] == "7b7d"
+    assert result["tag"]["last_seen_source"] == "agent"
+    assert client.get(f"{JOBS}/{job['id']}").json() == done.json()
+
+
+def test_pending_jobs_come_oldest_first(client: TestClient) -> None:
+    made = [client.post(JOBS, json={"kind": "read"}).json()["id"] for _ in range(3)]
+    assert [j["id"] for j in client.get(JOBS, params={"state": "pending"}).json()] == made
+
+
+def test_the_job_list_takes_only_the_pending_state(client: TestClient) -> None:
+    assert client.get(JOBS, params={"state": "armed"}).status_code == 422
+    assert client.get(JOBS).status_code == 422
+
+
+def test_an_unknown_job_is_404(client: TestClient) -> None:
+    unknown = f"{JOBS}/{uuid4()}"
+    assert client.get(unknown).status_code == 404
+    assert client.post(f"{unknown}/claim").status_code == 404
+    assert client.post(f"{unknown}/result", json={"error": "x"}).status_code == 404
+
+
+def test_a_write_job_needs_its_own_agent_write_backup(client: TestClient) -> None:
+    job_id = _armed(client)
+    spool_write = client.post(
+        BACKUPS, json={"uid": "04AA", "records": [_OTHER], "reason": "spool_write"}
+    ).json()["backup_id"]
+    other_job = _agent_backup(client, _armed(client))
+    for backup in (spool_write, other_job, None):
+        got = client.post(
+            f"{JOBS}/{job_id}/result",
+            json={"uid": "04AA", "records": [_REC], "backup_id": backup},
+        )
+        assert got.status_code == 409 and got.json()["code"] == "backup_mismatch", backup
+    assert client.get(f"{JOBS}/{job_id}").json()["state"] == "armed"
+
+
+def test_a_write_job_is_done_only_when_the_read_back_matches(client: TestClient) -> None:
+    job_id = _armed(client)
+    backup = _agent_backup(client, job_id)
+    done = client.post(
+        f"{JOBS}/{job_id}/result",
+        json={"uid": "04:aa", "records": [_REC], "backup_id": backup},
+    )
+    assert done.status_code == 200, done.text
+    assert done.json()["state"] == "done"
+    result = done.json()["result"]
+    assert result["uid"] == "04:aa" and result["backup_id"] == backup
+    assert [r["data_hex"] for r in result["records"]] == ["7b7d"] and "error" not in result
+
+    other = _armed(client)
+    failed = client.post(
+        f"{JOBS}/{other}/result",
+        json={"uid": "04AA", "records": [_OTHER], "backup_id": _agent_backup(client, other)},
+    )
+    assert failed.status_code == 200, failed.text
+    assert failed.json()["state"] == "failed"
+    assert failed.json()["result"]["error"] == "the tag does not hold what was sent"
+    assert failed.json()["result"]["records"][0]["data_hex"] == "5b5d"
+
+
+def test_an_agent_write_backup_needs_an_armed_write_job(client: TestClient) -> None:
+    pending = client.post(JOBS, json={"kind": "write", "records": [_REC]}).json()["id"]
+    read = _armed(client, "read")
+    for job_id in (pending, read, str(uuid4())):
+        got = client.post(
+            BACKUPS,
+            json={"uid": "04AA", "records": [], "reason": "agent_write", "job_id": job_id},
+        )
+        assert got.status_code == 409 and got.json()["code"] == "job_not_armed", job_id
+
+
+def _expire(pg_conninfo: str, job_id: str) -> None:
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE filament_nfc_jobs SET expires_at = now() - interval '1 second' WHERE id = %s",
+            (job_id,),
+        )
+
+
+def test_a_job_expires_after_its_ttl(client: TestClient, pg_conninfo: str) -> None:
+    job = client.post(JOBS, json={"kind": "read", "ttl_s": 30}).json()
+    ttl = datetime.fromisoformat(job["expires_at"]) - datetime.fromisoformat(job["created_at"])
+    assert 29 <= ttl.total_seconds() <= 31
+    _expire(pg_conninfo, job["id"])
+    assert client.get(f"{JOBS}/{job['id']}").json()["state"] == "expired"
+    assert client.get(JOBS, params={"state": "pending"}).json() == []
+    got = client.post(f"{JOBS}/{job['id']}/claim")
+    assert got.status_code == 409 and got.json()["code"] == "job_not_pending"
+
+
+def test_an_armed_job_expires_too(client: TestClient, pg_conninfo: str) -> None:
+    job_id = _armed(client)
+    _expire(pg_conninfo, job_id)
+    backup = client.post(
+        BACKUPS, json={"uid": "04AA", "records": [], "reason": "agent_write", "job_id": job_id}
+    )
+    assert backup.status_code == 409 and backup.json()["code"] == "job_not_armed"
+    got = client.post(f"{JOBS}/{job_id}/result", json={"error": "late"})
+    assert got.status_code == 409 and got.json()["code"] == "job_not_armed"
+    assert client.get(f"{JOBS}/{job_id}").json()["state"] == "expired"
+
+
+def test_a_job_is_claimed_once(client: TestClient) -> None:
+    job_id = _armed(client, "read")
+    got = client.post(f"{JOBS}/{job_id}/claim")
+    assert got.status_code == 409 and got.json()["code"] == "job_not_pending"
+
+
+def test_only_an_armed_job_takes_a_result(client: TestClient) -> None:
+    job_id = client.post(JOBS, json={"kind": "read"}).json()["id"]
+    got = client.post(f"{JOBS}/{job_id}/result", json={"uid": "04AA", "records": []})
+    assert got.status_code == 409 and got.json()["code"] == "job_not_armed"
+    client.post(f"{JOBS}/{job_id}/claim")
+    assert client.post(f"{JOBS}/{job_id}/result", json={"error": "x"}).status_code == 200
+    again = client.post(f"{JOBS}/{job_id}/result", json={"error": "x"})
+    assert again.status_code == 409 and again.json()["code"] == "job_not_armed"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"kind": "read", "records": [_REC]},
+        {"kind": "read", "records": []},
+        {"kind": "write"},
+        {"kind": "write", "records": []},
+        {"kind": "write", "records": [{"record_type": "mime", "data_hex": "00" * 889}]},
+        {"kind": "write", "records": [_REC] * 17},
+        {"kind": "erase"},
+        {"kind": "read", "ttl_s": 0},
+        {"kind": "read", "ttl_s": 601},
+    ],
+)
+def test_a_read_job_takes_no_records_and_a_write_job_needs_them(
+    client: TestClient, body: dict[str, object]
+) -> None:
+    assert client.post(JOBS, json=body).status_code == 422
+
+
+def test_a_failed_job_keeps_the_pages_error(client: TestClient) -> None:
+    job_id = _armed(client)
+    got = client.post(f"{JOBS}/{job_id}/result", json={"error": "The person declined."})
+    assert got.status_code == 200, got.text
+    assert got.json()["state"] == "failed"
+    assert got.json()["result"] == {"error": "The person declined."}
+    too_long = client.post(f"{JOBS}/{_armed(client)}/result", json={"error": "x" * 501})
+    assert too_long.status_code == 422

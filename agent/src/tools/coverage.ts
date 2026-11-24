@@ -46,6 +46,17 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       "One step of the phone page's restore of a tag backup (#7273 G7): the records to write back, after a fresh backup. The browser holds the tag and the page checks the read-back itself (R6), so an agent writes through nfc_write, which the page runs.",
   },
+  ...(
+    [
+      'GET /api/v1/filament/nfc-jobs',
+      'POST /api/v1/filament/nfc-jobs/{job_id}/claim',
+      'POST /api/v1/filament/nfc-jobs/{job_id}/result',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The phone page's side of an agent's NFC job (#7273 G4): it lists the pending jobs, arms one when the person taps Arm, and posts what the tag held. The agent creates and waits on jobs with nfc_read and nfc_write.",
+  })),
   {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
     reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
