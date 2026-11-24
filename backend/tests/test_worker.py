@@ -32,7 +32,7 @@ from temporalio.api.deployment.v1 import (
     WorkerDeploymentVersionInfo,
 )
 from temporalio.api.enums.v1 import TaskQueueType
-from temporalio.api.taskqueue.v1 import PollerInfo, TaskQueue
+from temporalio.api.taskqueue.v1 import PollerInfo
 from temporalio.api.workflowservice.v1 import (
     DescribeTaskQueueRequest,
     DescribeTaskQueueResponse,
@@ -122,6 +122,7 @@ from scadbuddy.workflows.client import (
 )
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
+from scadbuddy.workflows.pollers import TASK_QUEUE_PARTITIONS, partition_name, queue_pollers
 from tests.conftest import (
     UNUSED_DATABASE_URL,
     UNUSED_TEMPORAL_ADDRESS,
@@ -705,7 +706,10 @@ def _described(
         return UpdateWorkerDeploymentVersionMetadataResponse()
 
     async def describe(request: DescribeTaskQueueRequest, **_: object) -> DescribeTaskQueueResponse:
-        assert request.task_queue.name == "render"
+        # Every partition (`pollers.queue_pollers`) answers alike; the read merges them.
+        assert request.task_queue.name in {
+            partition_name("render", n) for n in range(TASK_QUEUE_PARTITIONS)
+        }
         assert request.task_queue_type == TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW
         return DescribeTaskQueueResponse(pollers=list(pollers))
 
@@ -912,7 +916,7 @@ async def test_a_poll_that_trusts_a_peer_reads_the_marks_once(
     # holds because `_patch_drain` sets the grace to 0, and because a poll before the
     # mark is written (`marked` unset) returns at once and reads nothing: with a grace,
     # or a mark written later, more polls would run before the trusted one.
-    assert reads == {"version": 2, "queue": 1}
+    assert reads == {"version": 2, "queue": TASK_QUEUE_PARTITIONS}
 
 
 async def test_a_poll_with_no_peer_reads_no_version_metadata(
@@ -924,7 +928,8 @@ async def test_a_poll_with_no_peer_reads_no_version_metadata(
     reads = _counting_reads(client)
     _patch_drain(monkeypatch, "b1")
     await _serve_fake_and_stop(client, "me@pod-a", timeout=0.5)
-    assert reads["queue"] >= 2, reads  # it polled past the grace, more than once
+    # It polled past the grace, more than once, each poll asking every partition.
+    assert reads["queue"] >= 2 * TASK_QUEUE_PARTITIONS, reads
     assert reads["version"] == 1, reads
 
 
@@ -1729,14 +1734,8 @@ def _not_found() -> RPCError:
 
 
 async def _pollers(client: Client, queue: str) -> int:
-    described = await client.workflow_service.describe_task_queue(
-        DescribeTaskQueueRequest(
-            namespace=client.namespace,
-            task_queue=TaskQueue(name=queue),
-            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-        )
-    )
-    return len(described.pollers)
+    """Every partition's (#7350): a worker can poll only the non-root ones."""
+    return len(await queue_pollers(client, queue, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW))
 
 
 def _in_process_settings(tmp_path: Path) -> tuple[Settings, WorkerDeps]:

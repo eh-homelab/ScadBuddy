@@ -424,7 +424,7 @@ describe('the spools CSV import (Task 15)', () => {
   })
 
   it('edits spools all or none, and archives and restores them in one request (#7151)', async () => {
-    expect(await bulkUpdateSpools([spoolId(1), spoolId(3), NOBODY], { note: 'June' })).toEqual({ updated: [spoolId(1), spoolId(3)].sort(), not_found: [NOBODY] })
+    expect(await bulkUpdateSpools([spoolId(1), spoolId(3), NOBODY], { note: 'June' })).toEqual({ changed: [spoolId(1), spoolId(3)].sort(), unchanged: [], not_found: [NOBODY] })
     expect((await getSpool(spoolId(3))).note).toBe('June')
     expect(await refusal(bulkUpdateSpools([spoolId(1)], { archived: true }))).toMatchObject({ status: 422 })
     expect(await refusal(bulkUpdateSpools([spoolId(1)], {}))).toMatchObject({ status: 422 })
