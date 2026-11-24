@@ -60,7 +60,7 @@ describe('the spool page', () => {
     open(8)
     await heading(8)
     const identity = screen.getByRole('region', { name: 'Identity' })
-    expect(within(identity).getByText('Its tag was written through SpoolBuddy.')).toBeInTheDocument()
+    expect(within(identity).getByText('Its tag was written as an OpenTag3D tag.')).toBeInTheDocument()
     expect(within(identity).getByText(`Tag written ${new Date('2026-11-10T15:30:00Z').toLocaleDateString(undefined, { dateStyle: 'medium' })}.`)).toBeInTheDocument()
   })
 

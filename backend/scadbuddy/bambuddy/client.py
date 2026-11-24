@@ -2116,7 +2116,7 @@ class BambuddyClient:
             )
         return value
 
-    # --- tags, auto-add, slots and SpoolBuddy (#6264) -------------------------
+    # --- tags, auto-add, slots (#6264) -------------------------
 
     async def link_tag(
         self,

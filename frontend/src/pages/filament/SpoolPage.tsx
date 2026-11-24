@@ -329,7 +329,7 @@ const ORIGINS: Record<string, string> = {
   rfid_auto: 'Bambuddy added this spool when an AMS read its unknown tag.',
   rfid_linked: 'Bambuddy matched its tag to this spool.',
   nfc_link: 'Its tag was linked to it by hand.',
-  opentag3d: 'Its tag was written through SpoolBuddy.',
+  opentag3d: 'Its tag was written as an OpenTag3D tag.',
 }
 const originText = (origin: string) => ORIGINS[origin] ?? `Its data came in as “${origin}”.`
 

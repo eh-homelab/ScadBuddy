@@ -1305,8 +1305,9 @@ class Spool(BambuddyModel):
     #: v1.3.1): the pull leaves a row made after an open create intent to the push
     #: (#6265 Decision 10).
     created_at: datetime | None = None
-    #: #7149: whether it was added full, when its tag was written (set only by a SpoolBuddy
-    #: write), and ``weight_used`` when its consumed counter was last reset: BB's "Total
+    #: #7149: whether it was added full, when its tag was written (Bambuddy's field;
+    #: ScadBuddy's phone page sets its own ``tag_encoded_at``),
+    #: and ``weight_used`` when its consumed counter was last reset: BB's "Total
     #: consumed" is ``weight_used - weight_used_baseline``
     #: (``SpoolResponse`` in ``sync-routes.json``; ``models/spool.py`` lines 37-50 and 85
     #: at https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/models/spool.py).

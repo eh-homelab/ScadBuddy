@@ -2836,9 +2836,8 @@ async def import_bambuddy(
         "stands: `applied` (the mode or the setting holds it, and Bambuddy's value is false), "
         "`pending` (a write has not landed, or Bambuddy could not be reached; `detail` names "
         "the error), `blocked` "
-        "(Bambuddy refused the write because its auth is on) or `off`. Also lists the "
-        "SpoolBuddy devices. Reads Bambuddy and writes nothing; when Bambuddy fails, "
-        "`bambuddy_auto_add` is null and `devices` is empty."
+        "(Bambuddy refused the write because its auth is on) or `off`. Reads Bambuddy "
+        "and writes nothing; when Bambuddy fails, `bambuddy_auto_add` is null."
     ),
 )
 async def get_rfid_status(filament: FilamentDep, store: SettingsStoreDep) -> m.RfidStatus:

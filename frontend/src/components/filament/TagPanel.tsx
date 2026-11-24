@@ -26,7 +26,8 @@ interface Props {
  * the open binding was made with `override`; the weight-lock line follows the spool's own
  * `weight_locked`, which unbinding never clears), the last one it held
  * with "Bind tag again" (free) or "Tag is on spool #N — Move it here" (another spool holds it
- * now; Decision 7), and a form to bind any tag by its UID or tray UUID. A restore binds nothing: the tag comes back only through
+ * now; Decision 7), and a form to bind any tag by its UID or tray UUID.
+ * A restore binds nothing: the tag comes back only through
  * these buttons, which post the last tag's own keys. The server moves a tag that another
  * spool holds whether or not `override` is set. "Move it here" sends `override: false`
  * (Decision 3). The override box is for a Bambu tag that belongs to a different filament
