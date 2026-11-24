@@ -427,7 +427,7 @@ const tools: Tool[] = [
       } else if (properties !== undefined && archived === undefined && Object.keys(fields).length === 0) {
         // Properties only: no row PATCH, which would move the type's `updated_at` and so its sync time.
         const set = await setPropertiesAfter(backend, `spool_type:${type_id}`, properties)
-        row = await ok(backend.GET('/api/v1/filament/types/{type_id}', { params: { path: { type_id } } }), `read spool type ${type_id}`)
+        row = await ok(backend.GET('/api/v1/filament/types/{type_id}', { params: { path: { type_id } } }), `the properties were set, but reading spool type ${type_id}`)
         return json({ ...row, properties: set })
       } else {
         row = await ok(
@@ -931,7 +931,7 @@ const tools: Tool[] = [
       if (spool_id !== undefined && properties !== undefined && Object.keys(fields).length === 0) {
         // Properties only: no row PATCH, as for a type (an empty one could still move the row's sync time).
         const set = await setPropertiesAfter(backend, `spool:${spool_id}`, properties)
-        const row = await ok(backend.GET('/api/v1/filament/spools/{spool_id}', { params: { path: { spool_id } } }), `read spool ${spool_id}`)
+        const row = await ok(backend.GET('/api/v1/filament/spools/{spool_id}', { params: { path: { spool_id } } }), `the properties were set, but reading spool ${spool_id}`)
         return json({ ...row, properties: set })
       }
       const withProperties = async (row: { id: string }) =>

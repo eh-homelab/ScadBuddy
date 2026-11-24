@@ -78,9 +78,12 @@ export interface TypeExtras {
   properties?: readonly string[]
 }
 
-/** An entity's property values as search text: a string as it is, each list item, a number or boolean as text. */
+/**
+ * An entity's property values as search text: a string as it is, each list item, a number as text.
+ * A boolean is left out: "true" would match every entity with any yes/no property.
+ */
 export function propertyTexts(values: Readonly<Record<string, string | number | boolean | readonly string[]>> | undefined): string[] {
-  return Object.values(values ?? {}).flatMap((value) => (Array.isArray(value) ? value : [String(value)]))
+  return Object.values(values ?? {}).flatMap((value) => (Array.isArray(value) ? value : typeof value === 'boolean' ? [] : [String(value)]))
 }
 
 export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDoc {
