@@ -139,10 +139,24 @@ worker makes the call. Set, batch and delete run once: Bambuddy dedupes none of 
 write the printer did not acknowledge answers `confirmed: false`. ScadBuddy keeps no copy;
 the notes live in Bambuddy, under the keys its own K-Profiles page uses.
 
+### The phone page (#7273)
+
+`/filament/scan` reads and writes spool tags with the phone's own NFC reader, through Web NFC
+(spec `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`). It works only in Chrome on
+Android, in its own tab: Web NFC refuses a frame, so inside Bambuddy the page shows its address
+to open. A tap posts the tag's UID and records to `POST /filament/tags/reads`, which opens the
+spool that holds the tag, or offers to bind it or make a spool from what the tag says
+(OpenSpool or OpenTag3D). "Write tag" on a spool backs the tag up first, writes the spool's
+records in the tag's own format (else the `filament_tag_format` setting), reads the tag back,
+and binds it only when the read-back equals what was sent. Every write keeps a backup, which
+the page can write back. An agent reads or writes a tag through an NFC job (`nfc_read`,
+`nfc_write`): the page shows the job and its records, and nothing runs until a person arms it
+and holds a tag.
+
 ## Code
 
 - Routes:
-  - `backend/scadbuddy/api/filament.py:220` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
+  - `backend/scadbuddy/api/filament.py:250` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
   - `backend/scadbuddy/api/tray_spools.py:44` (a tray's spool link, and create from slot);
   - `backend/scadbuddy/api/filament_profiles.py:26`;
   - `backend/scadbuddy/api/printer_kprofiles.py:42` (a printer's K-profiles, under `/printers/{id}/kprofiles`).
@@ -196,7 +210,8 @@ the notes live in Bambuddy, under the keys its own K-Profiles page uses.
   `docs/superpowers/plans/2026-11-23-spool-bb-fields.md`,
   migration `20261123T0609Z_filament_spool_bb_fields.sql`):
   - `data_origin` says how the spool's data came in, in Bambuddy's words (`rfid_auto`,
-    `rfid_linked`, `nfc_link`, `opentag3d`). It is read only. The pull takes Bambuddy's
+    `rfid_linked`, `nfc_link`, `opentag3d`), or `openspool`, ScadBuddy's own value for a tag
+    the phone page wrote in OpenSpool (Bambuddy has none for that format). It is read only. The pull takes Bambuddy's
     value; a person's tag bind sets `rfid_linked` when the tag's stored kind is a Bambu
     tag, else `nfc_link`; a tag written from the phone page (#7273) sets `openspool` or
     `opentag3d`, the format it wrote.

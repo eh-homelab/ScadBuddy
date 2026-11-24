@@ -344,7 +344,15 @@ same way, `vite.config.ts`).
   `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
   `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases; `rfid.ts` owns
-  `/filament/rfid/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
+  `/filament/rfid/*`; `tags.ts` owns the phone page's routes, `/filament/tags/reads`, the backups,
+  `tag-records`, `tag-written` and the restore, and the agents' `/filament/nfc-jobs`, with
+  `seedNfcJob`; its test `tags.test.ts` holds it to the real routes' order and answers).
+  `/filament/scan` (`pages/filament/ScanPage.tsx`, #7273, spec
+  `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`) is the phone page: Web NFC
+  (`lib/webNfc.ts`, `NfcSession`; Chrome on Android, top level only), one tap's read posted to
+  `POST /tags/reads`, a spool's "Write tag" and a backup's restore through `lib/tagWrite.ts`
+  `writeWithBackup` (backup, write, read back), and an agent's NFC job in `NfcJobBanner`
+  (`components/filament/scan/`); tests stub Web NFC with `src/test/ndefStub.ts`. e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
   `e2e/filament-sensors.spec.ts` (a place's sensor, its limit and history, #6268) and
   `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
   total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy

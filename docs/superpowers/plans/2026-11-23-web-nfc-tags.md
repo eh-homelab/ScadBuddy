@@ -50,7 +50,7 @@
 - Unit tests mock Web NFC with the `NDEFReader` stub of Task 5 (`frontend/src/test/ndefStub.ts`). No test reaches a real `NDEFReader`.
 - Never call `makeReadOnly`. Never write without a backup, and never write without a UID (G7).
 - Tag format names are fixed: `openspool` and `opentag3d`. The setting is `filament_tag_format`, its default is `openspool`, and it sits in Settings → Filament (the `filament` section of `frontend/src/pages/settings/fields.ts`).
-- Backup reasons are fixed: `spool_write`, `agent_write` and `restore`. Job kinds are `read` and `write`. Job states are `pending`, `armed`, `done`, `failed` and `expired`.
+- Backup reasons are fixed: `spool_write`, `agent_write` and `restore`. Job kinds are `read` and `write`. Job states are `pending`, `armed`, `done`, `failed`, `expired` and `cancelled` (R23).
 - Photo roles are fixed: `filament_label` and `spool_label` (entity attachment `role`, `^[a-z_]{1,32}$`, `backend/scadbuddy/api/entity_attachments.py:126`).
 - The phone page polls jobs every 2 s, and only while `document.visibilityState === 'visible'`.
 - The tags store a record's `data_hex` in lower case. Two record lists are equal when their `(record_type, media_type, data_hex)` triples are equal in order.
@@ -477,7 +477,7 @@ Expected: PASS.
 - Consumes: `seen_on`, `TagRead`, `NdefRecord` (Task 1).
 - Produces (models):
   - `BackupReason = Literal["spool_write", "agent_write", "restore"]`.
-  - `class TagBackupIn(_In)`: `uid: str` (≤64, no minimum length, so `""` reaches `NoUidError` and answers 422 `no_uid` as `"::"` does), `records: list[NdefRecord]` (≤16), `reason: BackupReason`, `job_id: UUID | None = None`. A model validator requires `job_id` exactly when `reason` is `agent_write` (both ways, as the table's CHECK does; a `job_id` on another reason is a 422, not an `IntegrityError`).
+  - `class TagBackupIn(_FitsOneTag)`: `uid: str` (≤64, no minimum length, so `""` reaches `NoUidError` and answers 422 `no_uid` as `"::"` does), `records: list[NdefRecord]` (≤16, and 888 bytes at most in all, from the `_FitsOneTag` mixin that `TagReadIn` and `TagRecordsIn` share), `reason: BackupReason`, `job_id: UUID | None = None`. A model validator requires `job_id` exactly when `reason` is `agent_write` (both ways, as the table's CHECK does; a `job_id` on another reason is a 422, not an `IntegrityError`).
   - `class TagBackup(BaseModel)`: `id: UUID`, `tag_id: UUID`, `uid: str`, `records: list[NdefRecord]`, `reason: BackupReason`, `job_id: UUID | None`, `actor: str`, `at: datetime`.
 - Produces (`tags.py`):
   - `BACKUP_TTL: Final = timedelta(minutes=10)` (R5).
@@ -514,6 +514,8 @@ BEGIN
 END $$;
 CREATE TRIGGER filament_tag_backups_keep BEFORE UPDATE OR DELETE ON filament_tag_backups
     FOR EACH ROW EXECUTE FUNCTION filament_tag_backups_keep();
+CREATE TRIGGER filament_tag_backups_keep_truncate BEFORE TRUNCATE ON filament_tag_backups
+    FOR EACH STATEMENT EXECUTE FUNCTION filament_tag_backups_keep();
 ```
 
 - [ ] **Step 2: Write the failing store tests** in `tests/filament/test_tags.py`:
@@ -870,7 +872,7 @@ Expected: PASS.
 **Interfaces:**
 - Consumes: `read_on`, `back_up`, `valid_backup`, `same_records` (Tasks 1, 3, 4).
 - Produces (models):
-  - `NfcJobKind = Literal["read", "write"]`, `NfcJobState = Literal["pending", "armed", "done", "failed", "expired"]`.
+  - `NfcJobKind = Literal["read", "write"]`, `NfcJobState = Literal["pending", "armed", "done", "failed", "expired", "cancelled"]` (`cancelled` from R23).
   - `class NfcJobIn(_In)`: `kind: NfcJobKind`, `records: list[NdefRecord] | None = None` (required for `write`, refused for `read`, by a model validator; 888 bytes at most), `ttl_s: int = Field(600, ge=1, le=600)` (R7).
   - `class NfcJob(BaseModel)`: `id`, `kind`, `records`, `created_by: str`, `state`, `result: dict[str, Any] | None`, `created_at`, `expires_at`, `armed_by: str | None`.
   - `class NfcJobResultIn(_In)`: `uid: str | None = None`, `records: list[NdefRecord] = []` (for a write, the read-back), `backup_id: UUID | None = None`, `error: str | None = None` (≤500). (The read test posts no `backup_id` or `error`, and Decline posts only `error`.) An `error` means a failed job and nothing else is read.
@@ -890,7 +892,7 @@ Expected: PASS.
   - `POST /nfc-jobs/{job_id}/claim` → `NfcJob`, 404, or 409 `job_not_pending`.
   - `POST /nfc-jobs/{job_id}/result` → `NfcJob`, 404, 409 `job_not_armed`, or 409 `backup_mismatch`.
 - Produces (agent, `tools/nfc.ts`):
-  - `nfc_read`: input `{ timeout_s: int 1..600 = 600 }`, `risk: 'write'` (R8), routes `POST /api/v1/filament/nfc-jobs` and `GET /api/v1/filament/nfc-jobs/{job_id}`, `waitsMs: ({timeout_s}) => timeout_s * 1000`. It creates `{kind:'read', ttl_s: timeout_s}`, then polls `GET` every `ctx.pollIntervalMs` until the state is `done`, `failed` or `expired`, `ctx.signal` aborts, or the deadline passes (the `activity_watch` loop, `tools/activity.ts:95-112`). It answers `json({ job_id, state, result })`, or `json({ job_id, state: 'expired' })`.
+  - `nfc_read`: input `{ timeout_s: int 1..600 = 600 }`, `risk: 'write'` (R8), routes `POST /api/v1/filament/nfc-jobs` and `GET /api/v1/filament/nfc-jobs/{job_id}`, `waitsMs: ({timeout_s}) => timeout_s * 1000`. It creates `{kind:'read', ttl_s: timeout_s}`, then polls `GET` every `ctx.pollIntervalMs` until the state is `done`, `failed` or `expired`, `ctx.signal` aborts, or the deadline passes (the `activity_watch` loop, `tools/activity.ts:95-112`). It answers `json({ job_id, state, result })`, or `json({ job_id, state: 'expired' })`. (Superseded by R23 and I1: it also stops at `cancelled`, waits to the server's `expires_at` plus one poll, cancels a job still open, through `POST /api/v1/filament/nfc-jobs/{job_id}/cancel`, and answers the state the server then gives; when the cancel fails it answers the last state it read and `cancel_failed`.)
   - `nfc_write`: input `{ records: NdefRecord[] (1..16), timeout_s }`, `risk: 'outward'`, `approval: 'none'`, with a comment citing the spec's Constraints ("The person's arm-and-tap on the page is its approval"). It does the same as `nfc_read` with `kind:'write'`. The `approval` doc comment in `tools/registry.ts:331-333` says only `confirm_action` opts out; reword it to name the opt-outs' rule (the tool is the approval path, or a person's own act on a page approves it), since this diff adds one.
   - Both set `source: 'NDEF records read from a physical tag, which anyone holding the tag could have written'` (`tools/registry.ts:379`): a read job's result carries the tag's records.
   - The descriptions say: "The user must have ScadBuddy's /filament/scan page open in Chrome on Android. It shows the job; the user taps Arm and holds a tag. Records are NDEF records with data as hex. The write replaces every record on the tag, after a backup the user can restore." `nfc_read` adds: "Any tag, not only a spool's."
@@ -908,7 +910,7 @@ CREATE TABLE filament_nfc_jobs (
     created_by text NOT NULL,
     armed_by text,
     state text NOT NULL DEFAULT 'pending'
-        CHECK (state IN ('pending', 'armed', 'done', 'failed', 'expired')),
+        CHECK (state IN ('pending', 'armed', 'done', 'failed', 'expired', 'cancelled')),
     result jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     expires_at timestamptz NOT NULL,
