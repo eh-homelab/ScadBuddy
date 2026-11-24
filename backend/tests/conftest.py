@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import functools
 import importlib.util
+import inspect
 import json
 import os
 import shutil
@@ -33,6 +34,7 @@ from psycopg import Connection, sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
+from temporalio.worker import _workflow as temporal_workflow_worker
 
 from scadbuddy import main as scadbuddy_main
 from scadbuddy.api.jobs import forget_unreadable_notes_logs
@@ -77,6 +79,32 @@ trace.set_tracer_provider(_provider)
 #: Every app a test starts binds its CRUD listener to a free port (#5298): on the fixed
 #: default, two xdist workers' apps (or a developer's own API) would collide.
 settings_module.DEFAULT_CRUD_PORT = 0
+
+#: The SDK fails a workflow task whose activation runs past 2 s as a deadlock
+#: (`temporalio.worker._workflow`, `_deadlock_timeout_seconds`). On a CI runner starved by
+#: a shard's other xdist workers, a plain activation paused that long and failed a test
+#: (#7443). Every test worker gets this larger bound: a pause passes, a real deadlock still
+#: fails the task. Not `debug_mode`, which also turns the bound off entirely.
+TEST_DEADLOCK_SECONDS = 30
+#: The SDK's own bound, for a test that needs the detector to fire as it does in production.
+SDK_DEADLOCK_SECONDS = 2
+
+_sdk_workflow_worker_init = temporal_workflow_worker._WorkflowWorker.__init__
+# The patch leans on a private class and attribute: a temporalio release that renames
+# either fails the session here, not every Worker or, worse, no test at all.
+assert "_deadlock_timeout_seconds = None if self._debug_mode else 2" in inspect.getsource(
+    _sdk_workflow_worker_init
+), "temporalio's deadlock bound moved: re-check tests/conftest.py's patch (#7443)"
+
+
+@functools.wraps(_sdk_workflow_worker_init)
+def _patient_workflow_worker_init(self: Any, *args: Any, **kwargs: Any) -> None:
+    _sdk_workflow_worker_init(self, *args, **kwargs)
+    if self._deadlock_timeout_seconds is not None:
+        self._deadlock_timeout_seconds = TEST_DEADLOCK_SECONDS
+
+
+temporal_workflow_worker._WorkflowWorker.__init__ = _patient_workflow_worker_init  # type: ignore[method-assign]
 
 
 @pytest.fixture(autouse=True)
