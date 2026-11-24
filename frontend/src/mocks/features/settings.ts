@@ -294,6 +294,10 @@ function putSettings(body: Record<string, unknown>) {
     if (name === 'filament_low_stock_pct' && typeof value === 'number' && value > 100) {
       return refused(name, 'Input should be less than or equal to 100')
     }
+    // #7273 — `core/settings.py`'s `filament_tag_format` Literal.
+    if (name === 'filament_tag_format' && value !== 'openspool' && value !== 'opentag3d') {
+      return refused(name, "Input should be 'openspool' or 'opentag3d'")
+    }
     // #7156 — `core/settings.py`'s bounds of the drying defaults.
     if (name === 'filament_drying_temp_c' && typeof value === 'number' && (value < 1 || value > 150)) {
       return refused(name, value < 1 ? 'Input should be greater than or equal to 1' : 'Input should be less than or equal to 150')

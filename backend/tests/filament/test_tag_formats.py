@@ -93,9 +93,11 @@ def _ot3d_record(payload: bytes) -> NdefRecord:
 
 # Each core field's `examples[0]`, at its `start` and `length`, from
 # https://github.com/queengooborg/OpenTag3D/blob/e14ee7ee5ff34629eb41f9f80d4830eac073cb4a/_data/spec.json
-# (v2.004). Integers are big-endian; strings UTF-8, NUL-padded.
+# (v2.004). Integers are big-endian; strings UTF-8, NUL-padded. The one exception is
+# `tag_version`: its example is 1234 (1.234), and a v1 tag has a layout of its own (R16),
+# so the payload claims 2004, the version whose layout the examples follow.
 _EXAMPLES: list[tuple[int, int, object]] = [
-    (0x00, 2, 1234),  # tag_version
+    (0x00, 2, 2004),  # tag_version
     (0x02, 5, "PLA"),  # material
     (0x07, 5, "CF"),  # material_mod
     (0x0C, 16, "Example Brand"),  # manufacturer
@@ -151,6 +153,16 @@ def test_openspool_decodes_the_published_sample() -> None:
 def test_openspool_reads_numbers_as_well_as_strings() -> None:
     got = decode([_json_record(OPENSPOOL_SAMPLE | {"min_temp": 200, "max_temp": "x"})])
     assert got is not None and (got.nozzle_temp_min, got.nozzle_temp_max) == (200, None)
+    assert got.warnings == ["max_temp"]
+
+
+def test_openspool_reads_a_whole_number_written_with_a_point() -> None:
+    got = decode([_json_record(OPENSPOOL_SAMPLE | {"min_temp": "220.0", "max_temp": 240.0})])
+    assert got is not None and (got.nozzle_temp_min, got.nozzle_temp_max) == (220, 240)
+    assert got.warnings == []
+    half = decode([_json_record(OPENSPOOL_SAMPLE | {"min_temp": "220.5", "max_temp": [1]})])
+    assert half is not None and (half.nozzle_temp_min, half.nozzle_temp_max) == (None, None)
+    assert half.warnings == ["min_temp", "max_temp"]
 
 
 def test_openspool_encodes_back_to_the_sample_keys_and_strings() -> None:
@@ -173,7 +185,7 @@ def test_openspool_names_a_missing_material_and_writes_generic_for_no_brand() ->
 def test_opentag3d_decodes_a_payload_built_from_spec_json_examples() -> None:
     got = decode([_ot3d_record(_ot3d_from_examples())])
     assert got is not None
-    assert got.format == "opentag3d" and got.version == "1.234"  # tag_version example 1234
+    assert got.format == "opentag3d" and got.version == "2.004"
     assert (got.material, got.subtype, got.brand) == ("PLA", "CF", "Example Brand")
     assert got.rgba == "#FFA64DFF" and got.diameter_mm == Decimal("1.750")
     assert got.density_g_cm3 == Decimal("1.240")
@@ -190,7 +202,7 @@ def test_opentag3d_decodes_a_payload_built_from_spec_json_examples() -> None:
         Decimal(4),
     )
     assert (got.colour_name, got.serial, got.extra_colours) == ("Orange", "1234-ABCD", None)
-    assert got.warnings == []  # an older major gets no version warning
+    assert got.warnings == []
 
 
 def test_opentag3d_round_trips_a_spool() -> None:
@@ -249,6 +261,7 @@ def test_opentag3d_writes_generic_for_no_brand_and_never_warns_of_it() -> None:
 
 def test_opentag3d_cuts_utf8_at_a_character_boundary() -> None:
     enc = encode("opentag3d", replace(FACTS_FULL, brand="Ünïcødé Filament Co"))  # 16-byte field
+    assert enc.warnings == ["manufacturer"]  # R17: a cut string is named
     got = decode(enc.records)
     assert got is not None and got.brand is not None
     assert "�" not in got.brand and len(got.brand.encode()) <= 16
@@ -263,6 +276,48 @@ def test_a_newer_major_version_is_not_read() -> None:
     got = decode([_ot3d_record(bytes(payload))])
     assert got is not None and got.material is None and "newer major version" in got.warnings
     assert got.version == "3.000"
+
+
+def test_an_older_major_version_is_not_read_with_the_v2_layout() -> None:
+    # spec.json's own tag_version example, 1234: a v1 tag, whose layout is spec_v1.json's.
+    payload = bytearray(_ot3d_from_examples())
+    payload[0:2] = (1234).to_bytes(2, "big")
+    got = decode([_ot3d_record(bytes(payload))])
+    assert got is not None and (got.format, got.version) == ("opentag3d", "1.234")
+    assert got.warnings == ["older major version"]
+    assert got.model_dump(exclude={"format", "version", "warnings"}, exclude_none=True) == {}
+
+
+def test_opentag3d_splits_a_long_material_at_its_dash_into_the_subtype() -> None:
+    enc = encode("opentag3d", replace(FACTS_FULL, material="PETG-CF", subtype=None))
+    got = decode(enc.records)
+    assert enc.warnings == [] and got is not None and (got.material, got.subtype) == ("PETG", "CF")
+    # A subtype of its own keeps the material whole, cut to 5 bytes and named (R17).
+    kept = encode("opentag3d", replace(FACTS_FULL, material="PETG-CF", subtype="HF"))
+    got = decode(kept.records)
+    assert kept.warnings == ["material"] and got is not None
+    assert (got.material, got.subtype) == ("PETG-", "HF")
+
+
+def test_opentag3d_names_the_colours_it_cannot_hold() -> None:
+    extra = ("#000001FF", "#000002FF", "#000003FF", "#000004FF")
+    enc = encode("opentag3d", replace(FACTS_FULL, extra_colours=extra))
+    got = decode(enc.records)
+    assert enc.warnings == ["color_4"] and got is not None
+    assert got.extra_colours == list(extra[:3])
+
+
+def test_opentag3d_names_a_value_too_big_for_its_field() -> None:
+    enc = encode("opentag3d", replace(FACTS_FULL, label_weight_g=70000))
+    got = decode(enc.records)
+    assert enc.warnings == ["weight"] and got is not None and got.label_weight_g is None
+
+
+def test_opentag3d_drops_a_partial_character_from_a_read_string() -> None:
+    payload = bytearray(_ot3d_from_examples())
+    payload[0x0C : 0x0C + 16] = b"Ab\xc3".ljust(16, b"\0")  # the first byte of a 2-byte character
+    got = decode([_ot3d_record(bytes(payload))])
+    assert got is not None and got.brand == "Ab"
 
 
 def test_a_newer_minor_version_warns_and_is_read() -> None:

@@ -9,7 +9,9 @@ e14ee7ee5ff34629eb41f9f80d4830eac073cb4a: ``_data/spec.json`` v2.004, ``spec.md`
 Implementation Guidelines", ``assets/scripts/opentag3d.js``) is one NDEF record of type
 ``application/opentag3d``: a fixed layout of unsigned big-endian integers, NUL-padded
 UTF-8 strings and RGBA bytes. A reader takes the first such record, reads missing bytes
-as 0, refuses a newer major version and warns of a newer minor one.
+as 0, refuses a newer major version and warns of a newer minor one. ScadBuddy reads only
+major version 2: an older major has its own layout (`spec_v1.json`), so it is not read
+with this one (R16).
 
 A write replaces the tag's whole message with one record of one format (plan ruling R3).
 """
@@ -19,7 +21,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Final, Literal
 
 from scadbuddy.codes.parse import format_code
@@ -197,31 +199,42 @@ def _text(value: object) -> str | None:
 
 
 def _whole(value: object) -> int | None:
-    """A positive whole number given as a number or a string."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        number = value
-    elif isinstance(value, str):
-        try:
-            number = int(value.strip())
-        except ValueError:
-            return None
-    else:
-        return None
-    return number if number > 0 else None
+    """A whole number given as a number or a string, ``220``, ``"220"`` or ``"220.0"``;
+    `ValueError` when it is not one."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ValueError(value)
+    try:
+        number = Decimal(str(value).strip())
+    except InvalidOperation:
+        raise ValueError(value) from None
+    if not number.is_finite() or number != number.to_integral_value():
+        raise ValueError(value)
+    return int(number)
 
 
 def _openspool_decode(obj: dict[str, Any]) -> m.DecodedSpool:
     hex_ = obj.get("color_hex")
+    warnings: list[str] = []
+    temps: dict[str, int | None] = {}
+    for key in ("min_temp", "max_temp"):
+        temps[key] = None
+        if obj.get(key) is None:
+            continue
+        try:
+            number = _whole(obj[key])
+        except ValueError:
+            warnings.append(key)
+            continue
+        temps[key] = number if number is not None and number > 0 else None
     return m.DecodedSpool(
         format="openspool",
         version=_text(obj.get("version")) or "",
         material=_text(obj.get("type")),
         brand=_text(obj.get("brand")),
         rgba=canonical_rgba(hex_) if isinstance(hex_, str) else None,
-        nozzle_temp_min=_whole(obj.get("min_temp")),
-        nozzle_temp_max=_whole(obj.get("max_temp")),
+        nozzle_temp_min=temps["min_temp"],
+        nozzle_temp_max=temps["max_temp"],
+        warnings=warnings,
     )
 
 
@@ -291,8 +304,19 @@ def _stored(value: Decimal | int | None, scale: Decimal) -> int | None:
     return None if value is None else _half_up(Decimal(value) / scale)
 
 
+def _material_and_mod(facts: SpoolFacts) -> tuple[str | None, str | None]:
+    """The ``material`` and ``material_mod`` to write. A material too long for its 5 bytes,
+    with no subtype, is split at its first ``-``: ``PETG-CF`` is ``PETG`` and ``CF`` (R17)."""
+    material, mod = facts.material or None, facts.subtype or None
+    if material and mod is None and len(material.encode("utf-8")) > 5 and "-" in material:
+        head, tail = material.split("-", 1)
+        material, mod = head or None, tail or None
+    return material, mod
+
+
 def _opentag3d_values(facts: SpoolFacts) -> dict[str, int | str | bytes | None]:
     """The value each field stores: an integer before packing, a string or RGBA bytes."""
+    material, mod = _material_and_mod(facts)
     colours: list[bytes | None] = [None] * 4
     for i, colour in enumerate((facts.rgba, *facts.extra_colours[:3])):
         rgba = canonical_rgba(colour)
@@ -300,8 +324,8 @@ def _opentag3d_values(facts: SpoolFacts) -> dict[str, int | str | bytes | None]:
     scale = {f[0]: f[4] for f in _LAYOUT}
     return {
         "tag_version": OPENTAG3D_VERSION,
-        "material": facts.material or None,
-        "material_mod": facts.subtype or None,
+        "material": material,
+        "material_mod": mod,
         "manufacturer": facts.brand or "Generic",
         "color_name": facts.colour_name or None,
         "color_1": colours[0],
@@ -342,6 +366,8 @@ def _opentag3d_encode(facts: SpoolFacts) -> EncodedTag:
         if kind == "utf8":
             assert isinstance(value, str)
             raw = _cut(value, length)
+            if len(raw) < len(value.encode("utf-8")):
+                warnings.append(field_id)  # cut to fit (R17)
         elif kind == "rgba":
             assert isinstance(value, bytes)
             raw = value
@@ -349,6 +375,9 @@ def _opentag3d_encode(facts: SpoolFacts) -> EncodedTag:
             assert isinstance(value, int)
             raw = value.to_bytes(length, "big")
         payload[start : start + len(raw)] = raw
+    if len(facts.extra_colours) > 3:
+        # color_4 is the last colour field; the extra colours after it are not written.
+        warnings.append("color_4")
     return EncodedTag("opentag3d", [_mime(OPENTAG3D_MEDIA, bytes(payload))], warnings)
 
 
@@ -360,7 +389,8 @@ def _opentag3d_decode(payload: bytes) -> m.DecodedSpool:
         return int.from_bytes(raw[field_id], "big") or None
 
     def text(field_id: str) -> str | None:
-        return raw[field_id].rstrip(b"\0").decode("utf-8", errors="replace") or None
+        # A partial or bad UTF-8 sequence is dropped, so no U+FFFD reaches a draft.
+        return raw[field_id].rstrip(b"\0").decode("utf-8", errors="ignore") or None
 
     def colour(field_id: str) -> str | None:
         value = raw[field_id]
@@ -377,10 +407,15 @@ def _opentag3d_decode(payload: bytes) -> m.DecodedSpool:
     tag_version = int.from_bytes(raw["tag_version"], "big")
     major, minor = divmod(tag_version, 1000)
     version = f"{major}.{minor:03d}"
-    if major > _MAJOR:
-        return m.DecodedSpool(format="opentag3d", version=version, warnings=["newer major version"])
+    if major != _MAJOR:
+        # Another major has a layout of its own (`spec_v1.json` for 1.x, which the reference
+        # reader loads), so only the v2 layout is read (R16).
+        newer = "newer" if major > _MAJOR else "older"
+        return m.DecodedSpool(
+            format="opentag3d", version=version, warnings=[f"{newer} major version"]
+        )
     warnings = []
-    if major == _MAJOR and minor > OPENTAG3D_VERSION % 1000:
+    if minor > OPENTAG3D_VERSION % 1000:
         warnings.append("newer minor version")
     target = temp("print_temp")
     extra = [c for c in (colour("color_2"), colour("color_3"), colour("color_4")) if c]

@@ -83,6 +83,8 @@
 - **R13. When a read's records decode as OpenSpool or OpenTag3D, the tag's stored `kind` changes** to `ntag_openspool` or `ntag_opentag`. A `bambu_mifare` tag never changes kind. A write can change a tag's format, and the kind must follow it.
 - **R14. A phone read with no UID** answers the decoded data with `tag: null`, `spool: null` and `next: "none"`. It makes no tag row and binds nothing.
 - **R15. The OpenTag3D mapping** is the table in Task 2. A required field with no value is written as 0 and named in `warnings`, and the page shows the warnings before the write.
+- **R16. An OpenTag3D tag whose major version is not 2** decodes to `format`, `version` and an "older major version" or "newer major version" warning only, and gives no draft; a 1.x tag has its own layout (`spec_v1.json`, which the reference reader loads).
+- **R17. An OpenTag3D write splits a material too long for its 5 bytes**, when the subtype is empty, at its first `-` into `material` and `material_mod` (`PETG-CF` is `PETG` and `CF`), and names in `warnings` any string field it still cuts.
 
 ## Review Focus
 
@@ -314,7 +316,7 @@ Write the keys in that order, with `json.dumps(obj, separators=(",", ":"), ensur
 
 | id | start | len | type | from `SpoolFacts` (write) | to `DecodedSpool` (read) |
 | --- | --- | --- | --- | --- | --- |
-| `tag_version` | 0x00 | 2 | int ×0.001 | `2004` | `version` `"2.004"`; a major above 2 decodes to only `format`, `version` and the warning `"newer major version"`; a major of 2 with a minor above 004 adds the warning `"newer minor version"` (an older major, such as the example `1.234`, gets no version warning) |
+| `tag_version` | 0x00 | 2 | int ×0.001 | `2004` | `version` `"2.004"`; a major other than 2 decodes to only `format`, `version` and the warning `"newer major version"` or `"older major version"` (R16); a major of 2 with a minor above 004 adds the warning `"newer minor version"` |
 | `material` | 0x02 | 5 | utf8 | `material` (required) | `material` |
 | `material_mod` | 0x07 | 5 | utf8 | `subtype` | `subtype` |
 | `manufacturer` | 0x0C | 16 | utf8 | `brand`, else `"Generic"` (required) | `brand` |
@@ -360,7 +362,7 @@ def test_openspool_encodes_back_to_the_sample_keys_and_strings():
 def test_opentag3d_decodes_a_payload_built_from_spec_json_examples():
     payload = _ot3d_from_examples()  # each core field's examples[0] at its start, spec.json v2.004
     got = decode([NdefRecord(record_type="mime", media_type="application/opentag3d", data_hex=payload.hex())])
-    assert got.format == "opentag3d" and got.version == "1.234"   # tag_version example 1234
+    assert got.format == "opentag3d" and got.version == "2.004"   # R16: the payload claims 2004
     assert (got.material, got.subtype, got.brand) == ("PLA", "CF", "Example Brand")
     assert got.rgba == "#FFA64DFF" and got.diameter_mm == Decimal("1.750") and got.density_g_cm3 == Decimal("1.240")
     assert (got.nozzle_temp_min, got.nozzle_temp_max, got.label_weight_g, got.empty_weight_g) == (190, 225, 1000, 105)
@@ -395,7 +397,7 @@ def test_a_json_record_that_is_not_json_decodes_to_nothing():
     assert decode([NdefRecord(record_type="mime", media_type="application/json", data_hex="7b7b")]) is None
 ```
 
-`_ot3d_from_examples` writes the `examples[0]` of each field in the mapping table at its start and length, as `spec.json` lists them. Put a link to `https://github.com/queengooborg/OpenTag3D/blob/e14ee7ee5ff34629eb41f9f80d4830eac073cb4a/_data/spec.json` above it. The examples are: tag_version 1234, material `PLA`, material_mod `CF`, manufacturer `Example Brand`, color_1 `[255,166,77,255]`, diameter 1750, min_print_temp 38, max_print_temp 45, density 1240, weight 1000, empty_spool_weight 105.
+`_ot3d_from_examples` writes the `examples[0]` of each field in the mapping table at its start and length, as `spec.json` lists them. Put a link to `https://github.com/queengooborg/OpenTag3D/blob/e14ee7ee5ff34629eb41f9f80d4830eac073cb4a/_data/spec.json` above it. The examples are (tag_version is written as 2004, not its example 1234, by R16): material `PLA`, material_mod `CF`, manufacturer `Example Brand`, color_1 `[255,166,77,255]`, diameter 1750, min_print_temp 38, max_print_temp 45, density 1240, weight 1000, empty_spool_weight 105.
 
 - [ ] **Step 2: Run them and see them fail**
 
