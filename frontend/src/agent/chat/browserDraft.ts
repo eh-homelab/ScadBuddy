@@ -25,6 +25,7 @@ export function browserOptions(d: BrowserDraft): SessionBrowserInput | undefined
   const locale = d.locale.trim()
   const width = d.width.trim()
   const height = d.height.trim()
+  // browserProblem holds a side that is not digits only, so Number() reads each as written.
   const out: SessionBrowserInput = {
     ...(userAgent ? { user_agent: userAgent } : {}),
     ...(width && height ? { viewport: { width: Number(width), height: Number(height) } } : {}),
@@ -32,6 +33,8 @@ export function browserOptions(d: BrowserDraft): SessionBrowserInput | undefined
   }
   return Object.keys(out).length ? out : undefined
 }
+
+const WHOLE = /^\d+$/
 
 /**
  * A draft the agent's schema could not take as a viewport (a shape, not a bound): one side set
@@ -42,7 +45,8 @@ export function browserProblem(d: BrowserDraft): string | null {
   const width = d.width.trim()
   const height = d.height.trim()
   if (!width !== !height) return 'Set both width and height, or neither.'
-  if (width && !(Number.isInteger(Number(width)) && Number.isInteger(Number(height)))) {
+  // Digits only: Number() also takes '1e3' (1000), '0x200' (512) and '1.0'.
+  if (width && !(WHOLE.test(width) && WHOLE.test(height))) {
     return 'Width and height are whole numbers of pixels.'
   }
   return null
