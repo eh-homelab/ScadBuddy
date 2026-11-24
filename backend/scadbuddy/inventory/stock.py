@@ -16,7 +16,9 @@
 
 Locks: the item `FOR SHARE` (the parent), then the rows being changed `FOR UPDATE`. A take
 locks all of the item's lots in FIFO order, so takes, give-backs and counts of one item run
-one after another."""
+one after another. A caller that takes or gives back several items in one transaction (an
+order's parts, the plan's Task 7) takes them in `item_id` order, and locks its own rows
+(the order and its items) before any lot, so two such callers cannot deadlock."""
 
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ import builtins
 from collections.abc import Callable
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from uuid import UUID
 
 import psycopg
@@ -337,7 +339,9 @@ class StockStore:
             ]
 
     def set_lot_cost(self, lot_id: UUID, unit_cost_minor: Decimal, by: Actor) -> Lot:
-        """The lot's cost now, known. No move changes (D14); `recost_lot` re-snapshots."""
+        """The lot's cost now, known. No move changes (D14); `recost_lot` re-snapshots.
+        `cost_currency` and `foreign_unit_cost_minor` stay: what it was bought in and at
+        (R-P2-12)."""
         if unit_cost_minor < 0 or unit_cost_minor != _six(unit_cost_minor):
             raise BadQuantity(str(unit_cost_minor))
         with self.pool.connection() as conn, conn.transaction():
@@ -351,8 +355,10 @@ class StockStore:
     def recost_lot(self, conn: Conn, lot_id: UUID) -> RecostResult:
         """ "Re-cost past uses" (spec §6.6), in the caller's transaction: every `use`,
         `return` and `adjust` move of the lot takes the lot's cost now. Names each order
-        item whose parts cost (`-sum(amount_minor)` of its `use` and `return` moves)
-        changed, with the figure before and after."""
+        item whose parts cost (`-sum(amount_minor)` of its `use` and `return` moves) or
+        unknown flag changed, with both before and after. The after figure is the before
+        figure plus what this update changed (`RETURNING old.*, new.*`), so a move another
+        transaction writes meanwhile on another lot does not count as a change."""
         lot = self._lock_lot(conn, lot_id)
         cost, unknown = lot["unit_cost_minor"], lot["cost_unknown"]
         touched = [
@@ -363,25 +369,35 @@ class StockStore:
                 (lot_id, list(_RECOST_KINDS)),
             ).fetchall()
         ]
-        before = _parts_costs(conn, touched)
-        changed = conn.execute(
+        before = _parts_costs(conn, touched, lot_id)
+        rows = conn.execute(
             "UPDATE stock_moves SET unit_cost_minor = %s, amount_minor = round(qty * %s, 6),"
             " cost_unknown = %s WHERE lot_id = %s AND kind = ANY(%s)"
-            " AND (unit_cost_minor <> %s OR cost_unknown <> %s)",
+            " AND (unit_cost_minor <> %s OR cost_unknown <> %s)"
+            " RETURNING order_item_id, kind, old.amount_minor AS old_amount,"
+            " new.amount_minor AS new_amount",
             (cost, cost, unknown, lot_id, list(_RECOST_KINDS), cost, unknown),
-        ).rowcount
-        after = _parts_costs(conn, touched)
-        orders = [
-            RecostedItem(
-                order_id=before[oi][0],
+        ).fetchall()
+        delta: dict[str, Decimal] = {}
+        for r in rows:
+            if r["order_item_id"] is not None and r["kind"] in ("use", "return"):
+                oi = r["order_item_id"]
+                delta[oi] = delta.get(oi, Decimal(0)) + r["new_amount"] - r["old_amount"]
+        orders: builtins.list[RecostedItem] = []
+        for oi in sorted(before, key=lambda oi: (before[oi].order_id or "", oi)):
+            was = before[oi]
+            # The lot's `use` and `return` moves now all carry its flag.
+            item = RecostedItem(
+                order_id=was.order_id,
                 order_item_id=oi,
-                before_minor=before[oi][1],
-                after_minor=after[oi][1],
+                before_minor=was.cost,
+                after_minor=was.cost - delta.get(oi, Decimal(0)),
+                before_unknown=was.unknown,
+                after_unknown=was.others_unknown or (was.on_lot and unknown),
             )
-            for oi in sorted(before, key=lambda oi: (before[oi][0] or "", oi))
-            if before[oi][1] != after[oi][1]
-        ]
-        return RecostResult(moves=changed, orders=orders)
+            if (item.before_minor, item.before_unknown) != (item.after_minor, item.after_unknown):
+                orders.append(item)
+        return RecostResult(moves=len(rows), orders=orders)
 
     # -- takes ---------------------------------------------------------------------------
 
@@ -405,7 +421,11 @@ class StockStore:
         unknown cost (spec §6.6, the plan's Review Focus 1). One move per lot."""
         item = _item(conn, item_id, "lot", lock=True)
         _positive(item["uom"], qty)
-        lots = _lock_lots(conn, item_id) or _open_lots(conn, item_id, by)
+        lots = _lock_lots(conn, item_id)
+        # Before a lot is opened, so a caller that goes on in its transaction keeps none.
+        if lot_id is not None and all(lot["id"] != lot_id for lot in lots):
+            raise LotNotFound(str(lot_id))
+        lots = lots or _open_lots(conn, item_id, by)
         return [
             _move(
                 conn,
@@ -710,15 +730,33 @@ def _lot(conn: Conn, lot_id: UUID) -> Lot:
     return Lot.model_validate(dict(row))
 
 
-def _parts_costs(
-    conn: Conn, order_item_ids: builtins.list[str]
-) -> dict[str, tuple[str | None, Decimal]]:
-    """Each order item's order and parts cost: `-sum(amount_minor)` of its `use` and
-    `return` moves (what job cost reads, the plan's Task 8)."""
+class _Parts(NamedTuple):
+    order_id: str | None
+    #: `-sum(amount_minor)` of the order item's `use` and `return` moves.
+    cost: Decimal
+    #: Any of them of unknown cost.
+    unknown: bool
+    #: Any of them, on another lot or a unit, of unknown cost.
+    others_unknown: bool
+    #: Any of them on the lot.
+    on_lot: bool
+
+
+def _parts_costs(conn: Conn, order_item_ids: builtins.list[str], lot_id: UUID) -> dict[str, _Parts]:
+    """Each order item's parts cost, as job cost reads it (the plan's Task 8), with what
+    `recost_lot` needs to know of `lot_id`."""
     rows = conn.execute(
-        "SELECT order_item_id, max(order_id) AS order_id, -sum(amount_minor) AS cost"
+        "SELECT order_item_id, max(order_id) AS order_id, -sum(amount_minor) AS cost,"
+        " bool_or(cost_unknown) AS unknown,"
+        " coalesce(bool_or(cost_unknown) FILTER (WHERE lot_id IS DISTINCT FROM %s), false)"
+        " AS others_unknown, coalesce(bool_or(lot_id = %s), false) AS on_lot"
         " FROM stock_moves WHERE order_item_id = ANY(%s) AND kind IN ('use', 'return')"
         " GROUP BY order_item_id",
-        (order_item_ids,),
+        (lot_id, lot_id, order_item_ids),
     ).fetchall()
-    return {r["order_item_id"]: (r["order_id"], r["cost"]) for r in rows}
+    return {
+        r["order_item_id"]: _Parts(
+            r["order_id"], r["cost"], r["unknown"], r["others_unknown"], r["on_lot"]
+        )
+        for r in rows
+    }

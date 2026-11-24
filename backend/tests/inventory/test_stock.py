@@ -664,3 +664,174 @@ def test_a_kind_made_by_a_person_is_counted_by_its_tracking(
     assert stock.lot(uuid4()) is None
     wire = lot.model_dump(mode="json")
     assert (wire["on_hand"], wire["unit_cost_minor"]) == ("2", "1")
+
+
+# -- Task 4 review --------------------------------------------------------------------------
+
+
+def test_recost_of_an_order_item_with_uses_on_two_lots(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    item = _item(items)
+    _, second = _two_lots(stock, item)
+    _take(pg_pool, stock, item, 15, order_id="o1", order_item_id="oi1")
+    stock.set_lot_cost(second, Decimal(900), BY)
+
+    with pg_pool.connection() as conn, conn.transaction():
+        result = stock.recost_lot(conn, second)
+
+    assert result.moves == 1
+    assert result.orders == [
+        RecostedItem(
+            order_id="o1",
+            order_item_id="oi1",
+            before_minor=Decimal(8500),
+            after_minor=Decimal(9500),
+        )
+    ]
+
+
+def test_recost_of_a_cost_unknown_lot_clears_its_moves_flag(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    """The order item is named although its amount stays 0: its cost became known."""
+    item = _item(items)
+    (use,) = _take(pg_pool, stock, item, 3, order_id="o1", order_item_id="oi1")
+    assert use.lot_id is not None and use.cost_unknown
+    stock.set_lot_cost(use.lot_id, Decimal(0), BY)
+
+    with pg_pool.connection() as conn, conn.transaction():
+        result = stock.recost_lot(conn, use.lot_id)
+
+    assert result.moves == 1
+    assert result.orders == [
+        RecostedItem(
+            order_id="o1",
+            order_item_id="oi1",
+            before_minor=Decimal(0),
+            after_minor=Decimal(0),
+            before_unknown=True,
+            after_unknown=False,
+        )
+    ]
+    (again,) = stock.moves(order_item_id="oi1")
+    assert again.cost_unknown is False
+
+
+@pytest.mark.parametrize("give_back_first", [True, False])
+def test_recost_and_give_back_wait_for_each_other(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool, give_back_first: bool
+) -> None:
+    """Either order, the use and its return end at one cost and net to 0."""
+    item = _item(items)
+    _, second = _two_lots(stock, item)
+    _take(pg_pool, stock, item, 5, lot_id=second, order_id="o1", order_item_id="oi1")
+    stock.set_lot_cost(second, Decimal(900), BY)
+
+    def give_back(conn: Conn) -> list[Move]:
+        return stock.give_back(conn, order_item_id="oi1", item_id=item, by=BY)
+
+    def recost(conn: Conn) -> object:
+        return stock.recost_lot(conn, second)
+
+    def alone(call: Callable[[Conn], object]) -> Callable[[], object]:
+        def run() -> object:
+            with pg_pool.connection() as conn, conn.transaction():
+                return call(conn)
+
+        return run
+
+    if give_back_first:
+        _while_held(pg_pool, give_back, alone(recost))
+    else:
+        _while_held(pg_pool, recost, alone(give_back))
+
+    moves = stock.moves(order_item_id="oi1")
+    assert {m.unit_cost_minor for m in moves} == {900}
+    assert sum(m.amount_minor for m in moves) == 0
+    assert [lot.on_hand for lot in stock.lots(item)] == [10, 10]
+
+
+def test_an_empty_named_lot_falls_back_to_fifo(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    item = _item(items)
+    first, second = _two_lots(stock, item)
+    _take(pg_pool, stock, item, 10, lot_id=first)
+
+    moves = _take(pg_pool, stock, item, 3, lot_id=first)
+
+    assert [_row(m.lot_id, m.qty, m.unit_cost_minor, m.needs_review) for m in moves] == [
+        (second, -3, 700, False)
+    ]
+
+
+def test_a_named_older_lot_and_a_shortfall_take_the_newest_lots_cost(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    item = _item(items)
+    first, second = _two_lots(stock, item)
+
+    moves = _take(pg_pool, stock, item, 25, lot_id=first)
+
+    assert [_row(m.lot_id, m.qty, m.unit_cost_minor, m.needs_review) for m in moves] == [
+        (first, -10, 500, False),
+        (second, -10, 700, False),
+        (second, -5, 700, True),
+    ]
+
+
+def test_a_named_lot_on_an_item_with_no_lot_opens_none(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    """Checked before a lot is opened, so a caller that goes on in its transaction keeps
+    no stray lot."""
+    item = _item(items)
+
+    with pg_pool.connection() as conn, conn.transaction():
+        with pytest.raises(LotNotFound):
+            stock.take(conn, item, Decimal(1), BY, lot_id=uuid4())
+        row = conn.execute("SELECT count(*) AS n FROM stock_lots").fetchone()
+    assert row is not None and row["n"] == 0
+
+
+def test_give_back_returns_only_the_named_item(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    bolt, nut = _item(items), _item(items, name="M3 nut")
+    _two_lots(stock, bolt)
+    _two_lots(stock, nut)
+    _take(pg_pool, stock, bolt, 2, order_item_id="oi1")
+    _take(pg_pool, stock, nut, 3, order_item_id="oi1")
+
+    with pg_pool.connection() as conn, conn.transaction():
+        back = stock.give_back(conn, order_item_id="oi1", item_id=bolt, by=BY)
+
+    assert [_row(m.item_id, m.qty) for m in back] == [(bolt, 2)]
+    assert [lot.on_hand for lot in stock.lots(nut)] == [7, 10]
+
+
+def test_a_count_needs_a_note(stock: StockStore, items: ItemStore) -> None:
+    item = _item(items)
+
+    with pytest.raises(ValueError, match="note"):
+        stock.count_item(item, Decimal(1), "  ", BY)
+
+
+def test_a_cost_set_later_keeps_the_currency_bought_in(stock: StockStore, items: ItemStore) -> None:
+    """R-P2-12: `cost_currency` is the currency the lot was bought in."""
+    item = _item(items)
+    lot = stock.receive_lot(
+        item, ReceiveLot(qty=Decimal(2), unit_cost_minor=Decimal(250), currency="EUR"), BY
+    )
+    blank = stock.receive_lot(item, ReceiveLot(qty=Decimal(1), currency="USD"), BY)
+
+    costed = stock.set_lot_cost(lot.id, Decimal(270), BY)
+
+    assert _row(
+        costed.unit_cost_minor,
+        costed.cost_unknown,
+        costed.cost_currency,
+        costed.foreign_unit_cost_minor,
+    ) == (270, False, "EUR", 250)
+    assert blank.cost_currency is None

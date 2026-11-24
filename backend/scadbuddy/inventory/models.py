@@ -293,7 +293,8 @@ class Lot(_Decimals):
     #: One unit's cost in minor units of the shop currency.
     unit_cost_minor: Decimal
     cost_unknown: bool
-    #: The currency a cost was given in when it was not the shop's (R-7067-11).
+    #: The currency the lot was bought in, when it was not the shop's (R-7067-11,
+    #: R-P2-12); a cost set later keeps it.
     cost_currency: str | None
     #: One unit's cost as given in `cost_currency`, in its minor units (R-P2-11).
     foreign_unit_cost_minor: Decimal | None
@@ -458,16 +459,21 @@ class UnitStatusInput(BaseModel):
 
 
 class RecostedItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     order_id: str | None
     order_item_id: str
     #: The order item's parts cost (`-sum(amount_minor)` of its `use` and `return` moves),
     #: before and after the re-cost.
     before_minor: Decimal
     after_minor: Decimal
+    #: Some of those moves were of unknown cost, before and after.
+    before_unknown: bool = False
+    after_unknown: bool = False
 
 
 class RecostResult(BaseModel):
     #: The moves whose snapshot changed.
     moves: int
-    #: The order items whose parts cost changed.
+    #: The order items whose parts cost or its unknown flag changed.
     orders: list[RecostedItem]
