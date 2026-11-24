@@ -72,7 +72,7 @@ def test_sources_find_the_qualifying_printer(
 ) -> None:
     pid = make_printer(printers, pg_pool)
     [source] = camera.sources()
-    assert (source.printer_id, source.host, source.port) == (pid, "172.16.0.187", 322)
+    assert (source.printer_id, source.host, source.port) == (pid, "10.0.0.9", 322)
     assert (source.path, source.cert_sha256) == ("/streaming/live/1", CERT)
     assert camera.sources(pid) == [source]
     assert camera.sources(str(uuid.uuid4())) == []
@@ -105,19 +105,19 @@ def test_sources_skip_unqualified(
 def test_acquire_is_exclusive(camera: CameraStore, printers: PrinterStore, pg_pool: PgPool) -> None:
     pid = make_printer(printers, pg_pool)
     barrier = threading.Barrier(8)
-    answers: list[bool] = []
+    answers: list[tuple[str, bool]] = []
 
     def go(name: str) -> None:
         barrier.wait()
-        answers.append(camera.lease(pid, name, "acquire", NOW).held)
+        answers.append((name, camera.lease(pid, name, "acquire", NOW).held))
 
     threads = [threading.Thread(target=go, args=(f"r{i}",)) for i in range(8)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert answers.count(True) == 1
-    assert camera.lease(pid, "r0", "acquire", NOW).holder is not None
+    assert [n for n, held in answers if held] == [camera.lease(pid, "r0", "renew", NOW).holder]
+    assert sum(held for _, held in answers) == 1
 
 
 def test_acquire_by_the_holder_renews(
@@ -164,15 +164,15 @@ def test_index_refuses_non_leader(
     pid = make_printer(printers, pg_pool)
     now = datetime.now(UTC)
     with pytest.raises(NotLeaderError):
-        camera.index(pid, "a", [seg(now)])
+        camera.index(pid, "a", [seg(now)], now)
     camera.lease(pid, "a", "acquire", now)
     with pytest.raises(NotLeaderError):
-        camera.index(pid, "b", [seg(now)])
+        camera.index(pid, "b", [seg(now)], now)
     camera.lease(pid, "c", "acquire", now - timedelta(minutes=5))
     camera.lease(pid, "a", "release", now)
     camera.lease(pid, "a", "acquire", now - timedelta(minutes=5))
     with pytest.raises(NotLeaderError):
-        camera.index(pid, "a", [seg(now)])
+        camera.index(pid, "a", [seg(now)], now)
 
 
 def test_index_is_idempotent_by_key(
@@ -182,9 +182,9 @@ def test_index_is_idempotent_by_key(
     now = datetime.now(UTC)
     camera.lease(pid, "a", "acquire", now)
     batch = [seg(NOW), seg(NOW + timedelta(seconds=4))]
-    assert camera.index(pid, "a", batch) == 2
-    assert camera.index(pid, "a", [*batch, seg(NOW + timedelta(seconds=8))]) == 1
-    assert camera.index(pid, "a", []) == 0
+    assert camera.index(pid, "a", batch, now) == 2
+    assert camera.index(pid, "a", [*batch, seg(NOW + timedelta(seconds=8))], now) == 1
+    assert camera.index(pid, "a", [], now) == 0
     with pg_pool.connection() as conn:
         row = conn.execute("SELECT count(*) AS n FROM camera_segments").fetchone()
     assert row is not None and row["n"] == 3
@@ -196,7 +196,7 @@ def test_indexed_until_is_last_end(
     pid = make_printer(printers, pg_pool)
     now = datetime.now(UTC)
     assert camera.lease(pid, "a", "acquire", now).indexed_until is None
-    camera.index(pid, "a", [seg(NOW), seg(NOW + timedelta(seconds=4), 3500)])
+    camera.index(pid, "a", [seg(NOW), seg(NOW + timedelta(seconds=4), 3500)], now)
     answer = camera.lease(pid, "a", "renew", now)
     assert answer.indexed_until == NOW + timedelta(seconds=7.5)
     assert camera.lease(pid, "b", "acquire", now).indexed_until == NOW + timedelta(seconds=7.5)
@@ -216,3 +216,32 @@ def test_report_feed_says_changed(
             "SELECT report FROM camera_feeds WHERE printer_id = %s AND part = 'relay'", (pid,)
         ).fetchone()
     assert row is not None and row["report"]["state"] == "retrying"
+
+
+def test_index_uses_the_callers_clock(
+    camera: CameraStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    pid = make_printer(printers, pg_pool)
+    t = datetime(2030, 1, 1, tzinfo=UTC)
+    assert camera.lease(pid, "a", "acquire", t).held
+    assert camera.index(pid, "a", [seg(t)], t + timedelta(seconds=19)) == 1
+    with pytest.raises(NotLeaderError):
+        camera.index(pid, "a", [seg(t, key="late")], t + timedelta(seconds=21))
+
+
+def test_sources_use_the_linked_host(
+    camera: CameraStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    report = {"ipcam": {"rtsp_url": "rtsps://203.0.113.9:8322/other/path"}}
+    pid = make_printer(printers, pg_pool, report=report)
+    [source] = camera.sources(pid)
+    assert (source.host, source.port, source.path) == ("10.0.0.9", 8322, "/other/path")
+
+
+@pytest.mark.parametrize("port", ["0", "70000"])
+def test_sources_skip_a_bad_port(
+    camera: CameraStore, printers: PrinterStore, pg_pool: PgPool, port: str
+) -> None:
+    report = {"ipcam": {"rtsp_url": f"rtsps://10.0.0.9:{port}/streaming/live/1"}}
+    pid = make_printer(printers, pg_pool, report=report)
+    assert camera.sources(pid) == []

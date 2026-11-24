@@ -53,7 +53,8 @@ class CameraStore:
         return [CameraSource(**s) for s in self._sources(printer_id)]
 
     def sources_with_codes(self, printer_id: str | None = None) -> list[CameraSourceWithCode]:
-        assert self._printers is not None
+        if self._printers is None:
+            raise RuntimeError("CameraStore needs a PrinterStore to open access codes")
         return [
             CameraSourceWithCode(
                 **s, access_code=SecretStr(self._printers.open_access_code(s["printer_id"]))
@@ -72,7 +73,7 @@ class CameraStore:
             args = (key,)
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT p.id, p.lan_cert_sha256, r.report FROM printers p"
+                "SELECT p.id, p.lan_host, p.lan_cert_sha256, r.report FROM printers p"
                 " JOIN printer_reports r ON r.printer_id = p.id"
                 " WHERE p.camera_recording AND p.lan_host IS NOT NULL"
                 " AND p.access_code_sealed IS NOT NULL AND p.lan_cert_sha256 IS NOT NULL"
@@ -85,28 +86,34 @@ class CameraStore:
             if url is None:
                 continue
             parts = urlsplit(url)
-            if parts.hostname is None:
+            try:
+                port = 322 if parts.port is None else parts.port
+            except ValueError:
+                continue
+            if not 1 <= port <= 65535:
                 continue
             found.append(
                 {
                     "printer_id": str(row["id"]),
-                    "host": parts.hostname,
-                    "port": parts.port or 322,
+                    "host": row["lan_host"],
+                    "port": port,
                     "path": parts.path,
                     "cert_sha256": row["lan_cert_sha256"],
                 }
             )
         return found
 
-    def index(self, printer_id: str, recorder: str, segments: list[SegmentIn]) -> int:
+    def index(
+        self, printer_id: str, recorder: str, segments: list[SegmentIn], now: datetime
+    ) -> int:
         key = printer_uuid(printer_id)
         if key is None:
             raise NotLeaderError(printer_id)
         with self._pool.connection() as conn, conn.transaction():
             held = conn.execute(
                 "SELECT 1 FROM camera_leases WHERE printer_id = %s AND holder = %s"
-                " AND expires_at > now() FOR SHARE",
-                (key, recorder),
+                " AND expires_at > %s FOR SHARE",
+                (key, recorder, now),
             ).fetchone()
             if held is None:
                 raise NotLeaderError(printer_id)
