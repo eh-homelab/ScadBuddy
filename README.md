@@ -1307,8 +1307,7 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   and the SB spools Bambuddy's path offers and maps a plan by (`…/filament/trays`,
   `…/filament/presets`, `…/filament/print-uses`, `…/filament/rows`, `…/filament/bb-to-sb`,
   area `filament`;
-  `…/own-presets`, `…/native-slices`; `…/held-presets` answers empty since #7244, for an
-  older worker during a roll; a start's uses and a run's settle take an
+  `…/own-presets`, `…/native-slices`; a start's uses and a run's settle take an
   `Idempotency-Key`).
   A LAN print reads a native slice's sliced 3MF by a URL the API mints for it
   (`…/transfer-urls`, #5298 Task 32): the internal blob route's, its token signed under

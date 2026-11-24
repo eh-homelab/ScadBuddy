@@ -257,7 +257,8 @@ skips without one), and its render is checked `verify.sh`-style on the saved out
 3MF; replies with suggestions are scored on their citations (`evals/citations.ts`,
 #1924).
 `.github/scripts/lint-one-runtime.sh` (the `lint` job) fails on a second turn path: a session
-mode branch in `agent/src`, `frontend/src` or `backend/scadbuddy` (`.ts`, `.tsx`, `.py`), the SDK's `query` imported outside `harness/run.ts` and
+mode branch in `agent/src`, `frontend/src` or `backend/scadbuddy` (`.ts`, `.tsx`, `.py`), a name of the session mode that is gone (its
+`retired` list, #7323), the SDK's `query` imported outside `harness/run.ts` and
 `harness/testConnection.ts`, or `agent-durable/` importing or depending on the Claude Agent
 SDK or naming `DurableSession` (plan Step 8.1).
 

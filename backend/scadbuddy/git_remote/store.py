@@ -1,5 +1,6 @@
-"""``git_remote_pushes`` (migration ``20261101T1728Z_git_remote_pushes``): per repository,
-the last commit a push landed at the remote, and how the last attempt went."""
+"""``git_remote_pushes`` (migrations ``20261101T1728Z_git_remote_pushes``,
+``20261124T1133Z_git_remote_refused_commit``): per repository, the last commit a push
+landed at the remote, and how the last attempt went."""
 
 from __future__ import annotations
 
@@ -22,6 +23,9 @@ class PushRecord:
     attempted_at: datetime
     #: Why the last attempt failed, scrubbed of the credential; None once one lands.
     error: str | None
+    #: The head the last attempt pushed, when the remote refused it for a reason no
+    #: retry can fix (#7388); None after a push lands or a transport failure.
+    refused_commit: str | None = None
 
 
 class PushRecords:
@@ -31,8 +35,8 @@ class PushRecords:
     def get(self, repository: str) -> PushRecord | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT repository, url, pushed_commit, pushed_at, attempted_at, error"
-                " FROM git_remote_pushes WHERE repository = %s",
+                "SELECT repository, url, pushed_commit, pushed_at, attempted_at, error,"
+                " refused_commit FROM git_remote_pushes WHERE repository = %s",
                 (repository,),
             ).fetchone()
         return None if row is None else PushRecord(**row)
@@ -46,23 +50,26 @@ class PushRecords:
                 " VALUES (%s, %s, %s, now(), now(), NULL)"
                 " ON CONFLICT (repository) DO UPDATE SET url = excluded.url,"
                 " pushed_commit = excluded.pushed_commit, pushed_at = excluded.pushed_at,"
-                " attempted_at = excluded.attempted_at, error = NULL",
+                " attempted_at = excluded.attempted_at, error = NULL, refused_commit = NULL",
                 (repository, url, commit),
             )
 
-    def failed(self, repository: str, url: str, error: str) -> None:
+    def failed(
+        self, repository: str, url: str, error: str, refused_commit: str | None = None
+    ) -> None:
         """A push to ``url`` failed: what it last landed stays, unless that was another
-        URL's."""
+        URL's. ``refused_commit`` is the head, when the remote refused it for good."""
         with self._pool.connection() as conn:
             conn.execute(
-                "INSERT INTO git_remote_pushes (repository, url, attempted_at, error)"
-                " VALUES (%s, %s, now(), %s)"
+                "INSERT INTO git_remote_pushes"
+                " (repository, url, attempted_at, error, refused_commit)"
+                " VALUES (%s, %s, now(), %s, %s)"
                 " ON CONFLICT (repository) DO UPDATE SET"
                 " pushed_commit = CASE WHEN git_remote_pushes.url = excluded.url"
                 "   THEN git_remote_pushes.pushed_commit END,"
                 " pushed_at = CASE WHEN git_remote_pushes.url = excluded.url"
                 "   THEN git_remote_pushes.pushed_at END,"
                 " url = excluded.url, attempted_at = excluded.attempted_at,"
-                " error = excluded.error",
-                (repository, url, error),
+                " error = excluded.error, refused_commit = excluded.refused_commit",
+                (repository, url, error, refused_commit),
             )

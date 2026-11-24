@@ -436,7 +436,7 @@ async def test_a_batch_after_an_unexpected_transport_error_is_still_forwarded(
             await until(lambda: outcome(metrics, "failed") == 1)
             forwarder.offer(BATCH)
             await until(lambda: outcome(metrics, "forwarded") == 1)
-    (record,) = caplog.records
+    (record,) = [r for r in caplog.records if r.name == forwarder_module.__name__]
     assert record.__dict__["reason"] == "ZeroDivisionError"
 
 
@@ -540,7 +540,7 @@ async def test_a_forward_task_that_dies_is_logged_at_once_and_refuses_later_batc
         async with forwarder.running():
             forwarder.offer(BATCH)
             await until(lambda: forwarder.dead)
-            (record,) = caplog.records
+            (record,) = [r for r in caplog.records if r.name == forwarder_module.__name__]
             assert record.exc_info is not None and record.exc_info[0] is ZeroDivisionError
             forwarder.offer(BATCH)
             assert outcome(metrics, "failed") == 1
@@ -549,4 +549,4 @@ async def test_a_forward_task_that_dies_is_logged_at_once_and_refuses_later_batc
             checked = True
     assert checked
     # Logged once, when it died, not again at shutdown.
-    assert len(caplog.records) == 1
+    assert len([r for r in caplog.records if r.name == forwarder_module.__name__]) == 1

@@ -18,6 +18,8 @@ export interface GlbPart {
   max: [number, number, number]
   /** #6349 — the alpha byte of a translucent part, as `scadbuddy_alpha` on its own mesh (`glb.py`). */
   alpha?: number
+  /** #6710 — the filament slot it prints in, from 0, as `scadbuddy_slot` on its own mesh (`glb.py` `SLOT_EXTRA`). */
+  slot?: number
 }
 
 const BOX_INDICES = [
@@ -110,19 +112,29 @@ export function buildGlb(parts: GlbPart[]): Uint8Array {
   })
 
   // One mesh for the opaque parts, as the writer's, and one of its own for each translucent
-  // part, which carries its alpha as an extra.
+  // part, which carries its alpha as an extra, and for each part with a slot (#6710).
   const primitiveOf = (i: number) => ({
     attributes: { POSITION: i },
     indices: indexAccessorIndex,
     material: i,
   })
-  const opaque = parts.flatMap((part, i) => (part.alpha === undefined ? [primitiveOf(i)] : []))
+  const own = (part: GlbPart) => part.alpha !== undefined || part.slot !== undefined
+  const opaque = parts.flatMap((part, i) => (own(part) ? [] : [primitiveOf(i)]))
   const meshDefs = [
     ...(opaque.length > 0 || parts.length === 0 ? [{ name: 'model', primitives: opaque }] : []),
     ...parts.flatMap((part, i) =>
-      part.alpha === undefined
-        ? []
-        : [{ name: 'model', primitives: [primitiveOf(i)], extras: { scadbuddy_alpha: part.alpha } }],
+      own(part)
+        ? [
+            {
+              name: 'model',
+              primitives: [primitiveOf(i)],
+              extras: {
+                ...(part.alpha === undefined ? {} : { scadbuddy_alpha: part.alpha }),
+                ...(part.slot === undefined ? {} : { scadbuddy_slot: part.slot }),
+              },
+            },
+          ]
+        : [],
     ),
   ]
 
