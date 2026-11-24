@@ -406,6 +406,54 @@ describe('PropertiesPanel (#7026)', () => {
     expect(entityMock.propertyPatches).toEqual([{ entity: TYPE, set: { tags: 'a, b, c' } }])
   })
 
+  it('closes without a PATCH when Save changes nothing, so an imported value stays as it was (#7379)', async () => {
+    seedEntityProperties(TYPE, { mpn: 'A00-K0-1.75' })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(within(await screen.findByRole('row', { name: /mpn/ })).getByRole('button', { name: 'Edit mpn' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('button', { name: 'Edit mpn' })).toBeInTheDocument()
+    expect(entityMock.propertyPatches).toEqual([])
+  })
+
+  it('gives a list taken to Text and back its items again (#7379)', async () => {
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await screen.findByText('No properties yet.')
+    await user.type(screen.getByLabelText('New property key'), 'notes')
+    await choose(user, screen.getByRole('combobox', { name: 'New property type' }), 'List')
+    await user.type(screen.getByLabelText('New property value, item 1'), 'a')
+    await user.click(screen.getByRole('button', { name: 'Add item' }))
+    await user.type(screen.getByLabelText('New property value, item 2'), 'b')
+    await choose(user, screen.getByRole('combobox', { name: 'New property type' }), 'Text')
+    expect(screen.getByLabelText('New property value')).toHaveValue('a, b')
+    await choose(user, screen.getByRole('combobox', { name: 'New property type' }), 'List')
+    expect(screen.getByLabelText('New property value, item 1')).toHaveValue('a')
+    expect(screen.getByLabelText('New property value, item 2')).toHaveValue('b')
+
+    // Text edited before going back is one item: the old items would drop the edit.
+    await choose(user, screen.getByRole('combobox', { name: 'New property type' }), 'Text')
+    await user.type(screen.getByLabelText('New property value'), ', c')
+    await choose(user, screen.getByRole('combobox', { name: 'New property type' }), 'List')
+    expect(screen.getByLabelText('New property value, item 1')).toHaveValue('a, b, c')
+    expect(screen.queryByLabelText('New property value, item 2')).not.toBeInTheDocument()
+  })
+
+  it("takes the add form's type from a key the schema knows, and keeps a type the person picked (#7379)", async () => {
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await screen.findByText('No properties yet.')
+    const key = screen.getByLabelText('New property key')
+    const type = screen.getByRole('combobox', { name: 'New property type' })
+    await user.type(key, 'td')
+    expect(type).toHaveTextContent('Number')
+    // Typing on past a schema key to one it does not know leaves the type alone.
+    await user.type(key, '_note')
+    expect(type).toHaveTextContent('Number')
+
+    await user.clear(key)
+    await choose(user, type, 'Text')
+    await user.type(key, 'td')
+    expect(type).toHaveTextContent('Text')
+  })
+
   it('keeps the form open when Escape only closes its type menu', async () => {
     seedEntityProperties(TYPE, { mpn: 'A' })
     const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
