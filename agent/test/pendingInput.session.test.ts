@@ -18,7 +18,7 @@ describe('sessionPendingInput for a grant holder', () => {
     const lookups: string[][] = []
     const sessions = {
       projection: {
-        session: async () => ({ mode: 'durable', owner: OWNER, creator: OWNER }),
+        session: async () => ({ owner: OWNER, creator: OWNER }),
         inRun: () => Promise.reject(new Error('one query per entry')),
         inRunOf: async (ids: readonly string[]) => {
           lookups.push([...ids])

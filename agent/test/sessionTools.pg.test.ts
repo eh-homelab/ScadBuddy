@@ -282,17 +282,17 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${session.id}`).toHaveLength(2)
     })
 
-    it("takes and ignores a new session's mode (plan Step 6.3)", async () => {
+    it("names no mode, and drops one an earlier caller still sends (#7323)", async () => {
       const { agent, sessions } = await setup()
       const a = await agent('write')
       for (const mode of [undefined, 'classic', 'durable']) {
-        const started = ok<Record<string, unknown>>(await a.call('sessions_start', { title: 'a', ...(mode ? { mode } : {}) }))
-        expect(started).toMatchObject({ session: { mode: 'durable' } })
+        const started = ok<{ session: Record<string, unknown> }>(await a.call('sessions_start', { title: 'a', ...(mode ? { mode } : {}) }))
+        expect(started.session).not.toHaveProperty('mode')
         expect(started).not.toHaveProperty('mode_fallback')
       }
       // Without Temporal, a new session is refused (spec 2026-10-13 §10.1).
       withoutTemporal(sessions)
-      expect(errorText(await a.call('sessions_start', { title: 'c', mode: 'classic' }))).toMatch(/Temporal/)
+      expect(errorText(await a.call('sessions_start', { title: 'c' }))).toMatch(/Temporal/)
     })
 
     it("shows a caller only the sessions it may see; another agent's are 'no session'", async () => {

@@ -9,7 +9,7 @@ import {
   SessionError,
   type SessionRecord,
 } from '../sessions/manager.js'
-import { type Owner, ownerSeenBy, SESSION_MODES, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
+import { type Owner, ownerSeenBy, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
 import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { ID_MAX, LOOKUP_TYPES, type LookupType, type ResourceRef } from '../sessions/touched.js'
 import { browserUser } from '../auth/browserSession.js'
@@ -117,8 +117,6 @@ export type SessionView = {
   offered_to_you: boolean
   status: SessionRecord['status']
   parent_id: string | null
-  /** Always `durable` (plan Step 6.3). */
-  mode: SessionRecord['mode']
   turns: number
   cost_usd: number
   budget_usd: number
@@ -146,7 +144,6 @@ export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>
     offered_to_you: s.offer !== null && sameOwner(viewer, s.offer.to),
     status: s.status,
     parent_id: s.parentId,
-    mode: s.mode,
     turns: s.turns,
     cost_usd: s.costUsd,
     budget_usd: s.budgetUsd,
@@ -161,8 +158,8 @@ export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>
 const StartBody = z.strictObject({
   title: z.string().max(200).optional(),
   prompt: z.string().min(1).max(MESSAGE_MAX).optional(),
-  /** Taken and ignored (plan Step 6.3): every session is an AgentSession. */
-  mode: z.enum(SESSION_MODES).optional(),
+  /** Taken, logged and ignored (#7323): every session is an AgentSession. Kept so an earlier client that sends it, with any value, is not refused. */
+  mode: z.unknown().optional(),
 })
 const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
 /** A queued message's new words (#6386). */
@@ -321,6 +318,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, StartBody, {})
       if (!body.ok) return body.response
+      if (body.value.mode !== undefined) console.log('sessions: a start named a session mode, which is ignored (#7323)')
       const { session, turn } = await sessions.start(browserUser(c), {
         origin: 'chat',
         ...(body.value.title ? { title: body.value.title } : {}),

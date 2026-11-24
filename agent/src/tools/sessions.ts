@@ -13,7 +13,7 @@ import type { LoggedEvent } from '../sessions/eventLog.js'
 import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
-import { type Origin, ORIGINS, type Owner, ownerSeenBy, type QueuedEntry, SESSION_MODES, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
+import { type Origin, ORIGINS, type Owner, ownerSeenBy, type QueuedEntry, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
 import { IMAGE_REFS_DESCRIPTION, ImageRefsSchema, resolveSendImages } from './imageRefs.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 
@@ -404,7 +404,7 @@ export const sessionTools: Tool[] = [
       "tools run with this caller's tiers; an outward action waits for a decision: a human's in the ScadBuddy UI, " +
       'or sessions_approve/sessions_deny from a token holding the approval grant. ' +
       'Returns the session and, with a prompt, the turn; read the reply with sessions_get or sessions_attach. ' +
-      'Every session runs as a Temporal workflow that survives restarts; `mode` is accepted only for compatibility and ignored: omit it.',
+      'Every session runs as a Temporal workflow that survives restarts.',
     input: z.object({
       prompt: z.string().min(1).max(MESSAGE_MAX).optional().describe('The first user message.'),
       // #2477: references only, as sessions_send's, sent with the prompt.
@@ -419,10 +419,6 @@ export const sessionTools: Tool[] = [
         })
         .optional()
         .describe('What the session is about (spec §6 "scope"), recorded with it.'),
-      mode: z
-        .enum(SESSION_MODES)
-        .optional()
-        .describe('Taken and ignored: every session runs as a Temporal workflow that survives restarts.'),
       wait_seconds: waitSeconds,
     }),
     risk: 'write',

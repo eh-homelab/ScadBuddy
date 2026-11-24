@@ -22,7 +22,7 @@ from tests.flows.flows_support import script
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
 DURABLE = "11111111-1111-4111-8111-111111111111"
-CLASSIC = "22222222-2222-4222-8222-222222222222"
+OTHERS = "22222222-2222-4222-8222-222222222222"
 
 
 def _envelope(tool: str, content: dict[str, Any]) -> str:
@@ -52,7 +52,7 @@ class Sessions:
             self._record("sessions_start", args)
             return _envelope(
                 "sessions_start",
-                {"session": {"id": DURABLE, "mode": "durable"}, "turn_id": "t1", "after_seq": 0},
+                {"session": {"id": DURABLE}, "turn_id": "t1", "after_seq": 0},
             )
 
         @activity.defn(name="sessions_send")
@@ -67,11 +67,11 @@ class Sessions:
             self._record("flow_session_check", args)
             if args["session_id"] != DURABLE:
                 raise ApplicationError(
-                    f"session {args['session_id']} is classic; a flow talks only to a durable one",
+                    f"no session {args['session_id']} of the person who started this run",
                     type="SessionRefused",
                     non_retryable=True,
                 )
-            return {"session_id": DURABLE, "mode": "durable"}
+            return {"session_id": DURABLE}
 
         @activity.defn(name="flow_session_turn")
         async def flow_session_turn(args: dict[str, Any]) -> dict[str, Any]:
@@ -118,7 +118,7 @@ async def test_agent_starts_a_durable_session_and_answers_with_its_turn(
     )
     [(start, start_id, start_args), (wait, wait_id, wait_args)] = served.calls
     assert (start, start_id) == ("sessions_start", f"tool-{step.call_id}")
-    assert start_args["mode"] == "durable"
+    assert "mode" not in start_args
     assert start_args["prompt"].startswith("Size the door")
     assert "authoring" in start_args["prompt"]
     assert (wait, wait_id, wait_args) == (
@@ -182,21 +182,21 @@ async def test_ask_session_sends_to_a_durable_session_and_waits_for_its_turn(
     ]
 
 
-async def test_ask_session_refuses_a_classic_session_and_sends_nothing(
+async def test_ask_session_refuses_another_persons_session_and_sends_nothing(
     outward: Outward, sessions: tuple[Sessions, str]
 ) -> None:
     served, queue = sessions
     run_id = await outward.run(
         script(
             "try:",
-            f"    await ask_session({CLASSIC!r}, 'hi')",
+            f"    await ask_session({OTHERS!r}, 'hi')",
             "except Exception as e:",
             "    return str(e)",
         ),
         tools_queue=queue,
     )
     run = await outward.finished(run_id)
-    assert "is classic" in (run.result or "")
+    assert "of the person who started this run" in (run.result or "")
     assert [name for name, _, _ in served.calls] == ["flow_session_check"]
 
 

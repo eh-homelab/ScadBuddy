@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { ANSWER_MAX, QUESTIONS_MAX } from '../harness/questions.js'
 import { AttachmentRefsSchema } from '../attachments/store.js'
-import { PROTOCOL_VERSION, SESSION_MODES } from './protocol.js'
+import { PROTOCOL_VERSION } from './protocol.js'
 
 // The panel → server half of the assistant panel's wire protocol, version 1,
 // as the agent's chat socket (routes/chat.ts) accepts it. The contract is the
@@ -64,10 +64,10 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
      */
     images: AttachmentRefsSchema.optional(),
     /**
-     * Taken and ignored (plan Step 6.3): every session is an AgentSession. Kept so a
-     * tab of an earlier release that still sends it is not refused.
+     * Taken, logged and ignored (#7323): every session is an AgentSession. Kept so a tab of
+     * an earlier release that still sends it, with any value, is not refused.
      */
-    mode: z.enum(SESSION_MODES).optional(),
+    mode: z.unknown().optional(),
   }),
   z.object({ v, type: z.literal('approval.decision'), sessionId, id: answerId, approve: z.boolean() }),
   // #940: the user's answer to an AskUserQuestion (gate/questions.ts).
