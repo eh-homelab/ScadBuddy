@@ -94,15 +94,7 @@ class OfferStore:
         for a SKU the item already has at the supplier."""
         with self.pool.connection() as conn, conn.transaction():
             _lock_supplier(conn, body.supplier_id)
-            item = conn.execute(
-                "SELECT i.archived_at, k.tracking FROM items i"
-                " JOIN item_kinds k ON k.id = i.kind_id WHERE i.id = %s FOR SHARE OF i",
-                (body.item_id,),
-            ).fetchone()
-            if item is None or item["archived_at"] is not None:
-                raise ItemNotFound(str(body.item_id))
-            if item["tracking"] == "filament":
-                raise FilamentItemRefused(str(body.item_id))
+            _lock_item(conn, body.item_id)
             try:
                 row = conn.execute(
                     "INSERT INTO supplier_offers (supplier_id, item_id, sku, url, pack_size,"
@@ -164,16 +156,18 @@ class OfferStore:
         return found
 
     def restore(self, offer_id: UUID) -> Offer:
-        """`SupplierNotFound` while its supplier is archived; `OfferExists` when an
-        unarchived offer of the item at the supplier took its SKU meanwhile."""
+        """`SupplierNotFound` while its supplier is archived, `ItemNotFound` while its item
+        is, `FilamentItemRefused` for a filament item; `OfferExists` when an unarchived
+        offer of the item at the supplier took its SKU meanwhile."""
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
-                "SELECT supplier_id, sku FROM supplier_offers WHERE id = %s FOR UPDATE",
+                "SELECT supplier_id, item_id, sku FROM supplier_offers WHERE id = %s FOR UPDATE",
                 (offer_id,),
             ).fetchone()
             if row is None:
                 raise OfferNotFound(str(offer_id))
             _lock_supplier(conn, row["supplier_id"])
+            _lock_item(conn, row["item_id"])
             try:
                 conn.execute(
                     "UPDATE supplier_offers SET archived_at = NULL, updated_at = now()"
@@ -231,6 +225,21 @@ def _lock_supplier(conn: Conn, supplier_id: UUID) -> None:
     ).fetchone()
     if row is None or row["archived_at"] is not None:
         raise SupplierNotFound(str(supplier_id))
+
+
+def _lock_item(conn: Conn, item_id: UUID) -> None:
+    """The item, held until commit so it cannot be archived meanwhile; `ItemNotFound` for
+    an unknown or archived one, `FilamentItemRefused` for one of a filament kind (D12,
+    Ruling 9)."""
+    item = conn.execute(
+        "SELECT i.archived_at, k.tracking FROM items i"
+        " JOIN item_kinds k ON k.id = i.kind_id WHERE i.id = %s FOR SHARE OF i",
+        (item_id,),
+    ).fetchone()
+    if item is None or item["archived_at"] is not None:
+        raise ItemNotFound(str(item_id))
+    if item["tracking"] == "filament":
+        raise FilamentItemRefused(str(item_id))
 
 
 def _get(conn: Conn, offer_id: UUID) -> Offer | None:

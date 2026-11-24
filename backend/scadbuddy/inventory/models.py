@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from scadbuddy.entities.links import MAX_URL, is_web_url
 
 #: How a kind's items are counted; `none` is "not counted" (the owner's amendment to
 #: §6.4 of 2026-11-23): offers and prices, never lots, units or moves.
@@ -131,8 +132,7 @@ class ItemPatch(BaseModel):
     note: str | None = Field(default=None, max_length=4000)
 
 
-#: `supplier_offers.url` and the ISO code of `offer_price_points.currency`.
-WEB_URL = r"^[Hh][Tt][Tt][Pp][Ss]?://"
+#: The ISO code of `offer_price_points.currency`.
 CURRENCY = r"^[A-Z]{3}$"
 
 
@@ -179,6 +179,11 @@ class OfferInput(BaseModel):
     pack_uom: str = Field(default="each", min_length=1)
     note: str | None = None
 
+    @field_validator("pack_uom")
+    @classmethod
+    def _pack_uom(cls, pack_uom: str) -> str:
+        return _stripped(pack_uom, "a pack unit")
+
     @field_validator("url")
     @classmethod
     def _url(cls, url: str | None) -> str | None:
@@ -201,6 +206,11 @@ class OfferPatch(BaseModel):
     pack_size: Decimal | None = Field(default=None, gt=0, max_digits=20, decimal_places=6)
     pack_uom: str | None = Field(default=None, min_length=1)
     note: str | None = None
+
+    @field_validator("pack_uom")
+    @classmethod
+    def _pack_uom(cls, pack_uom: str | None) -> str | None:
+        return None if pack_uom is None else _stripped(pack_uom, "a pack unit")
 
     @field_validator("url")
     @classmethod
@@ -226,12 +236,20 @@ class PriceInput(BaseModel):
 
 def _checked_url(url: str | None) -> str | None:
     url = _blank_none(url)
-    if url is not None and not re.match(WEB_URL, url):
-        raise ValueError("a purchase link is an http or https URL")
+    if url is None:
+        return None
+    url = url.strip()
+    if len(url) > MAX_URL or not is_web_url(url):
+        raise ValueError(f"a purchase link is an http or https URL with a host, up to {MAX_URL}")
     return url
 
 
+def _stripped(text: str, what: str) -> str:
+    text = text.strip()
+    if not text:
+        raise ValueError(f"{what} is not blank")
+    return text
+
+
 def _checked_sku(sku: str) -> str:
-    if not sku.strip():
-        raise ValueError("a SKU is not blank")
-    return sku
+    return _stripped(sku, "a SKU")

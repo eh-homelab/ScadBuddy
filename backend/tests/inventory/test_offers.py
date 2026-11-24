@@ -8,9 +8,10 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from scadbuddy.inventory.items import FilamentItemRefused, ItemNotFound, ItemStore
-from scadbuddy.inventory.models import ItemInput, OfferInput, OfferPatch, PriceInput
+from scadbuddy.inventory.models import ItemInput, Offer, OfferInput, OfferPatch, PriceInput
 from scadbuddy.inventory.offers import (
     OfferExists,
     OfferNotFound,
@@ -155,3 +156,123 @@ def test_update_keeps_the_sku_rule_and_blanks_the_url(
     assert [o.sku for o in offers.for_supplier(shop)] == ["NUT-3", "NUT-3B", "X"]
     with pytest.raises(OfferNotFound):
         offers.update(uuid4(), OfferPatch(sku="Y"), BY)
+
+
+def _offer(offers: OfferStore, shop: UUID, item: UUID, sku: str = "NUT-3") -> Offer:
+    return offers.create(OfferInput(supplier_id=shop, item_id=item, sku=sku), BY)
+
+
+def test_restore_brings_an_offer_back(
+    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    offer = _offer(offers, _supplier(pg_pool), _item(items, "M3 nut"))
+    offers.archive(offer.id)
+
+    assert offers.restore(offer.id).archived_at is None
+    with pytest.raises(OfferNotFound):
+        offers.restore(uuid4())
+
+
+def test_restore_refuses_an_archived_supplier_or_item(
+    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    shop = _supplier(pg_pool)
+    nut = _item(items, "M3 nut")
+    offer = _offer(offers, shop, nut)
+    offers.archive(offer.id)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_suppliers SET archived_at = now() WHERE id = %s", (shop,))
+    with pytest.raises(SupplierNotFound):
+        offers.restore(offer.id)
+
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_suppliers SET archived_at = NULL WHERE id = %s", (shop,))
+    items.archive(nut)
+    with pytest.raises(ItemNotFound):
+        offers.restore(offer.id)
+
+
+def test_restore_refuses_a_filament_item(offers: OfferStore, pg_pool: PgPool) -> None:
+    shop = _supplier(pg_pool)
+    with pg_pool.connection() as conn:
+        item = conn.execute(
+            "INSERT INTO items (kind_id, name) VALUES ('filament', 'PLA Red') RETURNING id"
+        ).fetchone()
+        assert item is not None
+        conn.execute(
+            "INSERT INTO supplier_offers (supplier_id, item_id, sku, archived_at)"
+            " VALUES (%s, %s, 'PLA-R', now()) RETURNING id",
+            (shop, item["id"]),
+        )
+        offer = conn.execute("SELECT id FROM supplier_offers").fetchone()
+    assert offer is not None
+
+    with pytest.raises(FilamentItemRefused):
+        offers.restore(offer["id"])
+
+
+def test_an_archived_item_takes_no_offer(
+    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    nut = _item(items, "M3 nut")
+    items.archive(nut)
+
+    with pytest.raises(ItemNotFound):
+        _offer(offers, _supplier(pg_pool), nut)
+
+
+def test_a_null_clears_the_note_and_keeps_the_pack_size(
+    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    offer = offers.create(
+        OfferInput(
+            supplier_id=_supplier(pg_pool),
+            item_id=_item(items, "M3 nut"),
+            sku=" NUT-3 ",
+            pack_size=Decimal(50),
+            pack_uom=" box ",
+            note="ask for the zinc ones",
+        ),
+        BY,
+    )
+    assert (offer.sku, offer.pack_uom) == ("NUT-3", "box")
+
+    changed = offers.update(offer.id, OfferPatch(note=None, pack_size=None), BY)
+    assert (changed.note, changed.pack_size) == (None, Decimal(50))
+
+
+def test_inputs_refuse_bad_links_skus_and_currencies() -> None:
+    for bad in ("ftp://x", "http://", "https://a/" + "b" * 2000):
+        with pytest.raises(ValidationError):
+            OfferInput(supplier_id=uuid4(), item_id=uuid4(), sku="A", url=bad)
+    with pytest.raises(ValidationError):
+        OfferInput(supplier_id=uuid4(), item_id=uuid4(), sku="  ")
+    with pytest.raises(ValidationError):
+        OfferPatch(sku="  ")
+    with pytest.raises(ValidationError):
+        PriceInput(price=Decimal(1), currency="usd")
+
+
+def test_the_latest_price_is_the_later_write_on_one_day(
+    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    offer = _offer(offers, _supplier(pg_pool), _item(items, "M3 nut"))
+    day = date(2026, 11, 20)
+
+    offers.add_price(offer.id, PriceInput(price=Decimal(2), on_date=day))
+    offers.add_price(offer.id, PriceInput(price=Decimal(3), on_date=day))
+    got = offers.get(offer.id)
+    assert got is not None and got.latest_price is not None
+    assert got.latest_price.price == Decimal(3)
+
+
+def test_archived_offers_are_listed_only_when_asked(
+    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    shop = _supplier(pg_pool)
+    offer = _offer(offers, shop, _item(items, "M3 nut"))
+    offers.archive(offer.id)
+
+    assert offers.for_supplier(shop) == []
+    assert [o.id for o in offers.for_supplier(shop, include_archived=True)] == [offer.id]
+    assert offers.by_sku(shop, "NUT-3") == []
