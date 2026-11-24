@@ -257,3 +257,86 @@ def test_a_merge_past_the_key_limit_may_shrink_but_not_grow(pg_pool: PgPool) -> 
         props.apply(kept, PropertyPatch(set={"new": 1}), BY)
     assert len(props.apply(kept, PropertyPatch(set={"g0": "changed"}), BY)) == MAX_KEYS + 10
     assert len(props.apply(kept, PropertyPatch(set={"g1": None}), BY)) == MAX_KEYS + 9
+
+
+def _move_on(pool: PgPool, ref: EntityRef) -> uuid.UUID:
+    """A `use` move of a lot item that names `ref` (R-P2-4)."""
+    entities = EntityStore(pool)
+    with pool.connection() as conn, conn.transaction():
+        entity_id = entities.ensure(conn, ref)
+        item = conn.execute(
+            "INSERT INTO items (kind_id, name) VALUES ('hardware', 'Grease') RETURNING id"
+        ).fetchone()
+        assert item is not None
+        lot = conn.execute(
+            "INSERT INTO stock_lots (item_id, received_qty, on_hand, unit_cost_minor, origin,"
+            " created_by) VALUES (%s, 0, -1, 0, 'adjustment', '{}') RETURNING id",
+            (item["id"],),
+        ).fetchone()
+        assert lot is not None
+        conn.execute(
+            "INSERT INTO stock_moves (item_id, lot_id, kind, qty, unit_cost_minor, amount_minor,"
+            " entity_id, actor) VALUES (%s, %s, 'use', -1, 0, 0, %s, '{}')",
+            (item["id"], lot["id"], entity_id),
+        )
+    return entity_id
+
+
+def test_an_orphan_a_stock_move_names_is_kept(pg_pool: PgPool) -> None:
+    """R-P2-4: `stock_moves.entity_id` has a plain foreign key, so the sweep leaves an
+    entity a move names (its history) and goes on to the others."""
+    entities = EntityStore(pg_pool)
+    attachments = EntityAttachmentStore(pg_pool, entities)
+    links = EntityLinkStore(pg_pool, entities)
+    named, bare = _spool(pg_pool), _spool(pg_pool)
+    entity_id = _move_on(pg_pool, named)
+    links.add(named, LinkInput(url="https://example.com/named"), BY)
+    links.add(bare, LinkInput(url="https://example.com/bare"), BY)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "DELETE FROM filament_spools WHERE id = ANY(%s)",
+            ([uuid.UUID(named.ref), uuid.UUID(bare.ref)],),
+        )
+
+    assert sweep_orphan_entities(entities, attachments) == 1
+
+    with pg_pool.connection() as conn:
+        assert entities.find(conn, named) == entity_id
+        assert entities.find(conn, bare) is None
+    assert sweep_orphan_entities(entities, attachments) == 0
+
+
+def test_a_sweep_rechecks_the_moves_under_its_lock(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An orphan read before a move named it is still kept."""
+    entities = EntityStore(pg_pool)
+    attachments = EntityAttachmentStore(pg_pool, entities)
+    spool = _spool(pg_pool)
+    entity_id = _move_on(pg_pool, spool)
+    with pg_pool.connection() as conn:
+        conn.execute("DELETE FROM filament_spools WHERE id = %s", (uuid.UUID(spool.ref),))
+    monkeypatch.setattr(entities, "orphans", lambda conn, limit, guarded=(): [(entity_id, spool)])
+
+    assert sweep_orphan_entities(entities, attachments) == 0
+
+
+def test_a_printer_merge_moves_the_stock_moves_to_the_kept_printer(pg_pool: PgPool) -> None:
+    """R-P2-4: a merge deletes the gone printer's entity, so a move that named it names
+    the kept printer after it, as its files and links do."""
+    entities = EntityStore(pg_pool)
+    printers = PrinterStore(pg_pool, None)
+    synthetic = printers.ensure_bambuddy(6, serial=None, name="H2C", model="H2C")
+    gone = EntityRef("printer", synthetic.id)
+    _move_on(pg_pool, gone)
+    mine = printers.create(PrinterCreate(serial="0938AB000000008", name="Mine"))
+    kept = EntityRef("printer", mine.id)
+    with pg_pool.connection() as conn:
+        kept_id = entities.ensure(conn, kept)
+
+    printers.ensure_bambuddy(6, serial="0938AB000000008", name="H2C", model="H2C")
+
+    with pg_pool.connection() as conn:
+        assert entities.find(conn, gone) is None
+        row = conn.execute("SELECT entity_id FROM stock_moves").fetchone()
+    assert row is not None and row["entity_id"] == kept_id

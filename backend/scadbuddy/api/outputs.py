@@ -120,7 +120,7 @@ from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryReads, served_reads
-from scadbuddy.print_library.store import NativeFile
+from scadbuddy.print_library.store import NativeFile, NativeListedFile
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
@@ -225,6 +225,17 @@ def detail(
     library_files: list[LibraryCopy],
     *,
     failed_before_queueing: bool = False,
+) -> OutputDetail:
+    # One read of the output's row for every part below (#7255).
+    with store.reading(meta.id):
+        return _detail(store, meta, library_files, failed_before_queueing)
+
+
+def _detail(
+    store: OutputStore,
+    meta: OutputMeta,
+    library_files: list[LibraryCopy],
+    failed_before_queueing: bool,
 ) -> OutputDetail:
     params = store.params(meta.id)
     thumbnail_version = _thumbnail_version(store.thumbnail_path(meta.id))
@@ -459,7 +470,7 @@ async def live_outputs_for_files(
 
 
 async def native_outputs_for_files(
-    outputs: OutputStore, files: Iterable[NativeFile]
+    outputs: OutputStore, files: Iterable[NativeFile | NativeListedFile]
 ) -> dict[int, str]:
     """`live_outputs_for_files` for ScadBuddy's own library (plan
     2026-10-17-native-print-library, Task 4): the output each file's row names, while
@@ -470,9 +481,9 @@ async def native_outputs_for_files(
 
 
 async def _live(outputs: OutputStore, output_ids: set[str]) -> set[str]:
-    """`_existing` on a thread, in a span (#7245): each output it does not remember is a
-    glob of the NFS share (`OutputStore._find_dir`, a child span), and a miss is never
-    remembered."""
+    """`_existing` on a thread, in a span (#7245): before a copy run finished (#7255),
+    each output it does not remember is a glob of the NFS share
+    (`OutputStore._files_dir`, a child span), and a miss is never remembered."""
     return await traced_thread(
         "outputs.existing",
         _existing,
@@ -484,13 +495,7 @@ async def _live(outputs: OutputStore, output_ids: set[str]) -> set[str]:
 
 def _existing(outputs: OutputStore, output_ids: set[str]) -> set[str]:
     """Those of ``output_ids`` the output store still has."""
-    found: set[str] = set()
-    for output_id in output_ids:
-        try:
-            outputs.directory(output_id)
-        except OutputNotFoundError:
-            continue
-        found.add(output_id)
+    found = outputs.existing(output_ids)
     # The span `_live` opened, current on this thread.
     trace.get_current_span().set_attribute("scadbuddy.found", len(found))
     return found
@@ -1107,6 +1112,45 @@ def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
     if gone and outputs.index is not None:
         outputs.index.forget(*gone)
     return metas
+
+
+class OutputCopyStatus(BaseModel):
+    """The last run of the copy of the saved outputs' files to rows (#7255): at an API start,
+    or in a housekeeping sweep."""
+
+    started_at: datetime
+    #: ``None`` while the run goes on, when it stopped before its end, or when it is
+    #: ``incomplete``.
+    finished_at: datetime | None
+    #: The run walked to its end but may have missed folders (a listing failed, the
+    #: outputs folder read empty while rows exist, or a first run found no outputs
+    #: folder). It does not end the fallback to the files; the next run tries again.
+    incomplete: bool
+    copied: int
+    refreshed: int
+    dropped: int
+    #: ``<slug>/<id>`` of each folder with no readable ``meta.json``: it has no row.
+    not_copied: list[str]
+    #: ``{output_id, slug, file, error}`` for each side file left out of its row.
+    damaged: list[dict[str, Any]]
+
+
+# Before `/outputs/{output_id}`, which would take `copy-status` for an id.
+@router.get(
+    "/outputs/copy-status",
+    response_model=OutputCopyStatus,
+    summary="The last copy of the outputs' files to rows",
+)
+async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
+    """The last run of the copy of the outputs' files to rows (#7255), at an API start or in
+    a housekeeping sweep: when it started and finished, what it copied, refreshed and
+    dropped, the folders it could not copy and the side files it left out. 404 before any
+    run."""
+    rows = outputs.rows
+    last = None if rows is None else await asyncio.to_thread(rows.last_run)
+    if last is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "no copy of the outputs to rows has run")
+    return OutputCopyStatus.model_validate(last)
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")

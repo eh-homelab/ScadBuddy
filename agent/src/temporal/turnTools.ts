@@ -18,6 +18,7 @@ import { harnessToolName } from '../plugins/registry.js'
 import { toolOffReason } from '../access/items.js'
 import { redact } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
+import type { SessionBrowser } from '../sessions/rows.js'
 import { turnPrincipal } from '../tools/harness.js'
 import type { FlowBlobStore } from './flowBlobs.js'
 import { type FlowRuns, flowOf } from './flowRuns.js'
@@ -178,6 +179,8 @@ export type TurnContext = {
   flow?: string
   /** The durable turn running now (`ai_sessions.durable_turn_id`), for audit rows; none for a flow. */
   turnId?: string
+  /** The session's browser options (#7027), from the row its owner is read from; none for a flow. */
+  browser?: SessionBrowser
   owner: Owner
   signal: AbortSignal
 }
@@ -483,9 +486,9 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
       lapsed: async (requestId, binding) => (await flows.lapsed?.(requestId, binding?.inputHash)) ?? false,
     }
   }
-  const { session, owner, turnTiers: sent, turnId } = await durableSession(name, deps.sessions)
+  const { session, owner, turnTiers: sent, turnId, browser } = await durableSession(name, deps.sessions)
   return {
-    context: { session, owner, ...(turnId ? { turnId } : {}) },
+    context: { session, owner, ...(turnId ? { turnId } : {}), ...(browser ? { browser } : {}) },
     owner,
     sessionId: session,
     requestId: durableRequestId(session, runId, toolUseId),
@@ -677,9 +680,9 @@ async function toolCallCaller(deps: TurnToolsDeps, name: string, call: { session
       throw ApplicationFailure.nonRetryable(`request ${requestId} is not session ${call.session}'s entry for call ${call.toolUseId}, so ${name} was not run`, NOT_APPROVED)
     }
   }
-  const { turnTiers: sent, turnId, ...owner } = found
+  const { turnTiers: sent, turnId, browser, ...owner } = found
   return {
-    context: { session: call.session, owner, ...(turnId ? { turnId } : {}) },
+    context: { session: call.session, owner, ...(turnId ? { turnId } : {}), ...(browser ? { browser } : {}) },
     owner,
     sessionId: call.session,
     // Never approved without its entry: `call:` names no approval.

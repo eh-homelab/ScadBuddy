@@ -479,6 +479,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
   },
   {
+    operation: 'GET /api/v1/outputs/copy-status',
+    reason:
+      "The last run of the copy of the outputs' files to rows (#7255), at an API start or in a housekeeping " +
+      "sweep: an operator's check after a deploy. The copy runs by itself, so an agent has nothing to act " +
+      'on; the outputs it copied are in the output tools.',
+  },
+  {
     operation: 'POST /api/v1/outputs/{output_id}/backfill',
     reason:
       'Re-renders an output saved before Arrange so Arrange can use it (#902); the History and Print ' +
@@ -747,21 +754,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Hosted plugins (#6937). The spec gives the assistant no versions tool (2026-11-21 §6.2): an offer always ' +
       "takes the plugin's latest_version (§6.3), which the plugin's own read answers.",
   },
-  ...(
-    [
-      'GET /api/v1/entities/{ref}/properties',
-      'PATCH /api/v1/entities/{ref}/properties',
-      'GET /api/v1/entity-kinds/{kind}/properties',
-      'GET /api/v1/entity-kinds/{kind}/property-schema',
-      'PUT /api/v1/entity-kinds/{kind}/property-schema',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      "An entity's key-value properties and a kind's property schema (#7026, spec §6.3a). Their tools " +
-      '(entity_property_list, _set, _schema_get, _schema_set) follow in the next layers of the same stack, ' +
-      'which drop these entries.',
-  })),
 ]
 
 /**

@@ -466,7 +466,10 @@ on shutdown.
     (`orders/store.py`), a storefront publish's lock (at most 2 at once,
     `orders/storefront/listings.py`, in the gauges as `scadbuddy-storefront-publish`), a library copy's target locks (`print_library/copy_store.py`),
     the Bambuddy catalogue refresh and upload claims, the store's folder lock, the
-    output backfill's claim, the service credential rotation and the flow keys. So
+    output backfill's claim, the service credential rotation and the flow keys. The copy
+    of the saved outputs to rows (#7255) holds its advisory lock for the whole run (up to
+    15 minutes) on a connection of its own (`scadbuddy-output-copy`), not on a pool's;
+    each of its statements takes a connection of the main pool. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main
     pool one more) and closes a connection left idle for a minute, one a minute
     (psycopg_pool's `max_idle`). The `LISTEN` connection and `scadbuddy-preview-follows`
@@ -1087,6 +1090,14 @@ hook (`temporal-promote-workers.yaml`) would also try to make the old revision c
 and fail that sync: take `scadbuddy-library` out of its list for such a rollback. Rolling back to any build
 from #4090 on needs nothing: its pods make their own build current.
 
+**Saved outputs during a roll-out (#7255).** An API pod of a build before #7255 saves
+an output in the files only. Once a copy run has finished, the newer pods look outputs
+up in the `outputs` rows only, so such an output is a 404 on them until the next copy
+writes its row: the next housekeeping sweep (every `asset_sweep_interval`), or the next
+API start. A rollback to such a build makes the same window. To end it sooner, restart
+one API pod once the roll-out is done: its start runs the copy. Then check
+`GET /api/v1/outputs/copy-status` ([Saved outputs](docs/architecture/data.md#saved-outputs)).
+
 ### Render worker (#424)
 
 Renders run on a separate worker. It is the
@@ -1358,9 +1369,13 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   nothing and spends no attempt. Temporal retries the task, and an auto-upgrade run's
   retry goes to the current build, which the new build becomes as it starts.
   Measured on the dev server (Temporal CLI 1.8.2, server 1.31.2;
-  `tests/test_operation_deferral.py`): the first failure is retried at once, then
-  about every 10 s (attempt 4 after 25 s), because the SDK lets a repeated failure time
-  out at the 10 s workflow task timeout rather than report it; the server logs it once.
+  `tests/test_operation_deferral.py`), at Temporal's default workflow task timeout of
+  10 s: the first failure is retried at once, then about every 10 s (attempt 4 after
+  25 s), because the SDK lets a repeated failure time out at the workflow task timeout
+  rather than report it; the server logs it once. A deployed `Operation` starts with
+  `SHORT_TASK_TIMEOUT` (3 s, `workflows/commands.py`, #7288), so it retries after each
+  3 s timeout: on Temporal CLI 1.10.1 (server 1.32.2) attempts began at 0, 0.25, 3.1 and
+  6.1 s, and from the fifth (14 s, 26 s) the server adds a growing backoff to the timeout.
   While the task fails, Temporal refuses an Update on that execution ("Workflow Task in
   failed state"); `start_command` answers that as still accepting (the route's 202 to
   follow, or 503 to send again), not as a refusal, and the re-send attaches to the

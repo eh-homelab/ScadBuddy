@@ -92,7 +92,7 @@ import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { CrudResourceRows, SessionResources } from './sessions/touched.js'
-import { CrudSessionRows } from './sessions/rows.js'
+import { CrudSessionRows, type SessionBrowser } from './sessions/rows.js'
 import { CrudTranscriptRows } from './sessions/crudTranscripts.js'
 import { CrudEventRows } from './sessions/crudEvents.js'
 import { CrudOrderCostRows, crudCostPoster, OrderCosts, touchedSinks } from './sessions/orderCosts.js'
@@ -575,8 +575,9 @@ const sessions = new SessionManager({
   onAppend: sessionEvents.onAppend,
   // Every tool call a turn makes, and every approval decision (#258).
   audit,
-  // Enabled plugins (#297), per turn, through the loopback forwarder.
-  remotePlugins: async () => forwardForRun(await loadEnabledPlugins(plugins), pluginForwarder, { record: true }),
+  // Enabled plugins (#297), per turn, through the loopback forwarder, with the session's browser options (#7027).
+  remotePlugins: async (browser) =>
+    forwardForRun(await loadEnabledPlugins(plugins), pluginForwarder, { record: true, ...(browser ? { browser } : {}) }),
   // Enabled plugin packages (#297), materialised from their pins, per turn.
   packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller),
   packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true, access: accessResolver }),
@@ -774,7 +775,8 @@ const turnHost =
     : undefined
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
-const durableRemotePlugins = async () => forwardForRun(await loadEnabledPlugins(plugins), pluginForwarder)
+const durableRemotePlugins = async (browser?: SessionBrowser) =>
+  forwardForRun(await loadEnabledPlugins(plugins), pluginForwarder, browser ? { browser } : {})
 const durableCredentialSecrets = async () => {
   const pool = new CredentialPool({ repo: credentials, audit })
   return (await pool.candidates().catch(() => [])).map((c) => c.credential.secret)

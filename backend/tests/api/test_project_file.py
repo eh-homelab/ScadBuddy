@@ -20,9 +20,10 @@ from fastapi.testclient import TestClient
 from scadbuddy.bambuddy import commits, project_file
 from scadbuddy.bambuddy.project_file import STEM_MAX_UTF16_UNITS, project_stem
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import META_NAME
+from scadbuddy.library.outputs import META_NAME, OutputMeta
 from scadbuddy.render.schema import ParamValue
 from tests.api.conftest import set_fake_env
+from tests.api.test_internal_outputs import state
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import _uploaded_colours, run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
@@ -91,13 +92,17 @@ def named_output(client: TestClient, model: str, name: str = "Elan") -> str:
     return output_id
 
 
-def in_spool_nines_colour(paths: DataPaths, model: str, output_id: str) -> None:
+def in_spool_nines_colour(client: TestClient, paths: DataPaths, model: str, output_id: str) -> None:
     """Make the output's own colour spool 9's (#688197, inventory-spools.json), so a
     print from spool 9 is in the colours Generate filed the project file in."""
     meta_path = paths.output_dir(model, output_id) / META_NAME
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["colors"] = ["#688197"]
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    # The row is the record a read answers from (#7255): it gets the same colours.
+    rows = state(client).outputs.rows
+    assert rows is not None
+    rows.update_meta(output_id, OutputMeta.model_validate(meta))
 
 
 def remember_h2c_at(client: TestClient, nozzle: str) -> None:
@@ -230,7 +235,7 @@ def test_a_later_print_on_the_same_printer_in_the_models_colours_reuses_the_proj
     the one the print uses, rather than a second copy beside it."""
     configure(client)
     output_id = make_output(client, model)
-    in_spool_nines_colour(paths, model, output_id)
+    in_spool_nines_colour(client, paths, model, output_id)
     remember_h2c_at(client, "0.2")
     project_folder_routes()
     uploaded = uploads(41, 42)
@@ -321,7 +326,7 @@ def test_filing_after_a_print_in_the_models_colours_reuses_the_prints_copy(
     so Generate's filing (no spools) reuses it rather than uploading a second one."""
     configure(client)
     output_id = make_output(client, model)
-    in_spool_nines_colour(paths, model, output_id)
+    in_spool_nines_colour(client, paths, model, output_id)
     remember_h2c_at(client, "0.2")
     project_folder_routes()
     uploaded = uploads(41, 42)
@@ -424,7 +429,7 @@ def test_generate_lays_the_file_out_for_the_projects_last_print(
     assert first.status_code == 200, first.text
 
     fresh = make_output(client, model, name="Second")
-    in_spool_nines_colour(paths, model, fresh)
+    in_spool_nines_colour(client, paths, model, fresh)
     assert file_into_project(client, fresh).json()["library_file_id"] == 42
     detail = client.get(f"/api/v1/outputs/{fresh}").json()
     # The recorded printer has its 0.2 on the right only, which the file states (#834),
@@ -455,7 +460,7 @@ def test_generate_with_the_printer_status_unreadable_states_no_sides(
     respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
 
     fresh = make_output(client, model, name="Second")
-    in_spool_nines_colour(paths, model, fresh)
+    in_spool_nines_colour(client, paths, model, fresh)
     assert file_into_project(client, fresh).json()["library_file_id"] == 42
     detail = client.get(f"/api/v1/outputs/{fresh}").json()
     assert [copy["target_key"] for copy in detail["library_files"]] == [

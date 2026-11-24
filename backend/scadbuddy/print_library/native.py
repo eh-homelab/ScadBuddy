@@ -32,6 +32,7 @@ from scadbuddy.core.tracing import span, traced_thread
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.store import (
     FolderCycleError,
+    FolderFiles,
     NativeFile,
     NativeFolder,
     NativeLibraryStore,
@@ -116,30 +117,24 @@ def _folder_not_found(folder_id: int | None) -> ApiError:
 FOLDER_CYCLE = "a folder cannot move into itself or a folder under it"
 
 
-def _shaped_folders(folders: list[NativeFolder], files: list[NativeFile]) -> list[Folder]:
+def _shaped_folders(
+    folders: list[NativeFolder], counted: dict[int | None, FolderFiles]
+) -> list[Folder]:
     """The folder tree as Bambuddy shapes it, with each folder's file count and its
     newest file's change."""
-    counts: dict[int, int] = {}
-    latest: dict[int, datetime] = {}
-    for f in files:
-        if f.folder_id is None:
-            continue
-        counts[f.folder_id] = counts.get(f.folder_id, 0) + 1
-        if f.folder_id not in latest or f.updated_at > latest[f.folder_id]:
-            latest[f.folder_id] = f.updated_at
     children: dict[int | None, list[NativeFolder]] = {}
     for folder in folders:
         children.setdefault(folder.parent_id, []).append(folder)
 
     def shaped(folder: NativeFolder) -> Folder:
-        changed = latest.get(folder.id)
+        files = counted.get(folder.id)
         return Folder(
             id=folder.id,
             name=folder.name,
             parent_id=folder.parent_id,
-            file_count=counts.get(folder.id, 0),
+            file_count=files.count if files else 0,
             project_id=None,
-            latest_activity_at=_naive_utc(changed) if changed else None,
+            latest_activity_at=_naive_utc(files.latest) if files else None,
             children=[shaped(c) for c in children.get(folder.id, [])],
         )
 
@@ -174,21 +169,25 @@ class NativeLibrary:
 
     async def folders(self) -> list[Folder]:
         folders = await traced_thread("native_library.folders", self.rows.folders)
-        files = await traced_thread(
-            "native_library.files", partial(self.rows.files, None, every_folder=True)
-        )
+        # One GROUP BY, not every live file read and validated (#7346).
+        counted = await traced_thread("native_library.folder_files", self.rows.folder_files)
         with span(
             "native_library.shape_folders",
-            attributes={"scadbuddy.folders": len(folders), "scadbuddy.files": len(files)},
+            attributes={
+                "scadbuddy.folders": len(folders),
+                "scadbuddy.files": sum(f.count for f in counted.values()),
+            },
         ):
-            return _shaped_folders(folders, files)
+            return _shaped_folders(folders, counted)
 
     async def library_listing(
         self, *, folder_id: int | None, every_folder: bool = False, filename: str | None = None
     ) -> list[LibraryListRow]:
         files = await traced_thread(
             "native_library.files",
-            partial(self.rows.files, folder_id, every_folder=every_folder, filename=filename),
+            partial(
+                self.rows.listed_files, folder_id, every_folder=every_folder, filename=filename
+            ),
         )
         return [
             LibraryListRow(

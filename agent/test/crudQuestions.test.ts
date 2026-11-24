@@ -271,6 +271,8 @@ describe('the reads through the CRUD routes', () => {
     expect(api.seen[0]!.body).toEqual({ kind: 'browser', id: 'browser' })
     expect(listed.summariesTruncated).toBe(true)
     expect(listed.questions).toHaveLength(500)
+    await questions.listPending(ME, SID)
+    expect(api.paths()).toEqual(['POST /questions/pending', `POST /questions/pending?session_id=${SID}`])
     expect(listed.questions[0]).toEqual({
       id: QID,
       sessionId: SID,

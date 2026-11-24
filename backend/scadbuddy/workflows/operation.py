@@ -111,8 +111,9 @@ class UnregisteredKindError(Exception):
     """A kind's activity this build does not register (#4139). Not an
     ``ApplicationError``, so raised from the workflow it fails the workflow task, not
     the workflow: nothing is scheduled and no attempt is spent. Temporal retries the
-    task (after the first retry, once per workflow task timeout, 10 s: the SDK lets a
-    repeated failure time out rather than report it), and an AUTO_UPGRADE run's retry
+    task (after the first retry, once per workflow task timeout: the SDK lets a
+    repeated failure time out rather than report it; an `Operation` starts with
+    `commands.SHORT_TASK_TIMEOUT`, 3 s, #7288), and an AUTO_UPGRADE run's retry
     goes to the current build, which a newer build with the kind becomes as it starts."""
 
 

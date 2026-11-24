@@ -54,6 +54,10 @@ def declare(
     params = json.loads(params_file.read_text(encoding="utf-8"))
     params["label_color"] = colour or outputs.get(output_id).colors[0]
     params_file.write_text(json.dumps(params), encoding="utf-8")
+    # The row is the record a read answers from (#7255): it is read again from the files.
+    row, _ = outputs.row_from_files(outputs.directory(output_id), model)
+    assert row is not None and outputs.rows is not None
+    outputs.rows.write_copy([], [row], outputs.rows.clock())
 
 
 #: Each model.json typo the load refuses (#5653): the field, its value, and the name

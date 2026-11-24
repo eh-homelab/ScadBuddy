@@ -51,7 +51,7 @@ COLUMNS = (
     f" CASE WHEN {LIVE_OFFER} THEN pending_owner_label END AS offer_label,"
     f" CASE WHEN {LIVE_OFFER} THEN"
     f" to_char(pending_owner_until AT TIME ZONE 'UTC', {_MS}) END AS offer_until,"
-    " status, title, tags, scope, parent_id::text AS parent_id, runtime, max_turns,"
+    " status, title, tags, scope, browser, parent_id::text AS parent_id, runtime, max_turns,"
     f" {POOL_BUDGET} AS budget_usd, cost_usd, {POOL_COST} AS pool_cost_usd, turns,"
     " (runtime = 'unified' AND durable_turn_id IS NOT NULL) AS turn_active,"
     f" {_iso('created_at', 'created_at')}, {_iso('updated_at', 'updated_at')},"
@@ -197,6 +197,7 @@ def insert(
     budget_of: str | None,
     fork_of: tuple[str, int] | None,
     background_tools: bool | None,
+    browser: dict[str, Any] | None,
     limit: tuple[int, int] | None,
 ) -> str | None:
     """Inserts the row (``rows.ts`` ``PgSessionRows.insert``), in one transaction: with
@@ -227,14 +228,17 @@ def insert(
         conn.execute(
             "INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind,"
             " creator_id, status, title, tags, scope, parent_id, runtime, max_turns, budget_usd,"
-            " budget_root_id, fork_parent_id, fork_cut, background_tools)"
+            " budget_root_id, fork_parent_id, fork_cut, background_tools, browser)"
             " VALUES (%(id)s, %(origin)s, %(kind)s, %(oid)s, %(label)s, %(kind)s, %(oid)s, 'idle',"
             " %(title)s, %(tags)s, %(scope)s, %(parent)s, %(runtime)s, %(max_turns)s, %(budget)s,"
             " (SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = %(budget_of)s),"
             " %(fork_parent)s, %(fork_cut)s,"
             " CASE WHEN %(bg)s::boolean IS NOT NULL THEN %(bg)s::boolean"
             " WHEN %(parent)s::uuid IS NOT NULL THEN coalesce((SELECT background_tools"
-            " FROM ai_sessions WHERE id = %(parent)s::uuid), true) ELSE true END)",
+            " FROM ai_sessions WHERE id = %(parent)s::uuid), true) ELSE true END,"
+            " CASE WHEN %(browser)s::jsonb IS NOT NULL THEN %(browser)s::jsonb"
+            " WHEN %(parent)s::uuid IS NOT NULL THEN (SELECT browser FROM ai_sessions"
+            " WHERE id = %(parent)s::uuid) END)",
             {
                 "id": session_id,
                 "origin": origin,
@@ -252,6 +256,7 @@ def insert(
                 "fork_parent": None if fork_of is None else fork_of[0],
                 "fork_cut": None if fork_of is None else fork_of[1],
                 "bg": background_tools,
+                "browser": None if browser is None else Jsonb(browser),
             },
         )
     return None

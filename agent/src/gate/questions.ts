@@ -39,7 +39,7 @@ export const DEFAULT_QUESTION_EXPIRY_SECONDS = 3600
 export const MIN_QUESTION_EXPIRY_SECONDS = 10
 export const MAX_QUESTION_EXPIRY_SECONDS = 86_400
 
-/** How many undismissed `done` summaries listPending returns. */
+/** How many undismissed `done` summaries listPending returns (of one session, when it names one). */
 export const PENDING_CAP = 500
 /**
  * #815 §5's per-user rate limit on attention requests: this many per window. A
@@ -186,8 +186,8 @@ export class QuestionService {
    * oldest are not listed. A row nothing parks on any more (a classic question, from before
    * every session was an AgentSession) is not listed: nobody would read its answer.
    */
-  async listPending(principal: Owner): Promise<{ questions: PendingQuestion[]; summariesTruncated: boolean }> {
-    const done = (await this.deps.routes.pending(principal)).map((r) => ({ ...r, created_at: new Date(r.created_at), expires_at: r.expires_at === null ? null : new Date(r.expires_at) }))
+  async listPending(principal: Owner, sessionId?: string): Promise<{ questions: PendingQuestion[]; summariesTruncated: boolean }> {
+    const done = (await this.deps.routes.pending(principal, sessionId)).map((r) => ({ ...r, created_at: new Date(r.created_at), expires_at: r.expires_at === null ? null : new Date(r.expires_at) }))
     const questions = done.slice(0, PENDING_CAP).map((r) => ({
       id: r.id,
       sessionId: r.session_id,

@@ -279,6 +279,8 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "_sweep_storefront", _broken(OSError("the database is gone")))
     # #6950: the entities whose owner is gone.
     monkeypatch.setattr(main, "sweep_orphan_entities", _broken(OSError("the database is gone")))
+    # #7255: the copy of the saved outputs' files to rows.
+    monkeypatch.setattr(main, "copy_outputs", _broken(OSError("the volume is gone")))
     # #7234: the order attempts' missed media, one read and a start per attempt.
     monkeypatch.setattr(main, "sweep_media", _broken_async)
     monkeypatch.setattr(
@@ -286,7 +288,8 @@ async def test_a_failing_sweep_fails_its_activity(
     )
     state = SimpleNamespace(
         render=SimpleNamespace(prune=_broken_async, store=SimpleNamespace(read=None)),
-        outputs=object(),
+        outputs=SimpleNamespace(rows=object()),
+        projection=SimpleNamespace(pool=object(), conninfo=""),
         store=SimpleNamespace(content=None),
         blobs=object(),
         refs=object(),
@@ -454,6 +457,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
 
     monkeypatch.setattr(main, "sweep_media", slow_media)
     state.settings = SimpleNamespace(media_upload_max_bytes=1 << 20)
+    # #7491: the sweep counts the starts it asked for.
+    state.metrics = SimpleNamespace(attempt_media_sweep_starts=SimpleNamespace(inc=lambda n: None))
     # #5298: the CRUD routes' idempotency replies past their 24 h, one delete.
     monkeypatch.setattr(main, "_prune_crud_requests", lambda state: time.sleep(0.1))
 
