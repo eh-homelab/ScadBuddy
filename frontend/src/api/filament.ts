@@ -239,7 +239,23 @@ export const spoolTagWritten = (spoolId: string, body: TagWrittenIn) =>
 export const restoreTagBackup = (tagId: string, backupId: string, body: TagRecordsIn) =>
   request<TagRecords>(`${BASE}/tags/${seg(tagId)}/backups/${seg(backupId)}/restore`, json('POST', body))
 
-// -- NTAG through SpoolBuddy (#6264) --------------------------------------------------
+export type NfcJob = Schemas['NfcJob']
+export type NfcJobClaimIn = Schemas['NfcJobClaimIn']
+export type NfcJobResultIn = Schemas['NfcJobResultIn']
+
+/** The agents' NFC jobs no page armed yet, oldest first (G4). */
+export const listPendingNfcJobs = () => request<NfcJob[]>(`${BASE}/nfc-jobs?state=pending`)
+
+/**
+ * Arms a job for this page. A write job's claim names the `records_sha256` of the records the
+ * person saw (R22): 409 `records_mismatch` when the job holds others, `job_not_pending` once it ended.
+ */
+export const claimNfcJob = (id: string, body: NfcJobClaimIn = {}) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/claim`, json('POST', body))
+
+/** Ends an armed job with what the tag gave, or with an `error`. */
+export const postNfcJobResult = (id: string, body: NfcJobResultIn) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/result`, json('POST', body))
+
+// -- NTAG through SpoolBuddy (#6264)--------------------------------------------------
 
 export type ScanResult = Schemas['ScanResult']
 export type NtagQueued = Schemas['NtagQueued']

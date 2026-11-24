@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { listTags } from '../../api/filament'
 import { spoolId } from '../../mocks/features/filament/seed'
+import { seedNfcJob } from '../../mocks/features/filament/tags'
 import { server } from '../../mocks/server'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { installNdefStub, type NdefStub } from '../../test/ndefStub'
@@ -265,6 +266,28 @@ describe('the scan page (#7273)', () => {
     expect(await screen.findByText('This tag gave no serial number, so ScadBuddy cannot keep it.')).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'On the tag' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Create a spool from this tag' })).toBeNull()
+  })
+
+  it("runs an agent's read job, and the tap stays out of this session's reads", async () => {
+    const job = seedNfcJob({ kind: 'read' })
+    const log = sent()
+    try {
+      const { user } = open()
+      const status = screen.getByRole('status', { name: 'Last read' })
+      const banner = await screen.findByRole('region', { name: 'Agent job' })
+      expect(within(banner).getByRole('heading', { name: 'Agent wants to read a tag' })).toBeInTheDocument()
+      const arm = within(banner).getByRole('button', { name: 'Arm' })
+      await waitFor(() => expect(arm).toBeEnabled())
+      await user.click(arm)
+      await within(banner).findByText('Hold a tag to the phone')
+      stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+      await waitFor(() => expect(status).toHaveTextContent('Agent job done: the tag was read.'))
+      expect(log.requests.map((one) => one.line)).toContain(`POST /api/v1/filament/nfc-jobs/${job.id}/result`)
+      expect(log.requests.map((one) => one.line)).not.toContain('POST /api/v1/filament/tags/reads')
+      expect(screen.queryByRole('list', { name: "This session's reads" })).toBeNull()
+    } finally {
+      log.off()
+    }
   })
 
   it('stops scanning when it unmounts', async () => {

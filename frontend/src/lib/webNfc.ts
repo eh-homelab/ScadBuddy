@@ -106,6 +106,24 @@ export function sameRecords(a: readonly WireRecord[], b: readonly WireRecord[]):
 }
 
 /**
+ * #7273 R22 — the SHA-256, as lower-case hex, of the records' canonical JSON, as the backend's
+ * `records_sha256` writes it (`NfcJobClaimIn`): each record with every field (an absent one as
+ * `null`) and its keys sorted, no spaces, non-ASCII as itself. A write job's claim carries it.
+ */
+export async function recordsSha256(records: readonly Partial<WireRecord>[]): Promise<string> {
+  const canonical = records.map((record) => {
+    const full: Record<string, unknown> = { data_hex: null, encoding: null, id: null, lang: null, media_type: null, record_type: null, ...record }
+    return Object.fromEntries(
+      Object.keys(full)
+        .sort()
+        .map((key) => [key, full[key] ?? null]),
+    )
+  })
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(canonical)))
+  return hexOf(new Uint8Array(digest))
+}
+
+/**
  * One reader for the page's life: `start` scans once and the reader stays on until `stop`
  * (screen 1), so each tap reaches `onReading`'s listeners and any `nextReading` waiting.
  */

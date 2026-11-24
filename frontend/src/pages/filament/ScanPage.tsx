@@ -4,6 +4,7 @@ import { Link } from 'react-router'
 import { ApiError } from '../../api/client'
 import { postTagRead, type TagReadResult } from '../../api/filament'
 import { KnownTag } from '../../components/filament/scan/KnownTag'
+import { NfcJobBanner } from '../../components/filament/scan/NfcJobBanner'
 import { DecodedFields, NewTag } from '../../components/filament/scan/NewTag'
 import type { HeldPhotos } from '../../components/filament/scan/PhotoButtons'
 import { filamentLinks } from '../../lib/filamentLinks'
@@ -40,7 +41,8 @@ function scanRefusal(cause: unknown): string {
  * #7273 — the phone page (spec 2026-11-23-web-nfc-tags-design.md, screens 1 to 4). One Web NFC
  * scan runs from the first "Scan" until the page goes; each tap is posted to `POST /tags/reads`
  * and listed newest first, and the newest opens: its spool (screen 2), a new tag (screen 3), or a
- * tag with no serial number. A browser without Web NFC gets the page's address to open elsewhere.
+ * tag with no serial number. An agent's NFC job shows on top until the person arms or declines it
+ * (`NfcJobBanner`). A browser without Web NFC gets the page's address to open elsewhere.
  */
 export function ScanPage() {
   const [support] = useState(nfcSupport)
@@ -191,6 +193,7 @@ function Scanner() {
       <p role="status" aria-label="Last read" className="sr-only">
         {announcement}
       </p>
+      <NfcJobBanner session={session} onAnnounce={setAnnouncement} />
       {opened && (
         <ReadView
           key={opened.key}

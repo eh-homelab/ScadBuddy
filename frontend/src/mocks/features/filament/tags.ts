@@ -1,6 +1,7 @@
 import { HttpResponse, http } from 'msw'
 import type { components } from '../../../api/schema'
 import { parseRgba } from '../../../lib/rgba'
+import { recordsSha256 } from '../../../lib/webNfc'
 import { newId } from '../../newId'
 import { bindOn, cleanTagUid, findByKey, holderOf, seenTag, spoolViewOf, tagOf, tagRowOf } from './index'
 
@@ -16,6 +17,9 @@ type S = components['schemas']
  * The write routes (`back_up`, `records_for_spool`, `written`, `restore_records`) keep each
  * tag's backups in memory, append-only. `tag-records` answers one OpenSpool record built from
  * the spool; `tag-written` checks the backup, the read-back and the records, then binds.
+ *
+ * The agents' NFC jobs (`tags.py` `claim_job`, `finish_job`, `cancel_job`) live in memory too;
+ * `seedNfcJob` queues one. A job past its `expires_at` is `expired` at the next request.
  */
 
 const BASE = '/api/v1/filament'
@@ -91,8 +95,43 @@ type Backup = S['TagBackup']
 /** Every backup, oldest first. */
 let backups: Backup[] = []
 
+type Job = S['NfcJob']
+
+/** Every NFC job, oldest first. */
+let jobs: Job[] = []
+
 export function reset() {
   backups = []
+  jobs = []
+}
+
+/** Queues an agent's job: a `read`, or a `write` of `records`; it waits `ttl_s` seconds (default 600). */
+export function seedNfcJob(job: { kind: Job['kind']; records?: S['NdefRecord'][]; ttl_s?: number }): Job {
+  const created = new Date()
+  const made: Job = {
+    id: newId(),
+    kind: job.kind,
+    records: job.kind === 'write' ? (job.records ?? []).map((one) => ({ media_type: null, id: null, encoding: null, lang: null, ...one, data_hex: one.data_hex.toLowerCase() })) : null,
+    created_by: 'agent@example.com',
+    state: 'pending',
+    result: null,
+    created_at: created.toISOString(),
+    expires_at: new Date(created.getTime() + (job.ttl_s ?? 600) * 1000).toISOString(),
+    armed_by: null,
+  }
+  jobs.push(made)
+  return made
+}
+
+/** `expire_jobs`: every open job whose time is up ends as `expired`. */
+function expireJobs() {
+  const now = Date.now()
+  for (const job of jobs) if ((job.state === 'pending' || job.state === 'armed') && Date.parse(job.expires_at) <= now) job.state = 'expired'
+}
+
+const jobOf = (id: string) => {
+  expireJobs()
+  return jobs.find((one) => one.id === id)
 }
 
 const hexOfText = (value: string) => Array.from(new TextEncoder().encode(value), (byte) => byte.toString(16).padStart(2, '0')).join('')
@@ -131,6 +170,51 @@ function covering(body: { uid: string; backup_id: string; records?: S['NdefRecor
 }
 
 export const handlers = [
+  http.get(`${BASE}/nfc-jobs`, () => {
+    expireJobs()
+    return HttpResponse.json(jobs.filter((one) => one.state === 'pending'))
+  }),
+  http.post(`${BASE}/nfc-jobs`, async ({ request }) => {
+    const body = (await request.json()) as S['NfcJobIn']
+    return HttpResponse.json(seedNfcJob({ kind: body.kind, records: body.records ?? undefined, ttl_s: body.ttl_s }), { status: 201 })
+  }),
+  http.get(`${BASE}/nfc-jobs/:id`, ({ params }) => {
+    const job = jobOf(String(params.id))
+    return job ? HttpResponse.json(job) : problem(404, `no NFC job ${String(params.id)}`)
+  }),
+  http.post(`${BASE}/nfc-jobs/:id/claim`, async ({ params, request }) => {
+    const job = jobOf(String(params.id))
+    if (!job) return problem(404, `no NFC job ${String(params.id)}`)
+    const text = await request.text()
+    const sha = text ? ((JSON.parse(text) as S['NfcJobClaimIn']).records_sha256 ?? null) : null
+    if (job.state !== 'pending') return conflict('job_not_pending', 'the job is not pending')
+    if (job.records === null) {
+      if (sha !== null) return problem(422, 'a read job takes no records_sha256', 'records_sha256_not_taken')
+    } else if (sha?.toLowerCase() !== (await recordsSha256(job.records))) return conflict('records_mismatch', 'the records are not the ones the page showed')
+    Object.assign(job, { state: 'armed', armed_by: 'owner@example.com' })
+    return HttpResponse.json(job)
+  }),
+  http.post(`${BASE}/nfc-jobs/:id/cancel`, ({ params }) => {
+    const job = jobOf(String(params.id))
+    if (!job) return problem(404, `no NFC job ${String(params.id)}`)
+    if (job.state === 'pending' || job.state === 'armed') job.state = 'cancelled'
+    return HttpResponse.json(job)
+  }),
+  http.post(`${BASE}/nfc-jobs/:id/result`, async ({ params, request }) => {
+    const job = jobOf(String(params.id))
+    if (!job) return problem(404, `no NFC job ${String(params.id)}`)
+    if (job.state !== 'armed') return conflict('job_not_armed', 'the job is not armed')
+    const body = (await request.json()) as S['NfcJobResultIn']
+    if (body.error != null) return HttpResponse.json(Object.assign(job, { state: 'failed', result: { error: body.error } }))
+    const uid = cleanTagUid(body.uid ?? null)
+    const records = body.records ?? []
+    if (job.kind === 'read') return HttpResponse.json(Object.assign(job, { state: 'done', result: { uid, records } }))
+    const backup = backups.find((one) => one.id === body.backup_id)
+    if (!backup || uid === null || backup.reason !== 'agent_write' || backup.job_id !== job.id || backup.uid !== uid) return conflict('backup_mismatch', 'the backup does not cover this write')
+    const result = { uid, records, backup_id: backup.id }
+    if (!sameRecords(job.records ?? [], records)) return HttpResponse.json(Object.assign(job, { state: 'failed', result: { error: 'the tag does not hold what was sent', ...result } }))
+    return HttpResponse.json(Object.assign(job, { state: 'done', result }))
+  }),
   http.post(`${BASE}/tags/backups`, async ({ request }) => {
     const body = (await request.json()) as S['TagBackupIn']
     const uid = cleanTagUid(body.uid)

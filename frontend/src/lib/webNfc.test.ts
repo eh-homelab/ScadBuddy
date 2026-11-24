@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { installNdefStub, type NdefStub } from '../test/ndefStub'
-import { NfcSession, nfcSupport, sameRecords, toInit, toWire, type NDEFRecord, type Reading } from './webNfc'
+import { NfcSession, nfcSupport, recordsSha256, sameRecords, toInit, toWire, type NDEFRecord, type Reading } from './webNfc'
 
 const bytes = (text: string) => new TextEncoder().encode(text)
 
@@ -115,5 +115,22 @@ describe('NfcSession', () => {
     expect(stub.writes).toHaveLength(1)
     expect(readOnly).not.toHaveBeenCalled()
     session.stop()
+  })
+})
+
+describe('recordsSha256 (#7273 R22)', () => {
+  // The records as GET /nfc-jobs/{id} answers them; the hex is what the backend's
+  // `scadbuddy.filament.models.records_sha256` gives for the same list (computed 2026-11-24
+  // with `uvx uv@0.13.9 run python` in backend/).
+  it('hashes a record list as the backend does', async () => {
+    const records = [
+      { record_type: 'text', media_type: null, id: null, encoding: 'utf-8', lang: 'en', data_hex: '5368656c66204233' },
+      { record_type: 'mime', media_type: 'application/json', id: 'naïve "x" ✓', encoding: null, lang: null, data_hex: '7b7d' },
+    ]
+    expect(await recordsSha256(records)).toBe('430aac9b54748997f382a364eb3234b32759d096d10f59a9ae47b49cfc4525e7')
+  })
+
+  it('writes an absent field as null, as the backend dumps it', async () => {
+    expect(await recordsSha256([{ record_type: 'mime', data_hex: '7b7d' }])).toBe('6b20428036a4096aeef2e2fe7084d6c7c53e2c476789c6643b343a13c563ad29')
   })
 })
