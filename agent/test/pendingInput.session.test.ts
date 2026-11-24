@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { ApprovalError } from '../src/approvals/service.js'
 import type { PendingInputEntry, ProjectionFilter } from '../src/gate/projection.js'
 import { sessionPendingInput } from '../src/routes/pendingInput.js'
 import type { SessionManager } from '../src/sessions/manager.js'
@@ -17,7 +18,7 @@ const entry = (id: string, kind: 'approval' | 'answer'): PendingInputEntry =>
   ({ id, kind, session_id: SESSION, created_at: '2026-11-23T00:00:00.000Z' }) as unknown as PendingInputEntry
 
 /** A manager whose record holds `rows`; any call to Temporal fails the test. */
-function managerOver(rows: PendingInputEntry[], grant = false) {
+function managerOver(rows: PendingInputEntry[], grant = false, access = { owner: OWNER, creator: OWNER }) {
   const filters: ProjectionFilter[] = []
   const grantReads: boolean[] = []
   const temporal = () => {
@@ -25,7 +26,7 @@ function managerOver(rows: PendingInputEntry[], grant = false) {
   }
   const sessions = {
     projection: {
-      session: async () => ({ owner: OWNER, creator: OWNER }),
+      session: async () => access,
       entries: async (filter: ProjectionFilter) => {
         filters.push(filter)
         return rows
@@ -63,6 +64,28 @@ describe("one session's pending input", () => {
     expect((await sessionPendingInput(sessions, GRANTED, SESSION))?.entries.map((e) => e.id)).toEqual(['durable:a'])
     expect(filters).toEqual([{ sessionId: SESSION, ownedBy: GRANTED, allApprovals: true }])
     expect(grantReads).toEqual([true])
+  })
+
+  it("lists a session's parked answers to the browser user who started it and handed it off", async () => {
+    const { sessions, filters } = managerOver([entry('durable:q', 'answer')], false, { owner: GRANTED, creator: OWNER })
+    expect((await sessionPendingInput(sessions, OWNER, SESSION))?.entries.map((e) => e.id)).toEqual(['durable:q'])
+    expect(filters).toEqual([{ sessionId: SESSION, ownAnswers: false }])
+  })
+
+  it("is undefined, not an error, when the approvals' own check finds no session", async () => {
+    const { sessions } = managerOver([entry('durable:a', 'approval')])
+    sessions.approvals.list = async () => {
+      throw new ApprovalError('not_found', `no session ${SESSION}`)
+    }
+    expect(await sessionPendingInput(sessions, OWNER, SESSION)).toBeUndefined()
+  })
+
+  it('lets any other failure of the approvals through', async () => {
+    const { sessions } = managerOver([])
+    sessions.approvals.list = async () => {
+      throw new Error('the API does not answer')
+    }
+    await expect(sessionPendingInput(sessions, OWNER, SESSION)).rejects.toThrow('the API does not answer')
   })
 
   it('is undefined for a principal that may not see the session, and reads nothing', async () => {

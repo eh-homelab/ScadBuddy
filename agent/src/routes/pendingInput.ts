@@ -117,12 +117,13 @@ export type PendingInputPage = { entries: PendingInputEntry[]; summaries_truncat
  * them. For anyone else, the approvals it may see (all of them with the approval
  * grant; else its own sessions' and its own MCP prepares), and the answers of the
  * sessions it owns. `sessionId` narrows it to one session; `grant` is whether `principal`
- * holds the approval grant, where the caller has read it already.
+ * holds the approval grant, where the caller has read it already; `allAnswers` lists that
+ * session's parked answers to a browser user who does not own it.
  */
 export async function pendingInput(
   sessions: SessionManager,
   principal: Owner = BROWSER_USER,
-  filter: { sessionId?: string; runs?: boolean; grant?: boolean } = {},
+  filter: { sessionId?: string; runs?: boolean; grant?: boolean; allAnswers?: boolean } = {},
 ): Promise<PendingInputPage> {
   const browser = principal.kind === 'browser'
   const grant = !browser && (filter.grant ?? (await sessions.approvals.holdsGrant(principal)))
@@ -132,14 +133,15 @@ export async function pendingInput(
   const [approvals, { questions: answers, summariesTruncated }, durable, own] = await Promise.all([
     // Each list is capped, so one session's read asks for that session's rows only.
     // Both approvals lists check the principal's access (and its grant) themselves, on purpose:
-    // that is the service's own guard, and `grant` here only shapes the projection's filter.
+    // that is the service's own guard (its refusal is sessionPendingInput's 404), and `grant`
+    // here only shapes the projection's filter.
     filter.sessionId === undefined
       ? sessions.approvals.listVisiblePending(principal)
       : sessions.approvals.list(principal, { sessionId: filter.sessionId, pending: true }),
     sessions.questions.listPending(principal, filter.sessionId),
     sessions.projection.entries({
       ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }),
-      ...(browser ? { ownAnswers: true } : { ownedBy: principal, allApprovals: grant }),
+      ...(browser ? { ownAnswers: filter.allAnswers !== true } : { ownedBy: principal, allApprovals: grant }),
     }),
     withRuns ? sessions.queue.ownEntries() : Promise.resolve([]),
   ])
@@ -173,7 +175,8 @@ export async function pendingInput(
  * session, so both lists read the record (`ai_pending_input`, R5) and filter alike. A
  * decided entry's row is gone from the record, and a session whose workflow closed, or that
  * Temporal no longer has (archived after its retention), lists what its record holds, never
- * asking Temporal (#7311). Undefined when there is no such session for the principal.
+ * asking Temporal (#7311). The session's creator sees its parked calls as its owner does.
+ * Undefined when there is no such session for the principal.
  */
 export async function sessionPendingInput(
   sessions: SessionManager,
@@ -186,7 +189,13 @@ export async function sessionPendingInput(
   const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
   const own = canSee(principal, { owner: session.owner, creator: session.creator, offer: null })
   if (principal.kind !== 'browser' && !grant && !own) return undefined
-  return await pendingInput(sessions, principal, { sessionId, grant })
+  try {
+    return await pendingInput(sessions, principal, { sessionId, grant, allAnswers: session.creator.kind === 'browser' })
+  } catch (err) {
+    // The approvals' own check: the session was forgotten, or the grant revoked, since the reads above.
+    if (err instanceof ApprovalError && err.code === 'not_found') return undefined
+    throw err
+  }
 }
 
 /** A response's cap (gate/validate.ts, plan 5b ruling 1). */
