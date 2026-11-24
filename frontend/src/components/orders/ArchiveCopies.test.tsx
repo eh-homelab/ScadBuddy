@@ -1,13 +1,19 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { Route, Routes } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Fulfilment } from '../../api/types'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../../api/client'
+import type { ArchiveOffer, AttemptArchives, Fulfilment } from '../../api/types'
 import { resetMockState } from '../../mocks/handlers'
 import { BROWSER, ITEM_APPROVED, ORDER_ACCEPTED, state } from '../../mocks/features/orders/state'
+import { server } from '../../mocks/server'
 import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
+import { ARCHIVE_READ_MS, ARCHIVE_READS } from './ArchiveCopies'
 
 vi.mock('../print/PlateScene', () => ({ PlateScene: () => <div data-testid="plate-scene" /> }))
+
+const ARCHIVES = '/api/v1/orders/:id/items/:item/fulfilments/:f/archives'
 
 /** An attempt whose print settled: what the print path records. */
 function printedAttempt(): Fulfilment {
@@ -32,48 +38,143 @@ function printedAttempt(): Fulfilment {
   return attempt
 }
 
-// #4253 §8.2 — a printed attempt offers its Bambuddy archive's finish photo and timelapse
-// as one-click copies into the item's files.
-describe('ArchiveCopies', () => {
-  beforeEach(() => resetMockState())
+function render() {
+  return renderPage(
+    <Routes>
+      <Route path="/orders/:id" element={<OrderPage />} />
+    </Routes>,
+    { route: `/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`, userEventOptions: { advanceTimers: vi.advanceTimersByTime } },
+  )
+}
 
-  it("copies the archive's finish photo and timelapse into the item's files, once each", async () => {
+/** Every read of the attempt's archives answers `offer`; the returned list counts the reads. */
+function answer(attempt: Fulfilment, offer: Partial<ArchiveOffer>): string[] {
+  const reads: string[] = []
+  server.use(
+    http.get(ARCHIVES, ({ params }) => {
+      reads.push(String(params.f))
+      return HttpResponse.json<AttemptArchives>({
+        linked: true,
+        attempt,
+        archives: [
+          {
+            archive_id: 8001,
+            status: 'completed',
+            finish_photos: ['finish_8001.jpg'],
+            timelapse: false,
+            completed_at: '2026-11-01T12:00:00Z',
+            finished_too_large: false,
+            timelapse_too_large: false,
+            ...offer,
+          },
+        ],
+      })
+    }),
+  )
+  return reads
+}
+
+// Spec 2026-11-05 §4.4 (owner's decision §8.2): the row loads when the page opens, shows
+// what each archive has attached, and offers a copy only of what is still missing.
+describe('ArchiveCopies', () => {
+  beforeEach(() => {
+    resetMockState()
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('loads on open with no click and shows what the import attached', async () => {
     printedAttempt()
-    const { user } = renderPage(
-      <Routes>
-        <Route path="/orders/:id" element={<OrderPage />} />
-      </Routes>,
-      { route: `/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}` },
-    )
-    const attempts = await screen.findByRole('list', { name: 'Attempts' })
-    await user.click(within(attempts).getByRole('button', { name: 'From Bambuddy…' }))
+    render()
     const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
-    expect(archives).toHaveTextContent('Archive 8001')
+    expect(screen.queryByRole('button', { name: 'From Bambuddy…' })).toBeNull()
+    await waitFor(() => expect(archives).toHaveTextContent('Archive 8001'))
+    // The read started the import and answered at once: nothing is attached yet.
+    expect(archives).toHaveTextContent('Importing finish photo')
     // Reading the archives copied what they say onto the attempt.
     await waitFor(() => expect(within(screen.getByRole('list', { name: 'Attempts' })).getByText(/9\.5 g/)).toBeInTheDocument())
 
-    await user.click(within(archives).getByRole('button', { name: 'Copy finish photo' }))
-    await waitFor(() => expect(within(archives).getByRole('button', { name: 'Finish photo copied' })).toBeDisabled())
-    await user.click(within(archives).getByRole('button', { name: 'Copy timelapse' }))
-    await waitFor(() => expect(within(archives).getByRole('button', { name: 'Timelapse copied' })).toBeDisabled())
-    const copied = state.attachments.filter((a) => a.item_id === ITEM_APPROVED)
-    expect(copied.map((a) => [a.role, a.kind])).toEqual([
-      ['finished', 'image'],
-      ['timelapse', 'video'],
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS)
+    await waitFor(() => expect(archives).toHaveTextContent('Finish photo attached'))
+    expect(archives).toHaveTextContent('Timelapse attached')
+    expect(within(archives).queryByRole('button')).toBeNull()
+    const imported = state.attachments.filter((a) => a.item_id === ITEM_APPROVED)
+    expect(imported.map((a) => [a.archive_media, a.caption])).toEqual([
+      ['finished_photo', 'Attempt 1, Bambuddy archive 8001'],
+      ['timelapse', 'Attempt 1, Bambuddy archive 8001'],
     ])
-    expect(copied[0]?.caption).toBe('Attempt 1, Bambuddy archive 8001')
   })
 
-  it('is not offered for an attempt recorded by hand', async () => {
+  it('shows what is attached after a reload, and reads no more', async () => {
+    const attempt = printedAttempt()
+    // Two reads before the page opens: the first starts the import, the second sees it done.
+    await api.attemptArchives(ORDER_ACCEPTED, ITEM_APPROVED, attempt.id)
+    await api.attemptArchives(ORDER_ACCEPTED, ITEM_APPROVED, attempt.id)
+    const read = vi.spyOn(api, 'attemptArchives')
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Finish photo attached'))
+    expect(archives).toHaveTextContent('Timelapse attached')
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS * 3)
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it(`reads again every ${ARCHIVE_READ_MS / 1000} s at most ${ARCHIVE_READS} times, then offers a copy of only what is missing`, async () => {
+    const attempt = printedAttempt()
+    const reads = answer(attempt, { finished_attachment_id: 'att-photo', timelapse: true })
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Importing timelapse'))
+    expect(within(archives).queryByRole('button', { name: 'Copy timelapse' })).toBeNull()
+    expect(reads).toHaveLength(1)
+
+    for (let n = 1; n <= ARCHIVE_READS; n++) {
+      await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS)
+      await waitFor(() => expect(reads).toHaveLength(1 + n))
+    }
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS * 3)
+    expect(reads).toHaveLength(1 + ARCHIVE_READS)
+
+    expect(await within(archives).findByRole('button', { name: 'Copy timelapse' })).toBeEnabled()
+    expect(within(archives).queryByRole('button', { name: 'Copy finish photo' })).toBeNull()
+    expect(archives).toHaveTextContent('Finish photo attached')
+  })
+
+  it.each([
+    ['has no completion time', null, 'waiting for Bambuddy to process the timelapse'],
+    ['completed under an hour ago', 10 * 60_000, 'waiting for Bambuddy to process the timelapse'],
+    ['completed an hour ago or more', 61 * 60_000, 'no timelapse in Bambuddy for this print'],
+  ])('says which timelapse state applies when the archive %s', async (_name, ago, text) => {
+    const attempt = printedAttempt()
+    const completed = ago == null ? null : new Date(Date.now() - ago).toISOString()
+    const reads = answer(attempt, { finished_attachment_id: 'att-photo', timelapse: false, completed_at: completed })
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent(text))
+    expect(archives).not.toHaveTextContent(/print's page/)
+    expect(within(archives).queryByRole('button')).toBeNull()
+    // Nothing is offered and missing, so the row reads no more.
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS * 2)
+    expect(reads).toHaveLength(1)
+  })
+
+  it('says a medium the import refused as too large is attached by hand, offers no copy, and reads no more', async () => {
+    const attempt = printedAttempt()
+    const reads = answer(attempt, { finished_attachment_id: 'att-photo', timelapse: true, timelapse_too_large: true })
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Timelapse is over the upload limit; attach it by hand'))
+    expect(archives).toHaveTextContent('Finish photo attached')
+    expect(within(archives).queryByRole('button')).toBeNull()
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS * 2)
+    expect(reads).toHaveLength(1)
+  })
+
+  it('is not shown for an attempt recorded by hand that names no archive', async () => {
     const attempt = printedAttempt()
     attempt.print_run_id = null
-    renderPage(
-      <Routes>
-        <Route path="/orders/:id" element={<OrderPage />} />
-      </Routes>,
-      { route: `/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}` },
-    )
-    const attempts = await screen.findByRole('list', { name: 'Attempts' })
-    expect(within(attempts).queryByRole('button', { name: 'From Bambuddy…' })).toBeNull()
+    render()
+    await screen.findByRole('list', { name: 'Attempts' })
+    expect(screen.queryByLabelText("Attempt 1's Bambuddy archives")).toBeNull()
   })
 })

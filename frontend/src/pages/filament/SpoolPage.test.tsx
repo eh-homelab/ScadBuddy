@@ -40,10 +40,12 @@ describe('the spool page', () => {
   it('has the seven sections, each a landmark with a heading, and an index', async () => {
     open(1)
     await heading(1)
-    for (const name of ['Identity', 'Weight', 'Colour and cost', 'Printers', 'Storage', 'Files and links', 'History']) {
+    for (const name of ['Identity', 'Weight', 'Colour and cost', 'Printers', 'Storage', 'Files, links and properties', 'History']) {
       expect(screen.getByRole('region', { name })).toBeInTheDocument()
       expect(screen.getByRole('heading', { level: 2, name })).toBeInTheDocument()
-      expect(within(screen.getByRole('navigation', { name: 'Sections' })).getByRole('link', { name })).toHaveAttribute('href', `#${name.toLowerCase().replace(/ /g, '-')}`)
+      // #7026: the files section keeps its old anchor now that it holds the properties too.
+      const anchor = name === 'Files, links and properties' ? 'files-and-links' : name.toLowerCase().replace(/ /g, '-')
+      expect(within(screen.getByRole('navigation', { name: 'Sections' })).getByRole('link', { name })).toHaveAttribute('href', `#${anchor}`)
     }
     expect(screen.getByRole('combobox', { name: 'Go to section' })).toBeInTheDocument()
   })
@@ -231,6 +233,8 @@ describe('the spool page', () => {
     expect(screen.getByText(/Empty spool/)).toHaveTextContent('250 g')
     const posts = recorded('POST', /\/events$/)
     await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '900')
+    // #7280: the button waits for the reading's insert weight check.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Record weighing' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Record weighing' }))
     await waitFor(() => expect(posts).toEqual([{ kind: 'weighed', grams: 650, source: 'scale' }]))
     await waitFor(async () => expect((await getSpool(spoolId(1))).grams_left).toBe(650))

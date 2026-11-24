@@ -39,12 +39,15 @@ var _ Library = (*api.Client)(nil)
 // Options are the mount's settings. All lists every file type, ReadOnly refuses every
 // write with EROFS, TTL is how long a folder's listing is kept, CacheDir holds
 // downloaded contents (at most CacheMax bytes of them, 0 no bound) and files being
-// written, and StateDir the writes whose upload failed, under unsent/ (#2865).
+// written, and StateDir the writes not yet sent, under unsent/ (#2865): those whose
+// upload failed and, with WriteBack, every write until the retrier sends it.
+// WriteBack makes a close queue what was written there instead of uploading it (#7286).
 type Options struct {
 	All, ReadOnly      bool
 	TTL                time.Duration
 	CacheDir, StateDir string
 	CacheMax           int64
+	WriteBack          bool
 }
 
 // NewRoot returns the root directory, the library's top level, with the unsent writes
@@ -74,7 +77,8 @@ type tree struct {
 	// owner is the mounting process's user and group, which own every entry: with
 	// root's, the mounting user's access(W_OK) would be refused.
 	owner fuse.Owner
-	// unsent is the writes whose upload failed (#2865).
+	// unsent is the writes not yet sent (#2865): those whose upload failed and, with
+	// WriteBack, every write until the retrier sends it.
 	unsent *queue
 
 	mu       sync.Mutex
@@ -635,7 +639,7 @@ type file struct {
 	file api.File
 	// pending is the file's write while handles are open on it; its size is the file's.
 	pending *pending
-	// queued is the file's unsent write, if its upload failed.
+	// queued is the file's unsent write, if its upload failed or WriteBack queued it.
 	queued *entry
 }
 

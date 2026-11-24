@@ -162,7 +162,12 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
             == 0
         )
 
-    assert sorted(r.getMessage() for r in caplog.records) == sorted(EXPECTED_MESSAGES)
+    rack_loggers = {"scadbuddy.bambuddy.print_run", "scadbuddy.rack.usage"}
+    assert sorted(r.getMessage() for r in caplog.records if r.name in rack_loggers) == sorted(
+        EXPECTED_MESSAGES
+    )
+    # Every logger's records, on purpose: no record of any module may carry a serial or
+    # a traceback.
     for record in caplog.records:
         text = f"{record.getMessage()} {record.__dict__!r}"
         assert not [serial for serial in INVENTED_SERIALS if serial in text], record.getMessage()

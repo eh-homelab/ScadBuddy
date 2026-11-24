@@ -650,6 +650,9 @@ class AmsUnit(BambuddyModel):
     is_ams_ht: bool = False
     module_type: str = ""
     tray: list[AmsTray] = Field(default_factory=list)
+    #: The unit's serial, which Bambuddy keys an AMS label by (#7153). Read in the backend
+    #: only, never in a status the API serves, as the tag keys are.
+    serial_number: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
 
     @field_validator("humidity", mode="before")
     @classmethod
@@ -741,6 +744,11 @@ class PrinterStatus(BambuddyModel):
     ams_switch_inlet: dict[str, str] = Field(default_factory=dict)
     fila_switch: FilaSwitch | None = None
     current_plate_id: int | None = None
+    #: The global tray the printer feeds from (255: none; #7153), and the AMS's own state,
+    #: 0 when idle, 1 while it changes filament, 2 while it reads a tag
+    #: (``backend/app/services/bambu_mqtt.py`` line 1292, maziggy/bambuddy v1.3.1).
+    tray_now: int | None = None
+    ams_status_main: int | None = None
     #: What the printer is doing now, whoever started it (#977). ``progress`` is a
     #: percentage and ``remaining_time`` minutes, as Bambu's MQTT ``mc_percent`` and
     #: ``mc_remaining_time`` are; ``current_archive_id`` is Bambuddy's archive of the job.
@@ -766,7 +774,13 @@ class PrinterStatus(BambuddyModel):
         return _number(value, float)
 
     @field_validator(
-        "remaining_time", "layer_num", "total_layers", "current_archive_id", mode="before"
+        "remaining_time",
+        "layer_num",
+        "total_layers",
+        "current_archive_id",
+        "tray_now",
+        "ams_status_main",
+        mode="before",
     )
     @classmethod
     def _count(cls, value: Any) -> Any:
@@ -1682,6 +1696,26 @@ class QueueItemCreate(BambuddyModel):
     #: extruder index. Bambuddy re-checks it against the live rack at dispatch.
     nozzle_rack_choice: dict[str, int] | None = None
     cleanup_library_after_dispatch: bool = False
+
+
+class SlotPreset(BambuddyModel):
+    """A row of ``GET /api/v1/printers/{id}/slot-presets`` (#7153): the slicer preset
+    Bambuddy shows for a slot, kept in its database, not on the printer
+    (``routes/printers.py`` line 2689, maziggy/bambuddy v1.3.1)."""
+
+    ams_id: int
+    tray_id: int
+    preset_id: str
+    preset_name: str
+    tray_info_idx: str | None = None
+
+
+class SlotControlAnswer(BambuddyModel):
+    """Bambuddy's ``{success, message}`` after a slot reset, refresh, load or unload
+    (#7153). It says the command was sent, not that the printer did it."""
+
+    success: bool = True
+    message: str = ""
 
 
 class SlotConfigure(BaseModel):

@@ -9,7 +9,8 @@ name: Go Module CI
 # tree, gooey's step, and each CLI's image is built and run once
 # (build-go-image.yml publishes them).
 #
-# Never path-gated. ci.yml's `go-select` decides whether this change touched Go
+# Path-gated only on a docs-only change (ci.yml `docs_only`), where it skips.
+# Otherwise ci.yml's `go-select` decides whether this change touched Go
 # and passes `run`; on "false" the job still runs, says so in its summary and
 # succeeds, so `CI Summary` asserts a job that really ran rather than counting a
 # skip as a pass.

@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
@@ -47,5 +47,32 @@ describe('FulfilmentForm stale attempts (#5592)', () => {
     const list = await screen.findByRole('list', { name: 'Attempts' })
     expect(within(list).getByRole('button', { name: `Accept attempt ${attempt.attempt}` })).toBeInTheDocument()
     expect(within(list).queryByText('Old design')).toBeNull()
+  })
+})
+
+// Spec 2026-11-05 §4.4: no order event reaches the page (F13), so an attempt by hand that
+// names an archive shows its archive row as soon as the page lists it, with no click.
+describe('FulfilmentForm archive row (#7236)', () => {
+  beforeEach(() => resetMockState())
+
+  it("loads a hand attempt's archive row with no click", async () => {
+    const attempt = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded', archive_id: 81 })
+    render()
+    const archives = await screen.findByLabelText(`Attempt ${attempt.attempt}'s Bambuddy archives`)
+    await waitFor(() => expect(archives).toHaveTextContent('Archive 81'))
+    // Bambuddy finished the archive just now: its timelapse is not processed yet.
+    expect(archives).toHaveTextContent('waiting for Bambuddy to process the timelapse')
+  })
+
+  it('reads the row again when the attempt names another archive', async () => {
+    const attempt = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded', archive_id: 81 })
+    const { user } = render()
+    const archives = await screen.findByLabelText(`Attempt ${attempt.attempt}'s Bambuddy archives`)
+    await waitFor(() => expect(archives).toHaveTextContent('Archive 81'))
+    state.fulfilments.find((f) => f.id === attempt.id)!.archive_ids = [82]
+    // Any change on the page reads the order again; here, an accept.
+    await user.click(screen.getByRole('button', { name: `Accept attempt ${attempt.attempt}` }))
+    const again = await screen.findByLabelText(`Attempt ${attempt.attempt}'s Bambuddy archives`)
+    await waitFor(() => expect(again).toHaveTextContent('Archive 82'))
   })
 })

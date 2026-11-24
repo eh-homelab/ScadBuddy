@@ -198,8 +198,8 @@ function catalogs(): Catalogs {
     effects: [aliased(40, 'Translucent', 0, ['Transparent']), aliased(41, 'Clear', 1), aliased(42, 'Silk', 2)],
     'insert-materials': [row(50, 'Plastic'), row(51, 'Cardboard', 1)],
     'insert-types': [
-      { ...row(60, 'Bambu reusable spool'), empty_weight_g: 250, insert_material_id: catalogId(50), note: null, bb_catalog_id: null },
-      { ...row(61, 'Cardboard spool', 1), empty_weight_g: 180, insert_material_id: catalogId(51), note: null, bb_catalog_id: null },
+      { ...row(60, 'Bambu reusable spool'), empty_weight_g: 250, insert_material_id: catalogId(50), note: null, bb_catalog_id: null, empty_weight_basis: 'catalog', placeholder: false, derived_count: 0 },
+      { ...row(61, 'Cardboard spool', 1), empty_weight_g: 180, insert_material_id: catalogId(51), note: null, bb_catalog_id: null, empty_weight_basis: 'catalog', placeholder: false, derived_count: 0 },
     ],
     colours: [
       // #6907: a synced row (`source`, `synced_at` its `updated_at`), and a person's own.

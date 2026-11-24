@@ -123,6 +123,7 @@ from scadbuddy.filament.csv_import import (
     import_on,
     import_rows,
 )
+from scadbuddy.filament.insert_weights import NoInsertWeightOfferError
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.filament.labels import (
     LabelNotFoundError,
@@ -231,6 +232,15 @@ NOT_NUDGED = frozenset(
         "claim_nfc_job",
         "cancel_nfc_job",
         "finish_nfc_job",
+        # #7153: these write the printer or Bambuddy's slot presets, no ScadBuddy row
+        # (`api/printer_slots.py`); the AMS label routes rename a place, so they nudge.
+        "configure_printer_slot",
+        "reset_printer_slot",
+        "refresh_printer_slot",
+        "load_printer_slot",
+        "unload_printer_slot",
+        "set_printer_slot_preset",
+        "clear_printer_slot_preset",
     }
 )
 #: A ``request.state`` attribute: a route that sets it true is not nudged for this request.
@@ -1635,6 +1645,78 @@ async def add_spool_event(
     if made is None:
         raise _no_spool(spool_id)
     return made
+
+
+_INSERT_WEIGHT_RULE = (
+    "A reading is from a new, unused spool when the spool's ledger shows no use (no print, "
+    "no print's grams, no delta down, no reading below the label weight) and its grams left "
+    "still equal the label weight (the spool's own, else its type's). Only then is an offer "
+    "made, and only when the reading is above the label weight and the derived weight "
+    "(`reading_g - label_weight_g`) is at most the label weight."
+)
+
+
+@router.get(
+    "/spools/{spool_id}/insert-weight-offer",
+    response_model=m.InsertWeightCheck,
+    summary="Check a new spool's weighing for its insert's empty weight",
+    description=(
+        "Reads only. `reading_g` is the scale's reading of the whole spool: filament, empty "
+        "spool and insert. `filament_g` is the reading less the insert's empty weight now "
+        "(`null` without an insert). Read it before the weighing is recorded, as the "
+        "weighing changes the grams left (#7280).\n\n"
+        f"{_INSERT_WEIGHT_RULE} Otherwise `offer` is `null` and `reason` says why.\n\n"
+        "The offer's `new_empty_weight_g` is the mean of the insert's readings with this one, "
+        "rounded half up. `checked_by_default` is true only for a placeholder weight or an "
+        "earlier derived one; nothing changes the insert until "
+        "`POST /filament/spools/{spool_id}/insert-weight` accepts it.\n\n"
+        "The weighing itself is still `POST /filament/spools/{spool_id}/events`, unchanged. "
+        "404 for no such spool; 422 when `reading_g` is missing, not above 0, or above 100000."
+    ),
+)
+async def insert_weight_offer(
+    filament: FilamentDep,
+    spool_id: UUID,
+    reading_g: Annotated[float, Query(gt=0, le=100_000)],
+) -> m.InsertWeightCheck:
+    check = await asyncio.to_thread(filament.insert_weights.check, spool_id, reading_g)
+    if check is None:
+        raise _no_spool(spool_id)
+    return check
+
+
+@router.post(
+    "/spools/{spool_id}/insert-weight",
+    response_model=m.InsertWeightAccepted,
+    summary="Accept a new spool's weighing as its insert's empty weight",
+    description=(
+        "Keeps the reading as this spool's one row for its insert (a second accept "
+        "replaces it) and sets the insert's `empty_weight_g` to the mean of its rows, "
+        "basis `derived`. It books no ledger event and calls no Bambuddy; the insert "
+        "reaches Bambuddy only by the usual sync (#7280).\n\n"
+        f"{_INSERT_WEIGHT_RULE} Every condition is checked again under the spool's and the "
+        "insert's row locks.\n\n"
+        "Accept before the weighing, then record the weighing with "
+        "`POST /filament/spools/{spool_id}/events` and the answer's `filament_g` as its "
+        "`grams`; that route is unchanged. 404 for no such spool; 409 with `code` "
+        "`no_insert_weight_offer` and the `reason` when no offer holds now."
+    ),
+)
+async def accept_insert_weight(
+    filament: FilamentDep, spool_id: UUID, body: m.InsertWeightAccept
+) -> m.InsertWeightAccepted:
+    try:
+        accepted = await asyncio.to_thread(filament.insert_weights.accept, spool_id, body.reading_g)
+    except NoInsertWeightOfferError as exc:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"no insert weight offer for spool {spool_id}: {exc.reason}",
+            code="no_insert_weight_offer",
+            reason=exc.reason,
+        ) from None
+    if accepted is None:
+        raise _no_spool(spool_id)
+    return accepted
 
 
 @router.post(

@@ -12,6 +12,7 @@ from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bb_sync_passes import SyncPassStore
 from scadbuddy.filament.catalog import CatalogStore
+from scadbuddy.filament.insert_weights import InsertWeightStore
 from scadbuddy.filament.inventory import FilamentInventory, PoolSbSpoolReads
 from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
@@ -67,6 +68,11 @@ class Filament:
         make them (`SbSpoolReads`): Bambuddy's path's picker rows among them (#6262
         Task 7)."""
         return PoolSbSpoolReads(self.inventory, self.presets)
+
+    @property
+    def insert_weights(self) -> InsertWeightStore:
+        """An insert's empty weight from new spools' weighings (#7280)."""
+        return InsertWeightStore(self.spools)
 
     @property
     def sync_passes(self) -> SyncPassStore:

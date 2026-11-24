@@ -17,6 +17,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "A multipart upload and a binary download. The assistant gets an invoice's file in the import session's first message, as an image or a PDF document block (#6267), not through a tool.",
   })),
   {
+    operation: 'GET /api/v1/print-imports/library-files/{file_id}',
+    reason:
+      "The Import print dialog's check, on focus, that its chosen library file still stands (#7335). The assistant imports with import_print, which gets the same refusals and the replacement from the import itself.",
+  },
+  {
     operation: 'POST /api/v1/filament/labels',
     reason:
       "The labels PDF (#7157, R-7157-10): the answer is a binary file that the assistant cannot read as text. The download tools' pattern (outputs.ts `binary`) embeds base64, which images and files never travel as (#2479), or links a GET, and this is a POST. The Labels page downloads it; the assistant reads the codes with filament_printer_labels and the sizes with filament_label_templates.",
@@ -766,21 +771,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Hosted plugins (#6937). The spec gives the assistant no versions tool (2026-11-21 §6.2): an offer always ' +
       "takes the plugin's latest_version (§6.3), which the plugin's own read answers.",
   },
-  ...(
-    [
-      'GET /api/v1/entities/{ref}/properties',
-      'PATCH /api/v1/entities/{ref}/properties',
-      'GET /api/v1/entity-kinds/{kind}/properties',
-      'GET /api/v1/entity-kinds/{kind}/property-schema',
-      'PUT /api/v1/entity-kinds/{kind}/property-schema',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      "An entity's key-value properties and a kind's property schema (#7026, spec §6.3a). Their tools " +
-      '(entity_property_list, _set, _schema_get, _schema_set) follow in the next layers of the same stack, ' +
-      'which drop these entries.',
-  })),
 ]
 
 /**

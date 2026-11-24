@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { matchesSearch, parseSearch, spoolSearchDoc, typeSearchDoc } from '../src/tools/filamentSearch.js'
+import { matchesSearch, parseSearch, propertyTexts, spoolSearchDoc, typeSearchDoc } from '../src/tools/filamentSearch.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -47,16 +47,21 @@ const spool = (values: Partial<Spool>) =>
   }) as Spool
 
 type Cases = { query: string; match: boolean }[]
+type Properties = Parameters<typeof propertyTexts>[0]
 type Vector =
-  | { name: string; kind: 'spool'; spool: Spool; extras: Parameters<typeof spoolSearchDoc>[1]; cases: Cases }
-  | { name: string; kind: 'type'; type: SpoolType; names: Record<string, string>; skus: string[]; cases: Cases }
+  | { name: string; kind: 'spool'; spool: Spool; extras: Parameters<typeof spoolSearchDoc>[1]; properties?: Properties; cases: Cases }
+  | { name: string; kind: 'type'; type: SpoolType; names: Record<string, string>; skus: string[]; properties?: Properties; cases: Cases }
 
 const { groups } = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/filament/search-vectors.json`, 'utf8')) as { groups: Vector[] }
 
 describe('the filament search matcher', () => {
   for (const group of groups) {
     it(`matches the shared vectors: ${group.name}`, () => {
-      const doc = group.kind === 'spool' ? spoolSearchDoc(group.spool, group.extras) : typeSearchDoc(group.type, new Map(Object.entries(group.names)), group.skus)
+      const properties = propertyTexts(group.properties)
+      const doc =
+        group.kind === 'spool'
+          ? spoolSearchDoc(group.spool, { ...group.extras, properties })
+          : typeSearchDoc(group.type, new Map(Object.entries(group.names)), group.skus, { properties })
       for (const { query, match } of group.cases) expect(matchesSearch(doc, parseSearch(query)), JSON.stringify(query)).toBe(match)
     })
   }
@@ -98,8 +103,16 @@ function backend() {
         { id: 'g2', tag_uid: 'AABBCCDD', tray_uuid: null, binding: null, spool_number: null },
       ]),
     ),
+    http.get(`${BACKEND}/api/v1/entity-kinds/:kind/properties`, ({ params }) =>
+      HttpResponse.json({
+        properties: params.kind === 'spool_type' ? { t2: { gtin: ['06975337041234'], td: 1.8 } } : { s87: { lot_number: 'L-2207' } },
+      }),
+    ),
   )
 }
+
+const propertiesDown = () =>
+  server.use(http.get(`${BACKEND}/api/v1/entity-kinds/:kind/properties`, () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
 
 const numbers = (result: unknown) => (firstText(result) as { number: number }[]).map((one) => one.number)
 const codes = (result: unknown) => (firstText(result) as { code: string }[]).map((one) => one.code)
@@ -133,6 +146,14 @@ describe('filament_spool_list q', () => {
     )
     expect(numbers(await runTool(tool('filament_spool_list'), { q: 'pink' }, ctx()))).toEqual([87])
   })
+
+  it('finds a spool by a value of its properties, and still lists when they cannot be read (#7026)', async () => {
+    backend()
+    expect(numbers(await runTool(tool('filament_spool_list'), { q: 'l-2207' }, ctx()))).toEqual([87])
+    propertiesDown()
+    expect(numbers(await runTool(tool('filament_spool_list'), { q: 'l-2207' }, ctx()))).toEqual([])
+    expect(numbers(await runTool(tool('filament_spool_list'), { q: 'pink' }, ctx()))).toEqual([87])
+  })
 })
 
 describe('filament_type_list q', () => {
@@ -144,5 +165,15 @@ describe('filament_type_list q', () => {
     expect(await run('#D4AF37')).toEqual(['EL-PLA-SILK-GOLD'])
     expect(await run('A00-R3')).toEqual(['BL-PLA-BASIC-HOT-PINK'])
     expect(await run('pla')).toEqual(['BL-PLA-BASIC-HOT-PINK', 'EL-PLA-SILK-GOLD'])
+  })
+
+  it('finds a type by a GTIN or a number in its properties, and still lists when they cannot be read (#7026)', async () => {
+    backend()
+    const run = async (q: string) => codes(await runTool(tool('filament_type_list'), { q }, ctx()))
+    expect(await run('06975337041234')).toEqual(['EL-PLA-SILK-GOLD'])
+    expect(await run('1.8')).toEqual(['EL-PLA-SILK-GOLD'])
+    propertiesDown()
+    expect(await run('06975337041234')).toEqual([])
+    expect(await run('elegoo')).toEqual(['EL-PLA-SILK-GOLD'])
   })
 })

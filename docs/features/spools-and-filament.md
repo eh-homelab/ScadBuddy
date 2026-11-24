@@ -10,7 +10,10 @@ The **Filament** section is ScadBuddy's own filament inventory. It covers:
 - locations with humidity and temperature sensors;
 - RFID tags, NTAG labels, and printed QR labels for spools, places, printers, AMS units and slots;
 - a printer's K-profiles (pressure advance) through Bambuddy: list, set, batch set, delete and notes;
-- a ledger of spool events, with history, metrics and a forecast.
+- a printer's AMS slots through Bambuddy: configure a slot by hand, its saved slicer preset, refresh
+  and reset, load and unload, and the AMS units' labels;
+- a ledger of spool events, with history, metrics and a forecast;
+- key-value properties on spools and spool types (#7026).
 
 The print dialog picks from these spools (ScadBuddy's own, "SB" spools). Tray changes and
 finished prints are recorded against them. The inventory can sync with Bambuddy's in
@@ -149,6 +152,17 @@ worker makes the call. Set, batch and delete run once: Bambuddy dedupes none of 
 write the printer did not acknowledge answers `confirmed: false`. ScadBuddy keeps no copy;
 the notes live in Bambuddy, under the keys its own K-Profiles page uses.
 
+A printer's AMS slots (#7153, plan `docs/superpowers/plans/2026-11-23-ams-slot-control.md`)
+are read from Bambuddy's live status of the printer its registry row links, and shown on its
+card in Settings → Printers ("AMS slots", closed until opened). The routes call Bambuddy in
+the request. Each write that reaches the printer (configure, reset, refresh, load, unload)
+reads Bambuddy's status first and refuses with a 409 and a `code` while the printer prints,
+while the AMS is busy, or where the slot is not there; load also refuses an empty slot or the
+one already feeding, and refresh refuses while filament is loaded. Configure takes any SB
+spool (its values and its type's preset and K value for the slot's nozzle) or the values by
+hand. A slot's saved preset and an AMS unit's label live in Bambuddy; a label write also
+names ScadBuddy's place of the unit. The page asks before every printer write.
+
 ### The phone page (#7273)
 
 `/filament/scan` reads and writes spool tags with the phone's own NFC reader, through Web NFC
@@ -163,20 +177,59 @@ the page can write back. An agent reads or writes a tag through an NFC job (`nfc
 `nfc_write`): the page shows the job and its records, and nothing runs until a person arms it
 and holds a tag.
 
+### Properties (#7026)
+
+Design: [inventory spec §6.3a](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md), D17.
+
+A spool and a spool type can hold properties: free key-value pairs, such as a part number,
+barcodes or a lot number. The store is generic and works for any entity, so it is not
+specific to filament. A value is a string, a number, a boolean or a list of strings. A key
+matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per string,
+50 items per list, 500 characters per item (`backend/scadbuddy/entities/properties.py`).
+
+- Each kind has a schema that documents and types the keys it knows. It never refuses a
+  key. The schema is an allowlisted subset of JSON Schema Draft 2020-12 (`TOP_KEYWORDS`,
+  `KEY_KEYWORDS`, `ITEM_KEYWORDS`; list items are strings). An `enum` or `const` must fit its
+  key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. Values
+  already stored are not checked again after a schema change.
+- The migration seeds the keys `mpn`, `gtin`, `asin`, `manufacturer_url`,
+  `empty_spool_weight_g` and `td` for `spool_type`, and `lot_number` for `spool`
+  (`backend/scadbuddy/migrations/20261123T0017Z_entity_properties.sql`).
+- Routes: `GET`/`PATCH /entities/{ref}/properties` (a key set to `null` is removed; a
+  patch applies whole or not at all), `GET /entity-kinds/{kind}/properties` and
+  `GET`/`PUT /entity-kinds/{kind}/property-schema`
+  (`backend/scadbuddy/api/entity_properties.py`).
+- UI: the section "Files, links and properties" of the spool and type pages
+  (`frontend/src/components/entities/PropertiesPanel.tsx`; the spool page's anchor
+  `#files-and-links` stays). A list value has one field per item. A rename or an add onto a key the entity
+  already has asks first, since it replaces that key's value.
+- Search: the Spools and Types tabs' search also matches property values, beside the hex
+  match on a spool's tag UID and tray UUID (#7151)
+  (`frontend/src/lib/filamentSearch.ts` `propertyTexts`, loaded by
+  `frontend/src/components/entities/api.ts`). The agent's search matches them too
+  (`agent/src/tools/filament.ts` loads them, `agent/src/tools/filamentSearch.ts` matches); both use the shared vectors
+  `test-fixtures/filament/search-vectors.json`.
+- Agent: `entity_property_list`, `entity_property_set`, `entity_property_schema_get` and
+  `entity_property_schema_set` (`agent/src/tools/entities.ts`), and a `properties` field on
+  `filament_type_upsert` and `filament_spool_upsert` (`agent/src/tools/filament.ts`). An
+  upsert that changes only properties skips the row PATCH, so `updated_at` and the
+  Bambuddy sync do not change.
+
 ## Code
 
 - Routes:
-  - `backend/scadbuddy/api/filament.py:250` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
+  - `backend/scadbuddy/api/filament.py:265` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
   - `backend/scadbuddy/api/tray_spools.py:44` (a tray's spool link, and create from slot);
   - `backend/scadbuddy/api/filament_profiles.py:26`;
-  - `backend/scadbuddy/api/printer_kprofiles.py:42` (a printer's K-profiles, under `/printers/{id}/kprofiles`).
+  - `backend/scadbuddy/api/printer_kprofiles.py:42` (a printer's K-profiles, under `/printers/{id}/kprofiles`);
+  - `backend/scadbuddy/api/printer_slots.py:44` (a printer's AMS slots and AMS labels, under `/printers/{id}/ams` and `/printers/{id}/trays`).
 - UI:
   - the **Filament** nav item (`frontend/src/components/AppShell.tsx:111`);
-  - its routes (`frontend/src/App.tsx:119-135`);
-  - `frontend/src/pages/filament/FilamentPage.tsx:45`, `SpoolPage.tsx:408`;
+  - its routes (`frontend/src/App.tsx:121-138`);
+  - `frontend/src/pages/filament/FilamentPage.tsx:45`, `SpoolPage.tsx:418`;
   - `frontend/src/components/filament/`;
-  - Settings → Printing → Filament (`frontend/src/pages/settings/sections/filament.tsx:684`);
-  - the print dialog's picker (`frontend/src/components/FilamentPicker.tsx:358`);
+  - Settings → Printing → Filament (`frontend/src/pages/settings/sections/filament.tsx:911`);
+  - the print dialog's picker (`frontend/src/components/FilamentPicker.tsx:361`);
   - a printer's K-profiles on its card in Settings → Printers (`frontend/src/components/settings/PrinterKProfiles.tsx:83`).
 - Core: `backend/scadbuddy/filament/`:
   - the SB spools a print reads: `inventory.py` (`read_sb_spools` at `:957`, `reconcile_trays` at `:453`);
@@ -189,7 +242,7 @@ and holds a tag.
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
-- Agent tools: `agent/src/tools/filament.ts`, `filamentPurchasing.ts`, `traySpools.ts`.
+- Agent tools: `agent/src/tools/filament.ts`, `filamentPurchasing.ts`, `traySpools.ts`, `printerSlots.ts`.
 
 ## Data
 
@@ -281,10 +334,14 @@ and holds a tag.
   - bulk edit, archive and restore (#7151): `test_filament_spool_bulk_ops.py`;
   - `backend/tests/test_spool_refresh_replay.py`;
   - `backend/tests/profile_fetch/`;
-  - `backend/tests/api/test_printer_kprofiles.py`, `backend/tests/bambuddy/test_client_kprofiles.py`.
-- Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`);
+  - `backend/tests/api/test_printer_kprofiles.py`, `backend/tests/bambuddy/test_client_kprofiles.py`;
+  - `backend/tests/api/test_printer_slots.py`, `backend/tests/bambuddy/test_client_slots.py`.
+- Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`),
+  `frontend/src/components/settings/PrinterAmsSlots.test.tsx` (mocks `frontend/src/mocks/features/printerAmsSlots.ts`),
+  and the AMS unit place's rename in `frontend/src/pages/filament/LocationsTab.test.tsx`;
   the #7151 operations in `components/filament/BulkBar.test.tsx`, `pages/filament/LocationPage.test.tsx`,
   `pages/filament/SpoolsTab.search.test.tsx` and `pages/filament/TagsTab.test.tsx`.
+- Agent: `agent/test/printerSlots.test.ts`.
 
 ## Limits and known issues
 
@@ -295,6 +352,14 @@ and holds a tag.
   lines 305-307): while Bambuddy's auth is on, every write is the scope problem naming
   `K-profiles (admin only)`. The assistant has no K-profile tool yet
   ([#7162](https://github.com/eh-homelab/ScadBuddy/issues/7162)).
+- A slot preset's and an AMS label's writes need Bambuddy's `PRINTERS_UPDATE`, which no
+  Bambuddy API key can hold
+  ([`core/auth.py`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py)
+  line 280): while Bambuddy's auth is on, they are the scope problem naming
+  `Printers (admin only)`. Renaming an AMS unit's place on Filament → Locations does not write
+  Bambuddy's label.
+- A slot write reads the printer's state, then writes: a print started between the two calls
+  is not caught by ScadBuddy (Bambuddy's own reset refuses it).
 - Parity with Bambuddy 1.2.6b1 (#6270) is not complete yet: [filament-parity.md](filament-parity.md)
   lists every §11 item, its evidence, and the gap issue for each miss.
 - Filament profiles in Postgres, and their follow-ups, are still open:

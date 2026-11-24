@@ -178,7 +178,11 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
   keywords. A schema with any other keyword is refused, and so is one that leaves a key no
   value: an `enum` with no member a key can hold, a `const` a key cannot hold (null, an
   object), a lower bound past its upper bound, or a minimum length or count past the value
-  caps (2000 characters, 50 strings of 500).
+  caps (2000 characters, 50 strings of 500). The caps hold even where the key's `type` makes
+  the bound inert: `{"type": "number", "minLength": 5000}` is refused, because
+  `check_schema` (`backend/scadbuddy/entities/properties.py`, through `_check_bounds`)
+  checks `minLength` and `minItems` whatever the type; `maxLength` and `maxItems` past the
+  caps are not refused.
 - Where the schema lives: for an entity kind registered in code (`spool`, `spool_type`, …),
   a row of `entity_property_schemas (kind, schema)`, seeded by migration and editable by a
   person. For an item (phase 2), its item kind's `attribute_schema`, which follows the same

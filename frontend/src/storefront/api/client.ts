@@ -169,6 +169,15 @@ export interface RenderInput {
   colours: Record<string, string>
 }
 
+/** #6710: a file listing's price read: the listing as read, and a listing filament id per part, by slot. */
+export interface FilePriceInput {
+  listing_updated_at: string
+  colours: Record<string, string>
+}
+
+/** A file listing's part (#6710 §6.1): an offered slot, its label and the filament it starts at. */
+export type PublicSlot = Schemas['PublicSlot']
+
 /** A submit of the cart the page shows: the edge's request body, from its spec. */
 export type SubmitInput = paths['/api/store/v1/draft/submit']['post']['requestBody']['content']['application/json']
 
@@ -189,6 +198,14 @@ export const store = {
    */
   variant: (input: RenderInput) =>
     call<StoreVariant>(`/listings/${encodeURIComponent(input.listing_id)}/variant`, { method: 'POST', json: input }),
+  /**
+   * #6710 §7.5: the price of a file listing's colours (a listing filament per part, by slot).
+   * A read: no `Idempotency-Key`. `slice` is firm, `pending` is read again after its
+   * `retry_after`, as is `last` (the file's last price, of other colours, shown as updating
+   * meanwhile), `none` is priced by hand. One that claims a new slice counts as a render.
+   */
+  price: (listingId: string, input: FilePriceInput) =>
+    call<StoreEstimate>(`/listings/${encodeURIComponent(listingId)}/price`, { method: 'POST', json: input }),
   startRender: (input: RenderInput, key: string) => call<StoreRender>('/renders', { method: 'POST', json: input, key }),
   render: (jobId: string) => call<StoreRender>(`/renders/${encodeURIComponent(jobId)}`),
   estimate: (jobId: string) => call<StoreEstimate>(`/renders/${encodeURIComponent(jobId)}/estimate`),

@@ -87,7 +87,11 @@ export function FulfilmentForm({
                 )
               )}
               {enabled && <EndAttempt orderId={orderId} itemId={itemId} attempt={attempt} made onChanged={onChanged} />}
-              {((attempt.print_run_id && attempt.finished_at) || (!attempt.print_run_id && (attempt.archive_ids ?? []).length > 0)) && <ArchiveCopies orderId={orderId} itemId={itemId} attempt={attempt} onChanged={onChanged} />}
+              {((attempt.print_run_id && attempt.finished_at) || (!attempt.print_run_id && (attempt.archive_ids ?? []).length > 0)) && (
+                // Spec 2026-11-05 §4.4: the row reads its archives when it mounts. A hand
+                // attempt's row mounts again when it names other archives, so it reads them.
+                <ArchiveCopies key={attempt.print_run_id ? attempt.id : `${attempt.id}:${(attempt.archive_ids ?? []).join(',')}`} orderId={orderId} itemId={itemId} attempt={attempt} onChanged={onChanged} />
+              )}
             </li>
           ))}
         </ol>

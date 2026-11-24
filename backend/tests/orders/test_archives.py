@@ -9,7 +9,7 @@ import hashlib
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -32,6 +32,7 @@ from scadbuddy.orders.archives import (
     mirror_archives,
     mirror_attempt,
     mirror_run,
+    sweep_media,
 )
 from scadbuddy.orders.attempt_media import start_media
 from scadbuddy.orders.component import OrdersComponent
@@ -1189,3 +1190,188 @@ async def test_a_read_starts_one_step_only_for_an_offered_medium_not_attached(
         shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(fail=True), limit=LIMIT
     )
     assert [a.archive_id for a in read.archives] == [81]
+
+
+async def test_the_read_answers_the_ids_of_what_is_attached(shop: Shop, step: Step) -> None:
+    """Spec 2026-11-05 §4.4: the answer says what each archive has attached now, so the
+    page shows it after a reload and offers only what is missing."""
+    order, item, attempt = by_hand(shop)
+    seam = Archives(facts(81))
+
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    [offer] = read.archives
+    assert (offer.finished_attachment_id, offer.timelapse_attachment_id) == (None, None)
+
+    await step(seam, attempt.id)
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    ids = {a.archive_media: a.id for a in shop.rows.attachments(order.id)}
+    [offer] = read.archives
+    assert offer.finished_attachment_id == ids["finished_photo"]
+    assert offer.timelapse_attachment_id == ids["timelapse"]
+
+
+async def test_a_copy_on_the_item_from_before_5268_is_answered_as_attached(shop: Shop) -> None:
+    order, item, attempt = by_hand(shop)
+    sha = "e" * 64
+    kept = shop.lifecycle.add_attachment(
+        order.id,
+        item.id,
+        BY,
+        attachment_id=str(uuid.uuid4()),
+        kind="image",
+        role="finished",
+        filename="finish_old.jpg",
+        media_type="image/jpeg",
+        size_bytes=10,
+        sha256=sha,
+        blob_key="attachment-" + sha,
+        caption="Attempt 1, Bambuddy archive 81",
+        archive_id=81,
+        archive_media="finished_photo",
+    )
+
+    read = await attempt_archives(
+        shop.lifecycle, Archives(facts(81)), order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+
+    [offer] = read.archives
+    assert offer.finished_attachment_id == kept.id
+    assert offer.timelapse_attachment_id is None
+
+
+def aged(pool: PgPool, fulfilment_id: str, created: timedelta, checked: timedelta | None) -> None:
+    """The attempt made ``created`` ago, its media last read ``checked`` ago (None: never)."""
+    now = datetime.now(UTC)
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET created_at = %s, media_checked_at = %s"
+            " WHERE id = %s",
+            (now - created, None if checked is None else now - checked, fulfilment_id),
+        )
+
+
+async def test_the_sweep_starts_one_step_for_an_attempt_missing_a_medium(
+    shop: Shop, pool: PgPool, step: Step
+) -> None:
+    """Spec 2026-11-05 §4.6: an attempt of the last 14 days that names an archive, lacks a
+    medium and was last read more than an hour ago gets one step; the sweep asks Bambuddy
+    nothing itself."""
+    _, _, missing_photo = by_hand(shop, 81)
+    await step(PerArchive(facts(81, finish_photos=[])), missing_photo.id)
+    _, _, checked_lately = by_hand(shop, 82)
+    _, _, too_old = by_hand(shop, 83)
+    _, _, has_both = by_hand(shop, 84)
+    await step(PerArchive(facts(84)), has_both.id)
+    _, _, never_checked = by_hand(shop, 85)
+    shop.accepted()  # an item with no attempt
+    order, item = shop.accepted()
+    shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="failed"), BY
+    )  # an attempt naming no archive
+    aged(pool, missing_photo.id, timedelta(days=3), timedelta(hours=2))
+    aged(pool, checked_lately.id, timedelta(days=3), timedelta(minutes=10))
+    aged(pool, too_old.id, timedelta(days=15), None)
+    aged(pool, has_both.id, timedelta(days=3), timedelta(hours=2))
+    starts = Starts()
+    sweeping = Archives()
+
+    await sweep_media(shop.lifecycle, sweeping, starts, limit=LIMIT)
+
+    assert sorted(starts.started) == sorted([(missing_photo.id, False), (never_checked.id, False)])
+    assert sweeping.downloads == []
+
+
+async def test_the_sweep_starts_a_finished_run_whose_outcome_was_missed(
+    shop: Shop, pool: PgPool
+) -> None:
+    """A run attempt that settled with no outcome heard has no archive copied yet; the
+    sweep still starts its step. A run still printing gets none."""
+    _, _, attempt, _ = printed(shop, pool)
+    order, item = shop.accepted()
+    started(shop, order, item, run_row(pool))
+    starts = Starts()
+
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=LIMIT)
+
+    assert starts.started == [(attempt.id, False)]
+
+
+async def test_the_sweep_skips_a_medium_refused_at_the_current_limit(
+    shop: Shop, pool: PgPool, step: Step
+) -> None:
+    """#7281 review: an attempt whose only missing medium the import refused as too large
+    at this limit, or a higher one, gets no step; a limit above the refusal's gets one."""
+    _, _, attempt = by_hand(shop, 81)
+    small = len(JPEG) + 1
+    await step(Archives(facts(81)), attempt.id, limit=small)  # the photo; the timelapse refused
+    aged(pool, attempt.id, timedelta(days=3), timedelta(hours=2))
+
+    starts = Starts()
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=small)
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=small - 1)
+    assert starts.started == []
+
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=small + 1)
+    assert starts.started == [(attempt.id, False)]
+
+
+async def test_without_bambuddy_the_sweep_starts_nothing(shop: Shop) -> None:
+    by_hand(shop)
+    starts = Starts()
+
+    await sweep_media(shop.lifecycle, NOT_LINKED, starts, limit=LIMIT)
+
+    assert starts.started == []
+
+
+class FirstFails(Starts):
+    """Temporal refuses the first start only."""
+
+    tries = 0
+
+    async def start(self, fulfilment_id: str, *, retries: bool) -> None:
+        self.tries += 1
+        if self.tries == 1:
+            raise RuntimeError("Temporal is down")
+        await super().start(fulfilment_id, retries=retries)
+
+
+async def test_the_sweep_goes_on_after_a_failed_start(shop: Shop) -> None:
+    """A start Temporal refuses is logged; the sweep starts the next attempt, and the
+    refused one is tried again at the next sweep (nothing stamped it checked)."""
+    _, _, first = by_hand(shop, 81)
+    _, _, second = by_hand(shop, 82)
+    starts = FirstFails()
+
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=LIMIT)
+    assert len(starts.started) == 1
+
+    again = Starts()
+    await sweep_media(shop.lifecycle, Archives(), again, limit=LIMIT)
+    assert sorted(again.started) == sorted([(first.id, False), (second.id, False)])
+
+
+async def test_the_read_answers_a_medium_refused_as_too_large(shop: Shop, step: Step) -> None:
+    """#7281 review: a medium the import refused at this limit, or a higher one, is
+    answered as too large, so the page stops waiting for it; a higher limit clears it."""
+    order, item, attempt = by_hand(shop)
+    seam = Archives(facts(81))
+    small = len(JPEG) + 1
+    await step(seam, attempt.id, limit=small)
+
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=small
+    )
+    [offer] = read.archives
+    assert offer.finished_attachment_id is not None and not offer.finished_too_large
+    assert (offer.timelapse_attachment_id, offer.timelapse_too_large) == (None, True)
+
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    [offer] = read.archives
+    assert (offer.timelapse_attachment_id, offer.timelapse_too_large) == (None, False)

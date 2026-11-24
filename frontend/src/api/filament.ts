@@ -71,6 +71,9 @@ export type TimelineRow = Schemas['TimelineRow']
 export type GramsPoint = Schemas['GramsPoint']
 export type SpoolMetrics = Schemas['SpoolMetrics']
 export type AmsError = Schemas['AmsError']
+export type InsertWeightCheck = Schemas['InsertWeightCheck']
+export type InsertWeightOffer = Schemas['InsertWeightOffer']
+export type InsertWeightAccepted = Schemas['InsertWeightAccepted']
 export type Forecast = Schemas['Forecast']
 export type SpoolForecast = Schemas['SpoolForecast']
 export type TypeForecast = Schemas['TypeForecast']
@@ -341,6 +344,14 @@ export const getSpoolHistory = (id: string) => request<SpoolHistory>(`${BASE}/sp
 
 /** A weighing (`grams`: the filament left, without the empty spool) or a drying (`temp_c`, `hours`). */
 export const addSpoolEvent = (id: string, body: SpoolEventAdd) => request<SpoolEvent>(`${BASE}/spools/${seg(id)}/events`, json('POST', body))
+
+/** Whether a scale reading of a new, unused spool offers its insert an empty weight (#7280). Read it before the weighing. */
+export const insertWeightOffer = (spoolId: string, readingG: number) =>
+  request<InsertWeightCheck>(`${BASE}/spools/${seg(spoolId)}/insert-weight-offer?reading_g=${encodeURIComponent(String(readingG))}`)
+
+/** Accepts the offer: the insert's empty weight becomes the mean of its new-spool readings. Run it before the weighing. */
+export const acceptInsertWeight = (spoolId: string, readingG: number) =>
+  request<InsertWeightAccepted>(`${BASE}/spools/${seg(spoolId)}/insert-weight`, json('POST', { reading_g: readingG }))
 
 /** `null` takes it out of every place. */
 export const moveSpool = (id: string, locationId: string | null) =>

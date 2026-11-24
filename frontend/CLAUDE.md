@@ -95,6 +95,19 @@ same way, `vite.config.ts`).
   nothing is. "Working out the price…" shows only with no price known; "We price this
   design by hand" only when the render's estimate answers `none`. The mock holds a variant
   once its render's estimate answered (`holdVariant` seeds one).
+  A file listing (#6710 PR 6, `source` `library_file`): `CustomizePage` hands it to
+  `pages/FileCustomize.tsx` before its render effect sees it, so it renders nothing. Its
+  parts are colour parameters named `colours.<slot>` (`fileParts.ts` `partsView`), shown by
+  `ListingView` under the same `colourPlan` rule; the preview is the plate's held GLB
+  (`listing.previews`, a plate chooser over the viewer for more than one), recoloured by
+  `Preview` `slotColours` (`lib/partOpacity.ts` `ownSlotMaterials`, `recolourSlots`: a mesh
+  with a `scadbuddy_slot` extra takes its slot's colour, one with none keeps its own). The
+  price is `store.price` (`POST /listings/{id}/price`), the add sends `values` empty and
+  `colours` by slot. A `last` price shows marked as updating while the page reads again; a
+  read that ends with no price (a limit, a failure, too slow) keeps it on screen as `Estimate`
+  `held` ("This was our last price…"), neither updating nor firm. The mock lists `FILE` (`l4`) and every file listing the back office's
+  mock published in the tab (`storefront.ts` `publishedFiles`, from `sessionStorage`); e2e
+  `e2e/storefront-sell.spec.ts` sells a library file, publishes it and opens its public page.
   The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)
   and loads Cloudflare's script only when `components/Turnstile.tsx` mounts. A form that
   takes the check sends the widget's token as `X-Turnstile-Token` and draws a new widget
@@ -260,6 +273,9 @@ same way, `vite.config.ts`).
   `labelSheet.ts` `httpsOrigin`, `labelBase` and `locationPayload`: the QR is `<base>/x/L-<n>`, and a
   payload over 84 bytes is refused with an alert). Both place modes draw at most `MAX_LABELS` (100)
   labels, as spool labels do, and none past it (#7081).
+  The spool and type pages' section "Files, links and properties" (on the spool page, anchor `#files-and-links`) holds
+  `components/entities/PropertiesPanel.tsx` (#7026); `lib/filamentSearch.ts` `propertyTexts` makes
+  search match property values.
   History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
   the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
   `charts/LineChart`) and metrics panel (`SpoolMetricsPanel`); the Metrics tab (`pages/filament/MetricsTab.tsx`:
@@ -309,10 +325,12 @@ same way, `vite.config.ts`).
   line is an error). Search (#6894): the Spools and Types tabs filter their loaded lists by
   `q=` (`FilamentSearchBox`, "/" focuses it) with `lib/filamentSearch.ts` (every token must
   match a field; `#87` is spool 87 only; a hex with or without `#`; SKUs from the suppliers'
-  products, trays from `/filament/inventory`), and every Filament tab has the quick find
+  products, trays from `/filament/inventory`, each spool's open tag's UID and tray UUID from 4 hex digits
+  (#7151, `tagsBySpool`), and each spool's and type's property values (#7026),
+  read by `readKindPropertyTexts` on every load of the tab's list; a failed reload keeps the values it had), and every Filament tab has the quick find
   (`FilamentQuickFind`, Ctrl+K or ⌘K: spools and types in groups, Enter opens one), which shares the
   colour picker's remembered filters (`lib/filamentPickerFilters.ts`). The agent's
-  `filament_spool_list` and `filament_type_list` `q` run a copy (`agent/src/tools/filamentSearch.ts`); both tests run `test-fixtures/filament/search-vectors.json`. The price book is edited on Filament → Types, not in Settings; the ledger
+  `filament_spool_list` and `filament_type_list` `q` run a copy (`agent/src/tools/filamentSearch.ts`), which matches property values too; both tests run `test-fixtures/filament/search-vectors.json`. The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
   configuration (`pages/settings/sections/filament.tsx`). The Catalog tab's Colours (#6907) adds
   `ColourSources` ("Sync from filamentcolors", "Add Bambu Lab colours", each run's progress read
