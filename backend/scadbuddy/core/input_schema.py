@@ -79,9 +79,10 @@ FORMATS: Final = ("email", "date", "date-time")
 #: format only where its package is installed, and the image has no rfc3339-validator.
 FORMAT_CHECKER: Final = jsonschema.FormatChecker(formats=("date",))
 MAX_EMAIL: Final = 254
-#: One `@`, a local part, and a domain of two labels or more, with no whitespace and no
-#: control character. Linear: no part can hold the separator that ends it.
-_EMAIL_PART = r"[^\s@\x00-\x1f\x7f-\x9f"
+#: One `@`, a local part, and a domain of two labels or more, with no whitespace, control
+#: character or any of `,;<>()[]\"` (a mail header reads those). Linear: no part can
+#: hold the separator that ends it.
+_EMAIL_PART = r"[^\s@,;<>()\[\]\\\"\x00-\x1f\x7f-\x9f"
 _EMAIL = re.compile(rf"{_EMAIL_PART}]+@{_EMAIL_PART}.]+(?:\.{_EMAIL_PART}.]+)+")
 _DATE_TIME = re.compile(
     r"(\d{4}-\d{2}-\d{2})[Tt](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?"

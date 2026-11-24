@@ -177,15 +177,15 @@ def test_unique_items_do_not_walk_an_item_that_is_not_a_scalar() -> None:
 @pytest.mark.parametrize(
     "items",
     [
-        [{"a": i, "b": [i]} for i in range(2000)],
-        [i if i % 2 else f"s{i}" for i in range(4000)],
+        [{"a": i, "b": [i]} for i in range(16_000)],
+        [i if i % 2 else f"s{i}" for i in range(32_000)],
     ],
     ids=["objects", "mixed"],
 )
 def test_unique_items_are_linear(items: list[Any]) -> None:
     started = time.monotonic()
     list(Validator({"uniqueItems": True}).iter_errors(items))
-    assert time.monotonic() - started < 1
+    assert time.monotonic() - started < 8
 
 
 def test_items_are_not_walked_once_there_are_too_many() -> None:
@@ -320,6 +320,16 @@ def test_an_email_with_a_local_part_and_a_domain_fits(value: Any) -> None:
         "jane@example\x85.com",
         "jane\u00a0doe@example.com",
         "jane@example\u2028.com",
+        # Characters that mean something in a mail header.
+        "jane@example.com,eve",
+        "jane,eve@example.com",
+        "jane@example.com;eve",
+        "<jane>@example.com",
+        "jane@example.com>",
+        "jane(x)@example.com",
+        "jane@[127.0.0.1]",
+        '"jane"@example.com',
+        "jane\\x@example.com",
         # 255 characters.
         f"{'a' * 61}@{LONG_LABEL}.{LONG_LABEL}.{LONG_LABEL}.c",
     ],

@@ -71,8 +71,8 @@ limit.
 items, may also have a `format`: `email`, `date` or `date-time` (`FORMATS`). A `date-time`
 is RFC 3339 with an offset, and a leap second is refused. An `email` has one `@`, a local
 part before it and a domain with a dot after it, no empty part between dots in the domain,
-no whitespace, no control character and at most 254 characters. A letter need not be
-ASCII. A `default` must fit its field, its `format` included. The inputs of a flow and of a
+no whitespace, no control character, none of `,;<>()[]\"` and at most 254 characters. A
+letter need not be ASCII. A `default` must fit its field, its `format` included. The inputs of a flow and of a
 pipeline refuse `format`.
 
 **Sizes.** `backend/scadbuddy/tasks/models.py` `TaskOpen` checks them. The title has 1 to

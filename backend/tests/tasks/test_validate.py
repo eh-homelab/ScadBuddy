@@ -372,19 +372,18 @@ def test_a_tuple_holds_only_what_the_store_can_write(bad: Any) -> None:
 @pytest.mark.parametrize(
     "items",
     [
-        [{"a": i, "b": [i]} for i in range(6000)],
         [i if i % 2 else f"s{i}" for i in range(16_000)],
         # Every one of these integers has the same hash.
         [(i + 1) * (2**61 - 1) for i in range(60_000)],
     ],
-    ids=["objects", "mixed", "one-hash"],
+    ids=["mixed", "one-hash"],
 )
 def test_unique_items_take_no_quadratic_time(items: list[Any]) -> None:
     schema = _asks({"type": "array", "items": {"type": "integer"}, "uniqueItems": True})
     started = time.monotonic()
     validate_answer(schema, {"x": items})
     # At most 0.7 s (2026-11-24). Quadratic, each takes over 50 s: a pair by pair check of
-    # the first two, and a `set` of the integers.
+    # the first, and a `set` of the integers.
     assert time.monotonic() - started < 8
 
 
