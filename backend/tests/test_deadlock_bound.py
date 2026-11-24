@@ -20,3 +20,16 @@ async def test_a_workflow_worker_takes_the_tests_deadlock_bound() -> None:
         worker = Worker(client, task_queue=f"t-{uuid.uuid4().hex[:8]}", workflows=[RenderPiece])
         assert worker._workflow_worker is not None
         assert worker._workflow_worker._deadlock_timeout_seconds == TEST_DEADLOCK_SECONDS
+
+
+async def test_a_worker_with_the_detector_off_keeps_it_off() -> None:
+    """``debug_mode`` turns the detector off (None); the session's bound leaves that alone."""
+    async with temporal_client() as client:
+        worker = Worker(
+            client,
+            task_queue=f"t-{uuid.uuid4().hex[:8]}",
+            workflows=[RenderPiece],
+            debug_mode=True,
+        )
+        assert worker._workflow_worker is not None
+        assert worker._workflow_worker._deadlock_timeout_seconds is None

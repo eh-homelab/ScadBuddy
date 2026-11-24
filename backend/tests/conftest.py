@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import functools
 import importlib.util
+import inspect
 import json
 import os
 import shutil
@@ -82,8 +83,15 @@ settings_module.DEFAULT_CRUD_PORT = 0
 #: (#7443). Every test worker gets this larger bound: a pause passes, a real deadlock still
 #: fails the task. Not `debug_mode`, which also turns the bound off entirely.
 TEST_DEADLOCK_SECONDS = 30
+#: The SDK's own bound, for a test that needs the detector to fire as it does in production.
+SDK_DEADLOCK_SECONDS = 2
 
 _sdk_workflow_worker_init = temporal_workflow_worker._WorkflowWorker.__init__
+# The patch leans on a private class and attribute: a temporalio release that renames
+# either fails the session here, not every Worker or, worse, no test at all.
+assert "_deadlock_timeout_seconds = None if self._debug_mode else 2" in inspect.getsource(
+    _sdk_workflow_worker_init
+), "temporalio's deadlock bound moved: re-check tests/conftest.py's patch (#7443)"
 
 
 @functools.wraps(_sdk_workflow_worker_init)
