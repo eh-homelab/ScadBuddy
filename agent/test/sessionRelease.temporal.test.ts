@@ -26,6 +26,7 @@ import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { TranscriptStore } from '../src/sessions/store.js'
 import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
+import { queuePollers } from '../src/temporal/pollers.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
@@ -305,8 +306,8 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
   }, 60_000)
 
   async function polled(queue: string, type: 1 | 2): Promise<boolean> {
-    const { pollers } = await env.client.workflowService.describeTaskQueue({ namespace: 'default', taskQueue: { name: queue }, taskQueueType: type })
-    return (pollers ?? []).length > 0
+    // Every partition (temporal/pollers.ts): a worker can poll only the non-root ones (#7306).
+    return (await queuePollers(env.client, queue, type, Date.now() + 10_000)).length > 0
   }
   const pollUntil = <T>(read: () => Promise<T> | T, expected: T, timeout = 60_000) => expect.poll(read, { timeout, interval: 100 }).toEqual(expected)
 

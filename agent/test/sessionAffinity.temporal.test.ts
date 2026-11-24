@@ -23,6 +23,7 @@ import { type SessionManager, type SessionManagerDeps, SETTING_SESSION_MAX_TURNS
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
+import { queuePollers } from '../src/temporal/pollers.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
@@ -265,8 +266,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
 
   /** Whether a worker polls `queue` (1 workflow, 2 activity) now. */
   async function polled(queue: string, type: 1 | 2): Promise<boolean> {
-    const { pollers } = await env.client.workflowService.describeTaskQueue({ namespace: 'default', taskQueue: { name: queue }, taskQueueType: type })
-    return (pollers ?? []).length > 0
+    // Every partition (temporal/pollers.ts): a worker can poll only the non-root ones (#7306).
+    return (await queuePollers(env.client, queue, type, Date.now() + 10_000)).length > 0
   }
   const pollUntil = <T>(read: () => Promise<T> | T, expected: T, timeout = 30_000) => expect.poll(read, { timeout, interval: 100 }).toEqual(expected)
 

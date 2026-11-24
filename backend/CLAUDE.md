@@ -2253,7 +2253,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   ids), and `library:<old>`'s remembered choices copied to an empty `library:<new>`
   (`SettingsStore.copy_library_choices`). The run's subject, `existing` and `start` take the
   new id; a retry reuses the check, finds the item moved or the file in "Storefront", and
-  uploads nothing. The variant is sliced with the
+  uploads nothing, unless the file it moved to is gone since (`Shelf.stands`): then the held
+  copy is put back again. The find skips a run's per-print copy (`per_print`), and a wait
+  for the lock past `PROJECT_LOCK_TIMEOUT_MS` is a 503 `UNAVAILABLE_PROBLEM` the operation
+  tries again. The variant is sliced with the
   choices and presets a back-office quote of a spool of the same filament type on the same
   printer gets (#6574, `test_slice_parity.py`). The shop slice profile gives only the
   printer and a filament type per material (`slice_profile.py`, a
