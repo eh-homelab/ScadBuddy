@@ -437,6 +437,30 @@ def test_a_create_whose_commit_fails_leaves_no_row(
     assert world.rows.get("ghost") is None
 
 
+def test_a_failed_refresh_after_an_undo_is_counted(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 6 amendment 1 (#7317): when the undo's refresh cannot take the write lock, the
+    failure is counted under ``no_commit``, as a failed refresh_locked is, and the create
+    still raises its own error."""
+    history = world.history
+    assert history is not None
+
+    def broken(*_: object, **__: object) -> None:
+        raise GitError("git commit failed")
+
+    def no_lock() -> None:
+        raise OSError("the lock file cannot be opened")
+
+    monkeypatch.setattr(history, "_commit_action", broken)
+    monkeypatch.setattr(history, "write_lock", no_lock)
+
+    with pytest.raises(GitError):
+        world.catalogue.create("ghost", SOURCE, ModelMeta(name="Ghost"))
+
+    assert world.failures == ["no_commit"]
+
+
 def test_the_built_in_media_refresh_runs_under_the_write_lock(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:

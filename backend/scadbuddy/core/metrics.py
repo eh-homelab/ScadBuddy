@@ -570,8 +570,9 @@ class Metrics:
             "scadbuddy_template_refresh_failures_total",
             "Refreshes of templates' rows that failed (#7317, model records spec §5.2), by"
             " path: commit (in the HEAD transaction, or a commit with no coordinator),"
-            " no_commit (a change that committed nothing) or no_git. The write stands; the"
-            " next copy run repairs the rows.",
+            " no_commit (a change that committed nothing, or a create undone after its commit"
+            " failed) or no_git. The write's own outcome stands; the next copy run repairs"
+            " the rows.",
             ["path"],
             registry=r,
         )

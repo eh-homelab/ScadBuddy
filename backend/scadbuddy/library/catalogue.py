@@ -2211,7 +2211,7 @@ class Catalogue:
     def _refresh_undone(self, slug: str) -> None:
         """Refresh ``slug``'s row under the write lock after a write undid its files.
         Never raises: the write's own error is what the caller raises. A failure is
-        logged; the next copy run repairs the row."""
+        logged and counted under ``no_commit``; the next copy run repairs the row."""
         if self.refresh is None or not self._has_history:
             return
         assert self.history is not None
@@ -2222,6 +2222,7 @@ class Catalogue:
             logger.exception(
                 "could not refresh an undone template's row", extra={"templates": [slug]}
             )
+            self.refresh.count_failure("no_commit")
 
     def _overlay_write_lock(self) -> AbstractContextManager[Any]:
         """The lock every write to a built-in's added media takes: the history's

@@ -86,7 +86,7 @@ class TemplateRefresh:
             try:
                 write(conn)
             except Exception:
-                self._count("commit")
+                self.count_failure("commit")
                 raise
 
         return run
@@ -115,9 +115,10 @@ class TemplateRefresh:
             "could not refresh the templates' rows",
             extra={"templates": list(models), "refresh_path": path},
         )
-        self._count(path)
+        self.count_failure(path)
 
-    def _count(self, path: str) -> None:
+    def count_failure(self, path: str) -> None:
+        """Count one failed refresh under ``path``; the caller has logged it."""
         if self.on_failure is None:
             return
         try:
