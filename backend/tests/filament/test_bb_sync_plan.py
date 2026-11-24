@@ -655,7 +655,7 @@ def test_supplier_links_carry_the_sku_and_the_price(pg_pool: PgPool) -> None:
 
 
 def test_a_supplier_with_only_item_offers_has_no_link(pg_pool: PgPool) -> None:
-    """D16 (#7067): only filament reaches Bambuddy. A supplier whose only offer is a
+    """D16 (#7067): a supplier Bambuddy knows (`bb_supplier_id` set) whose only offer is a
     `supplier_offers` row for a non-filament item is in no spool's supplier links."""
     f = _filament(pg_pool)
     spool = _spool(f, _type(f))
@@ -670,6 +670,42 @@ def test_a_supplier_with_only_item_offers_has_no_link(pg_pool: PgPool) -> None:
     sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
     _link(pg_pool, spool, 50)
     assert _plan(f, _snap([_row(50)]), sync).writes == []
+
+
+def test_an_unlinked_supplier_with_only_item_offers_is_not_created(pg_pool: PgPool) -> None:
+    """Spec 6.5, R-P2-8 (#7067): a supplier is sent only when it has a filament product or
+    a Bambuddy id already. One with only an item offer gets no create and no intent."""
+    f = _filament(pg_pool)
+    shop = f.suppliers.create(SupplierCreate(name="Bolt Depot"))
+    items = ItemStore(pg_pool, EntityStore(pg_pool))
+    nut = items.create(ItemInput(kind_id="hardware", name="M3 nut"), Actor(kind="browser"))
+    OfferStore(pg_pool, lambda: "USD").create(
+        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3"), Actor(kind="browser")
+    )
+    sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
+    writes = _plan(f, _snap([], suppliers=[]), sync).writes
+    assert [w for w in writes if w.kind == "supplier"] == []
+    assert _intents(pg_pool) == []
+
+
+def test_an_unlinked_supplier_with_a_filament_product_is_created(pg_pool: PgPool) -> None:
+    """R-P2-8: the rule leaves a filament supplier's create as it was."""
+    f = _filament(pg_pool)
+    shop = f.suppliers.create(SupplierCreate(name="Shop"))
+    assert f.suppliers.add_product(shop.id, ProductCreate(type_id=_type(f), sku="A-1"))
+    sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
+    writes = _plan(f, _snap([], suppliers=[]), sync).writes
+    (create,) = [w for w in writes if w.kind == "supplier"]
+    assert (create.op, create.sb_id) == ("create", shop.id)
+
+
+def test_a_linked_supplier_with_no_product_is_still_updated(pg_pool: PgPool) -> None:
+    """R-P2-8: a supplier Bambuddy already knows stays in the sync, product or not: a
+    missing row still gets its probe."""
+    f = _filament(pg_pool)
+    sb_id = _linked(pg_pool, f, "supplier")
+    writes = _plan(f, _snap([], suppliers=[]), _ROWS_PUSH).writes
+    assert [(w.op, w.sb_id) for w in writes if w.kind == "supplier"] == [("probe", sb_id)]
 
 
 # -- deferrals that clear, and those that do not (R-T4-1, R-T4-2) -----------------------
