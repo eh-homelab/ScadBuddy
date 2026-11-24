@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 from typing import Any
 
+import jsonschema
 import pytest
 
+from scadbuddy.core import input_schema
 from scadbuddy.core.input_schema import (
     FORMATS,
     PATTERN_TIMEOUT_S,
@@ -281,6 +284,21 @@ def test_every_default_of_a_schema_shares_one_pattern_budget() -> None:
     assert len(ran) + len(together) == 40
     assert 1 <= len(ran) <= PATTERNS_BUDGET_S / PATTERN_TIMEOUT_S + 1
     assert patterns_deadline.get() is None
+
+
+def test_the_patterns_budget_starts_after_the_metaschema_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fake clock: the metaschema check takes ten budgets."""
+    now = [100.0]
+
+    def check_schema(schema: Any) -> None:
+        now[0] += PATTERNS_BUDGET_S * 10
+
+    monkeypatch.setattr(jsonschema.Draft202012Validator, "check_schema", check_schema)
+    monkeypatch.setattr(input_schema, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    prop = {"type": "string", "pattern": "^a$", "maxLength": 8, "default": "a"}
+    assert schema_problems(_top(x=prop)) == []
 
 
 def test_a_schema_check_keeps_the_deadline_that_is_set() -> None:

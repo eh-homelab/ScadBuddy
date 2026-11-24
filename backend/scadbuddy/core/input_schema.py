@@ -105,6 +105,7 @@ def schema_problems(
     objects: bool = False,
     reserved: Collection[str] = (),
     formats: bool = False,
+    defaults: bool = True,
 ) -> list[str]:
     """Everything wrong with ``schema`` as an inputs schema; empty when it may be used.
 
@@ -114,20 +115,20 @@ def schema_problems(
     out), so neither stops it.
     ``objects``: a top-level input may be an object of scalar inputs (#5701).
     ``formats``: a string may have a ``format`` of `FORMATS` (a prompt's, #7364).
+    ``defaults``: false skips the check of each ``default``, which runs its pattern within
+    the budget below; the structure is still checked.
     ``reserved``: top-level names the host owns (a pipeline's ``params`` and ``v``).
 
     Every default's pattern runs within one `PATTERNS_BUDGET_S`, the caller's if it set
     one."""
-    token = None
-    if patterns_deadline.get() is None:
-        token = patterns_deadline.set(time.monotonic() + PATTERNS_BUDGET_S)
-    try:
-        return _schema_problems(
-            schema, stored=stored, objects=objects, reserved=reserved, formats=formats
-        )
-    finally:
-        if token is not None:
-            patterns_deadline.reset(token)
+    return _schema_problems(
+        schema,
+        stored=stored,
+        objects=objects,
+        reserved=reserved,
+        formats=formats,
+        defaults=defaults,
+    )
 
 
 def _schema_problems(
@@ -137,6 +138,7 @@ def _schema_problems(
     objects: bool,
     reserved: Collection[str],
     formats: bool,
+    defaults: bool,
 ) -> list[str]:
     if not isinstance(schema, dict):
         return ["the inputs schema must be a JSON object"]
@@ -149,6 +151,33 @@ def _schema_problems(
     except (OverflowError, RecursionError):
         # What `re` raises for `a{99999999999999}`, and for thousands of groups.
         return ["not a JSON Schema: a pattern is too large, or it is nested too deeply"]
+    # After the metaschema check, which runs no pattern: a busy pod must not spend the budget there.
+    token = None
+    if patterns_deadline.get() is None:
+        token = patterns_deadline.set(time.monotonic() + PATTERNS_BUDGET_S)
+    try:
+        return _properties_problems(
+            schema,
+            stored=stored,
+            objects=objects,
+            reserved=reserved,
+            formats=formats,
+            defaults=defaults,
+        )
+    finally:
+        if token is not None:
+            patterns_deadline.reset(token)
+
+
+def _properties_problems(
+    schema: dict[str, Any],
+    *,
+    stored: bool,
+    objects: bool,
+    reserved: Collection[str],
+    formats: bool,
+    defaults: bool,
+) -> list[str]:
     problems = [f"{key!r} is not supported at the top level" for key in schema if key not in _TOP]
     if schema.get("type") != "object":
         problems.append('the top level must be {"type": "object"}')
@@ -164,9 +193,11 @@ def _schema_problems(
             problems.append(f"{name}: {name!r} is reserved")
             continue
         if objects and isinstance(prop, dict) and prop.get("type") == "object":
-            found = _object_problems(name, prop, stored=stored, formats=formats)
+            found = _object_problems(name, prop, stored=stored, formats=formats, defaults=defaults)
         else:
-            found = _property_problems(name, prop, stored=stored, formats=formats)
+            found = _property_problems(
+                name, prop, stored=stored, formats=formats, defaults=defaults
+            )
         problems += [f"{name}: {p}" for p in found]
     problems += _required_problems(schema, properties, stored=stored, what="an input")
     return problems
@@ -189,7 +220,9 @@ def _required_problems(
     return problems
 
 
-def _object_problems(name: str, prop: dict[str, Any], *, stored: bool, formats: bool) -> list[str]:
+def _object_problems(
+    name: str, prop: dict[str, Any], *, stored: bool, formats: bool, defaults: bool
+) -> list[str]:
     """One level of object (#5701): scalar properties only, and no extra keys."""
     if not _NAME.match(name) or keyword.iskeyword(name):
         return ["a name is lower-case letters, digits and _, starting with a letter"]
@@ -206,7 +239,10 @@ def _object_problems(name: str, prop: dict[str, Any], *, stored: bool, formats: 
         problems.append(f"at most {MAX_INPUTS} properties")
     for inner, spec in properties.items():
         problems += [
-            f"{inner}: {p}" for p in _property_problems(inner, spec, stored=stored, formats=formats)
+            f"{inner}: {p}"
+            for p in _property_problems(
+                inner, spec, stored=stored, formats=formats, defaults=defaults
+            )
         ]
     problems += _required_problems(prop, properties, stored=stored, what="a property")
     return problems
@@ -220,7 +256,7 @@ def _format_problems(spec: dict[str, Any], where: str) -> list[str]:
 
 
 def _property_problems(
-    name: str, prop: Any, *, stored: bool = False, formats: bool = False
+    name: str, prop: Any, *, stored: bool = False, formats: bool = False, defaults: bool = True
 ) -> list[str]:
     if not _NAME.match(name) or keyword.iskeyword(name):
         return ["a name is lower-case letters, digits and _, starting with a letter"]
@@ -265,7 +301,7 @@ def _property_problems(
         )
         if unbounded and not stored:
             problems.append(f"a pattern needs a maxLength of at most {MAX_PATTERNED_LENGTH}")
-    if "default" in prop and not problems:
+    if defaults and "default" in prop and not problems:
         try:
             checker = FORMAT_CHECKER if formats else None
             Validator(prop, format_checker=checker).validate(prop["default"])

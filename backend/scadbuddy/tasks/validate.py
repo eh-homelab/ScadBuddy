@@ -115,6 +115,7 @@ def validate_answer(schema: dict[str, Any], answer: Any) -> list[AnswerProblem]:
     problems = _problems(schema, ((one.path, one.message) for one in bad))
     if problems:
         return problems
-    if prompt_schema_problems(schema, stored=True):
+    # Its defaults were checked when the task opened; a slow pattern must not fail a good answer.
+    if prompt_schema_problems(schema, stored=True, defaults=False):
         return [AnswerProblem(field="", message="this question's form is broken")]
     return _problems(schema, _failures(schema, answer))

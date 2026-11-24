@@ -8,9 +8,12 @@ from scadbuddy.core.input_schema import schema_problems
 from scadbuddy.core.json_values import unstorable
 
 
-def prompt_schema_problems(schema: Any, *, stored: bool = False) -> list[str]:
-    """Everything wrong with ``schema`` as a prompt's; ``stored`` as `schema_problems`."""
+def prompt_schema_problems(
+    schema: Any, *, stored: bool = False, defaults: bool = True
+) -> list[str]:
+    """Everything wrong with ``schema`` as a prompt's; ``stored`` and ``defaults`` as
+    `schema_problems`."""
     # First: the schema check itself writes the schema as JSON and recurses into it.
     for bad in unstorable(schema):
         return [f"the schema {bad.message}"]
-    return schema_problems(schema, stored=stored, formats=True)
+    return schema_problems(schema, stored=stored, formats=True, defaults=defaults)

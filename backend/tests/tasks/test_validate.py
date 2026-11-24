@@ -9,7 +9,7 @@ import pytest
 import regex
 from pydantic import ValidationError
 
-from scadbuddy.core.input_schema import schema_problems
+from scadbuddy.core.input_schema import patterns_deadline, schema_problems
 from scadbuddy.tasks.models import AnswerProblem, Task, TaskOpen
 from scadbuddy.tasks.validate import prompt_schema_problems, validate_answer
 
@@ -380,3 +380,21 @@ def test_a_pattern_that_does_not_match_still_says_so() -> None:
     prop = {"type": "string", "pattern": "^a$", "maxLength": 64}
     [problem] = validate_answer(_asks(prop), {"x": "b"})
     assert problem.message == "does not match the required pattern"
+
+
+def test_an_answer_does_not_run_its_questions_defaults_again() -> None:
+    """Counted, not timed: with the budget spent, a default's pattern cannot run."""
+    patterned = {"type": "string", "pattern": "^a$", "maxLength": 64, "default": "a"}
+    schema = _asks(patterned, y={"type": "string"})
+    token = patterns_deadline.set(time.monotonic() - 1)
+    try:
+        assert validate_answer(schema, {"y": "ok"}) == []
+        with pytest.raises(ValidationError):
+            TaskOpen(id="t", run_id="r", title="x", schema=schema)
+    finally:
+        patterns_deadline.reset(token)
+
+
+def test_an_answer_still_checks_its_questions_structure() -> None:
+    schema = _asks({"type": "string", "$ref": "#/a"})
+    assert validate_answer(schema, {"x": "a"}) == BROKEN
