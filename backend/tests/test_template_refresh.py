@@ -8,6 +8,7 @@ that moment: the rows written in the HEAD transaction, by the no-commit path, by
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import uuid
@@ -21,12 +22,12 @@ import pytest
 
 from scadbuddy.core.gitrepo import GitError, GitTimeoutError
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
+from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError, ModelMeta, ModelPatch
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MEDIA_UPLOAD_PREFIX, MediaKind, StagedMedia
 from scadbuddy.library.media_store import PostgresMediaStore
-from scadbuddy.library.repo_lock import PgRepoCoordinator
+from scadbuddy.library.repo_lock import HEAD_CHANNEL, PgRepoCoordinator, decode_change
 from scadbuddy.library.template_refresh import TemplateRefresh
 from scadbuddy.library.template_rows import TemplateRow, TemplateRows
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -552,3 +553,96 @@ def test_a_refresh_keeps_the_stored_version_when_git_does_not_answer(
     assert after.version == before.version
     assert after.files_stamp != before.files_stamp
     assert world.failures == ["no_commit"]
+
+
+def _save_meta(text: bytes) -> Callable[[World], object]:
+    def save(world: World) -> object:
+        # A model.json that is not JSON commits, then its record does not read.
+        with contextlib.suppress(InvalidModelMetaError):
+            return world.catalogue.update_files(
+                "demo", lambda _: {"model.json": text}, message="Edit model.json"
+            )
+        return None
+
+    return save
+
+
+def _save_description(world: World) -> object:
+    return world.catalogue.update("demo", ModelPatch(description="a\x00b"))
+
+
+@pytest.mark.parametrize(
+    ("save", "error"),
+    [
+        (_save_meta(b'{"name": "D\\u0000"}'), "not storable"),
+        (_save_meta(b'{"name": "D", "description": "a\\u0000b"}'), "not storable"),
+        (_save_meta(b'{"name": "D", "params": {"size\\u0000": "\\u0000"}}'), "not storable"),
+        (_save_meta(b'{"name": "D\x00"}'), "not JSON"),
+        (_save_meta(b"not json \x00 at all"), "not JSON"),
+        (_save_description, "not storable"),
+    ],
+    ids=[
+        "escape-in-name",
+        "escape-in-description",
+        "escape-in-params",
+        "nul-byte-in-json",
+        "nul-byte-not-json",
+        "description-patch",
+    ],
+)
+def test_a_saved_nul_records_the_head_sends_the_notify_and_writes_the_row(
+    world: World, pg_conninfo: str, save: Callable[[World], object], error: str
+) -> None:
+    """Review of #7484 (Blocking): a NUL byte, which a text column refuses, or a
+    ``\\u0000`` escape, which jsonb refuses, is cleaned when the row is built. The save
+    records its HEAD, sends its NOTIFY and writes the row in that transaction."""
+    history = world.history
+    assert history is not None
+    with psycopg.connect(pg_conninfo, autocommit=True) as listener:
+        listener.execute(f"LISTEN {HEAD_CHANNEL}")
+        save(world)
+        heard = [
+            decode_change(notice.payload)
+            for notice in listener.notifies(timeout=0.5, stop_after=None)
+        ]
+        found = listener.execute("SELECT head FROM models_repo_head WHERE id").fetchone()
+    head = history.head()
+    assert world.catalogue.version("demo") == head
+    assert found is not None and found[0] == head
+    assert [change.commit for change in heard] == [head]
+    assert heard[0].models == ["demo"]
+    assert world.failures == []
+    row = world.rows.get("demo")
+    assert row is not None
+    assert row.version == head and row.refreshed_head == head
+    assert row.meta is None
+    assert row.meta_error is not None and row.meta_error.startswith(error)
+    assert row.meta_text is not None and "\x00" not in row.meta_text
+    assert row == _expected(world, "demo")
+
+
+def test_a_row_postgres_refuses_still_records_the_head_and_its_notify(
+    world: World, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #7484 (Blocking), the second guard: with the build's cleaning turned
+    off, Postgres itself refuses the row's ``\\u0000``. The refusal rolls back the rows'
+    savepoint only: the HEAD is recorded, its NOTIFY sent, the failure counted, and the
+    row keeps what it had until the copy repairs it."""
+    history = world.history
+    assert history is not None
+    before = world.rows.get("demo")
+    monkeypatch.setattr("scadbuddy.library.catalogue._unstorable", lambda _: None)
+    with psycopg.connect(pg_conninfo, autocommit=True) as listener:
+        listener.execute(f"LISTEN {HEAD_CHANNEL}")
+        _save_meta(b'{"name": "Demo", "description": "a\\u0000b"}')(world)
+        heard = [
+            decode_change(notice.payload).commit
+            for notice in listener.notifies(timeout=0.5, stop_after=None)
+        ]
+        found = listener.execute("SELECT head FROM models_repo_head WHERE id").fetchone()
+    head = history.head()
+    assert world.catalogue.version("demo") == head
+    assert found is not None and found[0] == head
+    assert heard == [head]
+    assert world.failures == ["commit"]
+    assert world.rows.get("demo") == before

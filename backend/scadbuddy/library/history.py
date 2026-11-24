@@ -156,6 +156,9 @@ class ModelHistory(GitRepo):
         #: Writes each template's row with what touches it (#7317). Set once the
         #: migrations have run; None writes no rows.
         self.template_rows: TemplateRowsHook | None = None
+        #: The templates the running `commit` or `restore` names, under the write
+        #: lock: whose rows a commit refreshes when git cannot list what it touched.
+        self._writing: list[str] = []
 
     def _gitignore_body(self) -> str:
         return _gitignore_body(self.wrapper_prefix)
@@ -195,11 +198,14 @@ class ModelHistory(GitRepo):
         """:meth:`GitRepo.commit`, then the commit listener with the templates it
         touched."""
         with self._exclusive():
+            self._writing = _ids_of(paths)
             try:
                 created = self._commit_action(message, paths, prepare=prepare, rollback=rollback)
             except Exception:
                 self._refresh_uncommitted(paths)
                 raise
+            finally:
+                self._writing = []
             if created is None:
                 self._refresh_uncommitted(paths)
             touched = self._touched_by(created)
@@ -225,12 +231,14 @@ class ModelHistory(GitRepo):
 
     def _also_record(self, change: HeadChange) -> Callable[[Any], None] | None:
         """The rows of the templates ``change`` touched, written in the transaction
-        that records it (#7317). None when no hook is set or the templates are not
-        known (``models`` None): the copy run catches those."""
-        if self.template_rows is None or change.models is None:
+        that records it (#7317). When git could not list them (``models`` None), the
+        templates the write named (review of #7484); None when it named none, and the
+        copy run catches those."""
+        models = change.models if change.models is not None else list(self._writing)
+        if self.template_rows is None or not models:
             return None
         found: Callable[[Any], None] | None = self._guarded(
-            change.models, partial(self.template_rows.for_commit, change.models, change.commit)
+            models, partial(self.template_rows.for_commit, models, change.commit)
         )
         return found
 
@@ -243,8 +251,9 @@ class ModelHistory(GitRepo):
             models = self._changed_models(commit)
         except GitError:
             logger.exception("could not list what a commit touched", extra={"commit": commit})
-            return
-        self._guarded(models, partial(self.template_rows.refresh_locked, models, path="commit"))
+            models = list(self._writing)
+        if models:
+            self._guarded(models, partial(self.template_rows.refresh_locked, models, path="commit"))
 
     def _touched_by(self, commit: str | None) -> list[str]:
         """The templates ``commit`` changed, when anyone is listening for it."""
@@ -284,11 +293,14 @@ class ModelHistory(GitRepo):
             # Under the lock, once settled: a revision another replica just made is
             # not yet visible before (#2385).
             resolved = self.resolve(commit)
+            self._writing = _ids_of([slug])
             try:
                 created = self._restore_locked(slug, resolved, f"Restore {slug} to {resolved[:7]}")
             except Exception:
                 self._refresh_uncommitted([slug])
                 raise
+            finally:
+                self._writing = []
             if created is None:
                 self._refresh_uncommitted([slug])
             touched = self._touched_by(created)

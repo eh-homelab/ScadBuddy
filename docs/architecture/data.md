@@ -140,7 +140,12 @@ phase 1 nothing reads the rows yet; the readers move to them in phase 2.
 - A write that commits writes its templates' rows in the transaction that records the
   models HEAD and sends its NOTIFY (`scadbuddy/library/history.py` `_also_record`,
   `scadbuddy/library/repo_lock.py` `_PgHold._also`, in a savepoint), so a save adds no
-  Postgres commit. A write that commits nothing (`ModelHistory.commit` with no change, a
+  Postgres commit. The rows are read and built before that transaction opens, and a
+  failed read or row write costs the rows only, never the HEAD or its NOTIFY. Content
+  Postgres refuses (a NUL, a `\u0000` escape) is cleaned when the row is built
+  (`scadbuddy/library/catalogue.py` `_unstorable`, `_storable_text`). When git cannot
+  list what a commit touched, the rows written are those of the templates the write
+  named. A write that commits nothing (`ModelHistory.commit` with no change, a
   built-in's added media, a create whose commit failed) refreshes its rows under the
   models write lock in a transaction of its own (`scadbuddy/library/template_refresh.py`
   `TemplateRefresh.refresh_locked`); without git, `Catalogue.notify_change` refreshes them.

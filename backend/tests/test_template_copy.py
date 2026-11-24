@@ -17,6 +17,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.core.gitrepo import GitError, GitTimeoutError
 from scadbuddy.core.paths import DataPaths
@@ -405,3 +406,21 @@ def test_a_git_failure_reading_a_version_keeps_the_stored_version(
     assert after.name == "Edited by hand"
     assert after.version == before.version
     assert result.incomplete is True
+
+
+def test_the_copys_history_walk_has_a_span(world: World, spans: InMemorySpanExporter) -> None:
+    """Review of #7484 (non-blocking 3): the walk's cost shows in a span of its own, and
+    the history's `model_history.last_commits` under it says whether it walked."""
+    _copy(world)
+    finished = spans.get_finished_spans()
+    versions = [s for s in finished if s.name == "templates.copy.versions"][-1]
+    assert versions.attributes is not None
+    assert versions.attributes["scadbuddy.templates"] == len(IDS)
+    walks = [
+        s
+        for s in finished
+        if s.name == "model_history.last_commits"
+        and s.parent is not None
+        and s.parent.span_id == versions.context.span_id
+    ]
+    assert len(walks) == 1

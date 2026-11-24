@@ -331,3 +331,49 @@ def test_a_hook_that_raises_keeps_a_failed_commits_own_error(
     monkeypatch.setattr(history, "_commit_locked", refuse)
     with pytest.raises(GitError, match="the commit failed"):
         history.commit("Add demo", "demo")
+
+
+def _unlisted(*_args: object) -> list[str]:
+    raise GitError("git diff-tree failed")
+
+
+def test_a_commit_git_cannot_list_refreshes_the_ids_it_named(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #7484 (non-blocking 1): when git cannot list what a commit touched, the
+    HEAD's NOTIFY names no templates, and the rows written with it are those of the
+    templates the write named, so the write's own answer shows it."""
+    hook = FakeHook()
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    _write(history.root / "_builtin", "tag")
+    monkeypatch.setattr(history, "_changed_models", _unlisted)
+    created = history.commit("Add demo", "demo", "_builtin/tag")
+    assert created is not None
+    assert hook.commits == [(["demo", "builtin:tag"], created)]
+    assert _head(conninfo) == created
+    assert _version(conninfo, "demo") == created
+
+
+def test_a_restore_git_cannot_list_refreshes_its_id(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = FakeHook()
+    history, first = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "other", "sphere(1);")
+    assert history.commit("Edit other", "other") is not None
+    monkeypatch.setattr(history, "_changed_models", _unlisted)
+    created = history.restore("other", first)
+    assert hook.commits[-1] == (["other"], created)
+
+
+def test_a_commit_git_cannot_list_without_a_coordinator_refreshes_the_ids_it_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = FakeHook()
+    root = tmp_path / "models"
+    history = _history(root, None, hook)
+    _write(root, "demo")
+    monkeypatch.setattr(history, "_changed_models", _unlisted)
+    assert history.commit("Add demo", "demo") is not None
+    assert hook.refreshes == [(["demo"], "commit", True)]

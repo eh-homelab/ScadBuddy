@@ -47,6 +47,7 @@ from scadbuddy.core.paths import (
     model_path,
     revalidate_dirs,
 )
+from scadbuddy.core.tracing import span
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.template_refresh import TemplateRefresh
@@ -190,8 +191,11 @@ class _Copy:
         walk = _Walk(paths.models, paths.builtins)
         seen = walk.ids()
         walk_head = None if self.history is None else self.history.head()
-        # One walk of the history (`last_commits`) for every template's version.
-        versions: dict[str, str | None] = dict(self.catalogue.versions())
+        # One walk of the history (`last_commits`) for every template's version, outside
+        # the write lock; its own span `model_history.last_commits` says whether it hit
+        # the walk kept as of HEAD (review of #7484).
+        with span("templates.copy.versions", attributes={"scadbuddy.templates": len(seen)}):
+            versions: dict[str, str | None] = dict(self.catalogue.versions())
         known = self.rows.stamps()
         media = self.catalogue.media_store.items_for(seen)
         builtins = [template_id for template_id in seen if is_builtin(template_id)]
