@@ -31,7 +31,7 @@ from scadbuddy.workflows.housekeeping import (
     PRUNE_SWEEPS,
     SWEEPS,
 )
-from tests.test_library_versioning import _Nudges
+from tests.test_library_versioning import _library_state, _Nudges
 from tests.test_print_worker_task import StubWorker
 
 
@@ -95,6 +95,37 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
     assert "the library worker failed" in caplog.text
     # The app's sandbox, as every worker's (#2014).
     assert all("opentelemetry" in runner.restrictions.passthrough_modules for runner in runners)
+
+
+async def test_the_library_worker_is_built_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7359: `Worker(...)` checks each workflow by running it in the sandbox, which
+    imports its modules; on an API pod that had just started that held the loop 2 s."""
+    entered = asyncio.Event()
+    built_on: list[int] = []
+
+    def build(*args: Any, **kwargs: Any) -> StubWorker:
+        built_on.append(threading.get_ident())
+        return StubWorker(False, entered)
+
+    async def no_schedules(*args: Any) -> bool:
+        return False
+
+    async def no_triggers() -> None:
+        pass
+
+    monkeypatch.setattr(main, "library_worker", build)
+    monkeypatch.setattr(main, "ensure_schedules", no_schedules)
+    monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
+    monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_library_worker(_library_state("abc123"), stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(entered.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert built_on
+    assert threading.get_ident() not in built_on
 
 
 async def test_a_library_worker_still_connecting_stops_at_once(
