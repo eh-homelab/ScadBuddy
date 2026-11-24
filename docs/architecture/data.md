@@ -152,6 +152,17 @@ files. A store migration to `bambuddy` is refused while the index holds an `outp
 and releases its byte holds in one transaction, then removes the folder; the content sweep
 removes the blobs after its grace (`OutputRows.delete`).
 
+A save's cost in commits: each put writes its index row in a transaction of its own
+(`ContentStore.put`), one each for `model.3mf`, `preview.glb`, `thumbnail.png` when there,
+and each `files/` entry, before the row's transaction. On prod a commit is known to take
+1-2 s, so a save takes some seconds more than in phase 1. The save then files its 3MF in
+the native library from the folder it wrote, the same bytes as the model blob, so it
+does not download the blob again (`scadbuddy/library/output_operations.py`). The filing's
+own put commits once more. Fewer commits would need a batch put in `ContentStore`:
+upload every file first, then write every index row in one transaction (or in the row's
+own transaction), with its own answer to a reused object that the sweep freed meanwhile
+(`ReuseLostError`) and to a deadlock.
+
 What readers derive of the model (the geometry analysis and its attributed form, the
 asset ids, the plate names, the plate cover) is kept in `output_derived`, once per output.
 The plate cover is a small blob (`output-<id>-plate_cover-<sha256>`); the row names its

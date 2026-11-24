@@ -18,9 +18,10 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.output_rows import OUTPUT_HOLDER
-from scadbuddy.library.outputs import THUMBNAIL_NAME, hold_parts
+from scadbuddy.library.outputs import THUMBNAIL_NAME, OutputStore, hold_parts
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
+from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.store.content_models import StoreFullError
 from scadbuddy.store.index import Pool
 from tests.api.conftest import PNG_BYTES, wait_for_job
@@ -40,6 +41,23 @@ def s3_client(settings: Settings, s3: S3Settings) -> Iterator[TestClient]:
             "store_s3_prefix": s3.prefix,
             "store_s3_access_key_id": s3.access_key_id,
             "store_s3_secret_access_key": s3.secret_access_key,
+        }
+    )
+    with TestClient(create_app(on_s3)) as client:
+        yield client
+
+
+@pytest.fixture
+def native_s3_client(settings: Settings, s3: S3Settings) -> Iterator[TestClient]:
+    on_s3 = settings.model_copy(
+        update={
+            "store_backend": "s3",
+            "store_s3_endpoint": s3.endpoint,
+            "store_s3_bucket": s3.bucket,
+            "store_s3_prefix": s3.prefix,
+            "store_s3_access_key_id": s3.access_key_id,
+            "store_s3_secret_access_key": s3.secret_access_key,
+            "library_backend": "native",
         }
     )
     with TestClient(create_app(on_s3)) as client:
@@ -117,6 +135,36 @@ def test_save_on_s3_reads_its_files_off_the_loop(
     assert reads
     # No read of the output's files ran on the loop's thread.
     assert not any(reads)
+
+
+def test_save_files_its_3mf_from_the_folder_it_wrote(
+    native_s3_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The save files the 3MF it just wrote and put: from its folder, with no download of
+    the model blob (final review M4)."""
+    client = native_s3_client
+    created = client.post(
+        "/api/v1/models", json={"name": "Widget", "source": "width = 10;\n"}, headers=press()
+    )
+    assert created.status_code == 201, created.text
+    slug = created.json()["slug"]
+    job_id = _finished_job(client, slug)
+    roles: list[tuple[str, str]] = []
+    read_role = OutputStore.read_role
+
+    def spy(self: OutputStore, output_id: str, role: Any) -> Any:
+        roles.append((output_id, role))
+        return read_role(self, output_id, role)
+
+    monkeypatch.setattr(OutputStore, "read_role", spy)
+    saved = client.post(f"/api/v1/models/{slug}/outputs", json={"job_id": job_id}, headers=press())
+    monkeypatch.undo()
+    assert saved.status_code == 201, saved.text
+    output_id = saved.json()["id"]
+    native = _state(client).components.get(PRINT_LIBRARY).native
+    assert native is not None
+    assert [row.output_id for row in native.rows.filed_rows_for_output(output_id)] == [output_id]
+    assert (output_id, "model") not in roles
 
 
 def test_thumbnail_store_full_is_507_and_changes_nothing(

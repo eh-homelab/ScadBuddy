@@ -18,7 +18,6 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta
 from scadbuddy.print_library.filing import (
     file_output,
-    file_saved_output,
     put_in_folder,
     put_saved_in_folder,
     trash_filed,
@@ -88,19 +87,17 @@ async def test_a_retried_filing_after_the_copy_moved_files_a_second_copy(
 async def test_filing_uploads_blob_bytes(
     native: NativeLibrary, tmp_path: Path, pg_conninfo: str
 ) -> None:
-    """#7256: a saved output's filing and its put in a chosen folder read its 3MF from
-    the model blob, with the NFS file gone; with neither it is the 404."""
+    """#7256: a saved output's put in a chosen folder reads its 3MF from the model blob,
+    with the NFS file gone; with neither it is the 404."""
     async with blob_output(tmp_path / "output", pg_conninfo) as output:
         model = output.directory / MODEL_NAME
         data = model.read_bytes()
         model.unlink()
-        filed = await file_saved_output(native, output.store, output.meta, "Demo")
-        assert filed.sha256 == hashlib.sha256(data).hexdigest()
         gifts = native.rows.create_folder("Gifts", None).id
         placed, created = await put_saved_in_folder(
             native, output.store, output.meta, gifts, "Demo"
         )
-        assert created and placed.sha256 == filed.sha256
+        assert created and placed.sha256 == hashlib.sha256(data).hexdigest()
         assert output.store.rows is not None
         output.store.rows.set_blob(output.meta.id, "model", "output-gone-model")
         with pytest.raises(ApiError) as refused:
@@ -113,10 +110,9 @@ async def test_filing_uploads_blob_bytes(
 async def test_filing_again_reads_no_3mf(
     native: NativeLibrary, tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#7256 review B-M1: a re-file of a filed output, or a put in a folder that holds
-    its copy, answers the copy with no download of the 3MF."""
+    """#7256 review B-M1: a put in a folder that holds its copy answers the copy with no
+    download of the 3MF."""
     async with blob_output(tmp_path / "output", pg_conninfo) as output:
-        filed = await file_saved_output(native, output.store, output.meta, "Demo")
         gifts = native.rows.create_folder("Gifts", None).id
         placed, _ = await put_saved_in_folder(native, output.store, output.meta, gifts, "Demo")
         asked: list[str] = []
@@ -127,9 +123,8 @@ async def test_filing_again_reads_no_3mf(
             return real(output_id, role)
 
         monkeypatch.setattr(output.store, "local_role", counting)
-        again = await file_saved_output(native, output.store, output.meta, "Demo")
         there, created = await put_saved_in_folder(native, output.store, output.meta, gifts, "Demo")
-        assert (again.id, there.id, created) == (filed.id, placed.id, False)
+        assert (there.id, created) == (placed.id, False)
         assert asked == []
 
 

@@ -82,26 +82,12 @@ async def put_in_folder(
     return placed, inserted
 
 
-async def file_saved_output(
-    native: NativeLibrary, outputs: OutputStore, meta: OutputMeta, title: str
-) -> NativeFile:
-    """`file_output` of the output's 3MF: its model blob through a temporary file, else
-    its NFS file (#7256). 404 when it has neither. A filed copy found first answers with
-    no download of the 3MF."""
-    existing = await asyncio.to_thread(native.rows.filed_rows_for_output, meta.id)
-    if existing:
-        return existing[0]
-    async with outputs.local_role(meta.id, "model") as model_3mf:
-        if model_3mf is None:
-            raise _no_3mf(meta)
-        return await file_output(native, meta, model_3mf, title)
-
-
 async def put_saved_in_folder(
     native: NativeLibrary, outputs: OutputStore, meta: OutputMeta, folder_id: int, stem: str
 ) -> tuple[NativeFile, bool]:
-    """`put_in_folder` of the output's 3MF, read as `file_saved_output` reads it. A copy
-    already in the folder answers with no download of the 3MF."""
+    """`put_in_folder` of the output's 3MF: its model blob through a temporary file, else
+    its NFS file (#7256). 404 when it has neither. A copy already in the folder answers
+    with no download of the 3MF."""
     there = await asyncio.to_thread(native.rows.live_copy_in_folder, meta.id, folder_id)
     if there is not None:
         return there, False

@@ -35,6 +35,7 @@ from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import answered_as_routes
 from scadbuddy.library.outputs import (
     BACK_OFFICE,
+    MODEL_NAME,
     hold_parts,
     release_parts,
     require_output,
@@ -43,7 +44,7 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copies import open_runs_on_copies, trash_copies
-from scadbuddy.print_library.filing import file_saved_output, put_saved_in_folder, trash_filed
+from scadbuddy.print_library.filing import file_output, put_saved_in_folder, trash_filed
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
@@ -172,7 +173,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         files_dir = None
         if chosen is not None and chosen.files_key is not None:
             if not await blobs.fetch(chosen.files_key):
-                # Before `create`, so a refused save leaves nothing under outputs/.
+                # Before the save, so a refused save leaves nothing under outputs/.
                 raise ApiError(
                     status.HTTP_409_CONFLICT,
                     "the job's extra files are no longer in the store; render again",
@@ -256,8 +257,10 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                 title = await asyncio.to_thread(
                     template_title, state.paths.model_source(meta.slug).parent, meta.slug
                 )
-                # The 3MF from its blob, else its file (#7256).
-                await file_saved_output(native, state.outputs, meta, title)
+                # The 3MF the save just wrote and put: from its folder, the same bytes as
+                # its blob, so the blob is not downloaded again (#7256).
+                model_3mf = state.outputs.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
+                await file_output(native, meta, model_3mf, title)
         except Exception:
             logger.exception("could not file a saved output in the library", extra={"id": meta.id})
         # A new output has no uploads yet: no read to make.
