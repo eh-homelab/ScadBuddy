@@ -57,7 +57,7 @@
   - `open(task: TaskOpen) -> Task` (insert; same id again returns the existing row unchanged)
   - `get(task_id: str) -> Task | None`
   - `list(*, state: TaskState | None = "open", place: str | None = None, limit: int = 100) -> list[Task]`
-  - `mark_answered(task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str, *, final: bool = False) -> Task`: locks the run row `FOR SHARE`, then the task; a run on another execution (a Reset) leaves the task alone; from `open`, or `cancelled` by the run's end, it is `answered`; the same answer again only fills a NULL `by`; anything else raises `TaskNotOpenError(state)`; with `final=True` (the run's own mark, Task 5) the answer replaces another answered or cancelled row's on the same execution, an `expired` row is answered as it stands, an execution the run superseded gets the row as it stands, and any other execution mismatch (a row that lags Temporal) is refused as retryable
+  - `mark_answered(task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str, *, final: bool = False) -> Task`: locks the run row `FOR SHARE`, then the task; a run on another execution (a Reset) leaves the task alone; from `open`, or `cancelled` by the run's end, it is `answered`; the same answer again only fills a NULL `by`; anything else raises `TaskNotOpenError(state)`; with `final=True` (the run's own mark, Task 5) the answer replaces another answered or cancelled row's on the same execution, an `expired` row is returned as it stands, an execution the run superseded gets the row as it stands, and an unknown execution on an ended run gets the row as it stands, and on an open run (a row that lags Temporal) it is refused as retryable
   - `close(task_id: str, state: Literal["expired", "cancelled"]) -> Task | None` (only while `open`; returns None when it was not open)
   - `cancel_for_run(run_id: str) -> int` (every open task of the run → `cancelled`; returns the count)
   - `cancel_for_run_in(conn, run_id) -> int` and `match_waiting_in(conn, run_id, waiting_ids, done_ids) -> int`, on the caller's connection, for the run's own transactions in `flows/store.py` (Task 5). After a Reset, an open task in neither set is `cancelled`, and a task in `waiting_ids` that is not open is `open` again with its answer cleared.
@@ -85,7 +85,7 @@ def test_a_missing_required_field_is_a_root_problem_naming_it():
     assert p.field == "" and "email" in p.message
 
 def test_a_nested_or_referencing_schema_is_refused_for_a_prompt():
-    assert prompt_schema_problems({"type": "object", "properties": {"x": {"$ref": "#/a"}}})
+    assert prompt_schema_problems({"type": "object", "properties": {"x": {"type": "string", "$ref": "#/a"}}})
 ```
 
 `test_store.py` (marked `requires_postgres`, takes `pg_conninfo`): `test_open_twice_keeps_one_row`, `test_a_different_answer_to_an_answered_task_is_refused` (`TaskNotOpenError` with `state == "answered"`), `test_an_answer_that_landed_before_the_runs_end_is_kept` (a task `cancelled` by its run's end becomes `answered`), `test_the_runs_own_mark_is_final`, `test_close_of_an_answered_task_returns_none`, `test_cancel_for_run_cancels_only_open_tasks_of_that_run` (returns 2 for a run with 2 open + 1 answered, other run untouched), `test_list_filters_by_place`.
@@ -125,7 +125,7 @@ Expected: PASS
 
 **Files:**
 - Create: `backend/scadbuddy/api/crud_tasks.py` (`router = crud_router("projects")`)
-- Modify: `backend/scadbuddy/api/crud_areas.py` (`CRUD_AREAS["projects"]` gains `"tasks"`), `backend/scadbuddy/worker.py` (`PROJECTS_CRUD_AREAS` gains `"tasks"`), `backend/scadbuddy/auth/routes.py` (`CRUD_CLASSES`, as the projects caller's other routes are listed), the API's router registration
+- Modify: `backend/scadbuddy/api/crud_areas.py` (`CRUD_AREAS["projects"]` gains `"tasks"`), `backend/scadbuddy/worker.py` (`PROJECTS_CRUD_AREAS` gains `"tasks"`) (`CRUD_CLASSES` needs no change: it classes by caller), the API's router registration
 - Create: `backend/scadbuddy/crud/tasks.py` — `RemoteTasks(crud: CrudClient)` with `open(task: TaskOpen) -> Task`, `close(task_id: str, state: Literal["expired","cancelled"]) -> Task | None`, `mark_answered(task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str, *, final: bool = False) -> Task`
 - Test: `backend/tests/crud/test_crud_tasks.py`
 

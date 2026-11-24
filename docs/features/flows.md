@@ -37,7 +37,7 @@ sequenceDiagram
 
 ## Questions to a person
 
-A script asks with one of two host functions (`backend/scadbuddy/workflows/flow_tools.py`):
+A script asks with a host function (`backend/scadbuddy/workflows/flow_tools.py`):
 
 | | `wait_for_human(question, timeout_s=None)` | `prompt(title, schema, context=None, place=None, ui=None, timeout_s=None)` |
 |---|---|---|
@@ -127,7 +127,8 @@ another answer on the row and leaves an expired task as it is.
   a Reset replaced opens, marks and closes nothing. The run's own mark or close from an
   execution that the row of an open run does not know yet is refused (503 `run-behind`) and
   tried again. The row of an ended run answers with the task as it stands, with no retry.
-- **Retries.** The three activities are tried without limit. Only `flow_task_open` has final
+- **Retries.** The task activities (`flow_task_open`,
+  `flow_task_answered`, `flow_task_close`) are tried without limit. Only `flow_task_open` has final
   refusals: a task that is refused (422), a run that has ended and a run that is gone.
 - **Forget.** Forgetting a run deletes its tasks (`ON DELETE CASCADE`).
 
@@ -187,7 +188,7 @@ opens or moves to another state publishes `task.changed` on the realtime topics 
 
 - Grant checks do not follow the inherited chain
   ([#5685](https://github.com/eh-homelab/ScadBuddy/issues/5685)).
-- Two rare Resets can leave a task row behind its run: one made by hand in Temporal, and one
+- Some rare Resets can leave a task row behind its run: one made by hand in Temporal, and one
   through ScadBuddy whose commit was lost and which was then tried again
   ([#7413](https://github.com/eh-homelab/ScadBuddy/issues/7413)).
 - `wait_for_human` opens no task yet.
