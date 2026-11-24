@@ -8,15 +8,32 @@ nothing (spec §7.1). Synchronous, like `OutputIndex`: callers on the loop use a
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+
+from scadbuddy.core.paths import (
+    MODEL_META_NAME,
+    README_NAME,
+    SOURCE_NAME,
+    THUMBNAIL_NAME,
+    DataPaths,
+    is_builtin,
+)
+from scadbuddy.library.media import MEDIA_DIR, MediaItem
+
+#: A template's pipeline folder (spec 2026-09-27 §5.1).
+PIPELINE_DIR = "pipeline"
 
 #: The most of a ``model.json`` that is not JSON that a row keeps (spec §5.1).
 META_TEXT_MAX = 64 * 1024
@@ -97,6 +114,48 @@ def _values(row: TemplateRow) -> tuple[Any, ...]:
 
 def _row_of(found: DictRow) -> TemplateRow:
     return TemplateRow(**{column: found[column] for column in _COLUMNS})
+
+
+def template_stamp(
+    paths: DataPaths, template_id: str, media: Sequence[MediaItem], cover: str | None
+) -> str:
+    """A sha256 of everything a row is derived from (plan decision 6): the name, size and
+    ``mtime_ns`` of ``model.scad``, ``model.json``, ``README.md``, ``thumbnail.png``,
+    each entry of ``media/``, each top-level entry of ``pipeline/`` and, for a built-in,
+    each entry of ``builtin-media/<slug>/``; then ``media`` (the template's rows) and
+    ``cover`` (a built-in's chosen cover). A missing file or folder is left out; any
+    other `OSError` (an NFS ``ESTALE``) raises, so a copy run never trusts a half read."""
+    directory = paths.model_dir(template_id)
+    found: list[tuple[str, int, int]] = []
+
+    def add(name: str, path: Path) -> None:
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            return
+        found.append((name, info.st_size, info.st_mtime_ns))
+
+    def add_entries(prefix: str, folder: Path) -> None:
+        try:
+            names = os.listdir(folder)
+        except (FileNotFoundError, NotADirectoryError):
+            return
+        for name in names:
+            add(f"{prefix}/{name}", folder / name)
+
+    for name in (SOURCE_NAME, MODEL_META_NAME, README_NAME, THUMBNAIL_NAME):
+        add(name, directory / name)
+    add_entries(MEDIA_DIR, directory / MEDIA_DIR)
+    add_entries(PIPELINE_DIR, directory / PIPELINE_DIR)
+    if is_builtin(template_id):
+        add_entries("builtin-media", paths.builtin_media_dir(template_id))
+    digest = hashlib.sha256()
+    for name, size, mtime_ns in sorted(found):
+        digest.update(f"{name}\0{size}\0{mtime_ns}\n".encode())
+    rows = json.dumps([item.model_dump(mode="json") for item in media], sort_keys=True)
+    digest.update(rows.encode())
+    digest.update(json.dumps(cover).encode())
+    return digest.hexdigest()
 
 
 def write_rows(conn: Connection[Any], rows: Sequence[TemplateRow], gone: Sequence[str]) -> None:

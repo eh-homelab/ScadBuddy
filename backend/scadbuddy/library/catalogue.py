@@ -49,7 +49,9 @@ from scadbuddy.core.paths import (
     BUILTIN_PREFIX,
     LEGACY_PRESETS_NAME,
     MODEL_META_NAME,
+    README_NAME,
     SOURCE_NAME,
+    THUMBNAIL_NAME,
     DataPaths,
     is_builtin,
     model_path,
@@ -92,6 +94,7 @@ from scadbuddy.library.presets import (
 )
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
+from scadbuddy.library.template_rows import META_TEXT_MAX, TemplateRow, template_stamp
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -114,8 +117,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-THUMBNAIL_NAME = "thumbnail.png"
-README_NAME = "README.md"
 SYNC_MESSAGE = "Sync built-in templates from the image"
 LINK_MESSAGE = "Link seeded templates to their built-ins"
 #: A duplicate's staging folder under ``cache/`` (#156, #212).
@@ -259,6 +260,7 @@ class InvalidModelMetaError(ValueError):
     def __init__(self, slug: str, reason: str) -> None:
         super().__init__(f"the model.json of {slug!r} is not valid: {reason}")
         self.slug = slug
+        self.reason = reason
 
 
 #: A template's own interface: the directory its `ui` module and files live in.
@@ -658,6 +660,15 @@ class ModelRecord(ModelMeta):
     inputs_version: int = Field(default_factory=int)
 
 
+def _file_size(path: Path) -> int | None:
+    """The size of a regular file, or None when there is none."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info.st_size if stat.S_ISREG(info.st_mode) else None
+
+
 class Catalogue:
     """``data/models/<slug>/`` — one directory per model, metadata in a JSON sidecar."""
 
@@ -938,7 +949,7 @@ class Catalogue:
     def _meta(self, slug: str, raw: dict[str, Any]) -> ModelMeta:
         """``raw`` as this model's metadata, or :class:`InvalidModelMetaError`."""
         try:
-            return meta_from_raw(raw, slug.removeprefix(BUILTIN_PREFIX))
+            return meta_from_raw(raw, _default_name(slug))
         except ValidationError as error:
             problems = "; ".join(
                 f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
@@ -1043,16 +1054,7 @@ class Catalogue:
         chosen cover, from the listing's one query each; without them they are read
         for this template alone."""
         self._require(slug)
-        raw = self.read_raw_meta(slug)
-        if is_builtin(slug):
-            # Only `POST /models/import` sets `origin_url`, after fetching it over
-            # https, and the catalogue renders it as a link -- a bundled model.json
-            # never supplies one (#179). Dropped on read: the mirror must stay
-            # byte-identical to the image or it re-syncs on every boot.
-            raw.pop("origin_url", None)
-            # Nor is a built-in anything's duplicate (#156): only a duplicate of
-            # mine records an upstream.
-            raw.pop("upstream", None)
+        raw = _as_recorded(slug, self.read_raw_meta(slug))
         meta = self._meta(slug, raw)
         version = version_of(slug)
         upstream_state: UpstreamState | None = None
@@ -1095,6 +1097,106 @@ class Catalogue:
             previous_version=previous_version_of(slug) if previous_version_of is not None else None,
             upstream_state=upstream_state,
             invalid_libraries=invalid_entries(raw.get("libraries")),
+        )
+
+    def template_row(
+        self, template_id: str, *, version: str | None, head: str | None
+    ) -> TemplateRow | None:
+        """The template's derived row, read from its files (#7317, model records spec
+        §5.1, §5.2), or None when its folder has no ``model.scad``. ``version`` is its
+        last commit and ``head`` the HEAD it was read at, both the caller's.
+
+        It reads ``model.json`` and the media rows once. A ``model.json`` that is not
+        JSON keeps its text (cut to `META_TEXT_MAX`) instead of ``meta``; one that does
+        not parse keeps ``meta``; both set ``meta_error``. Unlike `record`, it never
+        raises for either."""
+        directory = self.paths.model_dir(template_id)
+        models = self.paths.models
+        below = [directory, *directory.parents]
+        revalidate_dirs(*reversed([path for path in below if path.is_relative_to(models)]))
+        source = self.paths.model_source(template_id)
+        try:
+            info = source.stat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        modified = info.st_mtime
+        # A metadata edit writes model.json alone, and is as much a change (#947).
+        with contextlib.suppress(FileNotFoundError):
+            modified = max(modified, self.paths.model_meta(template_id).stat().st_mtime)
+
+        meta: dict[str, Any] | None = None
+        meta_error: str | None = None
+        meta_text: str | None = None
+        parsed: ModelMeta | None = None
+        try:
+            meta = self.read_raw_meta(template_id)
+        except InvalidModelMetaError as error:
+            meta_error = error.reason
+            text = self.paths.model_meta(template_id).read_bytes().decode("utf-8", "replace")
+            # Postgres text holds no NUL.
+            meta_text = text[:META_TEXT_MAX].replace("\x00", "")
+        else:
+            try:
+                parsed = self._meta(template_id, _as_recorded(template_id, meta))
+            except InvalidModelMetaError as error:
+                meta_error = error.reason
+
+        builtin = is_builtin(template_id)
+        rows = self.media_store.items(template_id)
+        chosen = self.media_store.cover(template_id) if builtin else None
+        files: dict[str, int] = {}
+        added_dir = self.paths.builtin_media_dir(template_id)
+
+        def sizes(path: Path) -> int | None:
+            size = _file_size(path)
+            if size is not None:
+                if path.is_relative_to(directory):
+                    files[path.relative_to(directory).as_posix()] = size
+                else:
+                    files[f"builtin-media/{path.relative_to(added_dir).as_posix()}"] = size
+            return size
+
+        sizes(self.thumbnail_path(template_id))
+        media: list[MediaView] = []
+        if parsed is not None or not builtin:
+            media = self._media_listing(
+                template_id, parsed, lambda _: rows, lambda _: chosen, sizes=sizes
+            )[0]
+        cover: dict[str, str] | None = None
+        found = self._cover(template_id, media)
+        if found is not None:
+            with contextlib.suppress(FileNotFoundError):
+                cover = {
+                    "path": found[0].relative_to(self.paths.root).as_posix(),
+                    "content_type": found[1],
+                    "sha256": hashlib.sha256(found[0].read_bytes()).hexdigest(),
+                }
+
+        try:
+            text = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            colour_params = None
+        else:
+            colour_params = [n for n, a in find_annotations(text).items() if a.kind == "color"]
+
+        return TemplateRow(
+            template_id=template_id,
+            origin="builtin" if builtin else "mine",
+            meta=meta,
+            meta_error=meta_error,
+            meta_text=meta_text,
+            name=parsed.name if parsed is not None else _default_name(template_id),
+            version=version,
+            updated_at=datetime.fromtimestamp(modified, UTC),
+            has_readme=self.readme_path(template_id).is_file(),
+            inputs_version=self._inputs_version(template_id, parsed) if parsed is not None else 0,
+            colour_params=colour_params,
+            files=files,
+            cover=cover,
+            files_stamp=template_stamp(self.paths, template_id, rows, chosen),
+            refreshed_head=head,
         )
 
     @property
@@ -1675,12 +1777,18 @@ class Catalogue:
         return self.media_store.items(slug)
 
     def _views(
-        self, slug: str, items: list[MediaItem], *, readonly: bool = False
+        self,
+        slug: str,
+        items: list[MediaItem],
+        *,
+        readonly: bool = False,
+        sizes: Callable[[Path], int | None] = _file_size,
     ) -> list[MediaView]:
         """``items`` (in ``media/``) with what the disk says of each. With none stored,
-        the model's ``thumbnail.png``, if any, is the one item (the legacy thumbnail)."""
+        the model's ``thumbnail.png``, if any, is the one item (the legacy thumbnail).
+        ``sizes`` answers a file's size, or None when there is none."""
         if not items:
-            size = _file_size(self.thumbnail_path(slug))
+            size = sizes(self.thumbnail_path(slug))
             if size is None:
                 return []
             return [
@@ -1693,16 +1801,22 @@ class Catalogue:
                     readonly=readonly,
                 )
             ]
-        return self._item_views(slug, items, self.media_dir(slug), readonly=readonly)
+        return self._item_views(slug, items, self.media_dir(slug), readonly=readonly, sizes=sizes)
 
     def _item_views(
-        self, slug: str, items: list[MediaItem], directory: Path, *, readonly: bool
+        self,
+        slug: str,
+        items: list[MediaItem],
+        directory: Path,
+        *,
+        readonly: bool,
+        sizes: Callable[[Path], int | None] = _file_size,
     ) -> list[MediaView]:
         views: list[MediaView] = []
         for item in items:
-            size = _file_size(self._media_file(slug, item.id, item.file, directory))
+            size = sizes(self._media_file(slug, item.id, item.file, directory))
             poster = item.poster
-            if poster is not None and _file_size(directory / poster) is None:
+            if poster is not None and sizes(directory / poster) is None:
                 poster = None
             views.append(
                 MediaView(
@@ -1722,6 +1836,7 @@ class Catalogue:
         meta: ModelMeta | None = None,
         media_of: Callable[[str], list[MediaItem]] | None = None,
         cover_of: Callable[[str], str | None] | None = None,
+        sizes: Callable[[Path], int | None] = _file_size,
     ) -> tuple[list[MediaView], str | None]:
         """The template's media as listed, and a built-in's chosen cover.
 
@@ -1731,8 +1846,8 @@ class Catalogue:
         item other than the first, is moved to the front: the first item is the
         cover everywhere else too."""
         if not is_builtin(slug):
-            return self._views(slug, self._stored_media(slug, meta, media_of)), None
-        shipped = self._shipped(slug, meta)
+            return self._views(slug, self._stored_media(slug, meta, media_of), sizes=sizes), None
+        shipped = self._shipped(slug, meta, sizes)
         rows = media_of(slug) if media_of is not None else self.media_store.items(slug)
         cover = cover_of(slug) if cover_of is not None else self.media_store.cover(slug)
         taken = {view.id for view in shipped}
@@ -1741,6 +1856,7 @@ class Catalogue:
             [row for row in rows if row.id not in taken],
             self.paths.builtin_media_dir(slug),
             readonly=False,
+            sizes=sizes,
         )
         listed = [*shipped, *added]
         chosen = next((view for view in listed if view.id == cover), None)
@@ -1748,11 +1864,16 @@ class Catalogue:
             return listed, None
         return [chosen, *(view for view in listed if view is not chosen)], chosen.id
 
-    def _shipped(self, slug: str, meta: ModelMeta | None = None) -> list[MediaView]:
+    def _shipped(
+        self,
+        slug: str,
+        meta: ModelMeta | None = None,
+        sizes: Callable[[Path], int | None] = _file_size,
+    ) -> list[MediaView]:
         """What a built-in ships: its bundled model.json's media, or its legacy
         ``thumbnail.png``."""
         meta = meta or self._meta(slug, self.read_raw_meta(slug))
-        return self._views(slug, meta.media, readonly=True)
+        return self._views(slug, meta.media, readonly=True, sizes=sizes)
 
     def list_media(self, slug: str) -> list[MediaView]:
         """The template's images and videos, in order; the first is the cover."""
@@ -3180,13 +3301,25 @@ class _MediaEdit:
     legacy: MediaItem | None
 
 
-def _file_size(path: Path) -> int | None:
-    """The size of a regular file, or None when there is none."""
-    try:
-        info = path.stat()
-    except OSError:
-        return None
-    return info.st_size if stat.S_ISREG(info.st_mode) else None
+def _default_name(slug: str) -> str:
+    """The name a template whose ``model.json`` names none shows: its slug."""
+    return slug.removeprefix(BUILTIN_PREFIX)
+
+
+def _as_recorded(slug: str, raw: dict[str, Any]) -> dict[str, Any]:
+    """``raw`` as a record reads it: a built-in's without ``origin_url`` and ``upstream``."""
+    if not is_builtin(slug):
+        return raw
+    raw = dict(raw)
+    # Only `POST /models/import` sets `origin_url`, after fetching it over
+    # https, and the catalogue renders it as a link -- a bundled model.json
+    # never supplies one (#179). Dropped on read: the mirror must stay
+    # byte-identical to the image or it re-syncs on every boot.
+    raw.pop("origin_url", None)
+    # Nor is a built-in anything's duplicate (#156): only a duplicate of
+    # mine records an upstream.
+    raw.pop("upstream", None)
+    return raw
 
 
 def _routable(slug: str) -> bool:
