@@ -89,6 +89,7 @@
 - **R19. A backup covers only the tag state it saved.** `records_for_spool` and `restore_records` refuse with 409 `backup_mismatch` when the body's `records` are not `same_records` as the backup's, so after a write, replaying its backup fails.
 - **R20. `tag-written` checks `sent` against the format `tag-records` would choose**, `pick_format(backup.records, <setting default>)`, not `format_of(sent)`; `unknown_format` stays for a `sent` that is not one known record. It runs the check after `read_on`'s bind, under the spool's lock, and a mismatch rolls the bind back.
 - **R21. The AMS's one ingest is `capture.reconcile`.** It is the only AMS path that marks a tag seen (through `tags.seen_on`). Other `holder_on` callers (the `trays` view, the link check) are lookups over stored state, not readings, so they mark nothing (Task 7 review).
+- **R22. An agent write is approved by what the person saw.** `nfc_write` keeps `approval: 'none'` (spec Constraints: the arm-and-tap is the approval). So the claim of a `write` job carries `records_sha256`, the SHA-256 of the canonical JSON of the records the page shows; the backend refuses a mismatch with 409 `records_mismatch` and the job stays pending. The page (Task 9) renders every record (type, media type, size, and the text of a text or JSON record) before Arm is enabled. Raised by the security review of Task 8.
 
 ## Review Focus
 
