@@ -1520,8 +1520,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and
   `mocks/features/activity.ts`.
-- `backend/scadbuddy/entities/` — files and links on any row (#6950, inventory spec
-  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3, plan
+- `backend/scadbuddy/entities/` — files, links and key-value properties on any row
+  (#6950, #7026, inventory spec
+  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3a, plan
   `docs/superpowers/plans/2026-11-21-inventory-phase-1-entities.md`): `refs.py`
   (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table;
   `EntityStore`: an `entities` row made by `ensure` only for an owner row that exists, and
