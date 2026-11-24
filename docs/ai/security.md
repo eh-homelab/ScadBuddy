@@ -905,7 +905,7 @@ design is [spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-de
   wrote (`updated_by` is `migration:2171`) counts only when it is `off` or above the
   declared tier, so a copied lower tier is ignored (`toolAccess` in
   `agent/src/access/resolve.ts`).
-- **One answer for every caller.** The main agent, a subagent, a classic or durable turn,
+- **One answer for every caller.** The main agent, a subagent, a session's turn,
   a flow run and `/mcp` get the same access for the same item. A principal's tier cap
   still applies on top (spec §4.1, §4.5).
 - **Read per call.** A change applies from the next call, in either direction (spec §4.4).

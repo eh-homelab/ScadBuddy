@@ -811,8 +811,8 @@ export const sessionTools: Tool[] = [
     name: 'pending_input_list',
     label: 'List calls waiting on a person',
     description:
-      'Every tool call parked on a person that this caller may see, approvals and answers alike, across classic and ' +
-      'durable sessions: every pending approval for a token with the approval grant, else those of its own sessions ' +
+      'Every tool call parked on a person that this caller may see, approvals and answers alike, of every ' +
+      'session and of /mcp prepares: every pending approval for a token with the approval grant, else those of its own sessions ' +
       'and its own requests, and the questions of the sessions it owns. Each entry has the id sessions_approve and ' +
       'sessions_deny take for an approval; only the user in the ScadBuddy UI answers a question.',
     input: z.object({}),
