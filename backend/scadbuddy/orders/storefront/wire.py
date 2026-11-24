@@ -228,6 +228,14 @@ class FileSnapshot(BaseModel):
     remembered: dict[str, Any] | None = None
 
     @property
+    def previews(self) -> dict[int, str]:
+        """The held GLB of each plate; empty when publish held none. A list that is not one
+        key per plate is a ValueError: it would pair a key with another plate."""
+        if not self.preview_keys:
+            return {}
+        return dict(zip(self.plates, self.preview_keys, strict=True))
+
+    @property
     def offered(self) -> list[FileSlot]:
         """The slots a customer picks a colour for: used, and not support."""
         return [slot for slot in self.slots if slot.used and not slot.support]

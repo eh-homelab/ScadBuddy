@@ -2243,7 +2243,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `POST …/listings/{id}/price` (area `file-prices`; edge `/api/store/v1/listings/{id}/price`,
   counted as a read) takes `ListingPriceBody` (a listing colour per offered slot, one
   material, `file_choice`; a support slot takes the snapshot's lock) and answers
-  `slice_estimate` of `held_file.py` `priced_file(snapshot)`; a read that would claim a new
+  `slice_estimate` of `held_file.py` `priced_file(snapshot)`, or, while that is `pending`, the
+  file's last firm price as `last` (`SlicePrices.listing_last`); a read that would claim a new
   slice first takes one render of the visitor's rates (`RenderLimits.admit_slice`, a
   `storefront_renders` row of `kind` `slice` with no job, which render concurrency never
   counts), refunded when it claims none or its start gives the claim back. The cart add

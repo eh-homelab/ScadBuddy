@@ -475,8 +475,9 @@ async def listing_price_route(
     listing_id: str, request: Request, state: StateDep, visitor: Visitor, client: StoreClient
 ) -> StoreEstimate:
     """The price of a visitor's colours on a file listing (#6710 §7.5): the slice price of
-    its held copy, ``pending`` while it is worked out, or ``none``. A read that claims a
-    new slice counts as one render (429 ``render_limited`` over the limits)."""
+    its held copy, or ``none``. While it is worked out, ``last``: the last firm price of the
+    file, of any colours, with a ``retry_after``; ``pending`` when there is none. A read
+    that claims a new slice counts as one render (429 ``render_limited`` over the limits)."""
     body = await _body(
         request,
         ListingPriceBody,

@@ -805,7 +805,7 @@ As built (PR 6): "always show a price". While the visitor's colours have no pric
 (`slice_estimate` answers `pending`), the route answers `last`: the listing's last firm
 price of the file it sells now, of any colours (`SlicePrices.listing_last`, the newest
 `done` row of the pinned sha256, index `storefront_slice_prices_listing_last`; the
-listing's own row first, else another listing's of the same file, since they share a price,
+listing's own row first, else another published listing's of the same file, since they share a price,
 §7.4), with the pending `retry_after`. The slice runs
 behind it as before, and a read again answers the colours' own price. A listing with no
 such row answers `pending`. `last` is never a cart line's price (`line_prices.py` reads

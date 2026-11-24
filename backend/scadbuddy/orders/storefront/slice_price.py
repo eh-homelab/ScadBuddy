@@ -453,7 +453,8 @@ class SlicePrices:
         """A file listing's last firm price (#6710 §7.5): the newest ``done`` row of the
         file ``model_sha256``, of any colours, the listing's own before another's: two
         listings of one file share a price (`key_subject`), and its row names only the one
-        that made it. None when the file has none."""
+        that made it. Another listing's only while it is published, so a visitor sees no
+        price of a listing they cannot open. None when the file has none."""
         read = (
             f"SELECT {_COLUMNS} FROM storefront_slice_prices"
             " WHERE model_sha256 = %s AND status = 'done' AND listing_id {}"
@@ -464,7 +465,10 @@ class SlicePrices:
         with self._pool.connection() as conn:
             found = conn.execute(read.format("= %s"), (model_sha256, listing_id)).fetchone()
             if found is None:
-                found = conn.execute(read.format("IS NOT NULL"), (model_sha256,)).fetchone()
+                found = conn.execute(
+                    read.format("IN (SELECT id FROM storefront_listings WHERE published)"),
+                    (model_sha256,),
+                ).fetchone()
         return _row(found)
 
     def fail(self, price_key: str, model_sha256: str, failure: str) -> PriceRow:

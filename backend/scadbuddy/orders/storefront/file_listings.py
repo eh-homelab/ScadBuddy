@@ -542,7 +542,7 @@ async def held_preview(
     listing = await asyncio.to_thread(published_listing, store, listing_id, source="library_file")
     snapshot = listing.file_snapshot
     assert snapshot is not None
-    held = dict(zip(snapshot.plates, snapshot.preview_keys, strict=False))
+    held = snapshot.previews
     stat = None if plate not in held else await _content(state).stat(held[plate])
     if stat is None:
         raise problem(

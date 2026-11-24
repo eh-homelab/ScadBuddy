@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, cast
 
+import pytest
+
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.storefront.listings import public_card, public_listing
 from scadbuddy.orders.storefront.wire import FileSlot, FileSnapshot, Listing, PublicListing
@@ -136,3 +138,22 @@ def test_a_file_listing_with_no_preview_has_none() -> None:
 def test_the_card_of_a_file_listing_is_available() -> None:
     card = asyncio.run(public_card(cast(ContentStore, None), file_listing(), FILAMENTS, SHOP))
     assert card.available and card.title == "Keychain"
+
+
+def test_a_snapshots_previews_are_one_per_plate_or_none() -> None:
+    whole = {
+        "file_id": 1,
+        "library": "native",
+        "filename": "a.3mf",
+        "file_type": "3mf",
+        "sha256": "a" * 64,
+        "size": 1,
+        "copy_key": "listing-file-" + "a" * 64,
+        "slots": [],
+        "plates": [1, 3],
+    }
+    assert FileSnapshot.model_validate(whole).previews == {}
+    both = FileSnapshot.model_validate(whole | {"preview_keys": ["p1", "p3"]})
+    assert both.previews == {1: "p1", 3: "p3"}
+    with pytest.raises(ValueError, match="shorter"):
+        _ = FileSnapshot.model_validate(whole | {"preview_keys": ["p1"]}).previews

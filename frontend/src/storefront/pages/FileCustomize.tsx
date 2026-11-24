@@ -97,8 +97,9 @@ export function FileCustomize({
   const blocked = listingUnavailable(view) || chosen === null || stale
   const previews = listing.previews ?? []
   /** Whether the price on screen is the firm price of the colours on screen. */
-  const firm = priced !== undefined && priced.key === current && priced.estimate.source === 'slice' && pendingFor !== current
-  const held = !firm && priced?.heldFor === current
+  const firm = !blocked && priced !== undefined && priced.key === current && priced.estimate.source === 'slice' && pendingFor !== current
+  /** No read follows: the last one ended with no price, or none is made while blocked. */
+  const held = !firm && (blocked || priced?.heldFor === current)
   const shownPlate = Math.min(plate, Math.max(0, previews.length - 1))
 
   useEffect(() => {

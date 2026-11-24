@@ -1016,6 +1016,21 @@ describe('CustomizePage of a file listing (#6710)', () => {
     expect(screen.queryByText('We price this design by hand')).toBeNull()
   })
 
+  it('shows no price as updating once the shop changed the design', async () => {
+    server.use(http.post('/api/store/v1/draft/items', () => HttpResponse.json({ type: `${PROBLEMS}listing_changed`, title: 'Conflict', status: 409, detail: 'This listing has changed. Load it again.' }, { status: 409 })))
+    const { user } = show(FILE_ID, FAST, 10_000)
+    await screen.findByText('$7.00 for one')
+    await user.click(screen.getByRole('button', { name: /Part 1/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
+    expect(screen.getByText('Updating this price…')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Add to order' }))
+    await screen.findByRole('button', { name: 'Load the latest version' })
+    // No read follows until the visitor loads the design again.
+    expect(screen.queryByText('Updating this price…')).toBeNull()
+    expect(screen.getByText('$7.00 for one')).toBeInTheDocument()
+    expect(screen.getByText(HELD_NOTE)).toBeInTheDocument()
+  })
+
   it('shows the other file listing when its id changes in place', async () => {
     server.use(http.get('/api/store/v1/listings/l9', () => HttpResponse.json({ ...FILE, id: 'l9', title: 'Desk hook' })))
     const { rerender } = show(FILE_ID)

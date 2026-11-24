@@ -1575,7 +1575,7 @@ async def public_listing(
             media.append(PublicMedia(url=url, kind=item.kind, caption=item.caption))
     file = listing.file_snapshot
     previews = (
-        [listing_preview_path(listing.id, plate) for plate in file.plates[: len(file.preview_keys)]]
+        [listing_preview_path(listing.id, plate) for plate in file.previews]
         if file is not None
         else []
     )

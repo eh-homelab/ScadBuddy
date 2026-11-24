@@ -224,6 +224,22 @@ def test_a_second_listing_of_the_file_shows_the_files_last_price(
     assert (r.json()["source"], r.json()["price_key"]) == ("last", own["price_key"])
 
 
+def test_an_unpublished_listings_price_is_never_anothers_last_price(
+    crud: CrudCaller,
+    listed: dict[str, Any],
+    keychain: NativeFile,
+    pla_red: str,
+    pla_blue: str,
+) -> None:
+    """A visitor sees no price of a listing they cannot open."""
+    priced(crud, listed, {0: pla_red, 1: pla_blue})
+    second = publish(crud.api, create(crud.api, body(keychain, [pla_red, pla_blue]))["id"])
+    assert crud.api.post(f"{LISTINGS}/{listed['id']}/unpublish").status_code == 200
+    r = read(crud, second, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "pending"
+
+
 def test_a_listing_with_no_price_yet_answers_pending(
     crud: CrudCaller, listed: dict[str, Any], tmp_path: Path, pla_red: str, pla_blue: str
 ) -> None:
