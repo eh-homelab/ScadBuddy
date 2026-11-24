@@ -72,7 +72,8 @@ describe('OrderCosts', () => {
 
   it('shows the parts taken from stock in the cost breakdown (#7067)', async () => {
     const costs = await api.orderCosts(ORDER_ACCEPTED)
-    const item = { ...costs.items[0], parts_minor: 1250, cost_minor: (costs.items[0].cost_minor ?? 0) + 1250 }
+    const first = costs.items[0]!
+    const item = { ...first, parts_minor: 1250, cost_minor: first.cost_minor + 1250 }
     const { user } = renderPage(<OrderCosts costs={{ ...costs, items: [item] }} onChanged={() => {}} />)
 
     const row = await screen.findByRole('row', { name: /Name Keychain/ })

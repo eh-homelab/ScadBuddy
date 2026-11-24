@@ -51,7 +51,7 @@ describe('item parts (#5543)', () => {
     expect(screen.getByText(/unfulfil it to change them/)).toBeInTheDocument()
   })
 
-  it('a fulfilment takes the parts as a material cost, and an unfulfil gives them back', async () => {
+  it("a fulfilment takes the parts as the item's parts cost, and an unfulfil gives them back", async () => {
     const hook = seedPart({ name: 'Silver hook', pack_size: 100, pack_price_minor: 599, on_hand: 10 })
     await api.setItemParts(ORDER_ACCEPTED, ITEM_APPROVED, [{ part_id: hook.id, per_unit: 1 }])
 
@@ -59,11 +59,15 @@ describe('item parts (#5543)', () => {
     await api.acceptFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, attempt.id)
 
     expect((await api.parts())[0]?.on_hand).toBe(8)
+    // #7067: job cost reads them as the item's `parts_minor`; no cost entry is written.
     const costs = await api.orderCosts(ORDER_ACCEPTED)
-    const entries = costs.items.flatMap((i) => i.cost_entries ?? [])
-    expect(entries.map((e) => [e.kind, e.amount_minor, e.source])).toContainEqual(['material', 12, `part:${ITEM_APPROVED}:${hook.id}`])
+    const item = costs.items.find((i) => i.item_id === ITEM_APPROVED)!
+    expect(item.parts_minor).toBe(12)
+    expect((item.cost_entries ?? []).some((e) => e.source?.startsWith('part:'))).toBe(false)
 
     await api.unfulfilOrderItem(ORDER_ACCEPTED, ITEM_APPROVED)
     expect((await api.parts())[0]?.on_hand).toBe(10)
+    const after = await api.orderCosts(ORDER_ACCEPTED)
+    expect(after.items.find((i) => i.item_id === ITEM_APPROVED)!.parts_minor).toBe(0)
   })
 })
