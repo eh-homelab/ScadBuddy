@@ -1,4 +1,4 @@
-import type { FilamentInventoryView, Spool, SpoolType } from '../api/filament'
+import type { FilamentInventoryView, Spool, SpoolType, TagRow } from '../api/filament'
 import { listProducts, listSuppliers } from '../api/filamentPurchasing'
 
 /**
@@ -11,6 +11,7 @@ import { listProducts, listSuppliers } from '../api/filamentPurchasing'
  * - Any other token matches a spool whose number it is (`87`), a text field that contains it
  *   (brand, material, colour name, SKU, place…), or, from 3 characters, a colour whose hex
  *   contains it, with or without its `#` (`#FF6A13`, `ff6a13`).
+ * - #7151: from 4 hex digits (`:` and `-` left out), a tag UID or tray UUID that holds it (`04:A1:B2`).
  */
 export interface SearchToken {
   /** The token in lower case, without a leading `#`. */
@@ -25,6 +26,8 @@ export interface SearchDoc {
   texts: readonly (string | null | undefined)[]
   /** `#RRGGBB` or `#RRGGBBAA` colours. */
   hexes: readonly (string | null | undefined)[]
+  /** #7151 — the RFID keys of its open tag: the UID and the tray UUID, hex. */
+  tags?: readonly string[]
 }
 
 export function parseSearch(query: string | null | undefined): SearchToken[] {
@@ -41,7 +44,10 @@ function matchesToken(doc: SearchDoc, token: SearchToken): boolean {
   if (isNumber(token.text, doc.number)) return true
   if (token.numberOnly) return false
   if (doc.texts.some((text) => text?.toLowerCase().includes(token.text))) return true
-  return token.text.length >= 3 && /^[0-9a-f]+$/.test(token.text) && doc.hexes.some((hex) => hex?.toLowerCase().replace(/^#/, '').includes(token.text))
+  if (token.text.length >= 3 && /^[0-9a-f]+$/.test(token.text) && doc.hexes.some((hex) => hex?.toLowerCase().replace(/^#/, '').includes(token.text))) return true
+  // #7151: a tag key as a reader prints it, `04:A1:B2` or `04-a1-b2`, is the same hex.
+  const key = token.text.replace(/[:-]/g, '')
+  return key.length >= 4 && /^[0-9a-f]+$/.test(key) && (doc.tags ?? []).some((tag) => tag.toLowerCase().includes(key))
 }
 
 /** Every token matches some field of `doc`; no token matches everything. */
@@ -59,6 +65,8 @@ export interface SpoolExtras {
   typeCode?: string | null
   skus?: readonly string[]
   tray?: string | null
+  /** #7151 — its open tag's UID and tray UUID. */
+  tags?: readonly string[]
 }
 
 export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDoc {
@@ -76,6 +84,7 @@ export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDo
       ...(extras.skus ?? []),
     ],
     hexes: [spool.effective?.rgba ?? spool.rgba],
+    tags: extras.tags ?? [],
   }
 }
 
@@ -93,6 +102,15 @@ export function traysBySpool(view: FilamentInventoryView): Map<string, string> {
   const found = new Map<string, string>()
   for (const printer of view.trays) {
     for (const tray of printer.trays) if (tray.spool_id) found.set(tray.spool_id, `${printer.printer_name} ${tray.label}`)
+  }
+  return found
+}
+
+/** #7151 — each spool's open tag keys, its UID and tray UUID, for the search by tag. */
+export function tagsBySpool(tags: readonly TagRow[]): Map<string, string[]> {
+  const found = new Map<string, string[]>()
+  for (const tag of tags) {
+    if (tag.binding) found.set(tag.binding.spool_id, [tag.tag_uid, tag.tray_uuid].filter((key): key is string => !!key))
   }
   return found
 }
