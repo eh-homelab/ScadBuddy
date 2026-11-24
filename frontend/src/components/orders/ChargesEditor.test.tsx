@@ -150,11 +150,13 @@ describe('ChargesEditor', () => {
       expect(auto).toHaveTextContent('Tax 10%')
       expect(auto).toHaveTextContent('auto')
       expect(auto).toHaveTextContent('$1.00')
+      // The rows come from an effect after the auto line renders (#7468): wait for them.
+      const amount = await within(region).findByLabelText('Charge 1 amount')
       // One editable row, the shipping; the tax is not one of them.
       expect(within(region).queryByLabelText('Charge 2 label')).toBeNull()
 
-      await user.clear(within(region).getByLabelText('Charge 1 amount'))
-      await user.type(within(region).getByLabelText('Charge 1 amount'), '20')
+      await user.clear(amount)
+      await user.type(amount, '20')
       await user.click(within(region).getByRole('button', { name: 'Save charges' }))
       await waitFor(() => expect(plain).toHaveBeenCalledWith(ORDER_DRAFT, { charges: [{ kind: 'shipping', label: 'Post', amount_minor: 2000 }] }))
       // Recomputed on the new shipping.
@@ -168,7 +170,9 @@ describe('ChargesEditor', () => {
       const plain = vi.spyOn(api, 'updateOrder')
       const { user } = renderPage(<Host />)
       const region = await screen.findByRole('region', { name: 'Charges' })
-      await user.click(await within(region).findByRole('button', { name: 'Add charge' }))
+      // The option's row first, or the added row would be row 1 (#7468).
+      await within(region).findByLabelText('Charge 1 label')
+      await user.click(within(region).getByRole('button', { name: 'Add charge' }))
       await user.type(within(region).getByLabelText('Charge 2 label'), 'Rush')
       await user.type(within(region).getByLabelText('Charge 2 amount'), '3')
       await user.click(within(region).getByRole('button', { name: 'Save charges' }))
@@ -190,6 +194,8 @@ describe('ChargesEditor', () => {
       const { user } = renderPage(<Host />)
       const region = await screen.findByRole('region', { name: 'Charges' })
       await within(region).findByTestId('auto-tax')
+      // The shipping row first, or the added row would be row 1 (#7468).
+      await within(region).findByLabelText('Charge 1 label')
       await user.click(within(region).getByRole('button', { name: 'Add charge' }))
       await choose(user, within(region).getByRole('combobox', { name: 'Charge 2 kind' }), 'tax')
       await user.type(within(region).getByLabelText('Charge 2 label'), 'Tax 10%')
