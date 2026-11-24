@@ -116,6 +116,7 @@ from tests.crud.crud_support import FixedToken, served_render_jobs
 from tests.support.pipelines import FakeWorld
 from tests.support.renders import legacy_row, namespace_not_found
 from tests.support.temporal import temporal_client
+from tests.support.waits import until
 from tests.test_template_pipeline import NEVER_YIELDS
 from tests.test_workflows import FakeActivities, _worker
 
@@ -229,9 +230,7 @@ async def _settled(projection: JobProjection, job_id: str, timeout: float = WAIT
 
 
 async def _until(acts: FakeActivities, call: str) -> None:
-    async with asyncio.timeout(WAIT_HANG_BOUND):
-        while call not in acts.calls:
-            await asyncio.sleep(0.05)
+    await until(lambda: call in acts.calls, WAIT_HANG_BOUND, interval=0.05)
 
 
 @pytest.fixture

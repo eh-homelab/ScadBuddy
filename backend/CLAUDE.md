@@ -1025,7 +1025,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`ProfileFetches`: `open`, `get`, `latest`, `gaps`, `fail_unstarted`, `running_age`,
   `fail_unserved`; the module functions `start_fetch`, `store_file`, `import_run`, `mark_failed`
   and `end_unserved`; the run is the table `filament_profile_fetches`, its files
-  are `blob_refs` held by kind `profile_fetch`) and `api/crud_profile_fetch.py` (`crud_router(
+  are `blob_refs` held by kind `profile_fetch`; since #7176 `import_run` writes ScadBuddy's own
+  presets, `sb_presets.py`, and imports nothing into Bambuddy: the mirror, `preset_mirror.py`, sends
+  each written preset after the commit while the stored setting `filament_preset_mirror` is on, and
+  again after each kept-preset refresh, `sync_and_mirror`; the type's nozzle range wins, #7142,
+  `apply_type_temps`) and `api/crud_profile_fetch.py` (`crud_router(
   "profile-fetch")`, area `runs`: `PUT …/runs/{run_id}/files/{sha256}`, `POST …/runs/{run_id}/import`
   and `…/failed`). The public routes are `POST` and `GET /filament/types/{id}/profile-fetch`
   (`api/filament.py`). Invoice confirm starts a fetch for each new type with a `tdfp_id`.
@@ -1437,7 +1441,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the
   standard `OTEL_*` variables, the sampler (parentless `CLIENT` spans dropped), and the
   helpers every traced file uses (`span`, `detached_span` for a span exited in another
-  task such as a stream, `current_traceparent`, `link_to`, `use_traceparent`).
+  task such as a stream, `traced_thread` for an `asyncio.to_thread` call whose span says how
+  long it waited for a free thread (`scadbuddy.thread_wait_ms`, #7245), `current_traceparent`,
+  `link_to`, `use_traceparent`). The S3 backend makes its own CLIENT span per request
+  (`S3.<Operation>`, `store/s3.py` `_request`, whose docstring says why not the
+  `AiobotocoreInstrumentor`).
   `core/trace_scrub.py` strips exception messages and status
   descriptions before anything is exported; never record a parameter value, a log
   line or anything Bambuddy returns. Tests share one provider (`tests/conftest.py`,
@@ -2245,7 +2253,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   ids), and `library:<old>`'s remembered choices copied to an empty `library:<new>`
   (`SettingsStore.copy_library_choices`). The run's subject, `existing` and `start` take the
   new id; a retry reuses the check, finds the item moved or the file in "Storefront", and
-  uploads nothing. The variant is sliced with the
+  uploads nothing, unless the file it moved to is gone since (`Shelf.stands`): then the held
+  copy is put back again. The find skips a run's per-print copy (`per_print`), and a wait
+  for the lock past `PROJECT_LOCK_TIMEOUT_MS` is a 503 `UNAVAILABLE_PROBLEM` the operation
+  tries again. The variant is sliced with the
   choices and presets a back-office quote of a spool of the same filament type on the same
   printer gets (#6574, `test_slice_parity.py`). The shop slice profile gives only the
   printer and a filament type per material (`slice_profile.py`, a

@@ -1,5 +1,5 @@
 {
-  "comment": "#6894: the filament text search's cases. frontend/src/lib/filamentSearch.test.ts and agent/test/filamentSearch.test.ts both run every group, so the two copies of the matcher cannot drift apart. A spool group gives the spool and its extras; a type group gives the type, its catalog names and its SKUs.",
+  "comment": "#6894, #7151: the filament text search's cases. frontend/src/lib/filamentSearch.test.ts and agent/test/filamentSearch.test.ts both run every group, so the two copies of the matcher cannot drift apart. A spool group gives the spool and its extras; a type group gives the type, its catalog names and its SKUs.",
   "groups": [
     {
       "name": "a pink Bambu spool in a tray",
@@ -58,6 +58,23 @@
       "spool": { "number": 5, "colour_name": "Teal", "rgba": "#1B9AAAFF", "names": {}, "effective": {} },
       "extras": {},
       "cases": [{ "query": "teal 1b9aaa", "match": true }]
+    },
+    {
+      "name": "a tagged spool is found by its tag UID or tray UUID (#7151)",
+      "kind": "spool",
+      "spool": { "number": 12, "colour_name": null, "rgba": null, "names": { "material": "PLA" }, "effective": { "colour_name": "Black", "rgba": "#000000FF" } },
+      "extras": { "tags": ["04A1B2C3D4E5F6", "1234567890ABCDEF1234567890ABCDEF"] },
+      "cases": [
+        { "query": "04a1b2c3", "match": true },
+        { "query": "04:A1:B2:C3", "match": true },
+        { "query": "04-a1-b2", "match": true },
+        { "query": "c3d4", "match": true },
+        { "query": "1234567890abcdef", "match": true },
+        { "query": "pla 04a1b2", "match": true },
+        { "query": "04a", "match": false },
+        { "query": "ffff", "match": false },
+        { "query": "04:a1:zz", "match": false }
+      ]
     },
     {
       "name": "a gold silk type",

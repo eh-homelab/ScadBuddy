@@ -1,0 +1,345 @@
+# Attempt media auto-import — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan story by story. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** An order attempt that names a Bambuddy archive gets that archive's latest finish
+photo and its timelapse as attachments, with no click, imported once, by every trigger.
+
+**Architecture:** `entity_attachments` gains archive provenance (`archive_id`,
+`archive_media`) and a partial unique index, so "already imported" is a row read. One
+Temporal workflow per attempt, `AttemptMedia` on the `library` queue (the API's worker),
+runs the step `mirror_attempt` now, at +2 min and at +15 min. Three triggers start it (a
+hand attempt, a heard print outcome, the archives read); a housekeeping sweep catches the
+rest. The import copies only what Bambuddy's archive already has; ScadBuddy never asks
+Bambuddy to scan the printer (spec §9). The order page loads each attempt's archive row
+on open and renders from the answer.
+
+**Tech Stack:** Python 3.12, FastAPI, psycopg 3, Postgres 18, Temporal (library worker,
+housekeeping), React + TypeScript, TypeScript agent tools.
+
+**Spec:** [`docs/superpowers/specs/2026-11-05-attempt-media-auto-import-design.md`](../specs/2026-11-05-attempt-media-auto-import-design.md)
+(approved 2026-11-05, reviewed against main 2026-11-23). The spec is the authority; F1–F14
+are its facts table.
+
+## Tracking
+
+Epic: [#7229](https://github.com/eh-homelab/ScadBuddy/issues/7229)
+
+Stories:
+
+| story | issue | title |
+|---|---|---|
+| 1 | [#7230](https://github.com/eh-homelab/ScadBuddy/issues/7230) | Spike: record Bambuddy's `timelapse/scan` replies |
+| 2 | [#7231](https://github.com/eh-homelab/ScadBuddy/issues/7231) | Migration and model |
+| 3 | [#7232](https://github.com/eh-homelab/ScadBuddy/issues/7232) | `copy_in` provenance, race, actor |
+| 4 | [#7233](https://github.com/eh-homelab/ScadBuddy/issues/7233) | `mirror_media`, the `AttemptMedia` workflow, the three triggers |
+| 5 | [#7234](https://github.com/eh-homelab/ScadBuddy/issues/7234) | The housekeeping sweep |
+| 6 | [#7235](https://github.com/eh-homelab/ScadBuddy/issues/7235) | Scan the printer, behind a setting (dropped) |
+| 7 | [#7236](https://github.com/eh-homelab/ScadBuddy/issues/7236) | Read fields and the attempt row on page open |
+| 8 | [#7237](https://github.com/eh-homelab/ScadBuddy/issues/7237) | Agent text and docs |
+
+## Global constraints
+
+- Read the repo's `CLAUDE.md` and the area `CLAUDE.md` of each tree you touch
+  (`backend/CLAUDE.md`, `frontend/CLAUDE.md`, `agent/CLAUDE.md`).
+- Only the CRUD service (the API process) gets SQL. Every write in this plan is in the API:
+  its routes, and activities on the `library` queue, whose worker runs in the API
+  (`main.py` `_run_library_worker`). Never a new database client, never a write from the
+  agent or a worker pod.
+- Bytes go to the blob store with a `blob_refs` hold (`orders/attachments.py` `keep`);
+  never `bytea`, never base64 in JSON (#2479).
+- Migrations: a NEW file `$(date -u +%Y%m%dT%H%MZ)_<slug>.sql` in
+  `backend/scadbuddy/migrations/`. Never edit a merged one. A migration may depend only on
+  files already on main.
+- A Bambuddy download is never awaited inside an HTTP request. A route may start the
+  workflow (one Temporal call); a failed start is logged, never raised.
+- Workflows on the `library` worker are AUTO_UPGRADE through a `Versioned*` subclass in
+  `main.LIBRARY_WORKFLOWS`. A change to the commands a workflow issues goes behind
+  `workflow.patched`. A new housekeeping sweep goes behind its own patch, with a replay
+  history.
+- No system actor (Ruling 12). An automatic write names the attempt's `created_by`.
+- Tests first (superpowers:test-driven-development): each step below writes the failing
+  test before the code. A parallel backend test run uses its own database (NOTIFY
+  cross-talk). Use the uv version the Dockerfile pins (`uvx uv@<version>`).
+- A UI change loads the `frontend-design` skill first.
+- Never `pkill -f`, `killall` or any machine-wide kill. Kill only by pid or process group.
+- PRs: conventional-commit title, body `Fixes #N` (the story's issue), cite a source for
+  each external fact and say where each measured fact was measured (#259). Never commit
+  `backend/openapi.json` or either `schema.d.ts`. No counts of tests or migrations in docs.
+
+## Review focus
+
+1. A replay of the same trigger (three replicas, a page reload, the sweep) downloads a
+   medium at most once per attempt and never writes a second row for one
+   `(subject, archive_id, archive_media, filename)`. (Stories 3, 4.)
+2. A person's own `finished` photo is never replaced or deleted; a second finish photo
+   chosen by `name` is still allowed. (Story 3.)
+3. A timelapse over `media_upload_max_bytes` does not stop the finish photo. (Story 4.)
+4. `POST …/fulfilments` never waits on a download; with Temporal down it still answers 201.
+   (Story 4.)
+
+## Order and dependencies
+
+```
+1 spike (done)
+2 migration (done) ─► 3 copy_in ─► 4 workflow ─┬─► 5 sweep
+                                        └─► 7 read fields + frontend ─► 8 agent + docs
+6 scan + setting (dropped)
+```
+
+Story 1 is done; its findings led to the drop of story 6 (spec §4.3a, §9). Story 2 is done
+(#7241, `backend/scadbuddy/migrations/20261123T1649Z_attempt_media_provenance.sql`).
+Stories 3–5, 7 and 8 build the import of what Bambuddy's archive already has; their PRs
+are #7271 (3), #7281 (4), #7295 (5), #7301 (7) and #7303 (8).
+
+CI lanes (`.github/scripts/select-lanes.sh`): a change under `backend/` selects
+`backend` and `image`; under `frontend/`, `image`; under `agent/`, `agent_durable`. The
+`frontend`, `frontend-unit` and `agent` jobs run on every PR. An API schema change also
+shows up as the `freshness` job's diff comment and regenerates the Go client.
+
+---
+
+### Story 1: Spike — record Bambuddy's `timelapse/scan` replies (#7230)
+
+**Done** (merged in #7238). Its findings live in spec §4.3a and led to the drop of
+story 6 (spec §9).
+
+**Goal:** Know what `POST /api/v1/archives/{id}/timelapse/scan` answers, whether its FTP
+pull is complete when it returns, and what it matches on (spec §4.3a, F5).
+
+**What it recorded:** `backend/tests/bambuddy/recordings/timelapse-scan-none.json` and
+`timelapse-scan-exists.json`, with a row each in the recordings' README. The scan needs
+only the Manage Archives scope (read from Bambuddy 1.3.2's source). No `attached` reply
+is recorded: a match deletes the video from the printer's card (spec §4.3a).
+
+**Lanes:** `backend`, `image` (recordings live under `backend/tests/`).
+
+### Story 2: Migration and model — archive provenance and attempt stamps (#7231)
+
+**Goal:** `entity_attachments` records which archive and medium a copy came from, a
+double insert is impossible, and the attempt can record its last check (spec §4.2,
+§4.6).
+
+**Done** (merged in #7241). The migration is
+`backend/scadbuddy/migrations/20261123T1649Z_attempt_media_provenance.sql`. The steps
+below record what that PR built; do not build them again.
+
+PR #7241 (merged) added `timelapse_scanned_at` and `stamp_timelapse_scanned` before the
+drop. A follow-up PR adds a new migration that drops the column and removes the store
+method and the model field. Merged migrations are never edited. Tracked as #7272.
+
+**Files:**
+- Created: `backend/scadbuddy/migrations/20261123T1649Z_attempt_media_provenance.sql`
+- Modify: `backend/scadbuddy/orders/models.py` (`Attachment.archive_id`,
+  `.archive_media: Literal["finished_photo", "timelapse"] | None`;
+  `Fulfilment.media_checked_at`)
+- Modify: `backend/scadbuddy/orders/store.py` (`_ATTACHMENT`, `_FULFILMENT`,
+  `insert_attachment` takes and writes both columns and raises `ArchiveCopyExistsError` on the
+  unique index; `archive_media_present(fulfilment_id, item_id, *, conn=None) ->
+  set[tuple[int, ArchiveCopyMedia]]`;
+  `stamp_media_checked`)
+- Test: `backend/tests/test_pg_migrations.py`, `backend/tests/orders/test_attempt_files.py`
+
+Migration (one file):
+- `ALTER TABLE entity_attachments ADD COLUMN archive_id integer, ADD COLUMN archive_media
+  text CHECK (archive_media IN ('finished_photo', 'timelapse')), ADD CONSTRAINT
+  entity_attachments_archive_pair CHECK ((archive_id IS NULL) = (archive_media IS NULL))`.
+- Backfill: rows whose `subject` is `order_item_fulfilment:%` or `order_item:%` and whose
+  caption matches `^Attempt [0-9]+, Bambuddy archive ([0-9]+)$`; `archive_media` from
+  `filename` (`finish_%` → `finished_photo`, `timelapse-%` → `timelapse`); only the oldest
+  row (`created_at, id`) per `(subject, archive_id, archive_media, filename)`.
+- `CREATE UNIQUE INDEX entity_attachments_archive_copy ON entity_attachments (subject,
+  archive_id, archive_media, filename) WHERE archive_id IS NOT NULL`.
+- `ALTER TABLE order_item_fulfilments ADD COLUMN media_checked_at timestamptz`.
+
+**Steps:**
+- [x] Failing test in `test_pg_migrations.py`: seed rows as `copy_in` wrote them (an
+  attempt's photo and timelapse, an item's pre-#5268 photo, a caption a person edited, two
+  rows on one key), migrate, assert the columns, the one-of-two rule, and that the index
+  exists.
+- [x] Failing test in `test_attempt_files.py`: a second insert with the same key raises
+  `ArchiveCopyExistsError` and leaves one row and one `blob_refs` hold; a different `filename`
+  on the same archive is allowed.
+- [x] Write the migration and the store/model changes; run
+  `cd backend && uv run pytest tests/test_pg_migrations.py tests/orders -n auto`.
+
+**Acceptance:** the backfill is exact for the seeded rows; the index refuses a duplicate;
+`Fulfilment` and `Attachment` carry the new fields in the API answers.
+
+**Lanes:** `backend`, `image`.
+
+### Story 3: `copy_in` writes provenance, survives a race, names its actor (#7232)
+
+**Goal:** Every copy, manual or automatic, records its archive and medium; a lost race
+answers with the winner's row; the actor is explicit; the audit line says `source`
+(spec §4.2, §4.5, §4.6). Also fixes F14.
+
+**Files:**
+- Modify: `backend/scadbuddy/orders/archives.py` (`copy_in`: passes `archive_id`,
+  `archive_media`, `source`; catches `ArchiveCopyExistsError` and answers the existing row;
+  `by` stays required and is the actor written)
+- Modify: `backend/scadbuddy/orders/lifecycle.py` (`add_attachment` takes `archive_id`,
+  `archive_media`, `source: str | None`; the `attachment.added` event carries `source`)
+- Modify: `backend/scadbuddy/api/orders.py` (`ArchiveCopy.what:
+  Literal["finished_photo", "timelapse"]`, F14)
+- Test: `backend/tests/orders/test_archives.py`, `backend/tests/api/test_order_print.py`
+  (it tests the copy route today)
+
+**Steps:**
+- [ ] Failing tests: a manual copy writes `archive_id`/`archive_media`; two concurrent
+  `copy_in` of the same photo give one row and both answer it; a copy of a second named
+  photo gives a second row; the audit event of an import has `source: "archive"`;
+  `POST …/copy` with `what: "file"` is a 422.
+- [ ] Implement; run `cd backend && uv run pytest tests/orders tests/api -k "archive or attachment" -n auto`.
+
+**Acceptance:** the tests pass; the manual button behaves as today, plus the columns.
+
+**Lanes:** `backend`, `image`.
+
+### Story 4: `mirror_media`, the `AttemptMedia` workflow, and the three triggers (#7233)
+
+**Goal:** An attempt that names an archive imports its latest finish photo and its
+timelapse with no click, after a hand attempt, a heard outcome, or a read of its archives;
+retried at +2 and +15 min (spec §4.1, §4.2, §4.6).
+
+**Files:**
+- Modify: `backend/scadbuddy/orders/archives.py` (`mirror_media(lifecycle, integrations,
+  blobs, claims, attempt, facts, *, limit)`: for each archive, the latest `finish_` by name
+  and the timelapse when `facts.timelapse`, skipping what `archive_media_present` has; each
+  medium its own try; a too-large medium logged with size and limit. `mirror_attempt(
+  attempt_id) -> StepResult` (`missing: bool`), stamping `media_checked_at`. `mirror_run`
+  and `attempt_archives` start the workflow)
+- Create: `backend/scadbuddy/workflows/attempt_media.py` (`AttemptMedia`,
+  `VersionedAttemptMedia`, AUTO_UPGRADE; input `{fulfilment_id, retries: bool}`; steps at
+  0, +2 min, +15 min when `retries`, else once; ends early when a step answers nothing
+  missing; activity `attempt_media_step`, `start_to_close` 30 min (a 1 GiB timelapse),
+  heartbeat while downloading, retry 3 times)
+- Create: `backend/scadbuddy/orders/attempt_media.py` (`MediaStarter` protocol,
+  `TemporalMediaStarter` as `orders/storefront/staged_files.py` `TemporalWatcher`: id
+  `attempt-media:<fulfilment id>`, `USE_EXISTING`, `ALLOW_DUPLICATE`; a failed start logged)
+- Modify: `backend/scadbuddy/main.py` (`LIBRARY_WORKFLOWS`, the library worker's activities)
+- Modify: `backend/scadbuddy/api/orders.py` (`_with_archive_facts` starts the workflow with
+  retries after the facts, for a hand attempt with archives; the read route passes the
+  starter)
+- Modify: `backend/scadbuddy/orders/component.py` (the starter on `OrdersComponent`; the
+  `on_outcome` lambda)
+- Test: `backend/tests/orders/test_archives.py`, `backend/tests/test_attempt_media_workflow.py`
+  (new, as `test_staged_file_workflow.py`), `backend/tests/api/` (the fulfilment route)
+
+**Steps:**
+- [ ] Failing tests with the `Archives` fake (it counts downloads): a hand attempt imports
+  both media; a run attempt's outcome imports both; a second step downloads nothing; an
+  item-level copy from before #5268 counts as present; a too-large timelapse still imports
+  the photo; without Bambuddy nothing is asked; the latest photo is the last by name, not
+  by list order; created_by is the attempt's.
+- [ ] Failing workflow tests (time-skipping env): steps at 0, 2 and 15 min; ends after the
+  first step that answers nothing missing; a second start joins the running one; a start
+  after the end runs again.
+- [ ] Failing route test: `POST …/fulfilments` with `archive_id` answers 201 when the
+  starter raises; the route never calls `download_archive_media`.
+- [ ] Implement; run `cd backend && uv run pytest tests/orders tests/test_attempt_media_workflow.py tests/api -k "fulfil or archive" -n auto`.
+
+**Acceptance:** the tests pass; a deploy with the new workflow type follows the
+`StagedFile` precedent (#6133: no `Recreate`, the library build is made current at start).
+
+**Lanes:** `backend`, `image`.
+
+### Story 5: The housekeeping sweep (#7234)
+
+**Goal:** An attempt whose triggers were missed (Temporal down, a lost outcome, a timelapse
+pulled by hand days later) is still imported within the hour, for 14 days (spec §4.6).
+
+**Files:**
+- Modify: `backend/scadbuddy/workflows/housekeeping.py` (`ATTEMPT_MEDIA_SWEEP =
+  "housekeeping_import_attempt_media"`, `ATTEMPT_MEDIA_PATCH`; in `SWEEPS` and
+  `PRUNE_SWEEPS`)
+- Modify: `backend/scadbuddy/orders/store.py` (`attempts_missing_media(created_after,
+  checked_before)`: attempts with archives (or a finished run), lacking a finished or a
+  timelapse row, `media_checked_at` null or older)
+- Modify: `backend/scadbuddy/main.py` (the sweep activity, `@activity.defn(name=ATTEMPT_MEDIA_SWEEP)`,
+  as `STOREFRONT_DRAFTS_SWEEP`'s), starting one-step `AttemptMedia` runs
+- Create: `backend/tests/fixtures/housekeeping_histories/attempt_media.json`, as
+  `auto_import.json`
+- Test: `backend/tests/test_housekeeping.py`, `backend/tests/test_housekeeping_replay.py`,
+  `backend/tests/orders/test_archives.py`
+
+**Steps:**
+- [ ] Failing tests: the sweep starts a run for an attempt 3 days old missing its photo;
+  not for one checked 10 minutes ago; not for one 15 days old; not for one with both media.
+  The replay test replays the old history with the patch.
+- [ ] Implement; run `cd backend && uv run pytest tests/test_housekeeping.py tests/test_housekeeping_replay.py tests/orders -n auto`.
+
+**Acceptance:** the tests pass; the sweep calls Bambuddy only through the workflow's step.
+
+**Lanes:** `backend`, `image`.
+
+### Story 6: Scan the printer for a missing timelapse, behind a setting (#7235) — dropped 2026-11-23
+
+Dropped by the owner's direction to distance ScadBuddy from Bambuddy. ScadBuddy never
+calls `timelapse/scan`: it is a new Bambuddy dependency, a match deletes the video from
+the printer's card, and it can attach another print's video. See spec §9.
+
+### Story 7: The read tells the truth, and the row loads on page open (#7236)
+
+**Goal:** The order page shows, after a reload, what each attempt has attached; offers
+only what is missing; and says which of the two timelapse states applies (spec §4.4,
+owner decision §8.2).
+
+**Files:**
+- Modify: `backend/scadbuddy/orders/archives.py` (`ArchiveOffer.finished_attachment_id`,
+  `.timelapse_attachment_id`)
+- Modify: `frontend/src/components/orders/ArchiveCopies.tsx` (load on mount for an attempt
+  with archives or a finished run; render from the answer; the **From Bambuddy…** button
+  goes; re-read every 10 s, at most six times, while a medium is offered and not attached;
+  the states: "Timelapse attached"; "waiting for Bambuddy to process the timelapse" (the
+  archive's `completed_at` is null or less than 1 hour ago); "no timelapse in Bambuddy
+  for this print" (`completed_at` 1 hour ago or more), spec §4.4)
+- Modify: `frontend/src/components/orders/FulfilmentForm.tsx` (remount the row after a
+  hand attempt is recorded)
+- Modify: `frontend/src/mocks/features/orders/` (the new fields)
+- Test: `backend/tests/orders/test_archives.py`, `frontend/src/components/orders/ArchiveCopies.test.tsx`,
+  `FulfilmentForm.test.tsx`
+
+**Steps:**
+- [ ] Load the `frontend-design` skill.
+- [ ] Failing backend test: the answer carries the ids of the attached rows.
+- [ ] Failing frontend tests: loads on mount with no click; "attached" after a reload; the
+  copy button shows only for a missing medium; each timelapse state; the re-read stops
+  after six reads (fake timers).
+- [ ] Implement; run `cd frontend && pnpm gen:api && pnpm exec vitest run src/components/orders`
+  and `pnpm typecheck`.
+
+**Acceptance:** the tests pass; the mocks show an attempt in each state.
+
+**Lanes:** `backend`, `image`.
+
+### Story 8: Agent text and docs (#7237)
+
+**Goal:** The agent and the docs describe the import (spec §4.7, §5 Docs).
+
+**Files:**
+- Modify: `agent/src/tools/orders.ts` (`order_item_fulfil`: the import starts after the
+  record and `order_attempt_archives` shows it; `order_attempt_archives`: the two ids and that a
+  read starts an import; `order_attempt_copy`: for a chosen `name`
+  and the fallback)
+- Modify: `docs/superpowers/specs/2026-10-18-orders-design.md` §6.2, §8.2 ("imported; the
+  copy route remains for a chosen photo and as the fallback"; the hand trigger of #6134),
+  Ruling 12 (automatic writes name the attempt's creator)
+- Modify: `backend/CLAUDE.md` orders section (the triggers, `AttemptMedia`, the columns,
+  the trap that `GET …/archives` starts an import)
+- Modify: `docs/features/orders-and-quotes.md` (one line on attempt media)
+- Test: `agent/test/` tool text tests if a snapshot covers these tools (grep the tool names)
+
+**Steps:**
+- [ ] Update the text; run `cd agent && pnpm test -- orders` and `pnpm typecheck`.
+
+**Acceptance:** no doc says "offered as one-click copies" for attempt media; the tool
+text matches the routes' behaviour.
+
+**Lanes:** `agent_durable` (any `agent/` change); `backend` and `image` for
+`backend/CLAUDE.md`.
+
+## Deviations from the spec (for the owner)
+
+None beyond the review of 2026-11-23, which the spec records in its "Reviewed against
+main" section.

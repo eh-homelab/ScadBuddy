@@ -63,14 +63,21 @@ Bambuddy (BB) 1.2.6b1. Spec: `docs/superpowers/specs/2026-11-14-filament-managem
 - **R-7150-10 A copy does not carry `added_full`.** Whether a spool was added full is a fact
   of the source spool's own history, as its ledger and weight lock are. `copy` leaves it out
   of the draft, so the copy's `added_full` is unset (`null`).
-- **R-7150-11 A copy keeps each preset row's origin.** The draft's preset rows
-  (`SpoolDraftPreset`) carry `migrated`. A source's `migrated` row stays `migrated` on the
-  copy, so the copy's first type drops it as it would the source's (`presets.drop_migrated`).
-  The spool form sends a copied row back `migrated` only while its values are unchanged, as
-  `set_presets` keeps a row sent back unchanged; a row the person edited is theirs.
+- **R-7150-11 A copy keeps each preset row's origin.** A source's `migrated` row stays
+  `migrated` on the copy, so the copy's first type drops it as it would the source's
+  (`presets.drop_migrated`). A row the person edited is theirs. The mechanism is R-7150-13:
+  the draft names its source as `copy_of`, and the server matches the rows by key and values.
 - **R-7150-12 Bulk preset refusals match `PUT …/presets`.** A bulk create whose preset row names an
   `sb-<id>` that does not exist is `PresetUnknownError` (`names_preset`), as the presets PUT
   answers it; any other foreign key is `CatalogRefError`.
+- **R-7150-13 A client never marks a preset row `migrated`.** The bulk body's preset rows are
+  plain `SpoolPresetCreate` rows: a row sent with `migrated` is a 422, as any unknown field
+  is. The copy draft names its source instead: `GET …/copy` answers `copy_of` (the source's
+  id), and the bulk body takes it. With `copy_of`, a row whose key and values match one of
+  that spool's `migrated` rows is written `migrated` (R-7150-11 kept), and any other row is
+  the person's, so an edited row is theirs. A `copy_of` that names no spool is a 422. The
+  spool form and `filament_spool_upsert` send `copy_of` when they create from a copy. Found
+  by the review of #7205.
 
 ## Tasks
 

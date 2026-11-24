@@ -307,6 +307,57 @@ async def test_a_preset_with_no_stamp_writes_no_blob_while_unchanged(
     assert len(kept) == 1
 
 
+async def test_another_bambuddys_preset_is_never_refreshed_or_reused(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """After the Bambuddy URL changes, the kept copy's id 7 is another preset: the old
+    Bambuddy's preset 7 takes no version from it, and a binding naming 7 gets a preset of
+    its own."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    held = HeldPresetStore(pg_pool)
+    doc = _doc("Old seven")
+    key, sha256 = await keep_document(blobs, document_bytes(doc))
+    with pg_pool.connection() as conn, conn.transaction():
+        old = create_on(
+            conn,
+            name="Old seven",
+            source="bambuddy",
+            key=key,
+            sha256=sha256,
+            doc=doc,
+            made_by="t",
+            bb_preset_id=7,
+            bb_instance="0ld0ld0ld0ld",
+            bb_updated_at="2026-11-20T01:00:00",
+        )
+    await held.keep(_held(7, "New seven", "2026-11-23T01:00:00", low="190"))
+    assert await refresh_bambuddy(pg_pool, blobs, held, "n3wn3wn3wn3w") == 0
+    store = FilamentPresetStore(pg_pool, lambda: blobs)
+    before = store.get(old)
+    assert before is not None and before.version == 1
+
+    type_id = _type(pg_pool, "PLA-I")
+    _bind(pg_pool, type_id, "7")
+    assert await adopt_held(pg_pool, blobs, held, "n3wn3wn3wn3w") == 1
+    [(ref, _)] = _bindings(pg_pool, type_id)
+    made = store.get(sb_id(ref) or 0)
+    assert made is not None and made.id != old
+    assert (made.name, made.bb_instance) == ("New seven", "n3wn3wn3wn3w")
+
+
+async def test_an_adopted_id_records_the_links_instance(pg_pool: PgPool, tmp_path: Path) -> None:
+    """A preset's Bambuddy id is a link (#7176): when presets are the only links, the
+    adoption records their Bambuddy, so a URL change later waits for a reset."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    held = HeldPresetStore(pg_pool)
+    await held.keep(_held(7, "Mine", "2026-11-20T01:00:00"))
+    _bind(pg_pool, _type(pg_pool, "PLA-R"), "7")
+    assert await adopt_held(pg_pool, blobs, held, "a1b2c3d4e5f6") == 1
+    with pg_pool.connection() as conn:
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+    assert state is not None and state["instance"] == "a1b2c3d4e5f6"
+
+
 async def test_a_scadbuddy_owned_preset_is_never_read_back(pg_pool: PgPool, tmp_path: Path) -> None:
     blobs = LocalBlobStore(tmp_path / "blobs")
     held = HeldPresetStore(pg_pool)

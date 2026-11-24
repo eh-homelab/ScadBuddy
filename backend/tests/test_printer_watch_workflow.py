@@ -38,6 +38,7 @@ from scadbuddy.workflows.printer_watch import (
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
 from tests.support.temporal import temporal_client, terminate_open_workflows
+from tests.support.waits import until
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
@@ -125,9 +126,7 @@ async def serving(client: Client, queue: str, watches: WatchActivities) -> Async
 
 
 async def _until(predicate: Any, timeout: float = 15) -> None:
-    async with asyncio.timeout(timeout):
-        while not predicate():
-            await asyncio.sleep(0.05)
+    await until(predicate, timeout, interval=0.05)
 
 
 async def test_watch_writes_reports_and_emits_on_change(
