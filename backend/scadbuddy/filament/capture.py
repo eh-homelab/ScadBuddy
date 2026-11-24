@@ -252,22 +252,25 @@ def _holder(conn: Conn, printer: UUID, seen: SeenTray) -> tuple[UUID | None, Fou
     """The spool ``seen`` holds, as `FilamentInventory.holder_on` finds it, but a tray with
     a key is read through `tags.seen_on` first, as a phone's reading is (#7273 G3), so
     its tag is marked seen by the AMS. The mark skips a locked tag row: the caller holds
-    spools, and a bind locks the tag before its spools."""
-    if seen.tray_uuid is not None or seen.tag_uid is not None:
-        _, holder = tags.seen_on(
-            conn,
-            tags.TagRead(
-                source="ams",
-                uid=seen.tag_uid,
-                tray_uuid=seen.tray_uuid,
-                printer_id=printer,
-                ams_id=seen.ams_id,
-                tray_id=seen.tray_id,
-            ),
-        )
-        if holder is not None:
-            return holder, "tag"
-    return FilamentInventory.holder_on(conn, printer, seen)
+    spools, and a bind locks the tag before its spools. `tags.seen_on` looked the keys up
+    already, so a miss goes on to the fingerprint only (`FilamentInventory.holder_by_link`)."""
+    if seen.tray_uuid is None and seen.tag_uid is None:
+        return FilamentInventory.holder_on(conn, printer, seen)
+    _, holder = tags.seen_on(
+        conn,
+        tags.TagRead(
+            source="ams",
+            uid=seen.tag_uid,
+            tray_uuid=seen.tray_uuid,
+            printer_id=printer,
+            ams_id=seen.ams_id,
+            tray_id=seen.tray_id,
+        ),
+    )
+    if holder is not None:
+        return holder, "tag"
+    linked = FilamentInventory.holder_by_link(conn, printer, seen)
+    return (None, None) if linked is None else (linked, "link")
 
 
 def reconcile(

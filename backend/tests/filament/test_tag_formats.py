@@ -192,6 +192,28 @@ def test_openspool_names_a_json_integer_literal_too_long_for_python() -> None:
     assert got.warnings == ["min_temp"]
 
 
+def test_openspool_reads_no_text_from_a_non_finite_number() -> None:
+    # json.dumps writes NaN and Infinity as bare tokens, which Python's json reads.
+    record = _json_record(
+        OPENSPOOL_SAMPLE | {"type": float("nan"), "brand": float("inf"), "version": float("-inf")}
+    )
+    got = decode([record])
+    assert got is not None and (got.material, got.brand, got.version) == (None, None, "")
+
+
+def test_openspool_cuts_a_long_string_and_names_it() -> None:
+    text = json.dumps(
+        OPENSPOOL_SAMPLE | {"brand": "B" * 300, "type": "é" * 200}, ensure_ascii=False
+    )
+    # Built unvalidated: the decoder must hold whatever a tag gives, over 888 bytes or not.
+    record = NdefRecord.model_construct(
+        record_type="mime", media_type="application/json", data_hex=text.encode().hex()
+    )
+    got = decode([record])
+    assert got is not None and got.brand == "B" * 128 and got.material == "é" * 128
+    assert got.warnings == ["type", "brand"]
+
+
 def test_openspool_encodes_back_to_the_sample_keys_and_strings() -> None:
     enc = encode("openspool", FACTS_PLA)
     assert len(enc.records) == 1 and enc.warnings == []

@@ -204,32 +204,45 @@ from scadbuddy.workflows.commands import (
 #: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
 #: (Decision 17, R-T8-3); "Sync now" and the links' reset (#6773) nudge a full pass
-#: themselves; the Bambuddy import pulls
-#: and the RFID scan writes nothing, so neither has anything to push (Decision 163), nor
-#: has the labels PDF (#7157);
+#: themselves; the Bambuddy import pulls and writes nothing, so it has nothing to push
+#: (Decision 163), nor has the labels PDF (#7157);
 #: the printer labels (#6955) make only the printer and AMS places that capture makes
-#: too, un-nudged, and every labels-page load and agent read calls them.
+#: too, un-nudged, and every labels-page load and agent read calls them. The phone's tag
+#: routes (#7273) change nothing the sync pushes: a backup, the records to write, a
+#: restore's records and the agent's NFC jobs. A tag reading nudges only when it binds
+#: (`read_tag` sets `SKIP_NUDGE` otherwise); a checked write binds, so it nudges.
 NOT_NUDGED = frozenset(
     {
         "sync_ams_weights",
         "run_filament_sync",
         "reset_filament_sync_links",
         "import_bambuddy",
-        "scan_rfid_tag",
         "printer_labels",
         "render_labels_pdf",
+        "back_up_tag",
+        "tag_records",
+        "restore_tag_backup",
+        "create_nfc_job",
+        "claim_nfc_job",
+        "cancel_nfc_job",
+        "finish_nfc_job",
     }
 )
+#: A ``request.state`` attribute: a route that sets it true is not nudged for this request.
+SKIP_NUDGE = "skip_filament_nudge"
 
 
 async def nudge_after_write(request: Request, state: StateDep) -> AsyncIterator[None]:
     """A router's dependency: after a write's 2xx answer, nudge the filament sync in the
     background (Decision 17). A route that raised (any error answer, a 422 of its body
-    too) nudges nothing, and neither does a read or a route in `NOT_NUDGED`."""
+    too) nudges nothing, and neither does a read, a route in `NOT_NUDGED` or a request
+    whose route set `SKIP_NUDGE`."""
     yield
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return
     if getattr(request.scope.get("route"), "name", None) in NOT_NUDGED:
+        return
+    if getattr(request.state, SKIP_NUDGE, False):
         return
     state.filament_sync.nudge_soon()
 
@@ -1750,11 +1763,14 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
     ),
 )
 async def read_tag(
+    request: Request,
     filament: FilamentDep,
     store: SettingsStoreDep,
     caller: CallerDep,
     body: m.TagReadIn,
 ) -> m.TagReadResult:
+    # Only a bind changes what the sync pushes (`NOT_NUDGED`).
+    setattr(request.state, SKIP_NUDGE, body.bind_spool_id is None)
     reading = tags.TagRead(
         source="phone", uid=body.uid, tag_type=body.tag_type, records=tuple(body.records)
     )

@@ -19,6 +19,7 @@ A write replaces the tag's whole message with one record of one format (plan rul
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -40,7 +41,8 @@ KIND_OF: Final[dict[TagFormat, m.TagKind]] = {
     "openspool": "ntag_openspool",
     "opentag3d": "ntag_opentag",
 }
-#: The spool's ``data_origin`` after a write of each format, in Bambuddy's words (R11).
+#: The spool's ``data_origin`` after a write of each format (R11): ``opentag3d`` is
+#: Bambuddy's own word; Bambuddy has none for OpenSpool, so ``openspool`` is ScadBuddy's.
 ORIGIN_OF: Final[dict[TagFormat, str]] = {"openspool": "openspool", "opentag3d": "opentag3d"}
 
 
@@ -141,13 +143,14 @@ def _media(record: m.NdefRecord) -> str | None:
 def _openspool_object(record: m.NdefRecord) -> dict[str, Any] | None:
     """The record's JSON object when it is an OpenSpool one. A tag is untrusted, so every
     number is kept as its text (no ``int()`` of a huge literal, which Python refuses past
-    4300 digits); `_whole` bounds it before it is converted."""
+    4300 digits); `_whole` bounds it before it is converted. ``NaN`` and ``Infinity`` stay
+    floats, so `_text` and `_whole` refuse them."""
     try:
         obj = json.loads(
             bytes.fromhex(record.data_hex).decode("utf-8"),
             parse_int=str,
             parse_float=str,
-            parse_constant=str,
+            parse_constant=float,
         )
     except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError among them
         return None
@@ -200,10 +203,28 @@ def _openspool_encode(facts: SpoolFacts) -> EncodedTag:
     return EncodedTag("openspool", [_mime(OPENSPOOL_MEDIA, text.encode("utf-8"))], warnings)
 
 
+#: The most characters a string read from an OpenSpool tag keeps, as a spool's names hold
+#: (`models.Name`).
+_TEXT_MAX_CHARS: Final = 128
+
+
 def _text(value: object) -> str | None:
+    """A string, or a finite number as its text. A tag is untrusted: ``NaN`` and
+    ``Infinity`` are not text."""
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     return str(value).strip() or None
+
+
+def _capped(value: object, key: str, warnings: list[str]) -> str | None:
+    """`_text`, cut to `_TEXT_MAX_CHARS` characters; a cut names ``key`` in ``warnings``."""
+    text = _text(value)
+    if text is not None and len(text) > _TEXT_MAX_CHARS:
+        warnings.append(key)
+        text = text[:_TEXT_MAX_CHARS].rstrip()
+    return text
 
 
 #: The longest number text `_whole` reads, and its largest magnitude: under 10,000,000
@@ -248,11 +269,14 @@ def _openspool_decode(obj: dict[str, Any]) -> m.DecodedSpool:
             warnings.append(key)
             continue
         temps[key] = number if number > 0 else None
+    version = _capped(obj.get("version"), "version", warnings)
+    material = _capped(obj.get("type"), "type", warnings)
+    brand = _capped(obj.get("brand"), "brand", warnings)
     return m.DecodedSpool(
         format="openspool",
-        version=_text(obj.get("version")) or "",
-        material=_text(obj.get("type")),
-        brand=_text(obj.get("brand")),
+        version=version or "",
+        material=material,
+        brand=brand,
         rgba=canonical_rgba(hex_) if isinstance(hex_, str) else None,
         nozzle_temp_min=temps["min_temp"],
         nozzle_temp_max=temps["max_temp"],

@@ -1215,8 +1215,9 @@ class Spool(_Row):
     #: with none, costed or not; one with a line is refused (#6700).
     invoice_line_id: UUID | None = None
     #: How the spool's data came in, in Bambuddy's words (``rfid_auto``, ``nfc_link``,
-    #: ``opentag3d`` ...), whether the pull or ScadBuddy wrote it (#7149 R-7149-1). Read
-    #: only: the pull, a person's tag bind and a confirmed NTAG write set it.
+    #: ``opentag3d`` ...) or ScadBuddy's ``openspool``, whether the pull or ScadBuddy wrote
+    #: it (#7149 R-7149-1). Read only: the pull, a person's tag bind and a checked tag write
+    #: from the phone page (#7273) set it.
     data_origin: str | None = None
     #: Whether the spool was added full; ``None`` is not known (R-7149-2).
     added_full: bool | None = None
@@ -1850,6 +1851,22 @@ class NdefRecord(_In):
     def _lower(cls, value: str) -> str:
         return value.lower()
 
+    @field_validator("media_type", "id", "encoding", "lang")
+    @classmethod
+    def _utf8(cls, value: str | None) -> str | None:
+        return _utf8(value)
+
+
+def _utf8(value: str | None) -> str | None:
+    """``value`` when UTF-8 can hold it. JSON can carry a lone UTF-16 surrogate
+    (``"\\ud800"``), which no UTF-8 holds, so storing or hashing it would fail later."""
+    if value is not None:
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("the text holds a lone UTF-16 surrogate") from None
+    return value
+
 
 def _check_fits(records: Sequence[NdefRecord]) -> None:
     if sum(len(r.data_hex) // 2 for r in records) > MAX_RECORD_BYTES:
@@ -2015,6 +2032,11 @@ class NfcJobResultIn(_In):
     )
     backup_id: UUID | None = None
     error: Annotated[str, Field(max_length=500)] | None = None
+
+    @field_validator("error")
+    @classmethod
+    def _utf8(cls, value: str | None) -> str | None:
+        return _utf8(value)
 
     @model_validator(mode="after")
     def _fits(self) -> Self:

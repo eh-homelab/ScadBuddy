@@ -639,6 +639,41 @@ def test_backups_come_in_pages(pg_pool: PgPool) -> None:
     assert tags.backups(store, made[0].tag_id, before=uuid4()) == []
 
 
+def test_a_page_before_another_tags_backup_is_empty(pg_pool: PgPool) -> None:
+    # `before` names a backup of this tag only; one of another tag pages nothing.
+    store = FilamentSpoolStore(pg_pool)
+    mine = _backup(store, "04AA")
+    other = _backup(store, "04BB")
+    assert tags.backups(store, mine.tag_id, before=other.id) == []
+    found = tags.backups(store, mine.tag_id)
+    assert found is not None and [b.id for b in found] == [mine.id]
+
+
+def test_backups_made_at_one_time_page_by_id(pg_pool: PgPool) -> None:
+    # Backups of one transaction share `at` (now()); the id breaks the tie, highest first,
+    # and `before` pages past each of them exactly once.
+    store = FilamentSpoolStore(pg_pool)
+    tag_id = _backup(store).tag_id
+    with pg_pool.connection() as conn, conn.transaction():
+        for _ in range(3):
+            conn.execute(
+                "INSERT INTO filament_tag_backups (tag_id, uid, records, reason, actor)"
+                " VALUES (%s, '04AA', '[]', 'spool_write', 'ann')",
+                (tag_id,),
+            )
+    found = tags.backups(store, tag_id)
+    assert found is not None and len(found) == 4
+    tied = found[:3]
+    assert len({b.at for b in tied}) == 1
+    assert [b.id for b in tied] == sorted((b.id for b in tied), reverse=True)
+    paged: list[UUID] = []
+    before: UUID | None = None
+    while page := tags.backups(store, tag_id, limit=1, before=before):
+        paged.append(page[0].id)
+        before = page[0].id
+    assert paged == [b.id for b in found]
+
+
 def test_backups_cannot_be_truncated(pg_pool: PgPool) -> None:
     _backup(FilamentSpoolStore(pg_pool))
     with pg_pool.connection() as conn, pytest.raises(psycopg.errors.RaiseException):
@@ -659,6 +694,16 @@ def test_deleting_a_spool_keeps_the_backups(pg_pool: PgPool) -> None:
     assert store.delete(spool) is True
     found = tags.backups(store, made.tag_id)
     assert found is not None and [b.id for b in found] == [made.id]
+
+
+@pytest.mark.parametrize("field", ["media_type", "id", "encoding", "lang"])
+def test_a_record_with_a_lone_surrogate_is_refused(field: str) -> None:
+    # The HTTP body's JSON parse refuses one already (measured: 422); a record built in
+    # Python must be refused too, before it is hashed or stored.
+    with pytest.raises(ValueError):
+        NdefRecord.model_validate({"record_type": "text", "data_hex": "", field: "a\ud800"})
+    with pytest.raises(ValueError):
+        NfcJobResultIn(error="a\ud800")
 
 
 def test_a_backup_over_one_tags_bytes_is_refused() -> None:

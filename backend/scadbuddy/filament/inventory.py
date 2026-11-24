@@ -299,6 +299,14 @@ class FilamentInventory:
         keyed = tags.holder_by_keys(conn, seen.tray_uuid, seen.tag_uid)
         if keyed is not None:
             return keyed, "tag"
+        linked = FilamentInventory.holder_by_link(conn, printer_id, seen)
+        return (None, None) if linked is None else (linked, "link")
+
+    @staticmethod
+    def holder_by_link(conn: Conn, printer_id: UUID, seen: SeenTray) -> UUID | None:
+        """`holder_on`'s second look only: the spool placed at the tray whose
+        ``tray_fingerprint`` equals the tray's. For a caller that looked the keys up already
+        (`filament/capture.py`, through `tags.seen_on`)."""
         placed = conn.execute(
             "SELECT s.id FROM filament_spools s JOIN filament_locations l ON l.id = s.location_id"
             " WHERE l.printer_id = %s AND l.ams_id = %s AND l.tray_id = %s"
@@ -311,7 +319,10 @@ class FilamentInventory:
                 tray_fingerprint(seen.material, seen.rgba or seen.colour),
             ),
         ).fetchone()
-        return (None, None) if placed is None else (placed["id"], "link")
+        if placed is None:
+            return None
+        found: UUID = placed["id"]
+        return found
 
     @staticmethod
     def place_on(

@@ -634,14 +634,18 @@ def test_an_unknown_ams_tag_makes_no_tag_row(pg_pool: PgPool) -> None:
 
 def test_a_resent_report_does_not_touch_the_tag_again(pg_pool: PgPool) -> None:
     """The second write shows the same trays, so `trays_changed` runs no reconcile."""
-    _spool(pg_pool, tray_uuid=U1)
+    spool = _spool(pg_pool, tray_uuid=U1)
     pid, reports = _printer(pg_pool)
     report = _report(_tray(1, U1, remain=80))
     seen = []
+    loads = []
     for _ in range(2):
         with pg_pool.connection() as conn, conn.transaction():
             reports.advance_in(conn, pid, report, T0)
         seen.append(_tag_row(pg_pool, U1)["last_seen_at"])
+        loads.append(len(_events(pg_pool, spool, "loaded")))
+    # The first write reconciled (it booked the load); the second touched nothing.
+    assert loads == [1, 1]
     assert seen[0] is not None and seen[1] == seen[0]
 
 
@@ -661,4 +665,6 @@ def test_a_tag_locked_by_a_bind_is_skipped_not_waited_on(pg_pool: PgPool) -> Non
             )
     assert result.loaded == 1
     assert [e.kind for e in _events(pg_pool, spool, "loaded")] == ["loaded"]
-    assert _tag_row(pg_pool, U1)["last_seen_at"] == before["last_seen_at"]
+    after = _tag_row(pg_pool, U1)
+    assert after["last_seen_at"] == before["last_seen_at"]
+    assert after["last_seen_source"] != "ams"

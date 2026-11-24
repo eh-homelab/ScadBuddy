@@ -663,3 +663,22 @@ def test_the_spoolbuddy_routes_are_gone(client: TestClient) -> None:
         f"{base}/cancel",
     ):
         assert client.post(path, json={}).status_code in (404, 405), path
+
+
+@pytest.mark.parametrize("field", ["media_type", "id", "encoding", "lang"])
+def test_a_record_with_a_lone_surrogate_is_422(client: TestClient, field: str) -> None:
+    # JSON can carry a lone UTF-16 surrogate, which no UTF-8 holds: it is refused at the
+    # edge, never stored or hashed into a 500.
+    body = '{"kind": "write", "records": [{"record_type": "text", "data_hex": "00", '
+    body += f'"{field}": "a\\ud800"' + "}]}"
+    got = client.post(JOBS, content=body, headers={"content-type": "application/json"})
+    assert got.status_code == 422, got.text
+
+
+def test_a_job_error_with_a_lone_surrogate_is_422(client: TestClient) -> None:
+    got = client.post(
+        f"{JOBS}/{_armed(client)}/result",
+        content='{"error": "a\\ud800"}',
+        headers={"content-type": "application/json"},
+    )
+    assert got.status_code == 422, got.text
