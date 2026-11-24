@@ -294,9 +294,9 @@ module path), `place` (a station name, nullable), `assignee` (nullable principal
    stays open. A pass sends the update to the run, and the task is marked answered once the
    update landed, so a task is never answered without its run. One decision row per call
    picks the winner of two answers. A failure's message never quotes the rejected value.
-5. `prompt()` returns the answer as a dict, validated again in the run with a model built
-   from the schema (the `inputs_model` path flow inputs use), so the script reads
-   `answer["email"]`.
+5. The run marks its task with the answer it received, and `prompt()` returns the answer as a
+   dict, resolved as flow inputs are (`resolve_inputs`: defaults filled, then the model built
+   from the schema), so the script reads `answer["email"]`.
 
 The same, as a sequence:
 
