@@ -603,8 +603,9 @@ Lock order: callers lock items in `item_id` order, and lock orders before lots, 
   (`POST /parts` makes parts in `orders_currency`, `orders/parts.py` `create`), so
   `InventoryPart.currency` reads back the same, also for a part with no supplier. Add stock
   with a body pack price receives in that currency, so a foreign one opens a cost-unknown
-  lot (R-7067-11, R-P2-11). A pack needs a supplier: a pack without one is 422 with loc
-  `supplier` (R-P2-34). `unit_cost_minor` averages the known lots only, and
+  lot (R-7067-11, R-P2-11). A `/parts` create or edit that sets a pack (a `pack_size` other than 1 or a
+  `pack_price_minor` other than 0) on a part with no supplier is 422 with loc `supplier`;
+  Add stock is not affected (R-P2-34). `unit_cost_minor` averages the known lots only, and
   `InventoryPart.cost_unknown` is true when any on-hand lot is unknown (R-P2-35);
   `PartsPage` shows "unknown" for it; `POST /parts/{id}/adjust` → `count_item`; `GET /parts/{id}/moves`
   maps `Move` to `StockMove`; each route's description says "Alias of /inventory/…; goes
@@ -616,7 +617,7 @@ Lock order: callers lock items in `item_id` order, and lock orders before lots, 
 - [ ] **Step 1: Add one test and run.** `test_a_part_in_another_currency_round_trips`
   in `tests/api/test_parts.py`: a part migrated in EUR (shop USD) answers `currency ==
   "EUR"` on `GET /parts`; `POST /parts/{id}/stock` with `packs: 1` writes an EUR price
-  point and a lot with `cost_unknown`, `cost_currency = 'EUR'`, `unit_cost_minor = 0` and `foreign_unit_cost_minor` = the entered cost (R-P2-11); `GET /inventory/items/{id}` has `cost_unknown`. A supplier-less EUR part (no offer, an opening lot with `cost_currency = 'EUR'`) reads back `currency == "EUR"`, and `POST /parts/{id}/stock` with a body `pack_price_minor` opens a `cost_unknown` lot, never a costed USD one (R-P2-36). A pack with no supplier is 422 loc `supplier` (R-P2-34). `unit_cost_minor` averages known lots only and `cost_unknown` is true with an unknown lot (R-P2-35).
+  point and a lot with `cost_unknown`, `cost_currency = 'EUR'`, `unit_cost_minor = 0` and `foreign_unit_cost_minor` = the entered cost (R-P2-11); `GET /inventory/items/{id}` has `cost_unknown`. A supplier-less EUR part (no offer, an opening lot with `cost_currency = 'EUR'`) reads back `currency == "EUR"`, and `POST /parts/{id}/stock` with a body `pack_price_minor` opens a `cost_unknown` lot, never a costed USD one (R-P2-36). A `/parts` create or edit that sets a pack (size other than 1 or price other than 0) with no supplier is 422 loc `supplier`; `make_part` keeps its supplier (R-P2-34). `unit_cost_minor` averages known lots only and `cost_unknown` is true with an unknown lot (R-P2-35).
   Run `cd backend && uv run --frozen pytest tests/api/test_parts.py -q` — Expected: FAIL (tables gone).
 - [ ] **Step 2: Implement** the aliases; change the two entity strings.
 - [ ] **Step 3: Run** the same and `cd frontend && pnpm exec vitest run src/pages/PartsPage.test.tsx` (after `pnpm gen:api`) and `pnpm typecheck` — Expected: PASS.
@@ -863,7 +864,10 @@ task above follows them.
 - **R-P2-32** (Task 4). Lot inserts take `_open_lock`. `lock_items` takes `_open_lock`, then
   the lots.
 - **R-P2-33** (Task 7). An estimate outside the shop currency is 0 and unknown.
-- **R-P2-34** (Task 9). A pack needs a supplier: 422 with loc `supplier`.
+- **R-P2-34** (Task 9). A `/parts` create or edit that sets a pack (a `pack_size` other
+  than 1 or a `pack_price_minor` other than 0) on a part with no supplier is 422 with loc
+  `supplier`. Add stock (`POST /parts/{id}/stock`) is not affected: it takes the body's
+  pack price (R-P2-25, R-P2-36).
 - **R-P2-35** (Task 9). The `/parts` unit cost averages known lots only.
   `InventoryPart.cost_unknown` is set when a lot is unknown. The UI shows "unknown".
 - **R-P2-36** (Task 9). The alias currency is the currency of the offer's latest price point,
