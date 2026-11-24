@@ -115,18 +115,16 @@ def test_row_files_match_the_media_views(catalogue: Catalogue, paths: DataPaths)
 
 def test_row_cover_hash_is_the_thumbnail_hash_of_a_media_image(catalogue: Catalogue) -> None:
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
-    catalogue.add_media("demo", _stage(catalogue, PNG, "image", "png"))
-    _assert_cover_is_the_thumbnail(catalogue, "demo")
+    added = catalogue.add_media("demo", _stage(catalogue, PNG, "image", "png"))
+    _assert_cover_is_the_thumbnail(catalogue, "demo", f"models/demo/media/{added.media[0].file}")
 
 
 def test_row_cover_hash_is_the_thumbnail_hash_of_a_legacy_thumbnail(
     catalogue: Catalogue,
 ) -> None:
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"), thumbnail=PNG)
-    row = _assert_cover_is_the_thumbnail(catalogue, "demo")
+    row = _assert_cover_is_the_thumbnail(catalogue, "demo", "models/demo/thumbnail.png")
     assert row.files == {"thumbnail.png": len(PNG)}
-    assert row.cover is not None
-    assert row.cover["path"] == "models/demo/thumbnail.png"
 
 
 def test_row_cover_hash_is_the_thumbnail_hash_of_a_built_ins_chosen_cover(
@@ -136,11 +134,16 @@ def test_row_cover_hash_is_the_thumbnail_hash_of_a_built_ins_chosen_cover(
     added = catalogue.add_media(builtin, _stage(catalogue, PNG + b"mine", "image", "png"))
     chosen = added.media[1]
     catalogue.set_cover(builtin, chosen.id)
-    row = _assert_cover_is_the_thumbnail(catalogue, builtin)
+    row = _assert_cover_is_the_thumbnail(
+        catalogue, builtin, f"builtin-media/keychain/{chosen.file}"
+    )
+    record = catalogue.record(builtin)
     assert row.origin == "builtin"
-    assert row.name == "Keychain"
-    assert row.cover is not None
-    assert row.cover["path"] == f"builtin-media/keychain/{chosen.file}"
+    assert row.name == record.name == "Keychain"
+    assert row.updated_at == record.updated_at
+    assert row.has_readme == record.has_readme
+    assert row.inputs_version == record.inputs_version
+    assert row.version == record.version
     assert row.files == {
         "media/front.png": len(PNG),
         f"builtin-media/{chosen.file}": len(PNG) + 4,
@@ -148,17 +151,18 @@ def test_row_cover_hash_is_the_thumbnail_hash_of_a_built_ins_chosen_cover(
     assert row.files_stamp == _stamp(catalogue, builtin)
 
 
-def _assert_cover_is_the_thumbnail(catalogue: Catalogue, template_id: str) -> TemplateRow:
+def _assert_cover_is_the_thumbnail(
+    catalogue: Catalogue, template_id: str, path: str
+) -> TemplateRow:
     row = _row(catalogue, template_id)
     thumbnail = catalogue.thumbnail(template_id)
     assert thumbnail is not None
     assert row.cover == {
-        "path": row.cover["path"] if row.cover else "",
+        "path": path,
         "content_type": thumbnail[1],
         "sha256": hashlib.sha256(thumbnail[0]).hexdigest(),
     }
-    assert row.cover is not None
-    assert (catalogue.paths.root / row.cover["path"]).read_bytes() == thumbnail[0]
+    assert (catalogue.paths.root / path).read_bytes() == thumbnail[0]
     return row
 
 
@@ -256,6 +260,26 @@ def test_stamp_raises_on_an_os_error_other_than_not_found(
         return real_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(os, "stat", stat)
+    with pytest.raises(OSError) as raised:
+        _stamp(catalogue, "demo")
+    assert raised.value.errno == errno.ESTALE
+
+
+def test_stamp_raises_when_a_folder_listing_is_stale(
+    catalogue: Catalogue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review M3: ESTALE on the listing of media/, not only on a file's stat.
+    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
+    catalogue.add_media("demo", _stage(catalogue, PNG, "image", "png"))
+    stale = os.fspath(catalogue.media_dir("demo"))
+    real_listdir = os.listdir
+
+    def listdir(path: Any = ".") -> list[str]:
+        if os.fspath(path) == stale:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", listdir)
     with pytest.raises(OSError) as raised:
         _stamp(catalogue, "demo")
     assert raised.value.errno == errno.ESTALE
