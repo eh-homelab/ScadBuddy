@@ -5,13 +5,16 @@ the spool that holds it."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
 from scadbuddy.filament import models as m
+from scadbuddy.filament.catalog import find_by_key
 from scadbuddy.filament.spools import Conn, FilamentDefaults, FilamentSpoolStore, NoSpoolError
+from scadbuddy.filament.tag_formats import KIND_OF, decode, format_of
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 
@@ -66,11 +69,63 @@ def holder_by_keys(conn: Conn, tray_uuid: str | None, tag_uid: str | None) -> UU
 
 
 def kind_of(read: TagRead) -> m.TagKind:
-    """The kind a reading claims: a Bambu tray UUID is a MIFARE tag; no other format is
-    known yet."""
+    """The kind a reading claims: a Bambu tray UUID is a MIFARE tag; else the kind of the
+    format its records hold (`tag_formats.format_of`), else ``other``."""
     if clean_tray_uuid(read.tray_uuid) is not None:
         return "bambu_mifare"
-    return "other"
+    fmt = format_of(read.records)
+    return "other" if fmt is None else KIND_OF[fmt]
+
+
+def _set_kind(conn: Conn, tag_id: UUID, read: TagRead) -> None:
+    """Give the tag the kind its records' format names (R13). A Bambu tag keeps its kind."""
+    fmt = format_of(read.records)
+    if fmt is not None:
+        conn.execute(
+            "UPDATE filament_tags SET kind = %s"
+            " WHERE id = %s AND kind <> 'bambu_mifare' AND kind <> %s",
+            (KIND_OF[fmt], tag_id, KIND_OF[fmt]),
+        )
+
+
+#: The decoded values a draft copies as they are.
+_DRAFT_FIELDS: Final = (
+    "colour_name",
+    "rgba",
+    "extra_colours",
+    "diameter_mm",
+    "density_g_cm3",
+    "nozzle_temp_min",
+    "nozzle_temp_max",
+    "bed_temp_min",
+    "bed_temp_max",
+    "drying_temp_c",
+    "drying_hours",
+    "label_weight_g",
+)
+
+
+def draft_of(conn: Conn, decoded: m.DecodedSpool) -> m.SpoolCreate | None:
+    """A new spool as ``decoded`` describes it, its material, brand and subtype found in
+    the catalog by key (R12); ``None`` when no material is found. A value a spool cannot
+    hold (a temperature over 1000) is left out."""
+    material_id = None if not decoded.material else find_by_key(conn, "materials", decoded.material)
+    if material_id is None:
+        return None
+    values: dict[str, object] = {
+        "material_id": material_id,
+        "brand_id": None if not decoded.brand else find_by_key(conn, "brands", decoded.brand),
+        "subtype_id": None
+        if not decoded.subtype
+        else find_by_key(conn, "subtypes", decoded.subtype, material=material_id),
+    }
+    values |= {f: getattr(decoded, f) for f in _DRAFT_FIELDS}
+    try:
+        return m.SpoolCreate.model_validate(values)
+    except ValidationError as exc:
+        for error in exc.errors():
+            values.pop(str(error["loc"][0]), None)
+    return m.SpoolCreate.model_validate(values)
 
 
 def seen_on(conn: Conn, read: TagRead) -> tuple[UUID | None, UUID | None]:
@@ -92,6 +147,7 @@ def seen_on(conn: Conn, read: TagRead) -> tuple[UUID | None, UUID | None]:
         return None, None
     else:
         tag_id = FilamentSpoolStore.tag_on(conn, uid, tray, kind_of(read))
+        _set_kind(conn, tag_id, read)
         _mark(conn, tag_id, read)
     if tag_id is None:
         return None, None
@@ -155,7 +211,9 @@ def read_on(
     next_step: Literal["open_spool", "bind_or_create", "none"] = (
         "open_spool" if spool else "bind_or_create" if tag else "none"
     )
-    return m.TagReadResult(tag=tag, spool=spool, decoded=None, draft=None, next=next_step)
+    decoded = decode(read.records)
+    draft = None if decoded is None or holder is not None else draft_of(conn, decoded)
+    return m.TagReadResult(tag=tag, spool=spool, decoded=decoded, draft=draft, next=next_step)
 
 
 def read(

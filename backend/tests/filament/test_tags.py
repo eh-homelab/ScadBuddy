@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -211,3 +212,101 @@ def test_a_bind_with_no_uid_is_refused_before_the_spool_is_looked_up(pg_pool: Pg
             bind_spool_id=uuid4(),
             defaults=DEFAULTS,
         )
+
+
+# The OpenSpool README's sample: https://github.com/spuder/OpenSpool/blob/c060a06c/README.md
+OPENSPOOL_SAMPLE = {
+    "protocol": "openspool",
+    "version": "1.0",
+    "type": "PLA",
+    "color_hex": "FFAABB",
+    "brand": "Generic",
+    "min_temp": "220",
+    "max_temp": "240",
+}
+
+
+def _json_record(obj: object) -> NdefRecord:
+    return NdefRecord(
+        record_type="mime", media_type="application/json", data_hex=json.dumps(obj).encode().hex()
+    )
+
+
+def _pla(pool: PgPool) -> UUID:
+    return next(
+        r.id
+        for r in CatalogStore(pool).list("materials")
+        if isinstance(r, Material) and r.name == "PLA"
+    )
+
+
+def _openspool_read(uid: str | None = "04AA", sample: dict[str, str] = OPENSPOOL_SAMPLE) -> TagRead:
+    return TagRead(source="phone", uid=uid, records=(_json_record(sample),))
+
+
+def test_a_read_decodes_openspool_and_sets_the_tags_kind(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    result = tags.read(store, _openspool_read(), actor="ann", defaults=DEFAULTS)
+    assert result.decoded is not None and result.decoded.format == "openspool"
+    assert result.tag is not None and result.tag.kind == "ntag_openspool"
+
+
+def test_a_read_changes_a_known_tags_kind_to_its_records_format(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    store.bind_tag(_spool(store, pg_pool), tag_uid="04AA", kind="other", actor="ann")
+    # tag_version 2004, then material "PLA"; every other byte reads as 0.
+    payload = (2004).to_bytes(2, "big") + b"PLA"
+    ot3d = NdefRecord(
+        record_type="mime", media_type="application/opentag3d", data_hex=payload.hex()
+    )
+    result = tags.read(
+        store, TagRead(source="phone", uid="04AA", records=(ot3d,)), actor="ann", defaults=DEFAULTS
+    )
+    assert result.tag is not None and result.tag.kind == "ntag_opentag"
+    result = tags.read(store, _openspool_read(), actor="ann", defaults=DEFAULTS)
+    assert result.tag is not None and result.tag.kind == "ntag_openspool"
+
+
+def test_a_new_tag_with_a_known_material_answers_a_draft(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    result = tags.read(store, _openspool_read(), actor="ann", defaults=DEFAULTS)
+    assert result.draft is not None and result.draft.material_id == _pla(pg_pool)
+    assert (result.draft.nozzle_temp_min, result.draft.nozzle_temp_max) == (220, 240)
+    assert result.draft.rgba == "#FFAABBFF"
+
+
+def test_a_new_tag_with_an_unknown_material_answers_no_draft(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    sample = OPENSPOOL_SAMPLE | {"type": "UNOBTAINIUM"}
+    result = tags.read(store, _openspool_read(sample=sample), actor="ann", defaults=DEFAULTS)
+    assert result.decoded is not None and result.draft is None
+
+
+def test_a_draft_leaves_out_a_value_a_spool_cannot_hold(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    sample = OPENSPOOL_SAMPLE | {"max_temp": "5000"}
+    result = tags.read(store, _openspool_read(sample=sample), actor="ann", defaults=DEFAULTS)
+    assert result.draft is not None and result.draft.material_id == _pla(pg_pool)
+    assert (result.draft.nozzle_temp_min, result.draft.nozzle_temp_max) == (220, None)
+
+
+def test_a_held_tag_answers_no_draft(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    store.bind_tag(_spool(store, pg_pool), tag_uid="04AA", kind="other", actor="ann")
+    result = tags.read(store, _openspool_read(), actor="ann", defaults=DEFAULTS)
+    assert result.next == "open_spool" and result.decoded is not None and result.draft is None
+
+
+def test_a_read_with_no_uid_still_answers_what_the_records_say(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    result = tags.read(store, _openspool_read(uid=None), actor="ann", defaults=DEFAULTS)
+    assert (result.tag, result.spool, result.next) == (None, None, "none")
+    assert result.decoded is not None and result.decoded.material == "PLA"
+
+
+def test_a_bambu_tag_keeps_its_kind_whatever_its_records_say(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    store.bind_tag(spool, tag_uid="04AA", tray_uuid=_TRAY, kind="bambu_mifare", actor="ann")
+    result = tags.read(store, _openspool_read(), actor="ann", defaults=DEFAULTS)
+    assert result.tag is not None and result.tag.kind == "bambu_mifare"

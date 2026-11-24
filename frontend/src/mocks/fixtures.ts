@@ -1097,6 +1097,7 @@ export const settingsDefaults = {
   filament_burn_window_days: 30,
   filament_lead_time_days: 7,
   filament_safety_margin_days: 3,
+  filament_tag_format: 'openspool',
   event_log_retention_rows: 100_000,
   log_level: 'INFO',
   temporal_ui_url: null,

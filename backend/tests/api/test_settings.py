@@ -1061,6 +1061,18 @@ def test_filament_sync_takes_every_direction_for_every_type(client: TestClient) 
             assert read == _DEFAULT_SYNC | {key: direction}
 
 
+def test_the_tag_format_setting_round_trips(client: TestClient) -> None:
+    body = client.get("/api/v1/settings").json()
+    assert body["filament_tag_format"] == "openspool"
+    assert body["applies"]["filament_tag_format"] == "live"
+    saved = client.put("/api/v1/settings", json={"filament_tag_format": "opentag3d"})
+    assert saved.status_code == 200, saved.text
+    assert client.get("/api/v1/settings").json()["filament_tag_format"] == "opentag3d"
+    assert (
+        client.put("/api/v1/settings", json={"filament_tag_format": "tigertag"}).status_code == 422
+    )
+
+
 def test_filament_settings_round_trip(client: TestClient) -> None:
     body = client.get("/api/v1/settings").json()
     assert body["filament_sync"] == _DEFAULT_SYNC

@@ -907,6 +907,7 @@ class SettingsPatch(BaseModel):
     filament_burn_window_days: int | None = Field(default=None, ge=1, le=365)
     filament_lead_time_days: int | None = Field(default=None, ge=0, le=365)
     filament_safety_margin_days: int | None = Field(default=None, ge=0, le=365)
+    filament_tag_format: Literal["openspool", "opentag3d"] | None = None
     log_level: str | None = None
     temporal_ui_url: str | None = None
 
