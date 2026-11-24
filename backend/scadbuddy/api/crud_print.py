@@ -228,6 +228,7 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import SealError
 from scadbuddy.core.settings import FilamentSync
+from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import (
     MaybeIdempotencyKey,
@@ -1037,13 +1038,19 @@ async def put_report(
     reports, so a row per write was tens of thousands a day per printer. A plain write
     sent again needs none: the row then holds that report at that ``seen_at``, which never
     moves back, so the resend ends and starts nothing, the same answer as the first
-    send's; one older than the row is `stale` and answers nothing too."""
+    send's; one older than the row is `stale` and answers nothing too.
+
+    The ledger row stays for a write that ends or starts a print (#7389): that write moves
+    ``running_subtask``, so the same body sent again without it would end and start
+    nothing, and the watch would lose the end (the rack settle) or the start (the nudge).
+    A report that shows nothing new (`printers/reports.py` `read_view`) writes nothing,
+    and its transaction commits no row; the commit is a span (`traced_transaction`)."""
     key = required_key(idempotency_key)
     reports = printers.reports
     request = {"printer_id": printer_id, **body.model_dump(mode="json")}
 
     def run() -> dict[str, Any]:
-        with reports.pool.connection() as conn, conn.transaction():
+        with reports.pool.connection() as conn, traced_transaction(conn):
             stored = idempotent(conn, "print", key, REPORT_ROUTE, request)
             if stored is not None:
                 answer: dict[str, Any] = stored.body

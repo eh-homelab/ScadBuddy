@@ -99,6 +99,21 @@ def accrue(row: RunHours, t: datetime, report: dict[str, Any] | None) -> RunHour
     return after
 
 
+def unchanged_by(row: RunHours | None, t: datetime, report: dict[str, Any]) -> bool:
+    """Whether a report seen at ``t`` may go unwritten (`reports.read_view`, #7389) with the
+    counter left as it is: it names the row's state and subtask, and it is at or after
+    ``counted_to`` and within `GAP_LIMIT` of it. Then the next write counts the whole
+    stretch from ``counted_to`` on the same state, as the two writes would have. A row
+    an unlink cleared, a missing row, or a write before ``counted_to`` is written."""
+    return (
+        row is not None
+        and row.counted_to <= t
+        and t - row.counted_to <= GAP_LIMIT
+        and report.get("gcode_state") == row.state
+        and report.get("subtask_name") == row.subtask
+    )
+
+
 def hours(run_seconds: Decimal) -> Decimal:
     """The reading: ``run_seconds`` in hours, rounded half up to a tenth."""
     return (run_seconds / 3600).quantize(_TENTH, rounding=ROUND_HALF_UP)

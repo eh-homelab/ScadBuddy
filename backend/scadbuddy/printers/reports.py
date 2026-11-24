@@ -32,7 +32,15 @@ A written report and a touch also move the printer's hour counter (`run_hours.py
 #5774) in their transaction, the report row locked first, then the counter row.
 
 A stored report reads as the printer's status through `report_status`, as the print
-dialog and the SB tray resolution (`filament/inventory.py`) read it."""
+dialog and the SB tray resolution (`filament/inventory.py`) read it.
+
+A report that shows nothing new to any reader (`read_view`) is not written (#7389): the
+watch puts one about every second while a printer reports, most of them only a new
+temperature or ``sequence_id``, and each written one cost a commit (1-2 s on prod). Such a
+report is answered from the stored row, which it would leave as it is, and its
+transaction writes no row, so its commit flushes nothing. It is written whole once
+`REFRESH_EVERY` has passed since the stored ``seen_at``, so ``seen_at`` and the fields no
+reader reads lag the printer by at most that."""
 
 from __future__ import annotations
 
@@ -48,6 +56,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.filament import prints
 from scadbuddy.printers import run_hours
 from scadbuddy.printers.lan_models import LanReport
@@ -86,6 +95,61 @@ class PrintEnd:
 FUTURE_TOLERANCE = timedelta(seconds=30)
 
 
+#: How long a report with nothing new to a reader (`read_view`) may go unwritten. The
+#: readers of ``seen_at``: a card is offline, a run leaves the LAN, and an RFID slot or a
+#: queued run's state goes unread `STALE_AFTER` (90 s) after it; the hour counter puts a
+#: gap over `run_hours.GAP_LIMIT` (90 s too) that ends in another print in
+#: ``unseen_seconds``; an AMS reading of the same value is stored after
+#: `sensors.SAME_VALUE_EVERY` (15 min). A third of 90 s keeps a printer that reports on
+#: fresh with 60 s to spare for a slow write, keeps every gap the counter sees well under
+#: its limit, and makes a same-value reading at most 30 s late. The watch's quiet touch
+#: (`watch.HEARD_EVERY`, 10 s) moves ``seen_at`` on its own when reports stop.
+REFRESH_EVERY = timedelta(seconds=30)
+
+#: The report's top-level fields some reader reads as stored: the state, the subtask and
+#: the print error (`advance_print`, `run_hours`, `progress.from_lan_report`, `lan_ended`),
+#: the card's progress fields, the trays and AMS units (`capture`'s tray projection, the
+#: AMS sensors, `rfid_slots` `_tray_temps`), the HMS errors and the nozzle fields
+#: (`status.status_from_report`). ``device`` is read only in part (`read_view`).
+READ_FIELDS = (
+    "gcode_state",
+    "subtask_name",
+    "print_error",
+    "mc_percent",
+    "mc_remaining_time",
+    "layer_num",
+    "total_layer_num",
+    "hms",
+    "ams",
+    "vt_tray",
+    "vir_slot",
+    "nozzle_type",
+    "nozzle_diameter",
+)
+
+
+def read_view(report: dict[str, Any]) -> tuple[Any, ...]:
+    """What the readers of a stored report read of it: `READ_FIELDS`, and of ``device``
+    the nozzles (``nozzle``), the active extruder (``extruder.state``) and whether a
+    filament switch is fitted (`status.py`). Two reports with one view read alike, so the
+    second need not be written; the temperatures, fans and ``sequence_id`` are left out.
+    A new reader of a stored field adds it here."""
+    device = report.get("device")
+    device = device if isinstance(device, dict) else {}
+    extruder = device.get("extruder")
+    return (
+        tuple(report.get(name) for name in READ_FIELDS),
+        device.get("nozzle"),
+        extruder.get("state") if isinstance(extruder, dict) else None,
+        isinstance(device.get("fila_switch"), dict),
+    )
+
+
+#: The advisory lock class of a printer's report writes ("SBPR"), so a write that skips
+#: on what it read never misses a write still in flight.
+REPORT_LOCK_CLASS = 0x5342_5052
+
+
 def stale(stored: datetime | None, seen_at: datetime, now: datetime) -> bool:
     """Whether a report seen at ``seen_at`` is older than the row's ``stored``: then it
     is not written (`PrinterReportStore.advance_in`). A ``stored`` time more than
@@ -118,6 +182,23 @@ def advance_print(running: str | None, new: dict[str, Any]) -> tuple[str | None,
     if named != running:
         return now_running, PrintEnd(subtask_name=running, timed=False)
     return None, PrintEnd(subtask_name=running, timed=state in ("FINISH", "FAILED"))
+
+
+def _unchanged(
+    old: DictRow,
+    report: dict[str, Any],
+    seen_at: datetime,
+    running: str | None,
+    ended: PrintEnd | None,
+) -> bool:
+    """Whether writing ``report`` would change nothing any reader reads of the stored row
+    ``old`` (`PrinterReportStore.advance_in`)."""
+    return (
+        ended is None
+        and running == old["running_subtask"]
+        and old["seen_at"] <= seen_at < old["seen_at"] + REFRESH_EVERY
+        and read_view(old["report"]) == read_view(report)
+    )
 
 
 def started_print(before: str | None, after: str | None) -> str | None:
@@ -262,7 +343,7 @@ class PrinterReportStore:
         so it is unused."""
         if printer_uuid(printer_id) is None:
             return Advance()
-        with self.pool.connection() as conn, conn.transaction():
+        with self.pool.connection() as conn, traced_transaction(conn):
             return self.advance_in(conn, printer_id, report, seen_at)
 
     @staticmethod
@@ -273,20 +354,39 @@ class PrinterReportStore:
         ``seen_at`` writes nothing, touches nothing, and ends and starts nothing (`stale`):
         a write that lands after a newer one (a print worker's request still running on
         the API after the worker gave its answer up) never moves the row, or the print it
-        shows running, back. One as old as the row's writes as before, so a resend is the
-        same write. A skipped write answers no end and no start, as a written one that
-        ended and started nothing does, so the watch counts it written and announces
-        `printer.report` once more: the card refetches the row unchanged, which costs one
-        read."""
+        shows running, back. One as old as the row's is not stale, so a resend is the same
+        write again (or, showing nothing new, none: below). A stale write answers no end
+        and no start, as a written one that ended and started nothing does, so the watch
+        counts it written and announces `printer.report` once more: the card refetches the
+        row unchanged, which costs one read.
+
+        A report with the stored one's `read_view`, that ends and starts nothing, within
+        `REFRESH_EVERY` of the stored ``seen_at``, whose state and subtask the hour counter
+        already holds (`run_hours.unchanged_by`), writes nothing either (`_unchanged`):
+        its answer is that of a written one, and the row, the counter (the next write
+        counts the whole stretch) and the ledger read alike. It takes no row lock, so its
+        transaction writes nothing at all. The printer's advisory lock
+        (`REPORT_LOCK_CLASS`), which every write takes first, makes it wait for a write
+        still in flight and read that one."""
         if printer_uuid(printer_id) is None:
             return Advance()
-        old = conn.execute(
-            "SELECT running_subtask, report, seen_at, now() AS now FROM printer_reports"
-            " WHERE printer_id = %s FOR UPDATE",
-            (printer_id,),
-        ).fetchone()
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s))",
+            (REPORT_LOCK_CLASS, printer_id),
+        )
+        read = "SELECT running_subtask, report, seen_at, now() AS now FROM printer_reports"
+        old = conn.execute(f"{read} WHERE printer_id = %s", (printer_id,)).fetchone()
         if old is not None and stale(old["seen_at"], seen_at, old["now"]):
             return Advance()
+        before = None if old is None else old["running_subtask"]
+        running, ended = advance_print(before, report)
+        if (
+            old is not None
+            and _unchanged(old, report, seen_at, running, ended)
+            and run_hours.unchanged_by(run_hours.read(conn, printer_id), seen_at, report)
+        ):
+            return Advance()
+        old = conn.execute(f"{read} WHERE printer_id = %s FOR UPDATE", (printer_id,)).fetchone()
         before = None if old is None else old["running_subtask"]
         running, ended = advance_print(before, report)
         written = conn.execute(
@@ -310,7 +410,7 @@ class PrinterReportStore:
         key = printer_uuid(printer_id)
         if key is None:
             return
-        with self.pool.connection() as conn, conn.transaction():
+        with self.pool.connection() as conn, traced_transaction(conn):
             touched = conn.execute(
                 "UPDATE printer_reports SET seen_at = GREATEST(seen_at, %s) WHERE printer_id = %s",
                 (seen_at, printer_id),
