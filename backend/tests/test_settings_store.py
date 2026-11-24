@@ -1009,7 +1009,9 @@ def test_an_unreadable_money_rule_is_dropped_and_the_settings_still_load(
     ]
     assert [o.id for o in loaded.storefront_shipping_options or []] == ["pickup"]
     assert "on_tuesdays" not in caplog.text
-    assert sorted(str(getattr(r, "setting", "")) for r in caplog.records) == [
+    assert sorted(
+        str(getattr(r, "setting", "")) for r in caplog.records if r.name == settings_store.__name__
+    ) == [
         "orders_deposit_policy",
         "storefront_shipping_options",
     ]
