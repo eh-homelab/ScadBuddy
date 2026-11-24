@@ -41,7 +41,7 @@ import { fixedCredentials } from './support/fixedCredentials.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
-import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
+import { anyPoller, localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 import { PgSessionOwners } from './support/sql/approvalRecords.js'
 import { PgTurnRows } from './support/sql/turnRows.js'
 import { durableStores, hostStores } from './support/agentSessions.js'
@@ -314,8 +314,7 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
   }
 
   async function polled(queue: string, type: 1 | 2): Promise<boolean> {
-    const { pollers } = await env.client.workflowService.describeTaskQueue({ namespace: 'default', taskQueue: { name: queue }, taskQueueType: type })
-    return (pollers ?? []).length > 0
+    return anyPoller(env.client, queue, type)
   }
   const pollUntil = <T>(read: () => Promise<T> | T, expected: T, timeout = 60_000) => expect.poll(read, { timeout, interval: 100 }).toEqual(expected)
 

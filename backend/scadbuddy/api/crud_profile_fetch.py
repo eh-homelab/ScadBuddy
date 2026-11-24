@@ -5,7 +5,8 @@
 - ``PUT …/runs/{run_id}/files/{sha256}?printer_model=&nozzle=``: one target's preset file,
   the raw bytes in the body, named by their sha256; 204;
 - ``POST …/runs/{run_id}/import`` (``Idempotency-Key``, 428 without): the run's files
-  imported into Bambuddy and made the type's presets; the `ImportOutcome`;
+  kept as the type's ScadBuddy presets and made its presets, then mirrored to Bambuddy
+  after the commit while ``filament_preset_mirror`` is on (#7176); the `ImportOutcome`;
 - ``POST …/runs/{run_id}/failed``: the workflow gave up; 204.
 
 Each answers 404 ``run_not_found`` for no such run, and the file and ``failed`` routes 409

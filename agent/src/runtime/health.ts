@@ -1,7 +1,7 @@
 import type { Client } from '@temporalio/client'
 import { Hono } from 'hono'
 import { SERVICE_HEADER } from '../app.js'
-import { seenAtMs } from '../sessions/durable.js'
+import { queuePollers } from '../temporal/pollers.js'
 import { HOST_FRESH_MS } from '../temporal/session/affinity.js'
 import type { TemporalHealth } from '../temporal/worker.js'
 
@@ -79,14 +79,8 @@ export async function queuesPolled(
     for (const queue of queues) {
       // Each call its own deadline and clock: a slow first answer leaves the rest their full time.
       const asked = Date.now()
-      const { pollers } = await client.withDeadline(asked + DESCRIBE_DEADLINE_MS, () =>
-        client.workflowService.describeTaskQueue({
-          namespace: client.options.namespace,
-          taskQueue: { name: queue.name },
-          taskQueueType: queue.type,
-        }),
-      )
-      if (!(pollers ?? []).some((p) => p.identity === identity && Date.now() - seenAtMs(p.lastAccessTime) < HOST_FRESH_MS)) {
+      const pollers = await queuePollers(client, queue.name, queue.type, asked + DESCRIBE_DEADLINE_MS)
+      if (!pollers.some((p) => p.identity === identity && Date.now() - p.seenAtMs < HOST_FRESH_MS)) {
         return `this worker does not poll Temporal's "${queue.name}" queue yet`
       }
     }

@@ -1342,7 +1342,7 @@ function fetchTargets(): S['ExportTarget'][] {
 
 /**
  * The mock has no worker: a running fetch ends `imported` on the next read of it, with
- * one preset per target key (a Bambuddy local preset id and a 3DFP-style name), as the
+ * one preset per target key (a ScadBuddy preset ref, `sb-<id>`, and a 3DFP-style name), as the
  * API's import writes them.
  */
 function finishFetch(run: S['ProfileFetch']): S['ProfileFetch'] {
@@ -1353,7 +1353,7 @@ function finishFetch(run: S['ProfileFetch']): S['ProfileFetch'] {
       type_id: run.type_id,
       printer_model: target.printer_model,
       nozzle_diameter: nozzle,
-      slicer_filament: String(9000 + t * 10 + n),
+      slicer_filament: `sb-${9000 + t * 10 + n}`,
       slicer_filament_name: `${type?.code ?? 'Filament'} @BBL ${target.printer_model} ${nozzle} nozzle`,
     })),
   )
@@ -1925,7 +1925,11 @@ export const handlers = [
   // #7150 — `POST /filament/spools/bulk`: N spools of one draft, all or none.
   http.post(`${BASE}/spools/bulk`, async ({ request }) => {
     const raw = (await request.json()) as Record<string, unknown>
-    const extra = extraKeys(raw, ['spool', 'quantity', 'location_id', 'presets', 'k_values']) ?? extraKeys(raw.spool, FIELDS.spoolCreate)
+    const presetKeys = ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name']
+    const extra =
+      extraKeys(raw, ['spool', 'quantity', 'location_id', 'presets', 'k_values', 'copy_of']) ??
+      extraKeys(raw.spool, FIELDS.spoolCreate) ??
+      extraKeys(raw.presets, presetKeys)
     if (extra) return extra
     const body = raw as S['SpoolBulkCreate']
     const quantity = body.quantity ?? 1
@@ -1934,7 +1938,13 @@ export const handlers = [
       const place = body.location_id ? state.locations.find((one) => one.id === body.location_id && !one.archived_at) : null
       if (body.location_id && !place) return problem(422, REFUSED.moveTarget)
       if (place && place.tray_id != null) return problem(422, REFUSED.trayPlace)
-      const presets = body.presets ?? []
+      // R-7150-13: a client never marks a row migrated; a row that matches the copy source's migrated row stays so.
+      if (body.copy_of && !findSpool(body.copy_of)) return problem(422, 'copy_of names no spool')
+      const carried = state.spoolPresets.filter((one) => body.copy_of && one.spool_id === body.copy_of && one.migrated)
+      const presets = (body.presets ?? []).map((row) => ({
+        ...row,
+        migrated: carried.some((one) => one.printer_model === row.printer_model && one.nozzle_diameter === row.nozzle_diameter && one.slicer_filament === row.slicer_filament && (one.slicer_filament_name ?? null) === (row.slicer_filament_name ?? null)),
+      }))
       if (duplicated(presets, (row) => `${row.printer_model}|${row.nozzle_diameter}`)) return problem(422, REFUSED.rowsDuplicate)
       const fields = normalised(body.spool)
       const made: SpoolRow[] = []
@@ -1963,8 +1973,9 @@ export const handlers = [
     const draft: S['SpoolDraft'] = {
       spool: { ...spool, weight_locked: false, grams_left: null } as S['SpoolCreate-Output'],
       location_id: place?.id ?? null,
-      presets: state.spoolPresets.filter((one) => one.spool_id === row.id).map(({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name }) => ({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name, migrated: false })),
+      presets: state.spoolPresets.filter((one) => one.spool_id === row.id).map(({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name }) => ({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name })),
       k_values: state.spoolKValues.filter((one) => one.spool_id === row.id).map(({ spool_id: _s, ...one }) => one),
+      copy_of: row.id,
     }
     return HttpResponse.json(draft)
   }),
@@ -2019,6 +2030,7 @@ export const handlers = [
       const refused = spoolRefusal({ ...row, ...fields })
       if (refused) return problem(422, `spool #${row.number}: ${((await refused.clone().json()) as { detail: string }).detail}`)
     }
+    const changed: string[] = []
     for (const row of found) {
       const at = state.spools.indexOf(row)
       const changes = Object.fromEntries(
@@ -2027,11 +2039,12 @@ export const handlers = [
           .map((field) => [field, [row[field as keyof SpoolRow], fields[field as keyof SpoolRow]]]),
       )
       if (!Object.keys(changes).length) continue
+      changed.push(row.id)
       state.spools[at] = { ...row, ...fields, updated_at: now() }
       if (!row.type_id && fields.type_id) state.spoolPresets = state.spoolPresets.filter((one) => !(one.spool_id === row.id && one.migrated))
       addEvent(row.id, 'edited', { data: { changes } })
     }
-    return HttpResponse.json({ updated: found.map((row) => row.id), not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
+    return HttpResponse.json({ changed, unchanged: found.map((row) => row.id).filter((id) => !changed.includes(id)), not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
   }),
   // #7151 — `POST /filament/spools/bulk-archive` and `bulk-restore`: each spool's outcome, reported once.
   ...([true, false] as const).map((archived) =>

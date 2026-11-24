@@ -39,6 +39,7 @@ from scadbuddy.printers.lan_models import LanStarted
 from scadbuddy.printers.progress import LanProgress
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
+from tests.support.waits import until
 
 SUBJECT = PrintSubject.library(7)
 SLUG = "library-7"
@@ -105,12 +106,6 @@ def follower(
         read_run=read_run,
         **FAST,  # type: ignore[arg-type]
     )
-
-
-async def until(check: Callable[[], bool]) -> None:
-    async with asyncio.timeout(10):
-        while not check():
-            await asyncio.sleep(0.01)
 
 
 @respx.mock

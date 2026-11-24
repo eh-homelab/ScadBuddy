@@ -87,8 +87,8 @@ def _choice(preset: Preset) -> PresetChoice:
 
 
 def local_choice(preset: LocalPreset) -> PresetChoice:
-    """A ``/local-presets/`` row as a catalogue row: Bambuddy's, and the kept copy's on a
-    native run (``slicing/catalogue.py``, #4645)."""
+    """A ``/local-presets/`` row as a catalogue row, on Bambuddy's catalogue only: a native
+    run offers no Bambuddy local preset (#7244)."""
     colours = _local_list(preset.default_filament_colour)
     return PresetChoice(
         ref=preset.ref(),
@@ -116,9 +116,8 @@ class Catalogue:
     #: a ``cloud`` ref resolves by there. ``None`` on Bambuddy's, whose refs are its own.
     native_setting_ids: dict[str, dict[str, str]] | None = None
     #: On the image's own catalogue, the Bambuddy local id of each ScadBuddy preset it
-    #: offers, to that preset's ``sb-<id>`` (#7176): the kept row of that id is not listed,
-    #: so a ``local`` ref to it (a remembered choice, a binding not yet adopted) resolves to
-    #: the ScadBuddy preset instead.
+    #: offers, to that preset's ``sb-<id>`` (#7176), so a ``local`` ref to that id (a
+    #: remembered choice) resolves to the ScadBuddy preset.
     local_aliases: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -152,8 +151,8 @@ class Catalogue:
 
     @cached_property
     def _held(self) -> dict[str, frozenset[str]]:
-        """Each field's ``local`` ids: on the image's own catalogue, the kept copy's
-        Bambuddy local presets it offers (:meth:`with_held`)."""
+        """Each field's ``local`` ids: on the image's own catalogue, the ``sb-`` refs of
+        ScadBuddy's own presets it offers (:meth:`with_own`)."""
         return {
             field: frozenset(
                 row.ref.id for row in getattr(self, field) if row.ref.source == "local"
@@ -166,9 +165,10 @@ class Catalogue:
         ``ref`` names in ``field`` (``printer``, ``process``, ``filament``) or any of
         them: a ``standard`` ref as it is when offered, a ``cloud`` ref (a
         ``setting_id``) as the standard ref of the preset it names, a ``local`` ref as it
-        is when the kept copy's row is offered (#4645), or as the ScadBuddy preset that
-        holds its Bambuddy id (`local_aliases`, #7176); ``orca_cloud`` and anything not
-        offered is ``None``. On Bambuddy's catalogue every ref is its own, so ``None``."""
+        is when it is an offered ScadBuddy preset's ``sb-`` ref, or as the ScadBuddy preset
+        that holds its Bambuddy id (`local_aliases`, #7176); a Bambuddy local id with no
+        such preset (#7244), ``orca_cloud`` and anything not offered is ``None``. On
+        Bambuddy's catalogue every ref is its own, so ``None``."""
         ids = self.native_setting_ids
         if ids is None:
             return None
@@ -184,22 +184,14 @@ class Catalogue:
                 return PresetRef(source="local", id=alias)
         return None
 
-    def with_held(
-        self,
-        printer: list[PresetChoice],
-        process: list[PresetChoice],
-        filament: list[PresetChoice],
-        aliases: dict[str, str] | None = None,
-    ) -> Catalogue:
-        """This catalogue with the kept copy's local presets' rows after its own
-        (``slicing/catalogue.py`` ``catalogue_for``, #4645), and ``aliases`` added to its
-        `local_aliases` (#7176)."""
+    def with_own(self, filament: list[PresetChoice], aliases: dict[str, str]) -> Catalogue:
+        """This catalogue with ScadBuddy's own filament presets' rows after its own
+        (``slicing/catalogue.py`` ``with_own``, #7176), and ``aliases`` added to its
+        `local_aliases`."""
         return dataclasses.replace(
             self,
-            printer=[*self.printer, *printer],
-            process=[*self.process, *process],
             filament=[*self.filament, *filament],
-            local_aliases={**self.local_aliases, **(aliases or {})},
+            local_aliases={**self.local_aliases, **aliases},
         )
 
     def names(self) -> dict[tuple[str, str], str]:

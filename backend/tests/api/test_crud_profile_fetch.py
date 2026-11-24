@@ -1,19 +1,18 @@
 """#6625 Task 3: the profile-fetch worker's CRUD routes and the import they end in. The
-worker uploads a run's preset files; the API holds them as blobs, imports them into
-Bambuddy as one zip, and sets the type's presets and K values. Bambuddy is respx only."""
+worker uploads a run's preset files; the API holds them as blobs, makes them ScadBuddy's
+own presets (#7176), mirrors them to Bambuddy, and sets the type's presets and K values.
+Bambuddy is respx only."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import hashlib
-import io
 import itertools
 import json
 import re
 import threading
 import time
-import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal
@@ -155,43 +154,48 @@ def fetch(client: TestClient) -> Fetch:
     return Fetch(client, type_id, run.id, printer.id, bearer_of(client, "profile-fetch"))
 
 
-def _rows(names: list[str], first_id: int) -> list[dict[str, Any]]:
-    return [
-        {"id": first_id + i, "name": n, "preset_type": "filament", "source": "import"}
-        for i, n in enumerate(names)
-    ]
-
-
-def local_presets(
-    names: list[str], first_id: int = 101, before: list[dict[str, Any]] | None = None
-) -> respx.Route:
-    """Bambuddy's local presets: ``before`` (none by default) on the first listing, the
-    import's run reads before it imports; ``before`` and ``names`` (ids from
-    ``first_id``) on every later one."""
-    return _listing(respx.get(f"{API}/local-presets/"), before or [], _rows(names, first_id))
-
-
-def _listing(
-    route: respx.Route, before: list[dict[str, Any]], after: list[dict[str, Any]]
-) -> respx.Route:
-    calls = iter([before])
+def mirror(first_id: int = 101, status_code: int = 200) -> respx.Route:
+    """Bambuddy's ``POST /local-presets/``, the mirror's create (#7176): each call answers
+    the next id from ``first_id``, or ``status_code`` when it is not 200; and an empty
+    ``GET /local-presets/``, the listing the mirror reads before a create."""
+    ids = itertools.count(first_id)
 
     def answer(request: httpx.Request) -> httpx.Response:
-        rows = next(calls, before + after)
-        return httpx.Response(200, json={"filament": rows, "printer": [], "process": []})
+        if status_code != 200:
+            return httpx.Response(status_code, json={"detail": "Forbidden"})
+        body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": next(ids),
+                "name": body["name"],
+                "preset_type": "filament",
+                "source": "local",
+            },
+        )
 
-    return route.mock(side_effect=answer)
-
-
-def bb_import(imported: int, skipped: int = 0, status: int = 200) -> respx.Route:
-    body: Any = (
-        {"success": True, "imported": imported, "skipped": skipped, "errors": []}
-        if status == 200
-        else {"detail": "Forbidden"}
+    # The mirror lists Bambuddy's presets once before its first create.
+    respx.get(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(200, json={"filament": [], "printer": [], "process": []})
     )
-    return respx.post(f"{API}/local-presets/import").mock(
-        return_value=httpx.Response(status, json=body)
+    return respx.post(f"{API}/local-presets/").mock(side_effect=answer)
+
+
+def own_presets(fetch: Fetch) -> list[dict[str, Any]]:
+    """ScadBuddy's presets (#7176), oldest first."""
+    return fetch.rows(
+        "SELECT id, name, source, version, printer_model, nozzle_diameter, fetch_run_id,"
+        " bb_preset_id, blob_key, sha256, mirrored_sha256, mirror_error"
+        " FROM filament_presets ORDER BY id"
     )
+
+
+def own_doc(fetch: Fetch, preset: dict[str, Any]) -> Any:
+    return json.loads(_blob(fetch, preset["blob_key"]).read_bytes())
+
+
+def refs(fetch: Fetch) -> list[str]:
+    return [p[2] for p in fetch.presets()]
 
 
 def no_k_profiles() -> respx.Route:
@@ -336,7 +340,8 @@ def test_a_file_with_no_base_is_kept(fetch: Fetch, inherits: str | None) -> None
 @respx.mock
 def test_a_real_3dfp_export_is_kept_and_imported(fetch: Fetch) -> None:
     """#7029: a real 3DFP export (flattened, ``"inherits": ""``) is kept without its
-    G-code and imported into Bambuddy as it was kept, and the type's 0.4 mm preset is set."""
+    G-code and made a ScadBuddy preset as it was kept (#7176), and the type's 0.4 mm preset
+    is set to it."""
     body = REAL_EXPORT.read_bytes()
     doc = json.loads(body)
     r = fetch.put(body)
@@ -348,18 +353,17 @@ def test_a_real_3dfp_export_is_kept_and_imported(fetch: Fetch) -> None:
     assert kept == {k: v for k, v in doc.items() if k not in gcode}
     assert (entry["name"], kept["inherits"]) == (doc["name"], "")
 
-    sent = bb_import(1)
-    local_presets([doc["name"]])
+    sent = mirror()
     no_k_profiles()
     r = fetch.import_(
         [{"printer_model": "H2C", "nozzle": n, "reason": "x"} for n in ("0.2", "0.6", "0.8")]
     )
     assert r.status_code == 200, r.text
     assert (r.json()["status"], r.json()["presets"]) == ("partial", 1)
-    archive = zipfile.ZipFile(io.BytesIO(_zip_of(sent.calls.last.request)))
-    [name] = archive.namelist()
-    assert json.loads(archive.read(name)) == kept
-    assert fetch.presets() == [("H2C", "0.4", "101", doc["name"])]
+    [preset] = own_presets(fetch)
+    assert own_doc(fetch, preset) == kept
+    assert json.loads(sent.calls.last.request.content)["setting"] == kept
+    assert fetch.presets() == [("H2C", "0.4", f"sb-{preset['id']}", doc["name"])]
 
 
 def test_an_unknown_run_is_404(fetch: Fetch) -> None:
@@ -381,10 +385,12 @@ def test_another_caller_gets_403(fetch: Fetch) -> None:
 
 
 @respx.mock
-def test_import_posts_one_zip_and_sets_the_type_presets(fetch: Fetch) -> None:
+def test_import_makes_scadbuddy_presets_and_mirrors_them(fetch: Fetch) -> None:
+    """#7176: each file is a ``3dfp`` ScadBuddy preset of the type's key, the type names it
+    ``sb-<id>``, Bambuddy gets no import, and the mirror sends each one after the commit."""
     bodies = put_all(fetch)
-    sent = bb_import(4)
-    local_presets([name_of(b) for b in bodies])
+    sent = mirror()
+    imported = respx.post(f"{API}/local-presets/import")
     no_k_profiles()
 
     r = fetch.import_()
@@ -397,21 +403,21 @@ def test_import_posts_one_zip_and_sets_the_type_presets(fetch: Fetch) -> None:
         "missing": [],
         "notes": [],
     }
-    archive = zipfile.ZipFile(io.BytesIO(_zip_of(sent.calls.last.request)))
-    [row] = fetch.rows("SELECT files FROM filament_profile_fetches WHERE id = %s", fetch.run_id)
-    assert sorted(archive.namelist()) == sorted(
-        f"{e['sha256']}.json" for e in row["files"]["H2C"].values()
-    )
-    assert fetch.presets() == [
-        ("H2C", n, str(101 + i), name_of(bodies[i])) for i, n in enumerate(NOZZLES)
+    made = own_presets(fetch)
+    assert [(p["source"], p["nozzle_diameter"], p["version"]) for p in made] == [
+        ("3dfp", n, 1) for n in NOZZLES
     ]
+    assert {p["fetch_run_id"] for p in made} == {fetch.run_id}
+    assert fetch.presets() == [
+        ("H2C", n, f"sb-{made[i]['id']}", name_of(bodies[i])) for i, n in enumerate(NOZZLES)
+    ]
+    assert (imported.call_count, sent.call_count) == (0, 4)
+    assert [p["bb_preset_id"] for p in made] == [101, 102, 103, 104]
+    assert all(p["mirrored_sha256"] == p["sha256"] for p in made)
     run = fetch.run()
     assert (run.status, run.finished_at is not None) == ("imported", True)
-    # R-PR1: what the import made, kept in a commit of its own.
-    [made] = fetch.rows(
-        "SELECT bambuddy_made FROM filament_profile_fetches WHERE id = %s", fetch.run_id
-    )
-    assert made["bambuddy_made"] == [101, 102, 103, 104]
+    [row] = fetch.rows("SELECT files FROM filament_profile_fetches WHERE id = %s", fetch.run_id)
+    assert row["files"]["H2C"]["0.4"]["preset_id"] == f"sb-{made[1]['id']}"
 
 
 @respx.mock
@@ -428,9 +434,8 @@ def test_the_first_presets_an_import_sets_fill_the_type(
         return []
 
     monkeypatch.setattr(TypeFiller, "fill", spy)
-    bodies = put_all(fetch)
-    bb_import(4)
-    local_presets([name_of(b) for b in bodies])
+    put_all(fetch)
+    mirror()
     no_k_profiles()
     assert fetch.import_().status_code == 200
     assert asked == [[fetch.type_id]]
@@ -446,226 +451,183 @@ def test_a_filler_lookup_that_fails_after_the_commit_never_fails_the_import(
 
     # The import's own lookup now names a component nothing registers, so it raises.
     monkeypatch.setattr(component, "FILAMENT", Key("filament-gone"))
-    bodies = put_all(fetch)
-    bb_import(4)
-    local_presets([name_of(b) for b in bodies])
+    put_all(fetch)
+    mirror()
     no_k_profiles()
     with caplog.at_level("WARNING"):
         r = fetch.import_()
     assert r.status_code == 200, r.text
     assert fetch.run().status == "imported"
-    [warning] = [r for r in caplog.records if r.levelname == "WARNING" and hasattr(r, "error")]
-    assert warning.error == "KeyError"
-
-
-def _zip_of(request: httpx.Request) -> bytes:
-    """The ``file`` part of a multipart request."""
-    body = request.content
-    start = body.index(b"PK\x03\x04")
-    boundary = request.headers["content-type"].split("boundary=")[1].encode()
-    end = body.index(b"\r\n--" + boundary, start)
-    return body[start:end]
+    [warning] = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING" and getattr(r, "error", None) == "KeyError"
+    ]
+    assert warning.levelname == "WARNING"
 
 
 @respx.mock
-def test_the_zip_carries_no_site_gcode(fetch: Fetch) -> None:
+def test_the_preset_carries_no_site_gcode(fetch: Fetch) -> None:
     body = export(**GCODE)
     assert fetch.put(body).status_code == 204
     # The kept blob changed under the run (defence in depth: the import strips again).
     [row] = fetch.rows("SELECT files FROM filament_profile_fetches WHERE id = %s", fetch.run_id)
     path = _blob(fetch, row["files"]["H2C"]["0.4"]["key"])
     path.chmod(0o644)
-    path.write_bytes(body)
-    sent = bb_import(1)
-    local_presets([name_of(body)])
+    # Other bytes than the kept file's: a content-addressed blob the preset would share
+    # otherwise.
+    path.write_bytes(export(**GCODE, filament_notes=["tampered"]))
+    mirror()
     no_k_profiles()
     r = fetch.import_(
         [{"printer_model": "H2C", "nozzle": n, "reason": "x"} for n in ("0.2", "0.6", "0.8")]
     )
     assert r.status_code == 200, r.text
-    archive = zipfile.ZipFile(io.BytesIO(_zip_of(sent.calls.last.request)))
-    [entry] = archive.namelist()
-    doc = json.loads(archive.read(entry))
+    [preset] = own_presets(fetch)
+    doc = own_doc(fetch, preset)
     assert [k for k in doc if k.endswith("gcode") or k == "post_process"] == []
-    assert doc["name"] == name_of(body)
+    assert (doc["name"], doc["filament_notes"]) == (name_of(body), ["tampered"])
 
 
-@respx.mock
-def test_a_hand_made_preset_of_the_same_name_is_not_bound(fetch: Fetch) -> None:
-    clash, fresh = put_all(fetch, ["0.4", "0.6"])
-    bb_import(1, skipped=1)
-    local_presets([name_of(fresh)], first_id=101, before=_rows(["Other", name_of(clash)], 40))
-    no_k_profiles()
-    r = fetch.import_(
-        [{"printer_model": "H2C", "nozzle": n, "reason": "x"} for n in ("0.2", "0.8")]
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["status"] == "partial"
-    reason = f"Bambuddy already has a preset named {name_of(clash)} that no fetch of this type made"
-    assert {"printer_model": "H2C", "nozzle_diameter": "0.4", "reason": reason} in r.json()[
-        "missing"
-    ]
-    assert fetch.presets() == [("H2C", "0.6", "101", name_of(fresh))]
-
-
-@respx.mock
-def test_a_preset_an_earlier_fetch_set_is_bound_again(fetch: Fetch) -> None:
-    failures = [{"printer_model": "H2C", "nozzle": n, "reason": "x"} for n in ("0.2", "0.6", "0.8")]
-    [body] = put_all(fetch, ["0.4"])
-    bb_import(1)
-    listing = local_presets([name_of(body)], first_id=41, before=_rows(["Other"], 40))
-    no_k_profiles()
-    first = fetch.import_(failures)
-    assert first.json()["notes"] == [], first.text
-    assert fetch.presets() == [("H2C", "0.4", "41", name_of(body))]
-
+def _next_run(fetch: Fetch) -> None:
     run, _ = ProfileFetches(_state(fetch.client).settings_store.pool, lambda: NOZZLES).open(
         fetch.type_id, actor="person:test"
     )
     fetch.run_id = run.id
-    assert fetch.put(body, nozzle="0.4").status_code == 204
-    bb_import(0, skipped=1)
-    both = _rows(["Other", name_of(body)], 40)
-    _listing(listing, both, [])
 
-    r = fetch.import_(failures, key="k2")
+
+ONLY_04 = [{"printer_model": "H2C", "nozzle": n, "reason": "x"} for n in ("0.2", "0.6", "0.8")]
+
+
+@respx.mock
+def test_a_refetch_of_changed_content_is_a_new_version_sent_in_place(fetch: Fetch) -> None:
+    """#7176 Decision 3 and #7174: a re-fetch whose cleaned document differs is version 2
+    of the same preset (the type's ref stays), its notes name the keys that changed, and
+    the mirror rewrites Bambuddy's preset in place under the id spools and slots name."""
+    [body] = put_all(fetch, ["0.4"])
+    created = mirror(first_id=41)
+    no_k_profiles()
+    assert fetch.import_(ONLY_04).status_code == 200
+    [first] = own_presets(fetch)
+    ref = refs(fetch)
+
+    _next_run(fetch)
+    changed = export("0.4", nozzle_temperature=["225"], filament_flow_ratio=["0.95"])
+    assert fetch.put(changed, nozzle="0.4").status_code == 204
+    updated = respx.put(f"{API}/local-presets/41").mock(
+        return_value=httpx.Response(
+            200, json={"id": 41, "name": name_of(body), "preset_type": "filament"}
+        )
+    )
+
+    r = fetch.import_(ONLY_04, key="k2")
 
     assert r.status_code == 200, r.text
-    assert (r.json()["status"], r.json()["presets"]) == ("partial", 1), r.text
     assert r.json()["notes"] == [
-        f"Bambuddy kept its existing preset {name_of(body)}; its content was not updated"
+        f"H2C 0.4 mm: version 2 of {name_of(body)}; changed filament_flow_ratio, nozzle_temperature"
     ]
-    assert fetch.presets() == [("H2C", "0.4", "41", name_of(body))]
+    [now] = own_presets(fetch)
+    assert (now["id"], now["version"], now["bb_preset_id"]) == (first["id"], 2, 41)
+    assert own_doc(fetch, now)["nozzle_temperature"] == ["225"]
+    assert refs(fetch) == ref
+    assert (created.call_count, updated.call_count) == (1, 1)
+    assert json.loads(updated.calls.last.request.content)["setting"]["nozzle_temperature"] == [
+        "225"
+    ]
+    versions = fetch.rows(
+        "SELECT version FROM filament_preset_versions WHERE preset_id = %s ORDER BY version",
+        first["id"],
+    )
+    assert [v["version"] for v in versions] == [1, 2]
 
 
 @respx.mock
-def test_a_retry_binds_what_its_lost_first_attempt_made(fetch: Fetch) -> None:
-    bodies = put_all(fetch)
-    sent = bb_import(0, status=502)
-    listing = local_presets([])
-    assert fetch.import_().status_code == 502
-    # Bambuddy made the presets, but its answer was lost; the retry finds them listed.
-    sent.mock(
-        return_value=httpx.Response(
-            200, json={"success": True, "imported": 0, "skipped": 4, "errors": []}
-        )
-    )
-    _listing(listing, _rows([name_of(b) for b in bodies], 101), [])
-    no_k_profiles()
-
-    r = fetch.import_()
-
-    assert r.status_code == 200, r.text
-    assert (r.json()["status"], r.json()["presets"]) == ("imported", 4)
-    assert [p[2] for p in fetch.presets()] == ["101", "102", "103", "104"]
-
-
-@respx.mock
-def test_presets_an_unfinished_import_made_are_bound_by_the_next_run(fetch: Fetch) -> None:
-    """R-PR1: Bambuddy takes the zip, then every listing after it answers 5xx until the
-    run fails. The presets it made sit in the next run's own ``bambuddy_before``; that run
-    still binds them, as presets a fetch of this type made."""
-    bodies = put_all(fetch)
-    sent = bb_import(4)
-    names = [name_of(b) for b in bodies]
-    other, made = _rows(["Other"], 40), _rows(names, 101)
-    answers = iter([other])
-
-    def down(request: httpx.Request) -> httpx.Response:
-        rows = next(answers, None)
-        if rows is None:
-            return httpx.Response(502, json={"detail": "Bad Gateway"})
-        return httpx.Response(200, json={"filament": rows, "printer": [], "process": []})
-
-    listing = respx.get(f"{API}/local-presets/").mock(side_effect=down)
-    no_k_profiles()
-    for _ in range(2):
-        assert fetch.import_().status_code == 502
-    [row] = fetch.rows(
-        "SELECT import_lease_until FROM filament_profile_fetches WHERE id = %s", fetch.run_id
-    )
-    assert row["import_lease_until"] is None
-    assert fetch.failed("the import did not finish").status_code == 204
-    assert fetch.presets() == []
-
-    run, _ = ProfileFetches(_state(fetch.client).settings_store.pool, lambda: NOZZLES).open(
-        fetch.type_id, actor="person:test"
-    )
-    fetch.run_id = run.id
-    put_all(fetch)
-    sent.mock(
-        return_value=httpx.Response(
-            200, json={"success": True, "imported": 0, "skipped": 4, "errors": []}
-        )
-    )
-    listing.mock(
-        side_effect=lambda request: httpx.Response(
-            200, json={"filament": other + made, "printer": [], "process": []}
-        )
-    )
-
-    r = fetch.import_(key="k2")
-
-    assert r.status_code == 200, r.text
-    assert (r.json()["status"], r.json()["presets"]) == ("imported", 4), r.text
-    assert [p[2] for p in fetch.presets()] == ["101", "102", "103", "104"]
-
-
-@pytest.mark.parametrize(
-    "refusal",
-    [
-        httpx.Response(403, json={"detail": "Forbidden"}),
-        httpx.Response(
-            200, json={"success": False, "imported": 0, "skipped": 0, "errors": ["bad zip"]}
-        ),
-    ],
-    ids=["403", "not-success"],
-)
-@respx.mock
-def test_a_refused_import_made_nothing_a_later_fetch_binds(
-    fetch: Fetch, refusal: httpx.Response
-) -> None:
-    """R-PR5: Bambuddy refuses run A's import, so A made nothing. A person then makes a
-    preset of one of A's file names; run B does not bind it as a fetch's."""
+def test_a_refetch_of_the_same_content_changes_nothing(fetch: Fetch) -> None:
     [body] = put_all(fetch, ["0.4"])
-    sent = respx.post(f"{API}/local-presets/import").mock(return_value=refusal)
-    listing = local_presets([], before=_rows(["Other"], 40))
-    first = fetch.import_()
-    assert first.json()["status"] == "failed", first.text
-    [row] = fetch.rows(
-        "SELECT bambuddy_made FROM filament_profile_fetches WHERE id = %s", fetch.run_id
-    )
-    assert row["bambuddy_made"] == []
-
-    run, _ = ProfileFetches(_state(fetch.client).settings_store.pool, lambda: NOZZLES).open(
-        fetch.type_id, actor="person:test"
-    )
-    fetch.run_id = run.id
-    assert fetch.put(body, nozzle="0.4").status_code == 204
-    sent.mock(
-        return_value=httpx.Response(
-            200, json={"success": True, "imported": 0, "skipped": 1, "errors": []}
-        )
-    )
-    _listing(listing, _rows(["Other", name_of(body)], 40), [])
+    created = mirror(first_id=41)
     no_k_profiles()
+    assert fetch.import_(ONLY_04).status_code == 200
 
-    r = fetch.import_(key="k2")
+    _next_run(fetch)
+    assert fetch.put(body, nozzle="0.4").status_code == 204
+    r = fetch.import_(ONLY_04, key="k2")
 
     assert r.status_code == 200, r.text
-    assert (r.json()["status"], r.json()["presets"]) == ("failed", 0), r.text
-    reason = f"Bambuddy already has a preset named {name_of(body)} that no fetch of this type made"
-    assert {"printer_model": "H2C", "nozzle_diameter": "0.4", "reason": reason} in r.json()[
-        "missing"
+    assert (r.json()["status"], r.json()["presets"], r.json()["notes"]) == ("partial", 1, [])
+    [preset] = own_presets(fetch)
+    assert preset["version"] == 1
+    assert created.call_count == 1
+
+
+@respx.mock
+def test_a_mirror_refusal_never_fails_the_import(fetch: Fetch) -> None:
+    """#7176 Decision 11: Bambuddy refusing the copy is kept on the preset; the run ends
+    as it would have, and the next refresh sends it again."""
+    put_all(fetch, ["0.4"])
+    mirror(status_code=403)
+    no_k_profiles()
+    r = fetch.import_(ONLY_04)
+    assert r.status_code == 200, r.text
+    assert (r.json()["status"], r.json()["presets"]) == ("partial", 1)
+    [preset] = own_presets(fetch)
+    assert preset["bb_preset_id"] is None and preset["mirrored_sha256"] is None
+    assert preset["mirror_error"] is not None
+    assert refs(fetch) == [f"sb-{preset['id']}"]
+
+
+@respx.mock
+def test_no_mirror_when_the_setting_is_off(fetch: Fetch) -> None:
+    configure(fetch.client, filament_preset_mirror=False)
+    put_all(fetch, ["0.4"])
+    sent = mirror()
+    no_k_profiles()
+    assert fetch.import_(ONLY_04).status_code == 200
+    assert sent.call_count == 0
+    [preset] = own_presets(fetch)
+    assert preset["bb_preset_id"] is None
+
+
+@respx.mock
+def test_the_types_own_temperatures_win(fetch: Fetch) -> None:
+    """#7142: the type's nozzle range replaces 3DFP's and the nozzle temperatures are
+    clamped into it, each a note."""
+    fetch.rows(
+        "UPDATE filament_spool_types SET nozzle_temp_min = 200, nozzle_temp_max = 220"
+        " WHERE id = %s RETURNING id",
+        fetch.type_id,
+    )
+    body = export(
+        nozzle_temperature_range_low=["190"],
+        nozzle_temperature_range_high=["230"],
+        nozzle_temperature=["225"],
+        nozzle_temperature_initial_layer=["195"],
+    )
+    assert fetch.put(body).status_code == 204
+    mirror()
+    no_k_profiles()
+    r = fetch.import_(ONLY_04)
+    assert r.status_code == 200, r.text
+    [preset] = own_presets(fetch)
+    doc = own_doc(fetch, preset)
+    assert (
+        doc["nozzle_temperature_range_low"],
+        doc["nozzle_temperature_range_high"],
+        doc["nozzle_temperature"],
+        doc["nozzle_temperature_initial_layer"],
+    ) == (["200"], ["220"], ["220"], ["200"])
+    assert r.json()["notes"] == [
+        "H2C 0.4 mm: nozzle_temperature_range_low is the type's 200, not 3DFP's 190",
+        "H2C 0.4 mm: nozzle_temperature_range_high is the type's 220, not 3DFP's 230",
+        "H2C 0.4 mm: nozzle_temperature is 220, inside the type's range, not 3DFP's 225",
+        "H2C 0.4 mm: nozzle_temperature_initial_layer is 200, inside the type's range,"
+        " not 3DFP's 195",
     ]
-    assert fetch.presets() == []
 
 
 @respx.mock
 def test_a_missing_key_makes_the_run_partial(fetch: Fetch) -> None:
-    bodies = put_all(fetch, ["0.4", "0.6", "0.8"])
-    bb_import(3)
-    local_presets([name_of(b) for b in bodies])
+    put_all(fetch, ["0.4", "0.6", "0.8"])
+    mirror()
     no_k_profiles()
     reason = "3DFP offers no 0.2 mm nozzle for H2C"
     r = fetch.import_([{"printer_model": "H2C", "nozzle": "0.2", "reason": reason}])
@@ -693,9 +655,8 @@ def test_other_keys_are_kept(fetch: Fetch) -> None:
         ],
         actor="ann",
     )
-    bodies = put_all(fetch)
-    bb_import(4)
-    local_presets([name_of(b) for b in bodies])
+    put_all(fetch)
+    mirror()
     no_k_profiles()
     assert fetch.import_().status_code == 200
     assert ("X1C", "0.4", "7", "mine") in fetch.presets()
@@ -724,8 +685,7 @@ def test_k_values_need_an_exact_non_gf_match(fetch: Fetch) -> None:
     bodies = [export("0.2", filament_id="GFL99"), export("0.4"), export("0.6"), export("0.8")]
     for nozzle, body in zip(NOZZLES, bodies, strict=True):
         assert fetch.put(body, nozzle=nozzle).status_code == 204
-    bb_import(4)
-    local_presets([name_of(b) for b in bodies])
+    mirror()
     tables = {
         "0.2": httpx.Response(200, json={"profiles": [_profile("GFL99", "0.03")]}),
         "0.4": httpx.Response(
@@ -836,8 +796,7 @@ def test_a_stale_k_value_of_a_fetched_key_is_removed_and_named(fetch: Fetch) -> 
     bodies = [export("0.2", filament_id="GFL99"), export("0.4"), export("0.6"), export("0.8")]
     for nozzle, body in zip(NOZZLES, bodies, strict=True):
         assert fetch.put(body, nozzle=nozzle).status_code == 204
-    bb_import(4)
-    local_presets([name_of(b) for b in bodies])
+    mirror()
     respx.get(url__regex=KPROFILES.pattern).mock(side_effect=_k_table_answer)
 
     r = fetch.import_()
@@ -881,8 +840,7 @@ def test_a_fetch_keeps_a_k_value_it_did_not_set(fetch: Fetch, source: str, why: 
     types = _state(fetch.client).components.get(FILAMENT).types
     _seed_k(fetch, [(_k_row(fetch, fetch.printer_id, "0.4", "0.04"), source)])
     put_all(fetch)
-    bb_import(4)
-    local_presets([name_of(export(n)) for n in NOZZLES])
+    mirror()
     respx.get(url__regex=KPROFILES.pattern).mock(side_effect=_k_table_answer)
 
     r = fetch.import_()
@@ -898,43 +856,28 @@ def test_a_fetch_keeps_a_k_value_it_did_not_set(fetch: Fetch, source: str, why: 
 
 
 @respx.mock
-def test_bb_refusing_the_import_fails_the_run(fetch: Fetch) -> None:
-    put_all(fetch)
-    bb_import(0, status=403)
-    local_presets([])
-    r = fetch.import_()
-    assert r.status_code == 200, r.text
-    assert (r.json()["status"], r.json()["presets"]) == ("failed", 0)
-    run = fetch.run()
-    assert run.status == "failed"
-    assert run.error is not None and "Manage Library" in run.error
-    assert fetch.presets() == []
-
-
-@respx.mock
 def test_import_twice_with_one_key_imports_once(fetch: Fetch) -> None:
-    bodies = put_all(fetch)
-    sent = bb_import(4)
-    local_presets([name_of(b) for b in bodies])
+    put_all(fetch)
+    sent = mirror()
     no_k_profiles()
     first = fetch.import_()
     again = fetch.import_()
     assert (first.status_code, again.status_code) == (200, 200)
     assert again.json() == first.json()
-    assert sent.call_count == 1
-    # Another key, after the run ended: the stored outcome, and no second import.
+    assert sent.call_count == 4
+    # Another key, after the run ended: the stored outcome, and nothing written again.
     other = fetch.import_(key="k2")
     assert (other.status_code, other.json()) == (200, first.json())
-    assert sent.call_count == 1
+    assert sent.call_count == 4
+    assert len(own_presets(fetch)) == 4
 
 
 @respx.mock
 def test_a_retried_import_of_an_imported_run_calls_bambuddy_no_more(fetch: Fetch) -> None:
     """R-F2: a run already ``imported`` answers its stored outcome, under its first key or
     another one, and Bambuddy is not asked anything again."""
-    bodies = put_all(fetch)
-    bb_import(4)
-    local_presets([name_of(b) for b in bodies])
+    put_all(fetch)
+    mirror()
     no_k_profiles()
     first = fetch.import_()
     assert first.json()["status"] == "imported"
@@ -945,24 +888,35 @@ def test_a_retried_import_of_an_imported_run_calls_bambuddy_no_more(fetch: Fetch
     assert respx.calls.call_count == calls
 
 
-@respx.mock
-def test_two_concurrent_imports_of_a_run_call_bambuddy_once(fetch: Fetch) -> None:
-    """R-F2: the worker's client retries a slow import with the same key while the first
-    request still runs. The second waits for the run's import lease and then answers the first
-    one's outcome: one zip import, one set of listings, never two imports in parallel."""
-    bodies = put_all(fetch)
-    reached, release = threading.Event(), threading.Event()
+def _slow_k_tables(reached: threading.Event, release: threading.Event) -> respx.Route:
+    """The printers' K tables, the import's one slow step: the first read waits."""
 
-    async def slow_import(request: httpx.Request) -> httpx.Response:
+    async def slow(request: httpx.Request) -> httpx.Response:
         reached.set()
         await asyncio.to_thread(release.wait, 30)
-        return httpx.Response(
-            200, json={"success": True, "imported": 4, "skipped": 0, "errors": []}
-        )
+        return httpx.Response(200, json={"profiles": []})
 
-    sent = respx.post(f"{API}/local-presets/import").mock(side_effect=slow_import)
-    listing = local_presets([name_of(b) for b in bodies])
-    no_k_profiles()
+    return respx.get(url__regex=KPROFILES.pattern).mock(side_effect=slow)
+
+
+@respx.mock
+def test_two_concurrent_imports_of_a_run_write_once(
+    fetch: Fetch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-F2: the worker's client retries a slow import with the same key while the first
+    request still runs. The second waits for the run's import lease and then answers the first
+    one's outcome: one set of K table reads and one write, never two in parallel."""
+    from scadbuddy.filament.profile_fill import TypeFiller
+
+    async def no_fill(self: Any, settings: Any, type_ids: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    # The first presets also fill the type (more K table reads): not what this counts.
+    monkeypatch.setattr(TypeFiller, "fill", no_fill)
+    put_all(fetch)
+    reached, release = threading.Event(), threading.Event()
+    tables = _slow_k_tables(reached, release)
+    mirror()
     replies: dict[str, Any] = {}
 
     def call(name: str) -> None:
@@ -982,8 +936,8 @@ def test_two_concurrent_imports_of_a_run_call_bambuddy_once(fetch: Fetch) -> Non
     assert replies["second"].status_code == 200, replies["second"].text
     assert replies["second"].json() == replies["first"].json()
     assert replies["first"].json()["status"] == "imported"
-    assert sent.call_count == 1
-    assert listing.call_count == 2
+    assert tables.call_count == 4
+    assert [p["version"] for p in own_presets(fetch)] == [1, 1, 1, 1]
 
 
 @respx.mock
@@ -996,7 +950,7 @@ def test_a_waiting_import_holds_no_pool_connection(
     connection is checked out stays a small part of it (a held connection would fill it)."""
     monkeypatch.setattr(profile_fetch, "LEASE_POLL_SECONDS", 0.1)
     pool = _state(fetch.client).settings_store.pool
-    bodies = put_all(fetch)
+    put_all(fetch)
     reached, release = threading.Event(), threading.Event()
     lock = threading.Lock()
     open_since: dict[int, float] = {}
@@ -1019,17 +973,8 @@ def test_a_waiting_import_holds_no_pool_connection(
                 held.append(time.monotonic() - began)
 
     monkeypatch.setattr(pool, "connection", timed)
-
-    async def slow_import(request: httpx.Request) -> httpx.Response:
-        reached.set()
-        await asyncio.to_thread(release.wait, 30)
-        return httpx.Response(
-            200, json={"success": True, "imported": 4, "skipped": 0, "errors": []}
-        )
-
-    respx.post(f"{API}/local-presets/import").mock(side_effect=slow_import)
-    local_presets([name_of(b) for b in bodies])
-    no_k_profiles()
+    _slow_k_tables(reached, release)
+    mirror()
     replies: dict[str, Any] = {}
 
     def call(name: str) -> None:
@@ -1063,9 +1008,8 @@ def test_an_expired_lease_is_claimed(fetch: Fetch, monkeypatch: pytest.MonkeyPat
     """R-PR3: a lease a crashed request left behind holds the import off only until it
     expires; then the waiting request claims it and imports, and the end clears it."""
     monkeypatch.setattr(profile_fetch, "LEASE_POLL_SECONDS", 0.05)
-    bodies = put_all(fetch)
-    sent = bb_import(4)
-    local_presets([name_of(b) for b in bodies])
+    put_all(fetch)
+    mirror()
     no_k_profiles()
     fetch.rows(
         "UPDATE filament_profile_fetches SET import_lease_until = now() + interval '1 second'"
@@ -1079,7 +1023,7 @@ def test_an_expired_lease_is_claimed(fetch: Fetch, monkeypatch: pytest.MonkeyPat
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "imported"
     assert time.monotonic() - began >= 0.5
-    assert sent.call_count == 1
+    assert len(own_presets(fetch)) == 4
     [row] = fetch.rows(
         "SELECT import_lease_until FROM filament_profile_fetches WHERE id = %s", fetch.run_id
     )
@@ -1088,41 +1032,6 @@ def test_an_expired_lease_is_claimed(fetch: Fetch, monkeypatch: pytest.MonkeyPat
 
 def test_import_needs_its_key(fetch: Fetch) -> None:
     assert fetch.import_(key=None).status_code == 428
-
-
-@respx.mock
-def test_the_held_copy_is_refreshed_after_import(
-    fetch: Fetch, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from scadbuddy.filament.profile_fill import TypeFiller
-
-    async def no_fill(self: Any, settings: Any, type_ids: Any, **kwargs: Any) -> list[Any]:
-        return []
-
-    # The first presets also fill the type (one more local-preset read): not what this counts.
-    monkeypatch.setattr(TypeFiller, "fill", no_fill)
-    state = _state(fetch.client)
-    state.settings = state.settings.model_copy(update={"spool_overlay_refresh_seconds": 300})
-    bodies = put_all(fetch)
-    bb_import(4)
-    local_presets([name_of(b) for b in bodies])
-    no_k_profiles()
-    details = respx.get(url__regex=rf"{re.escape(API)}/local-presets/(\d+)$").mock(
-        side_effect=lambda request: httpx.Response(
-            200,
-            json={
-                "id": int(request.url.path.rsplit("/", 1)[1]),
-                "name": "n",
-                "preset_type": "filament",
-                "source": "import",
-                "setting": {"a": "b"},
-            },
-        )
-    )
-    assert fetch.import_().status_code == 200
-    assert details.call_count == 4
-    held = fetch.rows("SELECT id FROM held_local_presets ORDER BY id")
-    assert [row["id"] for row in held] == [101, 102, 103, 104]
 
 
 @respx.mock
@@ -1150,11 +1059,17 @@ def _edits(fetch: Fetch, spool_id: UUID) -> list[Any]:
 
 
 @respx.mock
-def test_an_import_writes_edited_on_spools_that_inherit(fetch: Fetch) -> None:
+def test_an_import_writes_edited_on_spools_that_inherit(
+    fetch: Fetch, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A type edit fans out (spec §5.7): the import's preset and K-value change each write
     one ``edited`` event, as the run's starter, on a spool that inherits it; a spool that
-    sets every changed key itself gets none."""
-    spools = _state(fetch.client).components.get(FILAMENT).spools
+    sets every changed key itself gets none. The image's vendor tree is left out: with it
+    (in CI's image), the type's fill from its new ScadBuddy preset writes a third edit of
+    its own (the fill after the commit, `test_the_first_presets_an_import_sets_fill_the_type`)."""
+    filament = _state(fetch.client).components.get(FILAMENT)
+    monkeypatch.setattr(filament, "profile_table", lambda: None)
+    spools = filament.spools
     heir = spools.create(SpoolCreate(type_id=fetch.type_id), actor="ann").id
     own = spools.create(SpoolCreate(type_id=fetch.type_id), actor="ann").id
     spools.set_presets(
@@ -1178,9 +1093,8 @@ def test_an_import_writes_edited_on_spools_that_inherit(fetch: Fetch) -> None:
         actor="ann",
     )
     before = {s: len(_edits(fetch, s)) for s in (heir, own)}
-    bodies = put_all(fetch)
-    bb_import(4)
-    local_presets([name_of(b) for b in bodies])
+    put_all(fetch)
+    mirror()
     respx.get(url__regex=KPROFILES.pattern).mock(side_effect=_k_table)
 
     r = fetch.import_()
@@ -1193,7 +1107,7 @@ def test_an_import_writes_edited_on_spools_that_inherit(fetch: Fetch) -> None:
     assert {e.data["type_id"] for e in events} == {str(fetch.type_id)}
     old, new = events[0].data["changes"]["presets"]
     assert old == []
-    assert [p["slicer_filament"] for p in new] == ["101", "102", "103", "104"]
+    assert [p["slicer_filament"] for p in new] == [f"sb-{p['id']}" for p in own_presets(fetch)]
     old, new = events[1].data["changes"]["k_values"]
     assert old == []
     assert [Decimal(str(k["k_value"])) for k in new] == [Decimal("0.025")]
@@ -1203,29 +1117,17 @@ def test_an_import_writes_edited_on_spools_that_inherit(fetch: Fetch) -> None:
 @respx.mock
 def test_an_import_that_changes_nothing_writes_no_event(fetch: Fetch) -> None:
     bodies = put_all(fetch)
-    types = _state(fetch.client).components.get(FILAMENT).types
-    types.set_presets(
-        fetch.type_id,
-        [
-            TypePreset(
-                type_id=fetch.type_id,
-                printer_model="H2C",
-                nozzle_diameter=n,
-                slicer_filament=str(101 + i),
-                slicer_filament_name=name_of(bodies[i]),
-            )
-            for i, n in enumerate(NOZZLES)
-        ],
-        actor="ann",
-    )
+    mirror()
+    no_k_profiles()
+    assert fetch.import_().status_code == 200
     spools = _state(fetch.client).components.get(FILAMENT).spools
     heir = spools.create(SpoolCreate(type_id=fetch.type_id), actor="ann").id
     before = len(_edits(fetch, heir))
-    bb_import(4)
-    local_presets([name_of(b) for b in bodies])
-    no_k_profiles()
 
-    r = fetch.import_()
+    _next_run(fetch)
+    for nozzle, body in zip(NOZZLES, bodies, strict=True):
+        assert fetch.put(body, nozzle=nozzle).status_code == 204
+    r = fetch.import_(key="k2")
 
     assert r.status_code == 200, r.text
     assert len(fetch.presets()) == 4

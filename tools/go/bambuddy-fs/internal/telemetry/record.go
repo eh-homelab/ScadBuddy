@@ -66,6 +66,7 @@ type recorder struct {
 	httpDuration  metric.Float64Histogram
 	transfer      metric.Int64Counter
 	unsentUploads metric.Int64Counter
+	refreshes     metric.Int64Counter
 }
 
 var current atomic.Pointer[recorder]
@@ -107,6 +108,8 @@ func install(tp trace.TracerProvider, mp metric.MeterProvider) (restore func()) 
 		metric.WithDescription("File contents downloaded and uploaded"))
 	r.unsentUploads, _ = m.Int64Counter("bambuddy_fs.unsent.uploads", metric.WithUnit("{upload}"),
 		metric.WithDescription("Attempts to send an unsent write, by result"))
+	r.refreshes, _ = m.Int64Counter("bambuddy_fs.listing.refreshes", metric.WithUnit("{refresh}"),
+		metric.WithDescription("Background refreshes of a stale folder listing, by result"))
 	cache, _ := m.Int64ObservableGauge("bambuddy_fs.cache.bytes", metric.WithUnit("By"),
 		metric.WithDescription("Bytes in the cache directory"))
 	entries, _ := m.Int64ObservableGauge("bambuddy_fs.unsent.entries", metric.WithUnit("{write}"),
@@ -222,6 +225,34 @@ func (r *Retry) End(result string, fileID int) {
 	}
 	r.span.End()
 	rec().unsentUploads.Add(context.Background(), 1, metric.WithAttributes(resultKey.String(result)))
+}
+
+// Refresh is a background refresh of a stale folder listing, which no FUSE operation
+// waits on.
+type Refresh struct{ span trace.Span }
+
+// StartRefresh starts the span listing.refresh for folderID, in the trace of ctx's span
+// but not cancelled with ctx: the operation that started it has answered.
+func StartRefresh(ctx context.Context, folderID int) (context.Context, *Refresh) {
+	ctx = trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+	ctx, span := rec().tracer.Start(ctx, "listing.refresh", trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(FolderID(folderID)))
+	return ctx, &Refresh{span: span}
+}
+
+// Refreshes' results.
+const (
+	RefreshOK     = "ok"
+	RefreshFailed = "failed"
+)
+
+// End ends the refresh with its result, one of the Refresh constants.
+func (r *Refresh) End(result string) {
+	if result != RefreshOK {
+		r.span.SetStatus(codes.Error, result)
+	}
+	r.span.End()
+	rec().refreshes.Add(context.Background(), 1, metric.WithAttributes(resultKey.String(result)))
 }
 
 var errnoNames = map[syscall.Errno]string{

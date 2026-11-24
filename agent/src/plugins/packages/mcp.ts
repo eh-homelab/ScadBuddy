@@ -139,8 +139,8 @@ export function unofferableNameProblem(pkg: string, server: string): string {
 
 /**
  * The local servers of the allowed packages that no turn offers, because the name their
- * tools carry holds `__` (#4757 review I2): a classic copy leaves them out, as a durable turn
- * starts none of them, and both say so (`unofferableNameProblem`).
+ * tools carry holds `__` (#4757 review I2): a package's copy leaves them out, no turn starts
+ * any of them, and the turn says so (`unofferableNameProblem`).
  */
 export function unofferedLocalServers(loaded: readonly LoadedPackage[]): { pkg: string; server: string }[] {
   return offeredServers(loaded)
@@ -270,8 +270,8 @@ export async function forwardPackageServers(
 ): Promise<PackageServers> {
   const { access, ...forwardOptions } = options
   const { configs, problems, off } = await packageServerConfigs(loaded, resolve, access)
-  // Its `*` switch at each call, on every path that reaches it (#4757): a classic or
-  // durable turn's, a flow's. A read that fails refuses the call (forwarder.ts).
+  // Its `*` switch at each call, on every path that reaches it (#4757): a
+  // turn's, a flow's. A read that fails refuses the call (forwarder.ts).
   const routeOptions = ({ pkg, server, name }: PackageServerConfig): ForwardOptions => {
     const source = packageServerSource(pkg, server)
     const callCheck = access

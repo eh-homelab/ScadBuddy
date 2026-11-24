@@ -4,7 +4,7 @@ import { api } from '../../../api/client'
 import { getResetPreview, getSyncStatus, listSyncPasses, resetSyncLinks } from '../../../api/filament'
 import { describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
-import { leaveOnlyColourLinks, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
+import { leaveOnlyColourLinks, leaveOnlyPresetLinks, leaveUnresolvedPresets, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
@@ -414,6 +414,18 @@ describe('Filament (#6262)', () => {
       expect(items.map((item) => item.textContent)).toEqual(['5 colour links'])
       await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
       expect(await within(filament).findByText('5 links reset. A full pass now links the new Bambuddy.')).toBeInTheDocument()
+    })
+
+    it('names the filament preset links when presets are the only links (#7176)', async () => {
+      linkOtherBambuddy()
+      leaveOnlyPresetLinks()
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      const items = within(within(dialog).getByRole('list', { name: 'What the reset deletes' })).getAllByRole('listitem')
+      expect(items.map((item) => item.textContent)).toEqual(['3 filament preset links'])
+      await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
+      expect(await within(filament).findByText('3 links reset. A full pass now links the new Bambuddy.')).toBeInTheDocument()
     })
 
     it('warns that an untagged spool can end up twice when the Bambuddy is another one', async () => {
@@ -919,5 +931,57 @@ describe('the sync pass history (#6905)', () => {
     await user.clear(field())
     await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
     await waitFor(() => expect(mockSettings().filament_sync_pass_ttl_days).toBeNull())
+  })
+})
+
+describe("Import Bambuddy's presets (#7244)", () => {
+  it('imports once whatever the presets direction says, and says what it found', async () => {
+    await api.putSettings({ filament_sync: { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'sb_to_bb', suppliers: 'off', locations: 'off' } })
+    let calls = 0
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/api/v1/filament/presets/bambuddy-import')) calls += 1
+    })
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    const button = within(filament).getByRole('button', { name: 'Import presets from Bambuddy now' })
+    await user.click(button)
+    expect(await within(filament).findByText("Imported: 2 new presets from Bambuddy, 1 preset updated to Bambuddy's version.")).toBeInTheDocument()
+    await user.click(button)
+    expect(await within(filament).findByText("Nothing to import: no spool or type names a Bambuddy preset, and none taken from Bambuddy changed since.")).toBeInTheDocument()
+    // A binding Bambuddy can no longer fill is said, never "nothing to import".
+    leaveUnresolvedPresets(1)
+    await user.click(button)
+    expect(
+      await within(filament).findByText(
+        'Nothing imported. 1 Bambuddy preset that spools or types name could not be imported: Bambuddy no longer holds it, or it is not a filament preset. Choose a ScadBuddy preset for those spools and types.',
+      ),
+    ).toBeInTheDocument()
+    expect(calls).toBe(3)
+    // The import saves nothing of the form: the direction stays as it was.
+    expect(mockSettings().filament_sync).toMatchObject({ presets: 'sb_to_bb' })
+  })
+
+  it('links to Connection when no Bambuddy is set up', async () => {
+    server.use(
+      http.post('*/api/v1/filament/presets/bambuddy-import', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'no Bambuddy URL is configured; set one in Settings' }, { status: 409 }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(within(filament).getByRole('button', { name: 'Import presets from Bambuddy now' }))
+    const alert = await within(filament).findByRole('alert')
+    expect(within(alert).getByRole('link', { name: 'Connection' })).toHaveAttribute('href', expect.stringContaining('/settings/general#connection'))
+  })
+
+  it('says to reset the links while they belong to another Bambuddy', async () => {
+    linkOtherBambuddy('0ld0ld0ld0ld')
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(within(filament).getByRole('button', { name: 'Import presets from Bambuddy now' }))
+    expect(await within(filament).findByRole('alert')).toHaveTextContent('The Bambuddy links belong to another Bambuddy. Reset them under Sync status, then try again.')
   })
 })
