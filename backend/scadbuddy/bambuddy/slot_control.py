@@ -260,9 +260,11 @@ def filled(status: PrinterStatus, ams_id: int, tray_id: int) -> bool:
 
 
 def ams_busy(status: PrinterStatus) -> bool:
-    """1 (changing filament) and 2 (reading a tag) only. 3 is the AMS assist, which the
-    recording shows on a running printer, so it is not busy by itself."""
-    return status.ams_status_main in (1, 2)
+    """Busy unless the AMS is idle (0) or in assist (3), which the recording shows on a
+    running printer. 1 (changing filament), 2 (reading a tag) and any value not seen yet
+    count as busy, so an unknown state refuses the write. A status without the field
+    (None) says nothing of the AMS, as before."""
+    return status.ams_status_main not in (None, 0, 3)
 
 
 def guard(status: PrinterStatus, action: Action, ams_id: int, tray_id: int) -> AmsTray:

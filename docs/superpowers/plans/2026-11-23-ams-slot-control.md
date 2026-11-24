@@ -76,8 +76,8 @@ Each is posted on #7153.
   reset, refresh, load, unload) reads BB's live status of the printer first (`GET
   /printers/{id}/status`) and refuses with a 409 and a `code`: `printer_offline` (BB is
   not connected to it), `printer_busy` (a print is active: `PREPARE`, `SLICING`,
-  `RUNNING`, `PAUSE`), `ams_busy` (`ams_status_main` is 1 or 2: the AMS changes filament
-  or reads a tag; 3, the AMS assist, is allowed), `no_slot` (the status shows no such unit or slot). Load also refuses
+  `RUNNING`, `PAUSE`), `ams_busy` (`ams_status_main` is anything but 0, 3 or absent: 1 the AMS changes filament, 2 it
+  reads a tag, and a value not seen yet is refused too; 3, the AMS assist, is allowed), `no_slot` (the status shows no such unit or slot). Load also refuses
   `tray_empty` (the slot holds no spool) and `already_loaded` (`tray_now` names it);
   refresh refuses `filament_loaded` (`tray_now` is not 255, as BB itself does). On a
   printer with two extruders, load sends BB the extruder the slot feeds; when the status

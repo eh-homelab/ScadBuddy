@@ -94,6 +94,8 @@ def test_load_names_the_global_tray_and_the_hotend_after_the_state(client: TestC
         ({"state": "RUNNING"}, "printer_busy"),
         ({"state": "PAUSE"}, "printer_busy"),
         ({"ams_status_main": 1}, "ams_busy"),
+        ({"ams_status_main": 2}, "ams_busy"),
+        ({"ams_status_main": 7}, "ams_busy"),
     ],
 )
 def test_every_printer_write_refuses_an_unsafe_state(
