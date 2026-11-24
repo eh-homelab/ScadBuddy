@@ -502,6 +502,8 @@ The migration, in one file, in this order:
 
 ### Task 7: Orders use items; rules and item parts repoint; re-cost
 
+Lock order: callers lock items in `item_id` order, and lock orders before lots, so that two moves never deadlock.
+
 **Files:**
 - Modify: `backend/scadbuddy/orders/parts.py` (keep only the models and the
   order-item-parts and rule reads/writes, over `order_item_parts.item_id` and
@@ -789,4 +791,15 @@ task above follows them.
   makes it a spool's purchase source), or has an open create intent. A supplier made for
   item offers, or from `parts.supplier` (Task 6), never reaches Bambuddy.
 - The Task 6 step 6 `cost_unknown` rule gains the currency term (review of 6a0b012ae).
-
+- **R-P2-11.** `stock_lots.foreign_unit_cost_minor` keeps the unit cost of a lot bought in a
+  foreign currency. The lot's cost stays unknown in the shop's currency. What a person
+  entered is never dropped.
+- **R-P2-12.** A lot's `cost_currency` is the currency it was bought in (NULL means the
+  shop's currency). `set_lot_cost` keeps `cost_currency` and `foreign_unit_cost_minor`, for
+  provenance.
+- **R-P2-13.** The API serializes an item's decimal figures normalized, like a lot's
+  (`"4"`, not `"4.000000"`).
+- **R-P2-14.** A move that names a lot uses that lot or is refused (an empty lot gives an
+  error). FIFO never silently replaces the lot.
+- **R-P2-15.** A count first zeroes the negative lots, then takes the difference FIFO, or
+  adds it to the newest lot. No lot keeps an offsetting negative balance.
