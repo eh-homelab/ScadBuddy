@@ -503,7 +503,7 @@ ships first.
    tools; `parts` migrates to items + lots (opening lots at today's unit cost), order parts
    and `model_part_rules` repoint; job cost reads part cost from moves. Starts after the
    filament purchasing PRs merge, because offers replace `filament_supplier_products`.
-   *Done in #7393, #7405, #7457, #7474, the layer 5 PR and the docs PR (#7067, layers 1 to 6;
+   *Done in #7393, #7405, #7457, #7474, #7475 and #7476 (#7067, layers 1 to 6;
    see `docs/features/inventory.md`).*
 3. **Generic purchasing.** Rename suppliers, offers, price points, invoices; non-filament
    invoice lines receive lots/units; `invoice_line_links`; order purchases link lines;
