@@ -325,8 +325,14 @@ which says whose bytes they are.) My call; §7 lists it.
   its own patch (F12). It starts a one-step `AttemptMedia` for every attempt of the last
   14 days that names an archive, lacks a medium, and was last checked more than an hour
   ago. Each step stamps `media_checked_at` on the attempt, so each attempt costs at most
-  one Bambuddy read an hour (an archive with no timelapse at all costs that for its 14
-  days). The draft's `BusResync` trigger goes: the sweep catches a missed outcome within
+  one Bambuddy read an hour. **As built (#7453):** one pass starts at most `SWEEP_BATCH`
+  (40) attempts, least lately checked first, as each start may wait `START_TIMEOUT` (5 s)
+  inside the sweep's 5 min. A medium that an archive past `FRESH` does not offer (a printer
+  with timelapse off) is recorded by the step in `order_attempt_media_not_offered`, which
+  each step rewrites, and the sweep leaves it out; so such an archive no longer costs a read
+  an hour for its 14 days. A timelapse Bambuddy offers later still comes in through the
+  read of the attempt's archives. A settled run with no archive yet is still read each hour.
+  The draft's `BusResync` trigger goes: the sweep catches a missed outcome within
   the hour, and a periodic pass belongs in the housekeeping sweeps, not in the API (F12).
 - **Replicas.** Every replica hears `print.outcome` (F8); the workflow id makes their
   three starts one run, so one step imports, not three. The manual copy operation can

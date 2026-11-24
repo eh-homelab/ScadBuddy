@@ -1695,7 +1695,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the attempt lacks; and the housekeeping sweep `housekeeping_import_attempt_media` (#7234,
   `ATTEMPT_MEDIA_SWEEP` in `SWEEPS` and `PRUNE_SWEEPS`, behind `ATTEMPT_MEDIA_PATCH`;
   `sweep_media` over `OrderStore.attempts_missing_media`) starts one step for each attempt of
-  the last 14 days that still lacks a medium and was not checked in the last hour. A step's
+  the last 14 days that still lacks a medium and was not checked in the last hour, at most
+  `SWEEP_BATCH` (40) a pass, least lately checked first, so a pass of slow starts
+  (`START_TIMEOUT` each) fits `ATTEMPT_MEDIA_TIMEOUT` (#7453); the partial index
+  `order_item_fulfilments_media_sweep` serves its read, whose WHERE repeats the index's
+  predicate. Each step rewrites the attempt's rows of `order_attempt_media_not_offered`
+  (`record_media_not_offered`, from `_not_offered`): the media an archive past `FRESH` does
+  not offer, which the sweep leaves out and nothing else reads (#7453). A step's
   `missing` (`_missing`) is true when no archive was read, or an archive lacks a medium
   that is neither present nor refused, and the archive offers it or may still offer it (its
   `completed_at` is null or under an hour old, `FRESH`). Refusals: a medium the import refused as larger than the
