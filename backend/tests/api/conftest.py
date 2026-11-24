@@ -5,7 +5,7 @@ import os
 import time
 import uuid
 import zipfile
-from collections.abc import Container, Iterator
+from collections.abc import Callable, Container, Coroutine, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -249,6 +249,25 @@ def app_payment_sweep_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(main_module, "_retry_payment_closes_logged", off)
     monkeypatch.setattr(main_module, "_settle_payment_captures_logged", off)
+
+
+@pytest.fixture(autouse=True)
+def app_run_holds_sweep_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[AppState], Coroutine[Any, Any, None]]:
+    """#7535: the app's own run-holds sweep does nothing. The prune Schedule's boot run
+    (as in `app_payment_sweep_off`) runs it near its end, still open while the test runs; on a
+    loaded runner it lands after the test inserted its runs: it records a LAN run whose
+    sequence is gone as stopped (`end_gone_sequences`) and drops the holds of the runs no
+    longer in use (`reap_run_holds`), before the test's own read. The real sweep is
+    returned for a test that runs it itself."""
+    real = main_module._reap_run_holds_logged
+
+    async def off(state: AppState) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "_reap_run_holds_logged", off)
+    return real
 
 
 @pytest.fixture(autouse=True)
