@@ -497,6 +497,12 @@ def test_an_attempts_archive_offers_its_finish_photo_as_a_copy(bambuddy: TestCli
         item.item["id"],
     )
     assert photo.call_count == 1
+    # #7232 (spec 2026-11-05 §4.2): the copy names its archive and medium.
+    assert (copied["archive_id"], copied["archive_media"]) == (81, "finished_photo")
+    # F14: the archive's 3MF is no medium to copy.
+    assert (
+        bambuddy.post(f"{base}/81/copy", json={"what": "file"}, headers=press()).status_code == 422
+    )
     refused = bambuddy.post(f"{base}/81/copy", json={"what": "timelapse"}, headers=press())
     problem(refused, "no_timelapse")
     elsewhere = bambuddy.post(f"{base}/99/copy", json={"what": "timelapse"}, headers=press())

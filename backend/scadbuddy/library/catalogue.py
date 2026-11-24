@@ -905,6 +905,12 @@ class Catalogue:
         """The catalogue thumbnail and its content type: the template's cover, else
         the first generated output's plate cover, else the default-render preview,
         else None."""
+        with span("catalogue.thumbnail", attributes={"scadbuddy.slug": slug}) as current:
+            found = self._thumbnail(slug)
+            current.set_attribute("scadbuddy.found", found is not None)
+            return found
+
+    def _thumbnail(self, slug: str) -> tuple[bytes, str] | None:
         self._require(slug)
         cover = self._cover(slug, self.list_media(slug))
         if cover is not None:
@@ -1130,8 +1136,15 @@ class Catalogue:
         ``model.json`` once: what :meth:`library_pins` answers for one name, less the
         entries that cannot be read as a pin. One walk answers any number of names
         (#253, review of #740)."""
+        # Every model's model.json on the NFS share: one span for the walk (#7245).
+        with span("catalogue.library_pin_index") as current:
+            slugs = self.slugs()
+            current.set_attribute("scadbuddy.models", len(slugs))
+            return self._library_pin_index(slugs)
+
+    def _library_pin_index(self, slugs: list[str]) -> dict[str, list[tuple[str, ModelLibrary]]]:
         index: dict[str, list[tuple[str, ModelLibrary]]] = {}
-        for slug in self.slugs():
+        for slug in slugs:
             try:
                 raw = self.read_raw_meta(slug)
             except InvalidModelMetaError:
@@ -1156,8 +1169,20 @@ class Catalogue:
     def _library_entries(self, name: str, commit: str | None = None) -> list[tuple[str, Any]]:
         """:meth:`library_users` with the entry that made each one a user, reading
         each ``model.json`` once: ``None`` for one that is not JSON."""
+        # Every model's model.json on the NFS share: one span for the walk (#7245). Not
+        # the library's name, which a person chose.
+        with span("catalogue.library_entries") as current:
+            slugs = self.slugs()
+            current.set_attribute("scadbuddy.models", len(slugs))
+            found = self._entries_naming(name, commit, slugs)
+            current.set_attribute("scadbuddy.found", len(found))
+            return found
+
+    def _entries_naming(
+        self, name: str, commit: str | None, slugs: list[str]
+    ) -> list[tuple[str, Any]]:
         found: list[tuple[str, Any]] = []
-        for slug in self.slugs():
+        for slug in slugs:
             try:
                 raw = self.read_raw_meta(slug)
             except InvalidModelMetaError:
@@ -1203,13 +1228,18 @@ class Catalogue:
             return rows.get(slug, [])
 
         records: list[ModelRecord] = []
-        for slug in slugs:
-            try:
-                records.append(self._record(slug, versions.get, history, media_of, covers.get))
-            except InvalidModelMetaError as error:
-                # One broken model.json costs its own model, never the whole page;
-                # `GET /models/{slug}` says what is wrong with it.
-                logger.warning("left a model out of the listing: %s", error, extra={"slug": slug})
+        # Each record reads its model.json, and its fallback cover may scan its outputs
+        # (`outputs.scan_plate_cover`, a child span): all on the NFS share (#7245).
+        with span("catalogue.records", attributes={"scadbuddy.models": len(slugs)}):
+            for slug in slugs:
+                try:
+                    records.append(self._record(slug, versions.get, history, media_of, covers.get))
+                except InvalidModelMetaError as error:
+                    # One broken model.json costs its own model, never the whole page;
+                    # `GET /models/{slug}` says what is wrong with it.
+                    logger.warning(
+                        "left a model out of the listing: %s", error, extra={"slug": slug}
+                    )
         return records
 
     def create(

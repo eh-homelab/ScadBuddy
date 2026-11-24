@@ -87,7 +87,7 @@ func (d *dir) Unlink(ctx context.Context, name string) (errno syscall.Errno) {
 	}
 	ctx, op := telemetry.StartOp(ctx, "unlink", telemetry.FolderID(d.id))
 	defer func() { op.End(errno) }()
-	l, errno := d.tree.view(ctx, d.id)
+	l, errno := d.tree.view(ctx, d.id, current)
 	if errno != 0 {
 		return errno
 	}
@@ -159,7 +159,7 @@ func (d *dir) Rmdir(ctx context.Context, name string) (errno syscall.Errno) {
 	}
 	ctx, op := telemetry.StartOp(ctx, "rmdir")
 	defer func() { op.End(errno) }()
-	l, errno := d.tree.list(ctx, d.id)
+	l, errno := d.tree.list(ctx, d.id, current)
 	if errno != 0 {
 		return errno
 	}
@@ -204,11 +204,11 @@ func (d *dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 	if errno := storable(newName); errno != 0 {
 		return errno
 	}
-	src, errno := d.tree.view(ctx, d.id)
+	src, errno := d.tree.view(ctx, d.id, current)
 	if errno != 0 {
 		return errno
 	}
-	dst, errno := d.tree.view(ctx, to.id)
+	dst, errno := d.tree.view(ctx, to.id, current)
 	if errno != 0 {
 		return errno
 	}
@@ -330,7 +330,7 @@ func (d *dir) renameUnsent(ctx context.Context, n *file, e *entry, to *dir, newN
 		// Sent meanwhile: its file now has the name.
 		q = nil
 		d.tree.forget(to.id)
-		v, errno := d.tree.view(ctx, to.id)
+		v, errno := d.tree.view(ctx, to.id, current)
 		if errno != 0 {
 			return errno
 		}
@@ -401,7 +401,7 @@ func changes(name, newName string, from, to int) (*string, *int) {
 
 // free is EEXIST if name is shown in in, or is a file being created or queued there.
 func (d *dir) free(ctx context.Context, in *dir, name string) syscall.Errno {
-	l, errno := d.tree.view(ctx, in.id)
+	l, errno := d.tree.view(ctx, in.id, current)
 	if errno != 0 {
 		return errno
 	}

@@ -162,6 +162,7 @@ from scadbuddy.filament.spools import (
     OverrideKindError,
     ResetBeforeLinkError,
     SpoolBambuddyLinkedError,
+    SpoolBulkRefusedError,
     SpoolInUseError,
     SpoolTrayPlaceError,
     SpoolTypelessError,
@@ -752,8 +753,9 @@ async def put_type_k_values(
         "Starts a fetch of the type's slicer presets from 3dfilamentprofiles.com (its "
         "`tdfp_id`): the profile-fetch worker exports one Bambu Studio preset per printer "
         "model ScadBuddy's printers have and per nozzle in the `profile_fetch_nozzles` "
-        "setting, and the API imports them into Bambuddy's local presets and makes them the "
-        "type's presets for those keys. It answers 202 at once with the run (`running`); "
+        "setting, and the API keeps them as ScadBuddy presets and makes them the type's "
+        "presets for those keys; while `filament_preset_mirror` is on it copies them to "
+        "Bambuddy's local presets. It answers 202 at once with the run (`running`); "
         "read its progress with `GET` on this path. A start while a fetch of the type runs "
         "joins it (`joined: true`, the same run) and starts nothing new, unless no "
         "profile-fetch worker serves that run: it then ends `failed` and a new run starts. "
@@ -1692,6 +1694,74 @@ async def reset_consumed(
 ) -> m.ConsumedResetDone:
     return await asyncio.to_thread(
         filament.spools.reset_consumed, body.spool_ids, actor=actor(caller)
+    )
+
+
+@router.post(
+    "/spools/bulk-update",
+    response_model=m.SpoolBulkUpdated,
+    summary="Change several spools at once",
+    description=(
+        "Bulk edit (#7151): `patch`, a `PATCH /filament/spools/{id}` body less `archived`, "
+        "on each spool of `spool_ids` (1 to 500), in one transaction. Each spool gets its "
+        "own `edited` ledger event of what changed on it, and none when nothing did, so a "
+        "resend books nothing. `null` on an override clears it. All or none: a spool the "
+        "patch refuses refuses the whole edit, and the 422 names its number. An id that "
+        "names no spool is in `not_found`. 422 for a bad field, a patch that sets nothing "
+        "or sets `archived` (use `bulk-archive` or `bulk-restore`), a row it names that "
+        "does not exist, a spool left with neither type nor material, or an effective "
+        "minimum temperature above its maximum."
+    ),
+)
+async def bulk_update_spools(
+    filament: FilamentDep, caller: CallerDep, body: m.SpoolBulkUpdate
+) -> m.SpoolBulkUpdated:
+    try:
+        return await asyncio.to_thread(
+            filament.spools.bulk_update, body.spool_ids, body.patch, actor=actor(caller)
+        )
+    except (SpoolBulkRefusedError, CatalogRefError) as exc:
+        raise _refused(exc) from None
+
+
+_BULK_ARCHIVE_DESCRIPTION = (
+    "each spool of `spool_ids` (1 to 500), in one transaction (#7151). Each spool it "
+    "changes gets its own `{event}` ledger event{extra}. The answer lists, in id order, "
+    "the spools it changed (`changed`), those already so (`unchanged`) and the ids that "
+    "name no spool (`not_found`); none of them is refused."
+)
+
+
+@router.post(
+    "/spools/bulk-archive",
+    response_model=m.SpoolsArchived,
+    summary="Archive several spools",
+    description="Archives "
+    + _BULK_ARCHIVE_DESCRIPTION.format(
+        event="archived",
+        extra=", and its open tag binding closes, as `POST /spools/{id}/archive` does",
+    ),
+)
+async def bulk_archive_spools(
+    filament: FilamentDep, caller: CallerDep, body: m.SpoolIds
+) -> m.SpoolsArchived:
+    return await asyncio.to_thread(
+        filament.spools.bulk_archive, body.spool_ids, True, actor=actor(caller)
+    )
+
+
+@router.post(
+    "/spools/bulk-restore",
+    response_model=m.SpoolsArchived,
+    summary="Restore several spools",
+    description="Restores "
+    + _BULK_ARCHIVE_DESCRIPTION.format(event="restored", extra="; no tag is bound back"),
+)
+async def bulk_restore_spools(
+    filament: FilamentDep, caller: CallerDep, body: m.SpoolIds
+) -> m.SpoolsArchived:
+    return await asyncio.to_thread(
+        filament.spools.bulk_archive, body.spool_ids, False, actor=actor(caller)
     )
 
 
