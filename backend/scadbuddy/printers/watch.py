@@ -59,6 +59,7 @@ from prometheus_client import Counter
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy.camera.models import rtsp_url
 from scadbuddy.core.events import EventBus, PrinterEvent, emit
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.printers.lan import KEEPALIVE, LanPrinter
@@ -323,10 +324,15 @@ class WatchActivities:
         self, printer_id: str, written: LanReport, announced: tuple[Any, ...] | None
     ) -> tuple[Any, ...]:
         """``printer.report`` once a written report shows a card something new: never for
-        a report not written, which a card would read back as the old one."""
-        now = shown(written.print)
-        if now != announced:
+        a report not written, which a card would read back as the old one. The last item
+        of ``announced`` is the camera URL (`camera.models.rtsp_url`); when a later report
+        shows another one, ``printer.changed`` follows, which the camera relay reads. The
+        first report written has no URL to differ from."""
+        now = (*shown(written.print), rtsp_url(written.print))
+        if announced is None or now[:-1] != announced[:-1]:
             emit(self.events, PrinterEvent(kind="printer.report", printer_id=printer_id))
+        if announced is not None and now[-1] != announced[-1]:
+            emit(self.events, PrinterEvent(kind="printer.changed", printer_id=printer_id))
         return now
 
     def _gave_up(self, printer_id: str) -> None:

@@ -14,6 +14,7 @@ import pytest
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.core.events import EventBus, PrinterEvent
 from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
@@ -30,7 +31,7 @@ from scadbuddy.printers.watch import SHOWN, WatchActivities, shown
 from scadbuddy.rack.usage import LanUsage, PickedHotend, RackUsageStore
 from scadbuddy.workflows.printer_watch import PrinterWatchInput
 from tests.conftest import PgPool
-from tests.printers.conftest import KEK
+from tests.printers.conftest import KEK, RecordingBus
 from tests.rack.helpers import serial
 
 pytestmark = pytest.mark.requires_postgres
@@ -523,3 +524,54 @@ def test_a_write_older_than_the_row_moves_nothing_back(
     # A write as old as the row is the same write again: written, ending nothing.
     assert reports.put(pid, FINISH_X, later + timedelta(seconds=1)) is None
     assert reports.get(pid) == (FINISH_X, later + timedelta(seconds=1))
+
+
+def _camera(url: str, percent: int = 0) -> dict[str, Any]:
+    return {"gcode_state": "RUNNING", "mc_percent": percent, "ipcam": {"rtsp_url": url}}
+
+
+async def _kinds(
+    linked: tuple[PrinterStore, PrinterReportStore, str], deltas: list[dict[str, Any]]
+) -> list[str]:
+    printers, reports, pid = linked
+    bus = RecordingBus()
+    lan = Lan(subscribes=True, deltas=deltas)
+    watches = WatchActivities(
+        printers,
+        reports,
+        cast(EventBus, bus),
+        connect=lambda *a: cast(LanPrinter, lan),
+        write_every=0,
+    )
+    last = deltas[-1]
+
+    async def written() -> bool:
+        got = reports.get(pid)
+        if got is None or got[0].get("mc_percent") != last["mc_percent"]:
+            return False
+        await asyncio.sleep(0.05)  # the announce follows the write by a tick
+        return True
+
+    await run_until(ActivityEnvironment(), watches, pid, written)
+    return [e.kind for e in bus.events if isinstance(e, PrinterEvent)]
+
+
+async def test_watch_announces_changed_on_rtsp_url_change(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(
+        linked,
+        [_camera("rtsps://10.0.0.9:322/a", 1), _camera("rtsps://10.0.0.8:322/a", 2)],
+    )
+    assert kinds.count("printer.changed") == 1
+
+
+async def test_watch_announces_no_change_for_progress_only(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(
+        linked,
+        [_camera("rtsps://10.0.0.9:322/a", 1), _camera("rtsps://10.0.0.9:322/a", 2)],
+    )
+    assert "printer.changed" not in kinds
+    assert kinds.count("printer.report") == 2

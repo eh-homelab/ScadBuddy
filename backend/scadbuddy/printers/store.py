@@ -66,7 +66,7 @@ _COLUMNS = (
     "id, serial, name, model, bambuddy_printer_id, bambuddy_unlinked_id, lan_host, lan_cert_sha256,"
     " access_code_sealed IS NOT NULL AS has_access_code, preferred_path, bambuddy_active,"
     " kind, bambuddy_vp_id, forwards_to, vp_mode, bambuddy_view, lan_sync_error,"
-    " lan_move_pending, created_at, updated_at"
+    " lan_move_pending, camera_recording, created_at, updated_at"
 )
 _LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:printers', 0))"
 
@@ -341,6 +341,11 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     # #6950: the printer's files and links (`entities`), or the sweep would take them.
     _repoint_entity,
     PrinterReference("printer_reports", "printer_id", unique=True),
+    # Camera recording: the segment index moves whole; a lease and a feed report stay the
+    # kept printer's own.
+    PrinterReference("camera_segments", "printer_id"),
+    PrinterReference("camera_leases", "printer_id", unique=True),
+    PrinterReference("camera_feeds", "printer_id", unique=True),
     # #5774: ScadBuddy's hour counter; the kept printer's row stays, the gone one's
     # moves only when the kept printer has none.
     PrinterReference("printer_run_hours", "printer", unique=True),
@@ -626,8 +631,14 @@ class PrinterStore:
             return self._update(
                 conn,
                 printer_id,
-                "name = %s, preferred_path = %s",
-                (body.name or current.name, body.preferred_path or current.preferred_path),
+                "name = %s, preferred_path = %s, camera_recording = %s",
+                (
+                    body.name or current.name,
+                    body.preferred_path or current.preferred_path,
+                    current.camera_recording
+                    if body.camera_recording is None
+                    else body.camera_recording,
+                ),
             )
 
     def link_bambuddy(self, printer_id: str, bambuddy_printer_id: int) -> PrinterRow:
