@@ -2,13 +2,15 @@ import threading
 import time
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
+import regex
 from pydantic import ValidationError
 
 from scadbuddy.core.input_schema import schema_problems
-from scadbuddy.tasks.models import Task, TaskOpen
+from scadbuddy.tasks.models import AnswerProblem, Task, TaskOpen
 from scadbuddy.tasks.validate import prompt_schema_problems, validate_answer
 
 EMAIL = {
@@ -19,6 +21,20 @@ EMAIL = {
         "also_sms": {"type": "boolean", "default": False},
     },
 }
+
+
+BROKEN = [AnswerProblem(field="", message="this question's form is broken")]
+
+
+def _asks(prop: Any, **others: Any) -> dict[str, Any]:
+    return {"type": "object", "properties": {"x": prop, **others}}
+
+
+def _nested(depth: int) -> Any:
+    value: Any = []
+    for _ in range(depth - 1):
+        value = [value]
+    return value
 
 
 def test_a_valid_answer_has_no_problems() -> None:
@@ -41,13 +57,14 @@ def test_a_nested_or_referencing_schema_is_refused_for_a_prompt() -> None:
 
 def test_a_problem_message_never_holds_the_rejected_value() -> None:
     bad = "secret-not-an-address"
-    enum_schema = {"type": "object", "properties": {"c": {"enum": ["a", "b"]}}}
-    short = {"type": "object", "properties": {"n": {"type": "string", "maxLength": 3}}}
+    choice = _asks({"type": "string", "enum": ["a", "b"]})
+    short = _asks({"type": "string", "maxLength": 3})
     found = [
         validate_answer(EMAIL, {"email": bad}),
         validate_answer(EMAIL, {"email": 12345678}),
-        validate_answer(enum_schema, {"c": bad}),
-        validate_answer(short, {"n": bad}),
+        validate_answer(choice, {"x": bad}),
+        validate_answer(short, {"x": bad}),
+        validate_answer(EMAIL, {"email": bad + "\x00"}),
     ]
     for problems in found:
         assert problems
@@ -55,10 +72,9 @@ def test_a_problem_message_never_holds_the_rejected_value() -> None:
 
 
 def test_the_field_is_a_slash_joined_path() -> None:
-    inner = {"type": "object", "properties": {"b": {"type": "integer"}}}
-    schema = {"type": "object", "properties": {"a": inner}}
-    [p] = validate_answer(schema, {"a": {"b": "x"}})
-    assert p.field == "a/b"
+    schema = _asks({"type": "array", "items": {"type": "integer"}})
+    [p] = validate_answer(schema, {"x": [1, "x"]})
+    assert p.field == "x/1"
 
 
 def test_the_email_schema_is_a_prompt_schema() -> None:
@@ -155,12 +171,14 @@ def test_a_remote_ref_is_never_fetched() -> None:
         thread.join()
         server.server_close()
     assert hits == []
-    assert [p.field for p in problems] == [""]
+    assert problems == BROKEN
 
 
-def test_a_file_ref_is_never_read() -> None:
-    problems = validate_answer({"$ref": "file:///etc/hostname"}, {})
-    assert [p.field for p in problems] == [""]
+def test_a_file_ref_is_never_read(tmp_path: Path) -> None:
+    # Read, the file would make "text" a type problem.
+    target = tmp_path / "integer.json"
+    target.write_text('{"type": "integer"}')
+    assert validate_answer({"$ref": target.as_uri()}, "text") == BROKEN
 
 
 def test_an_over_long_value_is_refused_before_its_pattern_runs() -> None:
@@ -171,3 +189,194 @@ def test_an_over_long_value_is_refused_before_its_pattern_runs() -> None:
     assert problem.field == "s" and "1024" in problem.message
     assert "aaaa" not in problem.message
     assert time.monotonic() - started < 1
+
+
+HALVES = _asks({"type": "number", "multipleOf": 0.5})
+
+
+def test_a_huge_integer_against_a_fractional_multiple_is_checked_exactly() -> None:
+    assert validate_answer(HALVES, {"x": 10**400}) == []
+    [problem] = validate_answer(_asks({"type": "number", "multipleOf": 0.7}), {"x": 10**400})
+    assert problem.field == "x" and "multiple" in problem.message
+
+
+def test_a_fraction_against_a_huge_multiple_is_checked() -> None:
+    [problem] = validate_answer(_asks({"type": "number", "multipleOf": 10**400}), {"x": 1.5})
+    assert problem.field == "x" and "multiple" in problem.message
+
+
+@pytest.mark.parametrize("bad", [1e400, -1e400, float("nan")])
+def test_a_number_that_is_not_finite_is_refused(bad: float) -> None:
+    for schema in (HALVES, _asks({"type": "number"})):
+        [problem] = validate_answer(schema, {"x": bad})
+        assert problem.field == "x" and "finite" in problem.message
+
+
+def test_an_integer_too_long_to_write_is_refused() -> None:
+    [problem] = validate_answer(_asks({"type": "integer"}), {"x": 10**5000})
+    assert problem.field == "x" and "too large" in problem.message
+
+
+@pytest.mark.parametrize("depth", [900, 100_000])
+def test_a_deeply_nested_answer_is_one_problem(depth: int) -> None:
+    prop = {"type": "array", "items": {"type": "string"}, "uniqueItems": True}
+    problems = validate_answer(_asks(prop), {"x": [_nested(depth), _nested(depth)]})
+    assert problems
+    assert {p.field for p in problems} <= {"x", "x/0", "x/1"}
+    assert all("nested" in p.message for p in problems)
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "properties": ["x"]},
+        {"$ref": "#"},
+        _asks({"type": ["string", "null"]}),
+        _asks({"type": "array", "items": {"type": ["string"]}}),
+        _asks({"type": "string", "maxLength": 5, "pattern": "a{99999999999999}"}),
+        _asks({"type": "string", "maxLength": 5, "pattern": "(" * 4000 + ")" * 4000}),
+        _asks({"type": "string", "enum": [_nested(900)]}),
+        _asks({"type": "object", "properties": {}}),
+        ["x"],
+    ],
+    ids=["list", "ref", "types", "item-types", "repeat", "parens", "deep", "object", "no-object"],
+)
+def test_a_stored_schema_outside_the_subset_is_one_problem(schema: Any) -> None:
+    assert validate_answer(schema, {"x": "a"}) == BROKEN
+
+
+def test_the_answer_is_checked_before_the_schema() -> None:
+    [problem] = validate_answer({"$ref": "#"}, {"x": float("nan")})
+    assert problem.field == "" and "finite" in problem.message
+
+
+@pytest.mark.parametrize("bad", ["a\x00b", "\ud800", "a\udfffb"])
+def test_text_the_store_cannot_write_is_refused_anywhere(bad: str) -> None:
+    tags = {"type": "array", "items": {"type": "string"}}
+    schema = _asks({"type": "string"}, tags=tags)
+    answers: list[tuple[Any, str]] = [
+        ({"x": bad}, "x"),
+        ({"tags": ["a", bad]}, "tags/1"),
+        ({"x": "a", bad: 1}, ""),
+        ({"other": bad}, ""),
+        ({"tags": [bad, {"a": 1}]}, "tags/0"),
+        ({"x": {"secret_key": bad}}, "x"),
+        (bad, ""),
+    ]
+    for answer, field in answers:
+        problems = validate_answer(schema, answer)
+        assert [p.field for p in problems if "stored" in p.message] == [field], answer
+        assert all(bad not in p.message and bad not in p.field for p in problems)
+
+
+def test_text_outside_the_basic_plane_is_stored() -> None:
+    assert validate_answer(_asks({"type": "string"}), {"x": "\U0001f600 \ud7ff\ue000"}) == []
+
+
+BAD_VALUES: list[Any] = ["a\x00b", "\ud800", 1e400, float("nan")]
+
+
+@pytest.mark.parametrize("bad", BAD_VALUES)
+def test_a_task_holds_only_what_the_store_can_write(bad: Any) -> None:
+    good: dict[str, Any] = {"id": "t", "run_id": "r", "title": "x", "schema": EMAIL}
+    places: list[dict[str, Any]] = [
+        {"context": [{"type": "text", "text": bad}]},
+        {"context": [{"deep": [{"deeper": [bad]}]}]},
+        {"schema": _asks({"type": "number", "default": bad})},
+        {"schema": _asks({"type": "string", "title": bad})},
+        {"schema": _asks({"type": "number", "minimum": bad})},
+    ]
+    if isinstance(bad, str):
+        places += [
+            {"title": bad},
+            {"ui": bad},
+            {"place": bad},
+            {"context": [{bad: 1}]},
+            {"schema": {"type": "object", "description": bad}},
+            {"schema": _asks({"type": "string", "enum": [bad]})},
+        ]
+    else:
+        places.append({"schema": _asks({"type": "string", "enum": [bad]})})
+    TaskOpen(**good)
+    accepted = []
+    for place in places:
+        try:
+            TaskOpen(**{**good, **place})
+        except ValidationError:
+            continue
+        accepted.append(place)
+    assert accepted == []
+
+
+def test_a_deeply_nested_context_or_schema_is_a_validation_error() -> None:
+    good: dict[str, Any] = {"id": "t", "run_id": "r", "title": "x", "schema": EMAIL}
+    deep = _asks({"type": "string", "enum": [_nested(5000)]})
+    for place in ({"context": [{"x": _nested(100_000)}]}, {"schema": deep}):
+        with pytest.raises(ValidationError, match="nested"):
+            TaskOpen(**{**good, **place})
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [{"a": i, "b": [i]} for i in range(2000)],
+        [i if i % 2 else f"s{i}" for i in range(4000)],
+        # Every one of these integers has the same hash.
+        [(i + 1) * (2**61 - 1) for i in range(20_000)],
+    ],
+    ids=["objects", "mixed", "one-hash"],
+)
+def test_unique_items_take_no_quadratic_time(items: list[Any]) -> None:
+    schema = _asks({"type": "array", "items": {"type": "integer"}, "uniqueItems": True})
+    started = time.monotonic()
+    validate_answer(schema, {"x": items})
+    assert time.monotonic() - started < 2
+
+
+def test_at_most_fifty_problems_are_returned() -> None:
+    schema = _asks({"type": "array", "items": {"type": "integer"}})
+    assert len(validate_answer(schema, {"x": ["a"] * 1000})) == 50
+    assert len(validate_answer(schema, {"x": [float("nan")] * 1000})) == 50
+
+
+def test_too_many_items_is_one_problem() -> None:
+    schema = _asks({"type": "array", "items": {"type": "integer"}, "maxItems": 2})
+    [problem] = validate_answer(schema, {"x": ["a"] * 1000})
+    assert problem == AnswerProblem(field="x", message="has more than 2 items")
+
+
+def test_a_date_time_needs_an_offset() -> None:
+    schema = _asks({"type": "string", "format": "date-time"})
+    assert validate_answer(schema, {"x": "2026-11-24T09:00:00Z"}) == []
+    [problem] = validate_answer(schema, {"x": "2026-11-24T09:00:00"})
+    assert problem == AnswerProblem(field="x", message="not a valid date-time")
+
+
+def test_a_date_time_default_needs_an_offset() -> None:
+    prop = {"type": "string", "format": "date-time", "default": "2026-11-24T09:00:00"}
+    [problem] = prompt_schema_problems(_asks(prop))
+    assert "default" in problem
+
+
+def test_a_pattern_that_ran_out_of_time_says_so() -> None:
+    prop = {"type": "string", "pattern": "^(a|aa)+$", "maxLength": 64}
+    schema = _asks({"type": "array", "items": prop})
+    problems = validate_answer(schema, {"x": ["a" * 60 + "!"] * 20})
+    assert len(problems) == 20
+    assert {p.message for p in problems} == {"could not be checked: its pattern took too long"}
+
+
+def test_a_pattern_that_does_not_compile_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    def search(*args: Any, **kwargs: Any) -> None:
+        raise regex.error("no")
+
+    prop = {"type": "string", "pattern": "^a$", "maxLength": 64}
+    monkeypatch.setattr(regex, "search", search)
+    [problem] = validate_answer(_asks(prop), {"x": "a"})
+    assert problem.message == "could not be checked: its pattern does not compile"
+
+
+def test_a_pattern_that_does_not_match_still_says_so() -> None:
+    prop = {"type": "string", "pattern": "^a$", "maxLength": 64}
+    [problem] = validate_answer(_asks(prop), {"x": "b"})
+    assert problem.message == "does not match the required pattern"

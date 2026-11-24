@@ -7,7 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from scadbuddy.core.input_schema import schema_problems
+from scadbuddy.core.json_values import unstorable
+from scadbuddy.tasks.schema import prompt_schema_problems
 
 TaskState = Literal["open", "answered", "cancelled", "expired"]
 
@@ -35,10 +36,17 @@ class TaskOpen(_TaskFields):
     """What a flow gives to open a task. Only this way in checks the schema, so a stored
     row still reads when the rules tighten later."""
 
+    @field_validator("title", "context", "place", "ui")
+    @classmethod
+    def _can_be_stored(cls, value: Any) -> Any:
+        for bad in unstorable(value):
+            raise ValueError(bad.message)
+        return value
+
     @field_validator("schema_")
     @classmethod
     def _schema_fits_the_subset(cls, value: dict[str, Any]) -> dict[str, Any]:
-        problems = schema_problems(value, formats=True)
+        problems = prompt_schema_problems(value)
         if problems:
             raise ValueError("; ".join(problems))
         return value
@@ -54,7 +62,7 @@ class Task(_TaskFields):
 
 
 class AnswerProblem(BaseModel):
-    #: The JSON pointer path of the field, joined by `/`; empty for the root.
+    #: The declared property (`email`), or an item of one (`tags/0`); empty for the root.
     field: str
     #: Never holds the rejected value: an answer may hold personal data.
     message: str

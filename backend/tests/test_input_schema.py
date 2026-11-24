@@ -3,9 +3,21 @@ spec 2026-11-17 §4.1, §10.1). The flows' own cases are in tests/flows/test_flo
 
 from __future__ import annotations
 
+import json
+import time
 from typing import Any
 
-from scadbuddy.core.input_schema import schema_problems, value_problems
+import pytest
+
+from scadbuddy.core.input_schema import (
+    FORMATS,
+    PATTERN_TIMEOUT_S,
+    PATTERNS_BUDGET_S,
+    Validator,
+    patterns_deadline,
+    schema_problems,
+    value_problems,
+)
 
 HOUSE: dict[str, Any] = {
     "type": "object",
@@ -85,3 +97,196 @@ def test_an_objects_required_may_not_name_a_boolean() -> None:
     house = {**HOUSE, "properties": {**HOUSE["properties"], "flag": {"type": "boolean"}}}
     problems = schema_problems(_top(house={**house, "required": ["flag"]}), objects=True)
     assert problems == ["house: required names 'flag', a boolean, which is never missing"]
+
+
+def _failed(schema: dict[str, Any], value: Any) -> list[str]:
+    """The keyword of each error (#7364)."""
+    return [str(error.validator) for error in Validator(schema).iter_errors(value)]
+
+
+@pytest.mark.parametrize(
+    ("value", "multiple", "fits"),
+    [
+        (10**400, 0.5, True),
+        (10**400, 0.7, False),
+        (-(10**400), 0.5, True),
+        (1e400, 0.5, False),
+        (-1e400, 0.5, False),
+        (float("nan"), 0.5, False),
+        (1e400, 2, False),
+        (float("nan"), 2, False),
+        (1.5, 10**400, False),
+        (10**401, 10**400, True),
+        (1e308, 1e-10, False),
+        # As jsonschema's own.
+        (4, 2, True),
+        (5, 2, False),
+        (4.0, 2, True),
+        (4.5, 0.5, True),
+        (4.6, 0.5, False),
+        (0.3, 0.1, False),
+        (0.2, 0.1, True),
+    ],
+    ids=lambda v: str(v)[:12],
+)
+def test_multiple_of_never_raises(value: Any, multiple: Any, fits: bool) -> None:
+    expected = [] if fits else ["multipleOf"]
+    assert _failed({"type": "number", "multipleOf": multiple}, value) == expected
+
+
+def test_multiple_of_takes_an_integer_too_long_to_write() -> None:
+    assert _failed({"multipleOf": 0.5}, 10**5000) == []
+    assert _failed({"multipleOf": 2}, 10**5000 + 1) == ["multipleOf"]
+
+
+@pytest.mark.parametrize(
+    ("items", "unique"),
+    [
+        ([], True),
+        ([1, 2, 1.5, "1", None, True, False, 0], True),
+        ([1, True, 0, False], True),
+        ([1, 1.0], False),
+        ([0, -0.0], False),
+        ([True, True], False),
+        ([None, None], False),
+        (["a", "b", "a"], False),
+        (["1", 1], True),
+        ([2**53, 2**53 + 1], True),
+        ([float(2**53), 2**53], False),
+        ([0.1, 0.1], False),
+        (["None", None, "true", True, "0x1", 1], True),
+        ([10**5000, 10**5000], False),
+    ],
+)
+def test_unique_items_follow_json_equality(items: list[Any], unique: bool) -> None:
+    expected = [] if unique else ["uniqueItems"]
+    assert _failed({"uniqueItems": True}, items) == expected
+    assert _failed({"uniqueItems": False}, items) == []
+
+
+def test_unique_items_do_not_walk_an_item_that_is_not_a_scalar() -> None:
+    schema = {"type": "array", "items": {"type": "string"}, "uniqueItems": True}
+    deep = [json.loads("[" * 900 + "]" * 900) for _ in range(2)]
+    assert _failed(schema, deep) == ["type", "type"]
+    assert _failed(schema, [{"a": 1}, {"a": 1}, "b", "b"]) == ["type", "type", "uniqueItems"]
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [{"a": i, "b": [i]} for i in range(2000)],
+        [i if i % 2 else f"s{i}" for i in range(4000)],
+    ],
+    ids=["objects", "mixed"],
+)
+def test_unique_items_are_linear(items: list[Any]) -> None:
+    started = time.monotonic()
+    list(Validator({"uniqueItems": True}).iter_errors(items))
+    assert time.monotonic() - started < 1
+
+
+def test_items_are_not_walked_once_there_are_too_many() -> None:
+    schema = {
+        "type": "array",
+        "items": {"type": "string"},
+        "maxItems": 2,
+        "uniqueItems": True,
+    }
+    assert _failed(schema, [1, 1, 1]) == ["maxItems"]
+    assert _failed(schema, [1, 1]) == ["type", "type", "uniqueItems"]
+
+
+@pytest.mark.parametrize(
+    "prop",
+    [
+        {"type": ["string", "null"]},
+        {"type": "array", "items": {"type": ["string"]}},
+        {"type": "string", "maxLength": 5, "pattern": "a{99999999999999}"},
+        {"type": "string", "maxLength": 5, "pattern": "(" * 4000 + ")" * 4000},
+    ],
+    ids=["types", "item-types", "repeat", "parens"],
+)
+def test_a_schema_outside_the_subset_is_a_problem_not_an_exception(prop: dict[str, Any]) -> None:
+    assert schema_problems(_top(x=prop))
+
+
+def test_the_format_checker_holds_exactly_the_formats() -> None:
+    from scadbuddy.core.input_schema import FORMAT_CHECKER
+
+    assert set(FORMAT_CHECKER.checkers) == set(FORMATS)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-11-24T09:00:00Z",
+        "2026-11-24t09:00:00z",
+        "2026-11-24T09:00:00.123456789Z",
+        "2026-11-24T23:59:59+05:30",
+        "2028-02-29T00:00:00-23:59",
+        7,
+    ],
+)
+def test_a_date_time_with_an_offset_fits(value: Any) -> None:
+    from scadbuddy.core.input_schema import FORMAT_CHECKER
+
+    assert FORMAT_CHECKER.conforms(value, "date-time")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-11-24T09:00:00",
+        "2026-11-24T09:00:00.5",
+        "2026-11-24 09:00:00Z",
+        "2026-11-24T09:00Z",
+        "2026-11-24T24:00:00Z",
+        "2026-11-24T09:60:00Z",
+        "2026-11-24T09:00:60Z",
+        "2026-11-24T09:00:00+24:00",
+        "2026-11-24T09:00:00+01:60",
+        "2026-11-24T09:00:00+0100",
+        "2026-11-24T09:00:00+01",
+        "2026-11-24T09:00:00.Z",
+        "2026-02-29T09:00:00Z",
+        "2026-13-01T09:00:00Z",
+        "2026-11-24",
+        "20261124T090000Z",
+        "2026-11-24T09:00:00Z\n",
+        "\u0662026-11-24T09:00:00Z",
+        "\u0662\u0660\u0662\u0666-11-24T09:00:00Z",
+        "",
+    ],
+)
+def test_any_other_date_time_is_refused(value: str) -> None:
+    from scadbuddy.core.input_schema import FORMAT_CHECKER
+
+    assert not FORMAT_CHECKER.conforms(value, "date-time")
+
+
+SLOW_DEFAULT = {
+    "type": "string",
+    "pattern": "^(a|aa)+$",
+    "maxLength": 64,
+    "default": "a" * 60 + "!",
+}
+
+
+def test_every_default_of_a_schema_shares_one_pattern_budget() -> None:
+    """As a run's values (#6010): counted, not timed."""
+    problems = schema_problems(_top(**{f"x{i}": SLOW_DEFAULT for i in range(40)}))
+    assert len(problems) == 40
+    ran = [p for p in problems if f"its pattern took over {PATTERN_TIMEOUT_S}s" in p]
+    together = [p for p in problems if f"took over {PATTERNS_BUDGET_S}s to check together" in p]
+    assert len(ran) + len(together) == 40
+    assert 1 <= len(ran) <= PATTERNS_BUDGET_S / PATTERN_TIMEOUT_S + 1
+    assert patterns_deadline.get() is None
+
+
+def test_a_schema_check_keeps_the_deadline_that_is_set() -> None:
+    token = patterns_deadline.set(time.monotonic() - 1)
+    try:
+        [problem] = schema_problems(_top(x=SLOW_DEFAULT))
+    finally:
+        patterns_deadline.reset(token)
+    assert "to check together" in problem

@@ -134,7 +134,10 @@ class TaskStore:
             return self.cancel_for_run_in(conn, run_id)
 
     def cancel_for_run_in(self, conn: Connection[DictRow], run_id: str) -> int:
-        """Cancel every open task of the run, in the caller's transaction."""
+        """Cancel every open task of the run, in the caller's transaction. Call this
+        before the caller publishes its own event. Publishing takes the event log's
+        advisory lock, and this takes row locks. `mark_answered` takes them in the other
+        order, so after a publish the two deadlock."""
         with conn.transaction():
             rows = conn.execute(
                 "UPDATE tasks SET state = 'cancelled', updated_at = now()"
@@ -155,7 +158,10 @@ class TaskStore:
         """Make the run's tasks match a run that was reset, in the caller's transaction.
         An open task in neither set is cancelled. A task in ``waiting_ids`` that is not
         open opens again, with no answer. A task in ``done_ids`` stays as it is, and so
-        does any other task that is not open. Returns how many rows changed."""
+        does any other task that is not open. Returns how many rows changed. Call this
+        before the caller publishes its own event. Publishing takes the event log's
+        advisory lock, and this takes row locks. `mark_answered` takes them in the other
+        order, so after a publish the two deadlock."""
         waiting, done = list(waiting_ids), list(done_ids)
         with conn.transaction():
             cancelled = conn.execute(

@@ -15,9 +15,9 @@ The subset keeps one Python type and one form control per input:
 
 A prompt's schema (a task's, ``prompt_schema_problems``) is checked with ``formats``: then a
 ``string`` (or a string ``items``) may also have a ``format`` of ``email``, ``date`` or
-``date-time``, which the installed checker checks and which a ``default`` must fit. No other
-format is allowed (``uri`` is not checked by the installed checker). Without ``formats``,
-``format`` stays refused, for flows' inputs and for pipelines.
+``date-time``, which `FORMAT_CHECKER` checks and which a ``default`` must fit. No other
+format is allowed. Without ``formats``, ``format`` stays refused, for flows' inputs and for
+pipelines.
 
 The API runs every ``pattern`` on the values it checks, so a pattern is bounded
 (`MAX_PATTERN`), needs a ``maxLength`` (`MAX_PATTERNED_LENGTH`) and runs with a deadline
@@ -28,11 +28,14 @@ from __future__ import annotations
 
 import json
 import keyword
+import math
 import re
 import time
 from collections.abc import Collection, Iterable, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import date
+from fractions import Fraction
 from typing import Any, Final
 
 import jsonschema
@@ -70,13 +73,29 @@ _OWN: dict[str, set[str]] = {
     "boolean": set(),
     "array": {"items", "minItems", "maxItems", "uniqueItems"},
 }
-#: The formats a prompt's strings may have (``formats=True``): the ones the installed
-#: format checker checks without another dependency.
+#: The formats a prompt's strings may have (``formats=True``).
 FORMATS: Final = ("email", "date", "date-time")
+#: Checks exactly `FORMATS`, with no optional dependency. jsonschema's shared checker has a
+#: format only where its package is installed, and the image has no rfc3339-validator.
+FORMAT_CHECKER: Final = jsonschema.FormatChecker(formats=("email", "date"))
+_DATE_TIME = re.compile(
+    r"(\d{4}-\d{2}-\d{2})[Tt](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?"
+    r"(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)",
+    re.ASCII,
+)
 _OBJECT_OWN = {"properties", "required", "additionalProperties"}
 _DESCRIBED = {"type", "title", "description"}
 #: Names a pydantic model cannot hold as fields (flows' `inputs_model`).
 _PYDANTIC = frozenset(name for name in dir(BaseModel) if not name.startswith("__"))
+
+
+@FORMAT_CHECKER.checks("date-time", raises=ValueError)
+def _is_date_time(instance: object) -> bool:
+    """RFC 3339, so with an offset. A leap second is refused: `datetime` holds none."""
+    if not isinstance(instance, str):
+        return True
+    found = _DATE_TIME.fullmatch(instance)
+    return found is not None and bool(date.fromisoformat(found[1]))
 
 
 def schema_problems(
@@ -95,7 +114,30 @@ def schema_problems(
     out), so neither stops it.
     ``objects``: a top-level input may be an object of scalar inputs (#5701).
     ``formats``: a string may have a ``format`` of `FORMATS` (a prompt's, #7364).
-    ``reserved``: top-level names the host owns (a pipeline's ``params`` and ``v``)."""
+    ``reserved``: top-level names the host owns (a pipeline's ``params`` and ``v``).
+
+    Every default's pattern runs within one `PATTERNS_BUDGET_S`, the caller's if it set
+    one."""
+    token = None
+    if patterns_deadline.get() is None:
+        token = patterns_deadline.set(time.monotonic() + PATTERNS_BUDGET_S)
+    try:
+        return _schema_problems(
+            schema, stored=stored, objects=objects, reserved=reserved, formats=formats
+        )
+    finally:
+        if token is not None:
+            patterns_deadline.reset(token)
+
+
+def _schema_problems(
+    schema: Any,
+    *,
+    stored: bool,
+    objects: bool,
+    reserved: Collection[str],
+    formats: bool,
+) -> list[str]:
     if not isinstance(schema, dict):
         return ["the inputs schema must be a JSON object"]
     if len(json.dumps(schema).encode()) > MAX_SCHEMA_BYTES:
@@ -104,6 +146,9 @@ def schema_problems(
         jsonschema.Draft202012Validator.check_schema(schema)
     except jsonschema.SchemaError as err:
         return [f"not a JSON Schema: {err.message}"]
+    except (OverflowError, RecursionError):
+        # What `re` raises for `a{99999999999999}`, and for thousands of groups.
+        return ["not a JSON Schema: a pattern is too large, or it is nested too deeply"]
     problems = [f"{key!r} is not supported at the top level" for key in schema if key not in _TOP]
     if schema.get("type") != "object":
         problems.append('the top level must be {"type": "object"}')
@@ -184,7 +229,7 @@ def _property_problems(
     if not isinstance(prop, dict):
         return ["must be an object"]
     kind = prop.get("type")
-    if kind not in _OWN:
+    if not isinstance(kind, str) or kind not in _OWN:
         return ["type must be one of " + ", ".join(_OWN)]
     extra = {"format"} if formats and kind == "string" else set()
     allowed = _DESCRIBED | {"default"} | _OWN[kind] | extra
@@ -193,7 +238,7 @@ def _property_problems(
         problems += _format_problems(prop, "")
     if kind == "array":
         items = prop.get("items")
-        if not isinstance(items, dict) or items.get("type") not in SCALARS:
+        if not isinstance(items, dict) or items.get("type") not in tuple(SCALARS):
             problems.append("items must be a string, integer, number or boolean schema")
         else:
             own = _DESCRIBED | _OWN[items["type"]]
@@ -222,7 +267,7 @@ def _property_problems(
             problems.append(f"a pattern needs a maxLength of at most {MAX_PATTERNED_LENGTH}")
     if "default" in prop and not problems:
         try:
-            checker = jsonschema.Draft202012Validator.FORMAT_CHECKER if formats else None
+            checker = FORMAT_CHECKER if formats else None
             Validator(prop, format_checker=checker).validate(prop["default"])
         except jsonschema.ValidationError as err:
             problems.append(f"default does not fit: {err.message}")
@@ -245,44 +290,124 @@ def _pattern(
         timeout = min(timeout, deadline - time.monotonic())
     if timeout <= 0:
         yield jsonschema.ValidationError(
-            f"is refused: the patterns took over {PATTERNS_BUDGET_S}s to check together"
+            f"is refused: the patterns took over {PATTERNS_BUDGET_S}s to check together",
+            cause=TimeoutError(),
         )
         return
     try:
         found = regex.search(pattern, instance, timeout=timeout)
-    except TimeoutError:
+    except TimeoutError as err:
         yield jsonschema.ValidationError(
-            f"is refused: its pattern took over {PATTERN_TIMEOUT_S}s to check it"
+            f"is refused: its pattern took over {PATTERN_TIMEOUT_S}s to check it", cause=err
         )
         return
     except regex.error as err:
-        yield jsonschema.ValidationError(f"its pattern does not compile: {err}")
+        yield jsonschema.ValidationError(f"its pattern does not compile: {err}", cause=err)
         return
     if found is None:
         # The value is not quoted, as the over-long refusal never quotes it (#3416).
         yield jsonschema.ValidationError(f"does not match {pattern!r}")
 
 
-#: Draft 2020-12, its `pattern` run by `_pattern`.
+def _shown(value: Any) -> str:
+    try:
+        return repr(value)
+    except (ValueError, RecursionError):
+        # CPython writes no integer of more than 4300 digits, and no deep nesting.
+        return "the value"
+
+
+def _is_multiple(number: float, of: float) -> bool:
+    if not all(math.isfinite(n) for n in (number, of) if isinstance(n, float)):
+        return False
+    try:
+        if not isinstance(of, float):
+            return bool(number % of == 0)
+        quotient = number / of
+        return int(quotient) == quotient
+    except OverflowError:
+        # One of them, or the quotient, is too large for a float.
+        return (Fraction(number) / Fraction(of)).denominator == 1
+
+
+def _multiple_of(
+    validator: Any, multiple: Any, instance: Any, schema: dict[str, Any]
+) -> Iterator[jsonschema.ValidationError]:
+    """jsonschema's `multipleOf`, which raises for a number that is not finite, and for a
+    huge integer against a fraction."""
+    if not validator.is_type(instance, "number") or _is_multiple(instance, multiple):
+        return
+    yield jsonschema.ValidationError(f"{_shown(instance)} is not a multiple of {_shown(multiple)}")
+
+
+def _too_many(instance: Any, schema: dict[str, Any]) -> bool:
+    return bool(len(instance) > schema.get("maxItems", len(instance)))
+
+
+def _items(
+    validator: Any, items: Any, instance: Any, schema: dict[str, Any]
+) -> Iterator[jsonschema.ValidationError]:
+    """jsonschema's `items`, for an array that `maxItems` has not refused."""
+    if validator.is_type(instance, "array") and not _too_many(instance, schema):
+        yield from jsonschema.Draft202012Validator.VALIDATORS["items"](
+            validator, items, instance, schema
+        )
+
+
+def _scalar_key(item: Any) -> str | None:
+    """The same text for the scalars that JSON Schema says are equal, and None for any other
+    item. Text, because a caller can choose integers that all have one hash."""
+    if item is None or isinstance(item, bool):
+        return str(item)
+    if isinstance(item, str):
+        return f"s{item}"
+    if isinstance(item, float) and not item.is_integer():
+        return f"n{item.hex()}"
+    if isinstance(item, int | float):
+        return f"n{int(item):x}"
+    return None
+
+
+def _unique_items(
+    validator: Any, unique: Any, instance: Any, schema: dict[str, Any]
+) -> Iterator[jsonschema.ValidationError]:
+    """jsonschema's `uniqueItems`, in linear time. An item that is not a scalar is not
+    walked: the subset's `items` refuses it."""
+    if not unique or not validator.is_type(instance, "array") or _too_many(instance, schema):
+        return
+    keys = [key for item in instance if (key := _scalar_key(item)) is not None]
+    if len(set(keys)) < len(keys):
+        yield jsonschema.ValidationError(f"{_shown(instance)} has non-unique elements")
+
+
+#: Draft 2020-12, with the keywords above, which never raise and stay bounded.
 Validator = jsonschema.validators.extend(  # type: ignore[no-untyped-call]
-    jsonschema.Draft202012Validator, {"pattern": _pattern}
+    jsonschema.Draft202012Validator,
+    {
+        "pattern": _pattern,
+        "multipleOf": _multiple_of,
+        "items": _items,
+        "uniqueItems": _unique_items,
+    },
 )
 
 
-def too_long_for_pattern(properties: dict[str, Any], given: dict[str, Any]) -> dict[str, list[str]]:
-    """Each input with a patterned string value longer than its maxLength, and its problems,
-    named by where it is but never quoted. The limit is never above MAX_PATTERNED_LENGTH:
-    a schema stored before #2661 may have no maxLength, or one far larger, and either
-    would let the pattern run on any value."""
-    found: dict[str, list[str]] = {}
+def too_long_for_pattern(
+    properties: dict[str, Any], given: dict[str, Any]
+) -> dict[str, list[tuple[tuple[str | int, ...], int]]]:
+    """Each input with a patterned string value longer than its maxLength: where each such
+    value is, and the limit. The limit is never above MAX_PATTERNED_LENGTH: a schema stored
+    before #2661 may have no maxLength, or one far larger, and either would let the pattern
+    run on any value."""
+    found: dict[str, list[tuple[tuple[str | int, ...], int]]] = {}
     for name, prop in properties.items():
         if not isinstance(prop, dict) or name not in given:
             continue
         value = given[name]
         items = prop.get("items")
-        checks = [(name, prop, value)]
+        checks: list[tuple[tuple[str | int, ...], dict[str, Any], Any]] = [((name,), prop, value)]
         if isinstance(items, dict) and isinstance(value, list):
-            checks = [(f"{name}.{i}", items, item) for i, item in enumerate(value)]
+            checks = [((name, i), items, item) for i, item in enumerate(value)]
         for where, spec, one in checks:
             if "pattern" not in spec or not isinstance(one, str):
                 continue
@@ -291,9 +416,7 @@ def too_long_for_pattern(properties: dict[str, Any], given: dict[str, Any]) -> d
                 limit = MAX_PATTERNED_LENGTH
             limit = min(limit, MAX_PATTERNED_LENGTH)
             if len(one) > limit:
-                found.setdefault(name, []).append(
-                    f"{where}: is longer than its maxLength of {limit}"
-                )
+                found.setdefault(name, []).append((where, limit))
     return found
 
 

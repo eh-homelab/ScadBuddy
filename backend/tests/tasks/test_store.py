@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from psycopg import Connection
+from psycopg.pq import TransactionStatus
 
 from scadbuddy.core.events import Event, TaskChanged
 from scadbuddy.tasks.models import TaskOpen
@@ -20,9 +21,12 @@ SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
 class Recorder:
     def __init__(self) -> None:
         self.events: list[Event] = []
+        #: The connection's transaction status at each publish.
+        self.statuses: list[TransactionStatus] = []
 
     def publish_in(self, conn: Connection[Any], event: Event) -> None:
         self.events.append(event)
+        self.statuses.append(conn.info.transaction_status)
 
     def changes(self) -> list[tuple[str, str]]:
         return [(e.task_id, e.state) for e in self.events if isinstance(e, TaskChanged)]
@@ -48,6 +52,7 @@ def store(pg_pool: PgPool, recorder: Recorder) -> Iterator[TaskStore]:
                 (run, f"flow-{run}", json.dumps({})),
             )
     yield TaskStore(pg_pool, events=recorder)
+    assert set(recorder.statuses) <= {TransactionStatus.INTRANS}
 
 
 def _task(task_id: str, run_id: str = "run-1", place: str | None = None) -> TaskOpen:
@@ -174,6 +179,34 @@ def test_cancel_for_run_in_joins_the_callers_transaction(
         assert store.cancel_for_run_in(conn, "run-1") == 1
         raise RuntimeError
     assert _states(store, "run-1") == {"a": "open"}
+
+
+def test_each_write_publishes_inside_its_transaction(
+    store: TaskStore, pg_pool: PgPool, recorder: Recorder
+) -> None:
+    def published() -> list[TransactionStatus]:
+        statuses, recorder.statuses = recorder.statuses, []
+        return statuses
+
+    inside = [TransactionStatus.INTRANS]
+    for name in ("a", "b", "c", "d"):
+        store.open(_task(name))
+        assert published() == inside
+    store.mark_answered("a", {"ok": True}, "u1")
+    assert published() == inside
+    store.close("b", "expired")
+    assert published() == inside
+    # An autocommit connection: each method opens its own transaction.
+    with pg_pool.connection() as conn:
+        store.match_waiting_in(conn, "run-1", waiting_ids={"a", "c"}, done_ids=set())
+    assert published() == inside * 2
+    with pg_pool.connection() as conn:
+        store.cancel_for_run_in(conn, "run-1")
+    assert published() == inside * 2
+    store.open(_task("e"))
+    assert published() == inside
+    store.cancel_for_run("run-1")
+    assert published() == inside
 
 
 def test_list_filters_by_place(store: TaskStore) -> None:

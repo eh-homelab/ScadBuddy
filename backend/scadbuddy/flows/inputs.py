@@ -105,7 +105,11 @@ def _resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None
     too_long = too_long_for_pattern(properties, given)
     checked = {**without_patterns(schema, too_long), "additionalProperties": False}
     validator = Validator(checked)
-    problems = [p for said in too_long.values() for p in said] + [
+    problems = [
+        f"{'.'.join(str(p) for p in path)}: is longer than its maxLength of {limit}"
+        for said in too_long.values()
+        for path, limit in said
+    ] + [
         f"{'.'.join(str(p) for p in err.absolute_path) or 'inputs'}: {err.message}"
         for err in sorted(validator.iter_errors(given), key=lambda e: list(e.absolute_path))
         # Said above already, with its limit.
