@@ -75,6 +75,8 @@ export const handlers = [
         caption: `Attempt ${attempt.attempt}, Bambuddy archive ${archive.archive_id}`,
         created_at: now(),
         created_by: BROWSER,
+        archive_id: archive.archive_id,
+        archive_media: body.what,
       }
       state.attachments.push(attachment)
       state.files[attachment.id] = new Blob([bytes])

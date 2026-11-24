@@ -72,7 +72,8 @@ describe("the worker's readiness", () => {
       withDeadline: <R>(_deadline: number, fn: () => Promise<R>) => fn(),
       workflowService: {
         describeTaskQueue: ({ taskQueue, taskQueueType }: { taskQueue: { name: string }; taskQueueType: number }) => {
-          const answer = pollers(taskQueue.name, taskQueueType)
+          // Every partition of a queue (`/_sys/<queue>/<n>`, temporal/pollers.ts) answers as the queue.
+          const answer = pollers(taskQueue.name.replace(/^\/_sys\/(.+)\/\d+$/, '$1'), taskQueueType)
           return answer instanceof Error ? Promise.reject(answer) : Promise.resolve({ pollers: answer })
         },
       },

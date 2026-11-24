@@ -654,8 +654,9 @@ def sync_status(
 def adopt_instance(store: Filament, instance: str) -> None:
     """Record ``instance`` as the links' Bambuddy when none is recorded and links exist:
     #6261's pull made them before the state row did (Decision 12). A link of a supplier,
-    location, insert type or filament counts too (`bambuddy_pull.ANY_LINK`). The API
-    calls it at boot with the configured Bambuddy's, before its first nudge."""
+    location, insert type, filament, colour or preset counts too
+    (`bambuddy_pull.ANY_LINK`). The API calls it at boot with the configured Bambuddy's,
+    before its first nudge."""
     with store.spools.transaction() as conn:
         record_instance(conn, instance)
 
@@ -682,9 +683,10 @@ _ROW_LINKS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _reset_counts(conn: Conn) -> LinksResetCounts:
+def _reset_counts(conn: Conn, instance: str | None) -> LinksResetCounts:
     """What a reset deletes now: one count per link kind, the intents, the error rows
-    and the ignored Bambuddy spools."""
+    and the ignored Bambuddy spools. ``presets``: the ScadBuddy presets whose Bambuddy id
+    a delete of ``instance``'s links drops (`reset_links`' own condition)."""
     counts: dict[str, int] = {}
     for name, table in (
         ("spools", "filament_bb_links"),
@@ -703,6 +705,12 @@ def _reset_counts(conn: Conn) -> LinksResetCounts:
         "SELECT count(*) AS n FROM filament_colours WHERE bb_colour_id IS NOT NULL"
     ).fetchone()
     counts["colours"] = row["n"] if row is not None else 0
+    row = conn.execute(
+        "SELECT count(*) AS n FROM filament_presets WHERE bb_preset_id IS NOT NULL"
+        " AND (bb_instance IS NULL OR bb_instance = %s)",
+        (instance,),
+    ).fetchone()
+    counts["presets"] = row["n"] if row is not None else 0
     return LinksResetCounts(**counts)
 
 
@@ -781,7 +789,7 @@ def reset_preview(
     then ``None``), which the answer says (Decision 198). Reads only."""
     with store.spools.transaction() as conn:
         state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
-        counts = _reset_counts(conn)
+        counts = _reset_counts(conn, state["instance"] if state is not None else None)
         same, changed = (False, False) if listing is None else _proof_of(conn, listing)
     return LinksResetPreview(
         instance=state["instance"] if state is not None else None,
@@ -839,6 +847,11 @@ def reset_links(
                 " CASE WHEN usage_read_instance = %s THEN %s ELSE usage_read_instance END",
                 (configured, instance, configured),
             )
+            # ScadBuddy's presets' Bambuddy ids are the same Bambuddy's too (#7176).
+            conn.execute(
+                "UPDATE filament_presets SET bb_instance = %s WHERE bb_instance = %s",
+                (configured, instance),
+            )
             logger.info(
                 "the Bambuddy links were kept: the new URL reaches the same Bambuddy",
                 extra={"instance": instance, "configured": configured},
@@ -849,7 +862,7 @@ def reset_links(
                 configured_instance=configured,
                 deleted=LinksResetCounts(),
             )
-        counts = _reset_counts(conn)
+        counts = _reset_counts(conn, instance)
         for table in (
             "filament_bb_links",
             "filament_bb_creates",
@@ -866,6 +879,16 @@ def reset_links(
         # A colour's link only: the pull never pushes a colour, so it has no hashes (#6907).
         conn.execute(
             "UPDATE filament_colours SET bb_colour_id = NULL WHERE bb_colour_id IS NOT NULL"
+        )
+        # ScadBuddy's presets (#7176): an id of the old Bambuddy names nothing on the new
+        # one. Each preset is sent to the new one by the next mirror, a preset made in
+        # the old Bambuddy too, which ScadBuddy now holds as its own (`manual`).
+        conn.execute(
+            "UPDATE filament_presets SET bb_preset_id = NULL, bb_instance = NULL,"
+            " bb_updated_at = NULL, mirrored_sha256 = NULL, mirror_create_floor = NULL,"
+            " source = CASE WHEN source = 'bambuddy' THEN 'manual' ELSE source END"
+            " WHERE bb_preset_id IS NOT NULL AND (bb_instance IS NULL OR bb_instance = %s)",
+            (instance,),
         )
         conn.execute(
             "UPDATE filament_bb_sync_state SET instance = NULL, usage_read_instance = NULL,"

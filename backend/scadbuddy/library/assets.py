@@ -55,6 +55,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, DataPaths
+from scadbuddy.core.tracing import span
 from scadbuddy.library.catalogue import THUMBNAIL_NAME
 from scadbuddy.render.provenance import ROOT_MODEL
 from scadbuddy.render.schema import FILE_KINDS, CustomizerSchema, ParamValue, is_bare_filename
@@ -1215,23 +1216,33 @@ def referenced_asset_ids(
     rather than guessing.
     """
     found: set[str] = set()
+    read = {"files": 0, "archives": 0, "outputs": 0}
 
     def scan(path: Path) -> None:
+        read["files"] += 1
         # Removed since the listing: it keeps nothing now.
         with suppress(FileNotFoundError):
             found.update(_ids_in(path.read_bytes()))
 
-    for directory in paths.outputs.glob("*/*/"):
-        for record in directory.glob("*.json"):
-            scan(record)
-        archive = directory / "model.3mf"
-        if not (directory / "params.json").is_file() and archive.is_file():
-            found.update(_ids_in_archive(archive))
-    for pattern in (f"*/{LEGACY_PRESETS_NAME}", "*/model.json"):
-        for template_file in (*paths.models.glob(pattern), *paths.builtins.glob(pattern)):
-            scan(template_file)
-    for document in records:
-        found.update(_ids_in(json.dumps(document).encode()))
+    # It reads every output's JSON records, some of their 3MFs and every template's
+    # model.json, all on the NFS share: one span for the walk, with what it read (#7245).
+    with span("assets.referenced") as current:
+        for directory in paths.outputs.glob("*/*/"):
+            read["outputs"] += 1
+            for record in directory.glob("*.json"):
+                scan(record)
+            archive = directory / "model.3mf"
+            if not (directory / "params.json").is_file() and archive.is_file():
+                read["archives"] += 1
+                found.update(_ids_in_archive(archive))
+        for pattern in (f"*/{LEGACY_PRESETS_NAME}", "*/model.json"):
+            for template_file in (*paths.models.glob(pattern), *paths.builtins.glob(pattern)):
+                scan(template_file)
+        for document in records:
+            found.update(_ids_in(json.dumps(document).encode()))
+        for name, count in read.items():
+            current.set_attribute(f"scadbuddy.{name}", count)
+        current.set_attribute("scadbuddy.assets", len(found))
     return found
 
 

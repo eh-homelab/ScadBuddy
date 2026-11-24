@@ -26,6 +26,10 @@ type S = components['schemas']
  * configured one; `loseSameBambuddy` makes it another before the reset (409 `proof_changed`), and
  * `{ unreadable: true }` a Bambuddy the dry run cannot read (`bambuddy_unreadable`). A reset
  * without `expect_kept` deletes, as the server's does.
+ *
+ * #7244 — `POST /api/v1/filament/presets/bambuddy-import`: 409 with no Bambuddy, 409
+ * `instance_changed` while the links are another Bambuddy's; else the first import adopts two
+ * presets and updates one, and every later one finds nothing new, as a second import does.
  */
 
 const BASE = '/api/v1/filament/sync'
@@ -59,6 +63,18 @@ let unreadable = false
 
 /** #6907 — the links left are only colours' links to Bambuddy's colour catalog. */
 let onlyColours = false
+/** #7176 — the other Bambuddy's only links are the preset mirror's. */
+let onlyPresets = false
+
+/** #7244 — whether the presets import ran: the next one finds nothing new. */
+let presetsImported = false
+/** #7244 — Bambuddy ids that bindings still name after an import (`unresolved`). */
+let unresolvedPresets = 0
+
+/** #7244 — the next imports find `count` bound Bambuddy ids they cannot import. */
+export function leaveUnresolvedPresets(count: number) {
+  unresolvedPresets = count
+}
 
 /**
  * #6905 — `GET /api/v1/filament/sync/passes`: the pass history, newest first. The seed holds
@@ -97,8 +113,10 @@ function seedPasses(): S['SyncPass'][] {
 let passes = seedPasses()
 
 /** What the seed's links number when they belong to another Bambuddy. */
-const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, colours: 5, intents: 1, ignored: 0 }
-const NO_LINKS = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, colours: 0, intents: 0, errors: 0, ignored: 0 }
+const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, colours: 5, presets: 0, intents: 1, ignored: 0 }
+const NO_LINKS = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, colours: 0, presets: 0, intents: 0, errors: 0, ignored: 0 }
+/** #7176 — how many ScadBuddy filament presets the other Bambuddy holds a mirror of. */
+const PRESET_LINKS = 3
 
 export function reset() {
   lastPassAt = FIRST_PASS
@@ -112,12 +130,20 @@ export function reset() {
   changedSincePull = false
   unreadable = false
   onlyColours = false
+  presetsImported = false
+  unresolvedPresets = 0
+  onlyPresets = false
   passes = seedPasses()
 }
 
 /** #6907 — the other Bambuddy's links are only colours' links (its spools and the rest were unlinked). */
 export function leaveOnlyColourLinks() {
   onlyColours = true
+}
+
+/** #7176 — the other Bambuddy's only links are the mirror's copies of ScadBuddy's filament presets. */
+export function leaveOnlyPresetLinks() {
+  onlyPresets = true
 }
 
 /**
@@ -169,6 +195,7 @@ function linksInstance(): string | null {
 function resetCounts(): S['LinksResetCounts'] {
   if (unlinked) return NO_LINKS
   if (onlyColours) return { ...NO_LINKS, colours: SEED_LINKS.colours }
+  if (onlyPresets) return { ...NO_LINKS, presets: PRESET_LINKS }
   return { ...SEED_LINKS, errors: errors.length }
 }
 
@@ -231,6 +258,16 @@ function status(): S['SyncStatus'] {
 const conflict = (detail: string, code: string) => problem(409, 'Conflict', detail, { code })
 
 export const handlers = [
+  http.post('/api/v1/filament/presets/bambuddy-import', () => {
+    if (!configured()) return conflict('no Bambuddy URL is configured; set one in Settings', 'no_bambuddy')
+    if (linksInstance() !== null && linksInstance() !== configured())
+      return conflict('the Bambuddy links belong to another Bambuddy; reset them first', 'instance_changed')
+    const done: S['PresetImport'] = presetsImported
+      ? { adopted: 0, updated: 0, unresolved: unresolvedPresets }
+      : { adopted: 2, updated: 1, unresolved: unresolvedPresets }
+    presetsImported = true
+    return HttpResponse.json(done)
+  }),
   http.get(`${BASE}/status`, () => {
     if (running !== null) {
       running -= 1

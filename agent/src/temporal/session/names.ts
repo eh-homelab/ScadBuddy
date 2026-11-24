@@ -17,7 +17,7 @@ export const RELEASE_WORKER_ACTIVITY = 'release_worker'
 /**
  * A replica's own queue for `session_turn` and `release_worker`: `agent-sessions.<identity>`, the
  * identity behind its `agent-tools.<identity>` (main.ts HOST_QUEUE). A queue of its own, not that
- * one: `agent-tools.<identity>` carries DurableSession's pinned calls (#2320, #2581), so a shared
+ * one: `agent-tools.<identity>` carries a turn tool's pinned calls (#2320, #2581), so a shared
  * activity limit would either starve them or let them make a live home look dead to a turn's
  * 5 s schedule-to-start.
  */
