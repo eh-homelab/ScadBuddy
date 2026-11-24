@@ -178,6 +178,10 @@ renders never start); a server named by `SCADBUDDY_TEST_TEMPORAL_ADDRESS` needs 
 The fixture terminates the workflows a test leaves open, since an abandoned piece
 would be joined by the next test that renders it. The dev server's store is a SQLite
 file (on `/dev/shm` when it has room): in memory it was lost mid-session under load.
+Each dev server runs with one partition per task queue, a 10 s task-queue idle time and
+`GOGC=25` (`tests/support/temporal.py` `DEV_SERVER_DYNAMIC_CONFIG`, #7527): with the defaults it
+kept about 3 MiB per test's queue and reached 2 GiB per xdist worker, which took a CI shard to its
+13 GiB container cap.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
 `20260928T0840Z_settings.sql`. A one-off fix of named rows belongs in a migration only when
@@ -286,7 +290,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   AUTO_UPGRADE through a `Versioned*` subclass (`main.LIBRARY_WORKFLOWS`; an unversioned
   worker cannot complete a workflow that declares a behavior), so each stays
   replay-compatible behind `patched`; a new one needs its own behavior or the worker
-  refuses to build. Sweeps off (`asset_sweep_interval` 0) deletes the
+  refuses to build. The output copy (#7255, `OUTPUT_COPY_SWEEP`, after `REAP_SWEEP`,
+  behind its patch, the sweeps' Schedule only) runs `library/output_copy.py`
+  `copy_outputs`, as the API's start does once, so the writes of pods on an older build
+  reach the `outputs` rows at the next housekeeping sweep; its advisory lock makes a
+  second run at once do nothing. Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
@@ -940,10 +948,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   reads the configured Bambuddy's spools (a failed read is `bambuddy_unreadable: true`);
   when it is the links' own Bambuddy at a new URL (`bb_sync_results.same_bambuddy`: every
   linked BB id there, none older than its link's `bb_updated_at`, one exactly that, at
-  least half the links timed on both sides), a reset with `expect_kept: true` reads them
+  least half the links timed on both sides; with no spool linked, the presets' links by the
+  same rule over Bambuddy's local presets and each preset's `bb_updated_at` (Bambuddy's `updated_at`
+  as ScadBuddy last took it: the mirror's last write, or for a preset imported from Bambuddy,
+  its last import), `wants_preset_listing`, #7343), a reset with `expect_kept: true` reads them
   again and, while that holds, deletes nothing, records the configured instance and answers
   `kept: true` (and `configured_instance`); else 409 `proof_changed`, nothing written. The dry run's `changed_since_pull` is
-  true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered. `expect_kept: false` deletes
+  true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered; with no spool linked, the same over the linked filament presets (#7343). A mirrored preset sent before the mirror kept Bambuddy's time has none until its next mirror write (R-7343-5). `expect_kept: false` deletes
   without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward).
   Every pass is also a row of `filament_bb_sync_passes` (#6905, `bb_sync_passes.py`):
   `record_pass` inserts it in the state row's transaction, keyed by the worker's `pass_id` so a
@@ -1491,6 +1502,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   During a roll, a `plugin-oauth:` acquire whose grant row an SQL-path agent pod holds keeps
   one of its connections for up to the request's `wait_s` (at most `MAX_WAIT`, 25 s). At
   most `MAX_ROW_WAITS` (2) acquires of a process wait so; the rest poll without waiting.
+- One plain setting (#7384): `SettingsStore.get(KEY)` with a typed key of
+  `library/settings_store.py` (`Setting[T]`, e.g. `OPERATION_RETENTION_SECONDS`; never a
+  secret, an own-table or a registry field) answers as `load` does, from the API's cache of
+  the plain rows (`core/settings_cache.py`): no query while warm. The cache is kept only
+  while the process's one `PgListener` listens on `scadbuddy_settings`, which a trigger on
+  `settings` NOTIFYs at every write's commit (`20261124T1216Z_settings_changed_notify.sql`);
+  a TTL (10 s) backs a lost notification, and a writer in the process drops it itself
+  (`SettingsStore._changed`, `settings_written` for the printer registry). `load` and
+  `snapshot` never read the cache: they read the secrets and the other tables in one
+  snapshot. A hot path that needs one plain value calls `get`, not `load()`.
 - A dict read from a `jsonb` column (e.g. `storefront_listings.params`) has no key order:
   Postgres stores the keys shortest first. Never show or answer its keys in that order;
   order them by the template schema's parameters (#6302).
@@ -1719,7 +1740,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the attempt lacks; and the housekeeping sweep `housekeeping_import_attempt_media` (#7234,
   `ATTEMPT_MEDIA_SWEEP` in `SWEEPS` and `PRUNE_SWEEPS`, behind `ATTEMPT_MEDIA_PATCH`;
   `sweep_media` over `OrderStore.attempts_missing_media`) starts one step for each attempt of
-  the last 14 days that still lacks a medium and was not checked in the last hour. A step's
+  the last 14 days that still lacks a medium and was not checked in the last hour, at most
+  `SWEEP_BATCH` (40) a pass, least lately checked first, so a pass of slow starts
+  (`START_TIMEOUT` each) fits `ATTEMPT_MEDIA_TIMEOUT` (#7453); the partial index
+  `order_item_fulfilments_media_sweep` serves its read, whose WHERE repeats the index's
+  predicate. Each step rewrites the attempt's rows of `order_attempt_media_not_offered`
+  (`record_media_not_offered`, from `_not_offered`): the media an archive past `FRESH` does
+  not offer, which the sweep leaves out and nothing else reads (#7453). Each pass adds the
+  starts it asked for to the counter `scadbuddy_attempt_media_sweep_starts` (#7491;
+  `main._import_attempt_media_logged`). A step's
   `missing` (`_missing`) is true when no archive was read, or an archive lacks a medium
   that is neither present nor refused, and the archive offers it or may still offer it (its
   `completed_at` is null or under an hour old, `FRESH`). Refusals: a medium the import refused as larger than the
@@ -2110,8 +2139,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   schema's defaults as `name=value`) and `ordered`; 50 a page by default. It reads the
   `output_index` table (`library/output_index.py` `OutputIndex`), which `OutputStore`
   writes on save (a failure is logged), rename and delete, and whose rows of a model go
-  when its outputs directory does (`Catalogue._forget_cover` → `OutputStore.forget_indexed`:
-  a model's delete, the orphan sweep and a reused slug); the API's start runs
+  with its outputs directory (`Catalogue._forget_outputs` → `OutputStore.forget_indexed`,
+  before the directory goes: a model's delete, the orphan sweep and a reused slug; it also
+  drops the slug's `outputs` rows, #7255, and a failure there keeps the directory); the
+  API's start runs
   `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
   gone is dropped as it is read. Each output has a `source` (#6371; `OutputMeta.source`

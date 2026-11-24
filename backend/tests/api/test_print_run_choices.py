@@ -36,6 +36,7 @@ from scadbuddy.bambuddy.models import FlowType
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.dialog_reads.component import DIALOG_READS
 from scadbuddy.dialog_reads.reads import DIALOG_TTL, DialogReads
+from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
@@ -1469,6 +1470,9 @@ def two_colour_output(
     meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
     meta["colors"] = colours
     (directory / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    # The row is the record a read answers from (#7255): it gets the same colours.
+    store = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+    store.rows.update_meta(output_id, OutputMeta.model_validate(meta))
     box = trimesh.creation.box(extents=(10, 10, 5))
     write_plates_3mf(
         [

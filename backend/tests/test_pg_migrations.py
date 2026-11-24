@@ -1111,3 +1111,5 @@ def test_the_attempt_media_migration_backfills_the_archive_copies(pg_conninfo: s
                 " archive_media = 'finished_photo' WHERE id = 'second'"
             )
         assert conn.execute("SELECT media_checked_at FROM order_item_fulfilments").fetchall() == []
+        # #7366: the scan was dropped (spec 2026-11-05 §9), and so is its stamp.
+        assert "timelapse_scanned_at" not in _table_columns(conn, "order_item_fulfilments")
