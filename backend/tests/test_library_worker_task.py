@@ -279,6 +279,8 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "_sweep_storefront", _broken(OSError("the database is gone")))
     # #6950: the entities whose owner is gone.
     monkeypatch.setattr(main, "sweep_orphan_entities", _broken(OSError("the database is gone")))
+    # #7234: the order attempts' missed media, one read and a start per attempt.
+    monkeypatch.setattr(main, "sweep_media", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -314,6 +316,10 @@ async def test_a_failing_sweep_fails_its_activity(
                 # #5774: the printers' maintenance logs, read from Bambuddy.
                 machine_rates=SimpleNamespace(read_logs=_broken_async),
                 attachments=None,  # #6950: read by the stubbed entity sweep
+                # #7234: read by the stubbed attempt media sweep.
+                lifecycle=None,
+                integrations=None,
+                media_starter=None,
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -438,6 +444,13 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
 
     monkeypatch.setattr(main, "reap_run_holds", slow_run_holds)
     state.refs = None
+
+    # #7234: the order attempts' missed media, one read and a Temporal start per attempt.
+    async def slow_media(*args: object) -> int:
+        await asyncio.sleep(0.1)
+        return 0
+
+    monkeypatch.setattr(main, "sweep_media", slow_media)
     # #5298: the CRUD routes' idempotency replies past their 24 h, one delete.
     monkeypatch.setattr(main, "_prune_crud_requests", lambda state: time.sleep(0.1))
 
@@ -518,6 +531,10 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             temporal=object,
             store=None,
             refs=None,
+            # #7234: read by the stubbed attempt media sweep.
+            lifecycle=None,
+            integrations=None,
+            media_starter=None,
         )
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]

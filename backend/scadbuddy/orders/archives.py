@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -59,6 +59,11 @@ from scadbuddy.store import BlobStore
 from scadbuddy.workflows.attempt_media import AttemptMediaStep
 
 logger = logging.getLogger(__name__)
+
+#: The sweep looks at the attempts made this recently (spec 2026-11-05 §4.6).
+SWEEP_DAYS = timedelta(days=14)
+#: The sweep starts a step for an attempt last read for media at least this long ago.
+SWEEP_CHECK_EVERY = timedelta(hours=1)
 
 ROLES: dict[ArchiveCopyMedia, AttachmentRole] = {
     "finished_photo": "finished",
@@ -293,6 +298,26 @@ async def mirror_attempt(
         )
     missing = not facts or any((f.archive_id, what) not in present for f in facts for what in ROLES)
     return AttemptMediaStep(missing=missing)
+
+
+async def sweep_media(
+    lifecycle: Lifecycle, integrations: OrderIntegrations, starter: MediaStarter
+) -> int:
+    """The housekeeping sweep ``housekeeping_import_attempt_media`` (spec 2026-11-05 §4.6):
+    one step of ``AttemptMedia`` for each attempt of the last `SWEEP_DAYS` that still
+    lacks a medium and was not read for media in the last `SWEEP_CHECK_EVERY`. It catches
+    what the triggers missed (Temporal down, an outcome not heard, a timelapse Bambuddy
+    got later). It asks Bambuddy nothing itself, and nothing without a Bambuddy. A failed
+    start is logged, and the next attempt is started. The number of starts asked for."""
+    if not integrations.linked:
+        return 0
+    now = datetime.now(UTC)
+    attempts = await asyncio.to_thread(
+        lifecycle.store.attempts_missing_media, now - SWEEP_DAYS, now - SWEEP_CHECK_EVERY
+    )
+    for fulfilment_id in attempts:
+        await start_media(starter, fulfilment_id, retries=False)
+    return len(attempts)
 
 
 def attempt_of(store: OrderStore, order_id: str, item_id: str, fulfilment_id: str) -> Fulfilment:
