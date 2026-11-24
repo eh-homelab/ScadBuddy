@@ -76,9 +76,10 @@ uv run --frozen pytest -n auto  # pytest-xdist; drop -n to run serially
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
 PATH. The backend will not start without `SCADBUDDY_DATABASE_URL` (#401: the settings
 live only in Postgres), so every test that builds the app takes the `pg_conninfo`
-fixture (a throwaway schema), and it and the `requires_postgres` tests (the render
+fixture (a throwaway database, cloned from one migrated per pytest process; empty for a
+test marked `pg_empty`), and it and the `requires_postgres` tests (the render
 queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_URL`
-points at a Postgres they can create schemas in, e.g.
+points at a Postgres they can create databases in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
 postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
 Without Docker, a native Postgres 18 works:
@@ -898,7 +899,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   missing from a complete listing gets one `probe`, `GET` only (a supplier, location or
   insert type has no `GET` by id, so its listing is read again); only a definite 404 drops
   the link, and the next round makes the row again under its direction, while a spool that
-  names such a row waits (#6688, plan Decisions 187-192 and 200-205). `workflows/filament_sync.py` is the workflow `FilamentBbSync`, one per
+  names such a row waits (#6688, plan Decisions 187-192 and 200-205). A supplier is the
+  exception: it is made again only when it has a filament product, a filament invoice or an
+  open create intent; one with none of these stays unlinked (`bb_sync_plan.py`
+  `_suppliers`; inventory spec §6.5, D16, #7067). `workflows/filament_sync.py` is the workflow `FilamentBbSync`, one per
   Bambuddy instance, on the `bambuddy` queue (AUTO_UPGRADE; a change to its commands goes
   behind `workflow.patched`, and `tests/test_filament_sync_replay.py` replays
   `tests/fixtures/filament_sync_histories/`). The API nudges after a write on
@@ -1403,6 +1407,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `flows/history.py` is the Reset preview, not git). Both repositories are shared by
   every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
   (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).
+  A models repository made from #7314 on keeps its meshes (`*/meshes/*.3mf`) in Git LFS:
+  `ModelHistory` passes the filter on every call (required, so a mesh it cannot read is an
+  error and never its pointer), writes `.gitattributes` only in a repository with no commit,
+  and its push sends the LFS objects first, to the remote's own endpoint whatever a
+  `.lfsconfig` says (`tests/test_history_lfs.py`).
   The off-box copy (#4974) is `git_remote/` (`push.py` `RemotePush`, `store.py`
   `git_remote_pushes`): `GitRepo.after_commit` asks for a push on a thread once the write
   lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
@@ -1482,6 +1491,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   During a roll, a `plugin-oauth:` acquire whose grant row an SQL-path agent pod holds keeps
   one of its connections for up to the request's `wait_s` (at most `MAX_WAIT`, 25 s). At
   most `MAX_ROW_WAITS` (2) acquires of a process wait so; the rest poll without waiting.
+- One plain setting (#7384): `SettingsStore.get(KEY)` with a typed key of
+  `library/settings_store.py` (`Setting[T]`, e.g. `OPERATION_RETENTION_SECONDS`; never a
+  secret, an own-table or a registry field) answers as `load` does, from the API's cache of
+  the plain rows (`core/settings_cache.py`): no query while warm. The cache is kept only
+  while the process's one `PgListener` listens on `scadbuddy_settings`, which a trigger on
+  `settings` NOTIFYs at every write's commit (`20261124T1216Z_settings_changed_notify.sql`);
+  a TTL (10 s) backs a lost notification, and a writer in the process drops it itself
+  (`SettingsStore._changed`, `settings_written` for the printer registry). `load` and
+  `snapshot` never read the cache: they read the secrets and the other tables in one
+  snapshot. A hot path that needs one plain value calls `get`, not `load()`.
 - A dict read from a `jsonb` column (e.g. `storefront_listings.params`) has no key order:
   Postgres stores the keys shortest first. Never show or answer its keys in that order;
   order them by the template schema's parameters (#6302).
@@ -1524,15 +1543,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (#6950, #7026, inventory spec
   `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3a, plan
   `docs/superpowers/plans/2026-11-21-inventory-phase-1-entities.md`): `refs.py`
-  (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table;
-  `EntityStore`: an `entities` row made by `ensure` only for an owner row that exists, and
-  `orphans`, the rows whose owner is gone), `attachments.py` (`EntityAttachmentStore` over
+  (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table,
+  `item`, `lot` and `unit` among them since #7067; `EntityStore`: an `entities` row made by
+  `ensure` only for an owner row that exists, and `orphans`, the rows whose owner is gone
+  and that no stock move names; `repoint_entity` also moves a merged entity's stock moves),
+  `attachments.py` (`EntityAttachmentStore` over
   `entity_attachments`, the old `order_attachments`: an order's files are its rows with an
   `order_id`, written only through the order routes, `ORDER_KINDS`; a print archive's files
   are Bambuddy's `print_attachments`, read in the same shape), `links.py` (`EntityLinkStore`
   over `entity_links`, http(s) URLs only), `sweep.py` (`sweep_orphan_entities`, the
   housekeeping step `ENTITY_ORPHANS_SWEEP`: an orphan's files and holds, then its row and
-  links; an order's kinds only once they hold no file), `properties.py` (#7026,
+  links; an order's kinds only once they hold no file; an orphan that a
+  `stock_moves.entity_id` names stays in place, since that foreign key keeps it as the
+  move's history, R-P2-4), `properties.py` (#7026,
   `entity_properties` and `entity_property_schemas`; the rules are in
   `docs/features/spools-and-filament.md` "Properties"), `operations.py` (the
   `entity_attachment_add` kind on the `library` queue), `activity.py`, `problems.py` and

@@ -12,6 +12,7 @@ import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
 import { type Origin, ORIGINS, type Owner, ownerSeenBy, type QueuedEntry, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
+import { SessionBrowserInput } from '../sessions/browserOptions.js'
 import { IMAGE_REFS_DESCRIPTION, ImageRefsSchema, resolveSendImages } from './imageRefs.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 
@@ -402,6 +403,8 @@ export const sessionTools: Tool[] = [
       "tools run with this caller's tiers; an outward action waits for a decision: a human's in the ScadBuddy UI, " +
       'or sessions_approve/sessions_deny from a token holding the approval grant. ' +
       'Returns the session and, with a prompt, the turn; read the reply with sessions_get or sessions_attach. ' +
+      "`browser` sets what the session's browser reports (user agent, viewport, locale); the session keeps it for its life, " +
+      'and its forks keep it too. A value out of bounds is refused, naming the field and the bound it broke. ' +
       'Every session runs as a Temporal workflow that survives restarts.',
     input: z.object({
       prompt: z.string().min(1).max(MESSAGE_MAX).optional().describe('The first user message.'),
@@ -417,6 +420,7 @@ export const sessionTools: Tool[] = [
         })
         .optional()
         .describe('What the session is about (spec §6 "scope"), recorded with it.'),
+      browser: SessionBrowserInput.optional(),
       wait_seconds: waitSeconds,
     }),
     risk: 'write',
@@ -425,7 +429,7 @@ export const sessionTools: Tool[] = [
     summarize: ({ title, prompt, images }) =>
       `start a session${title ? ` "${title}"` : ''}${prompt ? ' with a prompt' : ''}${images ? ` and ${images.length} image${images.length === 1 ? '' : 's'}` : ''}`,
     waitsMs: ({ wait_seconds }) => wait_seconds * 1000,
-    handler: async ({ prompt, images, title, tags, scope, wait_seconds }, ctx) => {
+    handler: async ({ prompt, images, title, tags, scope, browser, wait_seconds }, ctx) => {
       const sessions = manager(ctx)
       if (images && prompt === undefined) throw new ToolError('images are sent with a prompt: give the prompt too', 400)
       const owner = ownerOf(ctx.principal)
@@ -444,6 +448,7 @@ export const sessionTools: Tool[] = [
           ...(prompt !== undefined && ctx.flowTurn ? { flow: ctx.flowTurn } : {}),
           // Started by a flow run, or a session with none (#5870): its turns get no background built-in.
           ...(bare ? { withoutBackground: true } : {}),
+          ...(browser ? { browser } : {}),
         }),
       )
       if (resolved?.attached.length) {

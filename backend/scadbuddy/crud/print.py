@@ -1408,7 +1408,7 @@ def _when(value: str | None) -> datetime | None:
 _refuse(RemoteRackUsage, "RackUsageStore", RACK_API_ONLY)
 
 
-# -- held presets, native slices (Q30, #5298 Task 31) -----------------------------------
+# -- native slices (Q30, #5298 Task 31) ------------------------------------------------
 
 #: The route's reason for a slice start of a copy another subject's row holds.
 SLICE_SUBJECT = "slice-subject"

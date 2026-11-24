@@ -28,7 +28,7 @@ def _route_modules() -> dict[str, APIRouter]:
 
 def _app() -> FastAPI:
     app = FastAPI()
-    app.include_router(_api_router())
+    app.include_router(_api_router(), prefix=API_PREFIX)
     return app
 
 

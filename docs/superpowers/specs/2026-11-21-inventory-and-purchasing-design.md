@@ -210,6 +210,12 @@ for its units), `builtin` bool, `archived_at`. Built-in kinds seeded by migratio
 `ams_part`, `hardware`), `consumable` (`desiccant`, `packaging`, `lubricant`),
 `equipment` (`dry_bin`, `tool`), `printed_part`, `assembly`, `service`. People add more.
 
+Amendment (owner, 2026-11-23, ruling on the phase 2 plan
+`docs/superpowers/plans/2026-11-23-inventory-phase-2-item-core.md`): `tracking` has a
+fourth value, `none` ("not counted"). A `none` kind's items have offers and prices but
+never lots, units or moves, and any move on such an item is refused. `service` is a
+`none` kind.
+
 **Items** (`items`): what a thing is, the catalog entry.
 `id`, `kind_id`, `name`, `manufacturer`, `compatible_with text[]` (printer
 model codes, for example `{H2C,H3C}`), `low_stock` numeric, `life_hours` / `life_months`

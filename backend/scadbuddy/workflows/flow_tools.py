@@ -1324,6 +1324,7 @@ async def _start_session(
     result_schema: dict[str, Any] | None,
     images: list[Image],
     policy: StepPolicy | None = None,
+    browser: dict[str, Any] | None = None,
 ) -> Any:
     if result_schema is not None:
         _check_schema(result_schema)
@@ -1332,6 +1333,8 @@ async def _start_session(
         # Never retried: a lost answer would start a second session (Ruling 4's key is
         # not one a session start takes).
         body: dict[str, Any] = {"prompt": _prompt(prompt, skills, result_schema)}
+        if browser is not None:
+            body["browser"] = browser
         started = _untrusted(
             (await _call_tool(call_id, "sessions_start", body | _refs(images), attempts=1)).text
         )
@@ -1350,6 +1353,7 @@ async def _agent_session(
     images: list[Image] | None = None,
     grant: dict[str, Any] | None = None,
     on_outside: str = "escalate",
+    browser: dict[str, Any] | None = None,
 ) -> Any:
     """Start a durable agent session with `prompt`, as the person who started this run,
     and wait for its answer. `skills` names ScadBuddy skills for it to use (may be
@@ -1360,9 +1364,13 @@ async def _agent_session(
     its chat, unless the run's grant extends to its sessions and admits them. `grant`
     ({"rules": [...]}, the run grant's rule shape) narrows that for this session: a
     call must be admitted by both, so it can never widen it; None is the run grant as
-    it is. `on_outside` ("escalate" or "deny") says what a call outside it does."""
+    it is. `on_outside` ("escalate" or "deny") says what a call outside it does.
+    `browser` ({"user_agent": str, "viewport": {"width": int, "height": int}, "locale":
+    str}, every key optional) sets the browser the session's
+    Playwright tools drive; the session keeps it for its life. The API refuses a value out
+    of bounds, and the call then fails naming the field. None leaves the browser as it is."""
     policy = _policy(grant, on_outside)
-    return await _start_session(prompt, skills, result_schema, images or [], policy)
+    return await _start_session(prompt, skills, result_schema, images or [], policy, browser)
 
 
 # `agent` is the harness's module here; the host function takes the name the script calls.

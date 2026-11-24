@@ -549,6 +549,14 @@ opens every one and seals it again byte for byte).
     source for each request's header; a refused refresh marks the grant for "Sign in again". Claude Code renames tool-name characters outside
     `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
     colliding tools are hidden. Unlisted plugin tools are `outward`.
+    A session's browser options (#7027, `ai_sessions.browser`) go to every remote plugin
+    route of its turns as `X-ScadBuddy-Browser` (`forwarder.ts` `BROWSER_HEADER`, their JSON;
+    none when the session has none): a classic turn's from `ClaimedSession.browser`, a durable
+    turn's and its kept client's from the row its owner is read from (`RowSessionOwners`, into
+    `TurnContext.browser`; a listing's from the session the turn holds), never a second read; a
+    flow's never. Only the forwarder sets it; a client's own is dropped. The playwright-mcp
+    wrapper (`workers/playwright-mcp/`) reads it when an MCP session starts; other plugins
+    ignore it.
   - Customer messages (#5660, spec `2026-11-08-order-notify-customer-design.md`):
     `src/orders/messaging.ts` `pluginMessaging` opens the backend setting
     `orders_customer_messaging`'s source (a remote plugin, or a package's http MCP server,

@@ -178,13 +178,18 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `KEY_KEYWORDS`, `ITEM_KEYWORDS`; list items are strings). An `enum` or `const` must fit its
   key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. Values
   already stored are not checked again after a schema change.
+- `item` is the exception (#7067). An item's properties follow its item kind's
+  `attribute_schema`, merged down the kind tree (a child kind's key wins;
+  `backend/scadbuddy/inventory/kinds.py` `item_schema`). An item kind's schema is set on the
+  kind, so `GET` and `PUT /entity-kinds/item/property-schema` both answer 409
+  `schema_owned_by_item_kind` (`backend/scadbuddy/api/entity_properties.py`).
 - The migration seeds the keys `mpn`, `gtin`, `asin`, `manufacturer_url`,
   `empty_spool_weight_g` and `td` for `spool_type`, and `lot_number` for `spool`
   (`backend/scadbuddy/migrations/20261123T0017Z_entity_properties.sql`).
 - Routes: `GET`/`PATCH /entities/{ref}/properties` (a key set to `null` is removed; a
   patch applies whole or not at all), `GET /entity-kinds/{kind}/properties` and
-  `GET`/`PUT /entity-kinds/{kind}/property-schema`
-  (`backend/scadbuddy/api/entity_properties.py`).
+  `GET`/`PUT /entity-kinds/{kind}/property-schema`, which answer 409
+  `schema_owned_by_item_kind` for `item` (`backend/scadbuddy/api/entity_properties.py`).
 - UI: the section "Files, links and properties" of the spool and type pages
   (`frontend/src/components/entities/PropertiesPanel.tsx`; the spool page's anchor
   `#files-and-links` stays). A list value has one field per item. A rename or an add onto a key the entity

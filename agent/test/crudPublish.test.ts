@@ -126,7 +126,7 @@ describe("a session's owner from its row", () => {
       durable_turn_id: 'turn-1',
     } as unknown as TurnRow
     const owners = new RowSessionOwners({ get: (id) => Promise.resolve(id === SESSION ? row : undefined) })
-    expect(await owners.ownerOf(SESSION)).toEqual({ kind: 'bearer', id: 'token:1', label: 'MCP token:1', turnTiers: ['read', 'write'], turnId: 'turn-1' })
+    expect(await owners.ownerOf(SESSION)).toEqual({ kind: 'bearer', id: 'token:1', label: 'MCP token:1', turnTiers: ['read', 'write'], turnId: 'turn-1', browser: null })
     expect(await owners.ownerOf('7f1d2c3b-4a5e-4f60-8a9b-0c1d2e3f4a5b')).toBeUndefined()
     await expect(owners.ownerOf('../areas')).rejects.toThrow(/not a session id/)
     // A handoff since leaves the new owner its default.

@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, cast
 
 import pytest
 from temporalio.exceptions import (
@@ -33,8 +33,8 @@ from scadbuddy.slicing.store import NativeSlice
 from scadbuddy.workflows import printing, slicing_activities
 from scadbuddy.workflows.print_models import NativeSliced, SlicedUploadInput, SliceRunInput
 from scadbuddy.workflows.slicing import SLICE_ROUND, failure_status, slice_failure
-from scadbuddy.workflows.slicing_activities import RunActivities, _refused
-from scadbuddy.workflows.slicing_models import SLICE_REFUSED
+from scadbuddy.workflows.slicing_activities import RunActivities, SliceActivities, _refused
+from scadbuddy.workflows.slicing_models import SLICE_REFUSED, SliceWorkflowInput
 
 COPY = NATIVE_ID_BASE + 7
 #: Any starter: these tests never reach the start.
@@ -415,3 +415,94 @@ async def test_slice_run_holds_the_file_for_a_lan_run_only(
         assert run_id in message and key in message
     else:
         assert logged == []
+
+
+# --- #7499: a Bambuddy copy downloaded for a slice is capped -------------------------------
+
+#: A Bambuddy-range id: its copy is downloaded into the spool.
+BAMBUDDY_COPY = 41
+#: The cap these tests set, in place of the real 272 MiB.
+CAP = 1024
+CHUNK = b"x" * 512
+
+
+class _Bambuddy:
+    """A Bambuddy whose copy streams ``chunks`` chunks; it counts what it sent."""
+
+    def __init__(self, chunks: int) -> None:
+        self.chunks = chunks
+        self.sent = 0
+        self.closed = False
+
+    async def download_library_file(self, file_id: int) -> AsyncIterator[bytes]:
+        assert file_id == BAMBUDDY_COPY
+        try:
+            for _ in range(self.chunks):
+                self.sent += 1
+                yield CHUNK
+        finally:
+            self.closed = True
+
+
+class _Spool:
+    def __init__(self, spool: Path) -> None:
+        self.spool = spool
+        self.puts: list[bytes] = []
+
+    async def put(self, kind: str, body: BinaryIO, **_: Any) -> Any:
+        data = body.read()
+        self.puts.append(data)
+        return SimpleNamespace(sha256=hashlib.sha256(data).hexdigest())
+
+
+def _slice_input() -> SliceWorkflowInput:
+    return SliceWorkflowInput(
+        slice_id=1,
+        library_file_id=BAMBUDDY_COPY,
+        plan=PLAN,
+        plate_id=1,
+        preset_key="k",
+        slicer_queue="slicer",
+    )
+
+
+async def _input(content: _Spool, bambuddy: _Bambuddy) -> tuple[str, str]:
+    return await SliceActivities._input(
+        cast(SliceActivities, None),
+        cast(Any, content),
+        _slice_input(),
+        None,
+        cast(Any, bambuddy),
+    )
+
+
+async def test_a_copy_past_the_cap_stops_and_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The download stops at the chunk that passes the cap, nothing is put or left in
+    the spool, and the slice fails with a refusal no retry repeats."""
+    monkeypatch.setattr(slicing_activities, "MAX_INPUT_BYTES", CAP)
+    spool = tmp_path / "spool"
+    content = _Spool(spool)
+    bambuddy = _Bambuddy(chunks=100)
+
+    with pytest.raises(ApplicationError) as raised:
+        await _input(content, bambuddy)
+
+    error = raised.value
+    assert error.type == SLICE_REFUSED and error.non_retryable
+    assert f"library file {BAMBUDDY_COPY} is larger than" in error.message
+    assert failure_status(error) == 422
+    assert bambuddy.sent == CAP // len(CHUNK) + 1 and bambuddy.closed
+    assert content.puts == []
+    assert list(spool.iterdir()) == []
+
+
+async def test_a_copy_at_the_cap_is_put(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(slicing_activities, "MAX_INPUT_BYTES", CAP)
+    content = _Spool(tmp_path / "spool")
+
+    key, sha = await _input(content, _Bambuddy(chunks=CAP // len(CHUNK)))
+
+    assert content.puts == [CHUNK * (CAP // len(CHUNK))]
+    assert key == f"slice-{sha}"

@@ -11,8 +11,10 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg.types.json import Jsonb
 
+from scadbuddy.bambuddy.models import BbSupplier
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync, SyncDirection
+from scadbuddy.entities.registry import EntityStore
 from scadbuddy.filament.bb_sync_models import BbSnapshot, BbWrite, SyncPlan, seen_row
 from scadbuddy.filament.bb_sync_plan import (
     _CATALOG_FIELDS,
@@ -54,6 +56,10 @@ from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
+from scadbuddy.inventory.items import ItemStore
+from scadbuddy.inventory.models import ItemInput, OfferInput
+from scadbuddy.inventory.offers import OfferStore
+from scadbuddy.orders.models import Actor
 from tests.bambuddy.conftest import recording
 from tests.conftest import PgPool
 
@@ -647,6 +653,150 @@ def test_supplier_links_carry_the_sku_and_the_price(pg_pool: PgPool) -> None:
             "is_purchase_source": False,
         }
     ]
+
+
+def test_a_supplier_with_only_item_offers_has_no_link(pg_pool: PgPool) -> None:
+    """D16 (#7067): a supplier Bambuddy knows (`bb_supplier_id` set) whose only offer is a
+    `supplier_offers` row for a non-filament item is in no spool's supplier links."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shop = f.suppliers.create(SupplierCreate(name="Bolt Depot"))
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_suppliers SET bb_supplier_id = 7")
+    items = ItemStore(pg_pool, EntityStore(pg_pool))
+    nut = items.create(ItemInput(kind_id="hardware", name="M3 nut"), Actor(kind="browser"))
+    OfferStore(pg_pool, lambda: "USD").create(
+        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3"), Actor(kind="browser")
+    )
+    sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
+    _link(pg_pool, spool, 50)
+    assert _plan(f, _snap([_row(50)]), sync).writes == []
+
+
+def test_an_unlinked_supplier_with_only_item_offers_is_not_created(pg_pool: PgPool) -> None:
+    """Spec 6.5, R-P2-8 (#7067): a supplier is sent only when it has a filament product or
+    a Bambuddy id already. One with only an item offer gets no create and no intent."""
+    f = _filament(pg_pool)
+    shop = f.suppliers.create(SupplierCreate(name="Bolt Depot"))
+    items = ItemStore(pg_pool, EntityStore(pg_pool))
+    nut = items.create(ItemInput(kind_id="hardware", name="M3 nut"), Actor(kind="browser"))
+    OfferStore(pg_pool, lambda: "USD").create(
+        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3"), Actor(kind="browser")
+    )
+    sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
+    writes = _plan(f, _snap([], suppliers=[]), sync).writes
+    assert [w for w in writes if w.kind == "supplier"] == []
+    assert _intents(pg_pool) == []
+
+
+def test_an_unlinked_supplier_with_a_filament_product_is_created(pg_pool: PgPool) -> None:
+    """R-P2-8: the rule leaves a filament supplier's create as it was."""
+    f = _filament(pg_pool)
+    shop = f.suppliers.create(SupplierCreate(name="Shop"))
+    assert f.suppliers.add_product(shop.id, ProductCreate(type_id=_type(f), sku="A-1"))
+    sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
+    writes = _plan(f, _snap([], suppliers=[]), sync).writes
+    (create,) = [w for w in writes if w.kind == "supplier"]
+    assert (create.op, create.sb_id) == ("create", shop.id)
+
+
+def test_an_unlinked_invoice_supplier_is_created_for_its_spools_link(pg_pool: PgPool) -> None:
+    """R-P2-10, Decision 14: a supplier SB knows only from a filament invoice (no product)
+    is a spool's purchase source, so it is still created, and the spool's supplier link
+    follows that create."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shop = f.suppliers.create(SupplierCreate(name="Micro Center"))
+    with pg_pool.connection() as conn:
+        invoice = conn.execute(
+            "INSERT INTO filament_invoices (supplier_id, invoice_date, currency, subtotal, total)"
+            " VALUES (%s, '2026-11-20', 'USD', 20, 20) RETURNING id",
+            (shop.id,),
+        ).fetchone()
+        assert invoice is not None
+        line = conn.execute(
+            "INSERT INTO filament_invoice_lines (invoice_id, position, description, quantity,"
+            " unit_price, line_subtotal, line_tax, line_total, allocated_cost)"
+            " VALUES (%s, 1, 'PLA Red', 1, 20, 20, 0, 20, 20) RETURNING id",
+            (invoice["id"],),
+        ).fetchone()
+        assert line is not None
+        conn.execute(
+            "UPDATE filament_spools SET invoice_line_id = %s WHERE id = %s", (line["id"], spool)
+        )
+    _link(pg_pool, spool, 50)
+    sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
+    first = _plan(f, _snap([_row(50)], suppliers=[]), sync)
+    create = _only([w for w in first.writes if w.kind == "supplier"], "create")
+    assert create.sb_id == shop.id
+    # The spool's link waits for the create (`Pending`), then names the new row.
+    assert [w for w in first.writes if w.op == "suppliers"] == []
+    assert first.deferred == 1
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_suppliers SET bb_supplier_id = 7 WHERE id = %s", (shop.id,))
+        conn.execute("DELETE FROM filament_bb_creates")
+    listed = [BbSupplier(id=7, name="Micro Center")]
+    (link,) = [
+        w for w in _plan(f, _snap([_row(50)], suppliers=listed), sync).writes if w.op == "suppliers"
+    ]
+    assert link.body == [
+        {
+            "supplier_id": 7,
+            "supplier_article_number": None,
+            "quoted_price_per_kg": None,
+            "is_purchase_source": True,
+        }
+    ]
+
+
+def test_a_supplier_with_an_open_create_intent_is_still_adopted(pg_pool: PgPool) -> None:
+    """R-P2-9: an unlinked supplier with no filament product but an open create intent (a
+    create whose answer was lost) stays in the sync, so Bambuddy's row of its name is
+    adopted as before."""
+    f = _filament(pg_pool)
+    shop = f.suppliers.create(SupplierCreate(name="Bolt Depot"))
+    read_at = datetime.now(UTC)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_creates (kind, sb_id, started_at) VALUES ('supplier', %s, %s)",
+            (shop.id, read_at - timedelta(hours=1)),
+        )
+    sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
+    snap = _snap([], suppliers=[BbSupplier(id=9, name="Bolt Depot")], read_at=read_at)
+    writes = _plan(f, snap, sync).writes
+    assert [(w.op, w.sb_id, w.bb_id) for w in writes if w.kind == "supplier"] == [
+        ("update", shop.id, 9)
+    ]
+
+
+def test_a_supplier_whose_link_a_404_dropped_is_not_made_again(pg_pool: PgPool) -> None:
+    """D16 (#7067): once a probe's 404 drops a supplier's link, one with no filament
+    product, invoice or open intent is not created again. With a product it is."""
+    f = _filament(pg_pool)
+    sb_id = _linked(pg_pool, f, "supplier")
+    with pg_pool.connection() as conn:  # what the 404 leaves (`test_a_row_probe_404_...`)
+        conn.execute(
+            "UPDATE filament_suppliers SET bb_supplier_id = NULL, bb_seen = NULL,"
+            " bb_seen_at = NULL WHERE id = %s",
+            (sb_id,),
+        )
+
+    writes = _plan(f, _snap([], suppliers=[]), _ROWS_PUSH).writes
+    assert [w for w in writes if w.kind == "supplier"] == []
+    assert _intents(pg_pool) == []
+
+    assert f.suppliers.add_product(sb_id, ProductCreate(type_id=_type(f), sku="A-1"))
+    writes = _plan(f, _snap([], suppliers=[]), _ROWS_PUSH).writes
+    assert [(w.op, w.sb_id) for w in writes if w.kind == "supplier"] == [("create", sb_id)]
+
+
+def test_a_linked_supplier_with_no_product_is_still_updated(pg_pool: PgPool) -> None:
+    """R-P2-8: a supplier Bambuddy already knows stays in the sync, product or not: a
+    missing row still gets its probe."""
+    f = _filament(pg_pool)
+    sb_id = _linked(pg_pool, f, "supplier")
+    writes = _plan(f, _snap([], suppliers=[]), _ROWS_PUSH).writes
+    assert [(w.op, w.sb_id) for w in writes if w.kind == "supplier"] == [("probe", sb_id)]
 
 
 # -- deferrals that clear, and those that do not (R-T4-1, R-T4-2) -----------------------

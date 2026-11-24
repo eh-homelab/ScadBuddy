@@ -21,11 +21,13 @@ from temporalio import activity
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError, is_cancelled_exception
 
+from scadbuddy.api.internal_library import LAYOUT_HEADROOM
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.commits import upload_into
 from scadbuddy.bambuddy.errors import is_transient
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.print_run import NATIVE_SLICER_UNAVAILABLE, PlannedRun
+from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.bambuddy.runs import PrintRunError, hold_run_file
 from scadbuddy.bambuddy.send import folder_listing, same_bytes
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -74,6 +76,10 @@ GONE = "The slice's record is gone: slice again."
 LOST_PUT = "The sliced 3MF was lost; slice again."
 #: The copy's bytes are not the ones the start named the slice by.
 COPY_CHANGED = "The copy changed while the slice started: slice again."
+#: A Bambuddy copy downloaded for a slice is spooled under the cap a print's copy is
+#: put with (`api/internal_library.py` `PUT_ROUTE_LIMIT`, #7499): one past it is no
+#: copy ScadBuddy laid out, and could fill the spool's volume.
+MAX_INPUT_BYTES = MAX_DOWNLOAD_BYTES + LAYOUT_HEADROOM
 
 
 #: What `_refused` names besides the plan's own refusals (Task 13 review M3): a slice
@@ -137,8 +143,17 @@ class SliceActivities:
         with tempfile.TemporaryFile(dir=content.spool) as body:
             try:
                 reads = reads_for(file_id, client, None)
+                size = 0
                 async with aclosing(reads.download_library_file(file_id)) as chunks:
                     async for chunk in chunks:
+                        size += len(chunk)
+                        if size > MAX_INPUT_BYTES:
+                            # The stream closes here and the spooled part goes with
+                            # `body`; the same file is as large on a retry (#7499).
+                            raise _refused(
+                                f"library file {file_id} is larger than the"
+                                f" {MAX_INPUT_BYTES // (1024 * 1024)} MiB a slice reads"
+                            )
                         await asyncio.to_thread(body.write, chunk)
             except ApiError as error:
                 # A copy gone or a Bambuddy not set up: its message is already the

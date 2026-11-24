@@ -48,6 +48,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.events import EventBus, PrinterEvent, emit
 from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
+from scadbuddy.core.settings_cache import settings_written
 from scadbuddy.entities.registry import repoint_entity
 from scadbuddy.printers.models import (
     BambuddyView,
@@ -348,6 +349,8 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("print_runs", "printer"),
     # #4747: the printer a Bambuddy virtual printer forwards to.
     PrinterReference("printers", "forwards_to"),
+    # #7067: the printer a stock unit is (inventory spec §6.4).
+    PrinterReference("stock_units", "printer_id"),
     # #4971: the plate remembered on a printer; the kept printer's own wins.
     PrinterReference("printer_bed_types", "printer", unique=True),
     # #4971: the LAN-only printer a Bambuddy project last printed on.
@@ -659,6 +662,10 @@ class PrinterStore:
                 (bambuddy_printer_id,),
             )
         if merged is not None:
+            # The merge repointed settings rows (#7384). Drop this process's cache after
+            # the commit: a read between a drop and the commit would keep the old rows.
+            # The trigger's NOTIFY drops every other replica's.
+            settings_written()
             self._announce(merged, linked.id)
         return linked
 
@@ -877,6 +884,7 @@ class PrinterStore:
                 conn, bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed
             )
         if merged is not None:
+            settings_written()  # after the commit, as in `link_bambuddy`
             self._announce(*merged)
         return row, wrote
 
@@ -1161,3 +1169,5 @@ class PrinterStore:
             # offers a printer that is gone (#4442 M3).
             _forget_run_activity(conn, str(key))
             _forget_settings(conn, str(key))
+        # After the commit (#7384), as in `link_bambuddy`.
+        settings_written()

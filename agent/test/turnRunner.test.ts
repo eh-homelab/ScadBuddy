@@ -125,6 +125,22 @@ describe('TurnRunner', () => {
     }
   })
 
+  it("gives the session's browser options to its remote plugins, and none for a session without them (#7027)", async () => {
+    const { runner, session, principal, remoteBrowsers } = await turnRunnerForTest()
+    const options = { user_agent: 'Mozilla/5.0 (Test)', viewport: { width: 1280, height: 800 } }
+    await runner.assemble({ ...session, browser: options }, principal)
+    await runner.assemble(session, principal)
+    expect(remoteBrowsers).toEqual([options, undefined])
+  })
+
+  it("lists its turn tools with the session's browser options it already holds (#7027)", async () => {
+    const { runner, session, principal, listedBrowsers } = await turnRunnerForTest({ turnTools: ['hindsight__recall'] })
+    const options = { locale: 'de-DE' }
+    await runner.assemble({ ...session, browser: options }, principal)
+    await runner.assemble(session, principal)
+    expect(listedBrowsers).toEqual([options, undefined])
+  })
+
   it("runs a Workflow agent's chat on its own model, effort and subagent, and fingerprints them", async () => {
     const { runner, session, principal } = await turnRunnerForTest()
     const plain = await runner.assemble(session, principal)

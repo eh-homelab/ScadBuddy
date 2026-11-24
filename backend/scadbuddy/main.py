@@ -128,6 +128,7 @@ from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
     NATIVE_LIBRARY_NOT_READY,
+    PUBLIC_URL,
     RECOVER_BAMBUDDY_LIBRARY_SQL,
     StoreNotReadyError,
     load_render_store_settings,
@@ -294,11 +295,11 @@ ROOT_ROUTE_MODULES = frozenset({"health", "metrics", "telemetry"})
 
 
 def _api_router() -> APIRouter:
-    """Every other module in `scadbuddy.api` that defines a ``router``, under
+    """Every other module in `scadbuddy.api` that defines a ``router``, included under
     :data:`API_PREFIX`: a new route module is mounted without an edit here. The order
     is by name and does not matter, because no two routes match the same request
     (`tests/api/test_routes.py`)."""
-    router = APIRouter(prefix=API_PREFIX)
+    router = APIRouter()
     for info in sorted(pkgutil.iter_modules(scadbuddy.api.__path__), key=lambda i: i.name):
         if info.name in ROOT_ROUTE_MODULES:
             continue
@@ -2635,7 +2636,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     # A write from a page on another origin is refused before its body is read (#962).
     app.add_middleware(
         CrossSiteGate,
-        public_url=lambda: state.settings_store.load().public_url,
+        public_url=lambda: state.settings_store.get(PUBLIC_URL),
         allowed_origins=lambda: state.settings.allowed_origin_list,
     )
     # Outside every route and gate, so their answers go out gzipped too (#1033).
@@ -2649,7 +2650,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     app.include_router(metrics.router)
     # The browser trace relay: at the root like the two above, before the SPA's mount.
     app.include_router(telemetry.router)
-    app.include_router(_api_router())
+    # The prefix is given here, not to the router: with none, FastAPI (0.165) builds every
+    # route's context to check for an empty path, and drops them.
+    app.include_router(_api_router(), prefix=API_PREFIX)
     _name_in_openapi(
         app,
         models.PastedSource,
