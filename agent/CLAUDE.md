@@ -403,7 +403,9 @@ opens every one and seals it again byte for byte).
     to the columns that say where it is sent (for the credential: `kind` and `base_url`).
     Comparable tokens are stored hashed instead.
   - Poller reads (#7306): every read of a task queue's pollers goes through
-    `src/temporal/pollers.ts` `queuePollers`, tests included. DescribeTaskQueue reports one
+    `src/temporal/pollers.ts` `queuePollers`; tests use `test/support/temporal.ts`
+    `anyPoller` or `pollerIdentities`. ESLint's `no-restricted-syntax` refuses a
+    `describeTaskQueue(` call anywhere else (`eslint.config.js`). DescribeTaskQueue reports one
     partition's pollers, and a worker can poll only the non-root ones, so it asks the root and
     `/_sys/<queue>/1..3`. `TASK_QUEUE_PARTITIONS` (4) must equal the server's
     `matching.numTaskqueueReadPartitions`: Temporal's default is
