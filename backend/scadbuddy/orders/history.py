@@ -12,12 +12,13 @@ is the cost part that most exceeded what the items' own accepted quotes priced f
 filament and machine time of the production attempts that did not fail (against the
 quote's ``filament`` and ``machine_time`` lines), labour (against its ``labour`` and
 ``setup`` lines), and in full the parts a quote never prices: failed attempts, test
-prints and cost entries. A job whose accepted quote has no per-part lines (a ``manual``
-quote, a quote with a ``manual`` line, or no accepted quote) priced filament, machine time
-and labour together, if at all, so those three parts are left out of its comparison: only
-its failed prints, test prints and other costs can be its reason. Its price is never split
-across parts. The **suggested unit price** is the unit cost marked up by
-``pricing_markup_percent``; with no markup, the lowest price whose margin is not thin.
+prints, cost entries and the parts taken from stock (``ItemCost.parts_minor``). A job
+whose accepted quote has no per-part lines (a ``manual`` quote, a quote with a ``manual``
+line, or no accepted quote) priced filament, machine time and labour together, if at all,
+so those three parts are left out of its comparison: only its failed prints, test prints
+and other costs can be its reason. Its price is never split across parts. The **suggested
+unit price** is the unit cost marked up by ``pricing_markup_percent``; with no markup, the
+lowest price whose margin is not thin.
 
 **Parts** (§11, #5543; #7067). Given ``parts_unit_minor`` (the quoted item's parts at what a
 FIFO take would cost now), each job's own parts cost (``ItemCost.parts_minor``: its ``use``
@@ -231,7 +232,10 @@ def unit_cost_history(
     answer.jobs = len(history)
     answer.units = units
     answer.unit_cost_minor = _per_unit(cost, units)
-    answer.estimated = any(item.estimated or item.unknown for item, _ in history)
+    # The parts at today's prices replace each job's own, so its unknown parts do not
+    # make the answer estimated.
+    swapped = {"parts"} if parts_unit_minor is not None else set()
+    answer.estimated = any(item.estimated or set(item.unknown) - swapped for item, _ in history)
     if over[reason] > 0:
         answer.main_reason = reason
         answer.main_reason_minor = _per_unit(over[reason], units)

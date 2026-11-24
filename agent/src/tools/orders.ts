@@ -915,7 +915,8 @@ export const orderTools: Tool[] = [
       'Each product row is one model `slug` (`group` `model`), one custom item `sku` (`sku`), or the custom items ' +
       'with no SKU (`custom`), with its `orders`, `units`, what was charged (`revenue_minor`), the real cost ' +
       '(`cost_minor`), `margin_minor`, `margin_percent`, `margin_state` and the waste (`waste_minor`, ' +
-      '`waste_percent`: the cost of test and failed prints). Each item counts as order_costs gives it. The `order` ' +
+      '`waste_percent`: the cost of test and failed prints) and `parts_minor` (the parts taken from stock). Each ' +
+      'item counts as order_costs gives it. The `order` ' +
       "row is the orders' own entries, shipments' cost and charges (its `orders` counts only the orders that have " +
       "any; no order_list filter matches them), and the `total` row each currency's sum. Pass a product " +
       "row's `product`, `period_from`, `period_to` and `currency` to order_list for its orders. With `complete` " +
@@ -1299,7 +1300,9 @@ export const orderTools: Tool[] = [
       "An order's real cost and margin (#4251, #5326): per item, its accepted quote beside every attempt, failed " +
       'ones included, each costed in filament and machine time (`estimated` names a figure taken from the quote ' +
       "or today's settings; `unknown` an attempt with no source), its labour (`time_entries`, else a default, " +
-      '`labour_default`), its `cost_entries`, what it was charged (`revenue_minor`) and its `margin_minor`, ' +
+      "`labour_default`), its `cost_entries`, its parts taken from stock (`parts_minor`, at their lots' costs; " +
+      '`parts` is unknown while a use of unknown cost is not given back), what it was charged (`revenue_minor`) ' +
+      'and its `margin_minor`, ' +
       '`margin_percent` and `margin_state` (`ok`, `thin`, `loss`, `unknown`); the order adds its own entries, its ' +
       "shipments' cost and every charge but tax. `bambuddy_cost` is Bambuddy's own cost of an attempt, shown and " +
       'never in any sum.',

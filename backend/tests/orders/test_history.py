@@ -21,11 +21,13 @@ from scadbuddy.orders.models import (
     Order,
     OrderItem,
     PricingPolicy,
+    TimeEntryInput,
 )
 from scadbuddy.orders.parts import ItemPart
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
+from tests.orders.test_cost_entries import usd_rate
 from tests.orders.test_costs import attempt, priced_order
 from tests.orders.test_lifecycle import BY, Shop, resolved
 from tests.orders.test_parts_lifecycle import _item as stocked_item
@@ -322,3 +324,30 @@ def test_the_items_parts_replace_the_jobs_own_once(shop: Shop, pool: PgPool) -> 
     # (100 + 2 x 30.5) over 2 units: 80.5, rounded once.
     assert (parts.unit_cost_minor, parts.parts_unit_minor) == (81, 31)
     assert (parts.main_reason, parts.main_reason_minor) == ("other", 81)
+
+
+def test_the_items_parts_replace_a_jobs_unknown_parts(shop: Shop, pool: PgPool) -> None:
+    """A job's parts of unknown cost make the history estimated, unless this item's parts
+    at today's estimate take their place."""
+    ring = stocked_item(shop, "Ring", on_hand=0)
+    # The quote's own machine rate, so machine time is not estimated.
+    order, item = priced_order(shop, PricingPolicy(machine_rate_per_hour="1"))
+    shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(item_id=ring, per_unit=1)], BY)
+    # Labour by hand, so no default labour is estimated.
+    shop.lifecycle.add_time_entry(
+        order.id,
+        TimeEntryInput(order_item_id=item.id, kind="setup", minutes=5),
+        BY,
+        labour_rate=usd_rate("0"),
+    )
+    made = attempt(shop, order, item, "succeeded", 1, 10.0, 74)
+    shop.lifecycle.accept_fulfilment(order.id, item.id, made.id, BY)
+    done_at(pool, item, NOW - timedelta(days=3))
+
+    plain = unit_cost_history(shop.rows, "demo", USD, markup_percent="0", now=NOW)
+    parts = unit_cost_history(
+        shop.rows, "demo", USD, markup_percent="0", now=NOW, parts_unit_minor=Decimal(2)
+    )
+
+    assert plain.estimated
+    assert not parts.estimated

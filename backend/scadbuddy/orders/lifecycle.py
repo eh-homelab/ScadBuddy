@@ -5455,14 +5455,17 @@ class Lifecycle:
         """One unit of the order item's parts at what a FIFO take of its quantity would
         cost now (the plan's Ruling 10, `StockStore.estimate_unit_cost`), in the shop's
         currency, and whether some of it is of unknown cost: the known share is kept and
-        the flag says the rest is missing (R-P2-29). In any other currency the parts are
-        `(0, False)`, as a part priced in another currency was before #7067, and so for
-        an order item that does not exist. ``bad_quantity`` (unprocessable) when the take
-        is past what a move's amount holds (R-P2-16)."""
+        the flag says the rest is missing (R-P2-29). In any other currency stock costs do
+        not apply: the parts are `(0, True)` when the item has any, as job cost reads them
+        (R-P2-33). An item with no parts, or one that does not exist, is `(0, False)`.
+        ``bad_quantity`` (unprocessable) when the take is past what a move's amount holds
+        (R-P2-16)."""
         item = self.store.item(order_item_id)
-        if item is None or currency != shop_currency:
+        if item is None:
             return Decimal(0), False
         rows = self.parts.item_parts([item.id])[item.id]
+        if currency != shop_currency:
+            return Decimal(0), bool(rows)
         total = Decimal(0)
         unknown = False
         with self.store.transaction() as conn:
@@ -5520,6 +5523,7 @@ class Lifecycle:
                 # A move of an order not locked here: its event would be written without
                 # its lock, and locking it now, after the lot, could deadlock.
                 raise _OrdersMoved
+            wire = result.model_dump(mode="json")
             for order_id, items in sorted(by_order.items()):
                 order = locked.get(order_id)
                 if order is None:
@@ -5531,19 +5535,11 @@ class Lifecycle:
                     "item.parts_recosted",
                     lot_id=str(lot_id),
                     item_id=str(result.item_id),
-                    unit_cost_minor=_minor(result.unit_cost_minor),
-                    before_unit_costs_minor=[_minor(c) for c in result.before_unit_costs_minor],
+                    # The same decimal strings as the route's `RecostResult` (R-P2-13).
+                    unit_cost_minor=wire["unit_cost_minor"],
+                    before_unit_costs_minor=wire["before_unit_costs_minor"],
                     currency=self.rules().shop_currency,
-                    items=[
-                        {
-                            "order_item_id": i.order_item_id,
-                            "before_minor": _minor(i.before_minor),
-                            "after_minor": _minor(i.after_minor),
-                            "before_unknown": i.before_unknown,
-                            "after_unknown": i.after_unknown,
-                        }
-                        for i in items
-                    ],
+                    items=[i.model_dump(mode="json", exclude={"order_id"}) for i in items],
                 )
                 changes.append(_Change(order))
         for change in changes:

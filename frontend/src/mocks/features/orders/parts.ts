@@ -123,22 +123,25 @@ export function fillFromRule(order: Order, item: OrderItem): void {
 }
 
 /** `Lifecycle._use_parts`: out of stock, each use at the part's unit cost now; no cost entry
- * (`costs.py` reads the item's `parts_minor`, #7067). A part in another currency is unknown. */
+ * (`costs.py` reads the item's `parts_minor`, #7067). Stock costs are in the shop's currency:
+ * a part in another currency is of unknown cost, and in an order in another currency the
+ * parts are 0 and unknown, as `costs.py` reads them. */
 export function useParts(order: Order, item: OrderItem): void {
   const rows = (parts.items.get(item.id) ?? []).filter((r) => r.used === 0)
   if (rows.length === 0) return
+  const shop = mockSettings().orders_currency
   let minor = 0
-  let unknown = false
+  let unknown = order.currency !== shop
   for (const row of rows) {
     const p = find(row.item_id)
     const count = row.per_unit * item.quantity
     const amount = p.unit_cost * count
-    if (p.currency === order.currency) minor += amount
+    if (p.currency === shop) minor += amount
     else unknown = true
-    move(p, 'use', -count, { amount_minor: p.currency === order.currency ? Math.round(amount) : null, order_id: order.id, order_item_id: item.id })
+    move(p, 'use', -count, { amount_minor: p.currency === shop ? Math.round(amount) : null, order_id: order.id, order_item_id: item.id })
     row.used = count
   }
-  parts.taken.set(item.id, { minor: Math.round(minor), unknown })
+  parts.taken.set(item.id, { minor: order.currency === shop ? Math.round(minor) : 0, unknown })
   event(order, 'parts.used', { item_id: item.id })
 }
 

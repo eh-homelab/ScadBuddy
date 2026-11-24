@@ -307,7 +307,11 @@ def test_the_quote_prices_parts_at_the_fifo_estimate(shop: Shop) -> None:
     # 6 hooks: 4 at 5 and 2 at 8 is 6 each, so 12 a unit; the ring has no lot (unknown,
     # and the estimate says so).
     assert shop.lifecycle.parts_unit_cost(item.id, "USD", "USD") == (Decimal(12), True)
-    assert shop.lifecycle.parts_unit_cost(item.id, "EUR", "USD") == (Decimal(0), False)
+    # R-P2-33: stock costs are in the shop's currency, so in another one the parts are
+    # unknown; an item with no parts has none to miss.
+    assert shop.lifecycle.parts_unit_cost(item.id, "EUR", "USD") == (Decimal(0), True)
+    _, bare = shop.accepted(quantity=1)
+    assert shop.lifecycle.parts_unit_cost(bare.id, "EUR", "USD") == (Decimal(0), False)
     assert shop.lifecycle.parts_unit_cost("no-such-item", "USD", "USD") == (Decimal(0), False)
 
 
@@ -336,7 +340,7 @@ def test_recost_writes_the_change_on_each_order(shop: Shop) -> None:
     order, item = shop.accepted(quantity=2)
     shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(item_id=hook, per_unit=1)], BY)
     shop.fulfilled(order, item)
-    shop.lifecycle.stock.set_lot_cost(lot, Decimal(7), BY)
+    shop.lifecycle.stock.set_lot_cost(lot, Decimal("7.25"), BY)
 
     result = shop.lifecycle.recost_lot(lot, BY)
 
@@ -345,20 +349,21 @@ def test_recost_writes_the_change_on_each_order(shop: Shop) -> None:
     assert (changed.order_id, changed.before_minor, changed.after_minor) == (
         order.id,
         Decimal(10),
-        Decimal(14),
+        Decimal("14.5"),
     )
     [event] = [e for e in shop.rows.events(order.id) if e.kind == "item.parts_recosted"]
     assert event.detail == {
         "lot_id": str(lot),
         "item_id": hook,
-        "unit_cost_minor": "7",
+        # The route's decimal strings, a fraction kept (R-P2-13).
+        "unit_cost_minor": "7.25",
         "before_unit_costs_minor": ["5"],
         "currency": "USD",
         "items": [
             {
                 "order_item_id": item.id,
                 "before_minor": "10",
-                "after_minor": "14",
+                "after_minor": "14.5",
                 "before_unknown": False,
                 "after_unknown": False,
             }
