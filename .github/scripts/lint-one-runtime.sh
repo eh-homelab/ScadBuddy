@@ -29,7 +29,8 @@ if code "mode$q?[])]? ?[!=]==? ?$q(durable|classic)$q|case $q(durable|classic)$q
   fail=1
 fi
 # The names of the session mode the classic runtime left (#7323), each added here by the PR
-# that removed it. A frontend test may send an older peer's, to show it is dropped.
+# that removed it. A TypeScript test file, in any tree, may name one: it sends an older peer's
+# message, to show it is dropped.
 retired=(SessionModeSchema)
 if [ "${#retired[@]}" -gt 0 ] && code "\\b($(IFS='|'; echo "${retired[*]}"))\\b" --exclude='*.test.ts' --exclude='*.test.tsx'; then
   echo "a session mode is back: every session is an AgentSession" >&2
