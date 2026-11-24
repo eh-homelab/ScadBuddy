@@ -57,6 +57,9 @@ export function LinkTypeDialog({
 }) {
   const [chosen, setChosen] = useState(candidates[0]?.type.id ?? '')
   const picked = candidates.find((one) => one.type.id === chosen) ?? candidates[0]
+  // A forecast only, before the click: `linksBookRow` copies the server's match,
+  // `backend/scadbuddy/orders/store.py` `existing_filament`; change both together. After the
+  // click, the PATCH answer's `filament_id` is the truth (`FilamentsEditor` `linkType`, R-7344-2).
   const links = picked ? linksBookRow(row, picked.type, names) : false
   return (
     <Dialog open onOpenChange={(next) => !next && onClose()}>

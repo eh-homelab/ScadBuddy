@@ -145,6 +145,7 @@ export function rankCandidates(row: Pick<Filament, 'colour' | 'alpha'>, ids: Boo
  * by its material, subtype and brand names (upper-cased, no aliases), its RGB and its
  * alpha, and not its effect (`types.py` `_link_price_book`, `orders/store.py`
  * `existing_filament`). `names` holds the catalog names by id; an id it lacks never links.
+ * It is the dialog's forecast; the PATCH answer's `filament_id` says what the server linked (#7344).
  */
 export function linksBookRow(row: Pick<Filament, 'material' | 'subtype' | 'brand' | 'colour' | 'alpha'>, type: SpoolType, names: ReadonlyMap<string, string>): boolean {
   const name = (id: string | null) => (id === null ? '' : (names.get(id) ?? null))
