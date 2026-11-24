@@ -130,6 +130,11 @@ describe('recordsSha256 (#7273 R22)', () => {
     expect(await recordsSha256(records)).toBe('430aac9b54748997f382a364eb3234b32759d096d10f59a9ae47b49cfc4525e7')
   })
 
+  it('escapes a backslash, a newline and a tab as the backend does', async () => {
+    const records = [{ record_type: 'mime', media_type: 'application/x\\y\n\tz', id: 'a\\b\nc\td', encoding: null, lang: 'e\\n\n\t', data_hex: '00ff' }]
+    expect(await recordsSha256(records)).toBe('54639c29ef8bb4dc8ab3eeee256fe2753bc9dea0bbc054fee504247f752616c5')
+  })
+
   it('writes an absent field as null, as the backend dumps it', async () => {
     expect(await recordsSha256([{ record_type: 'mime', data_hex: '7b7d' }])).toBe('6b20428036a4096aeef2e2fe7084d6c7c53e2c476789c6643b343a13c563ad29')
   })

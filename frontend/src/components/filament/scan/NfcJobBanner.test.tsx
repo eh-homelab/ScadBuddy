@@ -1,5 +1,5 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { seedNfcJob } from '../../../mocks/features/filament/tags'
 import { server } from '../../../mocks/server'
@@ -36,6 +36,7 @@ function sent() {
     requests,
     lines: () => requests.map((one) => one.line),
     bodyOf: (line: string) => requests.find((one) => one.line === line)?.body,
+    bodiesOf: (line: string) => requests.filter((one) => one.line === line).map((one) => one.body),
     off: () => server.events.removeListener('request:start', listener),
   }
 }
@@ -187,16 +188,128 @@ describe('NfcJobBanner (#7273)', () => {
     await waitFor(() => expect(log.bodyOf(`POST ${JOBS}/${second.id}/result`)).toEqual({ error: 'a different tag answered' }))
   })
 
-  it('reloads and writes nothing when the job changed', async () => {
-    seedNfcJob({ kind: 'write', records: RECORDS })
-    server.use(http.post(`${JOBS}/:id/claim`, () => HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'changed', code: 'records_mismatch' }, { status: 409, headers: { 'Content-Type': 'application/problem+json' } }), { once: true }))
+  it('reloads and writes nothing when the job changed, then arms the new records', async () => {
+    const job = seedNfcJob({ kind: 'write', records: RECORDS })
+    const NEW: WireRecord[] = [{ record_type: 'text', media_type: null, id: null, encoding: 'utf-8', lang: 'en', data_hex: hexOfText('Shelf C1') }]
+    server.use(
+      http.post(
+        `${JOBS}/:id/claim`,
+        () => {
+          job.records = NEW
+          // The reload answers late, so a hash of the old records is ready first (M1).
+          server.use(http.get(JOBS, () => delay(300), { once: true }))
+          return HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'changed', code: 'records_mismatch' }, { status: 409, headers: { 'Content-Type': 'application/problem+json' } })
+        },
+        { once: true },
+      ),
+    )
     const { user } = render()
     await user.click(await armButton())
     expect(await screen.findByText('The job changed. Nothing was written.')).toBeInTheDocument()
-    const before = log.lines().filter((line) => line === `GET ${JOBS}`).length
-    await waitFor(() => expect(log.lines().filter((line) => line === `GET ${JOBS}`).length).toBeGreaterThan(before))
+    expect(await screen.findByRole('heading', { name: 'Agent wants to write 1 record' })).toBeInTheDocument()
     expect(stub.writes).toHaveLength(0)
-    expect(screen.getByRole('heading', { name: 'Agent wants to write 2 records' })).toBeInTheDocument()
+    await user.click(await armButton())
+    expect(await screen.findByText('Hold a tag to the phone')).toBeInTheDocument()
+    const claims = log.bodiesOf(`POST ${JOBS}/${job.id}/claim`)
+    expect(claims).toHaveLength(2)
+    expect(claims[1]).toEqual({ records_sha256: await recordsSha256(NEW) })
+  })
+
+  it('ends a read job with an error when ScadBuddy refuses the reading', async () => {
+    const job = seedNfcJob({ kind: 'read' })
+    // Keyed to this job: an earlier test's page may still end its own job on unmount.
+    server.use(http.post(`${JOBS}/${job.id}/result`, () => HttpResponse.json({ type: 'about:blank', title: 'Server error', status: 500, detail: 'boom' }, { status: 500, headers: { 'Content-Type': 'application/problem+json' } }), { once: true }))
+    const { user } = render()
+    await user.click(await armButton())
+    await screen.findByText('Hold a tag to the phone')
+    stub.tap({ serialNumber: UID, records: [OLD] })
+    await waitFor(() => expect(log.bodiesOf(`POST ${JOBS}/${job.id}/result`)).toHaveLength(2))
+    expect(log.bodiesOf(`POST ${JOBS}/${job.id}/result`)[1]).toEqual({ error: expect.stringContaining('ScadBuddy did not take the reading') })
+    await waitFor(() => expect(job.state).toBe('failed'))
+  })
+
+  it.each(['read', 'write'] as const)('stops a %s job the agent cancelled after Arm and frees the session', async (kind) => {
+    const job = seedNfcJob(kind === 'read' ? { kind } : { kind, records: RECORDS })
+    const { user, onAnnounce } = render()
+    await user.click(await armButton())
+    await screen.findByText('Hold a tag to the phone')
+    await fetch(new URL(`${JOBS}/${job.id}/cancel`, window.location.origin), { method: 'POST' })
+    expect(await screen.findByText('The agent stopped waiting.', {}, { timeout: 3500 })).toBeInTheDocument()
+    expect(onAnnounce).toHaveBeenLastCalledWith('The agent stopped waiting.')
+    expect(screen.queryByText('Hold a tag to the phone')).toBeNull()
+    expect(log.lines()).not.toContain(`POST ${JOBS}/${job.id}/result`)
+    const release = session.claim()
+    expect(release).not.toBeNull()
+    release?.()
+  })
+
+  it('announces when another write holds the session or NFC does not start', async () => {
+    seedNfcJob({ kind: 'read' })
+    const { user, onAnnounce } = render()
+    const held = session.claim()!
+    await user.click(await armButton())
+    await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith('Another write is running on this page. Arm the job once it ends.'))
+    held()
+    vi.spyOn(session, 'start').mockRejectedValueOnce(new Error('NFC is off'))
+    await user.click(await armButton())
+    await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith('NFC could not start: NFC is off. Nothing was armed.'))
+  })
+
+  it('cuts a long error on a character boundary', async () => {
+    const job = seedNfcJob({ kind: 'write', records: RECORDS })
+    const { user } = render()
+    await user.click(await armButton())
+    await screen.findByText('Hold a tag to the phone')
+    stub.failNextWrite(new DOMException('😀'.repeat(600), 'NetworkError'))
+    stub.tap({ serialNumber: UID, records: [OLD] })
+    await waitFor(() => expect(log.bodyOf(`POST ${JOBS}/${job.id}/result`)).toBeDefined())
+    const { error } = log.bodyOf(`POST ${JOBS}/${job.id}/result`) as { error: string }
+    expect([...error]).toHaveLength(500)
+    expect(error).not.toMatch(/[\uD800-\uDFFF]/u)
+  })
+
+  describe('shows what every record holds, as plain text (R22)', () => {
+    const shown = async (records: WireRecord[]) => {
+      seedNfcJob({ kind: 'write', records })
+      render()
+      const list = await screen.findByRole('list', { name: 'Records to write' })
+      await armButton()
+      return within(list).getAllByRole('listitem')
+    }
+
+    it('keeps JSON as it was sent unless pretty-printing loses nothing', async () => {
+      const items = await shown([
+        { record_type: 'mime', media_type: 'application/json', data_hex: hexOfText('{"a":1,"a":2}') },
+        { record_type: 'mime', media_type: 'application/json', data_hex: hexOfText('{"n":12345678901234567890}') },
+      ])
+      expect(items[0]).toHaveTextContent('{"a":1,"a":2}')
+      expect(items[1]).toHaveTextContent('{"n":12345678901234567890}')
+    })
+
+    it('shows a URL record and a smart poster as text, never a link', async () => {
+      // The poster's message: a short "U" record (prefix 0x04 "https://") then a short "T" record ("en", no text).
+      const poster = '91010c5504' + hexOfText('example.org') + '5101035402' + hexOfText('en')
+      const items = await shown([
+        { record_type: 'url', data_hex: hexOfText('https://example.com/x') },
+        { record_type: 'smart-poster', data_hex: poster },
+      ])
+      expect(items[0]).toHaveTextContent('https://example.com/x')
+      expect(items[1]).toHaveTextContent('https://example.org')
+      expect(screen.queryByRole('link')).toBeNull()
+    })
+
+    it('shows an unknown record, and a text record in an encoding NDEF does not use, as hex', async () => {
+      const items = await shown([
+        { record_type: 'mime', media_type: 'application/octet-stream', data_hex: '0001ff' },
+        { record_type: 'text', encoding: 'latin1', lang: 'en', data_hex: hexOfText('Hi there') },
+        { record_type: 'unknown', data_hex: 'ab'.repeat(100) },
+      ])
+      expect(items[0]).toHaveTextContent('00 01 ff')
+      expect(items[1]).toHaveTextContent(hexOfText('Hi there').match(/../g)!.join(' '))
+      expect(items[1]).not.toHaveTextContent('Hi there')
+      expect(items[2]).toHaveTextContent('100 bytes')
+      expect(items[2]).toHaveTextContent('36 more bytes')
+    })
   })
 
   it('drops a job the agent stopped waiting on', async () => {

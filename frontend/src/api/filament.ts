@@ -246,6 +246,9 @@ export type NfcJobResultIn = Schemas['NfcJobResultIn']
 /** The agents' NFC jobs no page armed yet, oldest first (G4). */
 export const listPendingNfcJobs = () => request<NfcJob[]>(`${BASE}/nfc-jobs?state=pending`)
 
+/** One job and its `state`; the page watches the job it armed, as the agent can cancel it (R23). */
+export const getNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}`)
+
 /**
  * Arms a job for this page. A write job's claim names the `records_sha256` of the records the
  * person saw (R22): 409 `records_mismatch` when the job holds others, `job_not_pending` once it ended.
