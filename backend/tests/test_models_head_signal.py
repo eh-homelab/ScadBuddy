@@ -39,6 +39,7 @@ from scadbuddy.library.repo_signal import ModelsHeadFollower
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.media import MemoryMediaStore
+from tests.support.waits import until
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -46,11 +47,7 @@ PROMPTLY = 10.0
 
 
 async def _until(predicate: Callable[[], bool], timeout: float = PROMPTLY) -> None:
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() >= deadline:
-            raise AssertionError("timed out")
-        await asyncio.sleep(0.02)
+    await until(predicate, timeout, interval=0.02, what="timed out")
 
 
 @pytest.fixture

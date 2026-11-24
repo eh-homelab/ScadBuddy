@@ -85,7 +85,7 @@ export type BackgroundActivityDeps = {
   send: TaskSender
   tz: string
   now?: () => Date
-  /** Where a classic session's directory is, the cwd a monitor's command runs in. */
+  /** Where a session's directory is, the cwd a monitor's command runs in. */
   paths?: HarnessPaths | undefined
   /**
    * The session directories (workspace/directory.ts): a running monitor command holds its
@@ -262,7 +262,7 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
       return { queue: deps.socketQueue ?? TASK_QUEUE, activity: BG_MONITOR_WS, timeoutMs }
     },
 
-    /** A classic session's monitor command, in its session directory on the replica that ran the turn. */
+    /** A session's monitor command, in its session directory on the replica that ran the turn. */
     async [BG_MONITOR_COMMAND](input: { taskId: string }): Promise<MonitorResult> {
       const t = await deps.store.get(input.taskId)
       if (!t || t.state !== 'active') return { end: { outcome: 'cancelled' }, events: 0 }

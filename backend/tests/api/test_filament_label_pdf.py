@@ -4,6 +4,7 @@ setting `filament_label_template` (plan
 
 from __future__ import annotations
 
+import re
 from uuid import uuid4
 
 import pytest
@@ -113,6 +114,24 @@ def test_a_spool_label_pdf_carries_the_spools_own_data(
     ]
     # No template sent: the stored setting's, the 50 x 25 mm roll by default.
     assert (template.id, layout) == ("roll_50x25", "roll")
+
+
+def test_a_stored_sheet_template_prints_on_its_sheet_whatever_the_layout(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    spools = [_spool(client)["id"] for _ in range(2)]
+    stored = {"template": "avery_5160"}
+    assert client.put(SETTINGS, json={"filament_label_template": stored}).status_code == 200
+    answer = client.post(PDF, json={"spool_ids": spools, "layout": "roll"})
+    assert answer.status_code == 200, answer.text
+    [(labels, template, layout)] = drawn
+    assert (template.id, layout, len(labels)) == ("avery_5160", "roll", 2)
+    # `render_pdf` lays a sheet template on its own grid: both labels on one Letter page,
+    # not a 66.675 x 25.4 mm page each as a roll would be.
+    boxes = re.findall(rb"/MediaBox \[ 0 0 ([\d.]+) ([\d.]+) \]", answer.content)
+    assert [(float(w), float(h)) for w, h in boxes] == [
+        pytest.approx((215.9 * MM, 279.4 * MM), abs=0.01)
+    ]
 
 
 def test_the_pdf_takes_the_stored_template_or_the_one_sent(

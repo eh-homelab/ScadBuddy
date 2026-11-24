@@ -21,6 +21,7 @@ from scadbuddy.telemetry.forwarder import (
     TraceForwarder,
 )
 from scadbuddy.telemetry.payload import MAX_PREPARED_BYTES
+from tests.support import waits
 
 ENDPOINT = "http://collector.test:4318"
 TARGET: tuple[str, dict[str, str]] = (ENDPOINT + "/v1/traces", {})
@@ -55,10 +56,9 @@ def make(
     return forwarder, metrics
 
 
-async def until(condition: Callable[[], bool]) -> None:
-    async with asyncio.timeout(5):
-        while not condition():
-            await asyncio.sleep(0.01)
+async def until(condition: Callable[[], bool], budget: float = 5.0) -> None:
+    """`tests.support.waits.until`, with this module's budget (#7014's late look)."""
+    await waits.until(condition, budget)
 
 
 async def test_an_accepted_batch_is_posted_to_the_traces_path() -> None:
@@ -105,6 +105,23 @@ async def test_an_unreachable_collector_counts_failed() -> None:
     async with forwarder.running():
         forwarder.offer(BATCH)
         await until(lambda: outcome(metrics, "failed") == 1)
+
+
+async def test_a_loop_blocked_past_the_deadline_still_sees_the_post_finish() -> None:
+    """#7014: the loop blocks past ``until``'s budget while a post is under way (as in a
+    long GC pause), and the post needs a few more turns after it. The count comes in those
+    turns, not after more time."""
+
+    async def collector(request: httpx.Request) -> httpx.Response:
+        time.sleep(0.3)  # blocks the loop past the budget below
+        for _ in range(3):
+            await asyncio.sleep(0)
+        raise httpx.ConnectError("refused", request=request)
+
+    forwarder, metrics = make(collector)
+    async with forwarder.running():
+        forwarder.offer(BATCH)
+        await until(lambda: outcome(metrics, "failed") == 1, budget=0.1)
 
 
 async def test_a_collector_that_never_answers_times_out() -> None:
