@@ -189,7 +189,7 @@ function AmsBody({ row }: { row: PrinterRow }) {
             <Button
               size="xs"
               variant="outline"
-              disabled={locked || view?.tray_now !== 255}
+              disabled={locked || view == null || (view.tray_now != null && view.tray_now !== 255)}
               onClick={() => setAsking({ action: 'refresh', unit, slot })}
             >
               Read the tag again
@@ -305,7 +305,7 @@ function UnitBlock({
           <span className="text-xs text-muted-foreground">Place: {unit.place_name}</span>
         )}
         {!external && !renaming && (
-          <Button size="icon-xs" variant="ghost" aria-label={`Rename ${unit.unit}`} onClick={() => setRenaming(true)}>
+          <Button size="icon-xs" variant="ghost" aria-label={`Rename ${unit.unit}`} onClick={() => { setLabel(unit.label ?? ''); setRenaming(true) }}>
             <PencilIcon />
           </Button>
         )}

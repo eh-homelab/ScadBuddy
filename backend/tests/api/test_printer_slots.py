@@ -49,6 +49,11 @@ def status_route(body: dict[str, Any] | None = None) -> respx.Route:
     )
 
 
+def view_routes() -> None:
+    respx.get(f"{API}/printers/3/slot-presets").mock(return_value=httpx.Response(200, json={}))
+    respx.get(f"{API}/printers/3/ams-labels").mock(return_value=httpx.Response(200, json={}))
+
+
 def slot(pid: str, ams: int = 0, tray: int = 1) -> str:
     return f"/api/v1/printers/{pid}/trays/{ams}/{tray}"
 
@@ -161,6 +166,35 @@ def test_refresh_and_load_refuse_what_bambuddy_cannot_address(client: TestClient
     assert client.post(f"{slot(pid, 255, 0)}/refresh").status_code == 422
     assert client.post(f"{slot(pid, 5, 0)}/load").status_code == 422
     assert client.post(f"{slot(pid, 128, 1)}/reset").status_code == 422
+
+
+@respx.mock
+def test_the_ams_assist_state_is_not_busy(client: TestClient) -> None:
+    pid = linked(client, 3)
+    status_route(idle(ams_status_main=3))
+    respx.post(f"{API}/printers/3/ams/load").mock(return_value=httpx.Response(200, json=DONE))
+
+    response = client.post(f"{slot(pid)}/load")
+
+    assert response.status_code == 200, response.text
+    view_routes()
+    assert client.get(f"/api/v1/printers/{pid}/ams").json()["ams_busy"] is False
+
+
+@respx.mock
+def test_ext_r_is_not_told_from_nothing_loaded(client: TestClient) -> None:
+    """The documented limit (`slot_control.EXTERNAL_TRAY`): Ext-R's tray 255 is also
+    `tray_now` for nothing loaded."""
+    pid = linked(client, 3)
+    body = idle(fila_switch=None, tray_now=255)
+    body["vt_tray"][1].update({"tray_type": "PETG", "tray_color": "FF0000FF", "state": 11})
+    status_route(body)
+    respx.post(f"{API}/printers/3/ams/load").mock(return_value=httpx.Response(200, json=DONE))
+
+    assert client.post(f"{slot(pid, 255, 1)}/load").status_code == 200
+    view_routes()
+    units = {u["ams_id"]: u for u in client.get(f"/api/v1/printers/{pid}/ams").json()["units"]}
+    assert all(not t["loaded"] for t in units[255]["slots"])
 
 
 @respx.mock

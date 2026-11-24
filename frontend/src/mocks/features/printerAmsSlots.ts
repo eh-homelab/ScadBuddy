@@ -84,17 +84,23 @@ function seedUnits(): AmsUnitView[] {
   ]
 }
 
-const state = { units: seedUnits(), printing: false, adminOnly: false, sent: [] as string[] }
+const state = { units: seedUnits(), printing: false, adminOnly: false, sent: [] as string[], trayNow: undefined as number | null | undefined }
 
 export function reset(): void {
   state.units = seedUnits()
   state.printing = false
   state.adminOnly = false
   state.sent = []
+  state.trayNow = undefined
 }
 
 export function setAmsPrinting(on: boolean): void {
   state.printing = on
+}
+
+/** Overrides the view's `tray_now` (`null` is a status that did not say); `undefined` derives it. */
+export function setAmsTrayNow(value: number | null | undefined): void {
+  state.trayNow = value
 }
 
 export function setAmsLabelAdminOnly(on: boolean): void {
@@ -114,7 +120,7 @@ function view(): AmsView {
     state: state.printing ? 'RUNNING' : 'IDLE',
     printing: state.printing,
     ams_busy: false,
-    tray_now: state.units[0]!.slots.find((s) => s.loaded) ? 0 : 255,
+    tray_now: state.trayNow !== undefined ? state.trayNow : state.units[0]!.slots.find((s) => s.loaded) ? 0 : 255,
     units: state.units,
   }
 }

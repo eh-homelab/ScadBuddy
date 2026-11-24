@@ -34,6 +34,11 @@ NozzleDiameter = Literal["0.2", "0.4", "0.6", "0.8"]
 NOTHING_LOADED = 255
 #: The global tray of the external holders: Ext-L (or the only one) and Ext-R.
 EXTERNAL_TRAY = 254
+# Limit: Ext-R's global tray is 255, which is also NOTHING_LOADED, so `tray_now` cannot say
+# Ext-R is loaded: it never shows `loaded`, and `already_loaded` never fires for it. The
+# status's `extruder_slots` names each extruder's slot, but the only recording of it
+# (`printer-status.json`) shows Ext-R's empty form (ams 254, slot 255), not a loaded one,
+# so the two are not told apart here. A Bambuddy-routed stopgap, ported in #7276.
 PRESET_ID = r"^[A-Za-z0-9_.+-]{0,64}$"
 COLOUR = r"^#?[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"
 #: Bambuddy's ``AmsLabelBody.label`` (``schemas/printer.py`` line 364, v1.3.1).
@@ -255,7 +260,9 @@ def filled(status: PrinterStatus, ams_id: int, tray_id: int) -> bool:
 
 
 def ams_busy(status: PrinterStatus) -> bool:
-    return status.ams_status_main not in (None, 0)
+    """1 (changing filament) and 2 (reading a tag) only. 3 is the AMS assist, which the
+    recording shows on a running printer, so it is not busy by itself."""
+    return status.ams_status_main in (1, 2)
 
 
 def guard(status: PrinterStatus, action: Action, ams_id: int, tray_id: int) -> AmsTray:

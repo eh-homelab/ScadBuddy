@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { PrinterRow } from '../../api/types'
-import { amsSent, setAmsLabelAdminOnly, setAmsPrinting } from '../../mocks/features/printerAmsSlots'
+import { amsSent, setAmsLabelAdminOnly, setAmsPrinting, setAmsTrayNow } from '../../mocks/features/printerAmsSlots'
 import { initialPrinters } from '../../mocks/features/printers'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -96,6 +96,33 @@ describe('PrinterAmsSlots (#7153)', () => {
     await user.click(screen.getByRole('button', { name: 'Save label' }))
     expect(await screen.findByRole('status')).toHaveTextContent('Labelled AMS-A “Left rack”.')
     expect(await screen.findByRole('heading', { name: 'Left rack' })).toBeInTheDocument()
+  })
+
+  it('reads the tag again when the status names no tray, as the route allows', async () => {
+    setAmsTrayNow(null)
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    expect(screen.getByRole('button', { name: 'Read the tag again' })).toBeEnabled()
+  })
+
+  it('does not read the tag again while a tray feeds the printer', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    expect(screen.getByRole('button', { name: 'Read the tag again' })).toBeDisabled()
+  })
+
+  it('starts Rename from the unit’s label each time it opens', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Rename AMS-A' }))
+    await user.type(screen.getByLabelText('Label for AMS-A'), 'Left rack')
+    await user.click(screen.getByRole('button', { name: 'Save label' }))
+    await screen.findByRole('heading', { name: 'Left rack' })
+    await user.click(screen.getByRole('button', { name: 'Rename AMS-A' }))
+    expect(screen.getByLabelText('Label for AMS-A')).toHaveValue('Left rack')
+    await user.click(screen.getByRole('button', { name: 'Clear label' }))
+    await screen.findByRole('heading', { name: 'AMS-A' })
+    await user.click(screen.getByRole('button', { name: 'Rename AMS-A' }))
+    expect(screen.getByLabelText('Label for AMS-A')).toHaveValue('')
   })
 
   it("says why Bambuddy refused a label", async () => {

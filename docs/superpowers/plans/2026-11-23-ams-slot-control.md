@@ -48,7 +48,12 @@ from BB's source at tag `v1.3.1`, the version prod runs
   an AMS label while BB's auth is on. Prod's BB had its auth off on 2026-11-17
   (`rfid-routes.json` `measured_2026-11-17`).
 - The AMS's own state: `ams_status_main` is 0 when the AMS is idle, 1 while it changes
-  filament, 2 while it reads a tag (`bambu_mqtt.py` line 1292). The print states BB
+  filament, 2 while it reads a tag (`bambu_mqtt.py` line 1292). The one recorded 3 (AMS
+  assist) is on a `RUNNING` printer (`printer-status.json`), so only 1 and 2 are busy.
+  Known limit: Ext-R's global tray, 255, is also `tray_now` for nothing loaded, so Ext-R
+  never shows `loaded` and never refuses `already_loaded`. The status's `extruder_slots`
+  might tell them apart, but the only recording shows Ext-R's empty form (ams 254, slot
+  255), not a loaded one, so this is left to the port (#7276). The print states BB
   counts as active are `PREPARE`, `SLICING`, `RUNNING` and `PAUSE` (`bambu_mqtt.py` line
   70), SB's `printers/lan_models.py` `BUSY_STATES`.
 
@@ -71,8 +76,8 @@ Each is posted on #7153.
   reset, refresh, load, unload) reads BB's live status of the printer first (`GET
   /printers/{id}/status`) and refuses with a 409 and a `code`: `printer_offline` (BB is
   not connected to it), `printer_busy` (a print is active: `PREPARE`, `SLICING`,
-  `RUNNING`, `PAUSE`), `ams_busy` (`ams_status_main` is not 0: the AMS changes filament
-  or reads a tag), `no_slot` (the status shows no such unit or slot). Load also refuses
+  `RUNNING`, `PAUSE`), `ams_busy` (`ams_status_main` is 1 or 2: the AMS changes filament
+  or reads a tag; 3, the AMS assist, is allowed), `no_slot` (the status shows no such unit or slot). Load also refuses
   `tray_empty` (the slot holds no spool) and `already_loaded` (`tray_now` names it);
   refresh refuses `filament_loaded` (`tray_now` is not 255, as BB itself does). On a
   printer with two extruders, load sends BB the extruder the slot feeds; when the status
