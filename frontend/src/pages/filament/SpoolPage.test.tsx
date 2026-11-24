@@ -515,6 +515,26 @@ describe('the spool page', () => {
     expect(sent.presets.every((row) => !('migrated' in row))).toBe(true)
   })
 
+  it('says the copied spool was deleted, and the next save makes a new spool with no copy link (#7150 review, R-7150-13)', async () => {
+    server.use(http.post('*/api/v1/filament/spools/bulk', () => HttpResponse.json({ type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'copy_of names no spool' }, { status: 422, headers: { 'Content-Type': 'application/problem+json' } }), { once: true }))
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(6)}`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    expect(await screen.findByLabelText('Colour name')).toHaveValue('Teal')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('The spool this form copied was deleted')
+    expect(alert).toHaveTextContent('Save again to make this one a new spool')
+    expect(alert).not.toHaveTextContent('copy_of')
+    expect(screen.queryByText(/stay with it/)).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Colour name')).toHaveValue('Teal')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    expect(await heading(20)).toBeInTheDocument()
+    expect(posts).toHaveLength(2)
+    expect((posts[0] as { copy_of: string | null }).copy_of).toBe(spoolId(6))
+    expect((posts[1] as { copy_of: string | null }).copy_of).toBeNull()
+  })
+
   it("an unchanged copied migrated row stays migrated, so the copy's first type drops it (R-7150-11, R-7150-13)", async () => {
     const before = new Set((await listSpools()).map((one) => one.id))
     const posts = recorded('POST', /\/filament\/spools\/bulk$/)
