@@ -308,10 +308,7 @@ async def variant_preview(
     if stream.response.status_code == 304:
         await stream.aclose()
         return Response(status_code=304, headers=headers)
-    if "content-length" in stream.response.headers and (
-        "content-encoding" not in stream.response.headers
-    ):
-        headers["Content-Length"] = stream.response.headers["content-length"]
+    headers.update(_length(stream))
     return _Relayed(stream, headers=headers)
 
 
