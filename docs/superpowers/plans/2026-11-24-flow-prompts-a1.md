@@ -24,7 +24,7 @@
 
 ## Review Focus
 
-1. A run that ends (finished, failed, cancelled, reset past the prompt) while its task is open: the task must not stay open on screens. → Task 1 `cancel_for_run`, Task 5 sweep test.
+1. A run that ends (finished, failed, cancelled, reset past the prompt) while its task is open: the task must not stay open on screens. → Task 1 `cancel_for_run_in` and `match_waiting_in`, used in the run's own transactions; Task 5 tests.
 2. Two people answer one task at once: one wins, the other gets 409 and the run gets one answer. → Task 4 test.
 3. The harness already resolved the call (an earlier answer whose reply was lost, then a retry): the route answers 409 and the task row ends `answered`, not stuck `open`. → Task 4 test.
 4. An answer that is not an object, or is over 16 KB: 422 or 413 before any validation or operation. → Task 4 test.
@@ -45,19 +45,20 @@
   - `TaskState = Literal["open", "answered", "cancelled", "expired"]`
   - `class TaskOpen(BaseModel)`: `id: str` (the harness call id), `run_id: str`, `title: str` (1–500 chars), `schema_: dict[str, Any]` (alias `schema`), `context: list[dict[str, Any]] = []`, `place: str | None = None`, `ui: str | None = None`, `expires_at: datetime | None = None`
   - `class Task(TaskOpen)`: `project_id: str | None`, `state: TaskState`, `answer: dict[str, Any] | None`, `answered_by: str | None`, `created_at: datetime`, `updated_at: datetime`
-  - `class AnswerProblem(BaseModel)`: `field: str` (JSON pointer path joined by `/`, `""` for the root), `message: str`
+  - `class AnswerProblem(BaseModel)`: `field: str` (JSON pointer path joined by `/`, `""` for the root), `message: str` (never holds the rejected value)
 - Produces (`tasks/validate.py`): `validate_answer(schema: dict[str, Any], answer: Any) -> list[AnswerProblem]`; `prompt_schema_problems(schema: dict[str, Any]) -> list[str]` (delegates to `core/input_schema.schema_problems`).
 - Produces (`tasks/store.py`, class `TaskStore` over the shared `scadbuddy-rows` pool, events through `TransactionalEvents.publish_in`):
   - `open(task: TaskOpen) -> Task` (insert; same id again returns the existing row unchanged)
   - `get(task_id: str) -> Task | None`
   - `list(*, state: TaskState | None = "open", place: str | None = None, limit: int = 100) -> list[Task]`
-  - `mark_answered(task_id: str, answer: dict[str, Any], by: str) -> Task` (only while `open`; else `TaskNotOpenError(state)`)
+  - `mark_answered(task_id: str, answer: dict[str, Any] | None, by: str | None) -> Task` (from `open`; on an answered row the same answer is a no-op and a NULL stored answer is filled; anything else raises `TaskNotOpenError(state)`)
   - `close(task_id: str, state: Literal["expired", "cancelled"]) -> Task | None` (only while `open`; returns None when it was not open)
   - `cancel_for_run(run_id: str) -> int` (every open task of the run → `cancelled`; returns the count)
+  - `cancel_for_run_in(conn, run_id) -> int` and `match_waiting_in(conn, run_id, waiting_ids, done_ids) -> int`, on the caller's connection, for the run's own transactions in `flows/store.py` (Task 5). After a Reset, an open task in neither set is `cancelled`, and a task in `waiting_ids` that is not open is `open` again with its answer cleared.
   - Each state change publishes `TaskChanged` in its transaction: `class TaskChanged(BaseEvent)`: `kind: Literal["task.changed"]`, `task_id: str`, `run_id: str`, `state: TaskState`, `place: str | None`.
 - Produces (`tasks/component.py`): `TASKS` component, `TasksDep` (the `core/components.py` pattern, `api/components.py` `component_dep`).
 
-Table: `id text PRIMARY KEY`, `run_id text NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE` (match `workflow_runs.id`'s type), `project_id text NULL`, `title text NOT NULL CHECK (length(title) BETWEEN 1 AND 500)`, `schema jsonb NOT NULL`, `context jsonb NOT NULL DEFAULT '[]'`, `place text NULL`, `ui text NULL`, `expires_at timestamptz NULL`, `state text NOT NULL DEFAULT 'open' CHECK (state IN ('open','answered','cancelled','expired'))`, `answer jsonb NULL`, `answered_by text NULL`, `created_at`/`updated_at timestamptz NOT NULL DEFAULT now()`; index `tasks_open_place ON tasks (place, created_at) WHERE state = 'open'`; index on `run_id`.
+Table: `id text PRIMARY KEY`, `run_id text NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE` (match `workflow_runs.id`'s type), `project_id text NULL`, `title text NOT NULL CHECK (length(title) BETWEEN 1 AND 500)`, `schema jsonb NOT NULL`, `context jsonb NOT NULL DEFAULT '[]'`, `place text NULL CHECK (1 to 100 characters, no control characters: it is part of a topic)`, `ui text NULL`, `expires_at timestamptz NULL`, `state text NOT NULL DEFAULT 'open' CHECK (state IN ('open','answered','cancelled','expired'))`, `answer jsonb NULL`, `answered_by text NULL`, `created_at`/`updated_at timestamptz NOT NULL DEFAULT now()`; index `tasks_open_place ON tasks (place, created_at) WHERE state = 'open'`; index on `run_id`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -117,14 +118,14 @@ Expected: PASS
 **Files:**
 - Create: `backend/scadbuddy/api/crud_tasks.py` (`router = crud_router("projects")`)
 - Modify: `backend/scadbuddy/api/crud_areas.py` (`CRUD_AREAS["projects"]` gains `"tasks"`), `backend/scadbuddy/worker.py` (`PROJECTS_CRUD_AREAS` gains `"tasks"`), `backend/scadbuddy/auth/routes.py` (`CRUD_CLASSES`, as the projects caller's other routes are listed), the API's router registration
-- Create: `backend/scadbuddy/crud/tasks.py` — `RemoteTasks(crud: CrudClient)` with `open(task: TaskOpen) -> Task`, `close(task_id: str, state: Literal["expired","cancelled"]) -> Task | None`
+- Create: `backend/scadbuddy/crud/tasks.py` — `RemoteTasks(crud: CrudClient)` with `open(task: TaskOpen) -> Task`, `close(task_id: str, state: Literal["expired","cancelled"]) -> Task | None`, `mark_answered(task_id: str, answer: dict[str, Any] | None, by: str | None) -> Task`
 - Test: `backend/tests/crud/test_crud_tasks.py`
 
 **Interfaces:**
-- Produces routes: `POST /api/v1/internal/crud/projects/tasks` (body `TaskOpen`, natural: the same id again answers the stored row), `POST /api/v1/internal/crud/projects/tasks/{task_id}/close` (body `{"state": "expired"|"cancelled"}`; answers the row, or 409 `task-not-open` with the current `state`).
+- Produces routes: `POST /api/v1/internal/crud/projects/tasks` (body `TaskOpen`, natural: the same id again answers the stored row), `POST /api/v1/internal/crud/projects/tasks/{task_id}/close` (body `{"state": "expired"|"cancelled"}`; answers the row, or 409 `task-not-open` with the current `state`); and `POST /api/v1/internal/crud/projects/tasks/{task_id}/answered` (body `{answer, by}`, `TaskStore.mark_answered`'s rules, 409 `task-not-open`): the `task_answer` operation runs on the projects worker, which has no SQL.
 - Consumes: `TaskStore` (Task 1).
 
-- [ ] **Step 1: Failing tests** — `test_open_without_a_credential_is_401`; `test_open_with_another_callers_credential_is_403`; `test_open_twice_answers_the_same_row`; `test_close_of_an_answered_task_is_409_with_its_state`; `test_the_projects_areas_include_tasks` (`"tasks" in CRUD_AREAS["projects"]` and `"tasks" in PROJECTS_CRUD_AREAS`).
+- [ ] **Step 1: Failing tests** — `test_open_without_a_credential_is_401`; `test_open_with_another_callers_credential_is_403`; `test_open_twice_answers_the_same_row`; `test_close_of_an_answered_task_is_409_with_its_state`; `test_the_same_answer_twice_answers_the_same_row`; `test_the_projects_areas_include_tasks` (`"tasks" in CRUD_AREAS["projects"]` and `"tasks" in PROJECTS_CRUD_AREAS`).
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/crud/test_crud_tasks.py -v` → FAIL
 - [ ] **Step 3: Implement** the router, the area entries and `RemoteTasks`.
 - [ ] **Step 4: Run** → PASS
@@ -142,10 +143,10 @@ Expected: PASS
   - `GET /api/v1/tasks?state=open&place=…&limit=` → `{"tasks": [Task]}`
   - `GET /api/v1/tasks/{task_id}` → `Task` | 404
   - `POST /api/v1/tasks/{task_id}/answer`, `Idempotency-Key` required, body `{"answer": {…}}` (an object; body ≤ 16 KB), browser-only → `Task` (state `answered`). Refusals: 404 unknown; 409 `https://scadbuddy.dev/problems/tasks/not-open` with `state`; 422 `https://scadbuddy.dev/problems/tasks/invalid-answer` with `problems: [AnswerProblem]` and the task left open.
-- Produces operation `task_answer` (queue `projects`): input `{run_id, task_id, answer (sealed with seal_answer), by}`; it records a `workflow_run_decisions` row as `run_answer` does, calls `AgentClient(...).provide_callback_result(task_id, result={"answer": answer}, update_id=<the decision's request_id>)`, then `TaskStore.mark_answered`. `CallbackAlreadyResolved` → the task is marked `answered` with the answer it carried and the route answers 409 `not-open` with `state: "answered"`; `MalformedCallbackResult` → 422.
+- Produces operation `task_answer` (queue `projects`): input `{run_id, task_id, answer_sealed, by}` (`seal_answer` over the answer's JSON text); it records a `workflow_run_decisions` row as `run_answer` does, calls `AgentClient(...).provide_callback_result(task_id, result={"answer": answer}, update_id=<the decision's request_id>)`, then `RemoteTasks.mark_answered` (Task 3). The decision row, one per call, picks the winner of two answers. `CallbackAlreadyResolved` → the task is marked `answered` with a NULL answer (which the winner's own mark fills; this request's answer lost, so it is never stored) and the route answers 409 `not-open` with `state: "answered"`; `MalformedCallbackResult` → 422.
 - Consumes: `validate_answer`, `TaskStore`.
 
-- [ ] **Step 1: Failing tests** (use a run parked on a `prompt`, built with the Task 5 helper once it exists; until then, a task row and a stub `AgentClient` as `tests/api/test_flows.py` stubs `provide_callback_result`):
+- [ ] **Step 1: Failing tests** (a task row and a stub `AgentClient`, as `tests/api/test_flows.py` stubs `provide_callback_result`; Task 5 tests the real path):
   - `test_a_valid_answer_resolves_the_callback_and_marks_the_task_answered`
   - `test_an_invalid_email_is_422_naming_the_field_and_the_task_stays_open` (`problems == [{"field": "email", …}]`, state still `open`)
   - `test_two_answers_at_once_one_wins_the_other_is_409` (two concurrent posts with different keys; exactly one 200, one 409; `provide_callback_result` called once)
@@ -153,7 +154,7 @@ Expected: PASS
   - `test_an_answer_that_is_not_an_object_is_422` and `test_a_17_kb_answer_is_refused`
   - `test_the_answer_route_refuses_a_service_caller` (browser-only)
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/api/test_tasks.py -v` → FAIL
-- [ ] **Step 3: Implement** the routes and the operation kind; the concurrency rule is `mark_answered`'s `open` check under the row lock, taken before the callback is resolved.
+- [ ] **Step 3: Implement** the routes and the operation kind; the concurrency rule is `record_decision` (one per call); the task is marked only after the callback landed.
 - [ ] **Step 4: Run** → PASS
 - [ ] **Step 5: Commit** — `feat(tasks): public task routes and the task_answer operation (#7364)`
 
@@ -164,7 +165,7 @@ Expected: PASS
 - Modify: `backend/scadbuddy/workflows/flow_tools.py` (`task_answer` and `human_answer_open` callbacks, `prompt`, `wait_for_human`, `FLOW_TOOLS`, `_INNER`)
 - Modify: `backend/scadbuddy/workflows/flow_activities.py` (activities `flow_task_open`, `flow_task_close` over `RemoteTasks`), `backend/scadbuddy/worker.py` (register them on the projects worker and the in-process one)
 - Modify: `backend/scadbuddy/flows/models.py` `HOST_FN` (`"task_answer": "prompt"`, `"human_answer_open": "wait_for_human"`)
-- Modify: `backend/scadbuddy/flows/sweep.py` (closed runs: `TaskStore.cancel_for_run`)
+- Modify: `backend/scadbuddy/flows/store.py` (in the same transaction: a terminal status and `mark_terminated` call `cancel_for_run_in`; `_reset_run` calls `match_waiting_in` with the new waiting and done ids)
 - Modify: `backend/scadbuddy/api/flows.py` (`PendingEntry` gains `task: Task | None`, filled by `TaskStore.get(call_id)` for `kind == "answer"`)
 - Create fixtures: `backend/tests/fixtures/project_workflow_histories/prompted.json`, `waited_open.json` (recorded with `SCADBUDDY_RECORD_HISTORIES=1`), added to `NAMES` in `tests/flows/test_project_replay.py`
 - Test: `backend/tests/flows/test_prompt.py`, `tests/flows/test_harness_facts.py` (one new fact)
@@ -178,15 +179,16 @@ Expected: PASS
   - `run_callback(run_tool, tool, timeout_s: float | None, *, call_id=None, **kwargs)`: `None` waits with no timer.
   - `WAIT_OPEN_PATCH = "flow-open-wait-7364"`.
 - `prompt` does, in order: `prompt_schema_problems(schema)` → `ValueError` naming them; `timeout_s` below `MIN_WAIT_S` → `ValueError`; `call_id = str(workflow.uuid4())`; activity `flow_task_open(TaskOpen(id=call_id, run_id=owner.run_id, title=…, schema=…, context=…, place=where, ui=…, expires_at=now+timeout_s or None))`; `async with step("prompt", call_id, outward=False, waiting="answer", prompt=title)`: `run_callback(owner.runner.run_tool, task_answer, timeout_s, call_id=call_id, title=title, schema=schema)`; on `TimeoutError` → activity `flow_task_close(call_id, "expired")` and re-raise; the result's `answer` is validated with `inputs_model(schema)` and returned as a dict.
-- `wait_for_human(question: str, timeout_s: int | None = None) -> HumanAnswer`: when `workflow.patched(WAIT_OPEN_PATCH)`: no `MAX_WAIT_S`, `None` waits with no timer, callback `human_answer_open`; otherwise the old body unchanged (`None` means `DEFAULT_WAIT_S`, callback `human_answer`), so `answered.json` replays.
+- `wait_for_human(question: str, timeout_s: int | None = None) -> HumanAnswer`: when `workflow.patched(f"{WAIT_OPEN_PATCH}:{call_id}")` (per call, as `FLOW_PINNED_CALL_PATCH`, so an older run's next question is open too): no `MAX_WAIT_S`, `None` waits with no timer, callback `human_answer_open`; otherwise the old body unchanged (`None` means `DEFAULT_WAIT_S`, callback `human_answer`), so `answered.json` replays.
 
 - [ ] **Step 1: Failing tests** (`test_prompt.py`, `requires_temporal`, `requires_postgres`, the flow-run harness the existing `wait_for_human` tests use):
-  - `test_a_prompt_without_a_timeout_starts_no_timer` (history of the parked run has no `TimerStarted` after the task's activity)
+  - `test_a_prompt_without_a_timeout_starts_no_timer` (no timer shorter than `OPEN_WAIT` in the parked run's history)
   - `test_a_prompt_answer_reaches_the_script_as_a_dict` (answer `{"email": "jane@example.com"}` through `POST /tasks/{id}/answer`; the script returns `answer["email"]`)
   - `test_a_prompt_with_timeout_expires_its_task_and_raises` (time-skipping, `timeout_s=60`; the script catches `TimeoutError`; task state `expired`)
   - `test_a_refused_schema_raises_before_any_task_row` (`{"properties": {"x": {"$ref": "#/a"}}}` → `ValueError` naming `$ref`; no row)
-  - `test_a_closed_run_cancels_its_open_task` (cancel the run, run the sweep; task `cancelled`)
-  - `test_wait_for_human_has_no_default_limit` (patched run parks with no timer; `timeout_s=200_000` is accepted)
+  - `test_a_closed_run_cancels_its_open_task` (a cancelled run and one the sweep ends; task `cancelled`)
+  - `test_a_reset_before_the_answer_opens_the_task_again` and `test_a_reset_before_the_prompt_cancels_its_task`
+  - `test_wait_for_human_has_no_default_limit` (a patched run parks with no timer shorter than `OPEN_WAIT`; `timeout_s=200_000` is accepted)
   - `test_harness_facts.py::test_a_callback_declared_with_a_ten_year_timeout_parks_and_answers`
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/flows/test_prompt.py tests/flows/test_harness_facts.py -v` → FAIL
 - [ ] **Step 3: Implement** as the Interfaces block says; record `prompted.json` and `waited_open.json`.
