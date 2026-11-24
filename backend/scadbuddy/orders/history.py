@@ -19,9 +19,10 @@ its failed prints, test prints and other costs can be its reason. Its price is n
 across parts. The **suggested unit price** is the unit cost marked up by
 ``pricing_markup_percent``; with no markup, the lowest price whose margin is not thin.
 
-**Parts** (§11, #5543). Given ``parts_unit_minor`` (the quoted item's parts at today's unit
-costs), each job's own ``part:`` cost entries leave its cost and ``parts_unit_minor`` per unit
-takes their place, in the unit cost, the ``other`` part and the suggestion, so the suggestion
+**Parts** (§11, #5543; #7067). Given ``parts_unit_minor`` (the quoted item's parts at what a
+FIFO take would cost now), each job's own parts cost (``ItemCost.parts_minor``: its ``use``
+and ``return`` stock moves, R-P2-27) leaves its cost and ``parts_unit_minor`` per unit takes
+its place, in the unit cost, the ``other`` part and the suggestion, so the suggestion
 carries this item's parts once, at today's prices.
 
 Advice only: nothing is stored and nothing is refused. With no history ``jobs`` and
@@ -87,8 +88,8 @@ class UnitCostHistory(BaseModel):
     main_reason: CostReason | None = None
     #: How much it exceeded them by, per unit.
     main_reason_minor: Money | None = None
-    #: This item's parts per unit at today's unit costs, in the unit cost; None when not
-    #: asked about an item.
+    #: This item's parts per unit at what a FIFO take would cost now, in the unit cost; None
+    #: when not asked about an item.
     parts_unit_minor: Money | None = None
     #: The settings the figures use.
     markup_percent: str
@@ -135,20 +136,9 @@ def _parts(item: ItemCost) -> dict[CostReason, int]:
             parts["filament"] += attempt.filament_minor or 0
             parts["machine"] += attempt.machine_minor or 0
     parts["labour"] = item.labour_minor
-    parts["other"] = item.other_minor
+    # A quote never prices the parts taken from stock: they count in full, as entries do.
+    parts["other"] = item.other_minor + item.parts_minor
     return parts
-
-
-#: The ``source`` prefix of a cost entry a fulfilment's parts wrote (``lifecycle._use_parts``).
-PART_SOURCE = "part:"
-
-
-def _part_entries(item: ItemCost) -> int:
-    return sum(
-        e.amount_minor
-        for e in item.cost_entries
-        if e.source is not None and e.source.startswith(PART_SOURCE)
-    )
 
 
 def _per_unit(total: int | Decimal, units: int) -> Money:
@@ -228,7 +218,7 @@ def unit_cost_history(
                 continue
             over[part] += amount - _quoted(quote, part, item.quantity)
         if parts_unit_minor is not None:
-            swap = parts_unit_minor * item.quantity - _part_entries(item)
+            swap = parts_unit_minor * item.quantity - item.parts_minor
             cost += swap
             over["other"] += swap
     reason = max(REASONS, key=lambda part: over[part])

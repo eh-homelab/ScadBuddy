@@ -27,6 +27,15 @@ cost is only its entries), nor does a cancelled one, which was never made.
 
 **Other** (§4.4). The cost entries; and on the order, its shipments' ``cost_minor``.
 
+**Parts** (inventory spec 2026-11-21 §6.6, #7067). An item's parts are what its fulfilment
+took from stock: ``-sum(amount_minor)`` of its ``use`` and ``return`` moves
+(``stock_moves``), each move's cost a snapshot of its lot's cost when it was written,
+rounded once per item; the order sums its items'. A move of unknown cost adds nothing and
+makes ``parts`` unknown while its use is not given back. Stock costs are in the shop's
+``orders_currency``: for an order in another currency an item with a use not given back
+has ``parts`` unknown and 0. No ``part:`` cost entry exists since #7067 (the parts
+migration converted them), so parts are never counted twice.
+
 **Charged and margin** (§5). An item is charged its accepted quote's total, nothing once
 it or its order is cancelled, and has no charged figure without an accepted quote. The
 order is charged its items' plus every charge but ``tax``, once every item not cancelled
@@ -83,7 +92,7 @@ PERCENT = Decimal("0.1")
 #: An attempt's figure taken from a quote or today's settings rather than measured.
 EstimatedFigure = Literal["grams", "seconds", "filament", "machine"]
 #: An item's or an order's part of the cost.
-CostPart = Literal["prints", "labour"]
+CostPart = Literal["prints", "labour", "parts"]
 #: Which machine rate priced an attempt's seconds (#5774, machine-rate actuals spec §6):
 #: its quote's ``machine_time`` line, its breakdown with or without actuals; today's rate
 #: of a printer with a profile, with or without actuals; or the price book's rate.
@@ -170,6 +179,8 @@ class Margin(BaseModel):
     labour_minor: Money = 0
     #: The cost entries (and on the order, its shipments' cost too).
     other_minor: Money = 0
+    #: What the parts taken from stock cost (#7067): the items' `use` and `return` moves.
+    parts_minor: Money = 0
     cost_minor: Money = 0
     #: What was charged; None without a charged figure.
     revenue_minor: Money | None = None
@@ -561,6 +572,17 @@ def _item_cost(
 
     prints = sum(a.cost_minor for a in attempts)
     others = sum(entry.amount_minor for entry in other)
+    parts = 0
+    moved = reader.rows.of.parts.get(item.id)
+    if moved is not None:
+        if not reader.today:
+            # Stock costs are in the shop's currency: they cannot be added here.
+            if moved.open:
+                unknown.append("parts")
+        else:
+            parts = _minor(moved.cost) or 0
+            if moved.unknown:
+                unknown.append("parts")
     if item.status == "cancelled" or reader.order.status == "cancelled":
         revenue: Money | None = 0
     else:
@@ -591,7 +613,8 @@ def _item_cost(
         machine_minor=sum(a.machine_minor or 0 for a in attempts),
         labour_minor=labour,
         other_minor=others,
-        cost_minor=prints + labour + others,
+        parts_minor=parts,
+        cost_minor=prints + labour + others + parts,
         revenue_minor=revenue,
         estimated=estimated,
         unknown=unknown,
@@ -632,7 +655,8 @@ def _order_costs(rows: _Rows, order: Order, rates: CostRates) -> OrderCosts:
     labour = sum(i.labour_minor for i in items) + own_labour
     others = sum(i.other_minor for i in items) + sum(e.amount_minor for e in own_other)
     prints = sum(i.prints_minor for i in items)
-    parts: tuple[CostPart, ...] = ("prints", "labour")
+    stock = sum(i.parts_minor for i in items)
+    parts: tuple[CostPart, ...] = ("prints", "labour", "parts")
     unknown = [p for p in parts if any(p in i.unknown for i in items)]
     if own_unknown and "labour" not in unknown:
         unknown.append("labour")
@@ -653,9 +677,10 @@ def _order_costs(rows: _Rows, order: Order, rates: CostRates) -> OrderCosts:
         machine_minor=sum(i.machine_minor for i in items),
         labour_minor=labour,
         other_minor=others + shipping,
+        parts_minor=stock,
         shipping_minor=shipping,
         charges_minor=charges,
-        cost_minor=prints + labour + others + shipping,
+        cost_minor=prints + labour + others + shipping + stock,
         revenue_minor=revenue,
         estimated=[p for p in parts if any(p in i.estimated for i in items)],
         unknown=unknown,

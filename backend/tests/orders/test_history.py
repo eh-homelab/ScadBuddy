@@ -22,11 +22,13 @@ from scadbuddy.orders.models import (
     OrderItem,
     PricingPolicy,
 )
+from scadbuddy.orders.parts import ItemPart
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_costs import attempt, priced_order
 from tests.orders.test_lifecycle import BY, Shop, resolved
+from tests.orders.test_parts_lifecycle import _item as stocked_item
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -59,9 +61,11 @@ def job(
     quantity: int = 1,
     slug: str = "demo",
     price: int = 1000,
+    parts: list[ItemPart] | None = None,
 ) -> tuple[Order, OrderItem]:
     """A fulfilled item of ``slug`` priced by hand, its one attempt made by hand (no grams,
-    so it costs nothing), ``cost`` as a material cost entry, done ``days_ago`` before NOW."""
+    so it costs nothing), ``cost`` as a material cost entry, ``parts`` taken from stock when
+    it is fulfilled, done ``days_ago`` before NOW."""
     order = shop.order()
     item = shop.lifecycle.add_item(order.id, BY, resolved(slug), output_id=None, quantity=quantity)
     shop.quoted(order, item, price)
@@ -70,6 +74,8 @@ def job(
         shop.lifecycle.add_cost_entry(
             order.id, CostEntryInput(order_item_id=item.id, kind="material", amount_minor=cost), BY
         )
+    if parts:
+        shop.lifecycle.set_item_parts(order.id, item.id, parts, BY)
     shop.fulfilled(order, shop.get_item(item))
     done_at(pool, item, NOW - timedelta(days=days_ago))
     return order, shop.get_item(item)
@@ -300,19 +306,11 @@ def test_a_mixed_history_names_filament_from_the_slice_jobs_alone(shop: Shop, po
 
 
 def test_the_items_parts_replace_the_jobs_own_once(shop: Shop, pool: PgPool) -> None:
-    """§11 (#5543): a job's parts entries (``part:``) leave its cost and this item's parts
-    at today's unit cost take their place, so they are counted once."""
-    order, item = job(shop, pool, 3, cost=100, quantity=2)
-    shop.lifecycle.add_cost_entry(
-        order.id,
-        CostEntryInput(
-            order_item_id=item.id,
-            kind="material",
-            amount_minor=40,
-            source=f"part:{item.id}:hook",
-        ),
-        BY,
-    )
+    """§11 (#5543), R-P2-27: a job's parts cost (its `use` and `return` moves, #7067) leaves
+    its cost and this item's parts at today's estimate take their place, so they are
+    counted once."""
+    hook = stocked_item(shop, "Silver hook", on_hand=10, cost="20")
+    job(shop, pool, 3, cost=100, quantity=2, parts=[ItemPart(item_id=hook, per_unit=1)])
 
     plain = unit_cost_history(shop.rows, "demo", USD, markup_percent="0", now=NOW)
     parts = unit_cost_history(

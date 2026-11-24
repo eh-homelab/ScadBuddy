@@ -8,8 +8,8 @@ import { BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Re
  * #5543, job cost spec §11 — the parts inventory (`backend/scadbuddy/api/parts.py`,
  * `orders/parts.py`). A part's unit cost is a rate kept to the millionth of a minor unit and
  * answered as a decimal string. An item's parts leave stock when it becomes fulfilled
- * (`useParts`, a `material` cost entry `part:<item>:<part>`) and come back when it is
- * unfulfilled (`returnParts`); `orders.ts` calls both, and `fillFromRule` when a model
+ * (`useParts`; job cost reads what they cost as the item's `parts_minor`, #7067, no cost
+ * entry) and come back when it is unfulfilled (`returnParts`); `orders.ts` calls both, and `fillFromRule` when a model
  * item is added.
  */
 
@@ -21,12 +21,15 @@ type Parts = {
   rules: Map<string, PartRule>
   /** `order_item_parts`, keyed by item id. */
   items: Map<string, ItemPartRow[]>
+  /** What each order item's parts cost when taken (its `use` moves, #7067), and whether a
+   * part had no cost in the order's currency. */
+  taken: Map<string, { minor: number; unknown: boolean }>
 }
 
 let parts: Parts = fresh()
 
 function fresh(): Parts {
-  return { parts: [], moves: [], rules: new Map(), items: new Map() }
+  return { parts: [], moves: [], rules: new Map(), items: new Map(), taken: new Map() }
 }
 
 export function reset(): void {
@@ -119,31 +122,23 @@ export function fillFromRule(order: Order, item: OrderItem): void {
   event(order, 'item.parts_set', { item_id: item.id, parts: rows.map(({ part_id, per_unit }) => ({ part_id, per_unit })), from_rule: true })
 }
 
-/** `Lifecycle._use_parts`: out of stock, each a `material` cost entry in the order's currency. */
+/** `Lifecycle._use_parts`: out of stock, each use at the part's unit cost now; no cost entry
+ * (`costs.py` reads the item's `parts_minor`, #7067). A part in another currency is unknown. */
 export function useParts(order: Order, item: OrderItem): void {
   const rows = (parts.items.get(item.id) ?? []).filter((r) => r.used === 0)
   if (rows.length === 0) return
+  let minor = 0
+  let unknown = false
   for (const row of rows) {
     const p = find(row.part_id)
     const count = row.per_unit * item.quantity
-    const amount = Math.round(p.unit_cost * count)
-    const costed = p.currency === order.currency && amount > 0
-    if (costed) {
-      state.costEntries.push({
-        id: newId('ce'),
-        order_id: order.id,
-        order_item_id: item.id,
-        kind: 'material',
-        amount_minor: amount,
-        note: `${count} x ${p.name}`,
-        source: `part:${item.id}:${p.id}`,
-        created_by: BROWSER,
-        created_at: now(),
-      })
-    }
-    move(p, 'use', -count, { amount_minor: costed ? amount : null, order_id: order.id, order_item_id: item.id })
+    const amount = p.unit_cost * count
+    if (p.currency === order.currency) minor += amount
+    else unknown = true
+    move(p, 'use', -count, { amount_minor: p.currency === order.currency ? Math.round(amount) : null, order_id: order.id, order_item_id: item.id })
     row.used = count
   }
+  parts.taken.set(item.id, { minor: Math.round(minor), unknown })
   event(order, 'parts.used', { item_id: item.id })
 }
 
@@ -153,15 +148,18 @@ export function returnParts(order: Order, item: OrderItem): void {
   if (rows.length === 0) return
   for (const row of rows) {
     const p = find(row.part_id)
-    const source = `part:${item.id}:${p.id}`
-    const entry = state.costEntries.find((e) => e.order_id === order.id && e.source === source)
-    if (entry) state.costEntries = state.costEntries.filter((e) => e !== entry)
     const taken = [...parts.moves].reverse().find((m) => m.kind === 'use' && m.order_item_id === item.id && m.part_id === p.id)
     if (taken) p.unit_cost = average(p, row.used, Number(taken.unit_cost_after_minor) * row.used)
-    move(p, 'return', row.used, { amount_minor: entry?.amount_minor ?? null, order_id: order.id, order_item_id: item.id })
+    move(p, 'return', row.used, { amount_minor: taken?.amount_minor ?? null, order_id: order.id, order_item_id: item.id })
     row.used = 0
   }
+  parts.taken.delete(item.id)
   event(order, 'parts.returned', { item_id: item.id })
+}
+
+/** `CostRows.parts` for `costs.ts`: the item's parts cost, rounded once, and whether a part is unknown. */
+export function partsCostOf(itemId: string): { minor: number; unknown: boolean } {
+  return parts.taken.get(itemId) ?? { minor: 0, unknown: false }
 }
 
 /** One unit of the item's parts at today's unit costs, in `currency`. */

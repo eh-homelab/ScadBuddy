@@ -4,6 +4,7 @@ shown and never summed."""
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -38,12 +39,15 @@ from scadbuddy.orders.models import (
     ShipmentItem,
     TimeEntryInput,
 )
+from scadbuddy.orders.parts import ItemPart
 from scadbuddy.orders.pricing import Plate, PlateFilament, price
+from scadbuddy.orders.report import profit_report
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_cost_entries import usd_rate
 from tests.orders.test_lifecycle import BY, Shop, _slice_quote
+from tests.orders.test_parts_lifecycle import _item as stocked_item
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -1003,3 +1007,104 @@ async def test_the_lists_margins_equal_the_per_order_read(shop: Shop) -> None:
     assert states == ["loss", "thin", "ok", "loss", "unknown", None, "loss", None]
     assert margins[uncharged.id].revenue_minor is None
     assert order_margins(shop.rows, [], rates) == {}
+
+
+# -- parts (#7067 Task 8: job cost reads part cost from stock moves) --------------------------
+
+
+def _parts_order(
+    shop: Shop, hook: str, quantity: int = 3, per_unit: int = 2
+) -> tuple[Order, OrderItem]:
+    order, item = shop.accepted(quantity=quantity)
+    shop.lifecycle.set_item_parts(
+        order.id, item.id, [ItemPart(item_id=hook, per_unit=per_unit)], BY
+    )
+    shop.fulfilled(order, item)
+    return order, shop.get_item(item)
+
+
+async def test_parts_cost_is_the_items_use_and_return_moves(shop: Shop) -> None:
+    """Spec §6.6: an item's parts cost is `-sum(amount_minor)` of its `use` and `return`
+    moves, rounded once; in `cost_minor`, never in `other_minor`."""
+    hook = stocked_item(shop, "Silver hook", on_hand=10, cost="599.5")
+    order, item = _parts_order(shop, hook)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (line,) = costs.items
+    assert (line.parts_minor, line.other_minor) == (3597, 0)
+    assert line.cost_minor == line.prints_minor + line.labour_minor + line.parts_minor
+    assert "parts" not in line.unknown
+    assert (costs.parts_minor, costs.other_minor) == (3597, 0)
+    assert costs.cost_minor == (
+        costs.prints_minor + costs.labour_minor + costs.other_minor + costs.parts_minor
+    )
+
+    shop.lifecycle.unfulfil_item(order.id, item.id, BY)
+    after = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+    assert after is not None
+    assert (after.items[0].parts_minor, after.parts_minor) == (0, 0)
+
+
+async def test_an_order_sums_its_items_parts(shop: Shop) -> None:
+    hook = stocked_item(shop, "Silver hook", on_hand=20, cost="1.5")
+    order = shop.order()
+    first, second = shop.item(order, quantity=1), shop.item(order, quantity=3)
+    for line in (first, second):
+        shop.quoted(order, line)
+        shop.lifecycle.set_item_parts(order.id, line.id, [ItemPart(item_id=hook, per_unit=1)], BY)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    shop.fulfilled(order, shop.get_item(first))
+    shop.fulfilled(order, shop.get_item(second))
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    # 1.5 rounds to 2 and 4.5 to 5: each item rounds once, and the order sums them.
+    assert [i.parts_minor for i in costs.items] == [2, 5]
+    assert costs.parts_minor == 7
+    margins = order_margins(shop.rows, [shop.get(order)], USD)
+    assert margins[order.id].cost_minor == costs.cost_minor
+
+
+async def test_a_cost_unknown_move_makes_parts_unknown(shop: Shop) -> None:
+    """R-P2-19: a take from an item with no lot opens a lot of unknown cost; its move
+    makes the item's parts unknown, and the margin unknown."""
+    bare = stocked_item(shop, "Bare hook", on_hand=0)
+    order, _ = _parts_order(shop, bare, quantity=1, per_unit=1)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (line,) = costs.items
+    assert "parts" in line.unknown and "parts" in costs.unknown
+    assert line.parts_minor == 0
+    assert (line.margin_state, costs.margin_state) == ("unknown", "unknown")
+
+
+async def test_parts_of_an_order_outside_the_shops_currency_are_unknown(shop: Shop) -> None:
+    """Stock costs are in the shop's currency: an order in another one cannot add them."""
+    hook = stocked_item(shop, "Silver hook", on_hand=10, cost="5")
+    order, _ = _parts_order(shop, hook, quantity=1, per_unit=1)
+    eur_shop = CostRates(shop_currency="EUR", machine_rate_per_hour="0", labour_per_item="0")
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, eur_shop)
+
+    assert costs is not None
+    assert (costs.items[0].parts_minor, "parts" in costs.items[0].unknown) == (0, True)
+
+
+def test_the_profit_report_carries_parts(shop: Shop) -> None:
+    hook = stocked_item(shop, "Silver hook", on_hand=10, cost="5")
+    order, _ = _parts_order(shop, hook, quantity=1, per_unit=3)
+    accepted = shop.get(order).accepted_at
+    assert accepted is not None
+
+    report = profit_report(
+        shop.rows, USD, since=accepted - timedelta(days=1), until=accepted + timedelta(days=1)
+    )
+
+    model, total = report.rows
+    assert (model.group, model.parts_minor) == ("model", 15)
+    assert (total.group, total.parts_minor) == ("total", 15)

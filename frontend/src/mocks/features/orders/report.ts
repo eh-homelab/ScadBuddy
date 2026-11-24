@@ -15,7 +15,7 @@ export const MAX_REPORT_ORDERS = 2000
 const DAY = 24 * 60 * 60 * 1000
 const PARAMS = new Set(['from', 'to', 'group'])
 
-type Part = 'prints' | 'labour'
+type Part = 'prints' | 'labour' | 'parts'
 
 /** `report.py` `product_of`: a slug first, then a SKU, else `custom` (an empty SKU is none). */
 export function productOf(item: Pick<OrderItem, 'reference' | 'sku'>): string {
@@ -31,14 +31,16 @@ class Sum {
   charged = false
   uncharged = 0
   cost = 0
+  parts = 0
   waste = 0
   estimated = false
   unknown: Part[] = []
 
-  add(orderId: string, f: { cost: number; revenue: number | null; units?: number; uncharged?: number; waste?: number; estimated?: boolean; unknown?: Part[] }) {
+  add(orderId: string, f: { cost: number; revenue: number | null; units?: number; uncharged?: number; waste?: number; parts?: number; estimated?: boolean; unknown?: Part[] }) {
     this.orders.add(orderId)
     this.units += f.units ?? 0
     this.cost += f.cost
+    this.parts += f.parts ?? 0
     this.waste += f.waste ?? 0
     this.uncharged += f.uncharged ?? 0
     if (f.revenue != null) {
@@ -72,6 +74,7 @@ class Sum {
       revenue_minor: this.revenue,
       uncharged_items: this.uncharged,
       cost_minor: this.cost,
+      parts_minor: this.parts,
       ...margin,
       waste_minor: this.waste,
       waste_percent: this.cost > 0 ? Math.round((this.waste * 1000) / this.cost) / 10 : null,
@@ -103,6 +106,7 @@ class Currency {
         units: open ? line.quantity : 0,
         uncharged: open && line.revenue_minor == null ? 1 : 0,
         waste: waste(line),
+        parts: line.parts_minor ?? 0,
         estimated: (line.estimated ?? []).length > 0,
         unknown: line.unknown ?? [],
       })
@@ -120,6 +124,7 @@ class Currency {
       units: costs.items.filter((l) => l.status !== 'cancelled').reduce((s, l) => s + l.quantity, 0),
       uncharged: costs.items.filter((l) => l.status !== 'cancelled' && l.revenue_minor == null).length,
       waste: costs.items.reduce((s, l) => s + waste(l), 0),
+      parts: costs.parts_minor ?? 0,
       estimated: (costs.estimated ?? []).length > 0,
       unknown: costs.unknown ?? [],
     })
