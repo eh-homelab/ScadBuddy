@@ -110,6 +110,29 @@ async def test_filing_uploads_blob_bytes(
         assert refused.value.status == 404
 
 
+async def test_filing_again_reads_no_3mf(
+    native: NativeLibrary, tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7256 review B-M1: a re-file of a filed output, or a put in a folder that holds
+    its copy, answers the copy with no download of the 3MF."""
+    async with blob_output(tmp_path / "output", pg_conninfo) as output:
+        filed = await file_saved_output(native, output.store, output.meta, "Demo")
+        gifts = native.rows.create_folder("Gifts", None).id
+        placed, _ = await put_saved_in_folder(native, output.store, output.meta, gifts, "Demo")
+        asked: list[str] = []
+        real = output.store.local_role
+
+        def counting(output_id: str, role: Any) -> Any:
+            asked.append(role)
+            return real(output_id, role)
+
+        monkeypatch.setattr(output.store, "local_role", counting)
+        again = await file_saved_output(native, output.store, output.meta, "Demo")
+        there, created = await put_saved_in_folder(native, output.store, output.meta, gifts, "Demo")
+        assert (again.id, there.id, created) == (filed.id, placed.id, False)
+        assert asked == []
+
+
 async def test_a_chosen_folder_copy_never_suppresses_the_filing(
     native: NativeLibrary, three_mf: Path
 ) -> None:

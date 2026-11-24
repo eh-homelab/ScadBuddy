@@ -140,7 +140,8 @@ class Fixes:
                 "the accepted fixes this print names cannot be checked",
                 type_=DATABASE_UNAVAILABLE_PROBLEM,
             ) from None
-        diagnostics, _ = run_checks(context)
+        # The checks read the 3MF (a blob's temporary file): in a thread, off the loop.
+        diagnostics, _ = await asyncio.to_thread(run_checks, context)
         apply_decisions(diagnostics, stored, context)
         fixes = accepted_fixes(request.accepted_fixes, diagnostics)
         return amend(request, [item for fix in fixes for item in fix.changes])

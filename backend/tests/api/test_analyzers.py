@@ -19,7 +19,7 @@ import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.analyzers import builtin
+from scadbuddy.analyzers import builtin, runner
 from scadbuddy.analyzers.component import DECISIONS
 from scadbuddy.analyzers.context import AnalysisContext
 from scadbuddy.analyzers.decisions import PostgresDecisionStore
@@ -127,6 +127,28 @@ def test_without_bambuddy_the_geometry_analyzers_run_and_the_rest_say_why(
     assert "SB1001" not in skipped
     kinds = [scope["kind"] for scope in report["scopes"]]
     assert kinds == ["global", "template", "template_version", "configuration", "print"]
+
+
+def test_the_report_is_built_off_the_loop(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7256 review B-M5: the analyzers read the temporary 3MF in a thread, never on the
+    event loop."""
+    output_id = make_output(client, model)
+    real = runner.build_report
+    on_loop: list[bool] = []
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("scadbuddy.api.analyzers.build_report", recorded)
+    _run(client, output_id)
+    assert on_loop == [False]
 
 
 def test_a_configuration_is_judged_on_its_newest_render(client: TestClient, model: str) -> None:

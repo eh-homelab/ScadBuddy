@@ -29,7 +29,7 @@ from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     kek_file,
     template,
 )
-from tests.api.test_storefront_public import TOKEN_A
+from tests.api.test_storefront_public import CRUD, TOKEN_A
 from tests.api.test_storefront_renders import (  # noqa: F401  (fixtures)
     GLB,
     TOKEN_B,
@@ -171,23 +171,35 @@ def test_variant_preview_streams_blob(
     outputs = _state(crud.api).outputs
     with store_pool(pg_conninfo) as pool:
         outputs.bytes = OutputBytes(local_content(tmp_path / "remote", pool))
-        output_id = row["output_id"]
-        directory = outputs.directory(output_id)
-        glb = (directory / PREVIEW_NAME).read_bytes()
-        portal = crud.api.portal
-        assert portal is not None
-        blobs = portal.call(outputs.bytes.put_folder, directory, output_id, listing["slug"])
-        assert outputs.rows is not None
-        outputs.rows.write_bytes([ByteWrite(output_id, blobs, "stamp", None)])
-        (directory / PREVIEW_NAME).unlink()
-        r = crud.get(f"/variants/{key}/preview.glb", token=TOKEN_C)
-        assert r.status_code == 200, r.text
-        assert r.headers["content-type"] == GLB
-        assert r.content == glb
-        # No preview at all: no variant.
-        outputs.rows.set_blob(output_id, "preview", "output-gone-preview")
-        assert crud.get(f"/variants/{key}/preview.glb").status_code == 404
-        outputs.bytes = None
+        try:
+            output_id = row["output_id"]
+            directory = outputs.directory(output_id)
+            glb = (directory / PREVIEW_NAME).read_bytes()
+            portal = crud.api.portal
+            assert portal is not None
+            blobs = portal.call(outputs.bytes.put_folder, directory, output_id, listing["slug"])
+            assert outputs.rows is not None
+            outputs.rows.write_bytes([ByteWrite(output_id, blobs, "stamp", None)])
+            (directory / PREVIEW_NAME).unlink()
+            r = crud.get(f"/variants/{key}/preview.glb", token=TOKEN_C)
+            assert r.status_code == 200, r.text
+            assert r.headers["content-type"] == GLB
+            assert r.content == glb
+            # #7256 review B-M3: the edge's revalidation is a 304, as the outputs' routes.
+            again = crud.api.get(
+                f"{CRUD}/variants/{key}/preview.glb",
+                headers={
+                    **crud._headers(TOKEN_C, "203.0.113.1", None),
+                    "If-None-Match": r.headers["etag"],
+                },
+            )
+            assert again.status_code == 304 and again.content == b""
+            # No preview at all: no variant.
+            outputs.rows.set_blob(output_id, "preview", "output-gone-preview")
+            assert crud.get(f"/variants/{key}/preview.glb").status_code == 404
+        finally:
+            # #7256 review B-M8: the app state is shared; never leave a closed store on it.
+            outputs.bytes = None
 
 
 def test_the_preview_route_refuses_a_key_that_names_no_preview(crud: CrudCaller) -> None:

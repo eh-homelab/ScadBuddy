@@ -630,7 +630,8 @@ async def post_run(
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
     except DATABASE_ERRORS as error:
         logger.warning("could not read analyzer decisions", exc_info=error)
-        return build_report(
+        return await asyncio.to_thread(
+            build_report,
             context,
             [],
             detail=body.detail,
@@ -639,7 +640,8 @@ async def post_run(
                 "decisions were applied"
             ),
         )
-    return build_report(context, stored, detail=body.detail)
+    # The analyzers read the 3MF (a blob's temporary file): in a thread, off the loop.
+    return await asyncio.to_thread(build_report, context, stored, detail=body.detail)
 
 
 @router.post("/fixes/preview", response_model=FixPreview, summary="Preview a fix")
@@ -679,7 +681,8 @@ async def post_preview(
         reads=filament.reads,
         stack=stack,
     )
-    diagnostic, fix = _find_fix(context, body)
+    # The checks read the 3MF (a blob's temporary file): in a thread, off the loop.
+    diagnostic, fix = await asyncio.to_thread(_find_fix, context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
     blockers = fix.blockers
     return FixPreview(
@@ -745,7 +748,8 @@ async def post_apply(
         reads=filament.reads,
         stack=stack,
     )
-    diagnostic, fix = _find_fix(context, body)
+    # The checks read the 3MF (a blob's temporary file): in a thread, off the loop.
+    diagnostic, fix = await asyncio.to_thread(_find_fix, context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
     if _fingerprint(context, diagnostic, fix, scope) != body.fingerprint:
         raise ApiError(

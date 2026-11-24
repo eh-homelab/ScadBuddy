@@ -26,6 +26,7 @@ from scadbuddy.library import backfill as backfill_module
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.backfill import (
     AmbiguousOutputError,
+    _announce,
     attach_backfills,
     attach_job_backfills,
     choose_output,
@@ -601,6 +602,21 @@ async def test_an_output_that_cannot_be_read_is_still_attached_and_the_pass_goes
         assert store.manifest(output_id) == written.manifest
         assert store.backfill(output_id) is None
     assert [(e.output_id, e.slug) for e in heard] == [(unreadable, "demo"), (good, "demo")]
+
+
+async def test_a_failed_row_read_still_announces_from_the_directory(tmp_path: Path) -> None:
+    """#7256 review B-M4: the slug's row read fails (a pool timeout); the announcement
+    takes the directory's slug and still goes out."""
+    store, old, _, _ = await _legacy_output(tmp_path)
+
+    class _Unreadable:
+        def slug_of(self, output_id: str) -> str | None:
+            raise TimeoutError("the pool gave no connection")
+
+    store.rows = _Unreadable()
+    bus, heard = _output_events()
+    _announce(bus, store, old.id)
+    assert [(e.output_id, e.slug) for e in heard] == [(old.id, "demo")]
 
 
 @pytest.mark.requires_postgres

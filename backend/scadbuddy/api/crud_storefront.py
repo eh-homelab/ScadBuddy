@@ -118,7 +118,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from scadbuddy.api.deps import AppState, PathsDep, ReadBudgetDep, StateDep
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE, get_job_preview
 from scadbuddy.api.orders import ensure_order_projects
-from scadbuddy.api.output_streams import stream_response
+from scadbuddy.api.output_streams import blob_not_modified, stream_response
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import MaybeIdempotencyKey, required_key
@@ -176,7 +176,8 @@ from scadbuddy.orders.storefront.renders import (
     render_estimate,
     shown_render,
     start_render,
-    variant_preview,
+    variant_not_found,
+    variant_output,
 )
 from scadbuddy.orders.storefront.submit import submit_draft
 from scadbuddy.orders.storefront.turnstile import (
@@ -492,15 +493,26 @@ async def listing_price_route(
 )
 async def variant_preview_route(
     variant_key: Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")],
+    request: Request,
     state: StateDep,
     _visitor: Visitor,
     _client: StoreClient,
 ) -> Response:
     """The preview mesh of the output a priced slice of the variant saved (#6921),
     streamed from its blob, else its file (#7256); 404 ``variant_not_found`` for a key
-    that names none."""
-    stream = await variant_preview(state, variant_key)
-    return stream_response(stream, media_type=GLB_MEDIA_TYPE, headers={})
+    that names none. An ``If-None-Match`` that names the bytes is a 304, from the index
+    before any byte is read (`blob_not_modified`), as the outputs' own routes answer."""
+    output_id = await variant_output(state, variant_key)
+    if_none_match = request.headers.get("if-none-match")
+    sha256 = await asyncio.to_thread(state.outputs.blob_sha, output_id, "preview")
+    if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match)) is not None:
+        return unchanged
+    stream = await state.outputs.open_role(output_id, "preview")
+    if stream is None:
+        raise variant_not_found()
+    return stream_response(
+        stream, media_type=GLB_MEDIA_TYPE, headers={}, if_none_match=if_none_match
+    )
 
 
 @router.get("/draft", name="crud_storefront_draft")
