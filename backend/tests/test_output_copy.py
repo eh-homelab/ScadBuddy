@@ -548,9 +548,7 @@ def test_a_first_run_with_a_stale_folder_does_not_end_the_fallback(
     incomplete, with no ``finished_at``, so a missing row still falls back to the files."""
     paths, job, metas = files
     store, rows = _stores(paths, projection)
-    other = OutputStore(paths).create(
-        job.model_copy(update={"slug": "other-model"}), name="other"
-    )
+    other = OutputStore(paths).create(job.model_copy(update={"slug": "other-model"}), name="other")
     stale = paths.outputs / job.slug
     iterdir = Path.iterdir
 

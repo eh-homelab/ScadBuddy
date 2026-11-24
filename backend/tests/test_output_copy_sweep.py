@@ -93,9 +93,7 @@ async def test_a_failed_run_is_tried_again_at_the_next_interval(
 
 
 def test_the_interval_setting_defaults_to_ten_minutes() -> None:
-    settings = Settings(
-        database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS
-    )
+    settings = Settings(database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS)
     assert settings.output_copy_interval_seconds == 600
     assert "output_copy_interval_seconds" in BOOTSTRAP_FIELDS
 

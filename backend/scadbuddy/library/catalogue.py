@@ -2726,7 +2726,9 @@ class Catalogue:
                 try:
                     self.outputs.restore_rows(slug)
                 except Exception:
-                    logger.exception("could not restore a model's output rows", extra={"slug": slug})
+                    logger.exception(
+                        "could not restore a model's output rows", extra={"slug": slug}
+                    )
             raise
         # The history is the shared `models/` repository, not the model's own:
         # a delete is one more commit, so the model's revisions stay restorable.
