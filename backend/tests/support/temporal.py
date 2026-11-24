@@ -155,15 +155,26 @@ def _dev_server(db_file: Path) -> Iterator[str]:
         loop.close()
 
 
+#: How long `cancel_recorded` waits for the cancel request in the history (#7500).
+CANCEL_RECORDED_WITHIN = 10.0
+
+
 async def cancel_recorded(handle: WorkflowHandle[Any, Any]) -> None:
     """Cancel ``handle``'s workflow and return once its history holds the cancel request,
-    so a recorder (#7433) opens its gate only after the server recorded the cancel."""
+    so a recorder (#7433) opens its gate only after the server recorded the cancel. A
+    cancel not recorded within `CANCEL_RECORDED_WITHIN` raises `TimeoutError` (#7500)."""
     await handle.cancel()
-    while not any(
-        event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
-        for event in (await handle.fetch_history()).events
-    ):
-        await asyncio.sleep(0.05)
+    try:
+        async with asyncio.timeout(CANCEL_RECORDED_WITHIN):
+            while not any(
+                event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+                for event in (await handle.fetch_history()).events
+            ):
+                await asyncio.sleep(0.05)
+    except TimeoutError:
+        raise TimeoutError(
+            f"no cancel request in {handle.id}'s history after {CANCEL_RECORDED_WITHIN} s"
+        ) from None
 
 
 async def terminate_open_workflows(client: Client, task_queue: str) -> None:
