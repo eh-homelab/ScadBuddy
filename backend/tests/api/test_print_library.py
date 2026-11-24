@@ -13,6 +13,7 @@ import time
 import zipfile
 from collections.abc import AsyncIterator
 from contextlib import aclosing
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -2611,6 +2612,33 @@ def test_a_library_file_with_a_hash_is_downloaded_from_bambuddy_once(
     state: AppState = getattr(app.state, STATE_ATTR)
     downloads = state.store.downloads
     assert downloads is not None and downloads.has(hashlib.sha256(content).hexdigest())
+
+
+@respx.mock
+def test_a_cached_library_files_copy_is_spooled_under_the_spool_dir(
+    client: TestClient, app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7316: with ``SCADBUDDY_SPOOL_DIR`` set (a node-local emptyDir), a hit's private
+    copy is made there, not under the data volume's cache (an NFS share in prod)."""
+    configure(client)
+    content = library_3mf()
+    library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    node = tmp_path / "node"
+    state.config = replace(state.config, spool_dir=node)
+    downloads = state.store.downloads
+    assert downloads is not None
+    real = downloads.private_copy
+    into: list[Path] = []
+
+    def private_copy(sha256: str | None, directory: Path, *, what: str) -> Any:
+        into.append(directory)
+        return real(sha256, directory, what=what)
+
+    monkeypatch.setattr(downloads, "private_copy", private_copy)
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert into == [node / "library-spool"]
 
 
 @respx.mock

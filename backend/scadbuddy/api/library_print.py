@@ -26,6 +26,7 @@ from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.api.accepted_fixes import Amend, FixesDep
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
+    ConfigDep,
     DownloadsDep,
     OutputsDep,
     PathsDep,
@@ -710,6 +711,8 @@ async def post_library_file(
     in ``folder_id`` or the top level; its filename is the library name. The body may be
     as large as the library download cap (#2686)."""
     # The body streamed to the data volume (#7245): the client's upload and the writes.
+    # Not to SCADBUDDY_SPOOL_DIR (#7316): `hold_file` links it into `cache/claims` on the
+    # same volume, and the run that reads the claim may be another replica's.
     with span("library.receive_upload") as current:
         received = await receive_upload(request, paths.cache, fields={"folder_id": 32})
         current.set_attribute("scadbuddy.bytes", sum(received.sizes.values()))
@@ -933,6 +936,7 @@ async def get_library_file(
     request: Request,
     store: SettingsStoreDep,
     paths: PathsDep,
+    config: ConfigDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
 ) -> Response:
@@ -959,9 +963,8 @@ async def get_library_file(
         # One kept but too large to copy before its first byte is not kept again.
         keep = sha is not None and (kept_size is None or kept_size <= CACHED_COPY_MAX_BYTES)
         if sha is not None and kept_size is not None and kept_size <= CACHED_COPY_MAX_BYTES:
-            copy = await asyncio.to_thread(
-                downloads.private_copy, sha, paths.cache / SPOOL_DIRNAME, what="library_file"
-            )
+            spool = (config.spool_dir or paths.cache) / SPOOL_DIRNAME
+            copy = await asyncio.to_thread(downloads.read_checked, sha, spool, what="library_file")
             if copy is not None:
                 size = await asyncio.to_thread(lambda: os.fstat(copy.fileno()).st_size)
                 return StreamingResponse(

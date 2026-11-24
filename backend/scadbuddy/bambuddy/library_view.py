@@ -126,10 +126,10 @@ async def spooled_3mf(
     An STL is not kept: what is read is its wrapped 3MF, not the file's bytes."""
     if downloads is not None and source.file_type == "3mf" and is_sha256(file_hash):
         spool = cache / SPOOL_DIRNAME
-        # Read from a checked private copy, never the shared entry itself. A fault in
-        # the cache reads as a miss.
+        # Read from a checked private copy, never a shared entry itself (a private
+        # directory's entry is read in place, #7316). A fault in the cache reads as a miss.
         copy = await asyncio.to_thread(
-            downloads.private_copy, file_hash, spool, what="library_file"
+            downloads.read_checked, file_hash, spool, what="library_file"
         )
         if copy is not None:
             with copy:

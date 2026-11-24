@@ -362,6 +362,12 @@ class Settings(BaseSettings):
     # volume's cache/downloads and a worker keeps none.
     download_cache_dir: Path | None = None
     download_cache_max_bytes: int = Field(default=DEFAULT_DOWNLOAD_CACHE_MAX_BYTES, ge=0)
+    # #7316: the download cache's directory is this process's alone (a node-local
+    # emptyDir), so a hit is read in place, with no private copy. The API only.
+    download_cache_private: bool = False
+    # #7316: where the API spools private copies of cached downloads. Unset, under the
+    # data volume's cache/.
+    spool_dir: Path | None = None
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
@@ -892,6 +898,8 @@ class Settings(BaseSettings):
             worker_cache_max_bytes=self.worker_cache_max_bytes,
             download_cache_dir=self.download_cache_dir,
             download_cache_max_bytes=self.download_cache_max_bytes,
+            download_cache_private=self.download_cache_private,
+            spool_dir=self.spool_dir,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:
@@ -1094,6 +1102,14 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "download_cache_max_bytes": (
             "Paired with the download cache's directory: a budget of the volume the"
             " deployment mounts it from."
+        ),
+        "download_cache_private": (
+            "Paired with the download cache's directory: only the deployment knows whether"
+            " that volume is this container's alone."
+        ),
+        "spool_dir": (
+            "A directory of the deployment's volumes, like the download cache's: the"
+            " process needs it before any stored setting is read."
         ),
         "storefront_public_url": (
             "The storefront edge's origin (#4960), set on its Deployment beside the edge's own"

@@ -292,6 +292,38 @@ def test_a_private_copy_on_a_volume_that_fails_is_a_miss(tmp_path: Path) -> None
     assert list((tmp_path / "ok").iterdir()) == []
 
 
+def test_a_shared_cache_reads_a_hit_from_a_private_copy(tmp_path: Path) -> None:
+    cache = DownloadCache(tmp_path / "shared", max_bytes=1 << 20)
+    data = b"the file"
+    cache.put(_sha(data), data)
+    with cache.read_checked(_sha(data), tmp_path / "spool", what="test") as read:  # type: ignore[union-attr]
+        assert read.read() == data
+        assert os.fstat(read.fileno()).st_ino != cache.path(_sha(data)).stat().st_ino
+    assert (tmp_path / "spool").is_dir()
+
+
+def test_a_private_cache_reads_a_hit_in_place_with_no_copy(tmp_path: Path) -> None:
+    """#7316: a directory this process alone writes (a node-local emptyDir) needs no
+    private copy: the entry is checked, then read from the same open file."""
+    cache = DownloadCache(tmp_path / "mine", max_bytes=1 << 30, private=True)
+    data = os.urandom(3 << 20)
+    cache.put(_sha(data), data)
+    with cache.read_checked(_sha(data), tmp_path / "spool", what="test") as read:  # type: ignore[union-attr]
+        assert os.fstat(read.fileno()).st_ino == cache.path(_sha(data)).stat().st_ino
+        assert read.read() == data
+    assert not (tmp_path / "spool").exists()
+
+
+def test_a_private_caches_bad_entry_is_dropped_and_a_miss(tmp_path: Path) -> None:
+    cache = DownloadCache(tmp_path / "mine", max_bytes=1 << 20, private=True)
+    data = b"the file"
+    cache.put(_sha(data), data)
+    cache.path(_sha(data)).write_bytes(b"rot")
+    assert cache.read_checked(_sha(data), tmp_path / "spool", what="test") is None
+    assert not cache.has(_sha(data))
+    assert cache.read_checked(_sha(b"never kept"), tmp_path / "spool", what="test") is None
+
+
 def test_a_file_too_large_to_keep_is_not_written_out_to_find_that_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -402,6 +434,28 @@ async def test_a_blob_hit_is_copied_on_this_processs_own_disk(
     monkeypatch.setattr(downloads, "private_copy", private_copy)
     assert await store.read(ref) == data
     assert into and all(not d.is_relative_to(tmp_path / "shared") for d in into)
+
+
+@pytest.mark.requires_postgres
+async def test_a_private_caches_hit_is_streamed_from_the_entry_with_no_spooled_copy(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """#7316: the mount's download on a node-local cache: no copy under the spool."""
+    plain = ContentStore(LocalContentBackend(tmp_path / "remote"), BlobIndex(pool))
+    data = os.urandom(3 << 20)
+    ref = await plain.put("piece", data, name="p", scope=SCOPE)
+    backend = _CountingBackend(tmp_path / "remote")
+    spool = tmp_path / "spool"
+    store = ContentStore(
+        backend,
+        BlobIndex(pool),
+        downloads=DownloadCache(tmp_path / "mine", 1 << 30, private=True),
+        spool=spool,
+    )
+    assert await store.read(ref) == data  # a miss: downloaded and kept
+    assert await store.read(ref) == data  # a hit
+    assert backend.downloads == 1
+    assert not spool.exists()
 
 
 @pytest.mark.requires_postgres

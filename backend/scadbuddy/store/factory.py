@@ -70,11 +70,16 @@ def build_store(
     fonts: FontService,
     metrics: Metrics | None,
     downloads_dir: Path | None = None,
+    downloads_private: bool = False,
     folders: KeepsFolders | None = None,
     drop_asset_copy: Callable[[str], bool] | None = None,
 ) -> StoreBundle:
     """``downloads_dir`` is where this process keeps whole Bambuddy downloads (#2788),
     None for none: the API passes its default, a worker only one it is set (README).
+    ``downloads_private`` says that directory is this process's alone (#7316), so a hit
+    is read in place; only the API passes it, never a worker, which runs template code.
+    A hit's private copy otherwise goes under ``config.spool_dir`` (default the data
+    volume's ``cache/``).
     ``index`` is the blob index: the API's `BlobIndex` on ``pool``, the render worker's
     `crud/render.py` `RemoteBlobIndex` (#5298). ``folders`` keeps a Bambuddy store's
     folders: SQL on ``pool`` unless given (the render worker's `RemoteStoreFolders`).
@@ -87,6 +92,7 @@ def build_store(
             downloads_dir,
             max_bytes=config.download_cache_max_bytes,
             min_age=config.activity_timeout,
+            private=downloads_private,
         )
         if downloads_dir is not None and config.download_cache_max_bytes > 0
         else None
@@ -101,7 +107,7 @@ def build_store(
         max_count=config.store_max_count,
         metrics=metrics,
         downloads=downloads,
-        spool=paths.cache / "blob-spool",
+        spool=(config.spool_dir or paths.cache) / "blob-spool",
     )
     blobs = CachedBlobStore(
         local,

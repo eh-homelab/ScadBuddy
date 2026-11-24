@@ -2268,8 +2268,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             history=state.history,
             fonts=state.fonts,
             metrics=state.metrics,
-            # #2788: on the API's /data, so every replica shares it.
+            # #2788: on the API's /data, so every replica shares it, unless set
+            # elsewhere: a node-local one (#7316) may be marked this container's alone.
             downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
+            downloads_private=state.config.download_cache_dir is not None
+            and state.config.download_cache_private,
         )
         # Plan 2026-10-17 Ruling 3: from any source, the environment's seed included
         # (a save never checks a seeded value), `native` needs a content store.
