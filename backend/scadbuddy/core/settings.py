@@ -365,8 +365,9 @@ class Settings(BaseSettings):
     # #7316: the download cache's directory is this process's alone (a node-local
     # emptyDir), so a hit is read in place, with no private copy. The API only.
     download_cache_private: bool = False
-    # #7316: where the API spools private copies of cached downloads. Unset, under the
-    # data volume's cache/.
+    # #7316: where the API spools private copies of cached downloads (blob-spool/) and
+    # every read of a Bambuddy library file (library-spool/). Unset, under the data
+    # volume's cache/.
     spool_dir: Path | None = None
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.

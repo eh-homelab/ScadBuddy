@@ -918,9 +918,10 @@ async def get_library_preview(
     return Response(data, media_type=GLB_MEDIA_TYPE)
 
 
-#: The largest kept file served from the download cache. A hit is copied whole into the
-#: request's own file before its first byte is sent, so past this a cached file would
-#: start later than Bambuddy's stream of it does; it is streamed from Bambuddy instead.
+#: The largest kept file served from the download cache. A hit is checked whole before
+#: its first byte is sent (copied into the request's own file, or, with a private cache,
+#: hashed in place), so past this a cached file would start later than Bambuddy's stream
+#: of it does; it is streamed from Bambuddy instead.
 CACHED_COPY_MAX_BYTES = 256 * 1024 * 1024
 
 
@@ -1039,8 +1040,9 @@ async def _native_download(native: NativeLibrary, file_id: int) -> Response:
 
 
 async def _read_closing(copy: BinaryIO) -> AsyncIterator[bytes]:
-    """``copy``'s bytes, closing it however the response ends. It has no name on disk,
-    so a dropped connection leaves nothing behind."""
+    """``copy``'s bytes, closing it however the response ends. It is the request's own
+    unnamed copy, so a dropped connection leaves nothing behind, or, with a private
+    cache, the kept entry itself, which stays in the cache."""
     try:
         while chunk := await asyncio.to_thread(copy.read, 1 << 20):
             yield chunk
