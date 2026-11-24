@@ -402,6 +402,17 @@ opens every one and seals it again byte for byte).
     vectors pin (`test/fixtures/secret-vectors.json`); the AAD binds each value to its row and
     to the columns that say where it is sent (for the credential: `kind` and `base_url`).
     Comparable tokens are stored hashed instead.
+  - Poller reads (#7306): every read of a task queue's pollers goes through
+    `src/temporal/pollers.ts` `queuePollers`, tests included. DescribeTaskQueue reports one
+    partition's pollers, and a worker can poll only the non-root ones, so it asks the root and
+    `/_sys/<queue>/1..3`. `TASK_QUEUE_PARTITIONS` (4) must equal the server's
+    `matching.numTaskqueueReadPartitions`: Temporal's default is
+    `GlobalDefaultNumTaskQueuePartitions = 4`
+    ([shared_constants.go](https://github.com/temporalio/temporal/blob/v1.32.1/common/dynamicconfig/shared_constants.go)),
+    and prod's `scadbuddy-temporal-v2-dynamicconfig` does not set it (read 2026-11-24). A
+    change to that setting changes the constant in the same PR. One failed or slow partition
+    fails the whole read: the plugin sweep then skips its run, placement takes the turn on
+    its own replica, and readiness answers "Temporal did not answer" (fails closed).
   - Temporal (#1055, spec 2026-10-01 §6.3): with `SCADBUDDY_TEMPORAL_ADDRESS`
     `src/temporal/worker.ts` runs one worker on `agent-tools`, a version of
     `scadbuddy-agent` with `agent-sessions` when the build has an id (#2726 Phase 11; the

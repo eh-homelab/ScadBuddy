@@ -3,7 +3,7 @@ import { listCatalog, setCatalogAliases, type SpoolType } from '../../api/filame
 import type { Filament } from '../../api/types'
 import { E, M, ST, B, T } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
-import { linksBookRow, linkTypeToBook, makeTypeFromBook, rankCandidates, typeCandidates } from './makeType'
+import { bookRowIds, linksBookRow, linkTypeToBook, makeTypeFromBook, rankCandidates } from './makeType'
 
 const book = (over: Partial<Filament>): Filament =>
   ({
@@ -96,28 +96,31 @@ describe('rankCandidates (#7159)', () => {
   })
 })
 
-describe('typeCandidates (#7159)', () => {
+/** The candidates as the price book finds them: the row's ids resolved, then ranked. */
+const candidatesOf = async (row: Filament, types: SpoolType[]) => rankCandidates(row, await bookRowIds(row), types)
+
+describe('bookRowIds and rankCandidates (#7159)', () => {
   it('resolves the names by key and spelling, and adds no catalog row', async () => {
     const before = await Promise.all((['materials', 'subtypes', 'brands', 'effects'] as const).map((kind) => listCatalog(kind, { includeArchived: true })))
     const gold = typeOf({ code: 'EL-PLA-SILK-GOLD', brand_id: B.ELEGOO, subtype_id: ST.SILK, effect_id: E.SILK, rgba: '#D4AF37FF' })
     const plain = typeOf({ code: 'EL-PLA-GOLD', brand_id: B.ELEGOO, rgba: '#d4af37ff' })
-    const found = await typeCandidates(book({ brand: 'ELEGOO', material: 'p.l.a', subtype: 'silk', effect: 'silk' as Filament['effect'], colour: '#D4AF37' }), [plain, gold])
+    const found = await candidatesOf(book({ brand: 'ELEGOO', material: 'p.l.a', subtype: 'silk', effect: 'silk' as Filament['effect'], colour: '#D4AF37' }), [plain, gold])
     expect(found.map((one) => [one.type.code, one.exact])).toEqual([
       ['EL-PLA-SILK-GOLD', true],
       ['EL-PLA-GOLD', false],
     ])
-    const unknown = await typeCandidates(book({ brand: 'Elegoo', material: 'Wax', subtype: 'Dual', colour: '#D4AF37' }), [gold])
+    const unknown = await candidatesOf(book({ brand: 'Elegoo', material: 'Wax', subtype: 'Dual', colour: '#D4AF37' }), [gold])
     expect(unknown.map((one) => one.exact)).toEqual([false])
     const after = await Promise.all((['materials', 'subtypes', 'brands', 'effects'] as const).map((kind) => listCatalog(kind, { includeArchived: true })))
     expect(after.map((rows) => rows.length)).toEqual(before.map((rows) => rows.length))
   })
 })
 
-describe('typeCandidates by a brand alias (#7159 R-7159-1)', () => {
+describe('bookRowIds by a brand alias (#7159 R-7159-1)', () => {
   it('finds the type of a brand the row names by its alias', async () => {
     await setCatalogAliases('brands', B.ELEGOO, ['Elegoo 3D'])
     const gold = typeOf({ code: 'EL-PLA-SILK-GOLD', brand_id: B.ELEGOO, rgba: '#D4AF37FF' })
-    const found = await typeCandidates(book({ brand: 'elegoo3d', colour: '#D4AF37' }), [gold])
+    const found = await candidatesOf(book({ brand: 'elegoo3d', colour: '#D4AF37' }), [gold])
     expect(found.map((one) => one.type.code)).toEqual(['EL-PLA-SILK-GOLD'])
   })
 })
