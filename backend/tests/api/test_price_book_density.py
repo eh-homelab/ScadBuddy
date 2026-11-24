@@ -1,8 +1,9 @@
 """A price-book filament's density from ScadBuddy's spools (#6136, #6262 Task 9 review
-ruling): the newest spool's own, else its slicer preset's (a Bambuddy local preset's while
-one is linked, else the image's vendor preset's), else that of the preset the tray holding
-it reports. The spool import and "Fill densities" write it where a record has none, the
-book says where each came from, and the estimate says which density it used."""
+ruling): the newest spool's own, else its slicer preset's (a ScadBuddy preset's, else the
+image's vendor preset's; a Bambuddy local preset is never read, #7244), else that of the
+preset the tray holding it reports. The spool import and "Fill densities" write it where a
+record has none, the book says where each came from, and the estimate says which density it
+used."""
 
 from __future__ import annotations
 
@@ -146,7 +147,7 @@ def test_the_spool_import_follows_the_chain(client: TestClient) -> None:
             cost_per_kg=26,
             slicer_filament="GFA05",
         ),
-        # A Bambuddy local preset by its numeric id.
+        # A Bambuddy local preset by its numeric id: never read (#7244), so no density.
         spool(
             3,
             brand="Cookiecad",
@@ -177,10 +178,7 @@ def test_the_spool_import_follows_the_chain(client: TestClient) -> None:
     rows = {_ids(row)[0]: row for row in response.json()["rows"]}
     assert (rows[1]["density_g_cm3"], rows[1]["density_profile"]) == ("1.3", None)
     assert (rows[2]["density_g_cm3"], rows[2]["density_profile"]) == ("1.32", SILK)
-    assert (rows[3]["density_g_cm3"], rows[3]["density_profile"]) == (
-        "1.275",
-        "Bambuddy local preset Cookiecad PETG Magic @H2C (spool preset 2)",
-    )
+    assert (rows[3]["density_g_cm3"], rows[3]["density_profile"]) == (None, None)
     assert (rows[4]["density_g_cm3"], rows[4]["density_profile"]) == (
         "1.27",
         "ScadBuddy spool #104",
@@ -189,8 +187,8 @@ def test_the_spool_import_follows_the_chain(client: TestClient) -> None:
     assert {f["id"]: f for f in client.get(BOOK).json()["filaments"]}[own["id"]][
         "density_g_cm3"
     ] == "1.3"
-    # One read of Bambuddy's local presets, for the numeric preset id.
-    assert local.call_count == 1
+    # No read of Bambuddy's local presets, even for the numeric preset id.
+    assert local.call_count == 0
 
 
 @respx.mock
