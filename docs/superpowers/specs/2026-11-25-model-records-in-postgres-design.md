@@ -171,22 +171,31 @@ One migration file, `<timestamp>_templates.sql`.
   text: why not (the text of `InvalidModelMetaError`); `meta_text` text: the file's
   text when it is not JSON, capped at 64 KiB, kept only so a later reader can match a
   library name in it.
+- What Postgres refuses is cleaned when the row is built, never at the write. A
+  `model.json` that parses but that `jsonb` refuses (a `\u0000` escape or a NUL in a
+  key or a string, NaN or an infinity, a lone surrogate) is kept as if it were not
+  JSON: `meta` null, `meta_error` `not storable (…)`, `meta_text` its text. Every text
+  column (`meta_text`, `meta_error`, `name`) drops NUL characters and replaces lone
+  surrogates, since a `text` column refuses NUL (`catalogue.py` `_unstorable`,
+  `_storable_text`). So a template's content cannot make its row write fail.
 - `name` text: the name the record shows (`meta_from_raw`'s default when blank).
 - `version` text: the template's last commit; null without git.
 - `updated_at` timestamptz: as today, the newest mtime of `model.scad` and
   `model.json`.
-- `has_readme` boolean, `inputs_version` int, `colour_params` text[] (the `// color`
-  parameters of `model.scad`, for `part_print_settings`'s check).
+- `has_readme` boolean, `inputs_version` bigint (a value past the bigint range is kept
+  clamped to it; `meta` and `name` stay as `record` answers them), `colour_params` text[]
+  (the `// color` parameters of `model.scad`, for `part_print_settings`'s check).
 - `files` jsonb: name → size for `thumbnail.png`, each `media/` file and, for a
   built-in, each `builtin-media/<slug>/` file. The media views' `size`, `missing` and
   poster come from it.
 - `cover` jsonb: the template's own cover (`file`, `content_type`, `sha256`), or null.
 - `files_stamp` text: a sha256 of the sorted name, size and `mtime_ns` of the files
-  above, as `library/output_copy.py` `files_stamp` does for outputs.
+  above, as `library/output_copy.py` `files_stamp` does for outputs (#7360, not yet
+  merged).
 - `refreshed_at` timestamptz default `clock_timestamp()`, `refreshed_head` text (the
   HEAD the row was read at).
 
-`template_copy_runs`: one row per copy run, as `output_copy_runs` (#7360):
+`template_copy_runs`: one row per copy run, as `output_copy_runs` (#7360, not yet merged):
 `started_at`, `finished_at` (set only when the walk saw every folder), `incomplete`,
 `added`, `refreshed`, `dropped`, `unreadable` (jsonb, the templates whose
 `model.json` could not be read).
@@ -204,26 +213,47 @@ template, it revalidates that template's directory (`core/paths.py`
 
 - **A change that commits.** In `_landed`, after `git commit` and after
   `_change_of` names the templates the commit touched (`HeadChange.models`),
-  `ModelHistory` reads those templates' rows. `_PgHold.record` then writes them in the transaction that upserts
-  `models_repo_head` and sends the NOTIFY. So a save adds no Postgres commit, and a
-  replica that hears the NOTIFY reads rows that already show the commit. `version` of
-  each touched template is the new commit. A touched template whose folder is gone
-  (a delete) loses its row.
+  `ModelHistory` reads those templates' rows (`TemplateRefresh.for_commit`). It reads
+  every file and builds every row before the HEAD transaction opens, behind a
+  catch-all: any exception there (an `OSError`, a `ValueError`, a bug) is logged and
+  counted, and the commit records its HEAD with no rows. `_PgHold.record` then writes
+  the rows in the transaction that upserts `models_repo_head` and sends the NOTIFY, in
+  a savepoint of their own after the upsert and before the NOTIFY. A row write that
+  fails, whatever it raises, rolls back the savepoint only: it is logged with the
+  template ids and counted, and the HEAD and its NOTIFY still commit. So a save adds
+  no Postgres commit, a replica that hears the NOTIFY reads rows that already show the
+  commit, and a row can never cost the other replicas the HEAD and NOTIFY that
+  #2385/#2507 depend on. `version` of each touched template is the new commit. A
+  touched template whose folder is gone (a delete) loses its row.
+- **A commit whose touched templates git cannot list.** When `_change_of` fails,
+  `_landed` records `HeadChange(commit)` with `models` None, and the NOTIFY tells the
+  other replicas to revalidate everything. The rows written with it are then those of
+  the templates the write named (the ids of `ModelHistory.commit`'s paths, or the
+  restored slug), so the write's own answer still shows the write. A write that named
+  none (the bare `_builtin` of `sync_builtins`) writes no rows; the copy catches them.
+  Without a coordinator (`_landed_alone`) the same ids are refreshed in a transaction
+  of their own.
 - **A change that makes no commit** (§3.4, with git present). `ModelHistory.commit`
   and the built-in media writes (`_overlay_change`) refresh the ids they were given,
-  still under the lock, in a transaction of their own. These changes are rare.
-- **No git.** `Catalogue.notify_change` refreshes the ids. There is no lock and no
-  second replica (git is missing only in development and some tests).
+  still under the lock, in a transaction of their own. These changes are rare. A
+  built-in's added media with git present is refreshed by `_overlay_change` alone,
+  under the write lock; its later `notify_change` refreshes nothing with git present,
+  so the row is refreshed once and never outside the lock.
+- **No git.** `Catalogue.notify_change` refreshes the ids, so it is the one refresh of
+  every write, `_overlay_change`'s included. There is no write lock and no second
+  replica (git is missing only in development and some tests).
 - **A failed refresh** (Postgres down, an NFS error) is logged with the template ids
-  and counted in a metric. It does not fail the write: the files and the commit are
-  already there. The next copy run repairs the row (§5.3).
+  and counted in a metric (`scadbuddy_template_refresh_failures_total`). It does not
+  fail the write: the files and the commit are already there. The next copy run
+  repairs the row (§5.3). A template whose content Postgres would refuse is not such a
+  failure: §5.1's cleaning writes its row.
 
 The flows repository shares `PgRepoCoordinator` and writes no rows: the hook is the
 models history's own.
 
 ### 5.3 The copy: fill at start, repair in every sweep
 
-`library/template_copy.py`, as `library/output_copy.py` (#7360):
+`library/template_copy.py`, as `library/output_copy.py` (#7360, not yet merged):
 
 - It runs as a task at each API start and as the housekeeping sweep
   `housekeeping_copy_templates` (`TEMPLATE_COPY_SWEEP` behind `workflow.patched`, with
@@ -232,6 +262,13 @@ models history's own.
   template's files for a `files_stamp`, and reads every template's last commit with
   one `last_commits()`. A template needs a refresh when it has no row, its stamp
   differs, or its `version` differs.
+- The `last_commits()` walk (24.84 s in §1) runs every sweep, but it walks git only
+  when HEAD moved since the last walk in that process; otherwise it answers the walk
+  kept as of HEAD (#2289). While it walks, it holds no write lock and no Postgres
+  transaction: only the copy's advisory lock, on an autocommit connection, and the
+  history's in-process `_last_commits_lock`, which a listing in the same process waits
+  on, as it would for its own walk. A span `templates.copy.versions` times it; its
+  child `model_history.last_commits` says whether it walked (`scadbuddy.cache_hit`).
 - It refreshes those templates with §5.2's routine, under the write lock, a few at a
   time, so a save waits for at most one small batch.
 - Under the lock, it drops each row whose folder has no `model.scad`.
@@ -247,7 +284,7 @@ volume. The first run fills every row.
 ### 5.4 Readers
 
 The rows are the answer once a copy run has finished (`template_copy_runs.finished_at`
-set), as `OutputRows.copied` does for outputs (#7360, design §6.1). Before that, each
+set), as `OutputRows.copied` does for outputs (#7360, not yet merged; design §6.1). Before that, each
 reader walks the files as today.
 
 | Reader | Today | From rows |
@@ -298,8 +335,20 @@ reads the output folders as today. A list is NFS-free only with both.
   `merge_upstream`, `duplicate`, `create`, `delete`, media add of an image and of a
   video, a built-in's added media, `sync_builtins`, a restore) leaves the row equal to
   what the walk builds for that template. One table-driven test.
-- The HEAD transaction: a failure in it leaves neither the HEAD nor the rows written;
-  the commit still stands, and the next copy run repairs the rows.
+- The HEAD transaction: the rows are written in a savepoint in it. A row write that
+  fails, with a Postgres error or any other exception, rolls back the savepoint only:
+  the HEAD and its NOTIFY are still recorded, the failure is logged with the template
+  ids and counted, the commit stands, and the next copy run repairs the rows (#7317,
+  Task 3 review B-I1). A read that fails before the transaction records the HEAD with
+  no rows. With §5.1's cleaning turned off, a real Postgres refusal of a `\u0000` shows
+  the same.
+- Content Postgres refuses: a save of a `model.json` with a `\u0000` escape in its
+  name, description or another field, a NUL byte in a JSON or a non-JSON
+  `model.json`, and a description edit with a NUL each record the HEAD, send the
+  NOTIFY, count no failure and write the row (`meta` null, `meta_error`, a `meta_text`
+  with no NUL).
+- A commit whose touched templates git cannot list writes the rows of the ids the
+  write named, with and without a coordinator.
 - The copy: a fixture tree fills the rows; a second run changes nothing; a hand edit
   of `model.json`, a commit made outside the catalogue and a deleted folder are each
   repaired; an ESTALE listing makes the run incomplete and drops nothing.
@@ -393,5 +442,8 @@ reads the output folders as today. A list is NFS-free only with both.
 - Column names and jsonb shapes beyond §5.1.
 - The copy's batch size and how it reports progress.
 - How `_PgHold.record` takes the extra writes (a callable from `ModelHistory`, or rows
-  passed in the `HeadChange`).
+  passed in the `HeadChange`), as long as they run in a savepoint after the HEAD
+  upsert and before the NOTIFY, and nothing that reads a file or builds a row runs
+  inside the transaction (§5.2). Phase 1 passes a callable (`RepoHold.record`'s
+  `also`).
 - PR boundaries inside each phase.
