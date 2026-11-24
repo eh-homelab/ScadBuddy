@@ -1,10 +1,12 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import type { UserEvent } from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { printRunPoll } from '../../api/client'
 import type { FlowPending, TaskQuestion } from '../../api/types'
 import { taskTopic } from '../../lib/flows'
+import { bridge } from '../../agent/bridge'
+import { useGlobalAgentTools } from '../../agent/global'
 import { fakeRealtime } from '../../lib/realtime.fake'
 import { getToasts } from '../../lib/toast'
 import { acceptOperation } from '../../mocks/features/operations'
@@ -40,17 +42,67 @@ function pending(task: TaskQuestion | null): FlowPending {
 
 const question = (fields: Partial<TaskQuestion> = {}): TaskQuestion => ({ ...taskQuestion(PROMPT_TASK_ID)!, ...fields })
 
-/** The card as a run's page draws it; `again` is the page read again, with the task as given. */
+/** The assistant's tools, as the app shell has them. */
+function Tools() {
+  useGlobalAgentTools()
+  return null
+}
+
+/**
+ * The card as a run's page draws it; `again` is the page read again, with the task as given
+ * at an execution of the run.
+ */
 function draw(task: TaskQuestion | null = question()) {
   const respond = vi.fn(async (send: () => Promise<unknown>) => {
     await send()
   })
-  const card = (next: TaskQuestion | null) => {
+  const card = (next: TaskQuestion | null, execution: string) => {
     const entry = pending(next)
-    return <PendingCard key={entry.call_id} entry={entry} runId="run-prompt" step={null} respond={respond} />
+    return (
+      <>
+        <Tools />
+        <button type="button">Elsewhere</button>
+        <PendingCard key={entry.call_id} entry={entry} runId="run-prompt" execution={execution} step={null} respond={respond} />
+      </>
+    )
   }
-  const view = renderPage(card(task))
-  return { ...view, respond, again: (next: TaskQuestion | null = question()) => view.rerender(card(next)) }
+  const view = renderPage(card(task, 'wr-1'))
+  return {
+    ...view,
+    respond,
+    again: (next: TaskQuestion | null = question(), execution = 'wr-1') => view.rerender(card(next, execution)),
+  }
+}
+
+/** The answer route, held until `release` is called. */
+function hold() {
+  let release!: (reply: Response) => void
+  const reply = new Promise<Response>((resolve) => (release = resolve))
+  const sent = vi.fn()
+  server.use(
+    http.post(ANSWER_URL, async () => {
+      sent()
+      return reply
+    }),
+  )
+  return { release, sent }
+}
+
+const refusal = (status: number, extra: Record<string, unknown> = {}) =>
+  HttpResponse.json(
+    { title: 'Refused', status, detail: `refused ${status}`, ...extra },
+    { status, headers: { 'Content-Type': 'application/problem+json' } },
+  )
+
+/** A followed operation that failed with `error`. */
+function failsLater(error: Record<string, unknown>) {
+  const op = { id: 'op-task', kind: 'task_answer', subject: 'flow:run-prompt', created_at: '2026-10-10T09:00:00Z' }
+  server.use(
+    http.post(ANSWER_URL, () => HttpResponse.json({ ...op, status: 'running', repeated: false }, { status: 202 })),
+    http.get('/api/v1/operations/op-task', () =>
+      HttpResponse.json({ ...op, status: 'failed', finished_at: op.created_at, error: { title: 'Conflict', ...error } }),
+    ),
+  )
 }
 
 const email = () => screen.getByLabelText(/^Email/)
@@ -70,10 +122,7 @@ function refuse(status: number, extra: Record<string, unknown> = {}, options: { 
       ANSWER_URL,
       async ({ request }) => {
         sent.push({ key: request.headers.get('Idempotency-Key'), body: await request.json() })
-        return HttpResponse.json(
-          { title: 'Refused', status, detail: `refused ${status}`, ...extra },
-          { status, headers: { 'Content-Type': 'application/problem+json' } },
-        )
+        return refusal(status, extra)
       },
       options,
     ),
@@ -262,6 +311,184 @@ describe('PendingCard, a prompt (#7364)', () => {
     expect(email()).toHaveValue('')
   })
 
+  it('asks again when the question is open again, with no other state seen', async () => {
+    refuse(409, { type: NOT_OPEN, state: 'open' }, { once: true })
+    const { user, again } = draw()
+    await answer(user, 'jo@example.com')
+    expect(await screen.findByText(ELSEWHERE)).toBeInTheDocument()
+    again(question({ updated_at: new Date(Date.now() + 1000).toISOString() }))
+    expect(email()).toHaveValue('')
+  })
+
+  it('asks again at another execution of the run, with the same row', async () => {
+    refuse(409, { type: NOT_OPEN, state: 'open' }, { once: true })
+    const { user, again } = draw()
+    await answer(user, 'jo@example.com')
+    expect(await screen.findByText(ELSEWHERE)).toBeInTheDocument()
+    again(question(), 'wr-1')
+    noForm()
+    again(question(), 'wr-2')
+    expect(email()).toHaveValue('')
+  })
+
+  it('never sends the key of another execution', async () => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.post(ANSWER_URL, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return HttpResponse.error()
+      }),
+    )
+    const { user, again } = draw()
+    await answer(user, 'jo@example.com')
+    await screen.findByRole('alert')
+    again(question(), 'wr-2')
+    await answer(user, 'jo@example.com')
+    await waitFor(() => expect(keys).toHaveLength(4))
+    expect(keys[0]).toBe(keys[1])
+    expect(keys[2]).toBe(keys[3])
+    expect(keys[2]).not.toBe(keys[0])
+  })
+
+  it('moves to the card when the form closes, and says why where a status already was', async () => {
+    refuse(409, { type: NOT_OPEN, state: 'open' })
+    const { user } = draw()
+    const status = screen.getByRole('status')
+    expect(status).toBeEmptyDOMElement()
+    await answer(user, 'jo@example.com')
+    await waitFor(() => expect(status).toHaveTextContent(ELSEWHERE))
+    expect(status).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Where do we send the pickup note?' })).toHaveFocus()
+  })
+
+  it('moves to the card when the question ends while the person types', async () => {
+    const { user, again } = draw()
+    await user.type(email(), 'jo')
+    again(question({ state: 'expired', updated_at: new Date(Date.now() + 1000).toISOString() }))
+    expect(screen.getByRole('region', { name: 'Where do we send the pickup note?' })).toHaveFocus()
+  })
+
+  it('leaves the focus where the person is', async () => {
+    const { user, again } = draw()
+    const ended = question({ state: 'expired', updated_at: new Date(Date.now() + 1000).toISOString() })
+    await user.type(email(), 'jo')
+    const elsewhere = screen.getByRole('button', { name: 'Elsewhere' })
+    await user.click(elsewhere)
+    again(ended)
+    expect(elsewhere).toHaveFocus()
+  })
+
+  it('does not take back a focus the person moved away', async () => {
+    const { user, again } = draw()
+    await user.type(email(), 'jo')
+    const elsewhere = screen.getByRole('button', { name: 'Elsewhere' })
+    await user.click(elsewhere)
+    act(() => elsewhere.blur())
+    again(question({ state: 'expired', updated_at: new Date(Date.now() + 1000).toISOString() }))
+    expect(document.body).toHaveFocus()
+  })
+
+  it('takes no focus from a page the person has not touched', () => {
+    const { again } = draw()
+    again(question({ state: 'expired', updated_at: new Date(Date.now() + 1000).toISOString() }))
+    expect(document.body).toHaveFocus()
+  })
+
+  it.each([
+    ['not-open', 409, { type: NOT_OPEN, state: 'answered' }, ELSEWHERE],
+    ['invalid', 422, { type: 'https://scadbuddy.dev/problems/tasks/invalid-answer', problems: [] }, 'refused 422'],
+    ['stale', 409, { type: 'https://scadbuddy.dev/problems/stale-entry' }, 'This request is out of date. The run has moved on.'],
+    ['another', 503, {}, 'refused 503'],
+  ])('says a refusal that comes after the card has gone in a toast (%s)', async (_, status, extra, said) => {
+    const { release, sent } = hold()
+    const { user, unmount } = draw()
+    await answer(user, 'jo@example.com')
+    await waitFor(() => expect(sent).toHaveBeenCalled())
+    unmount()
+    expect(getToasts()).toEqual([])
+    release(refusal(status, extra))
+    await waitFor(() =>
+      expect(getToasts().map((t) => [t.title, t.detail])).toEqual([[said, 'Where do we send the pickup note?']]),
+    )
+  })
+
+  it('says an answer landed after the card has gone', async () => {
+    const { release, sent } = hold()
+    const { user, unmount } = draw()
+    await answer(user, 'jo@example.com')
+    await waitFor(() => expect(sent).toHaveBeenCalled())
+    unmount()
+    release(HttpResponse.json({ ...question(), state: 'answered', answer: {}, answered_by: 'browser' }))
+    await waitFor(() => expect(getToasts().map((t) => t.title)).toEqual(['Answer sent']))
+  })
+
+  it.each([
+    ['refused as answered', 409, { type: NOT_OPEN, state: 'answered' }, ELSEWHERE, []],
+    ['refused another way', 503, {}, 'Answered', ['refused 503']],
+  ])('follows a question answered while an answer is in flight, then %s', async (_, status, extra, said, toasts) => {
+    const realtime = fakeRealtime()
+    const { release, sent } = hold()
+    const { user } = draw()
+    await answer(user, 'jo@example.com')
+    await waitFor(() => expect(sent).toHaveBeenCalled())
+    setTask(PROMPT_TASK_ID, { state: 'answered' })
+    await realtime.signal(taskTopic(PROMPT_TASK_ID), 'task.changed')
+    expect(await screen.findByText('Answered', {}, { timeout: 3000 })).toBeInTheDocument()
+    noForm()
+    release(refusal(status, extra))
+    await waitFor(() => expect(getToasts().map((t) => t.title)).toEqual(toasts))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(said))
+    noForm()
+  })
+
+  it('gives each of two questions its own draft and key', async () => {
+    const sent: { url: string; key: string | null }[] = []
+    server.use(
+      http.post(ANSWER_URL, ({ request }) => {
+        sent.push({ url: new URL(request.url).pathname, key: request.headers.get('Idempotency-Key') })
+        return HttpResponse.error()
+      }),
+    )
+    const other = question({ id: '00000000-0000-4000-8000-000000000000', title: 'And the other one?' })
+    const { user } = renderPage(
+      <>
+        {[question(), other].map((task) => (
+          <PendingCard
+            key={task.id}
+            entry={pending(task)}
+            runId="run-prompt"
+            execution="wr-1"
+            step={null}
+            respond={async (send) => void (await send())}
+          />
+        ))}
+      </>,
+    )
+    const cards = [/pickup note/, /other one/].map((name) => within(screen.getByRole('region', { name })))
+    await user.type(cards[0]!.getByLabelText(/^Email/), 'jo@example.com')
+    expect(cards[1]!.getByLabelText(/^Email/)).toHaveValue('')
+    await user.type(cards[1]!.getByLabelText(/^Email/), 'jo@example.com')
+    for (const card of cards) {
+      await user.click(card.getByRole('button', { name: 'Answer' }))
+      await card.findByRole('alert')
+    }
+    expect(sent.map((s) => s.url)).toEqual([
+      `/api/v1/tasks/${PROMPT_TASK_ID}/answer`,
+      `/api/v1/tasks/${PROMPT_TASK_ID}/answer`,
+      `/api/v1/tasks/${other.id}/answer`,
+      `/api/v1/tasks/${other.id}/answer`,
+    ])
+    expect(new Set(sent.map((s) => s.key)).size).toBe(2)
+    expect(sent[0]!.key).toBe(sent[1]!.key)
+  })
+
+  it('has a context a keyboard reaches', async () => {
+    const { user } = draw()
+    await user.tab()
+    await user.tab()
+    expect(screen.getByRole('group', { name: 'Context' })).toHaveFocus()
+  })
+
   it.each([
     [403, {}, 'refused 403'],
     [404, {}, 'refused 404'],
@@ -349,22 +576,19 @@ describe('PendingCard, a prompt (#7364)', () => {
   })
 
   it('closes when the followed operation says the task is not open', async () => {
-    const op = { id: 'op-task', kind: 'task_answer', subject: 'flow:run-prompt', created_at: '2026-10-10T09:00:00Z' }
-    server.use(
-      http.post(ANSWER_URL, () => HttpResponse.json({ ...op, status: 'running', repeated: false }, { status: 202 })),
-      http.get('/api/v1/operations/op-task', () =>
-        HttpResponse.json({
-          ...op,
-          status: 'failed',
-          finished_at: op.created_at,
-          error: { type: NOT_OPEN, title: 'Conflict', status: 409, detail: 'That was answered already. Read the task again.' },
-        }),
-      ),
-    )
+    failsLater({ type: NOT_OPEN, status: 409, detail: 'That was answered already. Read the task again.' })
     const { user } = draw()
     await answer(user, 'jo@example.com')
     expect(await screen.findByText(ELSEWHERE)).toBeInTheDocument()
     noForm()
+  })
+
+  it('says the run has moved on when the followed operation does', async () => {
+    failsLater({ type: 'https://scadbuddy.dev/problems/stale-entry', status: 409, detail: 'Another execution.' })
+    const { user } = draw()
+    await answer(user, 'jo@example.com')
+    expect(await screen.findByRole('alert')).toHaveTextContent('This request is out of date. The run has moved on.')
+    expect(email()).toHaveValue('jo@example.com')
   })
 
   it('says why when the followed operation fails another way', async () => {
@@ -410,5 +634,59 @@ describe('PendingCard, a prompt (#7364)', () => {
     draw()
     await waitFor(() => expect(read).toHaveBeenCalled())
     expect(email()).toBeInTheDocument()
+  })
+})
+
+// Spec §6.6: a person answers a flow's question, never the assistant through the person's tab.
+describe('PendingCard and the assistant', () => {
+  async function refused(tool: string, args: unknown) {
+    await waitFor(() => expect(bridge.liveNames()).toContain('click'))
+    const outcome = await bridge.call(tool, args)
+    expect(!outcome.ok && outcome.error.code).toBe('refused')
+  }
+
+  it('may not fill or send a prompt’s form, or read its draft', async () => {
+    const { user } = draw()
+    await user.type(email(), 'draft@example.com')
+    await refused('fill', { label: 'Email *email', value: 'agent@example.com' })
+    await refused('fill', { label: 'Languagelanguage', value: 'French' })
+    await refused('click', { role: 'button', name: 'Answer' })
+    await refused('click', { role: 'checkbox', name: 'Also send a text messagealso_sms' })
+    // Settings' own tool does not reach a run's page.
+    expect((await bridge.call('set_field', { field: 'bambuddy_url', value: 'x' })).ok).toBe(false)
+    expect(email()).toHaveValue('draft@example.com')
+    expect(taskAnswers()).toEqual([])
+    const snapshot = bridge.snapshot()
+    expect(JSON.stringify(snapshot)).not.toContain('draft@example.com')
+    expect(snapshot.elements).toContainEqual(expect.objectContaining({ name: 'Answer', userOnly: true }))
+  })
+
+  it('may not pick from a prompt’s open list', async () => {
+    const { user } = draw()
+    const language = screen.getByRole('combobox', { name: /Language/ })
+    await user.click(language)
+    await screen.findByRole('option', { name: 'French' })
+    await refused('click', { role: 'option', name: 'French' })
+    await user.click(screen.getByRole('option', { name: 'French' }))
+    expect(language).toHaveTextContent('French')
+  })
+
+  it('may not fill or send a text answer, or read its draft; the person may', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post('/api/v1/workflow-runs/:id/answer', async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({})
+      }),
+    )
+    const { user } = draw(null)
+    const box = screen.getByRole('textbox', { name: 'Your answer' })
+    await user.type(box, 'my draft')
+    await refused('fill', { label: 'Your answer', value: 'agent' })
+    await refused('click', { role: 'button', name: 'Answer' })
+    expect(box).toHaveValue('my draft')
+    expect(JSON.stringify(bridge.snapshot())).not.toContain('my draft')
+    fireEvent.submit(box.closest('form')!)
+    await waitFor(() => expect(sent).toEqual([expect.objectContaining({ answer: 'my draft' })]))
   })
 })

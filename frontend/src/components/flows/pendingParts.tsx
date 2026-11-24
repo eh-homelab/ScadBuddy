@@ -11,6 +11,8 @@ export const WAITING = 'mb-3 ring-destructive/40'
 export interface CardProps {
   entry: FlowPending
   runId: string
+  /** The run's execution now (`workflow_run_id`), which a Reset changes; null when not known. */
+  execution: string | null
   step: FlowQueueStep | null
   respond: (send: () => Promise<unknown>) => Promise<void>
 }

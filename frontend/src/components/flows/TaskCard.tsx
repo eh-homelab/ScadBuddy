@@ -1,7 +1,9 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState, type FocusEvent, type RefObject } from 'react'
+import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError, mayHaveRun, newRequestId } from '../../api/client'
 import type { AnswerProblem, TaskQuestion } from '../../api/types'
 import { Card, CardContent } from '@/components/ui/card'
+import { cn } from '@/lib/utils'
 import {
   hopUntilText,
   isStaleEntry,
@@ -13,6 +15,7 @@ import {
 } from '../../lib/flows'
 import { toast } from '../../lib/toast'
 import { useAsync } from '../../lib/useAsync'
+import { useLatest } from '../../lib/useLatest'
 import { usePassed } from '../../lib/usePassed'
 import { INSET, StepLine, WAITING, type CardProps } from './pendingParts'
 import { SchemaForm } from './SchemaForm'
@@ -23,54 +26,81 @@ const STATE_TEXT: Record<Exclude<TaskQuestion['state'], 'open'>, string> = {
   cancelled: 'Cancelled',
 }
 
-/** Why the form is closed on a task the page may still list as open. */
-type Closed = { by: 'sent' | 'elsewhere'; left: boolean }
+const ELSEWHERE = 'This question was answered elsewhere.'
 
-function closedText(state: TaskQuestion['state'], closed: Closed | null): string | null {
-  if (closed?.by === 'elsewhere' && (state === 'open' || state === 'answered')) return 'This question was answered elsewhere.'
+/** Why the form is closed on a task the page may still list as open, and the task's `updated_at` then. */
+type Closed = { by: 'sent' | 'elsewhere'; at: string }
+
+function closedText({ state, updated_at }: TaskQuestion, closed: Closed | null): string | null {
+  // An open row newer than the one closed here was opened again.
+  const by = closed && !(state === 'open' && Date.parse(updated_at) > Date.parse(closed.at)) ? closed.by : null
+  if (by === 'elsewhere' && (state === 'open' || state === 'answered')) return ELSEWHERE
   if (state !== 'open') return STATE_TEXT[state]
-  return closed ? STATE_TEXT.answered : null
+  return by && STATE_TEXT.answered
 }
 
 /**
  * #7364 — a run's prompt: the question, what the flow gave with it, and the form of its
  * schema. The flow's script wrote all of it, so it is shown as text. The page and the
- * card each read the task; the newer read is shown. Once the form is closed here, an older
- * read that says `open` does not draw it again; only a task seen to end and open again does.
+ * card each read the task; the newer read is shown. Once the form is closed here, a read
+ * that says `open` draws it again only when its row is newer.
  */
 export function TaskCard({ entry, task: listed, step, respond }: CardProps & { task: TaskQuestion }) {
   const read = useAsync(() => api.getTask(listed.id), [listed.id], [taskTopic(listed.id)])
   const task: TaskQuestion =
     read.data && Date.parse(read.data.updated_at) >= Date.parse(listed.updated_at) ? read.data : listed
   const [closed, setClosed] = useState<Closed | null>(null)
-  if (closed && !closed.left && task.state !== 'open') setClosed({ ...closed, left: true })
-  if (closed?.left && task.state === 'open') setClosed(null)
-  const said = closedText(task.state, closed)
-  const heading = said === null ? waitingText({ ...entry, prompt: task.title }) : task.title
+  // An answer closes the task as it is then, not as it was when the answer was sent.
+  const at = useLatest(task.updated_at)
+  const said = closedText(task, closed)
+  const open = said === null
+  const card = useRef<HTMLDivElement>(null)
+  const inside = useRef(false)
+
+  // The form takes the focus it holds with it: the card has it then.
+  useEffect(() => {
+    if (!open && inside.current && document.activeElement === document.body) card.current?.focus()
+  }, [open])
+
+  function onBlur({ relatedTarget }: FocusEvent) {
+    // With no target the focus goes nowhere: the button it was on is now disabled.
+    if (relatedTarget && !card.current?.contains(relatedTarget)) inside.current = false
+  }
+
+  const heading = open ? waitingText({ ...entry, prompt: task.title }) : task.title
 
   return (
-    <Card size="sm" role="region" aria-label={heading} className={said === null ? WAITING : 'mb-3'}>
+    <Card
+      ref={card}
+      size="sm"
+      role="region"
+      aria-label={heading}
+      tabIndex={-1}
+      onFocus={() => (inside.current = true)}
+      onBlur={onBlur}
+      className={cn('outline-none focus-visible:ring-3 focus-visible:ring-ring/50', open ? WAITING : 'mb-3')}
+    >
       <CardContent>
         <p className="mb-2 text-[13px] font-medium break-words">{heading}</p>
         {step && <StepLine step={step} />}
         {entry.summary && <p className="mb-2 text-[12.5px]">{entry.summary}</p>}
         <Context items={task.context} />
-        {said === null ? (
+        {open && (
           <>
             {task.expires_at && <Limit at={task.expires_at} />}
             <AnswerForm
               task={task}
               respond={respond}
-              onClosed={(by) => setClosed({ by, left: false })}
+              card={card}
+              onClosed={(by) => setClosed({ by, at: at.current })}
               onSettled={() => read.refresh()}
             />
           </>
-        ) : (
-          // A sent answer is told by its toast, which outlives the card.
-          <p role={closed?.by === 'sent' ? undefined : 'status'} className="text-[12.5px] text-muted-foreground">
-            {said}
-          </p>
         )}
+        {/* Always here: a status is announced when its text changes. */}
+        <p role="status" className="text-[12.5px] text-muted-foreground">
+          {said}
+        </p>
       </CardContent>
     </Card>
   )
@@ -79,17 +109,20 @@ export function TaskCard({ entry, task: listed, step, respond }: CardProps & { t
 function AnswerForm({
   task,
   respond,
+  card,
   onClosed,
   onSettled,
 }: {
   task: TaskQuestion
   respond: CardProps['respond']
+  card: RefObject<HTMLElement | null>
   onClosed: (by: Closed['by']) => void
   onSettled: () => void
 }) {
   const [busy, setBusy] = useState(false)
   const [problems, setProblems] = useState<AnswerProblem[]>()
   const [error, setError] = useState<string>()
+  const form = useRef<HTMLDivElement>(null)
   /** The last answer that may have landed, and its key: the same answer follows it. */
   const unsure = useRef<{ body: string; key: string } | null>(null)
 
@@ -109,10 +142,13 @@ function AnswerForm({
       } catch (caught) {
         unsure.current = mayHaveRun(caught) ? { body, key } : null
         const type = caught instanceof ApiError ? caught.problem.type : undefined
-        if (type === TASK_NOT_OPEN) onClosed('elsewhere')
+        const ended = type === TASK_NOT_OPEN
+        const why = ended ? ELSEWHERE : refusalOf(caught)
+        if (ended) onClosed('elsewhere')
         else if (type === TASK_INVALID_ANSWER) setProblems(problemsOf(caught as ApiError))
-        else if (isStaleEntry(caught)) setError(STALE_ENTRY_MESSAGE)
-        else setError(caught instanceof ApiError ? caught.detail : String(caught))
+        else setError(why)
+        // What would show it has gone.
+        if (!(ended ? card : form).current) toast({ title: why, detail: task.title })
       }
     })
     setBusy(false)
@@ -120,17 +156,25 @@ function AnswerForm({
   }
 
   return (
-    <SchemaForm
-      answer
-      schema={task.schema}
-      submitLabel="Answer"
-      busyLabel="Sending…"
-      busy={busy}
-      problems={problems}
-      error={error}
-      onSubmit={(answer) => void send(answer)}
-    />
+    // A person's answer: the assistant may neither write, send nor read it (spec §6.6).
+    <div ref={form} {...USER_ONLY}>
+      <SchemaForm
+        answer
+        schema={task.schema}
+        submitLabel="Answer"
+        busyLabel="Sending…"
+        busy={busy}
+        problems={problems}
+        error={error}
+        onSubmit={(answer) => void send(answer)}
+      />
+    </div>
   )
+}
+
+function refusalOf(caught: unknown): string {
+  if (isStaleEntry(caught)) return STALE_ENTRY_MESSAGE
+  return caught instanceof ApiError ? caught.detail : String(caught)
 }
 
 /** A 422's problems; its detail when it names none, so that the refusal is always said. */
@@ -162,13 +206,19 @@ function Context({ items }: { items: TaskQuestion['context'] }) {
   const shown = items.filter((item) => Object.keys(item).length > 0)
   if (shown.length === 0) return null
   return (
-    <div role="group" aria-label="Context" className={`mb-3 flex flex-col gap-2 ${INSET}`}>
+    <div
+      role="group"
+      aria-label="Context"
+      // It scrolls, so the keyboard must reach it.
+      tabIndex={0}
+      className={`mb-3 flex max-h-64 flex-col gap-2 overflow-y-auto outline-none focus-visible:ring-3 focus-visible:ring-ring/50 ${INSET}`}
+    >
       {shown.map((item, i) => (
         <dl key={i} className="grid grid-cols-[fit-content(40%)_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-[12.5px] not-first:border-t not-first:pt-2">
           {Object.entries(item).map(([name, value]) => (
             <div key={name} className="contents">
-              <dt className="break-words text-muted-foreground">{name}</dt>
-              <dd className="break-words whitespace-pre-wrap">
+              <dt className="min-w-0 wrap-anywhere text-muted-foreground">{name}</dt>
+              <dd className="min-w-0 wrap-anywhere whitespace-pre-wrap">
                 {contextText(value)}
               </dd>
             </div>

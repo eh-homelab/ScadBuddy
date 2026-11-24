@@ -14,6 +14,7 @@ import {
   childEntries,
   setFlowRunChildren,
   setFlowDetails,
+  setFlowRuns,
   setFlowPendingSummary,
 } from '../mocks/features/flows'
 import { taskAnswers } from '../mocks/features/tasks'
@@ -24,7 +25,7 @@ import { choose } from '../test/select'
 import { WorkflowRunPage } from './WorkflowRunPage'
 import { ATTENTION_POLL_MS } from '../agent/attention'
 import { fakePendingChanges } from '../lib/pendingChanges.fake'
-import { STALE_ENTRY_MESSAGE } from '../lib/flows'
+import { STALE_ENTRY_MESSAGE, TASK_NOT_OPEN } from '../lib/flows'
 
 // #1057 — one flow run (plan 2026-10-09 Task F1): its steps, and its answers and
 // approvals, sent through `command()` with an Idempotency-Key.
@@ -133,6 +134,31 @@ describe('WorkflowRunPage', () => {
       { answer: { email: 'jo@example.com', language: 'English', also_sms: false } },
     ])
     expect(screen.queryByRole('button', { name: 'Answer' })).toBeNull()
+  })
+
+  it('asks a closed prompt again once the run is at another execution (#7364)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const realtime = fakeRealtime()
+      server.use(
+        http.post('/api/v1/tasks/:id/answer', () =>
+          HttpResponse.json(
+            { type: TASK_NOT_OPEN, title: 'Conflict', status: 409, detail: 'no', state: 'open' },
+            { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const { user } = render('run-prompt')
+      await user.type(await screen.findByLabelText(/^Email/), 'jo@example.com')
+      await user.click(screen.getByRole('button', { name: 'Answer' }))
+      expect(await screen.findByText('This question was answered elsewhere.')).toBeInTheDocument()
+      const [run] = (await api.listFlowRuns()).filter((r) => r.id === 'run-prompt')
+      setFlowRuns([{ ...run!, workflow_run_id: 'wr-reset' }])
+      await realtime.signal('workflow-run:run-prompt')
+      expect(await screen.findByLabelText(/^Email/, {}, { timeout: 3000 })).toHaveValue('')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("keeps a prompt's draft when the run is read again (#7364)", async () => {

@@ -1,26 +1,10 @@
-import { useEffect, useRef, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useId, useRef, type FormEvent, type ReactNode } from 'react'
 import type { AnswerProblem } from '../../api/types'
-import { inputFields, noErrors, undrawnFields } from '../../lib/flowInputs'
+import { inputFields, undrawnFields } from '../../lib/flowInputs'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { Spinner } from '../ui/spinner'
 import { useInputs } from './inputsForm'
-
-/** Each problem by the field it is shown under, and the rest, which are shown above the button. */
-function placed(names: ReadonlySet<string>, problems: readonly AnswerProblem[]) {
-  const fields = noErrors()
-  const rest: string[] = []
-  for (const { field, message } of problems) {
-    const [name = '', item] = field.split('/')
-    if (!names.has(name)) {
-      rest.push(field ? `${field}: ${message}` : message)
-      continue
-    }
-    const said = item === undefined ? message : `Item ${Number(item) + 1}: ${message}`
-    fields[name] = fields[name] ? `${fields[name]}; ${said}` : said
-  }
-  return { fields, rest }
-}
 
 /** Why the server refused the form. */
 export function FormError({ error }: { error?: string }) {
@@ -44,7 +28,7 @@ export function SchemaForm({
   problems,
   error,
   answer = false,
-  actions = (submit) => <div>{submit}</div>,
+  actions,
   onSubmit,
 }: {
   schema: unknown
@@ -54,14 +38,14 @@ export function SchemaForm({
   problems?: readonly AnswerProblem[]
   error?: string
   answer?: boolean
-  /** Where the submit button goes. */
+  /** Puts the submit button elsewhere, after the form: a dialog's footer. */
   actions?: (submit: ReactNode) => ReactNode
   onSubmit: (values: Record<string, unknown>) => void
 }) {
+  const id = useId()
   const form = useRef<HTMLFormElement>(null)
   const fields = inputFields(schema)
-  const said = placed(new Set(fields.map((field) => field.name)), problems ?? [])
-  const { parse, rendered, errors } = useInputs(fields, { answer, problems: said.fields })
+  const { parse, rendered, errors, rest } = useInputs(fields, { answer, problems })
   const undrawn = answer ? undrawnFields(schema) : []
 
   // An answer that does not fit moves to its first bad field, whoever found it.
@@ -78,22 +62,26 @@ export function SchemaForm({
     if (values) onSubmit(values)
   }
 
+  const button = (
+    <Button type="submit" form={id} size={answer ? 'sm' : 'default'} disabled={busy} aria-busy={busy}>
+      {busy && <Spinner />}
+      {busy ? busyLabel : submitLabel}
+    </Button>
+  )
   return (
-    <form ref={form} noValidate onSubmit={submit} className={cn('flex flex-col gap-4', answer && 'max-w-lg')}>
-      {rendered}
-      {undrawn.map((label, i) => (
-        <div key={i} className="flex flex-col gap-1.5 text-sm">
-          <p className="leading-none font-medium break-words">{label}</p>
-          <p className="text-[12px] text-muted-foreground">This field cannot be answered here.</p>
-        </div>
-      ))}
-      <FormError error={[...said.rest, ...(error ? [error] : [])].join('\n')} />
-      {actions(
-        <Button type="submit" size={answer ? 'sm' : 'default'} disabled={busy} aria-busy={busy}>
-          {busy && <Spinner />}
-          {busy ? busyLabel : submitLabel}
-        </Button>,
-      )}
-    </form>
+    <>
+      <form ref={form} id={id} noValidate onSubmit={submit} className={cn('flex flex-col gap-4', answer && 'max-w-lg')}>
+        {rendered}
+        {undrawn.map((label, i) => (
+          <div key={i} className="flex flex-col gap-1.5 text-sm">
+            <p className="leading-none font-medium break-words">{label}</p>
+            <p className="text-[12px] text-muted-foreground">This field cannot be answered here.</p>
+          </div>
+        ))}
+        <FormError error={[...rest, ...(error ? [error] : [])].join('\n')} />
+        {!actions && <div>{button}</div>}
+      </form>
+      {actions?.(button)}
+    </>
   )
 }

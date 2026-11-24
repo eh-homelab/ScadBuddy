@@ -173,7 +173,7 @@ function InputsDialog({
           onSubmit={onStart}
           actions={(start) => (
             <DialogFooter>
-              <Button variant="ghost" onClick={onClose} disabled={busy}>
+              <Button type="button" variant="ghost" onClick={onClose} disabled={busy}>
                 Cancel
               </Button>
               {start}

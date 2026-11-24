@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { initialValues, inputFields, parseSchemaText, toInputs, undrawnFields } from './flowInputs'
+import { defaultText, initialValues, inputFields, parseSchemaText, toInputs, undrawnFields } from './flowInputs'
 
 const SCHEMA = {
   type: 'object',
@@ -166,6 +166,40 @@ describe("a prompt's answer (#7364)", () => {
     expect(initialValues(prop({ ...at, enum: ['2026-07-01T13:30:00Z'], default: '2026-07-01T13:30:00Z' }))).toEqual({
       x: '2026-07-01T13:30:00Z',
     })
+  })
+
+  it('says a year of five digits is the problem, before anything is sent', () => {
+    expect(toInputs(prop(at), { x: '12026-07-01T09:30' }).errors).toEqual({ x: 'The year must have four digits' })
+    const day = prop({ type: 'string', format: 'date' })
+    expect(toInputs(day, { x: '12026-07-01' })).toEqual({ inputs: {}, errors: { x: 'The year must have four digits' } })
+    expect(toInputs(day, { x: '2026-07-01' }).inputs).toEqual({ x: '2026-07-01' })
+    // Plain text is not a date.
+    expect(toInputs(prop({ type: 'string' }), { x: '12026-07-01' }).inputs).toEqual({ x: '12026-07-01' })
+  })
+
+  it('says what a field the browser could not read must hold', () => {
+    const fields = inputFields({
+      type: 'object',
+      properties: { size: { type: 'number' }, copies: { type: 'integer' }, at },
+      required: ['copies'],
+    })
+    const blank = { size: '', copies: '', at: '' }
+    expect(toInputs(fields, blank, { answer: true, unread: ['size', 'copies', 'at'] }).errors).toEqual({
+      size: 'A number',
+      copies: 'A whole number',
+      at: 'This is not complete',
+    })
+  })
+
+  it('reads a default as a person does: a date-time in local time', () => {
+    process.env.TZ = 'America/New_York'
+    const text = (schema: Record<string, unknown>) => defaultText(prop(schema)[0]!)
+    expect(text({ ...at, default: '2026-07-01t13:30:00z' })).toBe(new Date(2026, 6, 1, 9, 30).toLocaleString())
+    expect(text({ ...at, default: 'soon' })).toBe('soon')
+    expect(text({ ...at, enum: ['2026-07-01T13:30:00Z'], default: '2026-07-01T13:30:00Z' })).toBe('2026-07-01T13:30:00Z')
+    expect(text({ type: 'array', items: { type: 'string' }, default: ['a', 'b'] })).toBe('a, b')
+    expect(text({ type: 'integer', default: 2 })).toBe('2')
+    expect(text({ type: 'string' })).toBe('')
   })
 
   it('leaves out an optional field left empty, and never takes a default for a required one', () => {

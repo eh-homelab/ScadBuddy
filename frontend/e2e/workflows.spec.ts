@@ -36,6 +36,43 @@ test.describe('workflows (#1057)', () => {
     await expect(page.getByTestId('flow-run-status')).toHaveText('Running')
     await expect(email).toHaveCount(0)
   })
+
+  test('Enter in a text input sends the answer', async ({ page }) => {
+    await page.goto('/workflows/runs/run-prompt')
+    const email = page.getByRole('textbox', { name: /^Email/ })
+    await email.fill('jo@example.com')
+    await email.press('Enter')
+    await expect(page.getByTestId('flow-run-status')).toHaveText('Running')
+    await expect(email).toHaveCount(0)
+  })
+
+  test('Enter in a text input starts the run', async ({ page }) => {
+    await page.goto('/workflows/flows/def-coasters')
+    await page.getByRole('button', { name: 'Start run' }).click()
+    const template = page.getByRole('dialog', { name: 'Start coasters' }).getByRole('textbox', { name: /^Template/ })
+    await template.fill('coaster')
+    await template.press('Enter')
+    await expect(page).toHaveURL(/\/workflows\/runs\/run-new-1$/)
+  })
+
+  test('a phone shows every value of a long context, which scrolls in its own box', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/workflows/runs/run-prompt')
+    const context = page.getByRole('group', { name: 'Context' })
+    const value = context.getByText('Ring the side bell')
+    await value.scrollIntoViewIfNeeded()
+    const box = (await value.boundingBox())!
+    // Its column has room for the text, inside the screen.
+    expect(box.width).toBeGreaterThan(120)
+    expect(box.x + box.width).toBeLessThanOrEqual(390)
+    expect(await page.evaluate<number>('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
+    expect((await context.boundingBox())!.height).toBeLessThanOrEqual(260)
+    await context.evaluate((node) => (node.scrollTop = 0))
+    await context.focus()
+    await expect(context).toBeFocused()
+    await page.keyboard.press('End')
+    await expect.poll(() => context.evaluate((node) => node.scrollTop)).toBeGreaterThan(0)
+  })
 })
 
 // #2350 — the Flows tab, a flow's script and Start run, a run's reset preview, and

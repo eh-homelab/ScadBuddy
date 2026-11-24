@@ -102,6 +102,23 @@ function withOffset(text: string): string | null {
 }
 
 const isDateTime = (field: InputField) => field.format === 'date-time' && !field.enum
+const isDated = (field: InputField) => isDateTime(field) || (field.format === 'date' && !field.enum)
+
+/** A field's default as a person reads it: a date-time in local time. */
+export function defaultText(field: InputField): string {
+  const { default: value } = field
+  if (value === undefined || value === null) return ''
+  if (isDateTime(field)) {
+    const at = new Date(String(value).toUpperCase())
+    if (!Number.isNaN(at.getTime())) return at.toLocaleString()
+  }
+  return Array.isArray(value) ? value.join(', ') : String(value)
+}
+
+/** An array's items as typed, one per line, with the line of each: a blank line is no item. */
+export function itemLines(text: string): { line: number; text: string }[] {
+  return text.split('\n').flatMap((item, i) => (item.trim() === '' ? [] : [{ line: i + 1, text: item }]))
+}
 
 /** The form at each input's default: an array one item per line. */
 export function initialValues(fields: InputField[]): InputValues {
@@ -116,7 +133,12 @@ export function initialValues(fields: InputField[]): InputValues {
   )
 }
 
-function scalar(type: InputScalar, text: string): { value?: unknown; error?: string } {
+interface Parsed {
+  value?: unknown
+  error?: string
+}
+
+function scalar(type: InputScalar, text: string): Parsed {
   if (type === 'integer') {
     const value = Number(text)
     return text.trim() !== '' && Number.isInteger(value) ? { value } : { error: 'a whole number' }
@@ -145,11 +167,12 @@ const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
  *
  * #7364 — with `answer`, a prompt's: every blank is left out, and a blank required one is
  * an error whatever its default, because a task's answer is checked before its defaults.
+ * `unread` are the fields that only look blank: the browser could not read what they hold.
  */
 export function toInputs(
   fields: InputField[],
   values: InputValues,
-  { answer = false }: { answer?: boolean } = {},
+  { answer = false, unread = [] }: { answer?: boolean; unread?: readonly string[] } = {},
 ): { inputs: Record<string, unknown>; errors: Record<string, string> } {
   const inputs: Record<string, unknown> = {}
   const errors = noErrors()
@@ -160,6 +183,11 @@ export function toInputs(
       continue
     }
     const text = typeof raw === 'string' ? raw : ''
+    if (unread.includes(field.name)) {
+      const number = field.type === 'integer' || field.type === 'number' ? scalar(field.type, '') : ({} as Parsed)
+      errors[field.name] = capital(number.error ?? 'this is not complete')
+      continue
+    }
     if (text.trim() === '') {
       if (answer) {
         if (field.required) errors[field.name] = 'Required'
@@ -171,13 +199,20 @@ export function toInputs(
     }
     if (field.type === 'array') {
       const items: unknown[] = []
-      text.split('\n').forEach((line, i) => {
-        if (line.trim() === '' || errors[field.name]) return
-        const parsed = scalar(field.itemType ?? 'string', field.itemType === 'string' ? line : line.trim())
-        if (parsed.error) errors[field.name] = `Line ${i + 1}: ${parsed.error}`
-        else items.push(parsed.value)
-      })
+      for (const { line, text: item } of itemLines(text)) {
+        const parsed = scalar(field.itemType ?? 'string', field.itemType === 'string' ? item : item.trim())
+        if (parsed.error) {
+          errors[field.name] = `Line ${line}: ${parsed.error}`
+          break
+        }
+        items.push(parsed.value)
+      }
       if (!errors[field.name]) inputs[field.name] = items
+      continue
+    }
+    // A date input takes it, and no server does.
+    if (isDated(field) && /^\d{5}/.test(text)) {
+      errors[field.name] = 'The year must have four digits'
       continue
     }
     if (isDateTime(field)) {

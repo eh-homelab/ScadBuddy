@@ -18,10 +18,14 @@ import { TaskCard } from './TaskCard'
 // A run's parked calls and their decide controls, on the run's page and the order's
 // (#4252, orders spec §7.4): moved here from `pages/WorkflowRunPage.tsx` unchanged.
 
-/** #7364 — a prompt is answered from its task's schema; any other call, as it was. */
+/**
+ * #7364 — a prompt is answered from its task's schema; any other call, as it was. A Reset
+ * asks a prompt again, so each execution of the run has a card, a draft and a key of its own.
+ */
 export function PendingCard(props: CardProps) {
-  const { task } = props.entry
-  return task ? <TaskCard {...props} key={task.id} task={task} /> : <CallCard {...props} />
+  const { entry, execution } = props
+  const { task } = entry
+  return task ? <TaskCard {...props} key={`${execution}:${task.id}`} task={task} /> : <CallCard {...props} />
 }
 
 function CallCard({ entry, runId, step, respond }: CardProps) {
@@ -52,6 +56,8 @@ function CallCard({ entry, runId, step, respond }: CardProps) {
               void act(() => api.answerFlowRun(runId, entry.call_id, text))
             }}
             className="flex flex-col gap-2"
+            // A person's answer: the assistant may neither write, send nor read it (#7364).
+            {...USER_ONLY}
           >
             <Textarea aria-label="Your answer" value={text} onChange={(e) => setText(e.target.value)} rows={2} />
             <div>

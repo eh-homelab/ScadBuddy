@@ -120,6 +120,41 @@ describe('SchemaForm (#7364)', () => {
     expect(onSubmit).not.toHaveBeenCalled()
   })
 
+  it('says a number it could not read must be a number', async () => {
+    const { user, onSubmit } = draw({ size: { type: 'number' }, copies: { type: 'integer' } }, { required: ['copies'] })
+    for (const name of ['size', 'copies']) {
+      Object.defineProperty(screen.getByRole('spinbutton', { name: new RegExp(name) }), 'validity', { value: { badInput: true } })
+    }
+    await user.click(press())
+    expect(screen.getByRole('spinbutton', { name: /size/ })).toHaveAccessibleDescription('A number')
+    expect(screen.getByRole('spinbutton', { name: /copies/ })).toHaveAccessibleDescription('A whole number')
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('names the line the person typed, not the item sent, and keeps it through an edit', async () => {
+    const { user, again, onSubmit } = draw({ tags: { type: 'array', items: { type: 'string', format: 'email' } } })
+    const tags = screen.getByRole('textbox', { name: /tags/ })
+    await user.type(tags, 'a{Enter}{Enter}b{Enter}c')
+    await user.click(press())
+    expect(onSubmit).toHaveBeenLastCalledWith({ tags: ['a', 'b', 'c'] })
+    again([{ field: 'tags/1', message: 'not a valid email' }])
+    expect(tags).toHaveAccessibleDescription('One per line. Line 3: not a valid email')
+    await user.clear(tags)
+    expect(tags).toHaveAccessibleDescription('One per line. Line 3: not a valid email')
+  })
+
+  it('says what an emptied date-time becomes in local time', async () => {
+    const { user } = draw({ at: { type: 'string', format: 'date-time', default: '2026-12-01T17:30:00Z' } })
+    const at = screen.getByLabelText('at')
+    await user.clear(at)
+    expect(at).toHaveAccessibleDescription(`Left empty, this is ${new Date('2026-12-01T17:30:00Z').toLocaleString()}.`)
+  })
+
+  it('wraps a long field title', () => {
+    draw({ a: { type: 'string', title: 'x'.repeat(300) }, b: { type: 'boolean', title: 'y'.repeat(300) } })
+    for (const label of [screen.getByText(/^x+/), screen.getByText(/^y+/)]) expect(label).toHaveClass('min-w-0', 'break-words')
+  })
+
   it('keeps what was typed when problems come back, and moves to the first bad field', async () => {
     const { user, again } = draw({
       note: { type: 'string' },
@@ -138,7 +173,7 @@ describe('SchemaForm (#7364)', () => {
     expect(email).toHaveValue('jo')
     expect(email).toHaveFocus()
     expect(email).toHaveAccessibleDescription('not a valid email; is shorter than 6 characters')
-    expect(screen.getByRole('textbox', { name: /tags/ })).toHaveAccessibleDescription('One per line. Item 2: not a valid email')
+    expect(screen.getByRole('textbox', { name: /tags/ })).toHaveAccessibleDescription('One per line. Line 2: not a valid email')
     // A name the form does not draw has no place of its own.
     expect(screen.getByRole('alert')).toHaveTextContent('gone: is odd')
   })

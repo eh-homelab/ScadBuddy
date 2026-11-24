@@ -96,7 +96,15 @@ function OrderRun({ run, onChanged }: { run: FlowRun; onChanged: () => void }) {
         </p>
       )}
       {view.data?.pending.map((entry) => (
-        <PendingCard key={entry.call_id} entry={entry} runId={run.id} step={null} respond={respond} />
+        <PendingCard
+          key={entry.call_id}
+          entry={entry}
+          runId={run.id}
+          // As this read has it: the list may be an older one.
+          execution={view.data?.run?.workflow_run_id ?? null}
+          step={null}
+          respond={respond}
+        />
       ))}
     </li>
   )
