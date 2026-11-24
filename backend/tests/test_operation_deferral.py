@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from datetime import timedelta
 
 import pytest
 from temporalio import activity
@@ -20,6 +21,7 @@ from temporalio.worker import WorkflowInterceptorClassInput
 from scadbuddy.operations.store import Operation
 from scadbuddy.workflows import client as temporal
 from scadbuddy.workflows.commands import (
+    SHORT_TASK_TIMEOUT,
     AlreadyClosedError,
     CommandStillAcceptingError,
     start_command,
@@ -73,12 +75,17 @@ def test_a_worker_with_a_dynamic_activity_defers_nothing() -> None:
 
 
 async def _send_until_answered(
-    client: Client, queue: str, arg: OperationInput, still: list[float]
+    client: Client,
+    queue: str,
+    arg: OperationInput,
+    still: list[float],
+    task_timeout: timedelta | None = None,
 ) -> Operation:
     """As the browser's ``command()`` and ``run_operation`` do: the same request, sent
     again after each still-accepting answer (the route's 202 or 503), whose times
     ``still`` collects; once the execution has closed, the route answers from its record
-    (here, the execution's result). Anything else, a refusal included, is raised."""
+    (here, the execution's result). Anything else, a refusal included, is raised.
+    ``task_timeout`` is the start's workflow task timeout (None: Temporal's 10 s)."""
     loop = asyncio.get_running_loop()
     workflow_id = f"op-{arg.kind}-{arg.key}"
     while True:
@@ -92,6 +99,7 @@ async def _send_until_answered(
                 update="accepted",
                 result_type=OperationAnswer,
                 reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+                task_timeout=task_timeout,
             )
         except AlreadyClosedError:
             closed: Operation = await client.get_workflow_handle(
@@ -166,6 +174,59 @@ async def test_a_new_kind_waits_for_the_build_that_has_it(
     assert done.status == "succeeded"
     assert old_fake.calls == []
     assert new_fake.calls == ["check", "insert", "run", "finish:ok"]
+
+
+@pytest.mark.requires_temporal
+async def test_a_deployed_operation_retries_its_deferred_task_at_the_short_timeout(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deferral's spacing as deployed (#7288): `run_operation` starts an `Operation`
+    with `SHORT_TASK_TIMEOUT` (3 s), and the SDK lets a repeated failure time out, so the
+    deferred task is tried again after each 3 s timeout, not each 10 s one. Measured on
+    the dev server (Temporal CLI 1.10.1, server 1.32.2), attempts began at 0, 0.25, 3.1,
+    6.1, 14.0, 26.0 and 46.6 s: from the fifth the server adds a growing backoff to the
+    timeout. At the 10 s default they began at 0, 0.25, 10.2, 20.1, 34.7 and 53.6 s. The
+    bound is loose: a slow runner only spaces the tries further apart."""
+    name = f"scadbuddy-print-test-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(temporal, "PRINT_DEPLOYMENT_NAME", name)
+    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
+    old_fake = Fake()
+    old = temporal.bambuddy_worker(
+        client, queue, [old_fake.insert, old_fake.finish], build_id="old"
+    )
+    arg = op_input()
+    workflow_id = f"op-{arg.kind}-{arg.key}"
+    try:
+        async with old:
+            await _make(client, name, "old")
+            assert await wait_until_build_serves(
+                client, queue, "old", timeout=30, poll=0.05, max_poll=0.5, deployment_name=name
+            )
+            answering = asyncio.create_task(
+                _send_until_answered(client, queue, arg, [], task_timeout=SHORT_TASK_TIMEOUT)
+            )
+            loop = asyncio.get_running_loop()
+            began = loop.time()
+            await asyncio.sleep(OLD_BUILD_HOLD)
+            described = await client.get_workflow_handle(workflow_id).describe()
+            held = loop.time() - began
+            raw = described.raw_description
+            assert raw.execution_config.default_workflow_task_timeout.ToTimedelta() == (
+                SHORT_TASK_TIMEOUT
+            )
+            attempt = raw.pending_workflow_task.attempt
+            print(f"deferred workflow task at 3 s: attempt {attempt} after {held:.1f}s")
+            # The 10 s default cannot reach attempt 5 in under 30 s (three timeouts after
+            # the first retry); at 3 s it reached it after 14 s. Still backed off: not a
+            # tight loop.
+            assert 5 <= attempt <= held / 1.5 + 2
+            assert not answering.done()
+            answering.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await answering
+    finally:
+        await terminate_open_workflows(client, queue)
+    assert old_fake.calls == []
 
 
 @activity.defn(name="op.probe.check")
