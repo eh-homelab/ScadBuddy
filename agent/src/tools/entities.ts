@@ -291,7 +291,8 @@ export const entityTools = [
     description:
       "A kind's property schema: a JSON Schema (Draft 2020-12) object whose `properties` document and type the keys the " +
       'kind knows (their titles and help), and `keys_in_use`, each key its entities have with a count. The schema never ' +
-      'refuses a key it does not know.',
+      "refuses a key it does not know. An item's schema is its item kind's `attribute_schema`, not a schema of the kind " +
+      '`item` (409 `schema_owned_by_item_kind`).',
     input: z.object({ kind: propertyKind }),
     risk: 'read',
     routes: ['GET /api/v1/entity-kinds/{kind}/property-schema'],

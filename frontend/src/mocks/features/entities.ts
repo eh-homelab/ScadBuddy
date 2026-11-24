@@ -61,6 +61,13 @@ export function reset(): void {
 
 const coded = (request: Request, status: number, code: string, detail: string) => problem(request, status, detail, PROBLEMS + code, { code })
 
+/** The entity kind whose schema is its item kind's `attribute_schema` (#7067). */
+const ITEM = 'item'
+
+function schemaOwnedByItemKind(request: Request) {
+  return coded(request, 409, 'schema_owned_by_item_kind', "an item's properties follow its item kind's attribute_schema, so set the schema on the kind")
+}
+
 function useOrderRoute(request: Request, kind: string) {
   return coded(request, 409, 'use_order_route', `an order's files are changed on its own routes (\`/orders/{order_id}/…/attachments\`), where the order's rules apply; '${kind}' is one of them`)
 }
@@ -385,11 +392,13 @@ export const handlers = [
   http.get('/api/v1/entity-kinds/:kind/property-schema', ({ request, params }) => {
     const kind = String(params.kind)
     if (kind === PRINT_ARCHIVE) return noProperties(request, kind)
+    if (kind === ITEM) return schemaOwnedByItemKind(request)
     return HttpResponse.json({ kind, schema: entityMock.schemas[kind] ?? { type: 'object' }, keys_in_use: keysInUse(kind) })
   }),
   http.put('/api/v1/entity-kinds/:kind/property-schema', async ({ request, params }) => {
     const kind = String(params.kind)
     if (kind === PRINT_ARCHIVE) return noProperties(request, kind)
+    if (kind === ITEM) return schemaOwnedByItemKind(request)
     const body = (await request.json()) as { schema?: Record<string, unknown> }
     const schema = body.schema
     const problem = schemaProblem(schema)
