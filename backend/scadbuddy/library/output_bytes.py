@@ -6,6 +6,11 @@ streamed reads, and a temporary file for a reader that needs a path. The keys ar
 `output_rows.output_blob_key` and `output_file_key`; the row and its holds are
 `OutputRows`' to write. The temporary files go under ``content.spool``, the pod's own
 disk, and are removed when the reader is done, error or not.
+
+A sync reader reached from async code (Ruling R6, revised) runs in a thread on the
+temporary file: ``async with blobs.local_file(key, suffix) as path: await
+asyncio.to_thread(reader, path)``. There is no blocking form: a thread that waits for the
+loop's download deadlocks once its callers fill the default executor.
 """
 
 from __future__ import annotations
@@ -15,10 +20,12 @@ import contextlib
 import os
 import re
 import tempfile
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator
-from contextlib import AbstractAsyncContextManager, AbstractContextManager, aclosing
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import AbstractAsyncContextManager, aclosing
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
+from typing import BinaryIO, Self
 
 from scadbuddy.library.output_rows import (
     OutputBlobs,
@@ -29,15 +36,22 @@ from scadbuddy.library.output_rows import (
 from scadbuddy.render.job_models import FILE_NAME_PATTERN
 from scadbuddy.store.content import BlobData, BlobMissingError, BlobRef, BlobScope, ContentStore
 
-#: How long `OutputBytes.blocking_local_file` waits for the download, in seconds.
-BLOCKING_READ_TIMEOUT = 300.0
-
-#: The folder's byte files, as `library/outputs.py` names them. Not imported from there:
-#: `outputs.py` reads through this module.
+#: The folder's byte files. `library/outputs.py` imports them from here.
 MODEL_NAME = "model.3mf"
 PREVIEW_NAME = "preview.glb"
 THUMBNAIL_NAME = "thumbnail.png"
 FILES_DIR = "files"
+
+
+class OutputFileNameError(ValueError):
+    """A ``files/`` entry that is not a regular file or has a name an output may not
+    hold (`FILE_NAME_PATTERN`). ``names`` lists every such entry, sorted."""
+
+    def __init__(self, directory: Path, names: tuple[str, ...]) -> None:
+        super().__init__(
+            f"{directory / FILES_DIR} holds entries an output may not hold: {', '.join(names)}"
+        )
+        self.names = names
 
 
 def usable(content: ContentStore | None) -> bool:
@@ -48,10 +62,33 @@ def usable(content: ContentStore | None) -> bool:
 
 @dataclass
 class OutputStream:
+    """A blob's bytes. Whoever takes one closes it (`aclose`, or ``async with``), read
+    or not: an unread ``chunks`` generator never runs its own cleanup, so the backend's
+    read (``_source``) is closed apart."""
+
     size: int
     #: ``None`` when the bytes come from a file, which has no recorded sha256.
     sha256: str | None
-    chunks: AsyncIterator[bytes]
+    chunks: AsyncGenerator[bytes]
+    _source: AsyncGenerator[bytes] | None = field(default=None, repr=False)
+
+    async def aclose(self) -> None:
+        try:
+            await self.chunks.aclose()
+        finally:
+            if self._source is not None:
+                await self._source.aclose()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.aclose()
 
 
 async def _rest(first: bytes, chunks: AsyncGenerator[bytes]) -> AsyncGenerator[bytes]:
@@ -65,28 +102,37 @@ async def _rest(first: bytes, chunks: AsyncGenerator[bytes]) -> AsyncGenerator[b
 
 
 def _put_names(directory: Path) -> list[str]:
-    """The ``files/`` names an output may hold, sorted: a name's index is its key's."""
+    """Every ``files/`` name, sorted: a name's index is its key's. `OutputFileNameError`
+    when an entry is not a regular file or has a name an output may not hold."""
     folder = directory / FILES_DIR
     if not folder.is_dir():
         return []
-    return sorted(
-        path.name
-        for path in folder.iterdir()
-        if path.is_file() and re.fullmatch(FILE_NAME_PATTERN, path.name)
+    names = sorted(path.name for path in folder.iterdir())
+    bad = tuple(
+        name
+        for name in names
+        if (folder / name).is_symlink()
+        or not (folder / name).is_file()
+        or not re.fullmatch(FILE_NAME_PATTERN, name)
     )
+    if bad:
+        raise OutputFileNameError(directory, bad)
+    return names
 
 
 class OutputBytes:
-    def __init__(self, content: ContentStore, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, content: ContentStore) -> None:
         self.content = content
-        #: The loop that runs `blocking_local_file`'s downloads.
-        self._loop = loop
 
     async def put(self, key: str, data: BlobData, *, slug: str) -> BlobRef:
         return await self.content.put("output", data, name=key, scope=BlobScope(slug=slug), key=key)
 
     async def put_if_absent(self, key: str, data: bytes, *, slug: str) -> bool:
-        """Put ``data`` under ``key`` only when no blob has that key. False: one had."""
+        """Put ``data`` under ``key`` only when no blob has that key. False: one had.
+        A key the index names already is answered with no hash or upload; the
+        compare-and-swap stays the guard for a put that races this one."""
+        if await asyncio.to_thread(self.ref, key) is not None:
+            return False
         landed = await self.content.replace(
             key, "output", data, name=key, scope=BlobScope(slug=slug), expected=None
         )
@@ -110,12 +156,14 @@ class OutputBytes:
 
     async def put_folder(self, directory: Path, output_id: str, slug: str) -> OutputBlobs:
         """Put the folder's bytes, a file at a time and never read whole: ``model.3mf``
-        and ``preview.glb`` (`FileNotFoundError` before any put when one is missing),
-        ``thumbnail.png`` when there, and each ``files/`` entry with a file name an
-        output may hold."""
+        and ``preview.glb``, ``thumbnail.png`` when there, and every ``files/`` entry.
+        Before any put: `FileNotFoundError` when ``model.3mf`` or ``preview.glb`` is
+        missing, and `OutputFileNameError` when a ``files/`` entry is not a regular file
+        or has a name an output may not hold."""
         for name in (MODEL_NAME, PREVIEW_NAME):
             if not await asyncio.to_thread((directory / name).is_file):
                 raise FileNotFoundError(directory / name)
+        names = await asyncio.to_thread(_put_names, directory)
         model = output_blob_key(output_id, "model")
         preview = output_blob_key(output_id, "preview")
         await self._put_file(model, directory / MODEL_NAME, slug)
@@ -125,7 +173,7 @@ class OutputBytes:
             thumbnail = output_blob_key(output_id, "thumbnail")
             await self._put_file(thumbnail, directory / THUMBNAIL_NAME, slug)
         files: list[OutputFileBlob] = []
-        for n, name in enumerate(await asyncio.to_thread(_put_names, directory)):
+        for n, name in enumerate(names):
             key = output_file_key(output_id, n)
             ref = await self._put_file(key, directory / FILES_DIR / name, slug)
             files.append(OutputFileBlob(name=name, blob_key=key, size=ref.size))
@@ -144,7 +192,8 @@ class OutputBytes:
 
     async def stream(self, key: str) -> OutputStream:
         """The blob's bytes. The first chunk is read before this returns, so a missing
-        blob raises `BlobMissingError` here, not in the middle of a response."""
+        blob raises `BlobMissingError` here, not in the middle of a response. The caller
+        closes the stream (`OutputStream.aclose`), read or not."""
         ref = await self._ref(key)
         chunks = self.content.get(ref)
         try:
@@ -154,7 +203,9 @@ class OutputBytes:
         except BaseException:
             await chunks.aclose()
             raise
-        return OutputStream(size=ref.size, sha256=ref.sha256, chunks=_rest(first, chunks))
+        return OutputStream(
+            size=ref.size, sha256=ref.sha256, chunks=_rest(first, chunks), _source=chunks
+        )
 
     async def read(self, key: str) -> bytes:
         return await self.content.read(await self._ref(key))
@@ -164,15 +215,15 @@ class OutputBytes:
         ref = await asyncio.to_thread(self.ref, key)
         return ref is not None and await self.content.verify(ref)
 
-    def _temporary(self, suffix: str) -> Path:
-        """A new empty file under the spool. Blocking."""
+    def _temporary(self, suffix: str) -> tuple[BinaryIO, Path]:
+        """A new empty file under the spool, open for writing, and its path. Blocking."""
         self.content.spool.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(suffix=suffix, dir=self.content.spool)
-        os.close(fd)
-        return Path(name)
+        return os.fdopen(fd, "wb"), Path(name)
 
-    async def _download_to(self, ref: BlobRef, path: Path) -> None:
-        file = await asyncio.to_thread(path.open, "wb")
+    async def _download_to(self, ref: BlobRef, file: BinaryIO) -> None:
+        """Write the blob to ``file``, the one `_temporary` opened, and close it. The
+        path is never opened again, so nothing can make it again after its unlink."""
         try:
             async with aclosing(self.content.get(ref)) as chunks:
                 async for chunk in chunks:
@@ -187,42 +238,9 @@ class OutputBytes:
     @contextlib.asynccontextmanager
     async def _local_file(self, key: str, suffix: str) -> AsyncIterator[Path]:
         ref = await self._ref(key)
-        path = await asyncio.to_thread(self._temporary, suffix)
+        file, path = await asyncio.to_thread(self._temporary, suffix)
         try:
-            await self._download_to(ref, path)
-            yield path
-        finally:
-            path.unlink(missing_ok=True)
-
-    def blocking_local_file(self, key: str, suffix: str) -> AbstractContextManager[Path]:
-        """`local_file` for a worker thread (Ruling R6): the download runs on the loop,
-        and the thread waits at most `BLOCKING_READ_TIMEOUT` (then `TimeoutError`). On
-        a thread that runs an event loop it raises `RuntimeError` at once: the wait
-        would block the loop that must run the download."""
-        return self._blocking_local_file(key, suffix)
-
-    @contextlib.contextmanager
-    def _blocking_local_file(self, key: str, suffix: str) -> Iterator[Path]:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            raise RuntimeError(
-                "blocking_local_file runs on an event loop's thread, where it would block"
-                " the loop that must download the blob; use local_file there"
-            )
-        ref = self.ref(key)
-        if ref is None:
-            raise BlobMissingError(key)
-        path = self._temporary(suffix)
-        try:
-            future = asyncio.run_coroutine_threadsafe(self._download_to(ref, path), self._loop)
-            try:
-                future.result(timeout=BLOCKING_READ_TIMEOUT)
-            except TimeoutError:
-                future.cancel()
-                raise
+            await self._download_to(ref, file)
             yield path
         finally:
             path.unlink(missing_ok=True)

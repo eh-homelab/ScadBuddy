@@ -27,6 +27,10 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.libraries import ModelLibrary
+from scadbuddy.library.output_bytes import FILES_DIR as FILES_DIR
+from scadbuddy.library.output_bytes import MODEL_NAME as MODEL_NAME
+from scadbuddy.library.output_bytes import PREVIEW_NAME as PREVIEW_NAME
+from scadbuddy.library.output_bytes import THUMBNAIL_NAME as THUMBNAIL_NAME
 from scadbuddy.library.output_rows import OUTPUT_HOLDER as OUTPUT_HOLDER
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
@@ -57,9 +61,6 @@ logger = logging.getLogger(__name__)
 META_NAME = "meta.json"
 PARAMS_NAME = "params.json"
 INPUTS_NAME = "inputs.json"
-MODEL_NAME = "model.3mf"
-PREVIEW_NAME = "preview.glb"
-THUMBNAIL_NAME = "thumbnail.png"
 #: The cached `render.geometry` analysis of ``model.3mf``, written on first ask.
 GEOMETRY_NAME = "geometry.json"
 #: A pipeline output's bill of materials, what reproduces it (§8.4), and its extra files.
@@ -71,7 +72,6 @@ ARRANGED_NAME = "arranged_from.json"
 #: once attached; kept with an ``error`` when the re-render did not finish.
 BACKFILL_NAME = "backfill.json"
 _ID_LIST = TypeAdapter(list[str])
-FILES_DIR = "files"
 #: How many outputs whose thumbnail draw came to nothing a process remembers (#4775).
 UNDRAWABLE_MAX = 4096
 
@@ -1483,12 +1483,12 @@ def reap_orphan_holds(
 ) -> int:
     """Release every `output` hold (the Parts and byte blobs) older than ``grace`` whose
     output has no meta.json (#1007): a save that failed between holding its Parts and
-    byte blobs and writing meta.json, or a hold taken after a delete's release, leaves
-    holds that nothing else ever drops. Returns how many outputs' holds it released.
-    Each released output's directory, if one is left with no meta.json, goes too
-    (`_remove_orphan_directory`, #1815), as does an output directory with no meta.json
-    and no hold at all, past the same grace (#5448: a save that claimed its id and
-    stopped before it held its Parts).
+    writing meta.json, or a hold taken after a delete's release (a byte copy's or a
+    thumbnail's), leaves holds that nothing else ever drops. Returns how many outputs'
+    holds it released. Each released output's directory, if one is left with no
+    meta.json, goes too (`_remove_orphan_directory`, #1815), as does an output directory
+    with no meta.json and no hold at all, past the same grace (#5448: a save that claimed
+    its id and stopped before it held its Parts).
 
     It never mistakes a missing directory for deleted outputs. An output's hold is
     released only when the reaper knows the output's slug (``output_hold_slugs``) and

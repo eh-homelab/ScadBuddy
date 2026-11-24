@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
+from types import AsyncGeneratorType
+from typing import Any
 
 import pytest
 
-from scadbuddy.library import output_bytes
-from scadbuddy.library.output_bytes import OutputBytes, usable
+from scadbuddy.library.output_bytes import OutputBytes, OutputFileNameError, usable
 from scadbuddy.library.output_rows import OutputFileBlob, output_blob_key, output_file_key
 from scadbuddy.store.content import BlobMissingError, BlobRef, ContentStore
 from scadbuddy.store.index import Pool
@@ -38,7 +40,7 @@ async def content(tmp_path: Path, pool: Pool) -> AsyncGenerator[ContentStore]:
 
 @pytest.fixture
 async def blobs(content: ContentStore) -> OutputBytes:
-    return OutputBytes(content, asyncio.get_running_loop())
+    return OutputBytes(content)
 
 
 def _folder(root: Path, *, preview: bool = True, thumbnail: bool = True) -> Path:
@@ -52,8 +54,6 @@ def _folder(root: Path, *, preview: bool = True, thumbnail: bool = True) -> Path
     files.mkdir()
     (files / "b.stl").write_bytes(b"bb")
     (files / "a.stl").write_bytes(b"a")
-    # Not a file name an output may hold: left out.
-    (files / ".hidden").write_bytes(b"x")
     return root
 
 
@@ -94,9 +94,37 @@ async def test_put_folder_without_preview_raises(
     assert blobs.ref(output_blob_key("o1", "model")) is None
 
 
+async def test_put_folder_refuses_a_name_an_output_may_not_hold(
+    blobs: OutputBytes, tmp_path: Path
+) -> None:
+    root = _folder(tmp_path / "o1")
+    (root / "files" / ".hidden").write_bytes(b"x")
+    (root / "files" / "sub").mkdir()
+    with pytest.raises(OutputFileNameError) as raised:
+        await blobs.put_folder(root, "o1", "cube")
+    assert raised.value.names == (".hidden", "sub")
+    assert ".hidden" in str(raised.value) and "sub" in str(raised.value)
+    # The check comes before any put.
+    assert blobs.ref(output_blob_key("o1", "model")) is None
+
+
 async def test_put_if_absent_keeps_first(blobs: OutputBytes) -> None:
     key = output_blob_key("o1", "thumbnail")
     assert await blobs.put_if_absent(key, b"first", slug="cube") is True
+    assert await blobs.put_if_absent(key, b"second", slug="cube") is False
+    assert await blobs.read(key) == b"first"
+
+
+async def test_put_if_absent_uploads_nothing_when_key_exists(
+    blobs: OutputBytes, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = output_blob_key("o1", "thumbnail")
+    await blobs.put(key, b"first", slug="cube")
+
+    async def no_store(*args: object, **kwargs: object) -> None:
+        raise AssertionError("put_if_absent hashed or uploaded for a key that exists")
+
+    monkeypatch.setattr(content, "_store", no_store)
     assert await blobs.put_if_absent(key, b"second", slug="cube") is False
     assert await blobs.read(key) == b"first"
 
@@ -128,6 +156,21 @@ async def test_stream_raises_missing_before_first_chunk(
         await blobs.stream(output_blob_key("gone", "model"))
 
 
+async def test_stream_aclose_closes_source_unread(blobs: OutputBytes) -> None:
+    key = output_blob_key("o1", "model")
+    await blobs.put(key, b"3mf bytes", slug="cube")
+    stream = await blobs.stream(key)
+    source = stream._source
+    assert isinstance(source, AsyncGeneratorType) and source.ag_frame is not None
+    # A response that never starts its body still closes the backend's read.
+    await stream.aclose()
+    assert source.ag_frame is None
+    async with await blobs.stream(key) as held:
+        inner = held._source
+        assert isinstance(inner, AsyncGeneratorType)
+    assert inner.ag_frame is None
+
+
 async def test_local_file_holds_blob_bytes_then_is_removed(
     blobs: OutputBytes, content: ContentStore
 ) -> None:
@@ -156,48 +199,49 @@ async def test_local_file_removed_after_error(blobs: OutputBytes, content: Conte
     assert _spooled(content) == []
 
 
-async def test_blocking_local_file_from_thread(blobs: OutputBytes, content: ContentStore) -> None:
-    key = output_blob_key("o1", "model")
-    await blobs.put(key, b"3mf bytes", slug="cube")
-
-    def reader() -> tuple[bytes, Path]:
-        with blobs.blocking_local_file(key, ".3mf") as path:
-            return path.read_bytes(), path
-
-    data, path = await asyncio.to_thread(reader)
-    assert data == b"3mf bytes"
-    assert not path.exists()
-    assert _spooled(content) == []
-
-
-async def test_blocking_local_file_refuses_loop_thread(blobs: OutputBytes) -> None:
-    key = output_blob_key("o1", "model")
-    await blobs.put(key, b"3mf bytes", slug="cube")
-    # On the loop's own thread the wait would block the loop that must run the
-    # download: it raises at once and never waits.
-    with pytest.raises(RuntimeError, match="loop"), blobs.blocking_local_file(key, ".3mf"):
-        pass
-
-
-async def test_blocking_local_file_times_out(
+async def test_local_file_cancelled_during_download_leaves_no_file(
     blobs: OutputBytes, content: ContentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     key = output_blob_key("o1", "model")
     await blobs.put(key, b"3mf bytes", slug="cube")
+    reached = threading.Event()
+    gate = threading.Event()
+    opened = threading.Event()
+    reopened: list[Path] = []
+    original_open = Path.open
+
+    def gated_open(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        # A reopen of the temporary path: held until the reader was cancelled.
+        if self.parent == content.spool and "w" in mode:
+            reopened.append(self)
+            reached.set()
+            gate.wait(5)
+            try:
+                return original_open(self, mode, *args, **kwargs)
+            finally:
+                opened.set()
+        return original_open(self, mode, *args, **kwargs)
 
     async def stalling(ref: BlobRef) -> AsyncGenerator[bytes]:
+        reached.set()
         await asyncio.Event().wait()
         yield b""
 
+    monkeypatch.setattr(Path, "open", gated_open)
     monkeypatch.setattr(content, "get", stalling)
-    monkeypatch.setattr(output_bytes, "BLOCKING_READ_TIMEOUT", 0.2)
 
-    def reader() -> None:
-        with blobs.blocking_local_file(key, ".3mf"):
+    async def reader() -> None:
+        async with blobs.local_file(key, ".3mf"):
             pass
 
-    with pytest.raises(TimeoutError):
-        await asyncio.to_thread(reader)
+    task = asyncio.create_task(reader())
+    assert await asyncio.to_thread(reached.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gate.set()
+    if reopened:
+        await asyncio.to_thread(opened.wait, 5)
     assert _spooled(content) == []
 
 
