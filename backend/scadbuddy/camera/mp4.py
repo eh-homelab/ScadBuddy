@@ -12,22 +12,25 @@ from typing import BinaryIO
 SEGMENT_NAME = "%Y-%m-%d_%H-%M-%S-%f"
 
 
-def _box(handle: BinaryIO, offset: int) -> tuple[bytes, int]:
+def _box(handle: BinaryIO, offset: int) -> tuple[bytes, int, int]:
+    """A box's kind, its whole size and its header length (16 with a 64-bit size)."""
     handle.seek(offset)
     head = handle.read(8)
     if len(head) < 8:
         raise ValueError("the file ends inside a box header")
     size, kind = struct.unpack(">I4s", head)
+    header = 8
     if size == 1:
         wide = handle.read(8)
         if len(wide) < 8:
             raise ValueError("the file ends inside a box header")
         (size,) = struct.unpack(">Q", wide)
+        header = 16
     elif size == 0:
         raise ValueError("a box that runs to the end of the file has no init segment")
-    if size < 8:
+    if size < header:
         raise ValueError("a box is smaller than its header")
-    return kind, size
+    return kind, size, header
 
 
 def init_span(path: Path) -> tuple[int, str]:
@@ -40,18 +43,18 @@ def init_span(path: Path) -> tuple[int, str]:
     a discontinuity."""
     with path.open("rb") as handle:
         end = 0
-        spans: list[tuple[int, int]] = []
+        spans: list[tuple[int, int, int]] = []
         for expected in (b"ftyp", b"moov"):
-            kind, size = _box(handle, end)
+            kind, size, header = _box(handle, end)
             if kind != expected:
                 raise ValueError(f"expected a {expected.decode()} box, found {kind!r}")
-            spans.append((end, size))
+            spans.append((end, size, header))
             end += size
-        (_, ftyp), (moov, moov_size) = spans
+        (_, ftyp, _), (moov, moov_size, moov_header) = spans
         kept = [(0, ftyp)]
-        child = moov + 8
+        child = moov + moov_header
         while child < moov + moov_size:
-            kind, size = _box(handle, child)
+            kind, size, _ = _box(handle, child)
             if child + size > moov + moov_size:
                 raise ValueError("a box runs past the end of moov")
             if kind != b"udta":

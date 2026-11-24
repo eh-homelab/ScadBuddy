@@ -62,6 +62,22 @@ def test_init_digest_ignores_mediamtx_segment_info(tmp_path: Path) -> None:
     assert init_span(other)[1] != digest
 
 
+def test_init_span_reads_a_moov_with_a_64_bit_size(tmp_path: Path) -> None:
+    """A ``size == 1`` header is 16 bytes: moov's children start after all 16."""
+    plain = tmp_path / "plain.mp4"
+    wide = tmp_path / "wide.mp4"
+    plain.write_bytes(init(b"avc1 640x480", b"\0" * 44))
+    data = plain.read_bytes()
+    ftyp = struct.unpack(">I", data[:4])[0]
+    moov_size = struct.unpack(">I", data[ftyp : ftyp + 4])[0]
+    body = data[ftyp + 8 : ftyp + moov_size]
+    big = struct.pack(">I4sQ", 1, b"moov", 16 + len(body)) + body
+    wide.write_bytes(data[:ftyp] + big + data[ftyp + moov_size :])
+    length, digest = init_span(wide)
+    assert length == ftyp + len(big)
+    assert digest == init_span(plain)[1]
+
+
 def test_init_span_rejects_non_mp4(tmp_path: Path) -> None:
     junk = tmp_path / "x.mp4"
     junk.write_bytes(b"not an mp4 file at all")
