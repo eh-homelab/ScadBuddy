@@ -33,6 +33,11 @@ class KindCycle(ValueError):  # noqa: N818
     """The parent named is the kind or one of its descendants."""
 
 
+class KindArchived(ValueError):  # noqa: N818
+    """An archived kind named as a new parent, or as the kind of a new or restored
+    item."""
+
+
 class KindInUse(ValueError):  # noqa: N818
     """A change the kind's items or built-in status forbid: a tracking change on a
     built-in kind or on one with items, or the archive of a kind with unarchived items."""
@@ -106,11 +111,12 @@ class KindStore:
 
     def create(self, body: KindInput, by: Actor) -> ItemKind:
         """`BadPropertySchema` for a schema outside the allowed subset, `KindNotFound` for
-        an unknown parent, `KindExists` for a taken id."""
+        an unknown parent, `KindArchived` for an archived one, `KindExists` for a taken
+        id."""
         check_schema(body.attribute_schema)
         with self.pool.connection() as conn, conn.transaction():
-            if body.parent_id is not None and self._get(conn, body.parent_id) is None:
-                raise KindNotFound(body.parent_id)
+            if body.parent_id is not None:
+                self._lock_parent(conn, body.parent_id)
             try:
                 conn.execute(
                     "INSERT INTO item_kinds (id, name, parent_id, tracking, uom,"
@@ -135,8 +141,8 @@ class KindStore:
 
     def update(self, kind_id: str, patch: KindPatch, by: Actor) -> ItemKind:
         """The fields `patch` names, or nothing: `BadPropertySchema` leaves the old schema,
-        `KindCycle` refuses a parent at or below the kind, `KindInUse` a tracking change
-        on a built-in kind or one with items."""
+        `KindCycle` refuses a parent at or below the kind, `KindArchived` an archived
+        parent, `KindInUse` a tracking change on a built-in kind or one with items."""
         if patch.attribute_schema is not None:
             check_schema(patch.attribute_schema)
         fields = patch.model_dump(exclude_unset=True)
@@ -155,8 +161,7 @@ class KindStore:
                     raise KindInUse(f"{kind_id} has items; its tracking stays")
             parent = changes.get("parent_id")
             if parent is not None:
-                if self._get(conn, parent) is None:
-                    raise KindNotFound(parent)
+                self._lock_parent(conn, parent)
                 if kind_id in self._ancestors(conn, parent):
                     raise KindCycle(f"{parent} is {kind_id} or below it")
             if changes:
@@ -190,6 +195,20 @@ class KindStore:
             kind = self._get(conn, kind_id)
         assert kind is not None
         return kind
+
+    @staticmethod
+    def _lock_parent(conn: Conn, parent_id: str) -> None:
+        """One tree change at a time, so two moves cannot each pass the cycle check and
+        make a cycle together; then the parent, held until commit so it cannot be
+        archived meanwhile. `KindNotFound` or `KindArchived`."""
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext('item_kinds_tree'))")
+        row = conn.execute(
+            "SELECT archived_at FROM item_kinds WHERE id = %s FOR SHARE", (parent_id,)
+        ).fetchone()
+        if row is None:
+            raise KindNotFound(parent_id)
+        if row["archived_at"] is not None:
+            raise KindArchived(parent_id)
 
     def restore(self, kind_id: str) -> ItemKind:
         with self.pool.connection() as conn:

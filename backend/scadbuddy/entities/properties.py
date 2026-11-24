@@ -431,7 +431,9 @@ class EntityPropertyStore:
 
     def schema(self, kind: str) -> dict[str, Any]:
         """The kind's property schema; an object schema with no properties when it has
-        none."""
+        none. `SchemaOwnedByKind` for `item`, whose schema is each item kind's."""
+        if kind == ITEM:
+            raise SchemaOwnedByKind(kind)
         with self.pool.connection() as conn:
             return _schema_in(conn, kind)
 

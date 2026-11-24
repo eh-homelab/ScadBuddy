@@ -176,12 +176,19 @@ async def list_kind_properties(kind: KindPath, entities: EntitiesDep) -> KindPro
     description=(
         "A Draft 2020-12 object schema that documents and types the keys the kind knows. "
         "It never refuses a key. `keys_in_use` lists each key entities of the kind have, "
-        "with how many."
+        "with how many. An item's schema is its item kind's `attribute_schema`, so `item` "
+        "is 409 `schema_owned_by_item_kind`."
     ),
-    responses={422: {"description": "`unknown_entity_kind`"}},
+    responses={
+        409: {"description": "`schema_owned_by_item_kind`"},
+        422: {"description": "`unknown_entity_kind`"},
+    },
 )
 async def get_property_schema(kind: KindPath, entities: EntitiesDep) -> KindPropertySchema:
-    return await _schema_view(entities, _kind(kind))
+    try:
+        return await _schema_view(entities, _kind(kind))
+    except SchemaOwnedByKind:
+        raise schema_owned_by_item_kind() from None
 
 
 @router.put(

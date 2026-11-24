@@ -13,10 +13,9 @@ from scadbuddy.inventory.items import (
     ItemExists,
     ItemNotFound,
     ItemStore,
-    KindArchived,
 )
-from scadbuddy.inventory.kinds import KindNotFound, KindStore
-from scadbuddy.inventory.models import ItemInput, ItemPatch, KindInput
+from scadbuddy.inventory.kinds import KindArchived, KindNotFound, KindStore
+from scadbuddy.inventory.models import Item, ItemInput, ItemPatch, KindInput
 from scadbuddy.orders.models import Actor
 from tests.conftest import PgPool
 
@@ -178,3 +177,97 @@ def test_update_and_archive_name_a_missing_item(items: ItemStore) -> None:
         items.update(uuid4(), ItemPatch(name="x"), BY)
     with pytest.raises(ItemNotFound):
         items.archive(uuid4())
+
+
+def test_a_rename_into_a_taken_name_is_refused(items: ItemStore) -> None:
+    items.create(ItemInput(kind_id="hardware", name="M3 nut"), BY)
+    bolt = items.create(ItemInput(kind_id="hardware", name="M3 bolt"), BY)
+
+    with pytest.raises(ItemExists):
+        items.update(bolt.id, ItemPatch(name="m3 NUT"), BY)
+
+
+def test_a_restore_into_a_taken_name_is_refused(items: ItemStore) -> None:
+    old = items.create(ItemInput(kind_id="hardware", name="M3 nut"), BY)
+    items.archive(old.id)
+    items.create(ItemInput(kind_id="hardware", name="M3 NUT"), BY)
+
+    with pytest.raises(ItemExists) as refused:
+        items.restore(old.id)
+    assert "M3 nut" in str(refused.value)
+
+
+def test_a_restore_into_an_archived_kind_is_refused(items: ItemStore, kinds: KindStore) -> None:
+    kinds.create(KindInput(id="widget", name="Widget", tracking="lot"), BY)
+    made = items.create(ItemInput(kind_id="widget", name="Thing"), BY)
+    items.archive(made.id)
+    kinds.archive("widget")
+
+    with pytest.raises(KindArchived):
+        items.restore(made.id)
+
+
+def test_a_null_clears_only_a_nullable_field(items: ItemStore) -> None:
+    made = items.create(ItemInput(kind_id="nozzle", name="0.4 nozzle", life_hours=Decimal(500)), BY)
+
+    updated = items.update(made.id, ItemPatch(life_hours=None, name=None), BY)
+    assert updated.life_hours is None
+    assert updated.name == "0.4 nozzle"
+
+
+def test_q_escapes_like_wildcards(items: ItemStore) -> None:
+    items.create(ItemInput(kind_id="hardware", name="M3 nut"), BY)
+    snake = items.create(ItemInput(kind_id="hardware", name="snake_case"), BY)
+
+    assert [i.id for i in items.list(q="_")] == [snake.id]
+
+
+def test_q_matches_values_not_json_text(items: ItemStore, props: EntityPropertyStore) -> None:
+    tagged = items.create(ItemInput(kind_id="hardware", name="M3 nut"), BY)
+    items.create(ItemInput(kind_id="hardware", name="M4 nut"), BY)
+    props.apply(
+        EntityRef("item", str(tagged.id)),
+        PropertyPatch(set={"mpn": "X-0451", "tags": ["zinc", "din934"]}),
+        BY,
+    )
+
+    assert [i.id for i in items.list(q="din934")] == [tagged.id]
+    assert items.list(q='"X-') == []
+    assert items.list(q='zinc"') == []
+    assert items.list(q="[") == []
+    assert [i.id for i in items.list(q="X-0451")] == [tagged.id]
+
+
+def _lots(pg_pool: PgPool, item: Item, *rows: tuple[int, int, float, bool]) -> None:
+    actor = '{"kind": "browser"}'
+    with pg_pool.connection() as conn:
+        for received, on_hand, cost, unknown in rows:
+            conn.execute(
+                "INSERT INTO stock_lots (item_id, received_qty, on_hand, unit_cost_minor,"
+                " cost_unknown, origin, created_by) VALUES (%s, %s, %s, %s, %s, 'manual', %s)",
+                (item.id, received, on_hand, cost, unknown, actor),
+            )
+
+
+def test_a_negative_lot_counts_on_hand_not_value(items: ItemStore, pg_pool: PgPool) -> None:
+    nut = items.create(ItemInput(kind_id="hardware", name="M3 nut"), BY)
+    _lots(pg_pool, nut, (4, 4, 2.5, False), (2, -3, 7, True))
+
+    got = items.get(nut.id)
+    assert got is not None
+    assert got.on_hand == Decimal(1)
+    assert got.stock_value_minor == Decimal(10)
+    assert got.cost_unknown is False
+
+
+def test_an_empty_lot_of_unknown_cost_is_not_unknown(items: ItemStore, pg_pool: PgPool) -> None:
+    nut = items.create(ItemInput(kind_id="hardware", name="M3 nut"), BY)
+    _lots(pg_pool, nut, (4, 4, 2.5, False), (2, 0, 0, True))
+
+    got = items.get(nut.id)
+    assert got is not None
+    assert (got.on_hand, got.stock_value_minor, got.cost_unknown) == (
+        Decimal(4),
+        Decimal(10),
+        False,
+    )

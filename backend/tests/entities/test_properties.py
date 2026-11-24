@@ -621,6 +621,8 @@ def test_an_items_schema_is_its_kinds(pg_pool: PgPool, props: EntityPropertyStor
     assert _values(props, item) == {"colour": "red"}
     with pytest.raises(SchemaOwnedByKind):
         props.set_schema("item", {"type": "object", "properties": {}}, BY)
+    with pytest.raises(SchemaOwnedByKind):
+        props.schema("item")
 
 
 def test_schema_for_reads_the_kinds_schema_for_other_kinds(

@@ -13,7 +13,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 
 from scadbuddy.entities.registry import EntityStore
-from scadbuddy.inventory.kinds import KindNotFound
+from scadbuddy.inventory.kinds import KindArchived, KindNotFound
 from scadbuddy.inventory.models import Item, ItemInput, ItemPatch
 from scadbuddy.orders.models import Actor
 
@@ -31,10 +31,6 @@ class ItemExists(ValueError):  # noqa: N818
 
 class FilamentItemRefused(ValueError):  # noqa: N818
     """Items of a `filament` kind wait for phase 3 (#7068; the plan's Ruling 9)."""
-
-
-class KindArchived(ValueError):  # noqa: N818
-    """A new item of an archived kind."""
 
 
 #: Every item with its kind's figures and its stock. A lot counts at its `on_hand`; its
@@ -131,9 +127,11 @@ class ItemStore:
             where.append(
                 "(s.name ILIKE %s OR s.manufacturer ILIKE %s OR EXISTS (SELECT 1"
                 " FROM entity_properties p JOIN entities e ON e.id = p.entity_id"
-                " WHERE e.kind = 'item' AND e.ref = s.id::text AND p.value::text ILIKE %s))"
+                " WHERE e.kind = 'item' AND e.ref = s.id::text AND CASE jsonb_typeof(p.value)"
+                " WHEN 'array' THEN EXISTS (SELECT 1 FROM jsonb_array_elements_text(p.value) v"
+                " WHERE v ILIKE %s) ELSE p.value #>> '{}' ILIKE %s END))"
             )
-            params += [like, like, like]
+            params += [like, like, like, like]
         if low:
             where.append(_LOW)
         if compatible is not None:
@@ -161,7 +159,8 @@ class ItemStore:
         `ItemExists`. A blank `source_ref` is stored as null."""
         with self.pool.connection() as conn, conn.transaction():
             kind = conn.execute(
-                "SELECT tracking, archived_at FROM item_kinds WHERE id = %s", (body.kind_id,)
+                "SELECT tracking, archived_at FROM item_kinds WHERE id = %s FOR SHARE",
+                (body.kind_id,),
             ).fetchone()
             if kind is None:
                 raise KindNotFound(body.kind_id)
@@ -228,23 +227,40 @@ class ItemStore:
         return found
 
     def archive(self, item_id: UUID) -> Item:
-        return self._set_archived(item_id, "coalesce(archived_at, now())")
-
-    def restore(self, item_id: UUID) -> Item:
-        """`ItemExists` when an unarchived item of its kind took its name meanwhile."""
-        return self._set_archived(item_id, "NULL")
-
-    def _set_archived(self, item_id: UUID, value: str) -> Item:
         with self.pool.connection() as conn, conn.transaction():
-            try:
-                done = conn.execute(
-                    f"UPDATE items SET archived_at = {value}, updated_at = now() WHERE id = %s",
-                    (item_id,),
-                ).rowcount
-            except psycopg.errors.UniqueViolation:
-                raise ItemExists(str(item_id)) from None
+            done = conn.execute(
+                "UPDATE items SET archived_at = coalesce(archived_at, now()),"
+                " updated_at = now() WHERE id = %s",
+                (item_id,),
+            ).rowcount
             if not done:
                 raise ItemNotFound(str(item_id))
+            found = self._get(conn, item_id)
+        assert found is not None
+        return found
+
+    def restore(self, item_id: UUID) -> Item:
+        """`KindArchived` while its kind is archived; `ItemExists` when an unarchived
+        item of its kind took its name meanwhile."""
+        with self.pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "SELECT name, kind_id FROM items WHERE id = %s FOR UPDATE", (item_id,)
+            ).fetchone()
+            if row is None:
+                raise ItemNotFound(str(item_id))
+            kind = conn.execute(
+                "SELECT archived_at FROM item_kinds WHERE id = %s FOR SHARE", (row["kind_id"],)
+            ).fetchone()
+            assert kind is not None
+            if kind["archived_at"] is not None:
+                raise KindArchived(row["kind_id"])
+            try:
+                conn.execute(
+                    "UPDATE items SET archived_at = NULL, updated_at = now() WHERE id = %s",
+                    (item_id,),
+                )
+            except psycopg.errors.UniqueViolation:
+                raise ItemExists(row["name"]) from None
             found = self._get(conn, item_id)
         assert found is not None
         return found

@@ -10,6 +10,7 @@ import pytest
 from scadbuddy.entities.properties import BadPropertySchema
 from scadbuddy.inventory.items import ItemStore
 from scadbuddy.inventory.kinds import (
+    KindArchived,
     KindCycle,
     KindExists,
     KindInUse,
@@ -158,3 +159,44 @@ def test_an_items_schema_is_its_kinds_merged(
         assert kinds.item_schema(conn, str(made.id))["properties"] == {"mpn": {"type": "string"}}
         assert kinds.item_schema(conn, "not-a-uuid") == _schema()
         assert kinds.item_schema(conn, "00000000-0000-0000-0000-000000000000") == _schema()
+
+
+def test_a_null_parent_makes_a_root(kinds: KindStore) -> None:
+    _fastener(kinds)
+
+    moved = kinds.update("fastener", KindPatch(parent_id=None), BY)
+    assert moved.parent_id is None
+
+
+def test_a_tracking_change_counts_archived_items(kinds: KindStore, items: ItemStore) -> None:
+    _fastener(kinds)
+    made = items.create(ItemInput(kind_id="fastener", name="M3 bolt"), BY)
+    items.archive(made.id)
+
+    with pytest.raises(KindInUse):
+        kinds.update("fastener", KindPatch(tracking="unit"), BY)
+
+
+def test_archive_and_restore_name_an_unknown_kind(kinds: KindStore) -> None:
+    with pytest.raises(KindNotFound):
+        kinds.archive("nope")
+    with pytest.raises(KindNotFound):
+        kinds.restore("nope")
+
+
+def test_an_uncounted_kind_takes_an_item(kinds: KindStore, items: ItemStore) -> None:
+    kinds.create(KindInput(id="design_fee", name="Design fee", tracking="none"), BY)
+
+    made = items.create(ItemInput(kind_id="design_fee", name="One hour"), BY)
+    assert made.tracking == "none"
+
+
+def test_an_archived_parent_is_refused(kinds: KindStore) -> None:
+    kinds.create(KindInput(id="widget", name="Widget", tracking="lot"), BY)
+    kinds.archive("widget")
+
+    with pytest.raises(KindArchived):
+        kinds.create(KindInput(id="gizmo", name="Gizmo", parent_id="widget", tracking="lot"), BY)
+    _fastener(kinds)
+    with pytest.raises(KindArchived):
+        kinds.update("fastener", KindPatch(parent_id="widget"), BY)

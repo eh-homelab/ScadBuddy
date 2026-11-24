@@ -146,3 +146,5 @@ def test_an_items_schema_is_set_on_its_kind(client: TestClient) -> None:
     )
     _code(refused, 409, "schema_owned_by_item_kind")
     assert "attribute_schema" in refused.json()["detail"]
+    read = client.get("/api/v1/entity-kinds/item/property-schema")
+    _code(read, 409, "schema_owned_by_item_kind")
