@@ -27,6 +27,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.libraries import ModelLibrary
+from scadbuddy.library.output_rows import OUTPUT_HOLDER as OUTPUT_HOLDER
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
@@ -70,8 +71,6 @@ ARRANGED_NAME = "arranged_from.json"
 #: once attached; kept with an ``error`` when the re-render did not finish.
 BACKFILL_NAME = "backfill.json"
 _ID_LIST = TypeAdapter(list[str])
-#: `blob_refs.holder_kind` for a saved output: its Parts live as long as it does.
-OUTPUT_HOLDER = "output"
 FILES_DIR = "files"
 #: How many outputs whose thumbnail draw came to nothing a process remembers (#4775).
 UNDRAWABLE_MAX = 4096
