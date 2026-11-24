@@ -98,6 +98,9 @@ function Unsupported({ embedded }: { embedded: boolean }) {
   )
 }
 
+/** Every read of this UID, with the change; the others as they are. */
+const forTag = (entries: Entry[], uid: string, change: Partial<Entry>) => entries.map((one) => (one.uid === uid ? { ...one, ...change } : one))
+
 /** Screens 1 to 3. */
 function Scanner() {
   const [session] = useState(() => new NfcSession())
@@ -155,20 +158,26 @@ function Scanner() {
   const answer = (key: number, result: TagReadResult) =>
     setEntries((now) => {
       const uid = now.find((one) => one.key === key)?.uid
-      return now.map((one) => (one.key === key || (uid && one.uid === uid) ? { ...one, result } : one))
+      return uid ? forTag(now, uid, { result }) : now.map((one) => (one.key === key ? { ...one, result } : one))
     })
   /**
-   * A checked write answers for the tag it wrote: every read of that UID takes the answer and
-   * the records it holds now. A spool written onto a tag this session has not read yet adds
-   * that tag to the list.
+   * A checked write from the opened read `from`: every read of the written UID takes the
+   * answer and the records it holds now. A write onto another tag (a rebind) adds that tag as
+   * a read and opens it, and the tag `from` read is looked up again, as it no longer holds
+   * the spool.
    */
-  const written = (uid: string, records: WireRecord[], result: TagReadResult) => {
-    if (entries.some((one) => one.uid === uid)) {
-      setEntries((now) => now.map((one) => (one.uid === uid ? { ...one, records, result } : one)))
+  const written = (from: Entry, uid: string, records: WireRecord[], result: TagReadResult) => {
+    if (from.uid === uid) {
+      setEntries((now) => forTag(now, uid, { records, result }))
       return
     }
     const key = (nextKey.current += 1)
-    setEntries((now) => [{ key, at: new Date(), uid, records, result, held: {} }, ...now])
+    setEntries((now) => [{ key, at: new Date(), uid, records, result, held: {} }, ...forTag(now, uid, { records, result })])
+    setOpenKey(key)
+    postTagRead({ uid: from.uid || null, tag_type: null, records: from.records }).then(
+      (old) => setEntries((now) => forTag(now, from.uid, { result: old })),
+      (cause: unknown) => setError(`ScadBuddy could not look up the old tag again: ${cause instanceof ApiError ? cause.detail : 'read it again'}.`),
+    )
   }
   const opened = entries.find((one) => one.key === openKey) ?? null
 
@@ -189,7 +198,7 @@ function Scanner() {
           session={session}
           onChange={(change) => update(opened.key, change)}
           onResult={(result) => answer(opened.key, result)}
-          onWritten={written}
+          onWritten={(uid, records, result) => written(opened, uid, records, result)}
           onAnnounce={setAnnouncement}
         />
       )}

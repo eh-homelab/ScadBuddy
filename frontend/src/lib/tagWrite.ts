@@ -65,6 +65,7 @@ export interface WriteOptions {
 
 export async function writeWithBackup({ session, reason, jobId, prepare, confirm, onStep, signal }: WriteOptions): Promise<WriteOutcome> {
   const release = session.claim()
+  if (!release) return { status: 'failed', message: 'Another write is running. Nothing was written.', backupId: null }
   let backupId: string | null = null
   const stopped = (message: string): WriteOutcome => ({ status: 'failed', message, backupId })
   try {
@@ -74,25 +75,30 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
     } catch {
       return stopped('Stopped. Nothing was written.')
     }
+    if (signal?.aborted) return stopped('Stopped. Nothing was written.')
     if (!now.uid) return { status: 'failed', message: NO_UID, backupId: null }
 
     onStep('backing_up')
     try {
-      backupId = (await createTagBackup({ uid: now.uid, records: now.records, reason, ...(jobId ? { job_id: jobId } : {}) })).backup_id
+      backupId = (await createTagBackup({ uid: now.uid, records: now.records, reason, ...(jobId ? { job_id: jobId } : {}) }, signal)).backup_id
     } catch (cause) {
+      if (isAbort(cause, signal)) return stopped('Stopped. Nothing was written.')
       return { status: 'failed', message: `The tag was not backed up, so nothing was written: ${detailOf(cause)}`, backupId: null }
     }
 
+    if (signal?.aborted) return stopped('Stopped. Nothing was written.')
     let sent: WireRecord[]
     try {
       sent = await prepare(now, backupId)
     } catch (cause) {
+      if (isAbort(cause, signal)) return stopped('Stopped. Nothing was written.')
       if (codeOf(cause) === 'backup_mismatch') return { status: 'failed', message: BACKUP_MISMATCH, backupId }
       return { status: 'failed', message: `ScadBuddy did not give the records to write, so nothing was written: ${detailOf(cause)}`, backupId }
     }
 
     // Web NFC refuses a message with no records, so a blank tag gets one empty record.
     const written = sent.length > 0 ? sent : [EMPTY_RECORD]
+    if (signal?.aborted) return stopped('Stopped. Nothing was written.')
     onStep('writing')
     try {
       await session.write(written, signal)

@@ -55,6 +55,12 @@ describe('TagBackups (#7273)', () => {
     expect(rows[1]).toHaveTextContent('owner@example.com')
   })
 
+  it('says 50+ when the first page is full', async () => {
+    for (let n = 0; n < 50; n += 1) await createTagBackup({ uid: UID, records: OLD, reason: 'spool_write' })
+    renderPage(<TagBackups session={session} tagId={TAG.MOVED} />)
+    expect(await screen.findByRole('button', { name: 'Backups (50+)' })).toBeInTheDocument()
+  })
+
   it('restores a backup with a fresh backup first', async () => {
     await createTagBackup({ uid: UID, records: OLD, reason: 'spool_write' })
     const log = sent()
@@ -62,7 +68,7 @@ describe('TagBackups (#7273)', () => {
       const { user } = renderPage(<TagBackups session={session} tagId={TAG.MOVED} />)
       await user.click(await screen.findByRole('button', { name: 'Backups (1)' }))
       await user.click(screen.getByRole('button', { name: 'Restore' }))
-      await screen.findByText('Hold the tag to the phone. One tap does all three; keep it still.')
+      await screen.findByText('Hold the tag still. If asked, lift it and tap again.')
       stub.tap({ serialNumber: UID, records: [{ recordType: 'mime', mediaType: 'application/json', data: new Uint8Array([0x7b, 0x7d]) }] })
       await waitFor(() => expect(stub.writes).toHaveLength(1))
       const lines = log.requests.map((one) => one.line)

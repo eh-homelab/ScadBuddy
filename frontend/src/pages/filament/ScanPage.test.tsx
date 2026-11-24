@@ -209,7 +209,7 @@ describe('the scan page (#7273)', () => {
     stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
     await screen.findByRole('region', { name: 'Spool #3' })
     await user.click(screen.getByRole('button', { name: 'Write tag' }))
-    await screen.findByText('Hold the tag to the phone. One tap does all three; keep it still.')
+    await screen.findByText('Hold the tag still. If asked, lift it and tap again.')
     stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
     const steps = screen.getByRole('list', { name: 'Steps' })
     const readBack = within(steps).getByText('Read back').closest('li')!
@@ -222,6 +222,31 @@ describe('the scan page (#7273)', () => {
     expect(within(screen.getByRole('list', { name: "This session's reads" })).getAllByRole('listitem')).toHaveLength(1)
     const tag = (await listTags()).find((one) => one.tag_uid === '04A1B2C3D4E5F6')!
     expect(tag.kind).toBe('ntag_openspool')
+  })
+
+  it('moves to the new tag after a spool is written onto it, and the old tag no longer claims the spool', async () => {
+    const { user } = open()
+    await user.click(screen.getByRole('button', { name: 'Scan' }))
+    await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+    stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+    await screen.findByRole('region', { name: 'Spool #3' })
+    await user.click(screen.getByRole('button', { name: 'Write tag' }))
+    await screen.findByText('Hold the tag still. If asked, lift it and tap again.')
+    // A blank tag the session has not read.
+    stub.tap({ serialNumber: '04:0b:0b:0b:0b:0b:0b', records: [] })
+    const readBack = within(screen.getByRole('list', { name: 'Steps' })).getByText('Read back').closest('li')!
+    await waitFor(() => expect(readBack).toHaveAttribute('aria-current', 'step'))
+    const written = stub.writes[0]!
+    stub.tap({ serialNumber: '04:0b:0b:0b:0b:0b:0b', records: written.map((one) => ({ recordType: one.recordType, mediaType: one.mediaType, data: one.data as Uint8Array })) })
+    const reads = screen.getByRole('list', { name: "This session's reads" })
+    await waitFor(() => expect(within(reads).getAllByRole('listitem')).toHaveLength(2))
+    const [newer, older] = within(reads).getAllByRole('listitem')
+    // The written tag is opened and holds the spool; the old one is a new tag now.
+    expect(within(newer!).getByText('04:0b:0b:0b:0b:0b:0b')).toBeInTheDocument()
+    expect(within(newer!).getByRole('button')).toHaveAttribute('aria-current', 'true')
+    expect(within(newer!).getByText('Spool #3')).toBeInTheDocument()
+    await waitFor(() => expect(within(older!).getByText('New tag')).toBeInTheDocument())
+    expect(await screen.findByRole('region', { name: 'Spool #3' })).toBeInTheDocument()
   })
 
   it('says why NFC was refused', async () => {

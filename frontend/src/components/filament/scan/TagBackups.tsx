@@ -14,6 +14,9 @@ const REASONS: Record<TagBackup['reason'], string> = {
   restore: 'before a restore',
 }
 
+/** The route's default page: a full page means there are more. */
+const PAGE = 50
+
 const timeOf = (at: string) => new Date(at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 const countOf = (n: number) => (n === 1 ? '1 record' : `${n} records`)
 
@@ -22,7 +25,23 @@ const countOf = (n: number) => (n === 1 ? '1 record' : `${n} records`)
  * "Restore" writes a backup's records back, itself backed up first; the page checks the
  * read-back and posts it as a read, and binds nothing (R6).
  */
-export function TagBackups({ session, tagId, refresh = 0, onAnnounce }: { session: NfcSession; tagId: string; refresh?: number; onAnnounce?: (text: string) => void }) {
+export function TagBackups({
+  session,
+  tagId,
+  refresh = 0,
+  busy = false,
+  onRunning,
+  onAnnounce,
+}: {
+  session: NfcSession
+  tagId: string
+  refresh?: number
+  /** Another write runs on this page: no restore starts until it ends. */
+  busy?: boolean
+  /** True while a restore run is under way. */
+  onRunning?: (running: boolean) => void
+  onAnnounce?: (text: string) => void
+}) {
   const [restored, setRestored] = useState(0)
   const list = useAsync(() => listTagBackups(tagId), [tagId, refresh, restored])
   const [restoring, setRestoring] = useState<TagBackup | null>(null)
@@ -34,7 +53,7 @@ export function TagBackups({ session, tagId, refresh = 0, onAnnounce }: { sessio
         <Button type="button" variant="ghost" className="group h-11 justify-between px-2">
           <span className="inline-flex items-center gap-2">
             <HistoryIcon aria-hidden="true" />
-            {list.data ? `Backups (${rows.length})` : 'Backups'}
+            {list.data ? `Backups (${rows.length >= PAGE ? `${PAGE}+` : rows.length})` : 'Backups'}
           </span>
           <ChevronDownIcon aria-hidden="true" className="transition-transform group-data-[state=open]:rotate-180 motion-reduce:transition-none" />
         </Button>
@@ -57,7 +76,7 @@ export function TagBackups({ session, tagId, refresh = 0, onAnnounce }: { sessio
                   </span>
                   <span className="truncate text-muted-foreground">{row.actor}</span>
                 </div>
-                <Button type="button" variant="outline" className="h-11" aria-describedby={`backup-${row.id}`} disabled={restoring !== null} onClick={() => setRestoring(row)}>
+                <Button type="button" variant="outline" className="h-11" aria-describedby={`backup-${row.id}`} disabled={busy || restoring !== null} onClick={() => setRestoring(row)}>
                   Restore
                 </Button>
               </li>
@@ -75,6 +94,7 @@ export function TagBackups({ session, tagId, refresh = 0, onAnnounce }: { sessio
               setRestored((count) => count + 1)
               onAnnounce?.(headlineOf(outcome, true))
             }}
+            onRunning={onRunning}
             onClose={() => setRestoring(null)}
           />
         )}

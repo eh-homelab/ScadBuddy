@@ -115,7 +115,7 @@ export class NfcSession {
   private readonly listeners = new Set<(reading: Reading) => void>()
   private readonly waiters = new Set<(reading: Reading) => void>()
   private readonly errorListeners = new Set<() => void>()
-  private claims = 0
+  private claimed = false
   private readonly onReadingErrorEvent = () => {
     for (const listener of [...this.errorListeners]) listener()
   }
@@ -123,7 +123,7 @@ export class NfcSession {
     const { serialNumber, message } = event as NDEFReadingEvent
     const reading: Reading = { uid: serialNumber, records: message.records.map(toWire) }
     for (const waiter of [...this.waiters]) waiter(reading)
-    if (this.claims > 0) return
+    if (this.claimed) return
     for (const listener of [...this.listeners]) listener(reading)
   }
 
@@ -172,16 +172,18 @@ export class NfcSession {
   }
 
   /**
-   * While a claim holds, taps reach only `nextReading`, not `onReading`'s listeners: one
-   * consumer at a time, so the taps of a write do not also post reads. Returns the release.
+   * One consumer at a time: while a claim holds, taps reach only `nextReading`, not
+   * `onReading`'s listeners, so the taps of a write do not also post reads. A second claim
+   * while one holds gets `null`, so two writes never share one tap. Returns the release.
    */
-  claim(): () => void {
-    this.claims += 1
+  claim(): (() => void) | null {
+    if (this.claimed) return null
+    this.claimed = true
     let released = false
     return () => {
       if (released) return
       released = true
-      this.claims -= 1
+      this.claimed = false
     }
   }
 

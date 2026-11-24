@@ -89,6 +89,20 @@ describe('NfcSession', () => {
     session.stop()
   })
 
+  it('lets one claim hold at a time', async () => {
+    const session = new NfcSession()
+    const first = session.claim()
+    expect(first).not.toBeNull()
+    expect(session.claim()).toBeNull()
+    first!()
+    const second = session.claim()
+    expect(second).not.toBeNull()
+    // A release called twice does not free a later claim.
+    first!()
+    expect(session.claim()).toBeNull()
+    second!()
+  })
+
   it('writes with overwrite and never makes a tag read-only', async () => {
     const NDEFReader = (window as unknown as { NDEFReader: { prototype: { makeReadOnly: () => Promise<void>; write: () => Promise<void> } } }).NDEFReader
     const readOnly = vi.spyOn(NDEFReader.prototype, 'makeReadOnly')

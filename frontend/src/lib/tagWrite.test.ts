@@ -189,6 +189,43 @@ describe('writeWithBackup (#7273)', () => {
     expect(await outcome).toEqual({ status: 'checked', result: null })
   })
 
+  it('refuses a second write while one runs', async () => {
+    const log = sent()
+    try {
+      const first = write()
+      const second = await write()
+      expect(second).toEqual({ status: 'failed', message: 'Another write is running. Nothing was written.', backupId: null })
+      stub.tap({ serialNumber: UID, records: [] })
+      await readBack(UID)
+      expect((await first).status).toBe('checked')
+      expect(log.lines.filter((line) => line === 'POST /api/v1/filament/tags/backups')).toHaveLength(1)
+    } finally {
+      log.off()
+    }
+  })
+
+  it('takes no backup when cancelled after the first tap', async () => {
+    const log = sent()
+    try {
+      const stop = new AbortController()
+      const outcome = writeWithBackup({
+        session,
+        reason: 'spool_write',
+        prepare: async () => [],
+        confirm: async () => null,
+        onStep: (step) => steps.push(step),
+        signal: stop.signal,
+      })
+      stub.tap({ serialNumber: UID, records: [] })
+      stop.abort()
+      expect(await outcome).toMatchObject({ status: 'failed', backupId: null })
+      expect(log.lines).not.toContain('POST /api/v1/filament/tags/backups')
+      expect(stub.writes).toEqual([])
+    } finally {
+      log.off()
+    }
+  })
+
   it('keeps the page from seeing the taps of a write', async () => {
     const seen: string[] = []
     session.onReading((reading) => seen.push(reading.uid))

@@ -37,7 +37,7 @@ describe('WriteTag (#7273)', () => {
   const render = (props: Partial<Parameters<typeof WriteTag>[0]> = {}) => renderPage(<WriteTag session={session} spool={known.spool!} tag={known.tag!} onClose={() => {}} {...props} />)
   const stepNamed = (name: string) => within(screen.getByRole('list', { name: 'Steps' })).getByText(name).closest('li')!
   /** Waits until the flow listens for the first tap. */
-  const listening = () => screen.findByText('Hold the tag to the phone. One tap does all three; keep it still.')
+  const listening = () => screen.findByText('Hold the tag still. If asked, lift it and tap again.')
   /** Waits until the page listens for the read-back, then holds the tag that answers it. */
   async function readBack(serialNumber: string, records?: WireRecord[]) {
     await waitFor(() => expect(stepNamed('Read back')).toHaveAttribute('aria-current', 'step'))

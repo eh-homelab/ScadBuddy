@@ -34,6 +34,7 @@ export function WriteFlow({
   restoring = false,
   run,
   onSettled,
+  onRunning,
   onRestore,
   onClose,
 }: {
@@ -43,6 +44,8 @@ export function WriteFlow({
   restoring?: boolean
   run: (hooks: RunHooks) => Promise<WriteOutcome>
   onSettled?: (outcome: WriteOutcome) => void
+  /** True while a run is under way, false once it settles or stops: the parent allows one run at a time. */
+  onRunning?: (running: boolean) => void
   /** Offered after a mismatch: write that backup's records back. */
   onRestore?: (backupId: string) => void
   onClose: () => void
@@ -53,9 +56,9 @@ export function WriteFlow({
   const [outcome, setOutcome] = useState<WriteOutcome | null>(null)
   /** The run waits for the first tap: set just before `run`, which starts listening at once. */
   const [ready, setReady] = useState(false)
-  const latest = useRef({ run, onSettled })
+  const latest = useRef({ run, onSettled, onRunning })
   useEffect(() => {
-    latest.current = { run, onSettled }
+    latest.current = { run, onSettled, onRunning }
   })
   const stop = useRef<AbortController | null>(null)
 
@@ -67,11 +70,8 @@ export function WriteFlow({
     setRecords(null)
     setOutcome(null)
     setReady(false)
-    const failed = (prefix: string, cause: unknown): WriteOutcome => ({
-      status: 'failed',
-      message: `${prefix}${cause instanceof Error && cause.message ? cause.message : String(cause)}. Nothing was written.`,
-      backupId: null,
-    })
+    latest.current.onRunning?.(true)
+    const detail = (cause: unknown) => (cause instanceof Error && cause.message ? cause.message : String(cause))
     void (async () => {
       let done: WriteOutcome
       try {
@@ -84,23 +84,28 @@ export function WriteFlow({
             onRecords: (next) => live() && setRecords(next),
           })
         } catch (cause) {
-          done = failed('', cause)
+          // The run may have stopped after its write: only the tag can say what it holds.
+          done = { status: 'failed', message: `The write stopped with an error. Read the tag to see what it holds. (${detail(cause)})`, backupId: null }
         }
       } catch (cause) {
-        done = failed('NFC could not start: ', cause)
+        done = { status: 'failed', message: `NFC could not start: ${detail(cause)}. Nothing was written.`, backupId: null }
       }
       if (!live()) return
       setOutcome(done)
+      latest.current.onRunning?.(false)
       latest.current.onSettled?.(done)
     })()
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      latest.current.onRunning?.(false)
+    }
   }, [session, attempt])
 
   const at = stepIndexOf(step, outcome)
   const failed = outcome !== null && outcome.status !== 'checked'
 
   function detailOf(index: number) {
-    if (index === 0 && at === 0 && !outcome && step === null) return ready ? 'Hold the tag to the phone. One tap does all three; keep it still.' : 'Starting NFC…'
+    if (index === 0 && at === 0 && !outcome && step === null) return ready ? 'Hold the tag still. If asked, lift it and tap again.' : 'Starting NFC…'
     if (index === 1 && records && !restoring) {
       const format = records.format ? FORMAT_NAMES[records.format] : null
       const warnings = records.warnings ?? []
@@ -232,6 +237,7 @@ export function WriteTag({
   onWritten,
   onAnnounce,
   onSettled,
+  onRunning,
   onClose,
 }: {
   session: NfcSession
@@ -242,6 +248,8 @@ export function WriteTag({
   onWritten?: (uid: string, records: WireRecord[], result: TagReadResult) => void
   onAnnounce?: (text: string) => void
   onSettled?: (outcome: WriteOutcome) => void
+  /** True while a write or restore run is under way. */
+  onRunning?: (running: boolean) => void
   onClose: () => void
 }) {
   const [restoring, setRestoring] = useState<{ backupId: string; tagId: string } | null>(null)
@@ -266,6 +274,7 @@ export function WriteTag({
         restoring
         run={({ onStep, signal }) => restoreBackup({ session, tagId: restoring.tagId, backupId: restoring.backupId, onStep, signal })}
         onSettled={(outcome) => settled(outcome, true)}
+        onRunning={onRunning}
         onClose={onClose}
       />
     )
@@ -295,6 +304,7 @@ export function WriteTag({
           })
         }
         onSettled={(outcome) => settled(outcome, false)}
+        onRunning={onRunning}
         onRestore={(backupId) => {
           setLookup(null)
           tagIdFor(written.current.uid, tag).then(

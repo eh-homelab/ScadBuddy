@@ -64,6 +64,8 @@ export function KnownTag({
   const [writing, setWriting] = useState(false)
   /** Counts the writes run here, so the backups are read again. */
   const [writes, setWrites] = useState(0)
+  /** A write or a restore is under way: one at a time, so every write and restore button waits. */
+  const [running, setRunning] = useState(false)
   return (
     <div className="flex flex-col gap-5">
       <SpoolCard spool={spool} />
@@ -75,7 +77,7 @@ export function KnownTag({
             <ExternalLinkIcon /> Open spool
           </Link>
         </Button>
-        <Button type="button" variant="outline" className="h-11" disabled={!session || writing} onClick={() => setWriting(true)}>
+        <Button type="button" variant="outline" className="h-11" disabled={!session || writing || running} onClick={() => setWriting(true)}>
           <NfcIcon /> Write tag
         </Button>
       </div>
@@ -87,10 +89,11 @@ export function KnownTag({
           onWritten={onWritten}
           onAnnounce={onAnnounce}
           onSettled={() => setWrites((count) => count + 1)}
+          onRunning={setRunning}
           onClose={() => setWriting(false)}
         />
       )}
-      {session && tag && <TagBackups session={session} tagId={tag.id} refresh={writes} onAnnounce={onAnnounce} />}
+      {session && tag && <TagBackups session={session} tagId={tag.id} refresh={writes} busy={running} onRunning={setRunning} onAnnounce={onAnnounce} />}
     </div>
   )
 }

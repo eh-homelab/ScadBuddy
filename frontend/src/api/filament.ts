@@ -221,7 +221,8 @@ export type TagRecordsIn = Schemas['TagRecordsIn']
 export type TagWrittenIn = Schemas['TagWrittenIn']
 
 /** Keeps what a tag holds just before a write (G7); the write names the `backup_id`. */
-export const createTagBackup = (body: TagBackupIn) => request<Schemas['TagBackupMade']>(`${BASE}/tags/backups`, json('POST', body))
+export const createTagBackup = (body: TagBackupIn, signal?: AbortSignal) =>
+  request<Schemas['TagBackupMade']>(`${BASE}/tags/backups`, { ...json('POST', body), signal })
 
 /** A tag's backups, newest first (the first page, up to 50). */
 export const listTagBackups = (tagId: string) => request<TagBackup[]>(`${BASE}/tags/${seg(tagId)}/backups`)
