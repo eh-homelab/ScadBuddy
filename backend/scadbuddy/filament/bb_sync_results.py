@@ -833,9 +833,9 @@ def _proof_of(
     the same rule. A preset's time is Bambuddy's ``updated_at`` of the mirror's last write
     (`preset_mirror._mirrored`): Bambuddy's ``onupdate=func.now()``, so another Bambuddy
     would need a preset under the same id written at the same recorded time. A preset with
-    no time (sent before the mirror kept one, and not yet stamped from the kept copy,
-    `sb_presets.stamp_mirrored`) is only checked to be there, and counts against the rule
-    that at least half the links are timed on both sides."""
+    no time (sent before the mirror kept one, and not written by the mirror since) is only
+    checked to be there, and counts against the rule that at least half the links are timed
+    on both sides."""
     links = {
         row["bb_spool_id"]: row["bb_updated_at"]
         for row in conn.execute("SELECT bb_spool_id, bb_updated_at FROM filament_bb_links")

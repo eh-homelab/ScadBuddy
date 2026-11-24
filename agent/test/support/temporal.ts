@@ -1,7 +1,7 @@
 import type { Client } from '@temporalio/client'
 import { TestWorkflowEnvironment } from '@temporalio/testing'
 import { execFileSync } from 'node:child_process'
-import { queuePollers } from '../../src/temporal/pollers.js'
+import { type QueueDescriber, queuePollers } from '../../src/temporal/pollers.js'
 import { HOST_FRESH_MS } from '../../src/temporal/session/affinity.js'
 
 // A Temporal dev server for the agent's `agent-tools` tests (spec 2026-10-01 §8, #1055),
@@ -46,10 +46,23 @@ export function polledHosts(client: Pick<Client, 'workflowService' | 'options' |
   return async () => {
     const live = new Set<string>()
     for (const queue of queues) {
-      // As liveHostQueues: every partition, and a dev server that hangs fails the read, not the test's whole timeout.
-      const pollers = await queuePollers(client, queue, 2, Date.now() + 10_000)
+      // As liveHostQueues: every partition, within POLLER_READ_MS.
+      const pollers = await queuePollers(client, queue, 2, Date.now() + POLLER_READ_MS)
       if (pollers.some((p) => Date.now() - p.seenAtMs < HOST_FRESH_MS)) live.add(queue)
     }
     return live
   }
+}
+
+/** How long a test's poller read may take: a dev server that hangs fails the read, not the test's whole timeout. */
+const POLLER_READ_MS = 10_000
+
+/** The identities that poll `queue` (1 workflow, 2 activity) on any partition now (temporal/pollers.ts, #7306). */
+export async function pollerIdentities(client: QueueDescriber, queue: string, type: number): Promise<string[]> {
+  return (await queuePollers(client, queue, type, Date.now() + POLLER_READ_MS)).flatMap((p) => (p.identity ? [p.identity] : []))
+}
+
+/** Whether any worker polls `queue` (1 workflow, 2 activity) on any partition now (temporal/pollers.ts, #7306). */
+export async function anyPoller(client: QueueDescriber, queue: string, type: number): Promise<boolean> {
+  return (await queuePollers(client, queue, type, Date.now() + POLLER_READ_MS)).length > 0
 }

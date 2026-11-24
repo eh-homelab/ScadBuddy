@@ -5,6 +5,7 @@ Bambuddy owns."""
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -27,7 +28,6 @@ from scadbuddy.filament.sb_presets import (
     version_on,
 )
 from scadbuddy.filament.types import PresetUnknownError, SpoolTypeStore
-from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.own_presets import sb_id, sb_ref
 from scadbuddy.store.local import LocalBlobStore
 from tests.conftest import PgPool
@@ -57,6 +57,23 @@ def _held(bb_id: int, name: str, stamp: str | None, **over: Any) -> LocalPresetD
         updated_at=stamp,
         setting=_doc(name, **over),
     )
+
+
+class MemoryPresets:
+    """`sb_presets.PresetSource` in memory: Bambuddy's local presets as a read answers
+    them."""
+
+    def __init__(self) -> None:
+        self.presets: dict[int, LocalPresetDetail] = {}
+
+    async def keep(self, detail: LocalPresetDetail) -> None:
+        self.presets[detail.id] = detail
+
+    async def stamps(self) -> dict[int, str | None]:
+        return {bb_id: p.updated_at for bb_id, p in self.presets.items()}
+
+    async def documents(self, ids: Collection[int]) -> dict[int, LocalPresetDetail]:
+        return {i: self.presets[i] for i in ids if i in self.presets}
 
 
 def _bind(pool: PgPool, type_id: UUID, ref: str, nozzle: str = "0.4") -> None:
@@ -163,7 +180,7 @@ async def test_adoption_turns_bambuddy_ids_into_scadbuddy_presets(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     fetched_type = _type(pg_pool, "PLA-F")
     person_type = _type(pg_pool, "PLA-P")
     unheld_type = _type(pg_pool, "PLA-U")
@@ -207,7 +224,7 @@ async def test_adoption_turns_bambuddy_ids_into_scadbuddy_presets(
     assert fetched.mirrored_sha256 == fetched.sha256
     assert _bindings(pg_pool, fetched_type) == [(sb_ref(fetched.id), fetched.id)]
     assert _bindings(pg_pool, person_type) == [(sb_ref(person.id), person.id)]
-    # Not in the kept copy: left for a later refresh, still Bambuddy's id.
+    # Not in Bambuddy's answer: left, still Bambuddy's id.
     assert _bindings(pg_pool, unheld_type) == [("300", None)]
     assert (await store.documents([person.id]))[person.id] == _doc("Mine")
     # A binding that names it again later (the pull) is moved to the same preset.
@@ -228,7 +245,7 @@ async def test_one_preset_that_cannot_be_adopted_never_stops_the_rest(
     """A Bambuddy local preset whose row ScadBuddy refuses keeps its bindings' Bambuddy
     id; the ids after it are still adopted."""
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     refused, kept = _type(pg_pool, "PLA-R"), _type(pg_pool, "PLA-K")
     await held.keep(_held(5, "Refused", "2026-11-20T01:00:00"))
     await held.keep(_held(9, "Kept", "2026-11-20T01:00:00"))
@@ -252,7 +269,7 @@ async def test_a_bambuddy_edit_is_a_new_version_of_its_preset(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     type_id = _type(pg_pool, "PLA-B")
     await held.keep(_held(7, "Mine", "2026-11-20T01:00:00"))
     _bind(pg_pool, type_id, "7")
@@ -279,10 +296,10 @@ async def test_a_bambuddy_edit_is_a_new_version_of_its_preset(
 async def test_a_preset_with_no_stamp_writes_no_blob_while_unchanged(
     pg_pool: PgPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A kept preset Bambuddy sent with no ``updated_at`` is read at every refresh; its
+    """A preset Bambuddy sent with no ``updated_at`` is read at every refresh; its
     unchanged document keeps no new blob, and a changed one is a new version."""
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     await held.keep(_held(8, "Stampless", None))
     _bind(pg_pool, _type(pg_pool, "PLA-N"), "8")
     await adopt_held(pg_pool, blobs, held)
@@ -310,11 +327,11 @@ async def test_a_preset_with_no_stamp_writes_no_blob_while_unchanged(
 async def test_another_bambuddys_preset_is_never_refreshed_or_reused(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
-    """After the Bambuddy URL changes, the kept copy's id 7 is another preset: the old
+    """After the Bambuddy URL changes, the configured Bambuddy's id 7 is another preset: the old
     Bambuddy's preset 7 takes no version from it, and a binding naming 7 gets a preset of
     its own."""
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     doc = _doc("Old seven")
     key, sha256 = await keep_document(blobs, document_bytes(doc))
     with pg_pool.connection() as conn, conn.transaction():
@@ -349,7 +366,7 @@ async def test_an_adopted_id_records_the_links_instance(pg_pool: PgPool, tmp_pat
     """A preset's Bambuddy id is a link (#7176): when presets are the only links, the
     adoption records their Bambuddy, so a URL change later waits for a reset."""
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     await held.keep(_held(7, "Mine", "2026-11-20T01:00:00"))
     _bind(pg_pool, _type(pg_pool, "PLA-R"), "7")
     assert await adopt_held(pg_pool, blobs, held, "a1b2c3d4e5f6") == 1
@@ -360,7 +377,7 @@ async def test_an_adopted_id_records_the_links_instance(pg_pool: PgPool, tmp_pat
 
 async def test_a_scadbuddy_owned_preset_is_never_read_back(pg_pool: PgPool, tmp_path: Path) -> None:
     blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
+    held = MemoryPresets()
     doc = _doc("Ours")
     key, sha256 = await keep_document(blobs, document_bytes(doc))
     with pg_pool.connection() as conn, conn.transaction():
@@ -379,50 +396,3 @@ async def test_a_scadbuddy_owned_preset_is_never_read_back(pg_pool: PgPool, tmp_
     assert await refresh_bambuddy(pg_pool, blobs, held) == 0
     store = FilamentPresetStore(pg_pool, lambda: blobs)
     assert json.dumps((await store.documents([made]))[made]) == json.dumps(doc)
-
-
-#: The configured Bambuddy, and another one the links may name after a URL change.
-HERE, OLD = "a1b2c3d4e5f6", "0ld0ld0ld0ld"
-
-
-async def _mirrored_unstamped(pool: PgPool, blobs: LocalBlobStore, instance: str) -> int:
-    """A ScadBuddy preset the mirror sent as Bambuddy preset 60 before it kept
-    Bambuddy's time of the write (#7343)."""
-    doc = _doc("Sent")
-    key, sha256 = await keep_document(blobs, document_bytes(doc))
-    with pool.connection() as conn, conn.transaction():
-        made = create_on(
-            conn,
-            name="Sent",
-            source="3dfp",
-            key=key,
-            sha256=sha256,
-            doc=doc,
-            made_by="t",
-            bb_preset_id=60,
-            bb_instance=instance,
-        )
-        conn.execute("UPDATE filament_presets SET mirrored_sha256 = sha256 WHERE id = %s", (made,))
-    return made
-
-
-@pytest.mark.parametrize(("links", "stamped"), [(None, True), (HERE, True), (OLD, False)])
-async def test_a_mirrored_preset_with_no_time_takes_the_kept_copys(
-    pg_pool: PgPool, tmp_path: Path, links: str | None, stamped: bool
-) -> None:
-    """#7343: a preset the mirror sent before it kept Bambuddy's time takes the kept
-    copy's ``updated_at`` of its id, so a later reset can prove the same Bambuddy from
-    the presets. Only while the links' Bambuddy is the one the copy was read from: after
-    a URL change (links of ``OLD``) nothing is stamped."""
-    blobs = LocalBlobStore(tmp_path / "blobs")
-    held = HeldPresetStore(pg_pool)
-    made = await _mirrored_unstamped(pg_pool, blobs, HERE)
-    with pg_pool.connection() as conn:
-        conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (links,))
-    await held.keep(_held(60, "Sent", "2026-11-23T01:00:00"))
-
-    await sb_presets.sync_from_held(pg_pool, blobs, held, HERE)
-
-    got = FilamentPresetStore(pg_pool, lambda: blobs).get(made)
-    assert got is not None
-    assert got.bb_updated_at == ("2026-11-23T01:00:00" if stamped else None)

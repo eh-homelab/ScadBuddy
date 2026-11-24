@@ -11,11 +11,11 @@ else ``POST /local-presets/``, whose id is kept. A ``PUT`` that finds the preset
 (404) creates it again. A ``bambuddy`` preset is never sent back: it is Bambuddy's.
 
 A failure is the preset's ``mirror_error`` and never fails the write that asked for the
-mirror; the next refresh of the kept presets (`sync_and_mirror`) sends it again. An edit
+mirror; the Schedule's next pull (`mirror_after_pull`) sends it again. An edit
 made in Bambuddy to a mirrored preset is not read back.
 
 One mirror runs at a time (the session try-lock `LOCK`): another caller meanwhile sends
-nothing, and the next refresh sends what it left. A preset's Bambuddy id is kept with
+nothing, and the next pull sends what it left. A preset's Bambuddy id is kept with
 the Bambuddy it belongs to (``bb_instance``), and it is a Bambuddy link as the filament
 sync's are (`bambuddy_pull.ANY_LINK`): the write that stores it records its Bambuddy as
 the links' one when none is recorded (`sb_presets.record_instance_on`), so the links'
@@ -61,10 +61,8 @@ from scadbuddy.filament.sb_presets import (
     Conn,
     FilamentPresetStore,
     record_instance_on,
-    sync_from_held,
 )
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.store import BlobStore
 
 logger = logging.getLogger(__name__)
@@ -289,7 +287,7 @@ async def mirror_with(
     conninfo = pool.conninfo
     lock = await acquire_lock(conninfo() if callable(conninfo) else str(conninfo), LOCK)
     if lock is None:
-        logger.info("another filament preset mirror is running; the next refresh sends")
+        logger.info("another filament preset mirror is running; the next pull sends")
         return 0
     try:
         return await _mirror_locked(client, pool, store, instance, ids)
@@ -361,7 +359,7 @@ async def mirror_pending(
     ids: Collection[int] | None = None,
 ) -> int:
     """`mirror_with` over a client of its own, while the mirror runs (`wants_mirror`);
-    0 otherwise. Never raises: a failure is logged, and the next refresh sends again."""
+    0 otherwise. Never raises: a failure is logged, and the next pull sends again."""
     instance = instance_of(settings)
     if not wants_mirror(settings) or instance is None:
         return 0
@@ -370,21 +368,18 @@ async def mirror_pending(
             return await mirror_with(client, pool, store, instance, ids)
     except Exception as error:
         logger.warning(
-            "the filament preset mirror did not run; the next refresh retries",
+            "the filament preset mirror did not run; the next pull retries",
             extra={"error": type(error).__name__},
         )
         return 0
 
 
-async def sync_and_mirror(
-    pool: ConnectionPool[Conn],
-    blobs: BlobStore,
-    held: HeldPresetStore,
-    settings: Callable[[], StoredSettings],
-) -> None:
-    """What the kept presets' refresh runs after it: `sync_from_held` (its adopted
-    presets marked as the configured Bambuddy's), then every pending preset sent
-    (`mirror_pending`), so one that failed before is sent again."""
+async def mirror_after_pull(
+    pool: ConnectionPool[Conn], blobs: BlobStore, settings: Callable[[], StoredSettings]
+) -> int:
+    """What the Schedule's pull runs last (`spools/activities.py`
+    `filament_pull_activity`), whatever ``filament_sync`` says: every pending preset sent
+    (`mirror_pending`), so one that failed before is sent again. It reads nothing of
+    Bambuddy's presets into ScadBuddy (#7244)."""
     loaded = await asyncio.to_thread(settings)
-    await sync_from_held(pool, blobs, held, instance_of(loaded))
-    await mirror_pending(pool, FilamentPresetStore(pool, lambda: blobs), loaded)
+    return await mirror_pending(pool, FilamentPresetStore(pool, lambda: blobs), loaded)

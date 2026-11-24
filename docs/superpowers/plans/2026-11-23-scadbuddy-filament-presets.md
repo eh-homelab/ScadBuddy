@@ -156,11 +156,8 @@ Without a Bambuddy URL the mirror does nothing.
   `onupdate=func.now()`, `backend/app/models/local_preset.py` line 40 at
   maziggy/bambuddy@b7d894b5, and both routes `db.refresh` before they answer). Ids alone
   would prove nothing (any Bambuddy numbers its presets from 1). A preset mirrored before
-  this change has no time; the next kept-preset refresh gives it the kept copy's
-  `updated_at` of its id (`sb_presets.stamp_mirrored`), only while the links' Bambuddy is
-  the configured one (the copy's), its current document sent and no time kept, so the
-  proof never takes a time from a Bambuddy it has not proved. Until then an untimed link
-  counts against the half rule. A failed preset read is `bambuddy_unreadable`, as a failed
+  this change has no time until its next mirror write (R-7343-5). Until then an untimed
+  link counts against the half rule. A failed preset read is `bambuddy_unreadable`, as a failed
   spool read is. The delete stays possible, so the dialog, the agent tool and the skill also
   say that a delete of preset links on the same Bambuddy makes it hold every preset twice.
 - **R-7343-2 (a lost create left behind).** When no preset above the floor holds the
@@ -170,7 +167,7 @@ Without a Bambuddy URL the mirror does nothing.
   as sent, and the next successful send clears it. ScadBuddy deletes nothing in Bambuddy.
 - **R-7343-3 (`IMPORT_MIRROR_TIMEOUT`).** The comment counts every call: one listing, one
   write per preset (a 404 `PUT` adds a `POST`), and one `GET` per same-name preset above the
-  floor only after a lost create. 120 s stays: it is a cut-off, the refresh sends the rest.
+  floor only after a lost create. 120 s stays: it is a cut-off, the Schedule's next pull sends the rest.
 - **R-7343-4 (`GET` returns `setting` as `POST` stored it).** It does: `create_local_preset`
   stores `json.dumps(data.setting)` (`backend/app/api/routes/local_presets.py` line 115)
   and `get_local_preset` answers `json.loads(preset.setting)` (line 73), `setting: dict` on
@@ -178,3 +175,9 @@ Without a Bambuddy URL the mirror does nothing.
   maziggy/bambuddy@b7d894b5 (v1.3.2; unchanged since edf244c4 of 2026-02-09 but for the
   session scope, d8375fab). `extract_core_fields` only reads the dict. So `made_after`'s
   comparison is unchanged; both sides strip the credential keys as they parse.
+- **R-7343-5 (an untimed preset after the kept copy's retirement, #7244).** The kept copy
+  that `sb_presets.stamp_mirrored` read is gone, and the stamp may add no Bambuddy call. The
+  only listing the mirror reads (`preset_mirror._Listing`) is read before a create or a lost
+  create's match, and an untimed preset is never pending (its document is sent), so no run
+  reads a listing for it. So `stamp_mirrored` and its tests are removed: an untimed preset
+  takes its time from its next mirror write (a new version of its document).
