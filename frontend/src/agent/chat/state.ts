@@ -174,7 +174,7 @@ export interface SessionPatch {
   updatedAt?: string
   costUsd?: number
   budgetUsd?: number
-  /** Plan 5d — classic or durable. */
+  /** Always `durable` from a current agent (plan Step 6.3). */
   mode?: SessionMode
   /** For a session new to the panel: where it came from and who holds it. */
   origin?: Origin

@@ -1996,8 +1996,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   content hash. You install, approve and re-pin a package, and set its items, in
   Settings → Tools & plugins → Packages: its switch, each hook, skill (its commands
   among them) and subagent `on` or `off`, each built-in an allowed package names, and
-  each of its MCP servers with its tools. A change applies from the next call, in classic
-  and durable turns alike; a hook changes from the next turn. See
+  each of its MCP servers with its tools. A change applies from the next call, in every
+  turn; a hook changes from the next turn. See
   [`docs/ai/operating.md` §9](docs/ai/operating.md#9-plugin-packages-297), "Items and
   switches".
 - **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the

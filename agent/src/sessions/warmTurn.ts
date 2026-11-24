@@ -6,9 +6,9 @@ import type { TurnTrace } from '../telemetry/turn.js'
 import type { AssembledTurn } from './turnRunner.js'
 import { turnCostUsd, type WarmEntry, type WarmSessions, type WarmTurn } from './warm.js'
 
-// One classic turn on the session's warm Claude Code (unified runtime spec
+// One turn on the session's warm Claude Code (unified runtime spec
 // 2026-10-13 §5.3, §6.6, §6.7; plan Task 2.3). `warmAttempts` is what
-// `SessionManager.runTurn` gives `runWithFallback` (harness/fallback.ts) as its
+// `CoreTurn` (turnCore.ts) gives `runWithFallback` (harness/fallback.ts) as its
 // `run`: each attempt of the turn acquires the session's process from the
 // cache (warm.ts) for the attempt's credential and remaining budget, pushes the
 // attempt's prompt into the process's inbox, and reads its messages up to the

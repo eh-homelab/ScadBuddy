@@ -117,7 +117,7 @@ export type SessionView = {
   offered_to_you: boolean
   status: SessionRecord['status']
   parent_id: string | null
-  /** Classic or durable (plan 5d), set when the session started. */
+  /** Always `durable` (plan Step 6.3). */
   mode: SessionRecord['mode']
   turns: number
   cost_usd: number
