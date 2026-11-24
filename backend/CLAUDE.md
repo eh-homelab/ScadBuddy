@@ -678,9 +678,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   subject while the run's result marks it a LAN run with prints still to start, #6586; the hold outlives the row), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
   whenever it parses a preset, and never stores, forwards or writes them into a slicer
   file (`core/credentials.py` `strip_credentials`, applied at parse in `bambuddy/models.py`
-  `LocalPresetDetail`, nested keys too); the API strips the kept presets an older build
-  stored at its start and after each refresh, with no Bambuddy call (`slicing/held_presets.py`
-  `strip_kept_logged`); one window remains: preset files that older builds put in the
+  `LocalPresetDetail`, nested keys too); no copy of Bambuddy's local presets is kept
+  (#7244); one window remains: preset files that older builds put in the
   content store keep the keys until the content sweep collects them; the print worker, which holds the Bambuddy key,
   can still read Bambuddy's local presets, including any such keys, in the bytes Bambuddy
   sends, and what protects them is the Bambuddy key's scope; a backend that
@@ -773,10 +772,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
   command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
-  presets and a process preset's values in Bambuddy's shapes, with Bambuddy's `local`
-  presets from the kept copy `slicing/held_presets.py` (#4645: `held_local_presets`,
-  refreshed on the spool refresh's Schedule, read through `Profiles.held`; cloud user
-  presets are not offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
+  presets and a process preset's values in Bambuddy's shapes, with ScadBuddy's own
+  filament presets as `local` `sb-<id>` refs (`Profiles.own`, #7176). No Bambuddy local
+  preset is offered, valued or sliced (#7244, the owner's decision of 2026-11-23: the kept
+  copy `held_local_presets` is read by nothing and is to be dropped; a binding or override
+  that names one is refused, `presets.py` `bambuddy_local_refusal`, and the dialog says so,
+  `resolver.py` kind `no-preset`); cloud user presets are not offered, D5. `print_library/copies.py` files the laid-out per-print copy in the
   native library, marked with its run's subject (`library_files.print_subject`, as is
   its slice); `print_library/sweep.py` `sweep_print_copies` (housekeeping
   `NATIVE_COPIES_SWEEP`, #4337) trashes a folder's superseded copies and what nothing
@@ -869,7 +870,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (instances and tag bindings; every writer locks the tag before the spool; archive closes
   the open binding; `detail()` is the spool page's read: tags, last tag and its holder, the
   grams `basis`, `in_use`; `ledger()` pages every spool's events by an opaque `(at, seq)`
-  cursor; `low_stock` is computed per spool against its effective `low_stock_pct`, else the setting `filament_low_stock_pct` (20 by default, read once per call, before the store takes a pool connection, by its `defaults` reader (`FilamentDefaults`); the summary's `value_left` uses `filament_default_cost_per_kg` for a spool with no cost; Settings → Printing → Filament), `presets.py` (a spool's own presets and K values over its type's, by key; `preset_for` is exact, never a near nozzle; no key is `*`: the 0706Z migration made each `*` row one `migrated` row per model and nozzle, `drop_migrated` deletes them when a spool gets its first type; a ScadBuddy preset's row carries its mirror's Bambuddy id, `EffectivePreset.bambuddy_id`, and every path that hands a preset to Bambuddy sends `for_bambuddy()`), `sb_presets.py` (ScadBuddy's own filament presets, #7176, plan `docs/superpowers/plans/2026-11-23-scadbuddy-filament-presets.md`: `filament_presets`, each document a blob held by `filament_preset` per version, a changed document a new version of the same id; a binding names one by `sb-<id>` in `slicer_filament`, a foreign key through the generated `preset_id` column, refs in `slicing/own_presets.py`; `sync_from_held` runs after the kept presets' refresh in its activity: `refresh_bambuddy` versions a `bambuddy` preset whose Bambuddy `updated_at` moved, `adopt_held` moves every binding that names a kept Bambuddy local preset to a ScadBuddy one; the native slicer reads them through `Profiles.own`, on the print worker over `…/print/own-presets`, area `own-presets`, `RemoteFilamentPresets`), `ledger.py` (`filament_spool_events`, the one source of grams left:
+  cursor; `low_stock` is computed per spool against its effective `low_stock_pct`, else the setting `filament_low_stock_pct` (20 by default, read once per call, before the store takes a pool connection, by its `defaults` reader (`FilamentDefaults`); the summary's `value_left` uses `filament_default_cost_per_kg` for a spool with no cost; Settings → Printing → Filament), `presets.py` (a spool's own presets and K values over its type's, by key; `preset_for` is exact, never a near nozzle; no key is `*`: the 0706Z migration made each `*` row one `migrated` row per model and nozzle, `drop_migrated` deletes them when a spool gets its first type; a ScadBuddy preset's row carries its mirror's Bambuddy id, `EffectivePreset.bambuddy_id`, and every path that hands a preset to Bambuddy sends `for_bambuddy()`), `sb_presets.py` (ScadBuddy's own filament presets, #7176, plan `docs/superpowers/plans/2026-11-23-scadbuddy-filament-presets.md`: `filament_presets`, each document a blob held by `filament_preset` per version, a changed document a new version of the same id; a binding names one by `sb-<id>` in `slicer_filament`, a foreign key through the generated `preset_id` column, refs in `slicing/own_presets.py`; Bambuddy's presets come in only by `import_presets` (`refresh_bambuddy` versions a `bambuddy` preset whose Bambuddy `updated_at` moved, `adopt_held` moves every binding that names a Bambuddy local preset to a ScadBuddy one, each from a `PresetSource`, `LivePresets` reading `GET /local-presets` itself; #7244, the owner's decisions of 2026-11-23: ScadBuddy owns the presets, Bambuddy is at most a mirror target or an import's source, and no copy is kept): in the spool refresh's `filament_bambuddy_pull` activity after the pull while `filament_sync.presets` is `bb_to_sb` or `two_way` (`spools/activities.py`, within the activity's deadline), by hand whatever the direction (`POST /filament/presets/bambuddy-import`, 409 `not_configured` or `instance_changed`, agent `filament_bambuddy_presets_import`), at the API's start for the bindings that still name a Bambuddy local id (`adopt_at_start`, from `slicing/component.py`, retried every `ADOPT_RETRY_S`, on one replica at a time (the session try-lock `ADOPT_LOCK`); nothing bound, or links recorded for another Bambuddy (`links_elsewhere_on`), no call); a 3DFP fetch writes ScadBuddy presets itself and adopts nothing (#7201); the native slicer reads them through `Profiles.own`, on the print worker over `…/print/own-presets`, area `own-presets`, `RemoteFilamentPresets`), `ledger.py` (`filament_spool_events`, the one source of grams left:
   the newest absolute reading, then the deltas after it (`basis()` returns that anchor and those
   deltas, and `grams_left()` is built on it); events carry their physical time,
   ordered by `(at, delta before reading, seq)` (a paired plate's `print_run` is skipped for its `bb_usage` row); a time-less event gets a clock-step guard because the WSL clock
@@ -1047,7 +1048,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`ProfileFetches`: `open`, `get`, `latest`, `gaps`, `fail_unstarted`, `running_age`,
   `fail_unserved`; the module functions `start_fetch`, `store_file`, `import_run`, `mark_failed`
   and `end_unserved`; the run is the table `filament_profile_fetches`, its files
-  are `blob_refs` held by kind `profile_fetch`) and `api/crud_profile_fetch.py` (`crud_router(
+  are `blob_refs` held by kind `profile_fetch`; since #7176 `import_run` writes ScadBuddy's own
+  presets, `sb_presets.py`, and imports nothing into Bambuddy: the mirror, `preset_mirror.py`, sends
+  each written preset after the commit while the stored setting `filament_preset_mirror` is on, and
+  again at the end of each scheduled pull, whatever `filament_sync` says, `mirror_after_pull`; the
+  type's nozzle range wins, #7142,
+  `apply_type_temps`) and `api/crud_profile_fetch.py` (`crud_router(
   "profile-fetch")`, area `runs`: `PUT …/runs/{run_id}/files/{sha256}`, `POST …/runs/{run_id}/import`
   and `…/failed`). The public routes are `POST` and `GET /filament/types/{id}/profile-fetch`
   (`api/filament.py`). Invoice confirm starts a fetch for each new type with a `tdfp_id`.
@@ -1156,9 +1162,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   one is 503 `LAN_NEEDS_KEK`), and its rack hotends' usage (`RemoteRackUsage`, a
   `RackUsageStore` with no pool, area `rack`, #5298 Task 30: a LAN start's picks are one
   route and one transaction on the API; every write but `seen` takes an
-  `Idempotency-Key`; `spool_history` is the API's), and the kept presets and a native
-  slice's start (`RemoteHeldPresets`, `RemoteNativeSlices`, area `spools`, #5298 Task 31:
-  each write runs whole on the API under its lock), and the
+  `Idempotency-Key`; `spool_history` is the API's), and a native slice's start
+  (`RemoteNativeSlices`, area `spools`, #5298 Task 31: each write runs whole on the API
+  under its lock; the area's `…/held-presets` reads answer empty since #7244, for an older
+  worker during a roll), and ScadBuddy's own filament presets (`RemoteFilamentPresets`,
+  area `own-presets`), and the
   SB spools in a native run's trays and what its LAN starts use of them
   (`RemoteFilamentTrays`, `RemotePrintUses`, area `filament`, #6262 Task 6: an area of its
   own, so the worker waits for an API that serves it; a start's uses and a run's settle
@@ -1215,7 +1223,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `matched_by` `import`, beside its `print_imports` row (`PrintLinkStore.record_import`).
   #6394: or to a native library file that stands and is no run's per-print copy (a 422:
   the sweep would trash it), checked again in the import's transaction
-  (`require_import_target`) (`library_file_id`, subject `library:<id>`;
+  (`require_import_target`) (a file trashed and added again is a 404 `library-file-gone`
+  whose `replacement` is the live file of the same SHA-256, which the dialog offers, #7335)
+  (`library_file_id`, subject `library:<id>`;
   `print_imports.subject` is the target, while `library_file_id` and `source` stay where
   the 3MF was read from, and `slug` is NULL). The print watcher and `slugs_by_hash` read
   model imports only. A link of ScadBuddy's own print of that file takes the import's row
@@ -1462,7 +1472,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the
   standard `OTEL_*` variables, the sampler (parentless `CLIENT` spans dropped), and the
   helpers every traced file uses (`span`, `detached_span` for a span exited in another
-  task such as a stream, `current_traceparent`, `link_to`, `use_traceparent`).
+  task such as a stream, `traced_thread` for an `asyncio.to_thread` call whose span says how
+  long it waited for a free thread (`scadbuddy.thread_wait_ms`, #7245), `current_traceparent`,
+  `link_to`, `use_traceparent`). The S3 backend makes its own CLIENT span per request
+  (`S3.<Operation>`, `store/s3.py` `_request`, whose docstring says why not the
+  `AiobotocoreInstrumentor`).
   `core/trace_scrub.py` strips exception messages and status
   descriptions before anything is exported; never record a parameter value, a log
   line or anything Bambuddy returns. Tests share one provider (`tests/conftest.py`,
@@ -2270,7 +2284,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   ids), and `library:<old>`'s remembered choices copied to an empty `library:<new>`
   (`SettingsStore.copy_library_choices`). The run's subject, `existing` and `start` take the
   new id; a retry reuses the check, finds the item moved or the file in "Storefront", and
-  uploads nothing. The variant is sliced with the
+  uploads nothing, unless the file it moved to is gone since (`Shelf.stands`): then the held
+  copy is put back again. The find skips a run's per-print copy (`per_print`), and a wait
+  for the lock past `PROJECT_LOCK_TIMEOUT_MS` is a 503 `UNAVAILABLE_PROBLEM` the operation
+  tries again. The variant is sliced with the
   choices and presets a back-office quote of a spool of the same filament type on the same
   printer gets (#6574, `test_slice_parity.py`). The shop slice profile gives only the
   printer and a filament type per material (`slice_profile.py`, a

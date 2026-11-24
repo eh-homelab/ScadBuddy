@@ -13,7 +13,6 @@ import {
   serverAccess,
 } from '../src/plugins/packages/mcp.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { MockActivityEnvironment } from '@temporalio/testing'
 import { z } from 'zod'
 import { packageServerSource, packageSource, type AccessRow } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
@@ -35,6 +34,7 @@ import {
   type TurnServer,
 } from '../src/temporal/turnTools.js'
 import { startFakeMcp } from './support/fakeMcp.js'
+import { turnToolEnv } from './support/turnToolEnv.js'
 
 // A plugin package's MCP servers as turn tools (#2320): checked rather than trusted, and their
 // http MCP servers reached only through the loopback forwarder, as a remote plugin's are
@@ -363,7 +363,7 @@ describe("a package's MCP servers: their switch and their names (#4757)", () => 
       servers: async () => ({ servers: [inProcess], problems: [], secrets: [], release: () => {} }),
       approvals: { approved: async () => true },
     }
-    const env = (type: string) => new MockActivityEnvironment({ activityType: type, activityId: 'tool-t1', workflowExecution: { workflowId: `session-${SESSION}`, runId: 'r' } })
+    const env = (type: string) => turnToolEnv({ activityType: type, activityId: 'tool-t1', workflowExecution: { workflowId: `session-${SESSION}`, runId: 'r' } })
     const activities = turnToolActivities(deps)
     const { tools } = await listTurnTools(deps, { session: SESSION, owner: OWNER, signal: new AbortController().signal })
     expect(tools.map((t) => [t.name, t.tier])).toEqual([['plugin_notes_local__look', 'read']])

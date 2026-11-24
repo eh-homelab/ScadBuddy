@@ -582,7 +582,7 @@ async def test_an_import_onto_a_file_that_does_not_stand_writes_nothing(
 
     with pytest.raises(ImportTargetGoneError, match="per-print copy"):
         await links.record_import(copy)
-    with pytest.raises(ImportTargetGoneError, match="stands"):
+    with pytest.raises(ImportTargetGoneError, match="deleted or replaced"):
         await links.record_import(onto_file(194))
 
     assert await links.linked(193) is None and await links.linked(194) is None

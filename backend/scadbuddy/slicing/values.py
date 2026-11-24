@@ -6,11 +6,10 @@ The values are the preset flattened as the native slicer flattens it
 (:meth:`~scadbuddy.slicing.profiles.Profiles.process`), in the shape Bambuddy's answer has
 (a string, or a list of strings for a vector option: ``slicing/presets.py``
 ``apply_overrides``, measured 2026-10-18), so every caller reads either one the same way.
-A ``local`` process the kept copy of Bambuddy's local presets holds (#4645) is that
-copy's document flattened over the tree, as its slice is (`slicing/presets.py`).
 A preset the native catalogue does not offer is unresolved, never an error, as Bambuddy's
-unresolved answers are (#717, #1899): a ``local`` ref the copy lacks, an ``orca_cloud``
-ref, a cloud user preset, a base preset, or anything not a process.
+unresolved answers are (#717, #1899): a ``local`` ref (a Bambuddy local preset, which the
+native slicer refuses, #7244; ScadBuddy's own presets are filament presets), an
+``orca_cloud`` ref, a cloud user preset, a base preset, or anything not a process.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ import asyncio
 from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues, read_once
 from scadbuddy.bambuddy.models import NOT_IN_PROFILES, PresetRef, PresetValues
 from scadbuddy.slicing.catalogue import native_catalogue
-from scadbuddy.slicing.presets import held_flat
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError, Profiles
 
 __all__ = ["NOT_IN_PROFILES", "native_values", "values_for"]
@@ -33,7 +31,7 @@ def native_values(profiles: Profiles) -> ReadPresetValues:
 
     async def values(ref: PresetRef) -> PresetValues:
         if ref.source == "local":
-            return await held(ref)
+            return PresetValues(resolved=False, reason=NOT_IN_PROFILES)
         catalogue = await asyncio.to_thread(native_catalogue, profiles)
         native = catalogue.native_ref(ref, "process")
         if native is None:
@@ -49,25 +47,6 @@ def native_values(profiles: Profiles) -> ReadPresetValues:
                 return PresetValues(resolved=False, reason=NOT_IN_PROFILES)
             read[native.id] = PresetValues(resolved=True, values=flat)
         return read[native.id]
-
-    async def held(ref: PresetRef) -> PresetValues:
-        """A ``local`` process from the kept copy of Bambuddy's local presets (#4645),
-        flattened as its slice is (`presets.held_flat`); not kept, or not readable,
-        unresolved."""
-        key = f"local:{ref.id}"
-        if key not in read:
-            try:
-                flat = await held_flat(profiles, "process", ref)
-            except ProfileError as error:
-                if isinstance(error, ProfileImageError):
-                    raise
-                flat = None
-            read[key] = (
-                PresetValues(resolved=False, reason=NOT_IN_PROFILES)
-                if flat is None
-                else PresetValues(resolved=True, values=flat)
-            )
-        return read[key]
 
     return values
 

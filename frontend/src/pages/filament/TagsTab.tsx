@@ -6,7 +6,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { TD, TH, when } from '../../components/filament/formClasses'
 import { KINDS } from '../../components/filament/tagKinds'
 import { EntityLink } from '../../components/filament/EntityLink'
+import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { filamentLinks } from '../../lib/filamentLinks'
+import { matchesSearch, parseSearch } from '../../lib/filamentSearch'
 import { Button } from '@/components/ui/button'
 
 const ANY = '__any'
@@ -23,12 +25,14 @@ const keyOf = (tag: Pick<TagRow, 'tag_uid' | 'tray_uuid'>) => tag.tag_uid ?? tag
 /**
  * #6262 — the Tags tab: every RFID tag the spools have had, the spool each is on now, since
  * when, and whether it was taken over from another spool. A row opens the tag's history,
- * newest first. The kind and bound filters are in the URL.
+ * newest first. The kind and bound filters are in the URL, and so is the search (#7151):
+ * `q=` finds a tag by its UID or tray UUID, as a reader prints it, or by its spool's number.
  */
 export function TagsTab() {
   const [params, setParams] = useSearchParams()
   const kind = params.get('kind') ?? ''
   const shown = SHOWN.find((one) => one === params.get('show')) ?? 'all'
+  const search = params.get('q') ?? ''
   const [tags, setTags] = useState<TagRow[] | null>(null)
   // Spool numbers by id: read each time a history opens (a row already carries its spool's number).
   const [numbers, setNumbers] = useState<Map<string, number> | null>(null)
@@ -58,10 +62,12 @@ export function TagsTab() {
     setParams(next, { replace: true })
   }
 
-  const rows = useMemo(
-    () => (tags ?? []).filter((tag) => (!kind || tag.kind === kind) && (shown === 'all' || (shown === 'bound') === (tag.binding != null))),
-    [tags, kind, shown],
-  )
+  const rows = useMemo(() => {
+    const tokens = parseSearch(search)
+    const found = (tag: TagRow) =>
+      matchesSearch({ number: tag.binding ? tag.spool_number : null, texts: [], hexes: [], tags: [tag.tag_uid, tag.tray_uuid].filter((key): key is string => !!key) }, tokens)
+    return (tags ?? []).filter((tag) => (!kind || tag.kind === kind) && (shown === 'all' || (shown === 'bound') === (tag.binding != null)) && found(tag))
+  }, [tags, kind, shown, search])
 
   useEffect(() => {
     if (open) historyRef.current?.focus()
@@ -94,6 +100,7 @@ export function TagsTab() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3 text-[13px]">
+        <FilamentSearchBox label="Search tags" placeholder="Search: tag UID, tray UUID, #87  /" value={search} onChange={(text) => change('q', text.trim(), '')} className="w-full sm:w-72" />
         <label className="flex items-center gap-2 text-muted-foreground">
           Kind
           <Select value={kind || ANY} onValueChange={(next) => change('kind', next === ANY ? '' : next, '')}>

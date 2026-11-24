@@ -760,9 +760,15 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_spool_add_event',
   // #7149: a used-counter reset is a ledger event of each spool.
   'filament_spools_reset_consumed',
+  // #7151: a bulk edit, archive or restore writes each spool and its `edited` or `archived`
+  // event; a spool is no recorded kind.
+  'filament_spools_bulk_update',
+  'filament_spools_bulk_archive',
   'filament_location_upsert',
   'filament_spool_move',
   'filament_bambuddy_import',
+  // #7244: the presets import makes ScadBuddy presets and renames bindings, no recorded kind.
+  'filament_bambuddy_presets_import',
   'filament_sync_ams_weights',
   'filament_sensor_save',
   'filament_sensor_archive',
