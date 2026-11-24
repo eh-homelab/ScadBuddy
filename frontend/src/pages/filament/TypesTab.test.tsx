@@ -148,6 +148,85 @@ describe('the Types tab', () => {
       await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
       expect(await screen.findByRole('alert')).toHaveTextContent(/Zed stays in the catalog/)
     })
+
+    // #7159 — a row whose brand and colour a type has opens a choice instead of a duplicate.
+    describe('when a type of the brand and colour exists (#7159)', () => {
+      /** The type PATCH bodies sent while `run` runs; the listener is dropped whatever happens. */
+      async function typePatches(run: () => Promise<void>): Promise<unknown[]> {
+        const bodies: Promise<unknown>[] = []
+        server.events.on('request:start', ({ request }) => {
+          if (request.method === 'PATCH' && request.url.includes('/filament/types/')) bodies.push(request.clone().json())
+        })
+        try {
+          await run()
+          return await Promise.all(bodies)
+        } finally {
+          server.events.removeAllListeners()
+        }
+      }
+      const dialogOf = () => screen.findByRole('dialog', { name: 'This filament may already have a type' })
+
+      it('links the exact match, chosen first, and sets only its cost', async () => {
+        const row = await api.createFilament({ material: 'PLA', subtype: 'Silk', brand: 'elegoo', effect: 'silk', colour: '#d4af37', cost_per_kg: '22.5' })
+        const before = (await listTypes()).length
+        const patches = await typePatches(async () => {
+          const { user } = renderPage(<TypesTab />)
+          await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+          const dialog = await dialogOf()
+          expect(within(dialog).getByRole('radio', { name: /EL-PLA-SILK-GOLD/ })).toBeChecked()
+          expect(within(dialog).getByText(/PLA, Silk, 1000 g label, 1 spool$/)).toBeInTheDocument()
+          expect(within(dialog).queryByText(/this row still has no type/)).toBeNull()
+          await user.click(within(dialog).getByRole('button', { name: 'Link EL-PLA-SILK-GOLD' }))
+          await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('link', { name: 'EL-PLA-SILK-GOLD' })
+        })
+        expect(patches).toEqual([{ cost_per_kg: '22.5' }])
+        expect((await listTypes()).length).toBe(before)
+        expect((await listTypes()).find((type) => type.id === T.GOLD)).toMatchObject({ filament_id: row.id, subtype_id: ST.SILK, label_weight_g: 1000 })
+      })
+
+      it('links a type whose only difference is its effect, which the price book does not match on', async () => {
+        const row = await api.createFilament({ material: 'PLA', subtype: 'Silk', brand: 'Elegoo', colour: '#D4AF37', cost_per_kg: '23' })
+        const { user } = renderPage(<TypesTab />)
+        await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+        const dialog = await dialogOf()
+        expect(within(dialog).getByText('Its effect differs from this row')).toBeInTheDocument()
+        expect(within(dialog).queryByText(/this row still has no type/)).toBeNull()
+        await user.click(within(dialog).getByRole('button', { name: 'Link EL-PLA-SILK-GOLD' }))
+        await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('link', { name: 'EL-PLA-SILK-GOLD' })
+      })
+
+      // The prod case: the existing type has another subtype, so the price book cannot link it to this row.
+      it('offers a type of another subtype too, says first that it cannot link this row, and only sets its cost', async () => {
+        const row = await api.createFilament({ material: 'PLA', brand: 'Elegoo', colour: '#D4AF37', cost_per_kg: '21' })
+        const patches = await typePatches(async () => {
+          const { user } = renderPage(<TypesTab />)
+          await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+          const dialog = await dialogOf()
+          expect(within(dialog).getByRole('radio', { name: /EL-PLA-SILK-GOLD/ })).toBeChecked()
+          expect(within(dialog).getByText('Its subtype and effect differ from this row')).toBeInTheDocument()
+          expect(within(dialog).getByText(/this row still has no type\. Setting its cost gives 21 per kg to its own price book row/)).toBeInTheDocument()
+          await user.click(within(dialog).getByRole('button', { name: "Set EL-PLA-SILK-GOLD's cost" }))
+          expect(await screen.findByRole('status', { name: 'Type link' })).toHaveTextContent(/EL-PLA-SILK-GOLD now costs 21 per kg.*its own price book row/)
+        })
+        expect(patches).toEqual([{ cost_per_kg: '21' }])
+        expect(within(screen.getByTestId(`filament-${row.id}`)).getByRole('button', { name: /Make a type/ })).toBeInTheDocument()
+      })
+
+      it('makes a new type anyway when asked, and nothing on Cancel', async () => {
+        const row = await api.createFilament({ material: 'PLA', brand: 'Elegoo', colour: '#D4AF37', cost_per_kg: '21' })
+        const before = (await listTypes()).length
+        const { user } = renderPage(<TypesTab />)
+        const make = await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ })
+        await user.click(make)
+        await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+        await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+        expect((await listTypes()).length).toBe(before)
+        await user.click(make)
+        await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Make a new type' }))
+        await waitFor(async () => expect((await listTypes()).length).toBe(before + 1))
+        expect((await listTypes()).find((type) => type.filament_id === row.id)).toMatchObject({ rgba: '#D4AF37FF', subtype_id: null })
+      })
+    })
   })
 
   it('fills every type from its slicer profile and reports each', async () => {
