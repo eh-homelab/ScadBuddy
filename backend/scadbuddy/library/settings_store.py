@@ -505,6 +505,11 @@ class StoredSettings(BambuddyIds):
     #: only (no row is on), because `filament/shopping.py` `add_for_empty_on` reads it in
     #: the emptying write's own transaction, where no environment value reaches.
     filament_shopping_auto_add_empty: bool = True
+    #: #7176: ScadBuddy's own filament presets are sent to Bambuddy's local presets (the
+    #: mirror, `filament/preset_mirror.py`). On by default: Bambuddy's AMS slot settings and
+    #: spool records name presets it holds (plan 2026-11-23 "Measurement"). Stored only:
+    #: the mirror reads it where it runs, after a fetch and after each preset refresh.
+    filament_preset_mirror: bool = True
     #: #7156: off, ScadBuddy holds Bambuddy's auto-add of unknown RFID spools off; on, it
     #: leaves Bambuddy's value as it is. On by default. Stored only (no row is on),
     #: because `filament/rfid_mode.py` reads it in SQL beside the override mode
@@ -839,6 +844,9 @@ class SettingsPatch(BaseModel):
     #: #6868: whether an empty spool adds its type to the shopping list; ``null`` puts
     #: back the default (on).
     filament_shopping_auto_add_empty: bool | None = None
+    #: #7176: whether ScadBuddy's filament presets are mirrored to Bambuddy; ``null`` puts
+    #: back the default (on).
+    filament_preset_mirror: bool | None = None
     #: #7156: off holds Bambuddy's auto-add of unknown RFID spools off; ``null`` puts back
     #: the default (on).
     filament_auto_add_unknown_rfid: bool | None = None

@@ -249,6 +249,8 @@ ALL_ONE = {
     "insert_types": 1,
     "filaments": 1,
     "colours": 1,
+    # `_linked` makes no ScadBuddy preset (#7176).
+    "presets": 0,
     "intents": 1,
     "errors": 1,
     "ignored": 1,

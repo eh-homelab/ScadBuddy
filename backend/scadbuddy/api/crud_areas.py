@@ -176,8 +176,8 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: The print ``own-presets`` area is ``…/print/own-presets`` and its
 #: ``/documents``: ScadBuddy's own filament presets a native run reads (#7176).
 #: The profile-fetch ``runs`` area is ``…/profile-fetch/runs/{id}/files/{sha256}``,
-#: ``…/import`` and ``…/failed``: a fetch's preset files, their import into Bambuddy as the
-#: type's presets, and its failure (#6625, `api/crud_profile_fetch.py`).
+#: ``…/import`` and ``…/failed``: a fetch's preset files, their import as the type's
+#: ScadBuddy presets (#7176), and its failure (#6625, `api/crud_profile_fetch.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
