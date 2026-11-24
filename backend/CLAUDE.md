@@ -178,6 +178,10 @@ renders never start); a server named by `SCADBUDDY_TEST_TEMPORAL_ADDRESS` needs 
 The fixture terminates the workflows a test leaves open, since an abandoned piece
 would be joined by the next test that renders it. The dev server's store is a SQLite
 file (on `/dev/shm` when it has room): in memory it was lost mid-session under load.
+Each dev server runs with one partition per task queue, a 10 s task-queue idle time and
+`GOGC=25` (`tests/support/temporal.py` `DEV_SERVER_DYNAMIC_CONFIG`, #7527): with the defaults it
+kept about 3 MiB per test's queue and reached 2 GiB per xdist worker, which took a CI shard to its
+13 GiB container cap.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
 `20260928T0840Z_settings.sql`. A one-off fix of named rows belongs in a migration only when
