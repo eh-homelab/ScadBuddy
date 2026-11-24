@@ -3,8 +3,12 @@ store's NFS globs and the asset sweep's walk."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import threading
 from pathlib import Path
 
+import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -39,6 +43,31 @@ async def test_traced_thread_records_the_wait_and_parents_the_threads_spans(
     assert isinstance(waited, float) and waited >= 0
     assert inside.parent is not None
     assert inside.parent.span_id == outer.context.span_id
+
+
+async def test_a_cancelled_wait_leaves_no_write_on_an_ended_span(
+    spans: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The thread outlives the cancelled await and the span. It writes nothing to it."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def work() -> None:
+        started.set()
+        release.wait(5)
+
+    caplog.set_level(logging.WARNING)
+    task = asyncio.ensure_future(traced_thread("cancelled", work))
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    await asyncio.sleep(0.05)
+    (cancelled,) = [s for s in spans.get_finished_spans() if s.name == "cancelled"]
+    assert cancelled.attributes is not None
+    assert THREAD_WAIT_ATTRIBUTE not in cancelled.attributes
+    assert "ended span" not in caplog.text
 
 
 async def test_the_output_glob_is_a_span_and_a_remembered_hit_is_not(

@@ -1,7 +1,7 @@
 import type { Client } from '@temporalio/client'
 import { TestWorkflowEnvironment } from '@temporalio/testing'
 import { execFileSync } from 'node:child_process'
-import { seenAtMs } from '../../src/sessions/durable.js'
+import { queuePollers } from '../../src/temporal/pollers.js'
 import { HOST_FRESH_MS } from '../../src/temporal/session/affinity.js'
 
 // A Temporal dev server for the agent's `agent-tools` tests (spec 2026-10-01 §8, #1055),
@@ -46,15 +46,9 @@ export function polledHosts(client: Pick<Client, 'workflowService' | 'options' |
   return async () => {
     const live = new Set<string>()
     for (const queue of queues) {
-      // As liveHostQueues: a dev server that hangs fails the read, not the test's whole timeout.
-      const { pollers } = await client.withDeadline(Date.now() + 10_000, () =>
-        client.workflowService.describeTaskQueue({
-          namespace: client.options.namespace,
-          taskQueue: { name: queue },
-          taskQueueType: 2,
-        }),
-      )
-      if ((pollers ?? []).some((p) => Date.now() - seenAtMs(p.lastAccessTime) < HOST_FRESH_MS)) live.add(queue)
+      // As liveHostQueues: every partition, and a dev server that hangs fails the read, not the test's whole timeout.
+      const pollers = await queuePollers(client, queue, 2, Date.now() + 10_000)
+      if (pollers.some((p) => Date.now() - p.seenAtMs < HOST_FRESH_MS)) live.add(queue)
     }
     return live
   }

@@ -106,10 +106,29 @@ store; Bambuddy knows each one only by its mirror's local preset id
 configure send. After each refresh of the kept presets, a binding that still names a
 Bambuddy local preset is moved to a ScadBuddy preset made from the kept copy, and a preset
 made in Bambuddy takes a new version when Bambuddy edits it
-(`backend/scadbuddy/filament/sb_presets.py`). Until the fetch writes ScadBuddy presets
-itself (#7176's second PR), a re-fetch still imports into Bambuddy: at a key whose `3dfp`
-preset was already adopted, the new Bambuddy id is adopted as a second, `bambuddy` preset
-(plan Decision 6).
+(`backend/scadbuddy/filament/sb_presets.py`). While the stored setting
+`filament_preset_mirror` is on (the default), each preset ScadBuddy owns is copied to
+Bambuddy's local presets after a fetch and after each refresh, rewritten in place under the
+same Bambuddy id when it changes; a failed copy is the preset's `mirror_error`
+(`backend/scadbuddy/filament/preset_mirror.py`). One mirror runs at a time, a preset's
+Bambuddy id is kept with the Bambuddy it belongs to. That id is a Bambuddy link as the
+filament sync's are: the write that stores it records its Bambuddy as the links' one when
+none is recorded, so a site whose only links are presets has one too. After the Bambuddy
+URL changes the mirror waits, as the filament sync does, until the links are reset
+(`POST /filament/sync/reset-links`): a reset that finds the same Bambuddy (proved by the
+spool links, so never when presets are the only links) moves the ids to the new URL, and
+one that deletes the links drops them (the dry run's and the answer's `presets` count), so
+each preset is created on the new Bambuddy;
+meanwhile no path hands Bambuddy an id of the old one. A create whose answer was lost is
+found above the highest id listed before it, by its name and its document, not made
+twice; one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
+own `mirror_error` and never stops the rest.
+
+A fetch writes ScadBuddy only: each file is the type's `3dfp` preset of its key, a changed
+one a new version with its changed keys in the run's notes, and the type's own nozzle range
+wins over 3DFP's (#7142). Fetching presets is the `ProfileFetch` workflow on the
+profile-fetch worker, and a 3DFP search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
+([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).
 
 A printer's K-profiles (#7154, plan
 `docs/superpowers/plans/2026-11-23-printer-kprofiles.md`) are read from the printer through
@@ -119,10 +138,6 @@ delete, a note's set and delete) is an operation on the `bambuddy` queue, so the
 worker makes the call. Set, batch and delete run once: Bambuddy dedupes none of them, and a
 write the printer did not acknowledge answers `confirmed: false`. ScadBuddy keeps no copy;
 the notes live in Bambuddy, under the keys its own K-Profiles page uses.
-
-Fetching presets is the `ProfileFetch` workflow on the profile-fetch worker, and a 3DFP
-search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
-([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).
 
 ## Code
 
@@ -165,6 +180,7 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   (`backend/scadbuddy/migrations/20261118T1235Z_drop_native_spool_tables.sql`).
 - Settings: `spool_overlay_refresh_seconds` (the refresh Schedule), `filament_sync`,
   `filament_low_stock_pct`, `filament_default_cost_per_kg`, `profile_fetch_nozzles`,
+  `filament_preset_mirror`,
   `filament_drying_temp_c` and `filament_drying_hours` (#7156: the drying a spool is offered
   when its spool, type, subtype and material set none; empty by default, so none is offered),
   `filament_auto_add_unknown_rfid` (#7156, stored only, on by default: on leaves Bambuddy's own
