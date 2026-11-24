@@ -1,4 +1,4 @@
-"""`INVENTORY`: the kinds, items and offers stores (#7067) over the shared rows pool
+"""`INVENTORY`: the kinds, items, offers and stock stores (#7067) over the shared rows pool
 (`rows/component.py`), opened on first use as the entities' stores are. Only the API process
 builds it (#5295)."""
 
@@ -17,6 +17,7 @@ from scadbuddy.entities.registry import EntityStore
 from scadbuddy.inventory.items import ItemStore
 from scadbuddy.inventory.kinds import KindStore
 from scadbuddy.inventory.offers import OfferStore
+from scadbuddy.inventory.stock import StockStore
 from scadbuddy.rows.component import ROWS
 
 
@@ -25,9 +26,11 @@ class InventoryComponent:
         self, pool: ConnectionPool[Connection[DictRow]], shop_currency: Callable[[], str]
     ) -> None:
         self.pool = pool
+        entities = EntityStore(pool)
         self._kinds = KindStore(pool)
-        self._items = ItemStore(pool, EntityStore(pool))
+        self._items = ItemStore(pool, entities)
         self._offers = OfferStore(pool, shop_currency)
+        self._stock = StockStore(pool, entities, shop_currency)
 
     def opened(self) -> ConnectionPool[Connection[DictRow]]:
         """The shared pool, opened on first use (an open pool ignores it)."""
@@ -48,6 +51,11 @@ class InventoryComponent:
     def offers(self) -> OfferStore:
         self.opened()
         return self._offers
+
+    @property
+    def stock(self) -> StockStore:
+        self.opened()
+        return self._stock
 
 
 INVENTORY: Key[InventoryComponent] = Key("inventory")

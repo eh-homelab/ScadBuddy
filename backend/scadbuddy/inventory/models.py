@@ -7,9 +7,17 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from scadbuddy.entities.links import MAX_URL, is_web_url
+from scadbuddy.orders.models import Actor
 
 #: How a kind's items are counted; `none` is "not counted" (the owner's amendment to
 #: §6.4 of 2026-11-23): offers and prices, never lots, units or moves.
@@ -253,3 +261,210 @@ def _stripped(text: str, what: str) -> str:
 
 def _checked_sku(sku: str) -> str:
     return _stripped(sku, "a SKU")
+
+
+# -- stock (§6.4, §6.6) -------------------------------------------------------------------
+
+#: Where a lot or a unit came from (`stock_lots.origin`); `manual` is a receive with no
+#: invoice yet.
+Origin = Literal["invoice_line", "production_run", "opening", "adjustment", "manual"]
+UnitStatus = Literal["in_stock", "in_service", "retired", "scrapped", "sold"]
+MoveKind = Literal[
+    "receive", "use", "return", "adjust", "produce", "transfer", "sell", "retire", "scrap"
+]
+
+
+class _Decimals(BaseModel):
+    """Decimals on the wire as plain strings with their fraction (as `orders/parts.py`
+    `InventoryPart` writes `unit_cost_minor`)."""
+
+    @staticmethod
+    def _decimal(value: Decimal | None) -> str | None:
+        return None if value is None else format(value.normalize(), "f")
+
+
+class Lot(_Decimals):
+    id: UUID
+    item_id: UUID
+    location_id: UUID | None
+    received_qty: Decimal
+    #: The sum of the lot's moves; below 0 after a shortfall (spec §6.6).
+    on_hand: Decimal
+    #: One unit's cost in minor units of the shop currency.
+    unit_cost_minor: Decimal
+    cost_unknown: bool
+    #: The currency a cost was given in when it was not the shop's (R-7067-11).
+    cost_currency: str | None
+    origin: Origin
+    invoice_line_id: UUID | None
+    production_run_id: UUID | None
+    note: str
+    received_at: datetime
+    created_by: Actor
+
+    @field_serializer("received_qty", "on_hand", "unit_cost_minor")
+    def _decimals(self, value: Decimal) -> str | None:
+        return self._decimal(value)
+
+
+class Unit(_Decimals):
+    id: UUID
+    item_id: UUID
+    serial: str | None
+    name: str
+    location_id: UUID | None
+    status: UnitStatus
+    installed_in_unit_id: UUID | None
+    cost_minor: Decimal
+    cost_unknown: bool
+    origin: Origin
+    invoice_line_id: UUID | None
+    production_run_id: UUID | None
+    in_service_at: datetime | None
+    retired_at: datetime | None
+    life_hours: Decimal | None
+    life_months: int | None
+    printer_id: UUID | None
+    location_ref_id: UUID | None
+    received_at: datetime
+    created_by: Actor
+
+    @field_serializer("cost_minor", "life_hours")
+    def _decimals(self, value: Decimal | None) -> str | None:
+        return self._decimal(value)
+
+
+class Move(_Decimals):
+    id: UUID
+    at: datetime
+    item_id: UUID
+    lot_id: UUID | None
+    unit_id: UUID | None
+    kind: MoveKind
+    #: Signed: below 0 takes stock.
+    qty: Decimal
+    #: The cost when the move was written (D14).
+    unit_cost_minor: Decimal
+    #: `round(qty * unit_cost_minor, 6)`.
+    amount_minor: Decimal
+    cost_unknown: bool
+    #: A shortfall: taken past the stock on hand (spec §6.6).
+    needs_review: bool
+    reverses_move_id: UUID | None
+    reason: str
+    order_id: str | None
+    order_item_id: str | None
+    production_run_id: UUID | None
+    print_run_id: str | None
+    entity_id: UUID | None
+    actor: Actor
+
+    @field_serializer("qty", "unit_cost_minor", "amount_minor")
+    def _decimals(self, value: Decimal) -> str | None:
+        return self._decimal(value)
+
+
+class ReceiveLot(BaseModel):
+    """A receive with no invoice yet (`origin = manual`). The cost is `unit_cost_minor`
+    or `total_cost_minor` (for the whole quantity), in `currency` (the shop's
+    `orders_currency` when absent); with neither, or in another currency, the lot opens
+    with its cost unknown (R-7067-11, D11)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    qty: Decimal = Field(gt=0, max_digits=20, decimal_places=6)
+    unit_cost_minor: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=6)
+    total_cost_minor: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=6)
+    currency: str | None = Field(default=None, pattern=CURRENCY)
+    location_id: UUID | None = None
+    note: str = Field(default="", max_length=4000)
+    received_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _one_cost(self) -> ReceiveLot:
+        if self.unit_cost_minor is not None and self.total_cost_minor is not None:
+            raise ValueError("give unit_cost_minor or total_cost_minor, not both")
+        return self
+
+
+class ReceiveUnits(BaseModel):
+    """`count` units at `cost_minor` each, in the shop currency (unknown when absent).
+    `serials`, when given, has one entry per unit; a blank one is stored as null."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    count: int = Field(ge=1, le=100)
+    cost_minor: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=6)
+    serials: list[str] | None = None
+    location_id: UUID | None = None
+    name: str = Field(default="", max_length=200)
+
+    @model_validator(mode="after")
+    def _serials(self) -> ReceiveUnits:
+        if self.serials is not None and len(self.serials) != self.count:
+            raise ValueError("serials has one entry per unit")
+        return self
+
+
+class UseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    qty: Decimal = Field(gt=0, max_digits=20, decimal_places=6)
+    #: Taken first; FIFO for the rest (D2).
+    lot_id: UUID | None = None
+    #: What it was used on, `kind:ref` (a printer, say).
+    entity: str | None = None
+    reason: str = Field(default="", max_length=4000)
+
+
+class AdjustInput(BaseModel):
+    """A count of one lot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    on_hand: Decimal = Field(ge=0, max_digits=20, decimal_places=6)
+    note: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("note")
+    @classmethod
+    def _note(cls, note: str) -> str:
+        return _stripped(note, "a note")
+
+
+class CountInput(BaseModel):
+    """A count of the whole item."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    on_hand: Decimal = Field(ge=0, max_digits=20, decimal_places=6)
+    note: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("note")
+    @classmethod
+    def _note(cls, note: str) -> str:
+        return _stripped(note, "a note")
+
+
+class UnitStatusInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: UnitStatus
+    #: What it went into or to, `kind:ref` (the printer a nozzle went into).
+    entity: str | None = None
+    note: str = Field(default="", max_length=4000)
+
+
+class RecostedItem(BaseModel):
+    order_id: str | None
+    order_item_id: str
+    #: The order item's parts cost (`-sum(amount_minor)` of its `use` and `return` moves),
+    #: before and after the re-cost.
+    before_minor: Decimal
+    after_minor: Decimal
+
+
+class RecostResult(BaseModel):
+    #: The moves whose snapshot changed.
+    moves: int
+    #: The order items whose parts cost changed.
+    orders: list[RecostedItem]
