@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { copySpool, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
+import { getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
@@ -501,31 +501,37 @@ describe('the spool page', () => {
     expect(twin).toMatchObject({ colour_name: 'Teal', label_weight_g: 1000, grams_left: null })
   })
 
-  it("sends a copied migrated preset row back migrated, and an edited one as the person's (R-7150-11)", async () => {
-    const real = await copySpool(spoolId(6))
-    const row = { printer_model: 'H2C', slicer_filament: 'P1', slicer_filament_name: null }
-    server.use(
-      http.get(`*/api/v1/filament/spools/${spoolId(6)}/copy`, () =>
-        HttpResponse.json({
-          ...real,
-          presets: [
-            { ...row, nozzle_diameter: '0.4', migrated: true },
-            { ...row, nozzle_diameter: '0.6', migrated: true },
-          ],
-        }),
-      ),
-    )
+  it('names the source as copy_of and never marks a preset row migrated (R-7150-11, R-7150-13)', async () => {
     const posts = recorded('POST', /\/filament\/spools\/bulk$/)
     const { user } = render(`/filament/spools/new?copy=${spoolId(6)}`)
     expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
     const filaments = await screen.findAllByLabelText('Slicer filament')
-    await user.type(filaments[1]!, 'X')
+    await user.type(filaments[0]!, 'X')
     await user.click(screen.getByRole('button', { name: 'Save spool' }))
     await waitFor(() => expect(posts).toHaveLength(1))
-    expect((posts[0] as { presets: unknown[] }).presets).toEqual([
-      { ...row, nozzle_diameter: '0.4', migrated: true },
-      { ...row, nozzle_diameter: '0.6', slicer_filament: 'P1X', migrated: false },
-    ])
+    const sent = posts[0] as { copy_of: string; presets: Record<string, unknown>[] }
+    expect(sent.copy_of).toBe(spoolId(6))
+    expect(sent.presets.length).toBeGreaterThan(0)
+    expect(sent.presets.every((row) => !('migrated' in row))).toBe(true)
+  })
+
+  it("an unchanged copied migrated row stays migrated, so the copy's first type drops it (R-7150-11, R-7150-13)", async () => {
+    const before = new Set((await listSpools()).map((one) => one.id))
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(6)}`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    await screen.findAllByLabelText('Slicer filament')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(posts).toHaveLength(1))
+    const copy = await waitFor(async () => {
+      const made = (await listSpools()).find((one) => !before.has(one.id))
+      expect(made).toBeDefined()
+      return made!
+    })
+    expect((await getSpool(copy.id)).presets).toContainEqual(expect.objectContaining({ slicer_filament: 'GFA00', overridden: true, migrated: true }))
+    await patchSpool(copy.id, { type_id: T.JADE })
+    const after = (await getSpool(copy.id)).presets
+    expect(after.some((row) => row.overridden || row.migrated)).toBe(false)
   })
 
   it('a copy of a spool in a tray does not take the tray (#7150)', async () => {
