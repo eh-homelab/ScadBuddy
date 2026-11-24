@@ -630,6 +630,162 @@ describe('filament spool tools', () => {
   })
 })
 
+describe('filament_spool_add_event with a new spool reading (#7280)', () => {
+  const OFFER = {
+    spool_id: ROW,
+    insert_type_id: ROW,
+    insert_name: 'Bambu insert',
+    reading_g: 1150,
+    label_weight_g: 1000,
+    derived_g: 150,
+    new_empty_weight_g: 150,
+    current_empty_weight_g: 200,
+    current_basis: 'placeholder',
+    placeholder: true,
+    sample_count: 1,
+    checked_by_default: true,
+  }
+  const CHECK = { offer: OFFER, reason: null, insert_type_id: ROW, empty_weight_g: 200, filament_g: 950 }
+
+  function mock(check: Record<string, unknown>, order: string[], bodies: unknown[]) {
+    server.use(
+      http.get(`${SPOOL}/insert-weight-offer`, ({ request }) => {
+        order.push(`offer ${new URL(request.url).searchParams.get('reading_g')}`)
+        return HttpResponse.json(check)
+      }),
+      http.post(`${SPOOL}/insert-weight`, async ({ request }) => {
+        order.push('accept')
+        bodies.push(await request.json())
+        return HttpResponse.json({ insert_type: {}, empty_weight_g: 150, sample_count: 1, filament_g: 1000 })
+      }),
+      http.post(`${SPOOL}/events`, async ({ request }) => {
+        order.push('event')
+        bodies.push(await request.json())
+        return HttpResponse.json({ kind: 'weighed' }, { status: 201 })
+      }),
+    )
+  }
+
+  it('with an offer and no decision, reads the offer and books nothing', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(CHECK, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 1150 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 1150'])
+    expect(bodies).toEqual([])
+    const out = firstText(res) as Record<string, unknown>
+    expect(out.event).toBeNull()
+    expect(out.filament_g).toBeNull()
+    expect((out.insert_weight as { offer: unknown }).offer).toMatchObject(OFFER)
+    expect(out.insert_weight_accepted).toBeNull()
+    expect(JSON.stringify(out)).toContain('accept_insert_weight')
+  })
+
+  it('declines the offer and books the check filament', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(CHECK, order, bodies)
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: false },
+      ctx(),
+    )
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 1150', 'event'])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'person', grams: 950 }])
+    const out = firstText(res) as Record<string, unknown>
+    expect(out.filament_g).toBe(950)
+    expect(out.event).toEqual({ kind: 'weighed' })
+    expect(out.insert_weight_accepted).toBeNull()
+  })
+
+  it('with no offer, books the check filament at once', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock({ offer: null, reason: 'used', insert_type_id: ROW, empty_weight_g: 200, filament_g: 950 }, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 1150 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 1150', 'event'])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'person', grams: 950 }])
+    expect((firstText(res) as Record<string, unknown>).filament_g).toBe(950)
+  })
+
+  it('says a retry is safe when the booking fails after the accept', async () => {
+    const order: string[] = []
+    mock(CHECK, order, [])
+    server.use(http.post(`${SPOOL}/events`, () => HttpResponse.json({ detail: 'boom' }, { status: 500 })))
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true },
+      ctx(),
+    )
+    expect(res.isError).toBe(true)
+    const text = JSON.stringify(res)
+    expect(text).toContain("insert's empty weight was already set")
+    expect(text).toContain('retry with the same reading')
+  })
+
+  it('accepts before it books, with the accepted filament', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(CHECK, order, bodies)
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true },
+      ctx(),
+    )
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 1150', 'accept', 'event'])
+    expect(bodies).toEqual([{ reading_g: 1150 }, { kind: 'weighed', source: 'person', grams: 1000 }])
+    const out = firstText(res) as Record<string, { empty_weight_g: number }>
+    expect(out.insert_weight_accepted?.empty_weight_g).toBe(150)
+  })
+
+  it('books nothing when accept has no offer', async () => {
+    const order: string[] = []
+    mock({ offer: null, reason: 'used', insert_type_id: ROW, empty_weight_g: 200, filament_g: 950 }, order, [])
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true },
+      ctx(),
+    )
+    expect(res.isError).toBe(true)
+    expect(JSON.stringify(res)).toContain('used')
+    expect(order).toEqual(['offer 1150'])
+  })
+
+  it('refuses bad combinations before any call', async () => {
+    const order: string[] = []
+    mock(CHECK, order, [])
+    const run = (input: Record<string, unknown>) => runTool(tool('filament_spool_add_event'), { spool_id: ROW, ...input }, ctx())
+    expect((await run({ kind: 'weighed', reading_g: 1150, grams: 900 })).isError).toBe(true)
+    expect((await run({ kind: 'dried', reading_g: 1150 })).isError).toBe(true)
+    expect((await run({ kind: 'dried', accept_insert_weight: true })).isError).toBe(true)
+    expect((await run({ kind: 'weighed', grams: 900, accept_insert_weight: true })).isError).toBe(true)
+    expect(order).toEqual([])
+  })
+
+  it('refuses a reading when no empty weight is known', async () => {
+    const order: string[] = []
+    mock({ offer: null, reason: 'no_insert', insert_type_id: null, empty_weight_g: null, filament_g: null }, order, [])
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 1150 }, ctx())
+    expect(res.isError).toBe(true)
+    expect(JSON.stringify(res)).toContain('pass grams')
+    expect(order).toEqual(['offer 1150'])
+  })
+
+  it('books grams alone as before', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(CHECK, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', grams: 900 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['event'])
+    expect(firstText(res)).toEqual({ kind: 'weighed' })
+  })
+})
+
 const LOCATIONS = `${BACKEND}/api/v1/filament/locations`
 
 describe('filament location tools', () => {
