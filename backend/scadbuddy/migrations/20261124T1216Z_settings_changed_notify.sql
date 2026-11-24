@@ -1,5 +1,5 @@
 -- #7384: every write to `settings` NOTIFYs `scadbuddy_settings` at its commit, so each
--- API replica's cached plain settings (`library/settings_store.py` `SettingsCache`) are
+-- API replica's cached plain settings (`core/settings_cache.py` `SettingsCache`) are
 -- dropped whoever wrote the row: the settings store, the printer registry's merge and
 -- delete (`printers/store.py`), a migration or a hand-run fix (`store/backends.py`
 -- `RECOVER_LOCAL_SQL`). Once per statement; Postgres folds a transaction's identical
