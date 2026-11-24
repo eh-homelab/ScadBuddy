@@ -333,6 +333,7 @@ _DROP_LEGACY = next(
 )
 
 
+@pytest.mark.pg_empty
 @respx.mock
 async def test_pre_instance_rows_are_dropped_and_their_folders_adopted_again(
     pg_conninfo: str,

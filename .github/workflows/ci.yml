@@ -1241,7 +1241,7 @@ jobs:
 
           # The database is required (#401). The service container is on the
           # runner, reached through the host gateway; the app migrates the
-          # default schema, which the pytest step's per-test schemas never touch.
+          # test database itself, which the pytest step's per-test databases never touch.
           # Temporal is reached the same way.
           docker run -d --name scadbuddy-ci -p 18080:8080 \
             --add-host=host.docker.internal:host-gateway \
@@ -1539,6 +1539,8 @@ jobs:
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
+          # Every test clones a database and drops it, and none outlives the job.
+          POSTGRES_INITDB_ARGS: "-c fsync=off -c full_page_writes=off -c synchronous_commit=off"
         ports:
           - 5432:5432
         options: >-
