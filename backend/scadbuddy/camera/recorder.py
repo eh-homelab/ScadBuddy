@@ -30,7 +30,8 @@ flushed together and released, within `SHUTDOWN_SECONDS`.
 A container restart keeps the pod's name, and so the recorder's. At start the recorder
 releases every lease under its name and acquires none for `START_HOLDOFF` seconds, so the
 standby takes over. It adopts the segment files the last run left (`Recorder.adopt`) and
-leaves alone each MediaMTX path whose conf has not changed.
+puts every path again, since it cannot see the credentials of a listed one; the open segment
+that costs is in the standby's buffer.
 
 Only the recorder pods hold the bucket's camera keys (`uploads.Uploader`). The relay read
 password goes to MediaMTX through its control API only; a MediaMTX failure raises
@@ -90,8 +91,9 @@ SHUTDOWN_SECONDS: Final = 25.0
 RELEASE_SECONDS: Final = 5.0
 #: After a start, no acquire for two renewal periods: the standby takes the lease first.
 START_HOLDOFF: Final = 2 * TICK_SECONDS
-#: Twice the segment length: a file not written to for this long is complete.
-ADOPT_AGE: Final = 8.0
+#: A file not written to for this long is complete: past twice the segment length and
+#: MediaMTX's default ``readTimeout`` (10 s), after which a stalled source's file is closed.
+ADOPT_AGE: Final = 12.0
 STALL_SECONDS: Final = 120.0
 GAP: Final = timedelta(seconds=1)
 #: The most segments one index call takes (`api/crud_camera.py` ``MAX_SEGMENTS``).
@@ -153,6 +155,8 @@ class _Feed:
     own_end: datetime | None = None
     #: An index call is on its way: its end is not known yet.
     indexing: bool = False
+    #: Index calls finished: a renewal sent before one finished answers a stale end.
+    indexed_calls: int = 0
     seen: bool = False
     renewer: asyncio.Task[None] | None = None
     uploader: asyncio.Task[None] | None = None
@@ -160,30 +164,6 @@ class _Feed:
 
 class SourceError(Exception):
     """The API sent a source list the recorder cannot read."""
-
-
-def _redacted(source: object) -> object:
-    """A source URL as MediaMTX lists it: user and password redacted."""
-    if not isinstance(source, str):
-        return source
-    return re.sub(r"//[^@/]*@", "//<redacted>:<redacted>@", source, count=1)
-
-
-def _listed_as(listed: dict[str, Any], conf: dict[str, Any]) -> bool:
-    """Whether MediaMTX's listing of a path is ``conf``. MediaMTX redacts the source's user
-    and password and lists ``recordDeleteAfter: 0s`` as ``""`` (measured 2026-11-24 UTC on
-    v1.21.4 with ``GET /v3/config/paths/list``)."""
-    for key, value in conf.items():
-        found = listed.get(key)
-        if key == "source":
-            if found != _redacted(value):
-                return False
-        elif key == "recordDeleteAfter" and value == "0s":
-            if found not in ("0s", ""):
-                return False
-        elif found != value:
-            return False
-    return True
 
 
 class Recorder:
@@ -301,7 +281,7 @@ class Recorder:
             for name in sorted((set(existing) | set(self._feeds)) - wanted):
                 await self._stop(name, name in existing)
             for name in sorted(wanted):
-                await self._start(name, existing.get(name))
+                await self._start(name, name in existing)
 
     async def reconcile(self, printer_id: str) -> None:
         """Start one printer's recording, or stop it when the API answers 404."""
@@ -315,13 +295,13 @@ class Recorder:
                 if printer_id in existing or printer_id in self._feeds:
                     await self._stop(printer_id, printer_id in existing)
                 return
-            await self._start(printer_id, (await self._existing()).get(printer_id))
+            await self._start(printer_id, printer_id in await self._existing())
 
     async def stop(self, printer_id: str) -> None:
         async with self._lock:
             await self._stop(printer_id, printer_id in await self._existing())
 
-    async def _start(self, printer_id: str, listed: dict[str, Any] | None) -> None:
+    async def _start(self, printer_id: str, present: bool) -> None:
         if _SAFE_ID.fullmatch(printer_id) is None:
             logger.warning("camera recorder: ignored a printer id it cannot use as a path")
             return
@@ -330,12 +310,9 @@ class Recorder:
             now = self._clock()
             feed = self._feeds[printer_id] = _Feed(arrived=now, not_before=self._not_before)
             # Segments a previous run of this container left (`adopt`).
-            await asyncio.to_thread(self.adopt, printer_id)
+            await self.adopt(printer_id)
         conf = self._conf(printer_id)
-        if printer_id not in self._confs and listed is not None and _listed_as(listed, conf):
-            # This container restarted, MediaMTX did not: its recording goes on.
-            self._confs[printer_id] = conf
-        if not (listed is not None and self._confs.get(printer_id) == conf):
+        if not (present and self._confs.get(printer_id) == conf):
             self._confs.pop(printer_id, None)
             try:
                 await self._mtx.put_path(printer_id, conf)
@@ -467,18 +444,42 @@ class Recorder:
             self._feed.want(printer_id, "pulling")
         self.enforce_disk_cap()
 
-    def adopt(self, printer_id: str) -> None:
+    async def adopt(self, printer_id: str) -> None:
         """Take the printer's segment files that no hook named: those a previous run of this
         container left, or whose hook was lost. A file written to in the last `ADOPT_AGE`
         seconds may still be open in MediaMTX: it waits for its hook or a later pass. An
-        adopted segment ends at the next file's start or, for the newest, at its last write."""
+        adopted segment ends at the next file's start or, for the newest, at its last write.
+        The files are read in a thread; the pending list changes on the event loop only."""
         feed = self._feeds.get(printer_id)
         if feed is None:
             return
         known = {item.seg.path for item in feed.pending}
+        found = await asyncio.to_thread(self._scan, printer_id, known)
+        if self._feeds.get(printer_id) is not feed:
+            return
+        known = {item.seg.path for item in feed.pending}
+        previous: LocalSegment | None = None
+        for seg in found:
+            if seg.path in known or not seg.path.exists():
+                continue  # its hook came, or it was dropped, while the scan ran
+            gap = (
+                previous is None
+                or seg.started_at - previous.ends_at > GAP
+                or seg.init_sha256 != previous.init_sha256
+            )
+            previous = seg
+            bisect.insort(feed.pending, _Pending(seg, gap), key=lambda item: item.seg.started_at)
+            if feed.last is None or seg.started_at > feed.last.started_at:
+                feed.last = seg
+        if previous is not None:
+            self.enforce_disk_cap()
+
+    def _scan(self, printer_id: str, known: set[Path]) -> list[LocalSegment]:
+        """Read the complete files of the printer's folder that ``known`` does not hold. An
+        unreadable complete file is deleted. Runs in a thread: it touches files only."""
         files = sorted((self._segments / printer_id).glob("*.mp4"))
         now = time.time()
-        previous: LocalSegment | None = None
+        found: list[LocalSegment] = []
         for at, path in enumerate(files):
             if path in known:
                 continue
@@ -492,7 +493,7 @@ class Recorder:
                     with suppress(ValueError):
                         end = min(end, segment_start(files[at + 1]))
                 duration_ms = max(1, round((end - start).total_seconds() * 1000))
-                seg = _read(printer_id, path, duration_ms)
+                found.append(_read(printer_id, path, duration_ms))
             except (OSError, ValueError) as error:
                 logger.warning(
                     "camera recorder: dropped an unreadable leftover segment of %s (%s)",
@@ -500,18 +501,7 @@ class Recorder:
                     type(error).__name__,
                 )
                 path.unlink(missing_ok=True)
-                continue
-            gap = (
-                previous is None
-                or seg.started_at - previous.ends_at > GAP
-                or seg.init_sha256 != previous.init_sha256
-            )
-            previous = seg
-            bisect.insort(feed.pending, _Pending(seg, gap), key=lambda item: item.seg.started_at)
-            if feed.last is None or seg.started_at > feed.last.started_at:
-                feed.last = seg
-        if previous is not None:
-            self.enforce_disk_cap()
+        return found
 
     def _drop(self, printer_id: str, feed: _Feed, item: _Pending) -> None:
         """Delete a segment that will never be indexed: the next one starts a gap."""
@@ -590,6 +580,7 @@ class Recorder:
         sent = self._clock()
         if not feed.held and sent < feed.not_before:
             return
+        calls = feed.indexed_calls
         try:
             async with asyncio.timeout(self._tick_seconds or TICK_SECONDS):
                 answer = await self._lease(printer_id, "renew" if feed.held else "acquire")
@@ -611,7 +602,8 @@ class Recorder:
         if not answer.held:
             self._prune(feed, answer.indexed_until)
             return
-        if not feed.indexing and answer.indexed_until != feed.own_end:
+        fresh = not feed.indexing and feed.indexed_calls == calls
+        if fresh and answer.indexed_until != feed.own_end:
             self._handover(feed, answer.indexed_until)
         self._report(printer_id, feed)
 
@@ -621,7 +613,7 @@ class Recorder:
         feed = self._feeds.get(printer_id)
         if feed is None:
             return
-        await asyncio.to_thread(self.adopt, printer_id)
+        await self.adopt(printer_id)
         async with feed.lock:
             if self._feeds.get(printer_id) is feed and self._leads(feed):
                 await self._flush(printer_id, feed, deadline=None)
@@ -754,6 +746,7 @@ class Recorder:
             return False
         finally:
             feed.indexing = False
+            feed.indexed_calls += 1
         for item in batch:
             if item in feed.pending:
                 feed.pending.remove(item)

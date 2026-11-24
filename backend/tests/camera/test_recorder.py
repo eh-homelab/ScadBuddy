@@ -669,7 +669,7 @@ async def test_stop_with_a_large_backlog_renews_while_it_flushes(
         api.printers = []
         async with asyncio.timeout(10):
             await rig.recorder.reconcile(P1)
-        await rig.recorder.flushed()
+            await rig.recorder.flushed()
     finally:
         await rig.recorder.aclose()
     assert len(api.index) == 30
@@ -697,8 +697,9 @@ async def test_restart_adopts_leftovers_and_releases(tmp_path: Path, api: FakeCa
     await second.recorder.release_all()
     assert P1 not in api.leases
     await second.recorder.reconcile_all()
-    # The path was the same: MediaMTX's recording goes on.
-    assert first.mtx.calls == puts
+    # The listed path shows the same fields, but its credentials cannot be seen: put again.
+    assert first.mtx.paths[P1]["recordPath"] == second.recorder._conf(P1)["recordPath"]
+    assert first.mtx.calls == [*puts, ("replace", P1)]
     held = sorted(item.seg.path.name for item in second.recorder._feeds[P1].pending)
     assert held == [name(4), name(8), name(12)]
     # No acquire while the hold-off lasts: the standby gets the lease first.
@@ -720,11 +721,11 @@ async def test_adopt_waits_for_a_file_in_writing(tmp_path: Path, api: FakeCamera
     rig = Rig(tmp_path, api)
     await rig.recorder.reconcile_all()
     path = write_segment(rig.root, P1, at(0))
-    rig.recorder.adopt(P1)
+    await rig.recorder.adopt(P1)
     assert rig.recorder._feeds[P1].pending == []
     written = time.time() - ADOPT_AGE - 1
     os.utime(path, (written, written))
-    rig.recorder.adopt(P1)
+    await rig.recorder.adopt(P1)
     assert [item.seg.path for item in rig.recorder._feeds[P1].pending] == [path]
 
 
@@ -754,3 +755,60 @@ async def test_hook_answers_204_when_its_action_fails(caplog: pytest.LogCaptureF
     assert answer.status_code == 204
     assert "RuntimeError" in caplog.text
     assert "secret detail" not in caplog.text
+
+
+async def test_adoption_races_hooks_flushes_and_reconciles(tmp_path: Path, api: FakeCamera) -> None:
+    size = write_segment(tmp_path / "probe", P1, T0).stat().st_size
+    rig = Rig(tmp_path, api, disk_max_bytes=150 * size)
+    await rig.recorder.reconcile_all()
+    await rig.recorder.tick(P1)
+    old = time.time() - 60
+    paths = []
+    for i in range(200):
+        path = write_segment(rig.root, P1, at(i * 4))
+        os.utime(path, (old, old))
+        paths.append(path)
+    async with asyncio.timeout(20):
+        await asyncio.gather(
+            rig.recorder.adopt(P1),
+            rig.recorder.adopt(P1),
+            *(rig.recorder.on_segment(P1, path, 4.0) for path in paths[::3]),
+            rig.recorder.upload(P1),
+            rig.recorder.reconcile_all(),
+        )
+    pending = rig.recorder._feeds[P1].pending
+    starts = [item.seg.started_at for item in pending]
+    assert starts == sorted(starts)
+    assert len({item.seg.path for item in pending}) == len(pending)
+    assert sum(item.seg.bytes for item in pending) <= 150 * size
+    async with asyncio.timeout(20):
+        await rig.recorder.tick(P1)
+    indexed = api.starts()
+    assert indexed == sorted(indexed) and len(set(indexed)) == len(indexed)
+    assert api.unput == []
+
+
+async def test_stale_renewal_answer_is_no_handover(tmp_path: Path, api: FakeCamera) -> None:
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    await rig.recorder.tick(P1)
+    await rig.segment(4)
+    await rig.segment(8)
+    real = rig.recorder._lease
+
+    async def lease(printer_id: str, action: Any) -> Any:
+        # Sent before the index commits, answered after it: the end it names is stale.
+        answer = await real(printer_id, action)
+        await rig.recorder.upload(P1)
+        return answer
+
+    rig.recorder._lease = lease  # type: ignore[method-assign]
+    await rig.recorder.renew(P1)
+    rig.recorder._lease = real  # type: ignore[method-assign]
+    feed = rig.recorder._feeds[P1]
+    assert feed.own_end == at(12)
+    await rig.segment(12)
+    await rig.recorder.tick(P1)
+    assert api.starts() == [at(0), at(4), at(8), at(12)]
+    assert api.flags() == [True, False, False, False]
