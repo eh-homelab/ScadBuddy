@@ -27,13 +27,19 @@ Design: the [mesh-models spec](../superpowers/specs/2026-10-11-mesh-models-desig
 
 ## Data
 
-- The models git repository (scene, generated `model.scad`, and a pointer per mesh,
-  `meshes/<name>.3mf.blob`).
-- The meshes' bytes: on the data volume beside each pointer, and in the blob store as
-  `attachment-<sha256>`, held in `blob_refs` by `model_mesh` for good
-  (`backend/scadbuddy/library/mesh_blobs.py`, #7313). Git keeps them out
-  (`.gitignore`), so the off-box push never carries a file over GitHub's 100 MB limit
-  ([docs](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github#file-size-limits)).
+- The models git repository (scene, generated `model.scad`, meshes).
+- A release that reads mesh pointers but does not write them comes first (#7313,
+  `backend/scadbuddy/library/mesh_blobs.py` `WRITE_POINTERS` is off). Once a later one
+  turns them on, git holds a pointer per mesh, `meshes/<name>.3mf.blob`, and no new mesh.
+  GitHub refuses a file over 100 MB
+  ([docs](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github#file-size-limits));
+  the one already in the history is #7314, so that alone does not make the off-box push
+  succeed.
+- The bytes are then on the data volume beside each pointer, and in the blob store as
+  `attachment-<sha256>`, held in `blob_refs` by `model_mesh` for good. On the local store
+  that is the same volume: a mesh takes twice its size, and every version of it stays.
+- The off-box git copy then has pointers only. To restore a mesh from it, the blob store
+  is needed too.
 
 ## Tests
 

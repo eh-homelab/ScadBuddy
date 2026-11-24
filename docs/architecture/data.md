@@ -76,7 +76,7 @@ before it polls (for example `scadbuddy/worker.py:1106`). Retries are deduplicat
 ## Blob store
 
 Large bytes (render pieces, source snapshots, fonts, slices, library files, uploads,
-order attachments, mesh models' part meshes) live in the blob store, not in Postgres. The design is in the
+order attachments) live in the blob store, not in Postgres. The design is in the
 [template-pipelines spec §6](../superpowers/specs/2026-09-27-template-pipelines-design.md)
 and the [own-store spec §4](../superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md);
 where they disagree with the code, see [Drift from specs](README.md#drift-from-specs).
@@ -125,10 +125,11 @@ Templates are git repositories on the API's data volume (`SCADBUDDY_DATA_DIR`,
 start (`scadbuddy/library/catalogue.py:2940-2956`, called from `scadbuddy/main.py:1561-1565`).
 Every model edit is a commit, which is what versions and history read
 ([features/versions-and-history.md](../features/versions-and-history.md)).
-A mesh model's part meshes are not in git (#7313): git tracks a pointer beside each one
-(`meshes/<name>.3mf.blob`), and the bytes are held blobs of the blob store
-(`scadbuddy/library/mesh_blobs.py`). An export, a restore and an upstream merge fill
-them back in.
+A mesh model's part meshes are in git until a later release turns mesh pointers on
+(#7313, `scadbuddy/library/mesh_blobs.py` `WRITE_POINTERS`). Git then tracks a pointer
+beside each one (`meshes/<name>.3mf.blob`), and the bytes are held blobs of the blob
+store. An export, a restore and an upstream merge fill them back in, and a restore from
+the off-box copy needs the blob store too.
 
 ## Generated API files
 

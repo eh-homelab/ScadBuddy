@@ -543,7 +543,25 @@ def test_deleting_an_object_removes_the_meshes_only_it_used(
     assert created.status_code == 201, created.text
     slug = created.json()["slug"]
     meshes = paths.model_dir(slug) / "meshes"
-    # Each mesh with its pointer in the history beside it (#7313).
+    assert sorted(p.name for p in meshes.iterdir()) == ["o1-p1.3mf", "o2-p1.3mf"]
+    done = edit(client, slug, {"edit": "delete", "object": "o2"})
+    assert done.status_code == 200, done.text
+    assert sorted(p.name for p in meshes.iterdir()) == ["o1-p1.3mf"]
+
+
+@pytest.fixture
+def pointers_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The later release's start, which turns mesh pointers on (#7313)."""
+    monkeypatch.setattr("scadbuddy.library.history.WRITE_POINTERS", True)
+
+
+def test_deleting_an_object_removes_its_meshes_pointers(
+    pointers_on: None, client: TestClient, paths: DataPaths
+) -> None:
+    created = upload(client, data=two_objects_3mf(), filename="two.3mf")
+    assert created.status_code == 201, created.text
+    slug = created.json()["slug"]
+    meshes = paths.model_dir(slug) / "meshes"
     assert sorted(p.name for p in meshes.iterdir()) == [
         "o1-p1.3mf",
         "o1-p1.3mf.blob",
@@ -556,7 +574,7 @@ def test_deleting_an_object_removes_the_meshes_only_it_used(
 
 
 def test_the_apps_start_converts_meshes_tracked_as_bytes(
-    settings: Settings, paths: DataPaths
+    pointers_on: None, settings: Settings, paths: DataPaths
 ) -> None:
     """#7313: the first start on a volume from before it stores each mesh git tracks
     as bytes, holds it, and leaves a pointer in git and the mesh on the volume."""
@@ -583,7 +601,7 @@ def test_the_apps_start_converts_meshes_tracked_as_bytes(
 
 
 def test_a_mesh_is_a_held_blob_and_a_pointer_in_git(
-    client: TestClient, paths: DataPaths, settings: Settings
+    pointers_on: None, client: TestClient, paths: DataPaths, settings: Settings
 ) -> None:
     """#7313: the mesh's bytes are a blob of the store, held by `model_mesh`, and git
     tracks only its pointer, so the history stays small enough to push."""

@@ -230,7 +230,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   transfer: a painted part's `.paint.json` codes carried onto its rendered solid by the
   render's `paint` stage, `render/jobs.py` `paint_layout`; a layout part names its carried
   codes file, `PartSource.paint`), `locate.py` (the scene object a weak joint is in).
-  The part meshes are not in git (#7313, `library/mesh_blobs.py`): the working tree keeps
+  Mesh pointers (#7313, `library/mesh_blobs.py`) come in two releases: this code reads
+  them but no start turns them on (`WRITE_POINTERS` off), since a pod that does not know
+  them caches mesh-less exports by revision and puts the bytes back in git. Turn it on only
+  once every pod reads them. The repository decides what a commit does
+  (`ModelHistory._keeps_pointers`: its `.gitignore`), so a pod of either release follows
+  one that is on. An off-box copy then has pointers only: a mesh restore needs the blob
+  store too. In such a repository the part meshes are not in git: the working tree keeps
   their bytes, `.gitignore` keeps out `*/meshes/*.3mf` and `_builtin/*/meshes/*.3mf`, and
   `ModelHistory._stage` writes a pointer `meshes/<name>.3mf.blob` (sha256 and size) for
   each mesh a commit's paths hold, storing the bytes as the blob `attachment-<sha256>`
@@ -1412,9 +1418,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
   `GET /settings/git-remote` is the lag. `GitRepo.push` never forces, allows only the URL's
   protocol and hands the token (`git_remote_token`, a sealed secret; a save needs the KEK)
-  to git through `CREDENTIAL_HELPER` from the child's env, never the argv. Mesh models'
-  meshes stay out of the models repository (a pointer each, #7313; see `meshmodel/`),
-  since GitHub refuses a push with a file over 100 MB
+  to git through `CREDENTIAL_HELPER` from the child's env, never the argv. Mesh
+  models' meshes are to stay out of the models repository (a pointer each, once turned on,
+  #7313; see `meshmodel/`; the one already in it is #7314), since GitHub refuses a push with a file over 100 MB
   ([docs](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github#file-size-limits)).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets

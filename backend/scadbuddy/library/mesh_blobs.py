@@ -3,9 +3,13 @@
 A mesh model's part meshes (``<slug>/meshes/o<N>-p<M>.3mf``, #2146) can each run to
 over 100 MB, and GitHub refuses a push that holds one
 (https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github#file-size-limits),
-so the off-box copy (#4974) stopped moving. The working tree still holds every mesh's
-bytes, so every reader of the model directory is unchanged; ``.gitignore`` keeps them
-out of git (`GITIGNORE_LINES`), and git tracks a small pointer beside each one,
+so no new mesh may enter the history the off-box push (#4974) sends. (The one already in
+it is #7314: this alone does not make that push succeed.) The working tree still holds
+every mesh's bytes, so every reader of the model directory is unchanged. In a repository
+that keeps pointers (`ModelHistory._keeps_pointers`; no start turns that on until
+`WRITE_POINTERS` is), ``.gitignore`` keeps the bytes out of git (`GITIGNORE_LINES`), and
+git tracks a small pointer beside each one, so an off-box copy has pointers only and a
+restore from it needs the blob store too. A pointer is
 ``<name>.3mf.blob`` (`MeshPointer`: the sha256 and size). The bytes are a blob of
 ScadBuddy's own store, ``attachment-<sha256>`` (`orders/attachments.py` `keep_file`, on
 the local store and a remote one alike), held in ``blob_refs`` by `HOLDER` with the
@@ -41,6 +45,11 @@ POINTER_SUFFIX = ".blob"
 HOLDER = "model_mesh"
 #: The one commit that turns meshes still tracked as bytes into pointers.
 CONVERT_MESSAGE = "Move mesh files to the blob store"
+#: Whether a start turns pointers on and converts. Off in the release that first reads
+#: them: a pod that does not know pointers exports a revision with no meshes into caches
+#: keyed by revision alone, and puts the bytes back in git. Turn it on only in a release
+#: after every pod runs one that reads them; a rollback past that release is not safe then.
+WRITE_POINTERS = False
 #: What ``.gitignore`` keeps out: exactly the paths `is_mesh_path` answers for.
 GITIGNORE_LINES = (f"*/{MESHES_DIR}/*{MESH_SUFFIX}", f"{BUILTIN_DIR}/*/{MESHES_DIR}/*{MESH_SUFFIX}")
 #: The pathspecs of `GITIGNORE_LINES`, for ``git ls-files``.

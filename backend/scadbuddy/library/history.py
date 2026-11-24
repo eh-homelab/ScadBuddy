@@ -12,9 +12,10 @@ the model-specific part: the layout (a template per directory, built-ins under
 ``_builtin/``), the ``.gitignore`` of render byproducts, the commit listener, seeding,
 the symlink-safe tree reads, export and merge.
 
-A mesh model's part meshes are not in git (#7313, ``library/mesh_blobs.py``): their
-bytes are in the blob store, and git tracks a pointer beside each one, written when a
-commit is staged (:meth:`ModelHistory._stage`). Export, restore and an upstream merge
+In a repository that keeps mesh pointers (:meth:`ModelHistory._keeps_pointers`) a mesh
+model's part meshes are not in git (#7313, ``library/mesh_blobs.py``): their bytes are
+in the blob store, and git tracks a pointer beside each one, written when a commit is
+staged (:meth:`ModelHistory._stage`). Export, restore and an upstream merge
 fill the meshes back in from the store; a revision from before then holds them itself.
 """
 
@@ -73,6 +74,7 @@ from scadbuddy.library.mesh_blobs import (
     CONVERT_MESSAGE,
     GITIGNORE_LINES,
     POINTER_SUFFIX,
+    WRITE_POINTERS,
     MeshBlobMissingError,
     MeshPointer,
     MeshStore,
@@ -103,12 +105,12 @@ class BlobTooLargeError(ValueError):
     """A file at a revision is larger than the caller will read."""
 
 
-def _gitignore_body(wrapper_prefix: str) -> str:
+def _gitignore_body(wrapper_prefix: str, *, pointers: bool = False) -> str:
     # Every transient file a render drops beside a model: the colour wrappers and,
     # since #204, the uploaded assets staged for `import()` -- which are not .scad
     # -- and what the legacy queue kept under the template (`RENDERS_DIR_NAME`).
     transient = f"{wrapper_prefix}*" if wrapper_prefix else "*.scad"
-    return (
+    body = (
         "# Written by ScadBuddy. Everything here is regenerated from the model\n"
         "# source, so versioning it would only add noise to the history.\n"
         f"{transient}\n"
@@ -120,10 +122,14 @@ def _gitignore_body(wrapper_prefix: str) -> str:
         "*/media/*.webm\n"
         "_builtin/*/media/*.mp4\n"
         "_builtin/*/media/*.webm\n"
-        "# Mesh models' part meshes (#7313) are in the blob store: git keeps the\n"
-        "# <name>.3mf.blob pointer beside each one.\n"
-        + "".join(f"{line}\n" for line in GITIGNORE_LINES)
     )
+    if pointers:
+        body += (
+            "# Mesh models' part meshes (#7313) are in the blob store: git keeps the\n"
+            "# <name>.3mf.blob pointer beside each one.\n"
+            + "".join(f"{line}\n" for line in GITIGNORE_LINES)
+        )
+    return body
 
 
 class ModelHistory(GitRepo):
@@ -156,6 +162,8 @@ class ModelHistory(GitRepo):
         #: Where meshes' bytes are kept (#7313), set once the blob store is built. None:
         #: a commit with a mesh that has no pointer yet, or a read of a pointer, fails.
         self.meshes: MeshStore | None = None
+        #: Whether a start turns mesh pointers on here (`_keeps_pointers`).
+        self.write_pointers = WRITE_POINTERS
         #: The meshes a restore under way fetched, by path, to put in place once the
         #: revision is checked out (`_after_checkout`); None for one already in place.
         self._restoring: dict[str, Path | None] = {}
@@ -163,7 +171,18 @@ class ModelHistory(GitRepo):
         self._stored: dict[str, tuple[tuple[int, int, int, int], MeshPointer]] = {}
 
     def _gitignore_body(self) -> str:
-        return _gitignore_body(self.wrapper_prefix)
+        turns_on = self.write_pointers and self.meshes is not None
+        return _gitignore_body(self.wrapper_prefix, pointers=turns_on or self._keeps_pointers())
+
+    def _keeps_pointers(self) -> bool:
+        """Whether this repository keeps mesh pointers (#7313): its ``.gitignore`` says.
+        The repository decides, not the release, so a pod that does not turn pointers on
+        still writes them, and never the bytes, once another pod has."""
+        try:
+            lines = (self.root / GITIGNORE_NAME).read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return False
+        return all(line in lines for line in GITIGNORE_LINES)
 
     def _commit_retry_seconds(self) -> float:
         return COMMIT_RETRY_SECONDS
@@ -171,7 +190,7 @@ class ModelHistory(GitRepo):
     def _recovered_message(self) -> str:
         """A start that finds meshes still tracked as bytes converts them (#7313):
         :meth:`ensure_repo` commits everything, and `_stage` makes them pointers."""
-        if self.meshes is not None and self._tracked_meshes(["."]):
+        if self.meshes is not None and self._keeps_pointers() and self._tracked_meshes(["."]):
             return CONVERT_MESSAGE
         return RECOVERED_MESSAGE
 
@@ -180,7 +199,11 @@ class ModelHistory(GitRepo):
     def _stage(self, targets: list[str]) -> None:
         """`GitRepo._stage`, after each mesh under ``targets`` has its bytes stored and
         its pointer written, each pointer whose mesh is gone is removed, and each mesh
-        still tracked as bytes (a commit from before #7313) has left the index."""
+        still tracked as bytes (a commit from before #7313) has left the index. Only
+        that when the repository does not keep pointers (`_keeps_pointers`)."""
+        if not self._keeps_pointers():
+            super()._stage(targets)
+            return
         meshes, pointers = self._mesh_files(targets)
         legacy = set(self._tracked_meshes(targets))
         for mesh in meshes:
@@ -324,6 +347,8 @@ class ModelHistory(GitRepo):
     def _after_checkout(self, path: str, present: set[str]) -> None:
         """The restored revision's meshes put in place, and every mesh it did not have
         removed: meshes are not tracked, so the checkout left them as they were."""
+        if not self._keeps_pointers():
+            return
         wanted = {p.removesuffix(POINTER_SUFFIX) for p in present if is_pointer_path(p)}
         wanted |= {p for p in present if is_mesh_path(p)}
         for mesh in self._mesh_files([path])[0]:
@@ -380,6 +405,8 @@ class ModelHistory(GitRepo):
         ``timeout`` for it, and these can run to hundreds of MB. Under the lock each is
         then only hashed and found stored."""
         if self.meshes is None or not self.available:
+            return
+        if not (self.write_pointers or self._keeps_pointers()):
             return
         try:
             for mesh in self._tracked_meshes(["."]):

@@ -44,6 +44,7 @@ def store() -> MemoryMeshStore:
 def history(models: Path, store: MemoryMeshStore) -> ModelHistory:
     history = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
     history.meshes = store
+    history.write_pointers = True
     history.ensure_repo()
     return history
 
@@ -136,9 +137,8 @@ def test_a_deleted_mesh_deletes_its_pointer(models: Path, history: ModelHistory)
     assert "carrot/meshes/o1-p1.3mf.blob" not in _tracked(history)
 
 
-def test_a_commit_with_a_mesh_and_no_store_is_refused(models: Path) -> None:
-    history = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
-    history.ensure_repo()
+def test_a_commit_with_a_mesh_and_no_store_is_refused(models: Path, history: ModelHistory) -> None:
+    history.meshes = None
     _mesh_model(models, "carrot")
     with pytest.raises(GitError, match="blob store"):
         history.commit("Add carrot", "carrot")
@@ -337,6 +337,126 @@ def test_the_conversion_stores_meshes_before_it_takes_the_write_lock(
     assert history.log("carrot")[0].message == CONVERT_MESSAGE
 
 
+@pytest.fixture
+def reader(models: Path, store: MemoryMeshStore) -> ModelHistory:
+    """A pod that reads pointers but does not turn them on: the release before the one
+    that does, still serving while that one rolls out (#7313)."""
+    reader = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
+    reader.meshes = store
+    reader.write_pointers = False
+    return reader
+
+
+def test_a_reader_changes_nothing_in_a_repository_without_pointers(
+    models: Path, reader: ModelHistory, store: MemoryMeshStore
+) -> None:
+    """Safe beside pods that do not know pointers: git and `.gitignore` are as theirs."""
+    reader.ensure_repo()
+    _mesh_model(models, "carrot")
+    first = reader.commit("Add carrot", "carrot")
+    assert first is not None
+    assert "carrot/meshes/o1-p1.3mf" in _tracked(reader)
+    assert "meshes" not in (models / ".gitignore").read_text()
+    assert not (models / "carrot/meshes/o1-p1.3mf.blob").exists()
+    assert store.blobs == {}
+    assert reader.ensure_repo() is None
+    _write(models, "carrot/meshes/o1-p1.3mf", MESH_B)
+    reader.commit("Edit carrot", "carrot")
+    reader.restore("carrot", first)
+    assert (models / "carrot/meshes/o1-p1.3mf").read_bytes() == MESH_A
+    assert reader.clean("carrot")
+
+
+def test_the_default_is_a_reader(models: Path) -> None:
+    """The release that writes pointers is a later one: this one only reads them."""
+    assert ModelHistory(models).write_pointers is False
+
+
+def test_a_reader_exports_a_pointer_revision_with_its_meshes(
+    models: Path, history: ModelHistory, reader: ModelHistory, tmp_path: Path
+) -> None:
+    """What it exports is cached by revision for every pod, after the roll too."""
+    _mesh_model(models, "carrot")
+    commit = history.commit("Add carrot", "carrot")
+    assert commit is not None
+    dest = tmp_path / "export"
+    export_revision(reader, "carrot", commit, dest)
+    assert (dest / "meshes/o1-p1.3mf").read_bytes() == MESH_A
+
+
+def test_a_reader_with_no_mesh_caches_no_export(
+    models: Path, history: ModelHistory, reader: ModelHistory, tmp_path: Path
+) -> None:
+    _mesh_model(models, "carrot")
+    commit = history.commit("Add carrot", "carrot")
+    assert commit is not None
+    reader.meshes = None
+    dest = tmp_path / "export"
+    with pytest.raises(GitError):
+        export_revision(reader, "carrot", commit, dest)
+    assert not dest.exists()
+
+
+def test_a_reader_restores_a_pointer_revision(
+    models: Path, history: ModelHistory, reader: ModelHistory
+) -> None:
+    _mesh_model(models, "carrot")
+    first = history.commit("Add carrot", "carrot")
+    assert first is not None
+    _write(models, "carrot/meshes/o1-p1.3mf", MESH_B)
+    _write(models, "carrot/meshes/o2-p1.3mf", MESH_B)
+    history.commit("Edit carrot", "carrot")
+    reader.restore("carrot", first)
+    assert (models / "carrot/meshes/o1-p1.3mf").read_bytes() == MESH_A
+    assert not (models / "carrot/meshes/o2-p1.3mf").exists()
+    assert "carrot/meshes/o1-p1.3mf" not in _tracked(reader)
+
+
+def test_a_reader_that_starts_after_the_conversion_puts_no_mesh_back(
+    models: Path, history: ModelHistory, reader: ModelHistory
+) -> None:
+    """A crash or a rollback starts it on a converted repository."""
+    _mesh_model(models, "carrot")
+    _legacy_commit(history, "carrot", "carrot")
+    head = history.ensure_repo()
+    ignored = (models / ".gitignore").read_text()
+    assert reader.ensure_repo() is None
+    assert reader.head() == head
+    assert (models / ".gitignore").read_text() == ignored
+    _write(models, "carrot/meshes/o2-p1.3mf", MESH_B)
+    reader.commit("Edit carrot", "carrot")
+    assert [p for p in _tracked(reader) if p.endswith(".3mf")] == []
+    assert "carrot/meshes/o2-p1.3mf.blob" in _tracked(reader)
+
+
+def test_a_rollback_after_the_pointers_left_is_healed_by_the_next_commit(
+    models: Path, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging removes a deleted mesh's pointer; the action's rollback puts back the
+    mesh alone, and the next commit writes the pointer again."""
+    _mesh_model(models, "carrot")
+    history.commit("Add carrot", "carrot")
+    mesh = models / "carrot/meshes/o1-p1.3mf"
+
+    def refuse(*_args: Any) -> None:
+        raise GitError("refused")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(history, "_commit_with_retry", refuse)
+        with pytest.raises(GitError, match="refused"):
+            history.commit(
+                "Edit carrot",
+                "carrot",
+                prepare=mesh.unlink,
+                rollback=lambda: _write(models, "carrot/meshes/o1-p1.3mf", MESH_A),
+            )
+    assert mesh.read_bytes() == MESH_A
+    _write(models, "carrot/model.scad", b"// edited\n")
+    history.commit("Edit carrot", "carrot")
+    pointer = MeshPointer.loads(history.show("HEAD", "carrot/meshes/o1-p1.3mf.blob"))
+    assert pointer.sha256 == _sha(MESH_A)
+
+
 def test_the_gitignore_keeps_meshes_out(models: Path, history: ModelHistory) -> None:
     body = (models / ".gitignore").read_text()
     assert "*/meshes/*.3mf" in body.splitlines()
@@ -353,6 +473,7 @@ def catalogue(tmp_path: Path, store: MemoryMeshStore) -> Catalogue:
     paths.ensure()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     history.meshes = store
+    history.write_pointers = True
     history.ensure_repo()
     return Catalogue(paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
 
