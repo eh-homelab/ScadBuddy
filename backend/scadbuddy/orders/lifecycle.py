@@ -48,6 +48,7 @@ from scadbuddy.orders.models import (
     AddressInput,
     AddressSnapshot,
     Approval,
+    ArchiveCopyMedia,
     Attachment,
     AttachmentKind,
     AttachmentPatch,
@@ -6067,13 +6068,19 @@ class Lifecycle:
         revision_id: str | None = None,
         cart_of: str | None = None,
         conn: Conn | None = None,
+        archive_id: int | None = None,
+        archive_media: ArchiveCopyMedia | None = None,
+        source: str | None = None,
     ) -> Attachment:
         """The row of a file already kept as ``blob_key``, on the order, one of its
         items, or with ``fulfilment_id`` one of that item's attempts (#4251); the store
         holds the blob for it in the same transaction. With ``revision_id`` it is on
         that revision of the item (storefront spec §4): a render, or beside a
         ``fulfilment_id`` the photo of that revision's test print. ``cart_of`` and
-        ``conn`` as `delete_item`'s."""
+        ``conn`` as `delete_item`'s. ``archive_id`` and ``archive_media`` name the
+        Bambuddy archive copy it is (#7232); a second copy of one archive file raises
+        `ArchiveCopyExistsError` and writes nothing. ``source`` goes on the audit line
+        (``archive`` for a copy, spec 2026-11-05 §4.5)."""
         if revision_id is None:
             _refuse_revision_role(role)
         tell = conn is None
@@ -6126,6 +6133,8 @@ class Lifecycle:
                 blob_key=blob_key,
                 caption=caption,
                 created_by=by,
+                archive_id=archive_id,
+                archive_media=archive_media,
             )
             self._event(
                 conn,
@@ -6137,6 +6146,7 @@ class Lifecycle:
                 fulfilment_id=attachment.fulfilment_id,
                 revision_id=attachment.revision_id,
                 role=attachment.role,
+                source=source,
             )
             change = _Change(order)
             self._subject_item(change, conn, attachment)

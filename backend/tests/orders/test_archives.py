@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import time
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,7 +40,7 @@ from scadbuddy.orders.integrations import (
     MediaTooLargeError,
 )
 from scadbuddy.orders.lifecycle import FulfilmentInput, LifecycleError
-from scadbuddy.orders.models import Fulfilment, Order, OrderItem
+from scadbuddy.orders.models import ArchiveCopyMedia, Attachment, Fulfilment, Order, OrderItem
 from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.cache import CachedBlobStore
@@ -488,7 +488,7 @@ async def test_the_finish_photo_and_timelapse_copy_into_the_items_files(
     seam = Archives(facts(81), facts(82))
     claims = ClaimStore(tmp_path / "claims")
 
-    async def copy(what: ArchiveMedia, archive_id: int = 81, name: str | None = None) -> object:
+    async def copy(what: ArchiveCopyMedia, archive_id: int = 81, name: str | None = None) -> object:
         return await copy_in(
             store=shop.rows,
             lifecycle=shop.lifecycle,
@@ -518,6 +518,14 @@ async def test_the_finish_photo_and_timelapse_copy_into_the_items_files(
     ]
     assert files[0].caption == "Attempt 1, Bambuddy archive 81"
     assert files[0].filename == "finish_2_bb.jpg"
+    # #7232 (spec 2026-11-05 §4.2, §4.5): each copy names its archive and medium, and
+    # the audit line says the file came from an archive.
+    assert [(a.archive_id, a.archive_media, a.created_by) for a in files] == [
+        (81, "finished_photo", BY),
+        (81, "timelapse", BY),
+    ]
+    added = [e for e in shop.rows.events(order.id) if e.kind == "attachment.added"]
+    assert [e.detail["source"] for e in added] == ["archive", "archive"]
     # The same bytes again are the file already there.
     assert await copy("finished_photo") == photo
     assert await copy("timelapse") == video
@@ -526,13 +534,152 @@ async def test_the_finish_photo_and_timelapse_copy_into_the_items_files(
     assert [p for p in claims.root.iterdir() if not p.name.startswith(".")] == []
 
 
+class GatedArchives(Archives):
+    """Each download waits until ``count`` downloads have started, so the copies race.
+    Each photo's bytes differ by its name."""
+
+    def __init__(self, count: int, *facts: ArchiveFacts) -> None:
+        super().__init__(*facts)
+        self.count = count
+        self.started = 0
+        self.all_started = asyncio.Event()
+
+    async def download_archive_media(
+        self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
+    ) -> CopiedMedia:
+        self.started += 1
+        if self.started == self.count:
+            self.all_started.set()
+        await self.all_started.wait()
+        self.downloads.append((archive_id, what, name))
+        data = JPEG + (name or "").encode()
+        target.write_bytes(data)
+        return CopiedMedia(
+            filename=name or "", sha256=hashlib.sha256(data).hexdigest(), size=len(data)
+        )
+
+
+async def test_two_copies_of_one_photo_at_once_give_one_row(
+    shop: Shop, pool: PgPool, tmp_path: Path, blobs: CachedBlobStore
+) -> None:
+    """#7232 (spec 2026-11-05 §4.6): the manual copy and the import can race. Both answer
+    the one row; a second photo of the same archive is a row of its own."""
+    order, item, attempt, _ = printed(shop, pool)
+    seam = GatedArchives(2, facts(81))
+    claims = ClaimStore(tmp_path / "claims")
+
+    async def copy(name: str | None = None) -> Attachment:
+        return await copy_in(
+            store=shop.rows,
+            lifecycle=shop.lifecycle,
+            integrations=seam,
+            blobs=blobs,
+            claims=claims,
+            order_id=order.id,
+            item_id=item.id,
+            fulfilment_id=attempt.id,
+            archive_id=81,
+            what="finished_photo",
+            name=name,
+            by=BY,
+            limit=1 << 20,
+        )
+
+    first, second = await asyncio.gather(copy(), copy())
+
+    assert first == second
+    assert shop.rows.attachments(order.id) == [first]
+    seam.count, seam.started = 1, 0
+    other = await copy("finish_1_aa.jpg")
+    assert other.id != first.id
+    assert [(a.filename, a.archive_id) for a in shop.rows.attachments(order.id)] == [
+        ("finish_2_bb.jpg", 81),
+        ("finish_1_aa.jpg", 81),
+    ]
+
+
+class RacedArchives(Archives):
+    """While the copy downloads, another copy of the same file is recorded first."""
+
+    def __init__(self, win: Callable[[], None], *facts: ArchiveFacts) -> None:
+        super().__init__(*facts)
+        self.win = win
+
+    async def download_archive_media(
+        self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
+    ) -> CopiedMedia:
+        await asyncio.to_thread(self.win)
+        return await super().download_archive_media(archive_id, what, name, target, limit)
+
+
+async def test_a_copy_that_loses_the_race_answers_the_winner(
+    shop: Shop, pool: PgPool, tmp_path: Path, blobs: CachedBlobStore
+) -> None:
+    """#7232 (spec §4.6): the winner landed after the sha256 check could see it (here its
+    bytes differ, so that check never finds it). The unique index refuses the loser,
+    which writes no row, no hold and no audit line, and answers the winner's row."""
+    order, item, attempt, _ = printed(shop, pool)
+    sha = "d" * 64
+    winner: list[Attachment] = []
+
+    def win() -> None:
+        winner.append(
+            shop.lifecycle.add_attachment(
+                order.id,
+                item.id,
+                BY,
+                attachment_id=str(uuid.uuid4()),
+                kind="image",
+                role="finished",
+                filename="finish_2_bb.jpg",
+                media_type="image/jpeg",
+                size_bytes=10,
+                sha256=sha,
+                blob_key="attachment-" + sha,
+                caption="Attempt 1, Bambuddy archive 81",
+                fulfilment_id=attempt.id,
+                archive_id=81,
+                archive_media="finished_photo",
+                source="archive",
+            )
+        )
+
+    seam = RacedArchives(win, facts(81))
+    lost = await copy_in(
+        store=shop.rows,
+        lifecycle=shop.lifecycle,
+        integrations=seam,
+        blobs=blobs,
+        claims=ClaimStore(tmp_path / "claims"),
+        order_id=order.id,
+        item_id=item.id,
+        fulfilment_id=attempt.id,
+        archive_id=81,
+        what="finished_photo",
+        name=None,
+        by=BY,
+        limit=1 << 20,
+    )
+
+    assert lost == winner[0]
+    assert shop.rows.attachments(order.id) == winner
+    added = [e for e in shop.rows.events(order.id) if e.kind == "attachment.added"]
+    assert len(added) == 1
+    with pool.connection() as conn:
+        held = conn.execute(
+            "SELECT count(*) AS n FROM blob_refs WHERE key = %s",
+            ("attachment-" + hashlib.sha256(JPEG).hexdigest(),),
+        ).fetchone()
+    assert held is not None and held["n"] == 0
+
+
 async def test_a_copy_is_refused_for_what_the_archive_lacks(
     shop: Shop, pool: PgPool, tmp_path: Path, blobs: CachedBlobStore
 ) -> None:
     order, item, attempt, _ = printed(shop, pool)
     seam = Archives(facts(81, finish_photos=[], timelapse=False))
 
-    async def refusal(what: ArchiveMedia, archive_id: int, limit: int = 1 << 20) -> object:
+    async def refusal(what: ArchiveCopyMedia, archive_id: int, limit: int = 1 << 20) -> object:
         with pytest.raises(ApiError) as refused:
             await copy_in(
                 store=shop.rows,

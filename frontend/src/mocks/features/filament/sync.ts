@@ -63,6 +63,8 @@ let unreadable = false
 
 /** #6907 — the links left are only colours' links to Bambuddy's colour catalog. */
 let onlyColours = false
+/** #7176 — the other Bambuddy's only links are the preset mirror's. */
+let onlyPresets = false
 
 /** #7244 — whether the presets import ran: the next one finds nothing new. */
 let presetsImported = false
@@ -104,8 +106,10 @@ function seedPasses(): S['SyncPass'][] {
 let passes = seedPasses()
 
 /** What the seed's links number when they belong to another Bambuddy. */
-const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, colours: 5, intents: 1, ignored: 0 }
-const NO_LINKS = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, colours: 0, intents: 0, errors: 0, ignored: 0 }
+const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, colours: 5, presets: 0, intents: 1, ignored: 0 }
+const NO_LINKS = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, colours: 0, presets: 0, intents: 0, errors: 0, ignored: 0 }
+/** #7176 — how many ScadBuddy filament presets the other Bambuddy holds a mirror of. */
+const PRESET_LINKS = 3
 
 export function reset() {
   lastPassAt = FIRST_PASS
@@ -120,12 +124,18 @@ export function reset() {
   unreadable = false
   onlyColours = false
   presetsImported = false
+  onlyPresets = false
   passes = seedPasses()
 }
 
 /** #6907 — the other Bambuddy's links are only colours' links (its spools and the rest were unlinked). */
 export function leaveOnlyColourLinks() {
   onlyColours = true
+}
+
+/** #7176 — the other Bambuddy's only links are the mirror's copies of ScadBuddy's filament presets. */
+export function leaveOnlyPresetLinks() {
+  onlyPresets = true
 }
 
 /**
@@ -177,6 +187,7 @@ function linksInstance(): string | null {
 function resetCounts(): S['LinksResetCounts'] {
   if (unlinked) return NO_LINKS
   if (onlyColours) return { ...NO_LINKS, colours: SEED_LINKS.colours }
+  if (onlyPresets) return { ...NO_LINKS, presets: PRESET_LINKS }
   return { ...SEED_LINKS, errors: errors.length }
 }
 

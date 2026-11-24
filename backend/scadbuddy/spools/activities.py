@@ -87,6 +87,7 @@ def filament_pull_activity(
     sync: Callable[[], FilamentSync],
     execute: Callable[[PullStart], Awaitable[PullOutcome]],
     import_presets: Callable[[], Awaitable[PresetImport]] | None = None,
+    mirror: Callable[[], Awaitable[int]] | None = None,
 ) -> Callable[[], Any]:
     """``filament_bambuddy_pull``: Bambuddy's spools into ScadBuddy's own. It runs on the
     ``library`` worker, in the API process, and reads no Bambuddy (#6772): it decides what
@@ -106,11 +107,15 @@ def filament_pull_activity(
     `import_presets`, #7244), whatever the pull answered. It has what is left of the
     activity's timeout, less `IMPORT_MARGIN_S`; one cut short keeps what it made, and the
     next tick goes on. A failure is logged and changes nothing in the answer. With
-    ``presets`` ``off`` or ``sb_to_bb`` nothing is imported."""
+    ``presets`` ``off`` or ``sb_to_bb`` nothing is imported.
 
-    @activity.defn(name=FILAMENT_PULL_ACTIVITY)
-    async def filament_bambuddy_pull() -> str:
-        deadline = time.monotonic() + FILAMENT_PULL_TIMEOUT.total_seconds() - IMPORT_MARGIN_S
+    Last, whatever the pull did and whatever the direction is, ``mirror`` sends
+    ScadBuddy's own presets that Bambuddy has not taken yet (`filament/preset_mirror.py`
+    `mirror_pending`, #7176: it sends only while the stored setting
+    ``filament_preset_mirror`` is on), within what is left of the timeout. It never
+    reads Bambuddy's presets into ScadBuddy."""
+
+    async def pull(deadline: float) -> str:
         try:
             start = await pull_start(filament, load, sync)
             if start is None:
@@ -131,7 +136,28 @@ def filament_pull_activity(
             await _import_presets(import_presets, deadline - time.monotonic())
         return outcome
 
+    @activity.defn(name=FILAMENT_PULL_ACTIVITY)
+    async def filament_bambuddy_pull() -> str:
+        deadline = time.monotonic() + FILAMENT_PULL_TIMEOUT.total_seconds() - IMPORT_MARGIN_S
+        outcome = await pull(deadline)
+        if mirror is not None:
+            await _mirror(mirror, deadline - time.monotonic())
+        return outcome
+
     return filament_bambuddy_pull
+
+
+async def _mirror(run: Callable[[], Awaitable[int]], budget: float) -> None:
+    """The presets mirror within ``budget`` seconds; never raises."""
+    if budget <= 0:
+        activity.logger.warning("no time was left to mirror ScadBuddy's presets")
+        return
+    try:
+        await asyncio.wait_for(run(), budget)
+    except Exception as error:
+        activity.logger.warning(
+            "could not mirror ScadBuddy's presets", extra={"error": type(error).__name__}
+        )
 
 
 async def _import_presets(run: Callable[[], Awaitable[PresetImport]], budget: float) -> None:

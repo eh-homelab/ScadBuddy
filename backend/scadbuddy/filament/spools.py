@@ -146,6 +146,14 @@ class OverrideKindError(ValueError):
         super().__init__("only a bambu_mifare tag can be an override")
 
 
+class SpoolBulkRefusedError(ValueError):
+    """A bulk edit that one spool refuses (#7151, R-7151-1): the whole edit is refused,
+    naming that spool by its number."""
+
+    def __init__(self, number: int, cause: ValueError) -> None:
+        super().__init__(f"spool #{number}: {cause}")
+
+
 class SpoolTrayPlaceError(ValueError):
     """A new spool's place is a printer's tray (#7150, R-7150-2): a tray holds one spool,
     and the tray's own link (`PUT /printers/{id}/trays/{ams}/{tray}/spool`) puts it there."""
@@ -1355,6 +1363,72 @@ class FilamentSpoolStore:
                     )
         return m.ConsumedResetDone(
             reset=len(found), not_found=[i for i in dict.fromkeys(spool_ids) if i not in found]
+        )
+
+    def bulk_update(
+        self, spool_ids: Sequence[UUID], patch: m.SpoolPatch, *, actor: str
+    ) -> m.SpoolBulkUpdated:
+        """``patch`` on each spool named, in one transaction, the spools locked in id
+        order (#7151, R-7151-1): each its own ``edited`` event, as `update` writes it, and
+        none for a spool already so. All or none: a spool the patch refuses is
+        `SpoolBulkRefusedError` (its number), a row it names that does not exist
+        `CatalogRefError`. An id that names no spool is answered, not refused."""
+        wanted = sorted(set(spool_ids))
+        try:
+            with self._pool.connection() as conn, conn.transaction():
+                rows = conn.execute(
+                    "SELECT id, number FROM filament_spools WHERE id = ANY(%s)"
+                    " ORDER BY id FOR UPDATE",
+                    (wanted,),
+                ).fetchall()
+                for row in rows:
+                    try:
+                        self.update_on(conn, row["id"], patch, actor=actor)
+                    except (SpoolTypelessError, TypeTempError) as exc:
+                        raise SpoolBulkRefusedError(row["number"], exc) from None
+        except errors.ForeignKeyViolation:
+            raise CatalogRefError() from None
+        found = {row["id"] for row in rows}
+        return m.SpoolBulkUpdated(
+            updated=[row["id"] for row in rows],
+            not_found=[i for i in dict.fromkeys(spool_ids) if i not in found],
+        )
+
+    def bulk_archive(
+        self, spool_ids: Sequence[UUID], archived: bool, *, actor: str
+    ) -> m.SpoolsArchived:
+        """Archive (``True``) or restore each spool named, in one transaction (#7151,
+        R-7151-2): their open tags locked first, then the spools, each in id order, as
+        every writer of bindings takes them. Each spool changed gets its own event and,
+        archived, its binding closed, as `archive` does. A spool already so is
+        ``unchanged``; an id that names no spool is answered in ``not_found``."""
+        wanted = sorted(set(spool_ids))
+        changed: _Ids = []
+        unchanged: _Ids = []
+        with self._pool.connection() as conn, conn.transaction():
+            if archived:
+                conn.execute(
+                    "SELECT t.id FROM filament_tags t JOIN filament_tag_bindings b"
+                    " ON b.tag_id = t.id WHERE b.spool_id = ANY(%s) AND b.unbound_at IS NULL"
+                    " ORDER BY t.id FOR UPDATE OF t",
+                    (wanted,),
+                )
+            rows = conn.execute(
+                "SELECT id, archived_at FROM filament_spools WHERE id = ANY(%s)"
+                " ORDER BY id FOR UPDATE",
+                (wanted,),
+            ).fetchall()
+            for row in rows:
+                if (row["archived_at"] is not None) == archived:
+                    unchanged.append(row["id"])
+                    continue
+                self.update_on(conn, row["id"], m.SpoolPatch(archived=archived), actor=actor)
+                changed.append(row["id"])
+        found = {row["id"] for row in rows}
+        return m.SpoolsArchived(
+            changed=changed,
+            unchanged=unchanged,
+            not_found=[i for i in dict.fromkeys(spool_ids) if i not in found],
         )
 
     # -- internals --------------------------------------------------------------------

@@ -114,6 +114,36 @@ async def test_a_failed_pull_still_imports_and_a_failed_import_changes_no_answer
     assert calls == ["import", "import"]
 
 
+async def test_the_pull_mirrors_whatever_the_direction_and_a_failed_mirror_changes_nothing(
+    pg_pool: PgPool,
+) -> None:
+    """The mirror (#7176) runs last on every pull, a skipped one included, so it sends with
+    ``filament_sync`` all ``sb_to_bb`` too; its failure changes no answer (#7244)."""
+    mirrored: list[str] = []
+
+    async def mirror() -> int:
+        mirrored.append("mirror")
+        return 0
+
+    async def failing() -> int:
+        mirrored.append("failing")
+        raise RuntimeError("Bambuddy is down")
+
+    f = _filament(pg_pool)
+    ok = _Execute(PullOutcome(outcome="pulled"))
+    nothing = lambda: FilamentSync(  # noqa: E731
+        spools="sb_to_bb", weights="sb_to_bb", tags="sb_to_bb", presets="sb_to_bb"
+    )
+    assert await filament_pull_activity(f, lambda: SETTINGS, nothing, ok, None, mirror)() == (
+        "skipped"
+    )
+    pulls = lambda: FilamentSync(presets="sb_to_bb", spools="two_way")  # noqa: E731
+    assert await filament_pull_activity(f, lambda: SETTINGS, pulls, ok, None, failing)() == (
+        "pulled"
+    )
+    assert mirrored == ["mirror", "failing"]
+
+
 async def test_a_one_time_import_reads_bambuddy_itself(pg_pool: PgPool, tmp_path: Path) -> None:
     """`LivePresets`: one list, then a read of each preset the import needs."""
     blobs = LocalBlobStore(tmp_path / "blobs")

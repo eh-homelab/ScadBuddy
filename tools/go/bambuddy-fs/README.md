@@ -117,7 +117,7 @@ bambuddy-fs allow-other
 | `--all` | List every file. Without it the mount lists what the library dialog lists by default (unsliced 3MFs). |
 | `--allow-other` | Fail unless FUSE `allow_other` is allowed (other users and processes see the mount). It is on by default whenever `/etc/fuse.conf` has `user_allow_other`, or for root. |
 | `--no-allow-other` | Only the mounting user sees the mount. |
-| `--attr-ttl` | How long listings are cached, and the kernel's entry and attribute timeout. Default `5s`. |
+| `--attr-ttl` | How long a listing is served before it is refreshed in the background, and the kernel's entry and attribute timeout. Default `5s`. |
 | `--cache-dir` | Downloaded contents and files being written, under `<cache-dir>/<API host>[_<port>]/`, so two ScadBuddy instances never share contents (file IDs are each one's own). Default `$XDG_CACHE_HOME/bambuddy-fs`, or `~/.cache/bambuddy-fs`. One mount at a time uses an API's cache (it holds a `lock` there). |
 | `--cache-max` | At most this much downloaded contents is kept in `--cache-dir`, the least recently read removed first: a number of bytes, or with `K`, `M`, `G` or `T` (binary; `2G`, `2GiB` and `2GB` are the same). `0` is no bound. Default `2G`. |
 | `--state-dir` | Writes whose upload failed, under `unsent/` (see "Unsent writes"). Default `$XDG_STATE_HOME/bambuddy-fs`, or `~/.local/state/bambuddy-fs`. |
@@ -154,8 +154,20 @@ Opening a file downloads nothing; its first read fetches all of it, so a file ma
 that opens every file to sniff its type, or only `fstat`s it, costs no download. The
 downloaded contents are kept to `--cache-max` (default `2G`): past it, the least
 recently read are removed. Files being written are under the cache directory too but
-never count or go, and writes not sent yet are under `--state-dir`, not here. Listings
-are cached for `--attr-ttl`; every write invalidates its folder.
+never count or go, and writes not sent yet are under `--state-dir`, not here.
+
+Listings are cached for `--attr-ttl`. One request at a time lists a folder: lookups and
+`readdir`s that need it meanwhile share that request and its answer. A listing older
+than `--attr-ttl` is served at once while one background refresh lists the folder again
+(span `listing.refresh`, counted in `bambuddy_fs.listing.refreshes` by result), so
+only a folder not yet listed waits. A lookup of a name the old listing lacks waits for
+that refresh, so the kernel never caches "no such file" for a file added since. A write
+(create, `mkdir`, `rmdir`, rename, `unlink`) checks its names against a listing younger
+than `--attr-ttl`, waiting for the refresh in flight or a new one, so it never acts on a
+file renamed or added since. Every write through the mount (create, upload,
+`mkdir`, `rmdir`, rename, `unlink`) invalidates its folder, and the writer's next
+lookup waits for a listing asked for after the write. With `--attr-ttl 0`, every
+lookup and `readdir` waits for a listing.
 
 `statfs` (`df`, a copy's free-space check) reports the cache directory's filesystem,
 where every write is staged before its upload, and names of up to 255 bytes.

@@ -195,8 +195,8 @@ def spool_groups(
 async def own_densities(own: OwnPresets | None, refs: Iterable[str]) -> dict[str, LocalDensity]:
     """The ``filament_density`` of each ScadBuddy preset (``sb-<id>``, #7176) of ``refs``
     whose document has one, by its ref. An adopted binding names its preset so, and the
-    document is the one Bambuddy's local preset had (`filament/sb_presets.py`). None when
-    the blob store cannot be read (logged); a database error is raised."""
+    document is the one Bambuddy's local preset had (`filament/sb_presets.py`). No densities
+    when the blob store cannot be read (logged); a database error is raised."""
     ids = {found for ref in refs if (found := sb_id(ref)) is not None}
     if own is None or not ids:
         return {}
