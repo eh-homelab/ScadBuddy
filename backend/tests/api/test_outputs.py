@@ -1189,13 +1189,13 @@ def test_a_result_swept_while_it_is_copied_is_a_404(
     job_id = _finished_job(client, model)
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     result = state.render.store.read(job_id).result
-    create = state.outputs.create
+    create = state.outputs.prepare
 
     def swept_first(*args: Any, **kwargs: Any) -> Any:
         (paths.root / getattr(result, swept)).unlink()
         return create(*args, **kwargs)
 
-    monkeypatch.setattr(state.outputs, "create", swept_first)
+    monkeypatch.setattr(state.outputs, "prepare", swept_first)
     response = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
     )

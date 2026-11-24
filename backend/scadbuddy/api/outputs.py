@@ -1365,10 +1365,11 @@ async def _draw_thumbnail(
         if drawn_meanwhile:
             return
         raise missing
-    # The slot goes back when the thread ends, not when this read stops waiting for
-    # it: `wait_for` cannot stop a thread, and a draw past its budget still runs.
+    # The slot goes back when the draw ends (its thread, then its puts), not when this
+    # read stops waiting for it: `wait_for` cannot stop a thread, and a draw past its
+    # budget still runs. The shield keeps a cancelled read from cancelling it.
     outputs.draws_running += 1
-    drawing = asyncio.ensure_future(asyncio.to_thread(_draw_and_keep, outputs, output_id, path))
+    drawing = asyncio.ensure_future(_draw_and_keep(outputs, output_id, path))
     _DRAWING.add(drawing)
     gave_up = False
 
@@ -1429,14 +1430,17 @@ RETRY_DRAW_AFTER = 600.0
 _DRAWING: set[asyncio.Future[bool]] = set()
 
 
-def _draw_and_keep(outputs: OutputStore, output_id: str, path: Path) -> bool:
-    """The `iso` view of the output's preview mesh, kept as its thumbnail unless one
-    landed first; False, and remembered, when the mesh has nothing to draw."""
-    png = draw_view(path.with_name(PREVIEW_NAME), "iso", PLATE_PNG_SIZE, None)
+async def _draw_and_keep(outputs: OutputStore, output_id: str, path: Path) -> bool:
+    """The `iso` view of the output's preview mesh, drawn in a thread and kept as its
+    thumbnail, file and blob (`put_drawn_thumbnail`), unless one landed first; False,
+    and remembered, when the mesh has nothing to draw."""
+    png = await asyncio.to_thread(
+        draw_view, path.with_name(PREVIEW_NAME), "iso", PLATE_PNG_SIZE, None
+    )
     if png is None:
         outputs.remember_undrawable(output_id)
         return False
-    outputs.write_drawn_thumbnail(output_id, png)
+    await outputs.put_drawn_thumbnail(output_id, png)
     return True
 
 

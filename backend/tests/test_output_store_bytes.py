@@ -4,24 +4,35 @@ is the fallback when the row names none or the blob is lost."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.output_bytes import OutputBytes
-from scadbuddy.library.output_rows import ByteWrite, OutputRows, output_blob_key, output_file_key
+from scadbuddy.library.output_rows import (
+    OUTPUT_HOLDER,
+    ByteWrite,
+    OutputRows,
+    output_blob_key,
+    output_file_key,
+)
 from scadbuddy.library.outputs import (
     FILES_DIR,
     MODEL_NAME,
+    PREVIEW_NAME,
     THUMBNAIL_NAME,
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
     thumbnail_file_version,
 )
+from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
@@ -326,3 +337,245 @@ async def test_store_without_bytes_reads_files(
     assert store.files(meta.id) == ["a.stl", "late.stl"]
     thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
     assert store.thumbnail_version(meta.id) == thumbnail_file_version(thumbnail)
+
+
+class _Counted:
+    """A pool whose connections count their transactions and note any write made
+    outside one."""
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+        self.transactions = 0
+        self.writes_outside: list[str] = []
+
+    @contextlib.contextmanager
+    def connection(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        with self._pool.connection(*args, **kwargs) as conn:
+            yield _CountedConnection(conn, self)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
+
+
+class _CountedConnection:
+    def __init__(self, conn: Any, counted: _Counted) -> None:
+        self._conn = conn
+        self._counted = counted
+        self._depth = 0
+
+    @contextlib.contextmanager
+    def transaction(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        if self._depth == 0:
+            self._counted.transactions += 1
+        self._depth += 1
+        try:
+            with self._conn.transaction(*args, **kwargs) as tx:
+                yield tx
+        finally:
+            self._depth -= 1
+
+    def note(self, query: Any) -> None:
+        words = str(query).split()
+        if words and words[0].upper() in {"INSERT", "UPDATE", "DELETE"} and self._depth == 0:
+            self._counted.writes_outside.append(str(query))
+
+    def execute(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        self.note(query)
+        return self._conn.execute(query, *args, **kwargs)
+
+    @contextlib.contextmanager
+    def cursor(self, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        with self._conn.cursor(*args, **kwargs) as cursor:
+            yield _CountedCursor(cursor, self)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+class _CountedCursor:
+    def __init__(self, cursor: Any, conn: _CountedConnection) -> None:
+        self._cursor = cursor
+        self._conn = conn
+
+    def executemany(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        self._conn.note(query)
+        return self._cursor.executemany(query, *args, **kwargs)
+
+    def execute(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        self._conn.note(query)
+        return self._cursor.execute(query, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+
+def _holds(pool: Pool, output_id: str) -> set[str]:
+    with pool.connection() as conn:
+        found = conn.execute(
+            "SELECT key FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (OUTPUT_HOLDER, output_id),
+        ).fetchall()
+    return {str(row["key"]) for row in found}
+
+
+async def _with_files(tmp_path: Path) -> tuple[DataPaths, Job, Path]:
+    """A finished job whose output has one extra file, and the folder that holds it."""
+    paths, job, written = await finished_job(tmp_path / "data")
+    files = tmp_path / "extra" / "files"
+    files.mkdir(parents=True)
+    (files / "a.stl").write_bytes(b"a stl")
+    (files / "b.stl").write_bytes(b"b stl")
+    job = job.model_copy(
+        update={"outputs": [written.model_copy(update={"files": ["a.stl", "b.stl"]})]}
+    )
+    return paths, job, files
+
+
+def _store(paths: DataPaths, pool: Any, content: ContentStore | None) -> OutputStore:
+    store = OutputStore(paths)
+    store.rows = OutputRows(pool)
+    if content is not None:
+        store.bytes = OutputBytes(content)
+    return store
+
+
+async def test_save_puts_bytes_and_row_in_one_transaction(
+    tmp_path: Path, projection: JobProjection, content: ContentStore
+) -> None:
+    paths, job, files = await _with_files(tmp_path)
+    counted = _Counted(projection.pool)
+    store = _store(paths, counted, content)
+    meta = await store.save(job, name="first", files_dir=files)
+    # One transaction writes the row, its `output_files` rows and the holds.
+    assert counted.transactions == 1
+    assert counted.writes_outside == []
+    row = store.rows.get(meta.id) if store.rows is not None else None
+    assert row is not None and row.bytes_at is not None
+
+
+async def test_save_row_names_every_blob_and_holds_it(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
+) -> None:
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    meta = await store.save(job, name="first", files_dir=files)
+    assert store.rows is not None
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None
+    assert row.blobs.model == output_blob_key(meta.id, "model")
+    assert row.blobs.preview == output_blob_key(meta.id, "preview")
+    # No cover was drawn for this save, so no thumbnail.
+    assert row.blobs.thumbnail is None
+    listed = store.rows.files(meta.id)
+    assert [(item.name, item.blob_key) for item in listed] == [
+        ("a.stl", output_file_key(meta.id, 0)),
+        ("b.stl", output_file_key(meta.id, 1)),
+    ]
+    keys = {row.blobs.model, row.blobs.preview, *(item.blob_key for item in listed)}
+    assert _holds(pool, meta.id) == keys
+    directory = store.directory(meta.id)
+    for key, name in (
+        (row.blobs.model, MODEL_NAME),
+        (row.blobs.preview, PREVIEW_NAME),
+        (output_file_key(meta.id, 1), f"{FILES_DIR}/b.stl"),
+    ):
+        assert key is not None
+        assert await store.bytes.read(key) == (directory / name).read_bytes()  # type: ignore[union-attr]
+
+
+async def test_save_on_bambuddy_store_writes_no_blobs(
+    tmp_path: Path, projection: JobProjection, pool: Pool
+) -> None:
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, None)
+    meta = await store.save(job, name="first", files_dir=files)
+    assert store.rows is not None
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is None
+    assert (row.blobs.model, row.blobs.preview, row.blobs.thumbnail) == (None, None, None)
+    assert store.rows.files(meta.id) == []
+    assert _holds(pool, meta.id) == set()
+    assert (store.directory(meta.id) / MODEL_NAME).is_file()
+
+
+async def test_save_put_failure_removes_folder_and_row(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    put = content.put
+    calls = 0
+
+    async def second_fails(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("the store went away")
+        return await put(*args, **kwargs)
+
+    monkeypatch.setattr(content, "put", second_fails)
+    output_id = "f" * 32
+    with pytest.raises(OSError, match="the store went away"):
+        await store.save(job, name="first", files_dir=files, output_id=output_id)
+    assert not paths.output_dir(job.slug, output_id).exists()
+    assert store.rows is not None and store.rows.get(output_id) is None
+    assert _holds(pool, output_id) == set()
+
+
+async def test_put_thumbnail_writes_file_then_blob(
+    copied: tuple[OutputStore, OutputMeta],
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, meta = copied
+    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
+    seen: list[bytes] = []
+    put = content.put
+
+    async def file_first(*args: Any, **kwargs: Any) -> Any:
+        # The file holds the new bytes before the blob is put (the byte copy's order).
+        seen.append(thumbnail.read_bytes())
+        return await put(*args, **kwargs)
+
+    monkeypatch.setattr(content, "put", file_first)
+    await store.put_thumbnail(meta.id, b"new png")
+    assert seen == [b"new png"]
+    assert thumbnail.read_bytes() == b"new png"
+    assert await _read(store, meta.id, "thumbnail") == b"new png"
+    key = output_blob_key(meta.id, "thumbnail")
+    assert key in _holds(pool, meta.id)
+    assert store.thumbnail_version(meta.id) == hashlib.sha256(b"new png").hexdigest()[:16]
+
+
+async def test_put_thumbnail_without_blob_store_writes_file(
+    tmp_path: Path, projection: JobProjection
+) -> None:
+    store, meta = await _saved(tmp_path, projection, None)
+    await store.put_thumbnail(meta.id, b"new png")
+    assert (store.directory(meta.id) / THUMBNAIL_NAME).read_bytes() == b"new png"
+    assert store.rows is not None
+    row = store.rows.get(meta.id)
+    assert row is not None and row.blobs.thumbnail is None
+
+
+async def test_put_drawn_thumbnail_keeps_upload(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
+) -> None:
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    meta = await store.save(job, name="first", files_dir=files)
+    # No thumbnail yet: the draw is kept, file and blob.
+    assert await store.put_drawn_thumbnail(meta.id, b"drawn") is True
+    assert await _read(store, meta.id, "thumbnail") == b"drawn"
+    key = output_blob_key(meta.id, "thumbnail")
+    assert key in _holds(pool, meta.id)
+    # An upload lands; a later draw keeps it.
+    await store.put_thumbnail(meta.id, b"uploaded")
+    assert await store.put_drawn_thumbnail(meta.id, b"drawn again") is False
+    assert await _read(store, meta.id, "thumbnail") == b"uploaded"
+    assert (store.directory(meta.id) / THUMBNAIL_NAME).read_bytes() == b"uploaded"

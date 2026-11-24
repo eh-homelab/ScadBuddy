@@ -51,6 +51,7 @@ from scadbuddy.render.job_models import Job, PipelineOutput
 from scadbuddy.render.runner import OpenSCADError, with_defaults
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import template_title
+from scadbuddy.store.content_models import StoreFullError
 from scadbuddy.workflows.models import ArrangeInputs
 from scadbuddy.workflows.operation_models import PRELUDE_REQUESTED
 
@@ -207,8 +208,8 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         try:
             await asyncio.to_thread(hold_parts, state.refs, output_id, manifest, job.slug)
             with span("output.write", attributes={"scadbuddy.job_id": job.id}):
-                meta = await asyncio.to_thread(
-                    state.outputs.create,
+                # #7256: the folder, then its bytes in the blob store, then the row.
+                meta = await state.outputs.save(
                     job,
                     name=request["name"],
                     public_url=public_url,
@@ -238,6 +239,13 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                 # Evicted or swept after the check above, or unreadable: the same answer,
                 # not the copy's path. Only after the release, so this path leaks no holds.
                 raise _gone(job) from None
+            if isinstance(error, StoreFullError):
+                # Ruling R2, as a render's snapshot put (`api/jobs.py`): the save's folder
+                # is gone (`OutputStore.save`), and its Parts are released above.
+                raise ApiError(
+                    status.HTTP_507_INSUFFICIENT_STORAGE,
+                    f"the blob store has no room for this output: {error}",
+                ) from None
             raise
         emit(state.events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
         # Ruling 8: the save is the output; filing is logged and retried by nothing.
@@ -296,7 +304,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                 "this request's upload is no longer held; send it again",
             ) from None
         meta = await asyncio.to_thread(require_output, state.outputs, output_id)
-        await asyncio.to_thread(state.outputs.write_thumbnail, output_id, png)
+        await state.outputs.put_thumbnail(output_id, png)
         # #4822: an open History page shows the old image, or "No preview", until told.
         emit(state.events, OutputEvent(kind="output.updated", output_id=meta.id, slug=meta.slug))
         return {}

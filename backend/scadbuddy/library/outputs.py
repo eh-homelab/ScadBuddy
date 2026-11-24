@@ -43,7 +43,7 @@ from scadbuddy.library.output_bytes import PREVIEW_NAME as PREVIEW_NAME
 from scadbuddy.library.output_bytes import THUMBNAIL_NAME as THUMBNAIL_NAME
 from scadbuddy.library.output_bytes import OutputBytes, OutputStream
 from scadbuddy.library.output_rows import OUTPUT_HOLDER as OUTPUT_HOLDER
-from scadbuddy.library.output_rows import Role
+from scadbuddy.library.output_rows import OutputBlobs, Role, output_blob_key
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
@@ -422,6 +422,19 @@ _SIDE_FILES: dict[str, Callable[[Any], Any]] = {
     ARRANGED_NAME: _id_list,
     BACKFILL_NAME: _backfill_object,
 }
+
+
+@dataclass
+class PreparedOutput:
+    """An output `OutputStore.prepare` wrote, all but its ``meta.json`` and its row."""
+
+    directory: Path
+    meta: OutputMeta
+    params: dict[str, ParamValue]
+    inputs: dict[str, Any]
+    chosen: PipelineOutput | None
+    index: int
+    arranged_from: tuple[str, ...]
 
 
 class OutputStore:
@@ -814,14 +827,89 @@ class OutputStore:
         print_settings: Mapping[str, ProcessValue] | None = None,
         source: OutputSource = BACK_OFFICE,
     ) -> OutputMeta:
-        """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
-        one result for a job without outputs. ``files_dir`` holds that output's extra
-        files (the caller's ``dir_for(files_key) / "files"``). ``output_id`` lets a caller
-        that holds the output's Parts first name the output before it exists: a fresh id,
-        or one the caller holds the :meth:`claim` of, since a failed write removes the
-        directory.
+        """Save the job's output ``index`` with its bytes in files only: `commit` of
+        `prepare`, with no blobs. Blocking. `save` also puts the bytes in the blob store."""
+        prepared = self.prepare(
+            job,
+            name=name,
+            public_url=public_url,
+            inputs=inputs,
+            index=index,
+            files_dir=files_dir,
+            arranged_from=arranged_from,
+            output_id=output_id,
+            print_settings=print_settings,
+            source=source,
+        )
+        return self.commit(prepared, None)
+
+    async def save(
+        self,
+        job: Job,
+        *,
+        name: str | None = None,
+        public_url: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
+        index: int = 0,
+        files_dir: Path | None = None,
+        arranged_from: Sequence[str] = (),
+        output_id: str | None = None,
+        print_settings: Mapping[str, ProcessValue] | None = None,
+        source: OutputSource = BACK_OFFICE,
+    ) -> OutputMeta:
+        """`create`, with the bytes put in the blob store between `prepare` and `commit`
+        (#7256, spec §6.6), so the row, its ``output_files`` rows and the holds of its keys
+        are one transaction. With no blob store (`local`, `bambuddy`) or no rows, it puts
+        nothing. A failed put or commit removes the folder (`discard`) and raises again,
+        a `StoreFullError` among them; the blobs it put are held by nothing, so the sweep
+        removes them."""
+        prepared = await asyncio.to_thread(
+            self.prepare,
+            job,
+            name=name,
+            public_url=public_url,
+            inputs=inputs,
+            index=index,
+            files_dir=files_dir,
+            arranged_from=arranged_from,
+            output_id=output_id,
+            print_settings=print_settings,
+            source=source,
+        )
+        try:
+            blobs: OutputBlobs | None = None
+            if self.bytes is not None and self.rows is not None:
+                blobs = await self.bytes.put_folder(
+                    prepared.directory, prepared.meta.id, prepared.meta.slug
+                )
+            return await asyncio.to_thread(self.commit, prepared, blobs)
+        except Exception:
+            await asyncio.to_thread(self.discard, prepared)
+            raise
+
+    def prepare(
+        self,
+        job: Job,
+        *,
+        name: str | None = None,
+        public_url: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
+        index: int = 0,
+        files_dir: Path | None = None,
+        arranged_from: Sequence[str] = (),
+        output_id: str | None = None,
+        print_settings: Mapping[str, ProcessValue] | None = None,
+        source: OutputSource = BACK_OFFICE,
+    ) -> PreparedOutput:
+        """Write the folder of the job's output ``index`` (a pipeline job's `ctx.output`,
+        §5.2), or of its one result for a job without outputs, all but ``meta.json``:
+        until `commit`, no reader finds the output. ``files_dir`` holds that output's
+        extra files (the caller's ``dir_for(files_key) / "files"``). ``output_id`` lets a
+        caller that holds the output's Parts first name the output before it exists: a
+        fresh id, or one the caller holds the :meth:`claim` of, since a failed write
+        removes the directory.
         ``print_settings`` are the template's (#770), written into the saved 3MF.
-        ``source`` says who saved it (#6371)."""
+        ``source`` says who saved it (#6371). Blocking."""
         if job.outputs and not 0 <= index < len(job.outputs):
             raise IndexError(index)
         chosen = job.outputs[index] if job.outputs else None
@@ -911,37 +999,56 @@ class OutputStore:
             libraries=list(result.libraries),
             source=source,
         )
+        return PreparedOutput(
+            directory=directory,
+            meta=meta,
+            params=dict(job.params),
+            inputs=recorded,
+            chosen=chosen,
+            index=index,
+            arranged_from=tuple(arranged_from),
+        )
+
+    def commit(self, prepared: PreparedOutput, blobs: OutputBlobs | None) -> OutputMeta:
+        """Make the prepared output the record: ``meta.json``, then its row with
+        ``blobs`` (the keys `OutputBytes.put_folder` put; ``None``: the files hold the
+        bytes) in one transaction, then its index row, the cover and the listener.
+        Blocking."""
+        directory = prepared.directory
+        meta = prepared.meta
         self._write_meta(directory, meta)
         if self.rows is not None:
-            self._insert_row(directory, meta, job.params, recorded, chosen, index, arranged_from)
+            self._insert_row(prepared, blobs)
         if self.index is not None:
             # The save stands without its row: a failure is logged, and the next start's
             # `OutputIndex.sync` adds the row.
             try:
-                self.index.record(meta, job.params)
+                self.index.record(meta, prepared.params)
             except Exception:
-                logger.exception("could not index a saved output", extra={"id": output_id})
+                logger.exception("could not index a saved output", extra={"id": meta.id})
         # After the record is complete: a lookup racing the writes above may have
         # resolved against a half-written output.
-        self.forget_plate_cover(job.slug)
-        self._changed(job.slug)
+        self.forget_plate_cover(meta.slug)
+        self._changed(meta.slug)
         return meta
 
-    def _insert_row(
-        self,
-        directory: Path,
-        meta: OutputMeta,
-        params: Mapping[str, ParamValue],
-        inputs: Mapping[str, Any],
-        chosen: PipelineOutput | None,
-        index: int,
-        arranged_from: Sequence[str],
-    ) -> None:
-        """The saved output's row, in one transaction (spec §6.6). The row is the record:
-        when the insert fails, the files written for the save go and the save fails."""
+    def discard(self, prepared: PreparedOutput) -> None:
+        """Remove a prepared output's folder: a save that failed after `prepare`.
+        Blocking."""
+        shutil.rmtree(prepared.directory, ignore_errors=True)
+        self._dirs.pop(prepared.meta.id, None)
+
+    def _insert_row(self, prepared: PreparedOutput, blobs: OutputBlobs | None) -> None:
+        """The saved output's row, with its blob keys, their ``output_files`` rows and
+        holds, in one transaction (spec §6.6). The row is the record: when the insert
+        fails, the files written for the save go and the save fails."""
         from scadbuddy.library.output_rows import OutputRow
 
         assert self.rows is not None
+        directory = prepared.directory
+        meta = prepared.meta
+        chosen = prepared.chosen
+        index = prepared.index
         record: dict[str, Any] | None = None
         bom: list[Any] | None = None
         manifest: list[Any] | None = None
@@ -955,15 +1062,16 @@ class OutputStore:
             output_id=meta.id,
             slug=meta.slug,
             meta=meta,
-            params=dict(params),
-            inputs=dict(inputs),
+            params=dict(prepared.params),
+            inputs=dict(prepared.inputs),
             record=record,
             manifest=manifest,
             bom=bom,
-            arranged_from=list(arranged_from) or None,
+            arranged_from=list(prepared.arranged_from) or None,
             backfill=None,
             has_plate_cover=_holds_plate_cover(directory / MODEL_NAME),
             copied_at=meta.created_at,
+            blobs=blobs or OutputBlobs(),
         )
         try:
             self.rows.insert(row)
@@ -1557,6 +1665,26 @@ class OutputStore:
         """Whole, by a rename: a reader of the old file never gets half of this one."""
         _replace_bytes(self.thumbnail_path(output_id), png)
 
+    async def put_thumbnail(self, output_id: str, png: bytes) -> None:
+        """``png`` as the thumbnail: the file first (`write_thumbnail`), then its blob,
+        named in the row and held (#7256; the byte copy depends on that order). With no
+        blob store or no row yet, the file only; the byte copy takes it later."""
+        await asyncio.to_thread(self.write_thumbnail, output_id, png)
+        slug = await asyncio.to_thread(self._blob_slug, output_id)
+        if slug is None:
+            return
+        assert self.bytes is not None and self.rows is not None
+        key = output_blob_key(output_id, "thumbnail")
+        await self.bytes.put(key, png, slug=slug)
+        await asyncio.to_thread(self.rows.set_blob, output_id, "thumbnail", key)
+
+    def _blob_slug(self, output_id: str) -> str | None:
+        """The output's slug when its bytes go to the blob store too; ``None`` with no
+        blob store, no rows or no row. Blocking."""
+        if self.bytes is None or self.rows is None:
+            return None
+        return self.rows.slug_of(output_id)
+
     def drawable_thumbnail(self, output_id: str) -> bool:
         """True when the output has no thumbnail and the server may draw one from its
         preview mesh (#4775): not one whose draw came to nothing, until it may be tried
@@ -1593,6 +1721,20 @@ class OutputStore:
             return False
         finally:
             temporary.unlink()
+        return True
+
+    async def put_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
+        """`write_drawn_thumbnail`, then, when the file was this draw's, its blob, only
+        when no blob has the key: an upload that landed first stays, file and blob."""
+        if not await asyncio.to_thread(self.write_drawn_thumbnail, output_id, png):
+            return False
+        slug = await asyncio.to_thread(self._blob_slug, output_id)
+        if slug is None:
+            return True
+        assert self.bytes is not None and self.rows is not None
+        key = output_blob_key(output_id, "thumbnail")
+        if await self.bytes.put_if_absent(key, png, slug=slug):
+            await asyncio.to_thread(self.rows.set_blob, output_id, "thumbnail", key)
         return True
 
     def _write_meta(self, directory: Path, meta: OutputMeta) -> None:
