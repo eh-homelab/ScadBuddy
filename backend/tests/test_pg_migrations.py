@@ -21,6 +21,8 @@ from scadbuddy.render.pg_store import (
     migrate,
 )
 
+pytestmark = pytest.mark.pg_empty
+
 #: The positional list as it stood before #491, in order.
 _LEGACY = MIGRATIONS[: len(LEGACY_VERSIONS)]
 

@@ -87,12 +87,15 @@ def test_the_answer_is_kept_for_30_seconds_per_queue() -> None:
     clock.now += POLLERS_CACHE_SECONDS - 1
     assert has(one) is False
     assert len(client.workflow_service.reads) == 2
-    # Another queue is read on its own.
+    # Another queue is read on its own, both types at once (#7425).
     assert has(other) is True
-    assert client.workflow_service.reads[2:] == [(other, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW)]
+    assert client.workflow_service.reads[2:] == [
+        (other, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW),
+        (other, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY),
+    ]
     clock.now += 2
     assert has(one) is True
-    assert len(client.workflow_service.reads) == 4
+    assert len(client.workflow_service.reads) == 6
 
 
 def test_the_apps_probes_share_one_cache() -> None:
@@ -103,7 +106,7 @@ def test_the_apps_probes_share_one_cache() -> None:
     for _ in range(3):
         probe = TemporalQueueProbe(client, queue)  # type: ignore[arg-type]
         assert asyncio.run(probe.has_pollers()) is True
-    assert len(client.workflow_service.reads) == 1
+    assert len(client.workflow_service.reads) == 2
 
 
 def test_a_failed_read_is_not_kept() -> None:
@@ -115,7 +118,7 @@ def test_a_failed_read_is_not_kept() -> None:
         asyncio.run(probe.has_pollers())
     client.workflow_service.fail = False
     assert asyncio.run(probe.has_pollers()) is True
-    assert len(client.workflow_service.reads) == 2
+    assert len(client.workflow_service.reads) == 4
 
 
 def test_cancel_asks_temporal_to_cancel_the_runs_workflow() -> None:

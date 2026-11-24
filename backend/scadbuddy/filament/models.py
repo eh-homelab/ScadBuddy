@@ -274,19 +274,31 @@ class Subtype(_Aliased):
 # -- insert types, named colours ------------------------------------------------------
 
 
+#: Where an insert's empty weight came from (#7280 R-7280-3): ``catalog`` (Bambuddy's pull,
+#: and every row from before the column), ``person``, ``placeholder``, ``derived`` (the mean
+#: of new spools' weighings, `filament/insert_weights.py`) or ``weighed_empty``.
+InsertWeightBasis = Literal["catalog", "person", "placeholder", "derived", "weighed_empty"]
+#: The bases a person's catalog write may send (D6); no other is taken from a body.
+PersonWeightBasis = Literal["person", "placeholder"]
+
+
 class InsertTypeCreate(_In):
     name: Name
     sort_order: SortOrder = 0
     empty_weight_g: Annotated[int, Field(gt=0, le=100_000)]
+    #: ``placeholder`` marks a weight that nobody measured (R-7280-4).
+    empty_weight_basis: PersonWeightBasis = "person"
     insert_material_id: UUID | None = None
     note: Note | None = None
 
 
 class InsertTypePatch(_Patch):
-    not_null = frozenset({"name", "sort_order", "empty_weight_g"})
+    not_null = frozenset({"name", "sort_order", "empty_weight_g", "empty_weight_basis"})
     name: Name | None = None
     sort_order: SortOrder | None = None
+    #: Sent without ``empty_weight_basis``, it sets the basis to ``person`` (D6).
     empty_weight_g: Annotated[int, Field(gt=0, le=100_000)] | None = None
+    empty_weight_basis: PersonWeightBasis | None = None
     insert_material_id: UUID | None = None
     note: Note | None = None
     archived: bool | None = None
@@ -298,6 +310,71 @@ class InsertType(_Catalog):
     note: str | None
     #: Bambuddy's spool catalog entry this type is (the pull and the sync's results set it, #6265).
     bb_catalog_id: int | None = None
+    empty_weight_basis: InsertWeightBasis = "catalog"
+    #: The basis is ``placeholder`` or the note begins "Placeholder weight" (R-7280-3).
+    placeholder: bool = False
+    #: How many new spools' readings the derived weight is the mean of (R-7280-2).
+    derived_count: int = 0
+
+
+#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2).
+NoOfferReason = Literal[
+    "archived",
+    "no_insert",
+    "no_label_weight",
+    "used",
+    "not_full",
+    "not_above_label",
+    "derived_too_heavy",
+]
+
+
+class InsertWeightOffer(BaseModel):
+    """What accepting a new spool's weighing would make its insert's empty weight."""
+
+    insert_type_id: UUID
+    insert_name: str
+    spool_id: UUID
+    reading_g: float
+    #: The spool's own label weight, else its type's (D1).
+    label_weight_g: int
+    #: ``reading_g - label_weight_g``, not rounded.
+    derived_g: float
+    current_empty_weight_g: int
+    current_basis: InsertWeightBasis
+    placeholder: bool
+    #: The mean of the insert's readings with this one, rounded half up (D4).
+    new_empty_weight_g: int
+    #: The readings that mean uses, this one included.
+    sample_count: int
+    #: Only for a placeholder or an earlier derived weight (R-7280-4).
+    checked_by_default: bool
+
+
+class InsertWeightCheck(BaseModel):
+    """A reading checked against its spool's insert: an ``offer``, else the ``reason``."""
+
+    offer: InsertWeightOffer | None
+    reason: NoOfferReason | None
+    insert_type_id: UUID | None
+    #: The insert's empty weight now; ``None`` without an insert.
+    empty_weight_g: int | None
+    #: ``reading_g - empty_weight_g``; ``None`` without an insert.
+    filament_g: float | None
+
+
+class InsertWeightAccept(_In):
+    """A new spool's weighing: the filament, the empty spool and its insert."""
+
+    reading_g: Annotated[float, Field(gt=0, le=100_000)]
+
+
+class InsertWeightAccepted(BaseModel):
+    insert_type: InsertType
+    empty_weight_g: int
+    sample_count: int
+    #: ``reading_g - empty_weight_g`` with the new weight.
+    filament_g: float
 
 
 class ColourCreate(_In):

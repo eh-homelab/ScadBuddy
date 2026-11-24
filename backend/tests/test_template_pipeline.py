@@ -40,6 +40,7 @@ from scadbuddy.workflows.models import (
 )
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline
+from tests.conftest import SDK_DEADLOCK_SECONDS
 from tests.support.pipelines import (
     FakeWorld,
     OldRenderPiece,
@@ -296,8 +297,11 @@ async def run(ctx, inputs):
 
 #: Bounded CPU work that never yields: about a minute in CPython, 30x the SDK's 2 s
 #: deadlock detector, so every workflow task fails and only the execution timeout
-#: ends the run. Bounded, so no thread spins for the rest of the session. Should a
-#: machine ever finish it early, the pipeline raises: the job fails, never `done`.
+#: ends the run. The test's worker keeps that 2 s bound (`SDK_DEADLOCK_SECONDS`), not
+#: the session's 30 s (`TEST_DEADLOCK_SECONDS`, #7443): with 30 s, the worker's
+#: shutdown waited for the stuck activation until the detector fired. Bounded, so no
+#: thread spins for the rest of the session. Should a machine ever finish it early,
+#: the pipeline raises: the job fails, never `done`.
 NEVER_YIELDS = (
     "async def run(ctx, inputs):\n"
     "    total = sum(i * i for i in range(10**9))\n"
@@ -310,12 +314,15 @@ async def test_a_pipeline_that_never_yields_times_out() -> None:
     timed_out = False
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
-        async with Worker(
+        worker = Worker(
             client,
             task_queue=queue,
             workflows=[TemplatePipeline, RenderPiece],
             activities=world.activities(),
-        ):
+        )
+        assert worker._workflow_worker is not None
+        worker._workflow_worker._deadlock_timeout_seconds = SDK_DEADLOCK_SECONDS
+        async with worker:
             try:
                 await asyncio.wait_for(
                     client.execute_workflow(
