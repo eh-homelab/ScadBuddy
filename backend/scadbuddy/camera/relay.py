@@ -15,45 +15,37 @@ raises `SourceError`, which names the fields only, never their values; a MediaMT
 raises `MediaMtxError`, which names the path and the status only. `ChangeFollower` logs these.
 
 The relay has no database secret and refuses to start with one
-(`settings.RelaySettings.check_environment`). ``/healthz`` and ``/metrics`` on `HEALTH_PORT`.
+(`settings.RelaySettings.check_environment`). ``/healthz`` and ``/metrics`` on
+`process.HEALTH_PORT`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import signal
 import sys
 from collections.abc import Callable, Sequence
-from contextlib import suppress
 from typing import Any, Final, Literal
 from urllib.parse import quote
 
 import httpx
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import TypeAdapter, ValidationError
 
 from scadbuddy.auth.service_auth import ServiceAuth, exchange_source
+from scadbuddy.camera.feed import RETRY_MAX, RETRY_MIN, FeedSender
 from scadbuddy.camera.follow import ChangeFollower
-from scadbuddy.camera.mediamtx import MediaMtx
-from scadbuddy.camera.models import CameraSourceWithCode, FeedReport, FeedState
-from scadbuddy.camera.settings import CameraRefusal, RelaySettings
-from scadbuddy.core.logging import configure_logging
+from scadbuddy.camera.mediamtx import MediaMtx, MediaMtxError
+from scadbuddy.camera.mediamtx import why as _why
+from scadbuddy.camera.models import CameraSourceWithCode, FeedState
+from scadbuddy.camera.process import HOOK_HOST, HOOK_PORT, main_with, serve_health, serve_local
+from scadbuddy.camera.settings import RelaySettings
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, wait_for_areas
-from scadbuddy.intake_worker.hardening import forbid_dumping
 
 logger = logging.getLogger(__name__)
 
 BASE: Final = "/api/v1/internal/crud/camera-relay"
 AREAS: Final = frozenset({"printers", "changes"})
-HOOK_HOST: Final = "127.0.0.1"
-HOOK_PORT: Final = 9091
-HEALTH_PORT: Final = 9090
 HOOK_URL: Final = f"http://{HOOK_HOST}:{HOOK_PORT}/hook"
-#: The back-off of a feed report that did not land.
-RETRY_MIN: Final = 0.5
-RETRY_MAX: Final = 30.0
 #: The user name of a Bambu printer's camera.
 RELAY_USER: Final = "bblp"
 
@@ -63,10 +55,6 @@ _SOURCES = TypeAdapter(list[dict[str, Any]])
 
 class SourceError(Exception):
     """The API sent a source the relay cannot read. It names fields, never values."""
-
-
-class MediaMtxError(Exception):
-    """MediaMTX refused or missed a path change. It names the path and the status only."""
 
 
 def rtsps_source(source: CameraSourceWithCode) -> str:
@@ -109,14 +97,7 @@ class Relay:
         #: /v3/config/paths/list``), so the relay compares with its own copy. After a
         #: restart it has none, and puts each path once again.
         self._confs: dict[str, dict[str, Any]] = {}
-        #: The feed state the relay wants the API to hold, per printer.
-        self._desired: dict[str, FeedState] = {}
-        #: The last feed state the API took, per printer.
-        self._reported: dict[str, FeedState] = {}
-        #: One sender per printer whose desired state has not landed yet.
-        self._senders: dict[str, asyncio.Task[None]] = {}
-        self._retry_min = retry_min
-        self._retry_max = retry_max
+        self._feed = FeedSender(crud, BASE, "relay", retry_min=retry_min, retry_max=retry_max)
         self._lock = asyncio.Lock()
 
     def _conf(self, source: CameraSourceWithCode) -> dict[str, Any]:
@@ -161,61 +142,19 @@ class Relay:
             self._confs.pop(name, None)
             if self._held is not None:
                 self._held.discard(name)
-        if present or self._desired.get(name, "stopped") != "stopped":
+        if present or self._feed.desired(name) not in (None, "stopped"):
             self._want(name, "stopped")
 
     def _want(self, printer_id: str, state: FeedState) -> None:
-        """Record the state the API should hold. A sender posts it in the background,
-        again with back-off until it lands; a newer state replaces one still waiting."""
-        self._desired[printer_id] = state
-        sender = self._senders.get(printer_id)
-        if self._reported.get(printer_id) != state and (sender is None or sender.done()):
-            self._senders[printer_id] = asyncio.create_task(self._send(printer_id))
-
-    async def _send(self, printer_id: str) -> None:
-        delay = self._retry_min
-        path = f"{BASE}/printers/{quote(printer_id, safe='')}/feed"
-        while (state := self._desired[printer_id]) != self._reported.get(printer_id):
-            body = FeedReport(part="relay", state=state).model_dump(mode="json", exclude_none=True)
-            try:
-                await self._crud.request("POST", path, json=body)
-            except CrudRefusedError as refused:
-                # A refusal does not pass with time: stop. A later state or resync tries
-                # again, since the API's state is no longer known.
-                self._reported.pop(printer_id, None)
-                logger.warning(
-                    "camera relay: the API refused feed state %s for %s (%s)",
-                    state,
-                    printer_id,
-                    refused.status,
-                )
-                return
-            except Exception as error:
-                # The post may have reached the API before it failed (a lost answer): its
-                # state is no longer known, so the next desired state is always posted.
-                self._reported.pop(printer_id, None)
-                logger.warning(
-                    "camera relay: feed state %s for %s did not land (%s); retrying",
-                    state,
-                    printer_id,
-                    type(error).__name__,
-                )
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, self._retry_max)
-                continue
-            self._reported[printer_id] = state
-            delay = self._retry_min
+        self._feed.want(printer_id, state)
 
     async def flushed(self) -> None:
         """Wait until every desired feed state has landed."""
-        while pending := [t for t in self._senders.values() if not t.done()]:
-            await asyncio.gather(*pending)
+        await self._feed.flushed()
 
     async def aclose(self) -> None:
-        """Stop the senders."""
-        for sender in self._senders.values():
-            sender.cancel()
-        await asyncio.gather(*self._senders.values(), return_exceptions=True)
+        """Stop the feed senders."""
+        await self._feed.aclose()
 
     async def _runtime(self) -> None:
         """Set each held path's desired state from MediaMTX's runtime ``ready`` flag: a
@@ -251,7 +190,7 @@ class Relay:
             existing = await self._existing()
             self._held = set(existing)
             kept = {str(item.get("printer_id")) for item in items}
-            for name in sorted((set(existing) | set(self._desired)) - kept):
+            for name in sorted((set(existing) | self._feed.printers()) - kept):
                 await self._remove(name, name in existing)
             for printer_id, parsed in sources.items():
                 await self._put(printer_id, self._conf(parsed), printer_id in existing)
@@ -292,68 +231,30 @@ class Relay:
             self._want(printer_id, "pulling" if event == "ready" else "retrying")
 
 
-def _why(error: httpx.HTTPError) -> str:
-    """An httpx error as its type and status: never its request, whose body holds the code."""
-    if isinstance(error, httpx.HTTPStatusError):
-        return f"{type(error).__name__} {error.response.status_code}"
-    return type(error).__name__
-
-
 async def serve_hooks(relay: Relay, host: str, port: int) -> asyncio.Server:
     """``POST /hook/<printer_id>/ready`` (or ``not_ready``), from MediaMTX's ``runOnAvailable``
     and ``runOnUnavailable`` commands: 204, or 404 for any other request."""
 
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        status = b"404 Not Found"
-        with suppress(Exception):
-            line = await asyncio.wait_for(reader.readline(), 5)
-            end = (b"\r\n", b"\n", b"")
-            while await asyncio.wait_for(reader.readline(), 5) not in end:
-                continue
-            method, target, *_ = line.decode("ascii").split(" ")
-            parts = target.split("/")
-            if method == "POST" and len(parts) == 4 and parts[1] == "hook" and parts[2]:
-                event = parts[3]
-                if event in ("ready", "not_ready"):
-                    status = b"204 No Content"
-                    await relay.on_hook(parts[2], event)  # type: ignore[arg-type]
-        with suppress(Exception):
-            writer.write(
-                b"HTTP/1.1 " + status + b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            )
-            await writer.drain()
-        writer.close()
+    async def route(method: str, target: str) -> bool:
+        parts = target.split("/")
+        if method != "POST" or len(parts) != 4 or parts[1] != "hook" or not parts[2]:
+            return False
+        event = parts[3]
+        if event not in ("ready", "not_ready"):
+            return False
+        await relay.on_hook(parts[2], event)  # type: ignore[arg-type]
+        return True
 
-    return await asyncio.start_server(handle, host, port)
+    return await serve_local(route, host, port)
 
 
-async def _healthz(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """``GET /metrics``: the process's metrics; any other request 200."""
-    with suppress(Exception):
-        line = await asyncio.wait_for(reader.readline(), 5)
-        if line.split(b" ")[1:2] == [b"/metrics"]:
-            body, kind = generate_latest(), CONTENT_TYPE_LATEST.encode()
-        else:
-            body, kind = b"ok", b"text/plain"
-        writer.write(
-            b"HTTP/1.1 200 OK\r\nContent-Type: "
-            + kind
-            + b"\r\nContent-Length: "
-            + str(len(body)).encode()
-            + b"\r\nConnection: close\r\n\r\n"
-            + body
-        )
-        await writer.drain()
-    writer.close()
-
-
-async def run(settings: RelaySettings, *, stop: asyncio.Event | None = None) -> None:
+async def run(settings: RelaySettings, stop: asyncio.Event | None = None) -> None:
     stop = stop or asyncio.Event()
     auth = ServiceAuth(exchange_source("camera-relay", settings))
     crud = CrudClient(settings.api_internal_url, "camera-relay", auth)
     mtx = MediaMtx(settings.camera_mediamtx_api_url)
     relay = Relay(crud, mtx, source_for=rtsps_source)
-    health = await asyncio.start_server(_healthz, "0.0.0.0", HEALTH_PORT)
+    health = await serve_health()
     hooks: asyncio.Server | None = None
     follower: asyncio.Task[None] | None = None
     try:
@@ -388,35 +289,12 @@ async def run(settings: RelaySettings, *, stop: asyncio.Event | None = None) -> 
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    try:
-        RelaySettings.check_environment(os.environ)
-    except CameraRefusal as refusal:
-        configure_logging()
-        for reason in refusal.reasons:
-            logger.error(reason)
-        return 2
-    # Before the proof is read: no process of this user may read this one's memory, where
-    # the service credential and the access codes live.
-    forbid_dumping()
-    try:
-        settings = RelaySettings()  # type: ignore[call-arg]  # read from the environment
-    except ValidationError as invalid:
-        configure_logging()
-        for error in invalid.errors(include_input=False, include_url=False):
-            name = ".".join(str(part) for part in error["loc"]) or "settings"
-            logger.error("setting %s: %s", name, error["msg"])
-        return 2
-    configure_logging(settings.log_level)
-
-    async def _main() -> None:
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for signum in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(signum, stop.set)
-        await run(settings, stop=stop)
-
-    asyncio.run(_main())
-    return 0
+    return main_with(
+        RelaySettings.check_environment,
+        lambda: RelaySettings(),  # type: ignore[call-arg]  # read from the environment
+        lambda settings: settings.log_level,
+        run,
+    )
 
 
 if __name__ == "__main__":

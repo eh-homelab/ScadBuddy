@@ -1,5 +1,6 @@
 """A client of MediaMTX's control API (``/v3/config/paths/*``). The relay gives it each
-printer's source URL, access code included, here and nowhere else."""
+printer's source URL, access code included, here and nowhere else; the recorder gives it the
+relay's URL with the relay read password."""
 
 from __future__ import annotations
 
@@ -9,6 +10,17 @@ from urllib.parse import quote
 import httpx
 
 PAGE = 1000
+
+
+class MediaMtxError(Exception):
+    """MediaMTX refused or missed a path change. It names the path and the status only."""
+
+
+def why(error: httpx.HTTPError) -> str:
+    """An httpx error as its type and status: never its request, whose body holds a secret."""
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"{type(error).__name__} {error.response.status_code}"
+    return type(error).__name__
 
 
 class MediaMtx:
