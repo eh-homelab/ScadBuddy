@@ -81,12 +81,12 @@ class TemplateRefresh:
         write = partial(write_rows, rows=rows, gone=gone)
 
         def run(conn: Any) -> None:
-            # A failed write rolls the HEAD transaction back (`_PgHold.record`), and
-            # `_landed` logs that; it is counted here as a failed refresh too.
+            # A failed write rolls back its savepoint only, and `_PgHold.record` logs
+            # it with the template ids (review B-I1); it is counted here.
             try:
                 write(conn)
             except Exception:
-                self._failed(models, "commit")
+                self._count("commit")
                 raise
 
         return run
@@ -115,6 +115,9 @@ class TemplateRefresh:
             "could not refresh the templates' rows",
             extra={"templates": list(models), "refresh_path": path},
         )
+        self._count(path)
+
+    def _count(self, path: str) -> None:
         if self.on_failure is None:
             return
         try:

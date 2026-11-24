@@ -111,7 +111,7 @@ class _PgHold:
                     (commit,),
                 )
                 if also is not None:
-                    also(self._conn)
+                    self._also(change, also)
                 if self._channel is not None:
                     self._conn.execute(
                         "SELECT pg_notify(%s, %s)", (self._channel, encode_change(change))
@@ -121,6 +121,20 @@ class _PgHold:
                 f"could not record {commit[:7]} as the {self._label} HEAD"
             ) from error
         self.expected = commit
+
+    def _also(self, change: HeadChange, also: Callable[[Any], None]) -> None:
+        """``also`` in a savepoint (#7317, review B-I1): rows derived from the commit
+        never cost the HEAD record or its NOTIFY. Whatever it raises (a psycopg error,
+        or psycopg's ``UnicodeEncodeError`` for a lone surrogate, review B-M1) rolls
+        back the savepoint only; the copy run repairs the rows."""
+        try:
+            with self._conn.transaction():
+                also(self._conn)
+        except Exception:
+            logger.exception(
+                "the rows of a commit could not be written with its HEAD",
+                extra={"commit": change.commit, "templates": change.models},
+            )
 
 
 class PgRepoCoordinator:

@@ -298,8 +298,10 @@ reads the output folders as today. A list is NFS-free only with both.
   `merge_upstream`, `duplicate`, `create`, `delete`, media add of an image and of a
   video, a built-in's added media, `sync_builtins`, a restore) leaves the row equal to
   what the walk builds for that template. One table-driven test.
-- The HEAD transaction: a failure in it leaves neither the HEAD nor the rows written;
-  the commit still stands, and the next copy run repairs the rows.
+- The HEAD transaction: the rows are written in a savepoint in it. A row write that
+  fails rolls back the savepoint only: the HEAD and its NOTIFY are still recorded, the
+  failure is logged with the template ids and counted, the commit stands, and the next
+  copy run repairs the rows (#7317, Task 3 review B-I1).
 - The copy: a fixture tree fills the rows; a second run changes nothing; a hand edit
   of `model.json`, a commit made outside the catalogue and a deleted folder are each
   repaired; an ESTALE listing makes the run incomplete and drops nothing.

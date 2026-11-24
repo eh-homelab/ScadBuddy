@@ -54,7 +54,7 @@ class FakeHook:
     """A `TemplateRowsHook` that writes a plain row per model, and notes its calls."""
 
     history: ModelHistory | None = None
-    mode: Literal["rows", "fails", "unreadable"] = "rows"
+    mode: Literal["rows", "fails", "raises", "unreadable", "hook_raises"] = "rows"
     commits: list[tuple[list[str], str]] = field(default_factory=list)
     refreshes: list[tuple[list[str], str, bool]] = field(default_factory=list)
     #: What the HEAD row read on the transaction's own connection, when it ran.
@@ -66,6 +66,16 @@ class FakeHook:
             return None
         if self.mode == "fails":
             return lambda conn: conn.execute("SELECT * FROM no_such_table")
+        if self.mode == "raises":
+
+            def encode(conn: Any) -> None:
+                # As psycopg's own UnicodeEncodeError for a lone surrogate: not a
+                # psycopg.Error.
+                "\ud800".encode()
+
+            return encode
+        if self.mode == "hook_raises":
+            raise RuntimeError("the hook broke")
         write = partial(write_rows, rows=[_row(model, commit) for model in models], gone=[])
 
         def run(conn: Any) -> None:
@@ -83,6 +93,8 @@ class FakeHook:
             self.history.coordinator is None or self.history._hold is not None
         )
         self.refreshes.append((list(models), path, held))
+        if self.mode == "hook_raises":
+            raise RuntimeError("the hook broke")
 
 
 @pytest.fixture
@@ -174,10 +186,13 @@ def test_rows_commit_with_the_head_and_before_the_notify(tmp_path: Path, conninf
     assert hook.seen_head == [commit]
 
 
-def test_a_failing_row_write_leaves_neither_head_nor_rows_and_the_commit_stands(
-    tmp_path: Path, conninfo: str
+@pytest.mark.parametrize("mode", ["fails", "raises"])
+def test_a_failing_row_write_still_records_the_head_and_its_notify(
+    tmp_path: Path, conninfo: str, mode: Literal["fails", "raises"]
 ) -> None:
-    hook = FakeHook(mode="fails")
+    """Review B-I1, B-M1 (#7317): the rows run in a savepoint. A write that fails, with a
+    psycopg error or any other, loses the rows only; the copy repairs them."""
+    hook = FakeHook(mode=mode)
     history, first = _seeded(tmp_path, conninfo, hook)
     _write(history.root, "demo")
     with psycopg.connect(conninfo, autocommit=True) as listener:
@@ -186,9 +201,9 @@ def test_a_failing_row_write_leaves_neither_head_nor_rows_and_the_commit_stands(
         announced = _heads_announced(listener, 0.5)
     assert created is not None and created != first
     assert history.head() == created
-    assert _head(conninfo) == first
+    assert _head(conninfo) == created
     assert _version(conninfo, "demo") is None
-    assert created not in announced
+    assert created in announced
 
 
 def test_a_hook_that_cannot_read_still_records_the_head(tmp_path: Path, conninfo: str) -> None:

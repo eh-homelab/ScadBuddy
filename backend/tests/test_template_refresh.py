@@ -360,6 +360,29 @@ def test_a_read_that_fails_for_a_commit_is_counted_and_the_commit_stands(
     assert found is not None and found[0] == head
 
 
+def test_a_write_that_fails_for_a_commit_is_counted_and_the_head_stands(
+    world: World, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """Review B-I1 (#7317): the rows' write fails in its savepoint; the HEAD is recorded."""
+    assert world.history is not None
+    before = world.rows.get("demo")
+
+    def refuse(*_: object, **__: object) -> None:
+        raise psycopg.errors.NumericValueOutOfRange("integer out of range")
+
+    monkeypatch.setattr("scadbuddy.library.template_refresh.write_rows", refuse)
+
+    world.catalogue.update("demo", ModelPatch(description="kept"))
+
+    assert world.catalogue.record("demo").description == "kept"
+    assert world.failures == ["commit"]
+    assert world.rows.get("demo") == before
+    head = world.history.head()
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        found = conn.execute("SELECT head FROM models_repo_head WHERE id").fetchone()
+    assert found is not None and found[0] == head
+
+
 def test_the_built_in_media_refresh_runs_under_the_write_lock(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:

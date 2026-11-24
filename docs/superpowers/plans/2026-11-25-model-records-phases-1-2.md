@@ -25,7 +25,7 @@
 
 ## Plan decisions (the spec left these to the builder, §11)
 
-1. `RepoHold.record(change, also=None)`: `also` is a callable that `_PgHold.record` runs on its own connection inside the HEAD transaction. `GitRepo._landed` asks `self._also_record(change)` for it; only `ModelHistory` answers one. The callable only runs SQL with values prepared before the transaction, so it can raise only `psycopg.Error`.
+1. `RepoHold.record(change, also=None)`: `also` is a callable that `_PgHold.record` runs on its own connection inside the HEAD transaction. `GitRepo._landed` asks `self._also_record(change)` for it; only `ModelHistory` answers one. The callable only runs SQL with values prepared before the transaction. It runs in a savepoint: whatever it raises rolls back the savepoint only, and the HEAD and its NOTIFY still commit (revised after the Task 3 review, B-I1).
 2. The hook is attached (`history.template_rows = …`) in `_start_render` right after `projection.open()` (which applies the migrations) and before `_prepare_catalogue`. So `ensure_repo`'s boot commit, which runs before the migrations, writes no rows. The start copy fills them.
 3. With no coordinator (`_hold` is None: tests, one process), the rows of a commit are written in a transaction of their own, still under the lock (`GitRepo._landed_alone`).
 4. A change with no commit (`ModelHistory.commit` or `restore` answers `None`, or raises) refreshes the ids of its paths under the lock. The path `_builtin` alone maps to no id: the built-in sync at boot is followed by the start copy, and a built-in's media writes refresh their own id (`_overlay_change`).
@@ -136,7 +136,7 @@ Branch `feat/model-records-7317` from `origin/main`. Open the PR `feat(models): 
 **Interfaces:**
 - Consumes: Task 1's `write_rows` (the tests' fake hook writes real rows).
 - Produces:
-  - `RepoHold.record(self, change: HeadChange, also: Callable[[Any], None] | None = None) -> None`. `_PgHold.record` calls `also(self._conn)` inside its transaction, after the HEAD upsert and before `pg_notify`. A `psycopg.Error` from it fails the whole transaction (`RepoLockError`, logged by `_landed` as today).
+  - `RepoHold.record(self, change: HeadChange, also: Callable[[Any], None] | None = None) -> None`. `_PgHold.record` calls `also(self._conn)` inside its transaction, after the HEAD upsert and before `pg_notify`. It runs in a savepoint: any exception from it rolls back the savepoint only, is logged with the commit and the template ids, and the HEAD upsert and `pg_notify` still commit (Task 3 review B-I1, B-M1).
   - `GitRepo._also_record(self, change: HeadChange) -> Callable[[Any], None] | None` (None here) and `GitRepo._landed_alone(self, commit: str) -> None` (no-op here; `_landed` calls it when `_hold` is None).
   - In `history.py`: `class TemplateRowsHook(Protocol)`: `for_commit(self, models: list[str], commit: str) -> Callable[[Any], None] | None` (reads the files; never raises; None on failure) and `refresh_locked(self, models: list[str], *, path: Literal["commit", "no_commit", "no_git"]) -> None` (reads and writes in a transaction of its own; never raises). `ModelHistory.template_rows: TemplateRowsHook | None = None`.
   - `ModelHistory._also_record(change)`: `template_rows.for_commit(change.models, change.commit)` when both are set, else None. `ModelHistory._landed_alone(commit)`: `refresh_locked(self._changed_models(commit), path="commit")`.
@@ -145,7 +145,7 @@ Branch `feat/model-records-7317` from `origin/main`. Open the PR `feat(models): 
 
 - [ ] **Step 1: Write the failing tests** in `test_history_rows.py` (`requires_git`, `requires_postgres`; a `ModelHistory` with `PgRepoCoordinator(pg_conninfo)` on a migrated schema, and a fake `TemplateRowsHook` whose `for_commit` answers `partial(write_rows, rows=[<a TemplateRow for each model>], gone=[])` and whose `refresh_locked` records its calls and whether the lock is held):
   - `test_rows_commit_with_the_head_and_before_the_notify`: LISTEN on `HEAD_CHANNEL` on a second connection; a commit; when the notification arrives, `SELECT version FROM templates WHERE template_id = 'demo'` on that connection answers the new commit, and `models_repo_head.head` is it.
-  - `test_a_failing_row_write_leaves_neither_head_nor_rows_and_the_commit_stands`: `for_commit` answers a callable that runs invalid SQL; `commit` answers the new sha; `models_repo_head` keeps the old head; no `templates` row; no notification.
+  - `test_a_failing_row_write_still_records_the_head_and_its_notify`: `for_commit` answers a callable that runs invalid SQL, or one that raises a non-psycopg error; `commit` answers the new sha; `models_repo_head` holds the new head; no `templates` row; the notification is sent.
   - `test_a_hook_that_cannot_read_still_records_the_head`: `for_commit` answers None; the HEAD is recorded.
   - `test_a_commit_with_nothing_staged_refreshes_its_ids_under_the_lock`: `refresh_locked(["demo"], path="no_commit")`, called while `history._hold is not None`.
   - `test_a_failed_commit_refreshes_its_ids_then_raises` (make `_commit_locked` raise `GitError`).
