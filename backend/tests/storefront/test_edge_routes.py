@@ -2141,6 +2141,43 @@ def test_a_variant_preview_is_streamed(
     assert r.status_code == 200 and r.content == b"glTF-bytes"
     assert r.headers["content-type"] == "model/gltf-binary"
     assert len(route.calls.last.request.headers[VISITOR_HEADER]) == 43
+    assert "if-none-match" not in route.calls.last.request.headers
+    assert "etag" not in r.headers
+
+
+def test_a_variant_preview_passes_its_etag_back(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """#7256 Task 8 amendment: the edge passes the CRUD side's ``ETag`` back, and the
+    browser keeps the preview and asks again on each use."""
+    crud_mock.get(f"/api/v1/internal/crud/storefront/variants/{VARIANT_KEY}/preview.glb").respond(
+        200,
+        content=b"glTF-bytes",
+        headers={**CRUD, "Content-Type": "model/gltf-binary", "ETag": '"abc"'},
+    )
+    r = edge.get(f"/api/store/v1/variants/{VARIANT_KEY}/preview.glb")
+    assert r.status_code == 200 and r.content == b"glTF-bytes"
+    assert r.headers["etag"] == '"abc"'
+    assert r.headers["cache-control"] == "private, no-cache"
+
+
+def test_a_variant_preview_revalidation_is_a_304_through_the_edge(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """#7256 Task 8 amendment: the edge forwards ``If-None-Match`` to the CRUD route, and
+    passes its 304 back with the ``ETag`` and ``Cache-Control``, no body."""
+    route = crud_mock.get(
+        f"/api/v1/internal/crud/storefront/variants/{VARIANT_KEY}/preview.glb"
+    ).respond(304, headers={**CRUD, "ETag": '"abc"'})
+    r = edge.get(
+        f"/api/store/v1/variants/{VARIANT_KEY}/preview.glb", headers={"If-None-Match": '"abc"'}
+    )
+    assert route.calls.last.request.headers["if-none-match"] == '"abc"'
+    assert r.status_code == 304 and r.content == b""
+    assert r.headers["etag"] == '"abc"'
+    assert r.headers["cache-control"] == "private, no-cache"
 
 
 @pytest.mark.parametrize("key", ["..", "AB" * 32, "ab" * 31, "not-a-key"])

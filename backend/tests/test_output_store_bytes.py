@@ -98,7 +98,7 @@ async def _copy_bytes(store: OutputStore, meta: OutputMeta) -> None:
     """What the byte copy does: put the folder, then name the blobs in the row."""
     assert store.bytes is not None and store.rows is not None
     blobs = await store.bytes.put_folder(store.directory(meta.id), meta.id, meta.slug)
-    store.rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", None)])
+    store.rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", [])])
 
 
 @pytest.fixture

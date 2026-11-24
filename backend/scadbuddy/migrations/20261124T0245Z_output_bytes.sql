@@ -14,8 +14,8 @@ ALTER TABLE outputs
     -- Set by a save that put its blobs, or by the copy that wrote and verified them.
     -- NULL: the files still hold the bytes.
     ADD COLUMN bytes_at timestamptz,
-    -- `[{role, error}]` for the roles whose file was missing. NULL when none.
-    ADD COLUMN bytes_damaged jsonb;
+    -- `[{role, error}]` for the byte roles whose file was missing. Empty when none.
+    ADD COLUMN damaged jsonb NOT NULL DEFAULT '[]';
 
 CREATE INDEX outputs_bytes_pending ON outputs (output_id) WHERE bytes_at IS NULL;
 

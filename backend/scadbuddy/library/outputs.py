@@ -134,6 +134,22 @@ _LOST: tuple[type[Exception], ...] = (BlobMissingError, BlobCorruptError, *TRANS
 _COVER_READ_ERRORS: tuple[type[Exception], ...] = (OSError, ClientError, *TRANSPORT_ERRORS)
 
 
+#: S3's codes for an object that is not there (as `store/s3.py` reads them).
+_MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+
+
+def _object_missing(error: Exception) -> bool:
+    """Whether ``error`` says that the object is not there: a 404 or ``NoSuchKey``
+    answer, or a local ``FileNotFoundError``. A 401, 403 or other refusal is not one,
+    because a key rotation can heal it."""
+    if isinstance(error, FileNotFoundError):
+        return True
+    if not isinstance(error, ClientError):
+        return False
+    status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return status == 404 or error.response.get("Error", {}).get("Code") in _MISSING_CODES
+
+
 def _lost(error: Exception) -> bool:
     """Whether a reader takes the file in place of the blob after ``error``."""
     return isinstance(error, _LOST) or server_error(error)
@@ -1764,8 +1780,9 @@ class OutputStore:
         """The cover read out of the output's 3MF, then kept (`_keep_plate_cover`).
         The file's errors are as `plate_cover`'s: deleted or replaced since it was
         resolved, and the next ask resolves again. An error of the blob read is logged
-        once: a 4xx answer (a request the store refuses) is kept as no cover, so it is
-        not asked again; a full spool or a transport error is not kept."""
+        once. Only a missing object (`_object_missing`) is kept as no cover, so it is not
+        asked again. A refusal (401, 403, other 4xx), a full spool or a transport error is
+        not kept, so the next ask reads again (a key rotation heals)."""
         try:
             async with self.local_role(output_id, "model") as path:
                 if path is None:
@@ -1784,7 +1801,7 @@ class OutputStore:
                 "could not read an output's 3MF for its plate cover",
                 extra={"output_id": output_id, "error": str(error)},
             )
-            if isinstance(error, ClientError) and not server_error(error):
+            if _object_missing(error):
                 await self._keep_plate_cover(slug, output_id, None)
             return None
         await self._keep_plate_cover(slug, output_id, png)

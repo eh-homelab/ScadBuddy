@@ -1180,6 +1180,10 @@ def asset_ids_in(params: Mapping[str, object]) -> set[str]:
     return _ids_in(json.dumps(params, sort_keys=True).encode())
 
 
+class DamagedArchiveError(OSError):
+    """A 3MF that opens as a file but cannot be read as a 3MF."""
+
+
 def _ids_in_archive(archive: Path) -> set[str]:
     """The ids in a 3MF's root model, where its provenance is stamped.
 
@@ -1187,7 +1191,8 @@ def _ids_in_archive(archive: Path) -> set[str]:
     for none at all, which is right for "Edit in ScadBuddy" and wrong here -- a
     damaged or foreign-version stamp must still keep what it names. So the root
     model's raw text is matched, as a JSON record's is. An archive that cannot be
-    opened at all raises OSError, which skips the whole sweep.
+    read as a 3MF raises `DamagedArchiveError`, an OSError. The folder walk then skips
+    the whole sweep; the rows' scan skips that output only.
     """
     try:
         with zipfile.ZipFile(archive) as opened:
@@ -1195,7 +1200,9 @@ def _ids_in_archive(archive: Path) -> set[str]:
     except FileNotFoundError:  # removed since the listing: it keeps nothing now
         return set()
     except (KeyError, zipfile.BadZipFile) as error:
-        raise OSError(f"cannot read {archive} for the asset ids it names: {error}") from None
+        raise DamagedArchiveError(
+            f"cannot read {archive} for the asset ids it names: {error}"
+        ) from None
 
 
 def stopped(stop: threading.Event | None) -> bool:
@@ -1227,7 +1234,10 @@ async def referenced_asset_ids(
 
     A source that exists but cannot be read raises OSError: a sweep that cannot see
     every reference must not remove anything, so the caller skips the whole sweep
-    rather than guessing. Every read runs in a thread.
+    rather than guessing. One exception, in the rows' scan only: a 3MF that can never
+    be read as a 3MF (`DamagedArchiveError`) skips its own output, logged, so that one
+    damaged output does not stop every sweep (#7256). The ids read before a raise are
+    still kept. Every read runs in a thread.
     """
     rows = outputs.rows if outputs is not None else None
     if outputs is None or rows is None or not await asyncio.to_thread(rows.copied):
@@ -1236,15 +1246,29 @@ async def referenced_asset_ids(
     with span("assets.referenced") as current:
         found, read, bare = await asyncio.to_thread(_referenced_in_rows, paths, records, rows)
         kept: list[tuple[str, list[str]]] = []
-        for output_id in bare:
-            async with outputs.local_role(output_id, "model") as archive:
-                if archive is not None:
+        try:
+            for output_id in bare:
+                async with outputs.local_role(output_id, "model") as archive:
+                    if archive is None:
+                        continue
                     read["archives"] += 1
-                    ids = await asyncio.to_thread(_ids_in_archive, archive)
+                    try:
+                        ids = await asyncio.to_thread(_ids_in_archive, archive)
+                    except DamagedArchiveError as error:
+                        # It can never be read: it must not stop every sweep.
+                        logger.warning(
+                            "skipped an output whose 3MF cannot be read for its asset ids",
+                            extra={"output_id": output_id, "error": str(error)},
+                        )
+                        continue
                     found.update(ids)
                     kept.append((output_id, sorted(ids)))
-        # One write for the whole scan; a 3MF read here is not read again.
-        await asyncio.to_thread(rows.write_derived_many, "asset_ids", 0, ASSET_IDS_VERSION, kept)
+        finally:
+            # One write for the whole scan, also when a read raised; a 3MF read here
+            # is not read again.
+            await asyncio.to_thread(
+                rows.write_derived_many, "asset_ids", 0, ASSET_IDS_VERSION, kept
+            )
         for name, count in read.items():
             current.set_attribute(f"scadbuddy.{name}", count)
         current.set_attribute("scadbuddy.assets", len(found))

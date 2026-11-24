@@ -96,7 +96,7 @@ def _copy(client: TestClient, outputs: OutputStore, output_id: str) -> None:
     portal = client.portal
     assert portal is not None
     blobs = portal.call(outputs.bytes.put_folder, directory, output_id, slug)
-    assert outputs.rows.write_bytes([ByteWrite(output_id, blobs, "stamp", None)]) == {output_id}
+    assert outputs.rows.write_bytes([ByteWrite(output_id, blobs, "stamp", [])]) == {output_id}
 
 
 def _copied(

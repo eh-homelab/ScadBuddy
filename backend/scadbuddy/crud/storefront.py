@@ -278,14 +278,16 @@ class StorefrontCrud:
             content=body,
         )
 
-    async def variant_preview(self, key: str, *, visitor_id: str, client: str) -> CrudStream:
+    async def variant_preview(
+        self, key: str, *, visitor_id: str, client: str, if_none_match: str | None = None
+    ) -> CrudStream:
         """``GET …/storefront/variants/{key}/preview.glb`` (#6921), its body unread: the
-        caller reads it as a stream, then closes it. ``key`` must be a variant key."""
-        return await self._crud.stream(
-            "GET",
-            f"{BASE}/variants/{key}/preview.glb",
-            headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
-        )
+        caller reads it as a stream, then closes it. ``key`` must be a variant key. The
+        browser's ``If-None-Match`` goes on, so an unchanged preview is a 304 (#7256)."""
+        headers = {VISITOR_HEADER: visitor_id, CLIENT_HEADER: client}
+        if if_none_match is not None:
+            headers["If-None-Match"] = if_none_match
+        return await self._crud.stream("GET", f"{BASE}/variants/{key}/preview.glb", headers=headers)
 
     async def draft(self, *, visitor_id: str, client: str) -> Any:
         """``GET …/storefront/draft``: the visitor's draft order, or None."""

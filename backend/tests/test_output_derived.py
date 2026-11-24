@@ -78,7 +78,7 @@ async def _copied(
     store.bytes = OutputBytes(content)
     meta = store.create(job, name="first")
     blobs = await store.bytes.put_folder(store.directory(meta.id), meta.id, meta.slug)
-    store.rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", None)])
+    store.rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", [])])
     return store, meta
 
 
@@ -213,7 +213,7 @@ async def test_plate_cover_from_model_blob(
     run = rows.start_run()
     rows.finish_run(run, copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
     blobs = await store.bytes.put_folder(directory, meta.id, meta.slug)
-    rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", None)])
+    rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", [])])
     (directory / MODEL_NAME).unlink()
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
     # The sync form reads the NFS file only, which is gone.
@@ -264,7 +264,7 @@ async def _covered(
     run = rows.start_run()
     rows.finish_run(run, copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
     blobs = await store.bytes.put_folder(directory, meta.id, meta.slug)
-    rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", None)])
+    rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", [])])
     (directory / MODEL_NAME).unlink()
     return store, meta
 
@@ -332,34 +332,76 @@ async def test_lost_plate_cover_blob_is_derived_again(
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
 
 
-def _client_error(status: int) -> ClientError:
-    response: Any = {"Error": {"Code": str(status)}, "ResponseMetadata": {"HTTPStatusCode": status}}
+def _client_error(status: int, code: str | None = None) -> ClientError:
+    response: Any = {
+        "Error": {"Code": code or str(status)},
+        "ResponseMetadata": {"HTTPStatusCode": status},
+    }
     return ClientError(response, "GetObject")
 
 
-async def test_plate_cover_4xx_is_no_cover_once(
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(lambda: _client_error(404), id="404"),
+        pytest.param(lambda: _client_error(404, "NoSuchKey"), id="NoSuchKey"),
+        pytest.param(lambda: FileNotFoundError("gone"), id="FileNotFoundError"),
+    ],
+)
+async def test_plate_cover_missing_object_is_no_cover_once(
     tmp_path: Path,
     projection: JobProjection,
     content: ContentStore,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    error: Any,
 ) -> None:
-    """#7256 review B-M2: a 4xx answer of the model blob is no cover (not a 500), logged
-    once at warning and kept, so the next ask does not read again."""
+    """#7256 Task 8 amendment: only a missing object (404, ``NoSuchKey``, a local
+    ``FileNotFoundError``) is kept as no cover, so the next ask does not read again."""
     store, meta = await _covered(tmp_path, projection, content)
     gets: list[Any] = []
 
-    def refused(ref: Any, *args: Any, **kwargs: Any) -> Any:
+    def missing(ref: Any, *args: Any, **kwargs: Any) -> Any:
         gets.append(ref)
-        raise _client_error(403)
+        raise error()
 
-    monkeypatch.setattr(content, "get", refused)
+    monkeypatch.setattr(content, "get", missing)
     with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
         assert await store.read_plate_cover(meta.slug) is None
     warned = [r for r in caplog.records if "plate cover" in r.getMessage()]
     assert len(warned) == 1 and warned[0].levelno == logging.WARNING
     assert await store.read_plate_cover(meta.slug) is None
     assert len(gets) == 1
+    assert store.rows is not None
+    assert store.rows.derived(meta.id, "plate_cover", 0) == ("1", {"key": None})
+
+
+@pytest.mark.parametrize("status", [401, 403, 400])
+async def test_plate_cover_refused_read_is_not_kept(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    status: int,
+) -> None:
+    """#7256 Task 8 amendment: a 401, 403 or other 4xx is logged once at warning level and
+    not kept, so the cover comes back once the key is fixed (a key rotation heals)."""
+    store, meta = await _covered(tmp_path, projection, content)
+    real = content.get
+
+    def refused(ref: Any, *args: Any, **kwargs: Any) -> Any:
+        raise _client_error(status)
+
+    monkeypatch.setattr(content, "get", refused)
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+        assert await store.read_plate_cover(meta.slug) is None
+    warned = [r for r in caplog.records if "plate cover" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelno == logging.WARNING
+    assert store.rows is not None
+    assert store.rows.derived(meta.id, "plate_cover", 0) is None
+    monkeypatch.setattr(content, "get", real)
+    assert await store.read_plate_cover(meta.slug) == COVER_PNG
 
 
 async def test_plate_cover_5xx_is_asked_again(

@@ -120,8 +120,8 @@ class ByteWrite:
     blobs: OutputBlobs
     #: The copy's stamp of the byte files it read.
     stamp: str
-    #: ``[{role, error}]`` for the roles whose file was missing; ``None`` when none.
-    damaged: list[dict[str, Any]] | None
+    #: ``[{role, error}]`` for the byte roles whose file was missing; empty when none.
+    damaged: list[dict[str, Any]]
 
 
 _COLUMNS = (
@@ -654,7 +654,7 @@ class OutputRows:
 
     def write_bytes(self, writes: Sequence[ByteWrite]) -> set[str]:
         """One batch of the byte copy, in one transaction. Per write: the blob columns,
-        ``bytes_stamp``, ``bytes_damaged`` and ``bytes_at``, its ``output_files`` rows
+        ``bytes_stamp``, ``damaged`` and ``bytes_at``, its ``output_files`` rows
         replaced, a hold of each key, and the holds of byte keys it no longer names
         released. A row deleted meanwhile gets nothing, no hold either. The ids whose
         row still existed."""
@@ -666,14 +666,14 @@ class OutputRows:
                 blobs = write.blobs
                 cursor = conn.execute(
                     "UPDATE outputs SET model_blob = %s, preview_blob = %s,"
-                    " thumbnail_blob = %s, bytes_stamp = %s, bytes_damaged = %s,"
+                    " thumbnail_blob = %s, bytes_stamp = %s, damaged = %s,"
                     " bytes_at = clock_timestamp() WHERE output_id = %s",
                     (
                         blobs.model,
                         blobs.preview,
                         blobs.thumbnail,
                         write.stamp,
-                        _json(write.damaged),
+                        Jsonb(write.damaged),
                         write.output_id,
                     ),
                 )

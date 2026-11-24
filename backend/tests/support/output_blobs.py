@@ -15,6 +15,7 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_rows import ByteWrite, OutputRows
 from scadbuddy.library.outputs import OutputMeta, OutputStore
+from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from tests.support.arrange import finished_job
@@ -28,6 +29,8 @@ class BlobOutput:
     content: ContentStore
     #: The rows' pool, for a test that writes a row by hand.
     pool: ConnectionPool[Connection[DictRow]]
+    #: The finished render job, for a test that saves another output of it.
+    job: Job
 
     @property
     def directory(self) -> Path:
@@ -51,8 +54,8 @@ async def blob_output(tmp_path: Path, pg_conninfo: str) -> AsyncIterator[BlobOut
                 store.bytes = OutputBytes(content)
                 meta = store.create(job, name="first")
                 blobs = await store.bytes.put_folder(store.directory(meta.id), meta.id, meta.slug)
-                store.rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", None)])
-                yield BlobOutput(store, meta, content, jobs.pool)
+                store.rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", [])])
+                yield BlobOutput(store, meta, content, jobs.pool, job)
             finally:
                 await content.aclose()
     finally:

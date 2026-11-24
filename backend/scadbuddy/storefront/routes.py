@@ -249,20 +249,39 @@ async def listing_price(
     return {k: v for k, v in answer.items() if k in ESTIMATE_FIELDS}
 
 
+#: A variant preview's ``Cache-Control`` when it has an ``ETag`` (#7256): kept by the
+#: visitor's browser only, and asked again on each use.
+VARIANT_PREVIEW_CACHE: Final = "private, no-cache"
+
+
 @visitor_router.get("/variants/{variant_key}/preview.glb")
 async def variant_preview(
-    variant_key: str, crud: Crud, visitor_id: Visitor, client: Client
-) -> StreamingResponse:
+    variant_key: str, request: Request, crud: Crud, visitor_id: Visitor, client: Client
+) -> Response:
     """The preview mesh of a variant priced before (#6921), relayed as a stream. A key that
-    is not one is 404 before any call."""
+    is not one is 404 before any call. The browser's ``If-None-Match`` goes to the CRUD
+    route, and its ``ETag`` and 304 come back (#7256). The CRUD side marks every answer
+    ``no-store``, so a preview with an ``ETag`` is sent ``private, no-cache``: the browser
+    keeps it and asks again on each use, since a new slice can change it."""
     if VARIANT_KEY.fullmatch(variant_key) is None:
         raise ApiError(
             404,
             "There is no preview of these choices.",
             type_=f"{STOREFRONT_PROBLEMS}variant_not_found",
         )
-    stream = await crud.variant_preview(variant_key, visitor_id=visitor_id, client=client)
+    stream = await crud.variant_preview(
+        variant_key,
+        visitor_id=visitor_id,
+        client=client,
+        if_none_match=request.headers.get("if-none-match"),
+    )
     headers = {}
+    if (etag := stream.response.headers.get("etag")) is not None:
+        headers["ETag"] = etag
+        headers["Cache-Control"] = VARIANT_PREVIEW_CACHE
+    if stream.response.status_code == 304:
+        await stream.aclose()
+        return Response(status_code=304, headers=headers)
     if "content-length" in stream.response.headers and (
         "content-encoding" not in stream.response.headers
     ):

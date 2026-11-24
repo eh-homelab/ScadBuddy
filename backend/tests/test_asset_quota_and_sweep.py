@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import os
 import threading
 import time
@@ -404,7 +405,7 @@ async def test_referenced_asset_ids_from_rows_and_blob_3mf(
         with zipfile.ZipFile(model, "w") as written:
             written.writestr(ROOT_MODEL, f"<model>{in_archive}</model>")
         blobs = await store.bytes.put_folder(output.directory, output.meta.id, output.meta.slug)
-        rows.write_bytes([ByteWrite(output.meta.id, blobs, "stamp", None)])
+        rows.write_bytes([ByteWrite(output.meta.id, blobs, "stamp", [])])
         with output.pool.connection() as conn:
             conn.execute(
                 "UPDATE outputs SET params = '{}', inputs = %s WHERE output_id = %s",
@@ -436,7 +437,7 @@ async def test_referenced_asset_ids_read_each_3mf_once(
         with zipfile.ZipFile(model, "w") as written:
             written.writestr(ROOT_MODEL, f"<model>{in_archive}</model>")
         blobs = await store.bytes.put_folder(output.directory, output.meta.id, output.meta.slug)
-        rows.write_bytes([ByteWrite(output.meta.id, blobs, "stamp", None)])
+        rows.write_bytes([ByteWrite(output.meta.id, blobs, "stamp", [])])
         with output.pool.connection() as conn:
             conn.execute("UPDATE outputs SET params = '{}' WHERE output_id = %s", (output.meta.id,))
         run = rows.start_run()
@@ -456,6 +457,112 @@ async def test_referenced_asset_ids_read_each_3mf_once(
         assert found == (assets_module.ASSET_IDS_VERSION, [in_archive])
         assert in_archive in await referenced_asset_ids(store.paths, [], store)
         assert len(gets) == 1  # the second sweep read no blob
+
+
+async def _two_bare_outputs(output: Any, good: bytes, other: bytes) -> tuple[str, str]:
+    """Two copied outputs with empty ``params``: the helper's, whose 3MF is ``good``, and a
+    second one, whose 3MF is ``other``. Their NFS 3MFs are removed, so the blobs answer."""
+    store, rows = output.store, output.store.rows
+    second = store.create(output.job, name="second")
+    ids = (output.meta.id, second.id)
+    for output_id, data in zip(ids, (good, other), strict=True):
+        directory = store.directory(output_id)
+        (directory / "model.3mf").write_bytes(data)
+        blobs = await store.bytes.put_folder(directory, output_id, output.meta.slug)
+        rows.write_bytes([ByteWrite(output_id, blobs, "stamp", [])])
+        (directory / "model.3mf").unlink()
+    with output.pool.connection() as conn:
+        conn.execute("UPDATE outputs SET params = '{}' WHERE output_id = ANY(%s)", (list(ids),))
+    run = rows.start_run()
+    rows.finish_run(run, copied=2, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    return ids
+
+
+def _archive_naming(asset_id: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as written:
+        written.writestr(ROOT_MODEL, f"<model>{asset_id}</model>")
+    return buffer.getvalue()
+
+
+@pytest.mark.requires_postgres
+async def test_an_unreadable_3mf_skips_only_its_output(
+    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#7256 Task 8 amendment: a 3MF that cannot be read as a 3MF skips only its own
+    output, logged. The pass goes on, and the ids it read are kept."""
+    in_archive = "b" * 64
+    async with blob_output(tmp_path / "o", pg_conninfo) as output:
+        good, bad = await _two_bare_outputs(
+            output, _archive_naming(in_archive), b"PK\x03\x04 truncated"
+        )
+        rows = output.store.rows
+        assert rows is not None
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.library.assets"):
+            found = await referenced_asset_ids(output.store.paths, [], output.store)
+        assert in_archive in found
+        assert rows.derived(good, "asset_ids", 0) == (
+            assets_module.ASSET_IDS_VERSION,
+            [in_archive],
+        )
+        assert rows.derived(bad, "asset_ids", 0) is None
+        skipped = [r for r in caplog.records if getattr(r, "output_id", None) == bad]
+        assert len(skipped) == 1 and skipped[0].levelno == logging.WARNING
+
+
+@pytest.mark.requires_postgres
+async def test_a_failed_model_read_keeps_the_ids_read_before_and_raises(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7256 Task 8 amendment: a read the store fails (not a damaged 3MF) still raises, so
+    the sweep deletes nothing; the ids read before it in the pass are kept."""
+    async with blob_output(tmp_path / "o", pg_conninfo) as output:
+        ids = await _two_bare_outputs(output, _archive_naming("b" * 64), _archive_naming("c" * 64))
+        store, rows = output.store, output.store.rows
+        assert rows is not None
+        real = store.local_role
+        seen: list[str] = []
+
+        def failing_second(output_id: str, role: Any) -> Any:
+            seen.append(output_id)
+            if len(seen) == 2:
+                raise OSError("store went away")
+            return real(output_id, role)
+
+        monkeypatch.setattr(store, "local_role", failing_second)
+        with pytest.raises(OSError, match="store went away"):
+            await referenced_asset_ids(store.paths, [], store)
+        assert sorted(seen) == sorted(ids)
+        first_ids = {ids[0]: "b" * 64, ids[1]: "c" * 64}
+        assert rows.derived(seen[0], "asset_ids", 0) == (
+            assets_module.ASSET_IDS_VERSION,
+            [first_ids[seen[0]]],
+        )
+        assert rows.derived(seen[1], "asset_ids", 0) is None
+
+
+async def test_sweep_assets_deletes_nothing_when_references_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7256 Task 8 amendment: today's safety stays. When the referenced set cannot be
+    read at all, `sweep_assets` removes nothing."""
+    from types import SimpleNamespace
+
+    from scadbuddy import main
+
+    swept: list[Any] = []
+
+    async def unreadable(*args: Any, **kwargs: Any) -> set[str]:
+        raise OSError("cannot read the outputs")
+
+    state = SimpleNamespace(
+        paths=None, outputs=None, assets=SimpleNamespace(sweep=lambda *a, **k: swept.append(a))
+    )
+    monkeypatch.setattr(main, "_asset_records", lambda state: [])
+    monkeypatch.setattr(main, "referenced_asset_ids", unreadable)
+    with pytest.raises(OSError):
+        await main.sweep_assets(state)  # type: ignore[arg-type]
+    assert swept == []
 
 
 # -- the sweep --------------------------------------------------------------------

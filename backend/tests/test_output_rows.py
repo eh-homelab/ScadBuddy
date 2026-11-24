@@ -80,7 +80,7 @@ def test_output_bytes_tables_exist(projection: JobProjection) -> None:
         row = conn.execute("SELECT * FROM outputs WHERE output_id = 'o1'").fetchone()
         assert row is not None
         assert row["model_blob"] == "output-o1-model"
-        assert row["bytes_at"] is None and row["bytes_damaged"] is None
+        assert row["bytes_at"] is None and row["damaged"] == []
         run = conn.execute("INSERT INTO output_byte_runs DEFAULT VALUES RETURNING *").fetchone()
         assert run is not None and run["failed"] == [] and run["finished_at"] is None
         with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
@@ -408,7 +408,7 @@ def test_insert_failure_writes_no_hold(rows: OutputRows, projection: JobProjecti
     and its holds stay, and the save writes no file row and no hold."""
     rows.write_copy([_copied("o1")], [], rows.clock())
     copied = _blobs("o1", "a.stl")
-    rows.write_bytes([ByteWrite("o1", copied, "stamp", None)])
+    rows.write_bytes([ByteWrite("o1", copied, "stamp", [])])
     # Two `files/` entries of one name: `_write_files` fails on the key, after the drop.
     clash = dataclasses.replace(
         _blobs("o1", "b.stl"),
@@ -492,7 +492,7 @@ def test_write_bytes_skips_deleted_row_and_its_holds(
     written = rows.write_bytes(
         [
             ByteWrite("kept", _blobs("kept", "a.stl"), "stamp-1", damaged),
-            ByteWrite("deleted", _blobs("deleted", "a.stl"), "stamp-1", None),
+            ByteWrite("deleted", _blobs("deleted", "a.stl"), "stamp-1", []),
         ]
     )
     assert written == {"kept"}
@@ -505,10 +505,10 @@ def test_write_bytes_skips_deleted_row_and_its_holds(
     assert (slug, stamp) == ("cube", "stamp-1") and at is not None
     assert [f.name for f in rows.files("kept")] == ["a.stl"]
     with projection.pool.connection() as conn:
-        row = conn.execute("SELECT bytes_damaged FROM outputs WHERE output_id = 'kept'").fetchone()
-    assert row is not None and row["bytes_damaged"] == damaged
+        row = conn.execute("SELECT damaged FROM outputs WHERE output_id = 'kept'").fetchone()
+    assert row is not None and row["damaged"] == damaged
     # A second write replaces the files.
-    rows.write_bytes([ByteWrite("kept", _blobs("kept", "x.stl", "y.stl"), "stamp-2", None)])
+    rows.write_bytes([ByteWrite("kept", _blobs("kept", "x.stl", "y.stl"), "stamp-2", [])])
     assert [f.name for f in rows.files("kept")] == ["x.stl", "y.stl"]
     assert rows.write_bytes([]) == set()
 
@@ -542,7 +542,7 @@ def test_undo_copy_and_drop_unseen_release_byte_holds(
     mark = rows.clock()
     rows.write_copy([_copied("undone"), _copied("unseen"), _copied("replaced")], [], mark)
     for output_id in ("undone", "unseen", "replaced"):
-        rows.write_bytes([ByteWrite(output_id, _blobs(output_id), "s", None)])
+        rows.write_bytes([ByteWrite(output_id, _blobs(output_id), "s", [])])
     assert rows.undo_copy(["undone"], mark) == {"undone"}
     assert _holds(projection, "undone") == set()
     assert rows.drop_unseen(["unseen"], rows.clock()) == 1
@@ -600,5 +600,5 @@ def test_pending_bytes_counts_rows_without_bytes_at(rows: OutputRows) -> None:
     rows.insert(dataclasses.replace(make_row("saved"), blobs=_blobs("saved")))
     rows.insert(make_row("copied"))
     assert rows.pending_bytes() == 2
-    rows.write_bytes([ByteWrite("copied", _blobs("copied"), "s", None)])
+    rows.write_bytes([ByteWrite("copied", _blobs("copied"), "s", [])])
     assert rows.pending_bytes() == 1
