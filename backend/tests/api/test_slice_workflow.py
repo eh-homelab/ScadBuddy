@@ -51,6 +51,7 @@ from scadbuddy.slicing.start import (
 from scadbuddy.slicing.store import HOLDER, NativeSlice
 from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.content_models import BlobScope
+from scadbuddy.workflows.commands import SHORT_TASK_TIMEOUT
 from scadbuddy.workflows.slicing import SLICE_RETRY, SliceWorkflow
 from scadbuddy.workflows.slicing_models import SliceWorkflowInput
 from tests.api.test_send import API, configure
@@ -534,6 +535,23 @@ class _Down:
 
     async def start_workflow(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("temporal is down")
+
+
+class _Recording:
+    """A Temporal that records each start's options and starts nothing."""
+
+    def __init__(self) -> None:
+        self.starts: list[dict[str, Any]] = []
+
+    async def start_workflow(self, *args: Any, **kwargs: Any) -> None:
+        self.starts.append(kwargs)
+
+
+def test_a_slice_starts_with_the_short_task_timeout(slice_client: TestClient) -> None:
+    """#7288: a workflow task the server loses costs 3 s, not Temporal's 10 s default."""
+    temporal = _Recording()
+    _start(slice_client, temporal=temporal)
+    assert [start["task_timeout"] for start in temporal.starts] == [SHORT_TASK_TIMEOUT]
 
 
 def test_a_start_that_never_reached_temporal_is_swept_failed(
