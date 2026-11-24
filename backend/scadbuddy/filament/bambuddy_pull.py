@@ -354,7 +354,7 @@ def _column_value(field: str, value: Any) -> Any:
     return value
 
 
-#: Some SB row or spool is linked to a Bambuddy row (Decision 12).
+#: Some SB row, spool or preset is linked to a Bambuddy row (Decision 12).
 ANY_LINK = (
     "EXISTS (SELECT 1 FROM filament_bb_links)"
     " OR EXISTS (SELECT 1 FROM filament_suppliers WHERE bb_supplier_id IS NOT NULL)"
@@ -362,6 +362,8 @@ ANY_LINK = (
     " OR EXISTS (SELECT 1 FROM filament_insert_types WHERE bb_catalog_id IS NOT NULL)"
     " OR EXISTS (SELECT 1 FROM filament_spool_types WHERE bb_filament_id IS NOT NULL)"
     " OR EXISTS (SELECT 1 FROM filament_colours WHERE bb_colour_id IS NOT NULL)"
+    # ScadBuddy's presets' Bambuddy ids (#7176): the mirror's and the adopted ones.
+    " OR EXISTS (SELECT 1 FROM filament_presets WHERE bb_preset_id IS NOT NULL)"
 )
 
 
