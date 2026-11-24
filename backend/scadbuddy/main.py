@@ -681,10 +681,24 @@ async def _copy_output_bytes_logged(state: AppState, *, stop: threading.Event) -
 
 async def _copy_outputs_and_bytes_logged(state: AppState, *, stop: threading.Event) -> None:
     """The start's copies: the rows (#7255), then the bytes (#7256), which walk the rows
-    the first copy wrote."""
+    the first copy wrote. The bytes are copied only when the last row copy run finished:
+    a run that is ``incomplete`` (an outputs volume not there) or did not end leaves the
+    byte copy to the sweep `OUTPUT_BYTES_SWEEP`."""
     await _copy_outputs_logged(state, stop=stop)
-    if not stop.is_set():
-        await _copy_output_bytes_logged(state, stop=stop)
+    if stop.is_set():
+        return
+    rows = state.outputs.rows
+    if rows is None:
+        return
+    try:
+        last = await asyncio.to_thread(rows.last_run)
+    except Exception:
+        logger.exception("could not read the last row copy; the start does not copy the bytes")
+        return
+    if last is None or last["finished_at"] is None or last["incomplete"]:
+        logger.info("the row copy did not finish; the start does not copy the outputs' bytes")
+        return
+    await _copy_output_bytes_logged(state, stop=stop)
 
 
 #: How often a long sweep heartbeats: well inside its `HEARTBEAT_TIMEOUT`.

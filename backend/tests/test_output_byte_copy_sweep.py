@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,10 +18,17 @@ from scadbuddy import main
 from scadbuddy.library.output_byte_copy import ByteCopyResult
 from scadbuddy.workflows.housekeeping import OUTPUT_BYTES_SWEEP, OUTPUT_COPY_SWEEP, SWEEPS
 
+#: The last row copy run of a start whose row copy finished.
+FINISHED_RUN = {"finished_at": datetime(2026, 11, 24, tzinfo=UTC), "incomplete": False}
+
+
+def _rows(last_run: dict[str, Any] | None = FINISHED_RUN) -> Any:
+    return SimpleNamespace(last_run=lambda: last_run)
+
 
 def _state(rows: object | None = None) -> Any:
     return SimpleNamespace(
-        outputs=SimpleNamespace(rows=object() if rows is None else rows),
+        outputs=SimpleNamespace(rows=_rows() if rows is None else rows),
         projection=SimpleNamespace(pool=object()),
         store=SimpleNamespace(content=object()),
     )
@@ -114,6 +122,36 @@ async def test_a_stopped_start_skips_the_bytes(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(main, "_copy_outputs_logged", rows)
     await main._copy_outputs_and_bytes_logged(_state(), stop=stop)
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "last_run",
+    [
+        None,
+        {"finished_at": None, "incomplete": False},
+        {"finished_at": None, "incomplete": True},
+    ],
+    ids=["no run", "not finished", "incomplete"],
+)
+async def test_the_start_skips_the_bytes_after_a_row_copy_that_did_not_finish(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    last_run: dict[str, Any] | None,
+) -> None:
+    """The byte copy walks the rows: after a row copy that did not finish (a volume not
+    there, a failed listing), the start leaves it to the sweep."""
+    calls = _recording(monkeypatch, ByteCopyResult())
+
+    async def rows(state: Any, *, stop: threading.Event) -> None:
+        pass
+
+    monkeypatch.setattr(main, "_copy_outputs_logged", rows)
+    with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
+        await main._copy_outputs_and_bytes_logged(_state(_rows(last_run)), stop=threading.Event())
+    assert calls == []
+    assert "the row copy did not finish; the start does not copy the outputs' bytes" in [
+        r.getMessage() for r in caplog.records
+    ]
 
 
 async def test_a_cancelled_sweep_sets_its_stop(monkeypatch: pytest.MonkeyPatch) -> None:

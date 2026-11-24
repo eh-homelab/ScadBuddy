@@ -32,8 +32,13 @@ the commit.
 What the copy cannot copy is listed, never guessed: a missing ``model.3mf`` or
 ``preview.glb`` is ``damaged`` (in the run and in the row), a ``files/`` entry an output
 may not hold makes the whole output ``damaged`` and it is not copied, and a read or a
-check that fails is ``failed`` and leaves the row's ``bytes_at`` NULL. A stat that fails
-with anything but a missing file makes the run ``incomplete``. Before any upload, the
+check that fails is ``failed`` and leaves the row's ``bytes_at`` NULL. A missing file
+never drops a key: when the row names a blob for that role (or a ``files/`` name that
+went), the key and its hold stay, and the file is ``damaged``. A stat that fails with
+anything but a missing file makes the run ``incomplete``. So does a volume that is not
+there (phase 1's rule): an outputs folder that is missing or lists no slug folder while
+rows exist makes the run write nothing, and an output whose folder is missing gets no
+write. Before any upload, the
 bytes and blobs still to copy are checked against the store's caps; past one, the run
 is ``refused`` and uploads nothing. On the `local` store (no content store, Ruling R1)
 and on `bambuddy` (spec §6.4) every run is refused.
@@ -110,6 +115,8 @@ _CHUNK = 1 << 20
 
 @dataclass
 class ByteCopyResult:
+    #: The outputs whose row the run wrote with a blob it put or a key the row did not
+    #: name before.
     copied: int = 0
     verified: int = 0
     skipped: int = 0
@@ -121,7 +128,8 @@ class ByteCopyResult:
     damaged: list[dict[str, Any]] = field(default_factory=list)
     #: Why the run copied nothing.
     refused: str | None = None
-    #: A stat failed: the run may have missed bytes.
+    #: A stat failed, an output's folder is missing, or the outputs folder is missing or
+    #: lists no slug folder: the run may have missed bytes.
     incomplete: bool = False
 
 
@@ -184,6 +192,19 @@ class _Plan:
     work: list[_Work] = field(default_factory=list)
     needed_bytes: int = 0
     needed_count: int = 0
+    #: The outputs whose folder is missing: they get no write.
+    missing: list[str] = field(default_factory=list)
+
+
+def _root_lists_outputs(root: Path) -> bool:
+    """Whether the outputs folder lists a slug folder: a missing one, or one that reads
+    empty, is a volume not there, not every output gone (phase 1's rule). A listing that
+    fails with anything but a missing folder raises (`OSError`). Blocking."""
+    try:
+        entries = list(os.scandir(root))
+    except FileNotFoundError:
+        return False
+    return any(entry.is_dir() for entry in entries)
 
 
 def _sizes(directory: Path) -> list[int]:
@@ -222,6 +243,8 @@ def _plan(
         slug, stamp, bytes_at = states[output_id]
         directory = store.paths.output_dir(slug, output_id)
         try:
+            if not stat.S_ISDIR(directory.stat().st_mode):
+                raise NotADirectoryError(str(directory))
             now = bytes_stamp(directory)
             if bytes_at is not None and stamp == now:
                 result.skipped += 1
@@ -230,6 +253,9 @@ def _plan(
                 sizes = _sizes(directory)
                 plan.needed_bytes += sum(sizes)
                 plan.needed_count += len(sizes)
+        except FileNotFoundError:
+            plan.missing.append(output_id)
+            continue
         except OSError as error:
             result.incomplete = True
             logger.warning(
@@ -328,6 +354,9 @@ class _Copy:
         self.stop = stop
         self.result = ByteCopyResult()
         self.pending: list[ByteWrite] = []
+        #: The outputs the copy put a blob for or named a new key of: `ByteCopyResult.copied`
+        #: counts those of them it wrote.
+        self.copied: set[str] = set()
 
     def _stopped(self) -> bool:
         return self.stop is not None and self.stop.is_set()
@@ -348,7 +377,25 @@ class _Copy:
             content = self.content
             blobs = OutputBytes(content)
             states = await asyncio.to_thread(rows.byte_states)
+            if states and not await asyncio.to_thread(
+                _root_lists_outputs, self.store.paths.outputs
+            ):
+                result.incomplete = True
+                logger.warning(
+                    "the outputs folder lists no output; the byte copy wrote nothing",
+                    extra={"rows": len(states)},
+                )
+                return result
             plan = await asyncio.to_thread(_plan, self.store, states, result, self.stop)
+            # A row whose folder is missing: the volume may be only partly there. A row a
+            # delete took meanwhile does not count (rows go before files).
+            missing = await asyncio.to_thread(rows.existing, plan.missing)
+            if missing:
+                result.incomplete = True
+                logger.warning(
+                    "an output's folder is missing; the byte copy left its row as it was",
+                    extra={"rows": len(missing)},
+                )
             needed_bytes, needed_count = plan.needed_bytes, plan.needed_count
             result.refused = await asyncio.to_thread(_refusal, content, needed_bytes, needed_count)
             if result.refused is not None:
@@ -392,9 +439,7 @@ class _Copy:
             return
         batch, self.pending = self.pending, []
         written, replaced = await asyncio.to_thread(self.rows.write_byte_copy, batch)
-        self.result.copied += sum(
-            1 for write in batch if write.copied and write.output_id in written
-        )
+        self.result.copied += len(written & self.copied)
         for key, previous in replaced:
             await blobs.release_replaced(key, previous)
 
@@ -521,12 +566,14 @@ class _Copy:
             return None
         # A row not copied before has every blob read back, uploaded or not.
         check = row.bytes_at is None
+        kept = tuple(await asyncio.to_thread(self.rows.files, output_id))
+        before = row.blobs.keys() + [item.blob_key for item in kept]
         # The keys the row names, and so holds: the others a run reuses are touched.
-        held = set(row.blobs.keys())
-        if row.bytes_at is not None:
-            held |= {item.blob_key for item in await asyncio.to_thread(self.rows.files, output_id)}
+        held = set(before)
         damaged: list[dict[str, Any]] = []
         keys: dict[str, str | None] = {}
+        #: Whether the copy put a blob for the output.
+        put = False
         try:
             for role in _REQUIRED:
                 key = output_blob_key(output_id, role)
@@ -536,10 +583,13 @@ class _Copy:
                 )
                 if copied is None:
                     damaged.append({"role": role, "error": f"no {name}"})
-                    keys[role] = None
+                    # A key the row names keeps its blob and its hold: a file that went
+                    # does not make the blob wrong.
+                    keys[role] = row.blobs.model if role == "model" else row.blobs.preview
                     continue
                 keys[role] = key
                 moved, expected = copied
+                put = put or moved
                 if role == "model" and moved and expected is not None and not check:
                     # Readers read the blob of ``expected``: what they derived from it
                     # goes now, in a transaction of its own, so a batch that a live
@@ -547,7 +597,17 @@ class _Copy:
                     # had its rows derived from the file, which the copy put.
                     await asyncio.to_thread(self.rows.drop_derived, output_id)
             thumbnail, swap = await self._thumbnail(blobs, work, row.blobs.thumbnail, check)
+            put = put or swap is not None
             files: list[OutputFileBlob] = []
+            gone = [item.name for item in kept if item.name not in names]
+            if gone:
+                # A file the row names went: keep every file key the row names, since a
+                # key's index is the name's place in the sorted names.
+                damaged.append(
+                    {"role": "files", "error": f"no {FILES_DIR}/{gone[0]}", "names": gone}
+                )
+                names = []
+                files = list(kept)
             for n, name in enumerate(names):
                 key = output_file_key(output_id, n)
                 copied = await self._role(
@@ -562,6 +622,7 @@ class _Copy:
                 ref = await asyncio.to_thread(blobs.ref, key)
                 if copied is None or ref is None:
                     raise _FailedError("files", f"{FILES_DIR}/{name} went while it was copied")
+                put = put or copied[0]
                 files.append(OutputFileBlob(name=name, blob_key=key, size=ref.size))
         except _FailedError as failed:
             result.failed.append(
@@ -569,14 +630,17 @@ class _Copy:
             )
             return None
         result.damaged.extend({"output_id": output_id, **entry} for entry in damaged)
+        new = OutputBlobs(
+            model=keys["model"],
+            preview=keys["preview"],
+            thumbnail=thumbnail,
+            files=tuple(files),
+        )
+        if put or new.keys() != before:
+            self.copied.add(output_id)
         return ByteWrite(
             output_id,
-            OutputBlobs(
-                model=keys["model"],
-                preview=keys["preview"],
-                thumbnail=thumbnail,
-                files=tuple(files),
-            ),
+            new,
             work.stamp,
             damaged,
             guarded=True,

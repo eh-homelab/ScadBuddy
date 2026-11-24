@@ -7,6 +7,7 @@ thumbnail, leaves no hold for a deleted output, refuses past the store's cap and
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 import time
 from collections.abc import AsyncGenerator, Iterator
@@ -542,7 +543,10 @@ async def test_byte_copy_drops_derived_rows_when_a_live_writer_skips_the_batch(
     assert plate_cover_key(output_id, COVER_SHA) not in _holds(pool, output_id)
     monkeypatch.setattr(OutputRows, "write_byte_copy", write_byte_copy)
     result = await _run(tree, content, projection)
-    assert result is not None and result.copied == 1
+    # The skipped run put the model's blob already: this run writes the row and copies
+    # nothing.
+    assert result is not None and result.copied == 0 and result.failed == []
+    assert tree.rows.byte_states()[output_id][1] == bytes_stamp(tree.dir("plain"))
     assert tree.rows.derived(output_id, "plate_names", 0) is None
 
 
@@ -725,6 +729,129 @@ async def test_byte_copy_incomplete_on_a_failed_stat(
     assert result is not None and result.incomplete and result.copied == 4
     last = tree.rows.last_byte_run()
     assert last is not None and last["finished_at"] is None and last["incomplete"] is True
+
+
+def _damaged(pool: Pool, output_id: str) -> Any:
+    with pool.connection() as conn:
+        found = conn.execute(
+            "SELECT damaged FROM outputs WHERE output_id = %s", (output_id,)
+        ).fetchone()
+    assert found is not None
+    return found["damaged"]
+
+
+@pytest.mark.parametrize("gone", ["empty", "missing"])
+async def test_byte_copy_keeps_every_key_when_the_outputs_root_is_not_there(
+    tree: Tree, content: ContentStore, projection: JobProjection, pool: Pool, gone: str
+) -> None:
+    """An outputs folder that is missing or reads empty while rows exist is a volume not
+    there, not every output gone: the run is ``incomplete`` and writes nothing."""
+    await _run(tree, content, projection)
+    before = {name: tree.rows.get(tree.id(name)) for name in tree.metas}
+    holds = {name: _holds(pool, tree.id(name)) for name in tree.metas}
+    root = tree.store.paths.outputs
+    shutil.move(root, root.parent / "outputs-away")
+    if gone == "empty":
+        root.mkdir()
+    result = await _run(tree, content, projection)
+    assert result is not None and result.incomplete
+    assert result.copied == 0 and result.damaged == []
+    assert {name: tree.rows.get(tree.id(name)) for name in tree.metas} == before
+    assert {name: _holds(pool, tree.id(name)) for name in tree.metas} == holds
+    last = tree.rows.last_byte_run()
+    assert last is not None and last["finished_at"] is None and last["incomplete"] is True
+
+
+async def test_byte_copy_missing_output_folder_is_incomplete(
+    tree: Tree, content: ContentStore, projection: JobProjection, pool: Pool
+) -> None:
+    """A row whose folder is missing gets no write, and the run does not finish; the
+    other outputs are copied."""
+    await _run(tree, content, projection)
+    output_id = tree.id("plain")
+    before = tree.rows.get(output_id)
+    held = _holds(pool, output_id)
+    shutil.rmtree(tree.dir("plain"))
+    _touch_later(tree.dir("arranged") / MODEL_NAME)
+    result = await _run(tree, content, projection)
+    assert result is not None and result.incomplete and result.damaged == []
+    assert tree.rows.get(output_id) == before and _holds(pool, output_id) == held
+    assert tree.rows.byte_states()[tree.id("arranged")][1] == bytes_stamp(tree.dir("arranged"))
+    last = tree.rows.last_byte_run()
+    assert last is not None and last["finished_at"] is None and last["incomplete"] is True
+
+
+async def test_byte_copy_missing_folder_of_a_row_not_copied_is_incomplete(
+    tree: Tree, content: ContentStore, projection: JobProjection, pool: Pool
+) -> None:
+    output_id = tree.id("plain")
+    shutil.rmtree(tree.dir("plain"))
+    result = await _run(tree, content, projection)
+    assert result is not None and result.incomplete
+    row = tree.rows.get(output_id)
+    assert row is not None and row.bytes_at is None and row.blobs.model is None
+    assert _damaged(pool, output_id) == []
+    assert result.copied == 4
+
+
+async def test_byte_copy_keeps_held_keys_of_missing_files(
+    tree: Tree, content: ContentStore, projection: JobProjection, pool: Pool
+) -> None:
+    """A byte file that went while the row names a blob for it keeps the key and its
+    hold: it is ``damaged`` on the run and the row, and the run still finishes."""
+    await _run(tree, content, projection)
+    output_id = tree.id("plain")
+    before = tree.rows.get(output_id)
+    assert before is not None
+    held = _holds(pool, output_id)
+    (tree.dir("plain") / MODEL_NAME).unlink()
+    (tree.dir("plain") / PREVIEW_NAME).unlink()
+    result = await _run(tree, content, projection)
+    assert result is not None and not result.incomplete and result.failed == []
+    missing = [
+        {"role": "model", "error": f"no {MODEL_NAME}"},
+        {"role": "preview", "error": f"no {PREVIEW_NAME}"},
+    ]
+    assert result.damaged == [{"output_id": output_id, **entry} for entry in missing]
+    assert result.copied == 0
+    row = tree.rows.get(output_id)
+    assert row is not None and row.blobs == before.blobs
+    assert _holds(pool, output_id) == held
+    assert _damaged(pool, output_id) == missing
+    last = tree.rows.last_byte_run()
+    assert last is not None and last["finished_at"] is not None
+
+
+async def test_byte_copy_keeps_held_file_keys_of_missing_files(
+    tree: Tree, content: ContentStore, projection: JobProjection, pool: Pool
+) -> None:
+    await _run(tree, content, projection)
+    output_id = tree.id("files")
+    files = tree.rows.files(output_id)
+    held = _holds(pool, output_id)
+    (tree.dir("files") / FILES_DIR / "a.stl").unlink()
+    result = await _run(tree, content, projection)
+    assert result is not None and not result.incomplete and result.failed == []
+    entry = {"role": "files", "error": f"no {FILES_DIR}/a.stl", "names": ["a.stl"]}
+    assert result.damaged == [{"output_id": output_id, **entry}]
+    assert tree.rows.files(output_id) == files
+    assert _holds(pool, output_id) == held
+    assert _damaged(pool, output_id) == [entry]
+    # The kept blob still holds the file that went.
+    assert await _blob(content, files[0].blob_key) == b"a stl"
+
+
+async def test_byte_copy_counts_only_outputs_it_copied(
+    tree: Tree, content: ContentStore, projection: JobProjection
+) -> None:
+    """A changed stamp with the same bytes puts nothing and names no new key: it is not
+    ``copied``."""
+    await _run(tree, content, projection)
+    _touch_later(tree.dir("plain") / MODEL_NAME)
+    (tree.dir("arranged") / PREVIEW_NAME).write_bytes(b"another preview")
+    result = await _run(tree, content, projection)
+    assert result is not None and result.failed == [] and not result.incomplete
+    assert (result.copied, result.skipped) == (1, 3)
 
 
 def test_bytes_stamp_names_every_byte_file(tmp_path: Path) -> None:
