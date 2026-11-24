@@ -357,7 +357,11 @@ class WatchActivities:
         self, printer_id: str, written: LanReport, camera: str | None
     ) -> str | None:
         """``printer.changed`` when a written report moves the camera URL
-        (`camera.models.rtsp_url`), which the camera relay reads from the report."""
+        (`camera.models.rtsp_url`), which the camera relay reads from the report. A report
+        with no ``ipcam`` key (a delta before a reconnect's ``pushall`` answer) says nothing
+        about the camera, and the stored report keeps its ``ipcam`` (`reports.advance_in`)."""
+        if "ipcam" not in written.print:
+            return camera
         now = rtsp_url(written.print)
         if now != camera:
             emit(self.events, PrinterEvent(kind="printer.changed", printer_id=printer_id))

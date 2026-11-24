@@ -289,6 +289,10 @@ class PrinterReportStore:
             return Advance()
         before = None if old is None else old["running_subtask"]
         running, ended = advance_print(before, report)
+        if "ipcam" not in report and old is not None and "ipcam" in (old["report"] or {}):
+            # A delta before a reconnect's ``pushall`` answer has no ``ipcam``: keep the
+            # camera the row shows, or the camera relay would read it as gone (#7328).
+            report = {**report, "ipcam": old["report"]["ipcam"]}
         written = conn.execute(
             "INSERT INTO printer_reports (printer_id, report, seen_at, running_subtask)"
             " SELECT id, %s, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"

@@ -649,3 +649,30 @@ async def test_a_cancel_during_the_camera_seed_leaks_no_task() -> None:
     for _ in range(3):
         await asyncio.sleep(0)
     assert asyncio.all_tasks() - before == set()
+
+
+async def test_a_delta_without_ipcam_before_the_pushall_keeps_the_camera(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    """A reconnect's first message can be a delta, with no ``ipcam`` key, before the
+    ``pushall`` answer (`reports.advance_print`). It says nothing about the camera: no
+    ``printer.changed``, so the relay and the recorders keep the feed, and the stored
+    report keeps its URL for a resync in that window."""
+    _printers, reports, pid = linked
+    delta = {"gcode_state": "RUNNING", "mc_percent": 1}
+    kinds = await _kinds(linked, [delta, _camera(URL_A, 2)], stored=_camera(URL_A, 0))
+    assert "printer.changed" not in kinds
+    got = reports.get(pid)
+    assert got is not None and got[0]["ipcam"] == {"rtsp_url": URL_A}
+
+
+async def test_a_delta_without_ipcam_keeps_the_stored_url(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    _printers, reports, pid = linked
+    reports.put(pid, _camera(URL_A, 0), LONG_AGO)
+    reports.put(pid, {"gcode_state": "RUNNING", "mc_percent": 1}, LONG_AGO)
+    got = reports.get(pid)
+    assert got is not None
+    assert got[0]["ipcam"] == {"rtsp_url": URL_A}
+    assert got[0]["mc_percent"] == 1
