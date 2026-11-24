@@ -51,6 +51,7 @@ from scadbuddy.library.presets import (
     PresetStore,
     TooManyPresetsError,
 )
+from scadbuddy.library.settings_store import PUBLIC_URL
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.render.inputs import InputsError, legacy_inputs
@@ -151,7 +152,7 @@ def linked(presets: list[ParamPreset], slug: str, public_url: str | None) -> lis
 
 
 async def _linked(preset: ParamPreset, slug: str, state: AppState) -> ParamPreset:
-    public_url = (await asyncio.to_thread(state.settings_store.load)).public_url
+    public_url = await asyncio.to_thread(state.settings_store.get, PUBLIC_URL)
     return linked([preset], slug, public_url)[0]
 
 
@@ -175,7 +176,7 @@ def list_presets(
     slug: SlugPath, catalogue: CatalogueDep, presets: PresetsDep, store: SettingsStoreDep
 ) -> list[ParamPreset]:
     require_model_exists(catalogue, slug)
-    return linked(presets.presets(slug), slug, store.load().public_url)
+    return linked(presets.presets(slug), slug, store.get(PUBLIC_URL))
 
 
 @router.post(

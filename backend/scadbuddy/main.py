@@ -128,6 +128,7 @@ from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
     NATIVE_LIBRARY_NOT_READY,
+    PUBLIC_URL,
     RECOVER_BAMBUDDY_LIBRARY_SQL,
     StoreNotReadyError,
     load_render_store_settings,
@@ -2635,7 +2636,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     # A write from a page on another origin is refused before its body is read (#962).
     app.add_middleware(
         CrossSiteGate,
-        public_url=lambda: state.settings_store.load().public_url,
+        public_url=lambda: state.settings_store.get(PUBLIC_URL),
         allowed_origins=lambda: state.settings.allowed_origin_list,
     )
     # Outside every route and gate, so their answers go out gzipped too (#1033).
