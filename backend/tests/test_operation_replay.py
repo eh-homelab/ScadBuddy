@@ -11,16 +11,23 @@ recording below) against ``test_operation_workflow.py``'s fakes, under their rea
 activity names: ``succeeded`` (a done kind), ``answered_running`` (a kind that answers
 once recorded, #2462), ``refused`` (its check refuses: nothing recorded) and
 ``failed`` (its effect fails: recorded failed). Never re-record them.
+
+Recorded on temporalio 1.36.0, which runs a workflow task's activation jobs in one batch
+(workflow logic flag 2), by the workflow as #6929 left it (``SCADBUDDY_RECORD_HISTORIES=1``
+runs the second recording below; #7377): ``cancelled_during_check_136`` (a cancel while the
+check runs: the Update answers the cancelled refusal) and ``cancelled_during_insert_136``
+(a cancel while the insert runs: the row is recorded and ended). Never re-record them.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from pathlib import Path
 
 import pytest
-from temporalio.client import Client, WorkflowHistory
+from temporalio.client import Client, WorkflowFailureError, WorkflowHistory
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Replayer, Worker
@@ -32,9 +39,10 @@ from tests.test_operation_workflow import BAMBUDDY_502, Fake, ended, op_input, s
 
 HISTORIES = Path(__file__).parent / "fixtures" / "operation_histories"
 NAMES = ["succeeded", "answered_running", "refused", "failed"]
+CANCEL_NAMES = ["cancelled_during_check_136", "cancelled_during_insert_136"]
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", NAMES + CANCEL_NAMES)
 async def test_operation_replays_its_recorded_history(name: str) -> None:
     history = WorkflowHistory.from_json(f"op-{name}", (HISTORIES / f"{name}.json").read_text())
     replayer = Replayer(workflows=[OperationWorkflow], data_converter=pydantic_data_converter)
@@ -66,6 +74,42 @@ async def test_record_operation_histories() -> None:
                 await start(client, queue, arg)
                 if name == "refused":
                     with pytest.raises(Exception):  # noqa: B017 - it ends failed, as refused
+                        await ended(client, arg)
+                else:
+                    await ended(client, arg)
+            await _record(client, name, f"op-{arg.kind}-{arg.key}")
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records histories")
+async def test_record_operation_cancel_histories() -> None:
+    async with temporal_client() as client:
+        for name in CANCEL_NAMES:
+            fake = Fake()
+            step = "check" if name == "cancelled_during_check_136" else "insert"
+            gate = asyncio.Event()
+            if step == "check":
+                fake.check_gate = gate
+            else:
+                fake.insert_gate = gate
+            queue = f"op-{uuid.uuid4().hex[:8]}"
+            arg = op_input()
+            async with Worker(
+                client, task_queue=queue, workflows=[OperationWorkflow], activities=fake.all()
+            ):
+                accepting = asyncio.create_task(start(client, queue, arg))
+                while step not in fake.calls:
+                    await asyncio.sleep(0.05)
+                await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+                if step == "check":
+                    await accepting  # the check is cancelled, never completed
+                    gate.set()
+                else:
+                    await asyncio.sleep(0.5)
+                    gate.set()
+                    await accepting
+                if step == "check":
+                    with pytest.raises(WorkflowFailureError):
                         await ended(client, arg)
                 else:
                     await ended(client, arg)

@@ -30,7 +30,7 @@ from temporalio.exceptions import CancelledError
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.dispatch import SlicePlan
-from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef
+from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
@@ -38,7 +38,6 @@ from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.print_library.native import NativeLibrary, blob_key
 from scadbuddy.slicing.component import SLICING, Slicing
-from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.models import SliceProgress
 from scadbuddy.slicing.presets import native_preset_key
 from scadbuddy.slicing.profiles import ProfileError
@@ -687,7 +686,8 @@ def test_a_second_refused_url_fails(slice_client: TestClient, slicer: FakeSlicer
     assert slicer.calls == 2
 
 
-LOCAL_PLAN = PLAN.model_copy(update={"process_preset": PresetRef(source="local", id="4")})
+#: A Bambu Cloud user process: not in the tree, so its values are Bambuddy's.
+CLOUD_PLAN = PLAN.model_copy(update={"process_preset": PresetRef(source="cloud", id="PFUS4")})
 
 
 def test_a_process_preset_changed_since_the_start_is_refused(
@@ -701,7 +701,7 @@ def test_a_process_preset_changed_since_the_start_is_refused(
             for h in ("0.12", "0.20")
         ]
     )
-    row = _slice(slice_client, plan=LOCAL_PLAN)
+    row = _slice(slice_client, plan=CLOUD_PLAN)
     assert row.status == "failed"
     assert row.failure == "A preset Bambuddy holds changed while the slice started: slice again."
     assert slicer.calls == 0
@@ -712,50 +712,15 @@ LOCAL_FILAMENT_PLAN = PLAN.model_copy(
 )
 
 
-def _local_pla(nozzle_temperature: str) -> dict[str, Any]:
-    """Bambuddy's ``GET /local-presets/7``: a user's filament preset whose document
-    inherits a preset of the image's tree (#4233)."""
-    return {
-        "id": 7,
-        "name": "My PLA @H2C",
-        "preset_type": "filament",
-        "source": "orcaslicer",
-        "inherits": "Test PLA",
-        "setting": {
-            "type": "filament",
-            "name": "My PLA @H2C",
-            "inherits": "Test PLA",
-            "nozzle_temperature": [nozzle_temperature],
-        },
-    }
-
-
-def test_a_local_filament_preset_slices_from_bambuddys_document(
+def test_a_bambuddy_local_filament_preset_is_refused_and_not_read(
     slice_client: TestClient, bambuddy: respx.MockRouter, slicer: FakeSlicer
 ) -> None:
-    """#4233: a ``local`` filament preset is read from Bambuddy's local presets, at the
-    start for the key and again in ``slice_prepare`` for the file."""
-    route = bambuddy.get(f"{API}/local-presets/7").mock(
-        return_value=httpx.Response(200, json=_local_pla("215"))
-    )
-    row = _slice(slice_client, plan=LOCAL_FILAMENT_PLAN)
-    assert (row.status, row.failure) == ("completed", None)
-    assert slicer.calls == 1 and route.call_count == 2
-    assert "/bambuddy-filament_1=" in row.preset_key
-
-
-def test_a_local_filament_preset_changed_since_the_start_is_refused(
-    slice_client: TestClient, bambuddy: respx.MockRouter, slicer: FakeSlicer
-) -> None:
-    """#4233: ``PUT /local-presets/{id}`` rewrites a preset under its id, so one edited
-    between the start and ``slice_prepare`` is refused as changed process values are."""
-    bambuddy.get(f"{API}/local-presets/7").mock(
-        side_effect=[httpx.Response(200, json=_local_pla(t)) for t in ("215", "220")]
-    )
-    row = _slice(slice_client, plan=LOCAL_FILAMENT_PLAN)
-    assert row.status == "failed"
-    assert row.failure == "A preset Bambuddy holds changed while the slice started: slice again."
-    assert slicer.calls == 0
+    """#7244: the native slicer reads no Bambuddy local preset; the start refuses it,
+    saying to import it, and asks Bambuddy nothing for it."""
+    route = bambuddy.get(f"{API}/local-presets/7").respond(404)
+    with pytest.raises(ProfileError, match="Import presets from Bambuddy now"):
+        _start(slice_client, plan=LOCAL_FILAMENT_PLAN)
+    assert route.call_count == 0 and slicer.calls == 0
 
 
 def test_a_failed_slice_started_again_completes(
@@ -821,28 +786,12 @@ def test_standard_presets_slice_with_no_bambuddy(
     assert slicer.calls == 1
 
 
-def test_a_kept_local_preset_slices_with_no_bambuddy(
-    native_alone_client: TestClient, settings: Settings, tmp_path: Path
-) -> None:
-    """#4645: a ``local`` filament preset the kept copy holds slices a native file with
-    no Bambuddy at all, at the start and in ``slice_prepare`` alike, keyed by what the
-    copy held."""
-    client = native_alone_client
-    held = HeldPresetStore(_state(client).projection.pool)
-    _call(client, partial(held.keep, LocalPresetDetail.model_validate(_local_pla("215"))))
-    file_id = _native_upload(client, tmp_path)
-    with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as slicer:
-        row = _slice(client, file_id, plan=LOCAL_FILAMENT_PLAN)
-    assert row.status == "completed", row.failure
-    assert slicer.calls == 1 and "/bambuddy-filament_1=" in row.preset_key
-
-
 def test_a_preset_that_needs_bambuddy_says_none_is_configured(
     native_alone_client: TestClient, tmp_path: Path
 ) -> None:
     file_id = _native_upload(native_alone_client, tmp_path)
     with pytest.raises(ProfileError, match="needs Bambuddy, and none is configured"):
-        _start(native_alone_client, file_id, plan=LOCAL_PLAN)
+        _start(native_alone_client, file_id, plan=CLOUD_PLAN)
 
 
 # -- re-review: the cancel's edges and a swept row ---------------------------------------

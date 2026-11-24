@@ -120,6 +120,9 @@ interface PlaceLabel {
 interface LoadedPlaces {
   key: string
   base: string
+  /** Whether `base` came from Settings (the label address, or an https public URL). Without it the
+   * labels open the page's own origin, and the PDF route, which never takes a request's host, refuses them. */
+  hasBase: boolean
   labels: PlaceLabel[]
   /** What could not be read, as the alert says it; no label is drawn then. */
   error: string | null
@@ -269,7 +272,7 @@ export function LabelsPage() {
   useEffect(() => {
     if (!placesKey) return
     let live = true
-    const empty = { labels: [], error: null, tooMany: false, failed: [], tooLong: [], noReport: [] }
+    const empty = { labels: [], error: null, tooMany: false, failed: [], tooLong: [], noReport: [], hasBase: false }
     const draw = async (base: string | null, rows: { id: string; code: string; name: string }[], more: { noReport?: string[]; failed?: string[] } = {}) => {
       const origin = labelBase(base)
       // The cap stops drawing only: in `?printers=` mode the labels request has already made
@@ -282,7 +285,7 @@ export function LabelsPage() {
       const fits = (row: { code: string }) => new TextEncoder().encode(locationPayload(origin, row.code)).length <= MAX_PAYLOAD_BYTES
       const tooLong = rows.filter((row) => !fits(row)).map((row) => row.code)
       const labels = await Promise.all(rows.filter(fits).map(async (row) => ({ ...row, svg: await qrSvg(locationPayload(origin, row.code)) })))
-      if (live) setPlaces({ ...empty, key: placesKey, base: origin, labels, tooLong, noReport: more.noReport ?? [], failed: more.failed ?? [] })
+      if (live) setPlaces({ ...empty, key: placesKey, base: origin, hasBase: base !== null, labels, tooLong, noReport: more.noReport ?? [], failed: more.failed ?? [] })
     }
     const fail = (error: string) => () => {
       if (live) setPlaces({ ...empty, key: placesKey, base: labelBase(null), error })
@@ -375,6 +378,9 @@ export function LabelsPage() {
     ...placeLabels.map((one) => ({ key: one.id, node: <LocationLabel code={one.code} name={one.name} svg={one.svg} size={size} testId="print-label" /> })),
   ]
 
+  // A place label's PDF needs an address from Settings; a spool label needs none.
+  const pdfNeedsBase = placeLabels.length > 0 && readyPlaces !== null && !readyPlaces.hasBase
+
   /** #7157 — the server's PDF of the labels drawn, at the template shown; saved through `downloadBlob`, which works inside Bambuddy's frame. */
   const downloadPdf = () => {
     setPdfProblem(null)
@@ -437,12 +443,24 @@ export function LabelsPage() {
               </span>
             </RadioGroup>
           )}
-          <Button type="button" size="sm" variant="outline" disabled={count === 0 || pdfBusy} onClick={downloadPdf}>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={count === 0 || pdfBusy || pdfNeedsBase}
+            aria-describedby={pdfNeedsBase ? 'labels-pdf-needs-base' : undefined}
+            onClick={downloadPdf}
+          >
             <FileDownIcon /> Download PDF
           </Button>
           <Button type="button" size="sm" disabled={count === 0} onClick={() => window.print()}>
             <PrinterIcon /> Print
           </Button>
+          {pdfNeedsBase && (
+            <p id="labels-pdf-needs-base" className="basis-full text-right text-[13px] text-muted-foreground">
+              A PDF of place labels needs a label address. Set one in Settings, or an https public URL.
+            </p>
+          )}
         </header>
         {pickerValue === 'custom' && (
           <div className="-mt-2 mb-5 flex flex-wrap items-end gap-3">

@@ -143,6 +143,17 @@ export function BulkEditDialog({ open, ids, types, onClose, onDone }: Props) {
       lists.forEach((list, at) => {
         if (list.status === 'fulfilled') found[kinds[at]!] = list.value.map((row) => ({ id: row.id, name: row.name }))
       })
+      // A subtype's name repeats across materials: show whose it is.
+      const materials = new Map((found.materials ?? []).map((row) => [row.id, row.name]))
+      const subtypes = lists[kinds.indexOf('subtypes')]
+      if (subtypes?.status === 'fulfilled') {
+        found.subtypes = subtypes.value.map((row) => {
+          // `listCatalog` types every row as the widest kind; a subtype row carries `material_id`.
+          const materialId = 'material_id' in row && typeof row.material_id === 'string' ? row.material_id : null
+          const material = materialId ? materials.get(materialId) : undefined
+          return { id: row.id, name: material ? `${row.name} (${material})` : row.name }
+        })
+      }
       setOptions(found)
     })
     return () => {
@@ -174,7 +185,8 @@ export function BulkEditDialog({ open, ids, types, onClose, onDone }: Props) {
     try {
       const done = await bulkUpdateSpools(ids, patch)
       const gone = done.not_found.length ? ` ${spools(done.not_found.length)} no longer ${done.not_found.length === 1 ? 'exists' : 'exist'}.` : ''
-      onDone(`Changed ${spools(done.updated.length)}.${gone}`)
+      const same = done.unchanged.length ? ` ${spools(done.unchanged.length)} already had these values.` : ''
+      onDone(`${done.changed.length ? `Changed ${spools(done.changed.length)}.` : 'No spool changed.'}${same}${gone}`)
       onClose()
     } catch (cause) {
       setError(`Nothing changed. ${cause instanceof ApiError ? cause.detail : 'The request failed. Try again.'}`)
@@ -189,7 +201,7 @@ export function BulkEditDialog({ open, ids, types, onClose, onDone }: Props) {
     if (field.kind === 'pick' || field.kind === 'yesno' || field.kind === 'known') {
       const choices =
         field.kind === 'pick'
-          ? [{ id: CLEAR, name: "The type's value" }, ...pickOptions(field)]
+          ? [{ id: CLEAR, name: field.name === 'type_id' ? 'No type' : "The type's value" }, ...pickOptions(field)]
           : [...(field.kind === 'known' ? [{ id: CLEAR, name: 'Not known' }] : []), { id: 'yes', name: 'Yes' }, { id: 'no', name: 'No' }]
       return (
         <Select value={value || (field.kind === 'yesno' ? 'no' : CLEAR)} onValueChange={(next) => set(field.name, next)} disabled={disabled}>

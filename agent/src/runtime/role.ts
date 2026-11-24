@@ -2,16 +2,13 @@ import type { AgentRole } from '../config.js'
 
 // What one agent process starts, by SCADBUDDY_AGENT_ROLE (spec 2026-10-13 §14.3, plan Step 6.1):
 // the same image runs as the API pod's HTTP half (`api`), as a worker Deployment's turn runner
-// (`worker`), or as both (`all`, the default: dev, tests, and every pod until the worker
-// Deployment exists).
+// (`worker`), or as both (`all`, the default, as every pod ran before the roles).
 //
 // `api` still polls its own `agent-tools.<identity>`: a tab's socket is in that process, so the
 // browser calls other replicas make for it (`bridge.tab`, #4780) run there, as do the BridgeCall
-// workflows of the calls it makes for a tab on another replica (#5862), and so do a classic
-// session's Monitor commands and, until Step 8.1, a DurableSession's pinned `turn:` calls that it
-// listed there. Classic sessions still run in-process wherever SessionManager.send runs, until
-// Step 6.3. It polls neither `agent-sessions` nor the shared `agent-tools`, nor a session host
-// queue, so it runs no AgentSession turn and no shared-queue activity.
+// workflows of the calls it makes for a tab on another replica (#5862). It polls neither
+// `agent-sessions` nor the shared `agent-tools`, nor a session host queue, so it runs no
+// AgentSession turn and no shared-queue activity.
 
 export type RoleParts = {
   /** The HTTP server: the routes, the chat and bridge sockets, /mcp, and the sweeps only it needs. */

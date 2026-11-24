@@ -32,8 +32,8 @@ import { type SessionImage, sessionImage } from '../sessions/blobs.js'
 //   - an MCP principal (over /mcp, or a session it owns): the tab the user
 //     paired it with by typing its code (bridge/pairings.ts).
 //
-// The tabs are held in this process. A classic turn runs on the replica whose
-// chat socket started it, a durable session's tool call on whichever replica's
+// The tabs are held in this process. A session's turn runs on the worker
+// replica that took its `session_turn` activity, a tool call on whichever replica's
 // `agent-tools` worker took the activity (so the session's tab is also kept by
 // the API, bridge/sessionTabs.ts, #2086), and an MCP call on the replica that
 // holds its session; so the
