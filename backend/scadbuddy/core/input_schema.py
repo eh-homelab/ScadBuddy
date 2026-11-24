@@ -13,6 +13,12 @@ The subset keeps one Python type and one form control per input:
 - with ``objects``, a top-level input may also be an ``object`` of such scalar inputs,
   with its own ``required`` and ``additionalProperties: false``: one level, never two.
 
+A prompt's schema (a task's, ``prompt_schema_problems``) is checked with ``formats``: then a
+``string`` (or a string ``items``) may also have a ``format`` of ``email``, ``date`` or
+``date-time``, which the installed checker checks and which a ``default`` must fit. No other
+format is allowed (``uri`` is not checked by the installed checker). Without ``formats``,
+``format`` stays refused, for flows' inputs and for pipelines.
+
 The API runs every ``pattern`` on the values it checks, so a pattern is bounded
 (`MAX_PATTERN`), needs a ``maxLength`` (`MAX_PATTERNED_LENGTH`) and runs with a deadline
 (`PATTERN_TIMEOUT_S`, `PATTERNS_BUDGET_S`; #2661).
@@ -24,7 +30,7 @@ import json
 import keyword
 import re
 import time
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Final
@@ -64,6 +70,9 @@ _OWN: dict[str, set[str]] = {
     "boolean": set(),
     "array": {"items", "minItems", "maxItems", "uniqueItems"},
 }
+#: The formats a prompt's strings may have (``formats=True``): the ones the installed
+#: format checker checks without another dependency.
+FORMATS: Final = ("email", "date", "date-time")
 _OBJECT_OWN = {"properties", "required", "additionalProperties"}
 _DESCRIBED = {"type", "title", "description"}
 #: Names a pydantic model cannot hold as fields (flows' `inputs_model`).
@@ -76,6 +85,7 @@ def schema_problems(
     stored: bool = False,
     objects: bool = False,
     reserved: Collection[str] = (),
+    formats: bool = False,
 ) -> list[str]:
     """Everything wrong with ``schema`` as an inputs schema; empty when it may be used.
 
@@ -84,6 +94,7 @@ def schema_problems(
     capped as it runs, and a stored required boolean is harmless (it is false when left
     out), so neither stops it.
     ``objects``: a top-level input may be an object of scalar inputs (#5701).
+    ``formats``: a string may have a ``format`` of `FORMATS` (a prompt's, #7364).
     ``reserved``: top-level names the host owns (a pipeline's ``params`` and ``v``)."""
     if not isinstance(schema, dict):
         return ["the inputs schema must be a JSON object"]
@@ -108,9 +119,9 @@ def schema_problems(
             problems.append(f"{name}: {name!r} is reserved")
             continue
         if objects and isinstance(prop, dict) and prop.get("type") == "object":
-            found = _object_problems(name, prop, stored=stored)
+            found = _object_problems(name, prop, stored=stored, formats=formats)
         else:
-            found = _property_problems(name, prop, stored=stored)
+            found = _property_problems(name, prop, stored=stored, formats=formats)
         problems += [f"{name}: {p}" for p in found]
     problems += _required_problems(schema, properties, stored=stored, what="an input")
     return problems
@@ -133,7 +144,7 @@ def _required_problems(
     return problems
 
 
-def _object_problems(name: str, prop: dict[str, Any], *, stored: bool) -> list[str]:
+def _object_problems(name: str, prop: dict[str, Any], *, stored: bool, formats: bool) -> list[str]:
     """One level of object (#5701): scalar properties only, and no extra keys."""
     if not _NAME.match(name) or keyword.iskeyword(name):
         return ["a name is lower-case letters, digits and _, starting with a letter"]
@@ -149,12 +160,23 @@ def _object_problems(name: str, prop: dict[str, Any], *, stored: bool) -> list[s
     if len(properties) > MAX_INPUTS:
         problems.append(f"at most {MAX_INPUTS} properties")
     for inner, spec in properties.items():
-        problems += [f"{inner}: {p}" for p in _property_problems(inner, spec, stored=stored)]
+        problems += [
+            f"{inner}: {p}" for p in _property_problems(inner, spec, stored=stored, formats=formats)
+        ]
     problems += _required_problems(prop, properties, stored=stored, what="a property")
     return problems
 
 
-def _property_problems(name: str, prop: Any, *, stored: bool = False) -> list[str]:
+def _format_problems(spec: dict[str, Any], where: str) -> list[str]:
+    if "format" not in spec or spec["format"] in FORMATS:
+        return []
+    shown = str(spec["format"])[:40]
+    return [f"{where}format {shown!r} is not allowed: use one of {', '.join(FORMATS)}"]
+
+
+def _property_problems(
+    name: str, prop: Any, *, stored: bool = False, formats: bool = False
+) -> list[str]:
     if not _NAME.match(name) or keyword.iskeyword(name):
         return ["a name is lower-case letters, digits and _, starting with a letter"]
     if name in _PYDANTIC:
@@ -164,14 +186,20 @@ def _property_problems(name: str, prop: Any, *, stored: bool = False) -> list[st
     kind = prop.get("type")
     if kind not in _OWN:
         return ["type must be one of " + ", ".join(_OWN)]
-    allowed = _DESCRIBED | {"default"} | _OWN[kind]
+    extra = {"format"} if formats and kind == "string" else set()
+    allowed = _DESCRIBED | {"default"} | _OWN[kind] | extra
     problems = [f"{key!r} is not supported for {kind}" for key in prop if key not in allowed]
+    if extra:
+        problems += _format_problems(prop, "")
     if kind == "array":
         items = prop.get("items")
         if not isinstance(items, dict) or items.get("type") not in SCALARS:
             problems.append("items must be a string, integer, number or boolean schema")
         else:
             own = _DESCRIBED | _OWN[items["type"]]
+            if formats and items["type"] == "string":
+                own |= {"format"}
+                problems += _format_problems(items, "items: ")
             problems += [f"items: {key!r} is not supported" for key in items if key not in own]
     if "enum" in prop and (not isinstance(prop["enum"], list) or not prop["enum"]):
         problems.append("enum must list at least one value")
@@ -194,7 +222,8 @@ def _property_problems(name: str, prop: Any, *, stored: bool = False) -> list[st
             problems.append(f"a pattern needs a maxLength of at most {MAX_PATTERNED_LENGTH}")
     if "default" in prop and not problems:
         try:
-            Validator(prop).validate(prop["default"])
+            checker = jsonschema.Draft202012Validator.FORMAT_CHECKER if formats else None
+            Validator(prop, format_checker=checker).validate(prop["default"])
         except jsonschema.ValidationError as err:
             problems.append(f"default does not fit: {err.message}")
     return problems
@@ -240,6 +269,58 @@ Validator = jsonschema.validators.extend(  # type: ignore[no-untyped-call]
 )
 
 
+def too_long_for_pattern(properties: dict[str, Any], given: dict[str, Any]) -> dict[str, list[str]]:
+    """Each input with a patterned string value longer than its maxLength, and its problems,
+    named by where it is but never quoted. The limit is never above MAX_PATTERNED_LENGTH:
+    a schema stored before #2661 may have no maxLength, or one far larger, and either
+    would let the pattern run on any value."""
+    found: dict[str, list[str]] = {}
+    for name, prop in properties.items():
+        if not isinstance(prop, dict) or name not in given:
+            continue
+        value = given[name]
+        items = prop.get("items")
+        checks = [(name, prop, value)]
+        if isinstance(items, dict) and isinstance(value, list):
+            checks = [(f"{name}.{i}", items, item) for i, item in enumerate(value)]
+        for where, spec, one in checks:
+            if "pattern" not in spec or not isinstance(one, str):
+                continue
+            limit = spec.get("maxLength")
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                limit = MAX_PATTERNED_LENGTH
+            limit = min(limit, MAX_PATTERNED_LENGTH)
+            if len(one) > limit:
+                found.setdefault(name, []).append(
+                    f"{where}: is longer than its maxLength of {limit}"
+                )
+    return found
+
+
+def without_patterns(schema: dict[str, Any], names: Iterable[str]) -> dict[str, Any]:
+    """``schema`` with those inputs' patterns left out (and their items'), so the
+    validator still checks everything else about them."""
+    properties = dict(schema.get("properties", {}))
+    for name in names:
+        prop = {k: v for k, v in properties[name].items() if k != "pattern"}
+        if isinstance(prop.get("items"), dict):
+            prop["items"] = {k: v for k, v in prop["items"].items() if k != "pattern"}
+        properties[name] = prop
+    return {**schema, "properties": properties}
+
+
+def iter_errors(validator: Any, values: Any) -> list[jsonschema.ValidationError]:
+    """Every error of ``values`` against the validator, in path order, its patterns within
+    one `PATTERNS_BUDGET_S` (#2661)."""
+    token = patterns_deadline.set(time.monotonic() + PATTERNS_BUDGET_S)
+    try:
+        return sorted(
+            validator.iter_errors(values), key=lambda e: [str(p) for p in e.absolute_path]
+        )
+    finally:
+        patterns_deadline.reset(token)
+
+
 @dataclass(frozen=True)
 class ValueProblem:
     """One value that does not fit: where (``house.cols``; empty for the top level), the
@@ -253,13 +334,7 @@ class ValueProblem:
 def value_problems(schema: dict[str, Any], values: Any) -> list[ValueProblem]:
     """Every way ``values`` fails ``schema`` (a schema `schema_problems` passed), in path
     order, its patterns within one `PATTERNS_BUDGET_S`. Defaults are not filled in."""
-    token = patterns_deadline.set(time.monotonic() + PATTERNS_BUDGET_S)
-    try:
-        errors = sorted(
-            Validator(schema).iter_errors(values), key=lambda e: [str(p) for p in e.absolute_path]
-        )
-    finally:
-        patterns_deadline.reset(token)
+    errors = iter_errors(Validator(schema), values)
     return [
         ValueProblem(".".join(str(p) for p in err.absolute_path), str(err.validator), err.message)
         for err in errors

@@ -5,14 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from scadbuddy.core.input_schema import schema_problems
 
 TaskState = Literal["open", "answered", "cancelled", "expired"]
 
 
-class TaskOpen(BaseModel):
-    """What a flow gives to open a task."""
-
+class _TaskFields(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     #: The harness call id.
@@ -31,7 +31,20 @@ class TaskOpen(BaseModel):
     expires_at: datetime | None = None
 
 
-class Task(TaskOpen):
+class TaskOpen(_TaskFields):
+    """What a flow gives to open a task. Only this way in checks the schema, so a stored
+    row still reads when the rules tighten later."""
+
+    @field_validator("schema_")
+    @classmethod
+    def _schema_fits_the_subset(cls, value: dict[str, Any]) -> dict[str, Any]:
+        problems = schema_problems(value, formats=True)
+        if problems:
+            raise ValueError("; ".join(problems))
+        return value
+
+
+class Task(_TaskFields):
     project_id: str | None
     state: TaskState
     answer: dict[str, Any] | None

@@ -4,10 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from jsonschema import Draft202012Validator
+import jsonschema
 from jsonschema.exceptions import ValidationError
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
-from scadbuddy.core.input_schema import schema_problems
+from scadbuddy.core.input_schema import (
+    Validator,
+    iter_errors,
+    schema_problems,
+    too_long_for_pattern,
+    without_patterns,
+)
 from scadbuddy.tasks.models import AnswerProblem
 
 _FIXED = {
@@ -51,20 +59,43 @@ def _messages(error: ValidationError) -> list[str]:
 
 
 def validate_answer(schema: dict[str, Any], answer: Any) -> list[AnswerProblem]:
-    validator = Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER)
+    """Every way ``answer`` fails ``schema``. Patterns are bounded as flows' inputs are
+    (#2661), extra keys are refused, and a ``$ref`` is never fetched."""
+    properties: dict[str, Any] = schema.get("properties", {})
+    given = answer if isinstance(answer, dict) else {}
+    too_long = too_long_for_pattern(properties, given)
+    checked = {**without_patterns(schema, too_long), "additionalProperties": False}
+    validator = Validator(
+        checked,
+        format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER,
+        registry=Registry(),
+    )
     problems: list[AnswerProblem] = []
     seen: set[tuple[str, str]] = set()
-    for error in sorted(
-        validator.iter_errors(answer), key=lambda e: [str(p) for p in e.absolute_path]
-    ):
-        field = "/".join(str(part) for part in error.absolute_path)
+
+    def add(field: str, message: str) -> None:
+        # `required` makes one error per missing field, and each lists them all.
+        if (field, message) not in seen:
+            seen.add((field, message))
+            problems.append(AnswerProblem(field=field, message=message))
+
+    try:
+        errors = iter_errors(validator, answer)
+    except Unresolvable:
+        return [AnswerProblem(field="", message="the schema refers to a schema that is not there")]
+    for error in errors:
+        path = error.absolute_path
+        if error.validator == "maxLength" and path and path[0] in too_long:
+            # Said below, with its limit.
+            continue
         for message in _messages(error):
-            # `required` makes one error per missing field, and each lists them all.
-            if (field, message) not in seen:
-                seen.add((field, message))
-                problems.append(AnswerProblem(field=field, message=message))
+            add("/".join(str(part) for part in path), message)
+    for said in too_long.values():
+        for line in said:
+            where, _, message = line.partition(": ")
+            add(where.replace(".", "/"), message)
     return problems
 
 
 def prompt_schema_problems(schema: dict[str, Any]) -> list[str]:
-    return schema_problems(schema)
+    return schema_problems(schema, formats=True)
