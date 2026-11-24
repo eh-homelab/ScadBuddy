@@ -81,10 +81,10 @@ Without a Bambuddy URL the mirror does nothing.
    `bambuddy`. Its Bambuddy id is kept (the mirror's, or the origin's). The bytes go to the
    blob store, so this is code, not SQL; it runs as part of the deployed refresh. A row whose
    preset the copy lacks keeps its Bambuddy id, and the native slicer reads it as before.
-   Between PR 1 and PR 2 a fetch still imports into Bambuddy. A re-fetch of a type whose
-   key already has an adopted `3dfp` preset binds a new Bambuddy id there, and adoption
-   makes that one a `bambuddy` preset, so the key holds two presets until PR 2 (whose fetch
-   versions the `3dfp` preset in place) lands.
+   Between PR 1 and PR 2 a fetch still imported into Bambuddy. A re-fetch then of a type
+   whose key already had an adopted `3dfp` preset bound a new Bambuddy id there, and
+   adoption made that one a `bambuddy` preset, so that key holds two presets. From PR 2 on,
+   a fetch versions the `3dfp` preset in place.
 7. **The pull (comment steps 1 and 4).** `_bb_presets` writes `sb-<id>` when a ScadBuddy
    preset has the Bambuddy id Bambuddy sent, else the id (the next refresh adopts it). A row
    still holds "what Bambuddy sent last" when it holds that id or the `sb-` ref of the
@@ -105,7 +105,15 @@ Without a Bambuddy URL the mirror does nothing.
     Settings, #6219). After each write and on each refresh, a ScadBuddy-owned preset whose
     `mirrored_sha256` differs from its `sha256` is sent: `PUT /local-presets/{id}` when it
     has a Bambuddy id, else `POST /local-presets/`; the id is kept. A 404 on `PUT` creates it
-    again. A failure is `mirror_error` on the preset and never fails the write.
+    again. A failure is `mirror_error` on the preset and never fails the write. One mirror
+    runs at a time (a session try-lock); the Bambuddy id is kept with its instance
+    (`bb_instance`), and a `PUT` goes only to that instance; before a `POST` the mirror
+    keeps the highest listed id (`mirror_create_floor`), so a create whose answer was lost
+    is found above it by name and document. A preset's Bambuddy id is a link as the
+    sync's are (`ANY_LINK`), and storing one records its instance when none is, so after a
+    URL change the mirror waits for the filament sync's reset of the links, which moves the
+    ids (same Bambuddy) or drops them, even when presets are the only links (reviews of
+    #7201).
 12. **The fetch (PR 2).** Writes ScadBuddy only: no zip import. K values still come from the
     printers' K tables through Bambuddy, as before.
 13. **#7142 (PR 2).** The fetch writes the type's own `nozzle_temp_min`/`max` into
@@ -115,23 +123,23 @@ Without a Bambuddy URL the mirror does nothing.
 
 ## PR 1: the store, adoption, the native read, Bambuddy-facing refs
 
-- [ ] Migration `filament_presets`, `filament_preset_versions`, the generated `preset_id`
+- [x] Migration `filament_presets`, `filament_preset_versions`, the generated `preset_id`
       columns.
-- [ ] `filament/sb_presets.py`: refs, `FilamentPresetStore` (create, version, rows,
+- [x] `filament/sb_presets.py`: refs, `FilamentPresetStore` (create, version, rows,
       documents, by Bambuddy id), `adopt_held` (Decision 6) and `refresh_bambuddy` (Decision
       4). Tests first (`tests/filament/test_sb_presets.py`).
-- [ ] `held_presets_activity` runs adoption after the refresh.
-- [ ] `Profiles.own`, catalogue, `slicing/presets.py`, resolver native mapping; CRUD route and
+- [x] `held_presets_activity` runs adoption after the refresh.
+- [x] `Profiles.own`, catalogue, `slicing/presets.py`, resolver native mapping; CRUD route and
       `RemoteFilamentPresets`; wiring in the API and the print worker.
-- [ ] `EffectivePreset.bambuddy_id` and `for_bambuddy()`; resolver Bambuddy path, `bb_sync_plan`,
+- [x] `EffectivePreset.bambuddy_id` and `for_bambuddy()`; resolver Bambuddy path, `bb_sync_plan`,
       `rfid_slots`, `profile_fill` reads an `sb-` preset's document.
-- [ ] `_bb_presets` (Decision 7).
-- [ ] Docs: backend CLAUDE.md, `docs/features/spools-and-filament.md`.
+- [x] `_bb_presets` (Decision 7).
+- [x] Docs: backend CLAUDE.md, `docs/features/spools-and-filament.md`.
 
 ## PR 2: the fetch writes ScadBuddy, the mirror, #7142
 
-- [ ] `BambuddyClient.update_local_preset` (`PUT`).
-- [ ] Setting `filament_preset_mirror` (settings, docs, frontend field).
-- [ ] `filament/preset_mirror.py`: mirror one, mirror pending; after the fetch, in the refresh.
-- [ ] `profile_fetch.import_run` writes ScadBuddy presets (Decisions 3, 12, 13); tests.
-- [ ] Close #7174 (superseded) and #7142 when it lands.
+- [x] `BambuddyClient.update_local_preset` (`PUT`).
+- [x] Setting `filament_preset_mirror` (settings, docs, frontend field).
+- [x] `filament/preset_mirror.py`: mirror one, mirror pending; after the fetch, in the refresh.
+- [x] `profile_fetch.import_run` writes ScadBuddy presets (Decisions 3, 12, 13); tests.
+- [x] Close #7174 (superseded) and #7142 when it lands.

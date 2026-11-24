@@ -84,6 +84,7 @@ class OrdersComponent:
         self.flows = flows
         self._store: OrderStore | None = None
         self._lifecycle: Lifecycle | None = None
+        self._media_starter: MediaStarter | None = None
         self._listings: ListingStore | None = None
         self._mail: StorefrontMail | None = None
         self._integrations: tuple[str | None, OrderIntegrations] | None = None
@@ -208,10 +209,13 @@ class OrdersComponent:
 
     @property
     def media_starter(self) -> MediaStarter:
-        """Starts an attempt's media import on the ``library`` queue (#7233)."""
-        return TemporalMediaStarter(
-            self.core.print_runs.client, self.core.settings.temporal_task_queue_library
-        )
+        """Starts an attempt's media import on the ``library`` queue (#7233); one starter,
+        built on first use."""
+        if self._media_starter is None:
+            self._media_starter = TemporalMediaStarter(
+                self.core.print_runs.client, self.core.settings.temporal_task_queue_library
+            )
+        return self._media_starter
 
     @property
     def lifecycle(self) -> Lifecycle:
