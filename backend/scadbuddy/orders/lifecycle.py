@@ -32,12 +32,15 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from psycopg import errors
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.core.secrets import Kek
+from scadbuddy.inventory.models import RecostedItem, RecostResult
+from scadbuddy.inventory.stock import BadQuantity, StockStore
 from scadbuddy.orders.models import (
     OPEN_FOR_EDITS,
     PURCHASE_SOURCE_PREFIX,
@@ -98,7 +101,6 @@ from scadbuddy.orders.parts import (
     PartNotFoundError,
     PartStore,
     rule_parts,
-    use_amount,
 )
 from scadbuddy.orders.pricing import Plate, Priced, to_minor
 from scadbuddy.orders.reference import ResolvedReference
@@ -448,6 +450,14 @@ class NewRequestItem(NewItem):
     title: str
 
 
+class _OrdersMoved(Exception):  # noqa: N818
+    """A re-cost found a move of an order it had not locked: start again."""
+
+
+#: How often ``Lifecycle.recost_lot`` starts again before it gives up.
+_RECOST_TRIES = 5
+
+
 @dataclass
 class _Change:
     """What one transition did, told after commit."""
@@ -604,7 +614,17 @@ def _plain(percent: Decimal) -> str:
 
 
 def _parts_detail(parts: Sequence[ItemPart]) -> list[dict[str, Any]]:
-    return [{"part_id": p.part_id, "per_unit": p.per_unit} for p in parts]
+    return [{"item_id": p.item_id, "per_unit": p.per_unit} for p in parts]
+
+
+def _minor(value: Decimal) -> str:
+    """A cost in minor units as an event's detail keeps it: a decimal string, no trailing
+    zeros, no exponent."""
+    return format(value.normalize(), "f")
+
+
+#: The most one order item may take of one part: `order_item_parts.used` is an `integer`.
+MAX_USED = 2**31 - 1
 
 
 def check_submitted(order: Order) -> None:
@@ -637,6 +657,7 @@ class Lifecycle:
         bus: EventBus | None,
         refs: BlobRefs | None = None,
         rules: Callable[[], OrderRules] = lambda: NO_RULES,
+        stock: StockStore | None = None,
     ):
         self.store = store
         self.bus = bus
@@ -645,8 +666,14 @@ class Lifecycle:
         #: The shop's money rules (#5281: tax, deposits, shipping options), read when a
         #: transition needs them, so a settings change applies to the next one.
         self.rules = rules
-        #: The parts inventory (#5543): an item's parts, used when it is fulfilled.
+        #: An item's parts and the models' rules (#5543): the items it takes when it is
+        #: fulfilled.
         self.parts = PartStore(store)
+        #: The inventory's lots (#7067), which an item's parts are taken from and given
+        #: back to, in the transition's own transaction. Set by ``OrdersComponent``.
+        self.stock = stock or StockStore(
+            store._pool, store._entities, lambda: self.rules().shop_currency
+        )
         #: The payment providers offered (#4957, ``payments/registry.py``): a default
         #: provider not among them is no provider. Set by ``OrdersComponent``.
         self.offered_providers: frozenset[str] = frozenset()
@@ -3827,11 +3854,11 @@ class Lifecycle:
                 )
             copy = self._insert_new(conn, order, by, entry, after_acceptance)
             parts = [
-                ItemPart(part_id=row.part_id, per_unit=row.per_unit)
+                ItemPart(item_id=row.item_id, per_unit=row.per_unit)
                 for row in self.parts.item_parts([item.id], conn=conn)[item.id]
             ]
             given = [
-                ItemPart(part_id=row.part_id, per_unit=row.per_unit)
+                ItemPart(item_id=row.item_id, per_unit=row.per_unit)
                 for row in self.parts.item_parts([copy.id], conn=conn)[copy.id]
             ]
             if parts != given:
@@ -5280,10 +5307,11 @@ class Lifecycle:
         self._told(_Change(order, [(item, attempt.attempt)]))
         return item
 
-    # -- parts (job cost spec §11, #5543) --------------------------------------------------
+    # -- parts (job cost spec §11, #5543; inventory lots, #7067) ---------------------------
     # An item's parts leave stock when it becomes `fulfilled` and come back when it is
-    # unfulfilled, under the order's lock and then the parts' (in id order). Stock never
-    # refuses: it can go below zero. A failed attempt uses nothing.
+    # unfulfilled, under the order's lock and then the items' (in `item_id` order, then
+    # each item's lots: `StockStore.take`). Stock never refuses: it can go below zero. A
+    # failed attempt uses nothing. No cost entry is written: job cost reads the moves.
 
     def set_item_parts(
         self, order_id: str, item_id: str, parts: Sequence[ItemPart], by: Actor
@@ -5314,88 +5342,159 @@ class Lifecycle:
         return rows
 
     def _use_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
-        """The item's parts times its quantity out of stock, each a `material` cost entry
-        (``part:<item>:<part>``) at the part's unit cost now, when the part is priced in the
-        order's currency and costs anything."""
+        """The item's parts times its quantity out of the lots (`StockStore.take`: FIFO,
+        each move at its lot's cost now, of unknown cost where the lot's is), in
+        `item_id` order. ``bad_quantity`` when a part's count is past what
+        `order_item_parts.used` holds, or its cost past what a move's amount holds
+        (R-P2-16)."""
         rows = [r for r in self.parts.item_parts([item.id], conn=conn)[item.id] if r.used == 0]
         if not rows:
             return
-        locked = self.parts.lock_parts(conn, [r.part_id for r in rows])
         used: list[dict[str, Any]] = []
-        for row in sorted(rows, key=lambda r: r.part_id):
-            part = locked[row.part_id]
+        for row in sorted(rows, key=lambda r: r.item_id):
             count = row.per_unit * item.quantity
-            amount = use_amount(part.unit_cost_minor, count)
-            entry_id: str | None = None
-            if part.currency == order.currency and amount > 0:
-                entry, _ = self.store.insert_cost_entry(
+            try:
+                if count > MAX_USED:
+                    raise BadQuantity(str(count))
+                moves = self.stock.take(
                     conn,
-                    order.id,
-                    CostEntryInput(
-                        order_item_id=item.id,
-                        kind="material",
-                        amount_minor=amount,
-                        note=f"{count} x {part.name}",
-                        source=f"part:{item.id}:{part.id}",
-                    ),
-                    created_by=by,
+                    UUID(row.item_id),
+                    Decimal(count),
+                    by,
+                    order_id=order.id,
+                    order_item_id=item.id,
                 )
-                entry_id = entry.id
-            costed = amount if entry_id is not None else None
-            self.parts.move(
-                conn,
-                part,
-                "use",
-                -count,
-                by,
-                amount_minor=costed,
-                order_id=order.id,
-                order_item_id=item.id,
-            )
-            self.parts.set_used(conn, item.id, part.id, count)
+            except BadQuantity:
+                raise LifecycleError(
+                    "bad_quantity",
+                    f"item {item.id} uses {count} of part {row.item_id}: more than one"
+                    " stock move holds at its cost",
+                    items=[item.id],
+                ) from None
+            self.parts.set_used(conn, item.id, row.item_id, count)
             used.append(
-                {"part_id": part.id, "count": count, "entry_id": entry_id, "amount_minor": costed}
+                {
+                    "item_id": row.item_id,
+                    "count": count,
+                    "amount_minor": _minor(-sum((m.amount_minor for m in moves), Decimal(0))),
+                    "cost_unknown": any(m.cost_unknown for m in moves),
+                }
             )
         self._event(conn, order, by, "parts.used", item_id=item.id, parts=used)
 
     def _return_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
-        """What the item's fulfilment took, back in stock at the cost it was taken at, and
-        its cost entries removed."""
+        """What the item's fulfilment took, back to the lots it came from, each use at its
+        own cost (`StockStore.give_back`), in `item_id` order."""
         rows = [r for r in self.parts.item_parts([item.id], conn=conn)[item.id] if r.used > 0]
         if not rows:
             return
-        locked = self.parts.lock_parts(conn, [r.part_id for r in rows])
-        entries = {
-            e.source: e
-            for e in self.store.cost_entries(order.id, conn=conn)
-            if e.kind == "material" and e.source is not None
-        }
         returned: list[dict[str, Any]] = []
-        for row in sorted(rows, key=lambda r: r.part_id):
-            part = locked[row.part_id]
-            entry = entries.get(f"part:{item.id}:{part.id}")
-            if entry is not None:
-                self.store.delete_cost_entry(conn, order.id, entry.id)
-            self.parts.move(
-                conn,
-                part,
-                "return",
-                row.used,
-                by,
-                amount_minor=None if entry is None else entry.amount_minor,
-                unit_cost=self.parts.used_at(conn, item.id, part.id),
-                order_id=order.id,
-                order_item_id=item.id,
+        for row in sorted(rows, key=lambda r: r.item_id):
+            moves = self.stock.give_back(
+                conn, order_item_id=item.id, item_id=UUID(row.item_id), by=by
             )
-            self.parts.set_used(conn, item.id, part.id, 0)
+            self.parts.set_used(conn, item.id, row.item_id, 0)
             returned.append(
                 {
-                    "part_id": part.id,
+                    "item_id": row.item_id,
                     "count": row.used,
-                    "entry_id": None if entry is None else entry.id,
+                    "amount_minor": _minor(sum((m.amount_minor for m in moves), Decimal(0))),
                 }
             )
         self._event(conn, order, by, "parts.returned", item_id=item.id, parts=returned)
+
+    def parts_unit_cost(self, order_item_id: str, currency: str, shop_currency: str) -> Decimal:
+        """One unit of the order item's parts at what a FIFO take of its quantity would
+        cost now (the plan's Ruling 10, `StockStore.estimate_unit_cost`), in the shop's
+        currency. A part of unknown cost adds nothing, and in any other currency the parts
+        are 0, as a part priced in another currency was before #7067. 0 for an order item
+        that does not exist. ``bad_quantity`` (unprocessable) when the take is past what a
+        move's amount holds (R-P2-16)."""
+        item = self.store.item(order_item_id)
+        if item is None or currency != shop_currency:
+            return Decimal(0)
+        rows = self.parts.item_parts([item.id])[item.id]
+        total = Decimal(0)
+        with self.store.transaction() as conn:
+            for row in rows:
+                count = row.per_unit * item.quantity
+                try:
+                    cost, unknown = self.stock.estimate_unit_cost(
+                        conn, UUID(row.item_id), Decimal(count)
+                    )
+                except BadQuantity:
+                    raise LifecycleError(
+                        "bad_quantity",
+                        f"item {item.id} uses {count} of part {row.item_id}: more than one"
+                        " stock move holds at its cost",
+                        unprocessable=True,
+                    ) from None
+                if not unknown:
+                    total += cost * row.per_unit
+        return total
+
+    def recost_lot(self, lot_id: UUID, by: Actor) -> RecostResult:
+        """ "Re-cost past uses" (spec §6.6): every past `use`, `return` and `adjust` of the
+        lot takes its cost now (`StockStore.recost_lot`), and each order whose items' parts
+        cost changed gets one `item.parts_recosted` event with each item's before and
+        after. The orders are locked before the lot (the plan's lock order), in id order.
+        A move of another order written between the read of the orders and the lot's lock
+        starts the whole re-cost again."""
+        for _ in range(_RECOST_TRIES):
+            try:
+                return self._recost_lot(lot_id, by)
+            except _OrdersMoved:
+                continue
+        raise LifecycleError("recost_busy", f"lot {lot_id} kept taking new order moves: try again")
+
+    def _recost_lot(self, lot_id: UUID, by: Actor) -> RecostResult:
+        changes: list[_Change] = []
+        with self.store.transaction() as conn:
+            named = conn.execute(
+                "SELECT DISTINCT order_id FROM stock_moves WHERE lot_id = %s"
+                " AND order_id IS NOT NULL ORDER BY order_id",
+                (lot_id,),
+            ).fetchall()
+            locked: dict[str, Order] = {}
+            for row in named:
+                try:
+                    locked[row["order_id"]] = self.store.lock_order(conn, row["order_id"])
+                except OrderNotFoundError:
+                    continue
+            result = self.stock.recost_lot(conn, lot_id)
+            by_order: dict[str, list[RecostedItem]] = {}
+            for changed in result.orders:
+                if changed.order_id is not None:
+                    by_order.setdefault(changed.order_id, []).append(changed)
+            if any(o not in {r["order_id"] for r in named} for o in by_order):
+                # A move of an order not locked here: its event would be written without
+                # its lock, and locking it now, after the lot, could deadlock.
+                raise _OrdersMoved
+            for order_id, items in sorted(by_order.items()):
+                order = locked.get(order_id)
+                if order is None:
+                    continue
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "item.parts_recosted",
+                    lot_id=str(lot_id),
+                    items=[
+                        {
+                            "item_id": i.order_item_id,
+                            "before_minor": _minor(i.before_minor),
+                            "after_minor": _minor(i.after_minor),
+                            "before_unknown": i.before_unknown,
+                            "after_unknown": i.after_unknown,
+                        }
+                        for i in items
+                    ],
+                )
+                changes.append(_Change(order))
+        for change in changes:
+            self._told(change)
+        return result
 
     # -- the print path (§5.4, #4719) -----------------------------------------------------
 

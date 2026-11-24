@@ -11,9 +11,7 @@ from scadbuddy.orders.models import Actor, ColourSlot
 from scadbuddy.orders.parts import (
     PartExistsError,
     PartInput,
-    PartNotFoundError,
     PartPatch,
-    PartRuleInput,
     PartRuleLine,
     PartRuleWhen,
     PartStore,
@@ -49,11 +47,11 @@ def _colours(*hexes: str) -> list[ColourSlot]:
 def test_a_rule_picks_by_colour_else_its_default() -> None:
     lines = [
         PartRuleLine(
-            per_unit=1, part_id="silver", when=[PartRuleWhen(colour="#FF69B4", part_id="pink")]
+            per_unit=1, item_id="silver", when=[PartRuleWhen(colour="#FF69B4", item_id="pink")]
         ),
-        PartRuleLine(per_unit=2, part_id="ring"),
+        PartRuleLine(per_unit=2, item_id="ring"),
         PartRuleLine(
-            per_unit=1, part_id=None, when=[PartRuleWhen(colour="#000000", part_id="ring")]
+            per_unit=1, item_id=None, when=[PartRuleWhen(colour="#000000", item_id="ring")]
         ),
     ]
 
@@ -61,10 +59,10 @@ def test_a_rule_picks_by_colour_else_its_default() -> None:
     plain = rule_parts(lines, _colours("#ffffff"))
     black = rule_parts(lines, _colours("#000000"))
 
-    assert [(p.part_id, p.per_unit) for p in pink] == [("pink", 1), ("ring", 2)]
-    assert [(p.part_id, p.per_unit) for p in plain] == [("silver", 1), ("ring", 2)]
+    assert [(p.item_id, p.per_unit) for p in pink] == [("pink", 1), ("ring", 2)]
+    assert [(p.item_id, p.per_unit) for p in plain] == [("silver", 1), ("ring", 2)]
     # A part two lines name is summed; a line with no default and no match gives nothing.
-    assert [(p.part_id, p.per_unit) for p in black] == [("silver", 1), ("ring", 3)]
+    assert [(p.item_id, p.per_unit) for p in black] == [("silver", 1), ("ring", 3)]
 
 
 def test_a_link_must_be_http() -> None:
@@ -139,17 +137,6 @@ def test_a_pack_edit_moves_the_unit_cost_only_with_nothing_on_hand(parts: PartSt
     assert parts.update(stocked, PartPatch(pack_price_minor=1000)).unit_cost_minor == Decimal(
         "5.99"
     )
-
-
-def test_a_rule_names_only_parts_that_exist(parts: PartStore) -> None:
-    part_id = _hook(parts)
-    with pytest.raises(PartNotFoundError):
-        parts.set_rule("keychain", PartRuleInput(lines=[PartRuleLine(part_id="nope")]), BY)
-
-    saved = parts.set_rule("keychain", PartRuleInput(lines=[PartRuleLine(part_id=part_id)]), BY)
-    assert parts.rule("keychain") == saved
-    assert parts.set_rule("keychain", PartRuleInput(lines=[]), BY).lines == []
-    assert parts.rule("keychain").updated_at is None
 
 
 def test_a_stock_add_past_the_most_one_change_moves_is_refused(parts: PartStore) -> None:

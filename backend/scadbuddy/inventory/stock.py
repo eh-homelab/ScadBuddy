@@ -235,7 +235,9 @@ class StockStore:
     def estimate_unit_cost(self, conn: Conn, item_id: UUID, qty: Decimal) -> tuple[Decimal, bool]:
         """What `take` of `qty` would charge per unit now, and whether any of it is of
         unknown cost. Reads only. An item with no lot is `(0, True)`, as `take` would open
-        a zero-cost lot of unknown cost."""
+        a zero-cost lot of unknown cost. `BadQuantity` where `take` would refuse it: a
+        quantity, or a part of it at its lot's cost, past what `numeric(20,6)` holds
+        (R-P2-16)."""
         item = _item(conn, item_id, "lot", lock=False)
         _positive(item["uom"], qty)
         lots = conn.execute(
@@ -244,7 +246,7 @@ class StockStore:
         if not lots:
             return Decimal(0), True
         plan = _fifo([dict(r) for r in lots], qty, None)
-        total = sum((_six(part * lot["unit_cost_minor"]) for lot, part, _ in plan), Decimal(0))
+        total = sum((_amount(part, lot["unit_cost_minor"]) for lot, part, _ in plan), Decimal(0))
         return _six(total / qty), any(lot["cost_unknown"] for lot, _, _ in plan)
 
     # -- lots ----------------------------------------------------------------------------

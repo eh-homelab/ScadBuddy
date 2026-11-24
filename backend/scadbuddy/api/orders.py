@@ -1152,8 +1152,11 @@ async def estimate(
         "`orders_thin_margin_percent`, and `below_cost` that it is below the unit cost "
         "itself (a price above the cost can still warn with a thin margin). Advice only. "
         "With no history, `jobs` is 0 and nothing warns. With `item_id` (the item being "
-        "quoted), its parts at today's unit costs (`parts_unit_minor`, #5543) replace the "
-        "past jobs' own parts entries in the unit cost and the suggestion."
+        "quoted), its parts at what a FIFO take of its quantity from the inventory lots "
+        "would cost now (`parts_unit_minor`, #5543, #7067; a part of unknown cost adds "
+        "nothing, and in a currency other than the shop's the parts are 0) replace the "
+        "past jobs' own parts entries in the unit cost and the suggestion. 422 when that "
+        "take is past what a stock move's amount holds."
     ),
 )
 async def unit_cost(
@@ -1168,10 +1171,11 @@ async def unit_cost(
     runtime = settings.snapshot().runtime
     parts_unit: Decimal | None = None
     if item_id is not None:
-        parts_unit = await asyncio.to_thread(
-            orders.lifecycle.parts.unit_cost_of_item,
-            item_id,
-            currency or runtime.orders_currency,
+        quoted: str = item_id
+        parts_unit = await _run(
+            lambda: orders.lifecycle.parts_unit_cost(
+                quoted, currency or runtime.orders_currency, runtime.orders_currency
+            )
         )
     return await asyncio.to_thread(
         unit_cost_history,

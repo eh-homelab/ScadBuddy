@@ -10,8 +10,12 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.orders.component import ORDERS
 from tests.api.test_inventory import API, ENTITY_PROBLEMS, _code, _item
+from tests.api.test_orders_lifecycle import fulfil
+from tests.api.test_orders_unfulfil import accepted_order
 from tests.api.test_settings_runtime import _state
+from tests.api.test_versions import SLUG
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
@@ -310,3 +314,64 @@ def test_a_use_of_a_named_empty_lot_is_lot_empty(client: TestClient) -> None:
         409,
         "lot_empty",
     )
+
+
+# -- an order's parts are items (#7067 Task 7) ---------------------------------------------
+
+
+@pytest.mark.requires_git
+def test_an_orders_parts_take_from_lots_and_recost_writes_the_order(client: TestClient) -> None:
+    hook = _item(client)
+    lot = _receive(client, hook["id"], unit_cost_minor="5")
+    order_id, [item_id] = accepted_order(client)
+    path = f"/api/v1/orders/{order_id}/items/{item_id}/parts"
+
+    # The old body's `part_id` key still works for one release.
+    done = client.put(path, json={"parts": [{"part_id": hook["id"], "per_unit": 2}]})
+    assert done.status_code == 200, done.text
+    assert done.json() == [{"item_id": hook["id"], "part_id": hook["id"], "per_unit": 2, "used": 0}]
+    twice = {"parts": [{"item_id": hook["id"], "per_unit": 1}] * 2}
+    assert client.put(path, json=twice).status_code == 422
+    for missing in ("nope", str(uuid.uuid4())):
+        unknown = client.put(path, json={"parts": [{"item_id": missing, "per_unit": 1}]})
+        assert unknown.status_code == 409, unknown.text
+        assert unknown.json()["type"].endswith("/part_not_found")
+
+    fulfil(client, order_id, item_id, 1)
+    [use] = client.get(f"{API}/moves", params={"item_id": hook["id"]}).json()["moves"][:1]
+    assert (use["kind"], use["qty"], use["order_item_id"]) == ("use", "-2", item_id)
+    # The quote's parts: a FIFO take of 2 from what is left, at 5 each.
+    history = client.get(
+        "/api/v1/orders/history/unit-cost", params={"slug": SLUG, "item_id": item_id}
+    ).json()
+    assert (history["jobs"], history["parts_unit_minor"]) == (1, 10)
+
+    client.patch(f"{API}/lots/{lot['id']}", json={"unit_cost_minor": "6"}, headers=press())
+    recosted = _post(client, f"/lots/{lot['id']}/recost")
+    assert recosted.status_code == 200, recosted.text
+    assert recosted.json()["moves"] == 1
+    assert [
+        (o["order_id"], o["order_item_id"], o["before_minor"], o["after_minor"])
+        for o in recosted.json()["orders"]
+    ] == [(order_id, item_id, "10", "12")]
+    events = client.get(f"/api/v1/orders/{order_id}/events").json()
+    [event] = [e for e in events if e["kind"] == "item.parts_recosted"]
+    assert event["detail"]["items"][0]["after_minor"] == "12"
+
+    _code(_post(client, f"/lots/{uuid.uuid4()}/recost"), 404, "lot_not_found")
+
+
+@pytest.mark.requires_git
+def test_a_parts_estimate_past_an_amount_is_a_422(client: TestClient) -> None:
+    """R-P2-16: the unit-cost route's parts estimate never answers a 500."""
+    hook = _item(client)
+    _receive(client, hook["id"], qty="1", unit_cost_minor="90000000000000")
+    order_id, [item_id] = accepted_order(client)
+    path = f"/api/v1/orders/{order_id}/items/{item_id}/parts"
+    assert client.put(path, json={"parts": [{"item_id": hook["id"], "per_unit": 1000}]}).is_success
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute("UPDATE order_items SET quantity = 2000000 WHERE id = %s", (item_id,))
+
+    got = client.get("/api/v1/orders/history/unit-cost", params={"slug": SLUG, "item_id": item_id})
+
+    assert got.status_code == 422, got.text

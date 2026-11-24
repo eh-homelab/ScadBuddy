@@ -1,15 +1,19 @@
-"""Parts inventory (#5543, job cost spec 2026-11-05 §11): the hooks, rings and magnets an
-item uses beside its filament, their stock, and the rule a model gives its items.
+"""Parts (#5543, job cost spec 2026-11-05 §11; #7067): the hooks, rings and magnets an item
+uses beside its filament, and the rule a model gives its items.
 
-A part's ``unit_cost_minor`` is a rate in minor units with its fraction kept (a pack of 100
-for 599 is 5.99 each). It starts at the pack's price over its size; each "Add stock" makes it
-the weighted average of the stock on hand and the new pack (:func:`average`). A cost entry
-made from it is rounded once (:func:`use_amount`), so an order keeps the cost it was given.
+Since #7067 (Task 7) a part is an inventory item (`items`, a kind with tracking `lot`), and
+its stock is in lots (`inventory/stock.py`). An order item's parts are
+`order_item_parts.item_id`; a model's rule names items as `item_id` (a rule or a body that
+still says `part_id` is read the same, for one release). The lifecycle takes an item's
+parts from the lots when it is fulfilled (`StockStore.take`, FIFO, a cost snapshot on each
+move) and gives them back when it is unfulfilled (`StockStore.give_back`, at each use's
+own cost); it writes no cost entry (the plan's Pre-flight 5). It locks the order first,
+then the items in `item_id` order, so two writers never wait on each other in opposite
+orders.
 
-Every stock change is a ``part_stock_moves`` row written in its own transaction under the
-part's row lock. The lifecycle takes the parts' locks after the order's, in id order
-(:meth:`PartStore.lock_parts`), and the part routes take only the part's: no two writers
-wait on each other in opposite orders. Stock can go below zero; nothing here refuses a use.
+`PartStore`'s part rows (`parts`, `create`, `add_stock`, ...) read the `parts` table, which
+the parts migration renamed (#7067 Task 6). Task 9 makes the `/parts` routes aliases of
+`/inventory` and removes them.
 """
 
 from __future__ import annotations
@@ -17,11 +21,21 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Literal
+from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from psycopg import errors
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer, field_validator
+from pydantic import (
+    AfterValidator,
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_serializer,
+    field_validator,
+)
 
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.models import Actor, Colour, ColourSlot, Money
@@ -170,22 +184,46 @@ class StockMove(BaseModel):
         return format(value.normalize(), "f")
 
 
+def canonical(item_id: str) -> str:
+    """A uuid's text in its one spelling (lower case, with hyphens); any other text as it
+    is (it names no item: `part_not_found`)."""
+    try:
+        return str(UUID(item_id))
+    except ValueError:
+        return item_id
+
+
+#: An item's id, read from `item_id` or the old `part_id` key (#7067: for one release).
+ItemId = Annotated[
+    str,
+    Field(min_length=1, max_length=100, validation_alias=AliasChoices("item_id", "part_id")),
+    AfterValidator(canonical),
+]
+
+
 class PartRuleWhen(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     #: Used when an item has this colour in any slot (compared in any case).
     colour: Colour
-    part_id: str = Field(min_length=1, max_length=100)
+    item_id: ItemId
 
 
 class PartRuleLine(BaseModel):
     """One part each unit uses: the first ``when`` whose colour the item has, else
-    ``part_id`` (None: nothing when no colour matched)."""
+    ``item_id`` (None: nothing when no colour matched)."""
 
     model_config = ConfigDict(extra="forbid")
 
     per_unit: int = Field(default=1, ge=1, le=MAX_PER_UNIT)
-    part_id: str | None = Field(default=None, min_length=1, max_length=100)
+    item_id: (
+        Annotated[
+            str,
+            Field(min_length=1, max_length=100),
+            AfterValidator(canonical),
+        ]
+        | None
+    ) = Field(default=None, validation_alias=AliasChoices("item_id", "part_id"))
     when: list[PartRuleWhen] = Field(default_factory=list, max_length=50)
 
 
@@ -202,11 +240,11 @@ class PartRule(PartRuleInput):
 
 
 class ItemPart(BaseModel):
-    """One part one unit of an item uses."""
+    """One part (an inventory item) one unit of an order item uses."""
 
     model_config = ConfigDict(extra="forbid")
 
-    part_id: str = Field(min_length=1, max_length=100)
+    item_id: ItemId
     per_unit: int = Field(ge=1, le=MAX_PER_UNIT)
 
 
@@ -218,7 +256,7 @@ class ItemPartsInput(BaseModel):
     @field_validator("parts")
     @classmethod
     def _once_each(cls, parts: list[ItemPart]) -> list[ItemPart]:
-        ids = [p.part_id for p in parts]
+        ids = [p.item_id for p in parts]
         if len(set(ids)) != len(ids):
             raise ValueError("a part is named twice: give it one row with its count")
         return parts
@@ -228,18 +266,35 @@ class ItemPartRow(ItemPart):
     #: How many the item's fulfilment took out of stock; 0 until fulfilled.
     used: int = 0
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def part_id(self) -> str:
+        """`item_id` under its old name, for one release (#7067)."""
+        return self.item_id
+
 
 class PartNeed(BaseModel):
     """One part an order's items still need, against the stock on hand."""
 
-    part_id: str
+    item_id: str
     name: str
     #: The items not yet fulfilled (nor cancelled): their parts times their quantity.
     needed: int
-    on_hand: int
+    #: The item's lots' `on_hand` summed (below 0 after a shortfall).
+    on_hand: Decimal
     #: How many more than on hand are needed; 0 when the stock covers it.
-    short: int
+    short: Decimal
     low: bool
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def part_id(self) -> str:
+        """`item_id` under its old name, for one release (#7067)."""
+        return self.item_id
+
+    @field_serializer("on_hand", "short")
+    def _decimal(self, value: Decimal) -> str:
+        return format(value.normalize(), "f")
 
 
 class ItemParts(BaseModel):
@@ -271,22 +326,25 @@ def order_parts(store: OrderStore, parts: PartStore, order_id: str) -> OrderPart
         if item.status in ("fulfilled", "cancelled"):
             continue
         for row in rows[item.id]:
-            needed[row.part_id] = needed.get(row.part_id, 0) + row.per_unit * item.quantity
-    stock = {p.id: p for p in parts.parts() if p.id in needed}
+            needed[row.item_id] = needed.get(row.item_id, 0) + row.per_unit * item.quantity
+    needs: list[PartNeed] = []
+    for stock in parts.stock(needed):
+        on_hand = stock["on_hand"]
+        need = needed[stock["id"]]
+        needs.append(
+            PartNeed(
+                item_id=stock["id"],
+                name=stock["name"],
+                needed=need,
+                on_hand=on_hand,
+                short=max(Decimal(0), need - on_hand),
+                low=stock["low_stock"] > 0 and on_hand <= stock["low_stock"],
+            )
+        )
     return OrderParts(
         order_id=order_id,
         items=[ItemParts(item_id=i.id, parts=rows[i.id]) for i in items],
-        needs=[
-            PartNeed(
-                part_id=part.id,
-                name=part.name,
-                needed=needed[part.id],
-                on_hand=part.on_hand,
-                short=max(0, needed[part.id] - part.on_hand),
-                low=part.low,
-            )
-            for part in stock.values()
-        ],
+        needs=needs,
     )
 
 
@@ -315,10 +373,10 @@ def rule_parts(lines: Iterable[PartRuleLine], colours: Iterable[ColourSlot]) -> 
     have = {slot.colour.lower() for slot in colours}
     found: dict[str, int] = {}
     for line in lines:
-        chosen = next((w.part_id for w in line.when if w.colour.lower() in have), line.part_id)
+        chosen = next((w.item_id for w in line.when if w.colour.lower() in have), line.item_id)
         if chosen is not None:
             found[chosen] = found.get(chosen, 0) + line.per_unit
-    return [ItemPart(part_id=p, per_unit=min(n, MAX_PER_UNIT)) for p, n in found.items()]
+    return [ItemPart(item_id=p, per_unit=min(n, MAX_PER_UNIT)) for p, n in found.items()]
 
 
 # -- the store --------------------------------------------------------------------------------
@@ -365,44 +423,37 @@ class PartStore:
     def item_parts(
         self, item_ids: Sequence[str], *, conn: Conn | None = None
     ) -> dict[str, list[ItemPartRow]]:
+        """Each order item's parts, by the items' names."""
         found: dict[str, list[ItemPartRow]] = {item_id: [] for item_id in item_ids}
         if not item_ids:
             return found
         with self.store._read(conn) as c:
             rows = c.execute(
-                "SELECT ip.order_item_id, ip.part_id, ip.per_unit, ip.used FROM order_item_parts ip"
-                " JOIN parts p ON p.id = ip.part_id"
-                " WHERE ip.order_item_id = ANY(%s) ORDER BY lower(p.name), p.id",
+                "SELECT ip.order_item_id, ip.item_id::text AS item_id, ip.per_unit, ip.used"
+                " FROM order_item_parts ip JOIN items i ON i.id = ip.item_id"
+                " WHERE ip.order_item_id = ANY(%s) ORDER BY lower(i.name), i.id",
                 (list(item_ids),),
             ).fetchall()
         for row in rows:
             found[row["order_item_id"]].append(
-                ItemPartRow(part_id=row["part_id"], per_unit=row["per_unit"], used=row["used"])
+                ItemPartRow(item_id=row["item_id"], per_unit=row["per_unit"], used=row["used"])
             )
         return found
 
-    def unit_cost_of_item(self, item_id: str, currency: str) -> Decimal:
-        """One unit of the item's parts at today's unit costs, of the parts priced in
-        ``currency`` (a part in another cannot be added in)."""
+    def stock(self, item_ids: Iterable[str]) -> list[dict[str, Any]]:
+        """Each item's name, `low_stock` and lots' `on_hand` summed, by name."""
+        wanted = sorted(set(item_ids))
+        if not wanted:
+            return []
         with self.store._read(None) as c:
-            row = c.execute(
-                "SELECT coalesce(sum(ip.per_unit * p.unit_cost_minor), 0) AS cost"
-                " FROM order_item_parts ip JOIN parts p ON p.id = ip.part_id"
-                " WHERE ip.order_item_id = %s AND p.currency = %s",
-                (item_id, currency),
-            ).fetchone()
-        assert row is not None
-        return Decimal(row["cost"])
-
-    def used_at(self, conn: Conn, item_id: str, part_id: str) -> Decimal | None:
-        """The unit cost the item's last ``use`` of the part took it at."""
-        row = conn.execute(
-            "SELECT unit_cost_after_minor FROM part_stock_moves"
-            " WHERE order_item_id = %s AND part_id = %s AND kind = 'use'"
-            " ORDER BY created_at DESC, id DESC LIMIT 1",
-            (item_id, part_id),
-        ).fetchone()
-        return None if row is None else Decimal(row["unit_cost_after_minor"])
+            rows = c.execute(
+                "SELECT i.id::text AS id, i.name, i.low_stock,"
+                " coalesce(sum(l.on_hand), 0) AS on_hand"
+                " FROM items i LEFT JOIN stock_lots l ON l.item_id = i.id"
+                " WHERE i.id = ANY(%s::uuid[]) GROUP BY i.id ORDER BY lower(i.name), i.id",
+                (wanted,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # part writes, each in its own transaction under the part's lock
 
@@ -519,11 +570,11 @@ class PartStore:
             return self.move(conn, part, "adjust", body.on_hand - part.on_hand, by, note=body.note)
 
     def set_rule(self, slug: str, body: PartRuleInput, by: Actor) -> PartRule:
-        """Every part the rule names must exist; ``PartNotFoundError`` names the first that
-        does not. An empty rule removes it."""
+        """Every item the rule names must exist and track lots; ``PartNotFoundError``
+        names the first that does not. An empty rule removes it."""
         with self.store.transaction() as conn:
-            named = {line.part_id for line in body.lines if line.part_id is not None}
-            named |= {w.part_id for line in body.lines for w in line.when}
+            named = {line.item_id for line in body.lines if line.item_id is not None}
+            named |= {w.item_id for line in body.lines for w in line.when}
             self.require(conn, named)
             if not body.lines:
                 conn.execute("DELETE FROM model_part_rules WHERE slug = %s", (slug,))
@@ -544,42 +595,45 @@ class PartStore:
 
     # in the caller's transaction (the lifecycle's)
 
-    def require(self, conn: Conn, part_ids: Iterable[str]) -> None:
-        wanted = sorted(set(part_ids))
+    def require(self, conn: Conn, item_ids: Iterable[str]) -> None:
+        """Every id names an item whose kind tracks lots (a part's stock is in lots);
+        `PartNotFoundError` names the first that does not. A text that is not a uuid is
+        refused before any SQL (R-P2-16)."""
+        wanted = sorted(set(item_ids))
         if not wanted:
             return
-        rows = conn.execute("SELECT id FROM parts WHERE id = ANY(%s)", (wanted,)).fetchall()
+        ids: list[UUID] = []
+        for item_id in wanted:
+            try:
+                ids.append(UUID(item_id))
+            except ValueError:
+                raise PartNotFoundError(item_id) from None
+        rows = conn.execute(
+            "SELECT i.id::text AS id FROM items i JOIN item_kinds k ON k.id = i.kind_id"
+            " WHERE i.id = ANY(%s) AND k.tracking = 'lot'",
+            (ids,),
+        ).fetchall()
         have = {r["id"] for r in rows}
         missing = [p for p in wanted if p not in have]
         if missing:
             raise PartNotFoundError(missing[0])
 
-    def lock_parts(self, conn: Conn, part_ids: Iterable[str]) -> dict[str, InventoryPart]:
-        """The parts under their row locks, taken in id order."""
-        wanted = sorted(set(part_ids))
-        if not wanted:
-            return {}
-        rows = conn.execute(
-            f"SELECT {_PART} FROM parts WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (wanted,)
-        ).fetchall()
-        return {r["id"]: InventoryPart.model_validate(r) for r in rows}
-
     def set_item_parts(self, conn: Conn, item_id: str, parts: Sequence[ItemPart]) -> None:
         """The item's parts replaced whole (``used`` 0: only an item not fulfilled may be
         given parts)."""
-        self.require(conn, [p.part_id for p in parts])
+        self.require(conn, [p.item_id for p in parts])
         conn.execute("DELETE FROM order_item_parts WHERE order_item_id = %s", (item_id,))
         for part in parts:
             conn.execute(
-                "INSERT INTO order_item_parts (order_item_id, part_id, per_unit)"
+                "INSERT INTO order_item_parts (order_item_id, item_id, per_unit)"
                 " VALUES (%s, %s, %s)",
-                (item_id, part.part_id, part.per_unit),
+                (item_id, part.item_id, part.per_unit),
             )
 
-    def set_used(self, conn: Conn, item_id: str, part_id: str, used: int) -> None:
+    def set_used(self, conn: Conn, order_item_id: str, item_id: str, used: int) -> None:
         conn.execute(
-            "UPDATE order_item_parts SET used = %s WHERE order_item_id = %s AND part_id = %s",
-            (used, item_id, part_id),
+            "UPDATE order_item_parts SET used = %s WHERE order_item_id = %s AND item_id = %s",
+            (used, order_item_id, item_id),
         )
 
     def move(

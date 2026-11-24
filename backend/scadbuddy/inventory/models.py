@@ -505,7 +505,7 @@ class UnitStatusInput(BaseModel):
     note: Text = Field(default="", max_length=4000)
 
 
-class RecostedItem(BaseModel):
+class RecostedItem(_Decimals):
     model_config = ConfigDict(extra="forbid")
 
     order_id: str | None
@@ -517,6 +517,10 @@ class RecostedItem(BaseModel):
     #: Some of those moves were of unknown cost, before and after.
     before_unknown: bool = False
     after_unknown: bool = False
+
+    @field_serializer("before_minor", "after_minor")
+    def _decimals(self, value: Decimal) -> str | None:
+        return self._decimal(value)
 
 
 class RecostResult(BaseModel):
