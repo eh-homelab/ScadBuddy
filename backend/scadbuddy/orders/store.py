@@ -28,6 +28,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityStore
+from scadbuddy.inventory.stock import PartsMoved, parts_moved, parts_moves
 from scadbuddy.orders.models import (
     IMPORT_STUCK,
     Actor,
@@ -95,14 +96,6 @@ Pool = ConnectionPool[Conn]
 MAIL_QUEUED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "storefront_mail_queued", default=False
 )
-
-
-class PartsMoved(NamedTuple):
-    """An order item's parts as its stock moves say (#7067, ``CostRows.parts``)."""
-
-    cost: Decimal
-    unknown: bool
-    open: bool
 
 
 @dataclass
@@ -2646,21 +2639,14 @@ class OrderStore:
             ).fetchall():
                 charge = Charge.model_validate(row)
                 rows.charges.setdefault(charge.order_id, []).append(charge)
-            # A use is open until a return names it (`reverses_move_id`, `give_back`).
-            for row in c.execute(
-                "SELECT m.order_item_id,"
-                " coalesce(-sum(m.amount_minor) FILTER (WHERE NOT m.cost_unknown), 0) AS cost,"
-                " coalesce(bool_or(m.cost_unknown) FILTER (WHERE o.open), false) AS unknown,"
-                " coalesce(bool_or(o.open), false) AS open"
-                " FROM stock_moves m CROSS JOIN LATERAL (SELECT m.kind = 'use' AND NOT EXISTS"
-                "  (SELECT 1 FROM stock_moves r WHERE r.reverses_move_id = m.id) AS open) o"
-                " WHERE m.order_item_id IN (SELECT id FROM order_items WHERE order_id = ANY(%s))"
-                " AND m.kind IN ('use', 'return') GROUP BY m.order_item_id",
-                (ids,),
-            ).fetchall():
-                rows.parts[row["order_item_id"]] = PartsMoved(
-                    Decimal(row["cost"]), row["unknown"], row["open"]
-                )
+            # One reading with a re-cost's (`parts_moved`, R-P2-31).
+            items = [
+                r["id"]
+                for r in c.execute(
+                    "SELECT id FROM order_items WHERE order_id = ANY(%s)", (ids,)
+                ).fetchall()
+            ]
+            rows.parts.update(parts_moved(parts_moves(c, items)))
         return rows
 
     # -- shipments (§6.3) -------------------------------------------------------------

@@ -12,9 +12,11 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from pydantic import ValidationError
 
+import scadbuddy.inventory.stock as stock_module
 from scadbuddy.entities.refs import BadEntityRef, EntityRef
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.inventory.items import ItemNotFound, ItemStore
@@ -280,6 +282,108 @@ def test_recost_keeps_a_use_and_its_return_netting_to_zero(
     assert result.moves == 2
     assert result.orders == []
     assert sum(m.amount_minor for m in stock.moves(order_item_id="oi1")) == 0
+
+
+def _mark_unknown(pg_pool: PgPool, where: str, *params: object) -> None:
+    """A move of unknown cost that still has an amount, as the parts migration can leave."""
+    with pg_pool.connection() as conn:
+        conn.execute(f"UPDATE stock_moves SET cost_unknown = true WHERE {where}".encode(), params)
+
+
+def test_recost_reads_an_unknown_use_as_job_cost_does(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    """R-P2-31: a use of unknown cost adds nothing to job cost, so once a re-cost makes it
+    known the job cost rises: before 0 and unknown, after its amount and known."""
+    item = _item(items)
+    _, second = _two_lots(stock, item)
+    (use,) = _take(pg_pool, stock, item, 5, lot_id=second, order_id="o1", order_item_id="oi1")
+    _mark_unknown(pg_pool, "id = %s", use.id)
+
+    with pg_pool.connection() as conn, conn.transaction():
+        result = stock.recost_lot(conn, second)
+
+    assert result.orders == [
+        RecostedItem(
+            order_id="o1",
+            order_item_id="oi1",
+            before_minor=Decimal(0),
+            after_minor=Decimal(3500),
+            before_unknown=True,
+            after_unknown=False,
+        )
+    ]
+
+
+def test_recost_ignores_an_unknown_use_that_was_given_back(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    """R-P2-31: a use of unknown cost and its return leave job cost known, before and
+    after a re-cost of another lot of the item."""
+    item = _item(items)
+    first, second = _two_lots(stock, item)
+    _take(pg_pool, stock, item, 5, lot_id=first, order_id="o1", order_item_id="oi1")
+    with pg_pool.connection() as conn, conn.transaction():
+        stock.give_back(conn, order_item_id="oi1", item_id=item, by=BY)
+    _mark_unknown(pg_pool, "lot_id = %s AND order_item_id = 'oi1'", first)
+    _take(pg_pool, stock, item, 5, lot_id=second, order_id="o1", order_item_id="oi1")
+    stock.set_lot_cost(second, Decimal(900), BY)
+
+    with pg_pool.connection() as conn, conn.transaction():
+        result = stock.recost_lot(conn, second)
+
+    assert result.orders == [
+        RecostedItem(
+            order_id="o1",
+            order_item_id="oi1",
+            before_minor=Decimal(3500),
+            after_minor=Decimal(4500),
+        )
+    ]
+
+
+def test_lock_items_locks_item_by_item_in_item_id_order(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-P2-28, R-P2-32: whatever order the caller names them in, each item is locked in
+    `item_id` order: the item, the lock every lot insert takes, then its lots."""
+    ids = [_item(items, name=f"Bolt {n}") for n in range(3)]
+    calls: list[tuple[str, UUID]] = []
+    for name in ("_item", "_open_lock", "_lock_lots"):
+        real = getattr(stock_module, name)
+
+        def spy(
+            conn: Conn, item_id: UUID, *a: Any, _r: Any = real, _n: str = name, **k: Any
+        ) -> Any:
+            calls.append((_n, item_id))
+            return _r(conn, item_id, *a, **k)
+
+        monkeypatch.setattr(stock_module, name, spy)
+
+    with pg_pool.connection() as conn, conn.transaction():
+        stock.lock_items(conn, list(reversed(sorted(ids))))
+
+    assert calls == [(n, i) for i in sorted(ids) for n in ("_item", "_open_lock", "_lock_lots")]
+
+
+def test_a_receive_waits_for_a_holder_of_lock_items(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    """R-P2-32: a lot insert takes the lock that `lock_items` holds, so no lot appears under
+    a fulfil that has locked the item. A short `lock_timeout` shows the wait."""
+    item = _item(items)
+    with pg_pool.connection() as held, held.transaction():
+        stock.lock_items(held, [item])
+        with (
+            pg_pool.connection() as other,
+            pytest.raises(psycopg.errors.LockNotAvailable),
+            other.transaction(),
+        ):
+            other.execute("SET LOCAL lock_timeout = '200ms'")
+            stock.receive_in(other, item, ReceiveLot(qty=Decimal(1)), BY, shop="USD")
+    assert stock.lots(item) == []
+    stock.receive_lot(item, ReceiveLot(qty=Decimal(1)), BY)
+    assert len(stock.lots(item)) == 1
 
 
 def test_a_whole_number_uom_refuses_a_fraction(

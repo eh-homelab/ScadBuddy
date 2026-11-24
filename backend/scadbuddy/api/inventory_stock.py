@@ -155,10 +155,12 @@ async def adjust_lot(lot_id: UUID, body: AdjustInput, inventory: InventoryDep) -
     description=(
         "Every past `use`, `return` and `adjust` move of the lot takes the lot's cost now "
         "(and its `cost_unknown`): a move's cost is otherwise a snapshot. `moves` counts "
-        "the moves that changed; `orders` names each order item whose parts cost changed, "
-        "before and after. Each such order gets one `item.parts_recosted` event with its "
-        "items' before and after. 409 `recost_busy` (orders problem) when new order moves "
-        "kept reaching the lot; try again."
+        "the moves that changed; `orders` names each order item whose parts cost or unknown "
+        "flag changed as job cost reads them (`parts_minor`: the known-cost moves; unknown "
+        "while a use not given back is of unknown cost), before and after. Each such "
+        "order gets one `item.parts_recosted` event with its items' before and after. "
+        "409 `recost_busy` (orders problem) when new order moves kept reaching the lot; "
+        "try again."
     ),
     responses=codes(
         (404, "`lot_not_found`"),

@@ -510,11 +510,11 @@ class RecostedItem(_Decimals):
 
     order_id: str | None
     order_item_id: str
-    #: The order item's parts cost (`-sum(amount_minor)` of its `use` and `return` moves),
-    #: before and after the re-cost.
+    #: The order item's parts cost as job cost reads it (`-sum(amount_minor)` of its
+    #: known-cost `use` and `return` moves, `stock.parts_moved`), before and after.
     before_minor: Decimal
     after_minor: Decimal
-    #: Some of those moves were of unknown cost, before and after.
+    #: A `use` not given back was of unknown cost, before and after.
     before_unknown: bool = False
     after_unknown: bool = False
 

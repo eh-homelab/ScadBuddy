@@ -2134,7 +2134,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   takes the body's price and writes no price point (R-P2-25).
   `Lifecycle.add_item` copies the model's rule; `accept_fulfilment` or `fulfil_items` making an
   item `fulfilled` takes its parts from the lots (`StockStore.take`, the part items locked
-  first in `item_id` order; `parts.used`), and `unfulfil_item` gives each use back to its lot
+  first in `item_id` order by `lock_items`: each item, the lock every lot insert takes, then
+  its lots, so no receive or count adds a lot under it; `parts.used`), and `unfulfil_item` gives each use back to its lot
   at its cost (`parts.returned`); no cost entry is written: job cost reads the moves as
   `parts_minor` (`costs.py`). A fulfilled item's parts are fixed (`item_parts_used`).
   `POST /inventory/lots/{id}/recost` runs `Lifecycle.recost_lot` (`item.parts_recosted`). The

@@ -5361,7 +5361,7 @@ class Lifecycle:
         rows = self.parts.item_parts([item.id for item in items], conn=conn)
         wanted = {UUID(r.item_id) for found in rows.values() for r in found if r.used == 0}
         if wanted:
-            self.stock.lock_items(conn, wanted)
+            self.stock.lock_items(conn, sorted(wanted))
 
     def _use_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
         """The item's parts times its quantity out of the lots (`StockStore.take`: FIFO,
