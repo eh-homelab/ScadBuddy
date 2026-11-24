@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { FilamentInventoryView, Spool, SpoolType } from '../api/filament'
-import { addSku, matchesSearch, namesNumber, parseSearch, spoolSearchDoc, traysBySpool, typeSearchDoc } from './filamentSearch'
+import { addSku, matchesSearch, namesNumber, parseSearch, propertyTexts, spoolSearchDoc, traysBySpool, typeSearchDoc } from './filamentSearch'
 import type { SpoolExtras } from './filamentSearch'
 
 type Cases = { query: string; match: boolean }[]
@@ -42,5 +42,19 @@ describe('the filament search (#6894)', () => {
     addSku(skus, 't', 'A')
     addSku(skus, 't', 'B')
     expect(skus.get('t')).toEqual(['A', 'B'])
+  })
+
+  it('reads property values as text: strings, list items, numbers and booleans (#7026)', () => {
+    expect(propertyTexts({ gtin: ['0123', '0456'], td: 1.8, ok: true })).toEqual(['0123', '0456', '1.8', 'true'])
+    expect(propertyTexts(undefined)).toEqual([])
+  })
+
+  it('matches a type by a GTIN in its properties, and a spool by its lot (#7026)', () => {
+    const type = { id: 't', code: 'PLA-BLK', brand_id: null, material_id: null, subtype_id: null, colour_name: 'Black', rgba: '#000000FF' } as unknown as SpoolType
+    const tokens = parseSearch('0456')
+    expect(matchesSearch(typeSearchDoc(type, new Map()), tokens)).toBe(false)
+    expect(matchesSearch(typeSearchDoc(type, new Map(), [], { properties: propertyTexts({ gtin: ['0123', '0456'] }) }), tokens)).toBe(true)
+    const spool = { id: 's', number: 3, names: {}, rgba: '#000000FF' } as unknown as Spool
+    expect(matchesSearch(spoolSearchDoc(spool, { properties: propertyTexts({ lot_number: 'L-2207' }) }), parseSearch('l-2207'))).toBe(true)
   })
 })

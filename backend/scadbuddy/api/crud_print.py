@@ -94,8 +94,8 @@ ScadBuddy's own filament presets (area ``own-presets``, #7176) are
 A native slice's start (Q30, area ``spools``, #5298 Task 31) is `NativeSliceStore`'s, for
 `RemoteNativeSlices`: ``…/native-slices/start`` (under the lock on its workflow id, whole
 in one transaction here, plan D6; natural). The kept copy of Bambuddy's local presets went
-in #7244: its two reads, ``…/held-presets`` and ``…/held-presets/documents``, answer empty
-for a print worker of an older build during a roll, until the table is dropped. The spool
+in #7244, and its two reads, ``…/held-presets`` and ``…/held-presets/documents``, with its
+table in #7275. The spool
 overlay's routes (``…/spools/overlay``, ``…/spools/records``,
 ``…/spools/refreshes/{provider}/failed``) went with the overlay in #6262 Task 12, and the
 shelf's and the uses routes in Task 11: a print worker from before Task 6 that calls one
@@ -206,7 +206,7 @@ from scadbuddy.bambuddy.copy_leases import (
     CopyLeases,
     LeaseLostError,
 )
-from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail, SpoolAssignment
+from scadbuddy.bambuddy.models import SpoolAssignment
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
 from scadbuddy.bambuddy.print_links import LinkedPrint, PrintLink, PrintReprint, PrintSend
 from scadbuddy.bambuddy.print_run import PrintRunResult
@@ -1787,11 +1787,6 @@ class PrintUsesSettled(BaseModel):
     settled: bool
 
 
-class HeldPresetRow(BaseModel):
-    preset: LocalPreset
-    sha256: str
-
-
 class FilamentPresetRow(BaseModel):
     """One of ScadBuddy's own filament presets as a native run's catalogue reads it
     (`slicing/own_presets.py` `OwnRow`, #7176)."""
@@ -2214,21 +2209,6 @@ async def end_sensor_notification(
             sensors.end_on(conn, notification_id, body)
 
     await asyncio.to_thread(write)
-
-
-@router.get("/held-presets", name="crud_print_held_presets")
-async def held_presets() -> list[HeldPresetRow]:
-    """Empty: no copy of Bambuddy's local presets is kept (#7244). Only a print worker of
-    an older build calls it, during a roll."""
-    return []
-
-
-@router.get("/held-presets/documents", name="crud_print_held_preset_documents")
-async def held_preset_documents(
-    id: Annotated[list[int], Query(default_factory=list)],
-) -> dict[int, LocalPresetDetail]:
-    """Empty, as ``…/held-presets`` (#7244)."""
-    return {}
 
 
 @router.get("/own-presets", name="crud_print_own_presets")

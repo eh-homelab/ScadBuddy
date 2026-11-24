@@ -1,6 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { useLocation } from 'react-router'
+import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
+import { server } from '../../mocks/server'
+import { seedEntityProperties } from '../../mocks/features/entities'
+import { spoolId } from '../../mocks/features/filament/seed'
 import { renderPage } from '../../test/utils'
 import { SpoolsTab } from './SpoolsTab'
 
@@ -97,5 +101,30 @@ describe('the Spools tab search', () => {
     await table()
     await user.keyboard('/')
     expect(screen.getByRole('searchbox', { name: 'Search spools' })).toHaveFocus()
+  })
+
+  it('reads the properties again when the tab loads its spools again (#7026)', async () => {
+    const { user } = render('/filament/spools?q=LOT-77')
+    expect(await screen.findByText('No spool matches “LOT-77” with these filters.')).toBeInTheDocument()
+    seedEntityProperties(`spool:${spoolId(3)}`, { lot: 'LOT-77' })
+    await user.click(screen.getByRole('button', { name: 'Sync weights from AMS' }))
+    await waitFor(async () => expect(numbers(await table())).toEqual(['3']))
+  })
+
+  it('keeps the property values it has when a reload cannot read them (#7026)', async () => {
+    seedEntityProperties(`spool:${spoolId(3)}`, { lot: 'LOT-77' })
+    const { user } = render('/filament/spools?q=LOT-77')
+    await waitFor(async () => expect(numbers(await table())).toEqual(['3']))
+    let failed = 0
+    server.use(
+      http.get('/api/v1/entity-kinds/:kind/properties', () => {
+        failed++
+        return HttpResponse.json({ detail: 'down' }, { status: 503 })
+      }),
+    )
+    await user.click(screen.getByRole('button', { name: 'Sync weights from AMS' }))
+    await waitFor(() => expect(failed).toBeGreaterThan(0))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(numbers(await table())).toEqual(['3'])
   })
 })

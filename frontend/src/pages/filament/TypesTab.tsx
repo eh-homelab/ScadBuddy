@@ -10,6 +10,7 @@ import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { FilamentsEditor } from '../../components/orders/FilamentsEditor'
+import { readKindPropertyTexts } from '../../components/entities/api'
 import { addSku, matchesSearch, parseSearch, typeSearchDoc } from '../../lib/filamentSearch'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -73,6 +74,7 @@ export function TypesTab() {
   const [newest, setNewest] = useState<Map<string, PricePoint>>(new Map())
   const [pricesFailed, setPricesFailed] = useState(false)
   const [skus, setSkus] = useState<Map<string, string[]>>(new Map())
+  const [propertyTexts, setPropertyTexts] = useState<Map<string, string[]>>(new Map())
   const [notice, setNotice] = useState<string | null>(null)
   // Types whose add is in flight: a second click meanwhile would make a second pending item.
   const [adding, setAdding] = useState<ReadonlySet<string>>(new Set())
@@ -84,6 +86,15 @@ export function TypesTab() {
   const latest = useRef(0)
   const load = useCallback(async () => {
     const mine = ++latest.current
+    // #7026: each type's property values, searched as text, read on every load so an edit
+    // shows; beside the list, never holding it back. A failed read keeps the map it has
+    // (empty when the first read fails): the search still runs on everything else.
+    readKindPropertyTexts('spool_type').then(
+      (found) => {
+        if (mine === latest.current) setPropertyTexts(found)
+      },
+      () => {},
+    )
     try {
       const [types, spools, materials, subtypes, brands] = await Promise.all([
         listTypes({ includeArchived: true }),
@@ -157,7 +168,7 @@ export function TypesTab() {
   // Every type is loaded: a price book row linked to an archived type still names it.
   const tokens = parseSearch(search)
   const kept = data?.types.filter((type) => archived || !type.archived_at) ?? []
-  const shown = tokens.length && data ? kept.filter((type) => matchesSearch(typeSearchDoc(type, data.names, skus.get(type.id)), tokens)) : kept
+  const shown = tokens.length && data ? kept.filter((type) => matchesSearch(typeSearchDoc(type, data.names, skus.get(type.id), { properties: propertyTexts.get(type.id) }), tokens)) : kept
   const setParam = (key: string, value: string | null) => {
     const next = new URLSearchParams(params)
     if (value) next.set(key, value)

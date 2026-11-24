@@ -33,6 +33,7 @@ type config struct {
 	Command      string
 	API          string
 	ReadOnly     bool
+	WriteBack    bool
 	All          bool
 	AllowOther   bool
 	NoAllowOther bool
@@ -61,7 +62,8 @@ mount mounts Bambuddy's print library, through ScadBuddy's API, as a filesystem,
 unless --background.
 umount unmounts it and stops its process.
 status says whether it is mounted and its process running.
-unsent lists the writes whose upload failed, kept to be sent again, and exits.
+unsent lists the writes not yet sent (those whose upload failed and, with --write-back,
+every write until the retrier sends it), kept to be sent, and exits.
 allow-other turns on user_allow_other in /etc/fuse.conf (through sudo), so mounts let
 other users and Windows Explorer (\\wsl$) see them.
 
@@ -74,6 +76,7 @@ func newFlagSet(cfg *config) *flag.FlagSet {
 	set.StringVar(&cfg.API, "api", defaultAPI(), "ScadBuddy's API root, like http://host/api/v1 (default $BAMBUDDY_FS_API, else the deployed ScadBuddy)")
 	set.StringVar(&cfg.TokenFile, "token-file", os.Getenv("BAMBUDDY_FS_TOKEN_FILE"), "a file holding a personal access token from ScadBuddy's Settings → Access tokens, sent on every call (default $BAMBUDDY_FS_TOKEN_FILE; none when unset)")
 	set.BoolVar(&cfg.ReadOnly, "ro", false, "refuse every write with EROFS")
+	set.BoolVar(&cfg.WriteBack, "write-back", false, "close returns once a write is queued under --state-dir, and the retrier uploads it; close no longer reports a failed upload")
 	set.BoolVar(&cfg.All, "all", false, "list every file, not only unsliced 3MFs")
 	set.BoolVar(&cfg.AllowOther, "allow-other", false, "fail unless other users and processes may see the mount (FUSE allow_other; on by default whenever "+fuseConf+" has user_allow_other)")
 	set.BoolVar(&cfg.NoAllowOther, "no-allow-other", false, "only the mounting user sees the mount")
@@ -90,7 +93,7 @@ func newFlagSet(cfg *config) *flag.FlagSet {
 }
 
 func stateDirFlag(set *flag.FlagSet, cfg *config) {
-	set.StringVar(&cfg.StateDir, "state-dir", defaultStateDir(), "where writes whose upload failed are kept until they are sent")
+	set.StringVar(&cfg.StateDir, "state-dir", defaultStateDir(), "where writes not yet sent are kept: failed uploads and, with --write-back, every write until it is sent")
 }
 
 // byteSize is a flag's size in bytes: a number with an optional binary suffix, K, M,
@@ -382,7 +385,7 @@ func run(cfg config) int {
 	// 1 s if the mount failed, when there is little to send and the user waits.
 	flush := 5 * time.Second
 	defer func() { stopTelemetry(flush) }()
-	root := fsys.NewRoot(lib, fsys.Options{All: cfg.All, ReadOnly: cfg.ReadOnly, TTL: cfg.TTL, CacheDir: cacheDir, CacheMax: int64(cfg.CacheMax), StateDir: cfg.StateDir})
+	root := fsys.NewRoot(lib, fsys.Options{All: cfg.All, ReadOnly: cfg.ReadOnly, WriteBack: cfg.WriteBack, TTL: cfg.TTL, CacheDir: cacheDir, CacheMax: int64(cfg.CacheMax), StateDir: cfg.StateDir})
 	ttl := cfg.TTL
 	server, err := fs.Mount(cfg.Mountpoint, root, &fs.Options{
 		EntryTimeout: &ttl,

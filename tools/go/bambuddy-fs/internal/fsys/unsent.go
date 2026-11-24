@@ -22,7 +22,8 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 )
 
-// Unsent writes (#2865). A write whose upload fails is the user's only copy, so its
+// Unsent writes (#2865). A write whose upload fails, and with --write-back every write
+// (#7286), is the user's only copy, so its
 // bytes move to <state dir>/unsent/<seq>/ (contents, and record.json saying where it
 // goes), not to the cache directory, which cache cleaners may empty. The entry stays
 // in its folder, read from that copy, and can be renamed or removed like any file
@@ -559,8 +560,12 @@ func (q *queue) reschedule(e *entry) {
 }
 
 // backoff is the wait after attempts failed attempts: retryFirst doubling up to
-// retryMax, each within 20% either way, and never past retryMax.
+// retryMax, each within 20% either way, and never past retryMax. A write queued before
+// any attempt (--write-back) waits for nothing.
 func (q *queue) backoff(attempts int) time.Duration {
+	if attempts == 0 {
+		return 0
+	}
 	d := q.first
 	for i := 1; i < attempts && d < q.max; i++ {
 		d *= 2
@@ -791,7 +796,8 @@ func (t *tree) send(ctx context.Context, e *entry) {
 		e.sending.Unlock()
 		return
 	}
-	// An attempt is the write's (Attempts+1)th: the first was its own upload.
+	// The retry's number is Attempts+1: Attempts counts the tries already made (the
+	// write's own upload, or none for a write-back entry, which is only queued).
 	ctx, retry := telemetry.StartRetry(ctx, rec.Attempts+1)
 	result, sentID := telemetry.RetryFailed, 0
 	defer func() { retry.End(result, sentID) }()

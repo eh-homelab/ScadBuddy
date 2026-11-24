@@ -65,6 +65,21 @@ function combinationCount(listing: StorefrontListing): number {
   return sizes.length === 0 ? 0 : sizes.reduce((a, b) => a * b, 1)
 }
 
+/**
+ * #6710 PR 6 — the file listings published in this tab, read again from `sessionStorage`:
+ * the public page's mock (`storefrontPublic.ts`) shows them, as the CRUD side lists every
+ * published listing. The public page is another page load, so it reads them there.
+ */
+export function publishedFiles(): StorefrontListing[] {
+  let stored: StorefrontListing[]
+  try {
+    stored = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? '[]') as StorefrontListing[]
+  } catch {
+    stored = []
+  }
+  return stored.filter((listing) => listing.published && listing.source === 'library_file')
+}
+
 function save(): void {
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(listings))

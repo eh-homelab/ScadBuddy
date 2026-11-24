@@ -8,7 +8,7 @@ const SECTIONS = [
   { id: 'colour-and-cost', title: 'Colour and cost' },
   { id: 'printers', title: 'Printers' },
   { id: 'storage', title: 'Storage' },
-  { id: 'files-and-links', title: 'Files and links' },
+  { id: 'files-and-links', title: 'Files, links and properties' },
   { id: 'history', title: 'History' },
 ] as const
 

@@ -764,9 +764,7 @@ class Fulfilment(BaseModel):
     #: The archives' printing time and filament, summed (§8.2).
     actual_seconds: int | None = None
     actual_grams: float | None = None
-    #: When the media import last asked Bambuddy to scan the printer for the timelapse,
-    #: and when it last read the attempt's archives for media (#7231).
-    timelapse_scanned_at: datetime | None = None
+    #: When the media import last read the attempt's archives for media (#7231).
     media_checked_at: datetime | None = None
 
 
