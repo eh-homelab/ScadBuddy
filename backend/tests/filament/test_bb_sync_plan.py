@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync, SyncDirection
+from scadbuddy.entities.registry import EntityStore
 from scadbuddy.filament.bb_sync_models import BbSnapshot, BbWrite, SyncPlan, seen_row
 from scadbuddy.filament.bb_sync_plan import (
     _CATALOG_FIELDS,
@@ -54,6 +55,10 @@ from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
+from scadbuddy.inventory.items import ItemStore
+from scadbuddy.inventory.models import ItemInput, OfferInput
+from scadbuddy.inventory.offers import OfferStore
+from scadbuddy.orders.models import Actor
 from tests.bambuddy.conftest import recording
 from tests.conftest import PgPool
 
@@ -647,6 +652,24 @@ def test_supplier_links_carry_the_sku_and_the_price(pg_pool: PgPool) -> None:
             "is_purchase_source": False,
         }
     ]
+
+
+def test_a_supplier_with_only_item_offers_has_no_link(pg_pool: PgPool) -> None:
+    """D16 (#7067): only filament reaches Bambuddy. A supplier whose only offer is a
+    `supplier_offers` row for a non-filament item is in no spool's supplier links."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shop = f.suppliers.create(SupplierCreate(name="Bolt Depot"))
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_suppliers SET bb_supplier_id = 7")
+    items = ItemStore(pg_pool, EntityStore(pg_pool))
+    nut = items.create(ItemInput(kind_id="hardware", name="M3 nut"), Actor(kind="browser"))
+    OfferStore(pg_pool, lambda: "USD").create(
+        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3"), Actor(kind="browser")
+    )
+    sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
+    _link(pg_pool, spool, 50)
+    assert _plan(f, _snap([_row(50)]), sync).writes == []
 
 
 # -- deferrals that clear, and those that do not (R-T4-1, R-T4-2) -----------------------
