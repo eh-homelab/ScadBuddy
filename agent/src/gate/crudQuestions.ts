@@ -99,7 +99,7 @@ export type DoneFacts = { windows: AwayWindow[]; touches: DoneTouch[] }
 /** QuestionService's routes. */
 export interface QuestionRoutes {
   entry(id: string): Promise<QuestionRow | undefined>
-  pending(principal: Owner): Promise<PendingRow[]>
+  pending(principal: Owner, sessionId?: string): Promise<PendingRow[]>
   gateAnswer(requestId: string): Promise<GateAnswer | undefined>
   answer(call: AnswerCall): Promise<Logged[]>
   /**
@@ -141,8 +141,10 @@ export class CrudQuestions implements QuestionRoutes {
     return entry ?? undefined
   }
 
-  async pending(principal: Owner): Promise<PendingRow[]> {
-    const { questions } = await this.#call<{ questions: PendingRow[] }>('the pending summaries', '/questions/pending', {
+  async pending(principal: Owner, sessionId?: string): Promise<PendingRow[]> {
+    // In the query: an API from before #7311 ignores it, and the caller filters by session too.
+    const only = sessionId === undefined ? '' : qs({ session_id: sessionId })
+    const { questions } = await this.#call<{ questions: PendingRow[] }>('the pending summaries', `/questions/pending${only}`, {
       body: wellFormed({ kind: principal.kind, id: principal.id }),
     })
     return questions
