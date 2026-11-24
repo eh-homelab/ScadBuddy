@@ -295,8 +295,8 @@ module path), `place` (a station name, nullable), `assignee` (nullable principal
    update landed, so a task is never answered without its run. One decision row per call
    picks the winner of two answers. A failure's message never quotes the rejected value.
 5. The run marks its task with the answer it received, and `prompt()` returns the answer as a
-   dict, resolved as flow inputs are (`resolve_inputs`: defaults filled, then the model built
-   from the schema), so the script reads `answer["email"]`.
+   dict with its defaults filled in and typed by a model built from the schema, as flow inputs
+   are (no pattern runs in the workflow), so the script reads `answer["email"]`.
 
 The same, as a sequence:
 
