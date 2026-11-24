@@ -55,6 +55,7 @@ from scadbuddy.bambuddy.models import LocalPresetDetail
 from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.rfid_push import acquire_lock
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.attachments import blob_path, keep_file
 from scadbuddy.slicing.own_presets import OwnRow, facts, sb_id, sb_ref
@@ -677,6 +678,11 @@ def links_elsewhere_on(pool: ConnectionPool[Conn], configured: str) -> bool:
     return state is not None and state["instance"] not in (None, configured)
 
 
+#: The session advisory lock one replica holds while it runs `adopt_at_start`'s step, so
+#: the replicas of one start do not each read Bambuddy's presets (#7244 review).
+ADOPT_LOCK = "scadbuddy:filament:adopt_at_start"
+
+
 async def adopt_at_start(
     pool: ConnectionPool[Conn],
     blobs: Callable[[], BlobStore],
@@ -690,11 +696,19 @@ async def adopt_at_start(
     Bambuddy than the configured one, no call either (`links_elsewhere_on`), since a local id
     means something only on the Bambuddy that issued it. A failed try is logged and tried
     again every ``retry_s`` until one ends; ids Bambuddy no longer holds are logged and left,
-    each an error the print dialog shows. Never raises."""
+    each an error the print dialog shows. One replica does it: each try takes the session
+    try-lock `ADOPT_LOCK`, and a replica that finds it held leaves the step to its holder.
+    Never raises."""
     while True:
+        held = None
         try:
             ids = await asyncio.to_thread(bound_bb_ids, pool)
             if not ids:
+                return
+            conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
+            held = await acquire_lock(conninfo, ADOPT_LOCK)
+            if held is None:
+                logger.info("another replica adopts the bound Bambuddy local presets")
                 return
             settings = await asyncio.to_thread(load)
             if not settings.bambuddy_url:
@@ -737,6 +751,9 @@ async def adopt_at_start(
                 "could not adopt the bound Bambuddy local presets; trying again later",
                 extra={"error": type(error).__name__},
             )
+        finally:
+            if held is not None:
+                await asyncio.to_thread(held.close)
         await asyncio.sleep(retry_s)
 
 

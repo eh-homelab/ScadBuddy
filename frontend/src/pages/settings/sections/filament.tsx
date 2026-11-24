@@ -97,7 +97,7 @@ const SYNC_ROWS: Record<SyncKind, { label: string; help: string }> = {
   },
   presets: {
     label: 'Presets and K values',
-    help: "Each spool's filament presets and K values. While Bambuddy's changes come in (Bambuddy → ScadBuddy or Both ways), each pull also copies Bambuddy's filament presets into ScadBuddy's own, with Bambuddy's later edits. Otherwise nothing copies them unless you import them below.",
+    help: "Each spool's filament presets and K values. While Bambuddy's changes come in (Bambuddy → ScadBuddy or Both ways), each pull also makes the presets your spools and types name by Bambuddy's id ScadBuddy's own, and presets taken from Bambuddy earlier take its later edits. Otherwise nothing copies them unless you import them below.",
   },
 }
 
@@ -172,7 +172,7 @@ function SyncRows({ form }: { form: BackendSettings }) {
 
 /** #7244 — what the presets import found, in a sentence. */
 function importLine(done: PresetImport): string {
-  if (done.adopted === 0 && done.updated === 0) return "Nothing new: ScadBuddy already has Bambuddy's presets."
+  if (done.adopted === 0 && done.updated === 0) return "Nothing to import: no spool or type names a Bambuddy preset, and none taken from Bambuddy changed since."
   const parts = [
     done.adopted > 0 && `${plural(done.adopted, 'new preset', 'new presets')} from Bambuddy`,
     done.updated > 0 && `${plural(done.updated, 'preset', 'presets')} updated to Bambuddy's version`,

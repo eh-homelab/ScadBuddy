@@ -948,7 +948,7 @@ describe("Import Bambuddy's presets (#7244)", () => {
     await user.click(button)
     expect(await within(filament).findByText("Imported: 2 new presets from Bambuddy, 1 preset updated to Bambuddy's version.")).toBeInTheDocument()
     await user.click(button)
-    expect(await within(filament).findByText("Nothing new: ScadBuddy already has Bambuddy's presets.")).toBeInTheDocument()
+    expect(await within(filament).findByText("Nothing to import: no spool or type names a Bambuddy preset, and none taken from Bambuddy changed since.")).toBeInTheDocument()
     expect(calls).toBe(2)
     // The import saves nothing of the form: the direction stays as it was.
     expect(mockSettings().filament_sync).toMatchObject({ presets: 'sb_to_bb' })

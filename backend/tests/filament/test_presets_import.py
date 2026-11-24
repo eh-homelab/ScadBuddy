@@ -4,6 +4,8 @@ bindings that still name a Bambuddy local id. No copy of Bambuddy's presets is k
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
 from uuid import UUID
 
@@ -13,8 +15,10 @@ import respx
 
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.core.settings import FilamentSync, SyncDirection
-from scadbuddy.filament.bb_pull_models import PullOutcome
+from scadbuddy.filament.bb_pull_models import PullOutcome, PullStart
+from scadbuddy.filament.rfid_push import try_lock_on
 from scadbuddy.filament.sb_presets import (
+    ADOPT_LOCK,
     FilamentPresetStore,
     LivePresets,
     PresetImport,
@@ -24,8 +28,10 @@ from scadbuddy.filament.sb_presets import (
 )
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.slicing.own_presets import sb_id
+from scadbuddy.spools import activities
 from scadbuddy.spools.activities import filament_pull_activity
 from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.workflows.spool_refresh import FILAMENT_PULL_TIMEOUT
 from tests.conftest import PgPool
 from tests.filament.test_bambuddy_pull import _Execute, _filament
 from tests.filament.test_sb_presets import MemoryPresets, _bind, _bindings, _held, _type
@@ -241,3 +247,74 @@ async def test_the_start_asks_no_other_bambuddy_than_the_links_one(
         await adopt_at_start(pg_pool, lambda: LocalBlobStore(tmp_path), lambda: SETTINGS, retry_s=0)
         assert router.calls.call_count == 0
     assert _bindings(pg_pool, bound) == [("9", None)]
+
+
+async def test_the_start_leaves_the_adopt_to_the_replica_that_holds_its_lock(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """One replica adopts: another that finds `ADOPT_LOCK` held reads nothing (#7244
+    review)."""
+    bound = _type(pg_pool, "PLA-L")
+    _bind(pg_pool, bound, "9")
+    assert isinstance(pg_pool.conninfo, str)
+    held = try_lock_on(pg_pool.conninfo, ADOPT_LOCK)
+    assert held is not None
+    try:
+        with respx.mock() as router:
+            await adopt_at_start(
+                pg_pool, lambda: LocalBlobStore(tmp_path), lambda: SETTINGS, retry_s=0
+            )
+            assert router.calls.call_count == 0
+    finally:
+        held.close()
+    assert _bindings(pg_pool, bound) == [("9", None)]
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.mark.parametrize(
+    ("left_s", "logged"),
+    [(-1.0, "no time was left to import"), (0.05, "ran out of time importing")],
+)
+async def test_a_pull_that_leaves_the_import_no_time_says_so(
+    pg_pool: PgPool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    left_s: float,
+    logged: str,
+) -> None:
+    """A slow pull leaves the import what is left of the activity's timeout: none, or too
+    little, is a warning, and the pull's answer stands (#7244 review)."""
+    clock = _Clock()
+    monkeypatch.setattr(activities, "time", clock)
+    deadline = FILAMENT_PULL_TIMEOUT.total_seconds() - activities.IMPORT_MARGIN_S
+
+    class _Slow(_Execute):
+        async def __call__(self, start: PullStart) -> PullOutcome:
+            clock.now = deadline - left_s
+            return await super().__call__(start)
+
+    started: list[str] = []
+
+    async def slow_import() -> PresetImport:
+        started.append("import")
+        await asyncio.sleep(5)
+        return PresetImport(adopted=0, updated=0)
+
+    caplog.set_level(logging.WARNING)
+    run = filament_pull_activity(
+        _filament(pg_pool),
+        lambda: SETTINGS,
+        lambda: FilamentSync(presets="two_way"),
+        _Slow(PullOutcome(outcome="pulled")),
+        slow_import,
+    )
+    assert await run() == "pulled"
+    assert started == ([] if left_s < 0 else ["import"])
+    assert [r.getMessage() for r in caplog.records if logged in r.getMessage()]

@@ -404,8 +404,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " Bambuddy's usage rows are booked while spools or weights pulls."
             " Tags moves tag bindings; a new Bambuddy spool takes its tags whatever this says."
             " Presets moves Bambuddy's filament preset into a spool's presets; while it"
-            " pulls, each pull also imports Bambuddy's filament presets into ScadBuddy's own"
-            " (a new version when Bambuddy changed one ScadBuddy took). With presets off or"
+            " pulls, each pull also makes the presets your spools and types name by"
+            " Bambuddy's id ScadBuddy's own, and gives a preset taken from Bambuddy a new"
+            " version when Bambuddy changed it. With presets off or"
             " sb_to_bb nothing imports them; Import presets from Bambuddy now does it once,"
             " whatever this says."
             " With spools off, no spool is created or linked, so weights, presets, suppliers"
@@ -417,8 +418,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "spool_overlay_refresh_seconds": SettingDoc(
             "Pull from Bambuddy every",
             "How often Bambuddy's spools are pulled, on a schedule of their own so a print"
-            " never waits on Bambuddy. The pull imports Bambuddy's filament presets into"
-            " ScadBuddy's own only while Filament sync's presets pulls; ScadBuddy keeps no"
+            " never waits on Bambuddy. Only while Filament sync's presets pulls, the pull"
+            " makes the presets your spools and types name by Bambuddy's id ScadBuddy's"
+            " own; ScadBuddy keeps no"
             " copy of them and slices none of them. The same run"
             " reconciles each printer's report with the filament ledger (the capture"
             " backstop) and reads the Home Assistant sensors. A sensor's alert notification"

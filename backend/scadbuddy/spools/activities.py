@@ -163,10 +163,18 @@ async def _mirror(run: Callable[[], Awaitable[int]], budget: float) -> None:
 async def _import_presets(run: Callable[[], Awaitable[PresetImport]], budget: float) -> None:
     """The pull's presets import within ``budget`` seconds; never raises."""
     if budget <= 0:
-        activity.logger.warning("no time was left to import Bambuddy's presets")
+        activity.logger.warning(
+            "no time was left to import Bambuddy's presets; the next pull goes on"
+        )
         return
     try:
         done = await asyncio.wait_for(run(), budget)
+    except TimeoutError:
+        activity.logger.warning(
+            "ran out of time importing Bambuddy's presets; the next pull goes on",
+            extra={"budget_s": round(budget, 1)},
+        )
+        return
     except Exception as error:
         activity.logger.warning(
             "could not import Bambuddy's presets", extra={"error": type(error).__name__}
