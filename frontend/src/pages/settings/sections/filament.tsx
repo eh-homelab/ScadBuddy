@@ -854,10 +854,10 @@ function OverrideRow({ status }: { status: AsyncState<RfidStatus> }) {
     try {
       const answer = await call()
       if ('mode' in answer) {
-        status.setData({ ...answer.mode, devices: status.data?.devices })
+        status.setData(answer.mode)
         setReport(reportLine(answer))
       } else {
-        status.setData({ ...answer, devices: status.data?.devices })
+        status.setData(answer)
       }
     } catch (cause) {
       setProblem(cause instanceof ApiError ? cause.detail : 'The server could not be reached. Try again.')

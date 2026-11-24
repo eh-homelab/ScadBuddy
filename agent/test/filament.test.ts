@@ -924,28 +924,24 @@ describe('filament sensor and AMS weight tools (#6268)', () => {
 })
 
 const RFID = `${BACKEND}/api/v1/filament/rfid`
-const STATUS = { override_mode: true, state: 'applied', devices: [] }
+const STATUS = { override_mode: true, state: 'applied' }
 
 describe('filament RFID tools (#6264)', () => {
   it.each([
     ['filament_rfid_status', 'read', false],
-    ['filament_rfid_scan', 'read', false],
-    ['filament_spool_ntag_confirm', 'write', false],
     ['filament_spool_bind_tag', 'write', false],
     ['filament_tag_unbind', 'write', false],
-    // Each changes Bambuddy itself (a setting, an AMS slot, a tag on a reader): outward and
+    // Each changes Bambuddy itself (a setting, an AMS slot): outward and
     // approved first, as the virtual-printer tools are (printers.ts).
     ['filament_rfid_override_mode', 'outward', true],
     ['filament_rfid_reconcile', 'outward', true],
-    ['filament_spool_ntag_write', 'outward', true],
-    ['filament_spool_ntag_cancel', 'outward', true],
   ])('%s is %s tier, gated: %s', (name, risk, gated) => {
     expect(tool(name).risk).toBe(risk)
     expect(tool(name).gated).toBe(gated)
   })
 
   it('never says "Writes ScadBuddy only" of a tool that can tell Bambuddy', () => {
-    for (const name of ['filament_spool_bind_tag', 'filament_tag_unbind', 'filament_spool_ntag_confirm']) {
+    for (const name of ['filament_spool_bind_tag', 'filament_tag_unbind']) {
       expect(tool(name).description).not.toContain('Writes ScadBuddy only')
       expect(tool(name).description).toContain('Bambuddy')
     }
@@ -953,10 +949,16 @@ describe('filament RFID tools (#6264)', () => {
     expect(tool('filament_rfid_reconcile').description).not.toContain('Bambuddy only')
   })
 
-  it('refuses a device id that is not one path segment', () => {
-    const t = tool('filament_spool_ntag_cancel')
-    expect(() => t.parse({ spool_id: ROW, device_id: '../x' })).toThrow()
-    expect(() => t.parse({ spool_id: ROW, device_id: 'sb-1a2b' })).not.toThrow()
+  it('has no SpoolBuddy tools', () => {
+    const names = new Set(ALL_TOOLS.map((t) => t.name))
+    for (const gone of [
+      'filament_rfid_scan',
+      'filament_spool_ntag_write',
+      'filament_spool_ntag_confirm',
+      'filament_spool_ntag_cancel',
+    ]) {
+      expect(names.has(gone)).toBe(false)
+    }
   })
 
   it('reads the status', async () => {
@@ -976,54 +978,6 @@ describe('filament RFID tools (#6264)', () => {
     const result = await t.execute(t.parse({ enabled: true }), ctx('outward'))
     expect(result.isError).toBeFalsy()
     expect(bodies).toEqual([{ enabled: true }])
-  })
-
-  it('scans with the timeout and the device', async () => {
-    const bodies: unknown[] = []
-    const found = { status: 'tag', tag_uid: '04AABBCC', kind: 'ntag_opentag', sb_spool: null }
-    server.use(
-      http.post(`${RFID}/scan`, async ({ request }) => {
-        bodies.push(await request.json())
-        return HttpResponse.json(found)
-      }),
-    )
-    const result = await runTool(tool('filament_rfid_scan'), { device_id: 'sb-1' }, ctx())
-    expect(firstText(result)).toEqual(found)
-    expect(bodies).toEqual([{ timeout_s: 30, device_id: 'sb-1' }])
-  })
-
-  it('writes an NTAG with {device_id, replace: false}', async () => {
-    const bodies: unknown[] = []
-    server.use(
-      http.post(`${SPOOL}/ntag/write`, async ({ request }) => {
-        bodies.push(await request.json())
-        return HttpResponse.json({ status: 'queued', warnings: [] })
-      }),
-    )
-    const write = tool('filament_spool_ntag_write')
-    const result = await write.execute(write.parse({ spool_id: ROW, device_id: 'sb-1' }), ctx('outward'))
-    expect(result.isError).toBeFalsy()
-    expect(bodies).toEqual([{ device_id: 'sb-1', replace: false }])
-  })
-
-  it('confirms and cancels', async () => {
-    const cancelled: unknown[] = []
-    server.use(
-      http.post(`${SPOOL}/ntag/confirm`, () =>
-        HttpResponse.json({ bound: true, tag_uid: '04AABBCC' }),
-      ),
-      http.post(`${SPOOL}/ntag/cancel`, async ({ request }) => {
-        cancelled.push(await request.json())
-        return new HttpResponse(null, { status: 204 })
-      }),
-    )
-    const confirmed = await runTool(tool('filament_spool_ntag_confirm'), { spool_id: ROW }, ctx())
-    expect(firstText(confirmed)).toEqual({ bound: true, tag_uid: '04AABBCC' })
-    const cancel = tool('filament_spool_ntag_cancel')
-    const result = await cancel.execute(cancel.parse({ spool_id: ROW, device_id: 'sb-1' }), ctx('outward'))
-    expect(result.isError).toBeFalsy()
-    expect(firstText(result)).toEqual({ cancel_requested: 'sb-1' })
-    expect(cancelled).toEqual([{ device_id: 'sb-1' }])
   })
 
   it('reconciles once', async () => {

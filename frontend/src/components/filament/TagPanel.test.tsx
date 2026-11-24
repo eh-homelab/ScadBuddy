@@ -22,6 +22,11 @@ describe('TagPanel', () => {
     expect(screen.getByRole('link', { name: 'Read or write with a phone' })).toHaveAttribute('href', filamentLinks.scan)
   })
 
+  it('has no scan button', async () => {
+    await render(2)
+    expect(screen.queryByRole('button', { name: 'Scan a tag' })).toBeNull()
+  })
+
   it('shows the open tag and takes it off', async () => {
     const { user, onChanged } = await render(4)
     expect(screen.getByText(/A1B2C3D4/)).toBeInTheDocument()
@@ -89,56 +94,6 @@ describe('TagPanel', () => {
     expect(bodies[0]).toMatchObject({ override: true, kind: 'bambu_mifare' })
   })
 
-  it('test_scanning_fills_the_form', async () => {
-    server.use(
-      http.post('*/api/v1/filament/rfid/scan', () =>
-        HttpResponse.json({ status: 'tag', tag_uid: '04A1B2C3', tray_uuid: null, kind: 'ntag_opentag', sb_spool: { id: spoolId(5), number: 5 } }),
-      ),
-    )
-    const { user } = await render(2)
-    await user.click(screen.getByRole('button', { name: 'Scan a tag' }))
-    await waitFor(() => expect(screen.getByLabelText('Tag UID')).toHaveValue('04A1B2C3'))
-    expect(screen.getByLabelText('Tray UUID')).toHaveValue('')
-    expect(screen.getByRole('combobox', { name: 'Tag kind' })).toHaveTextContent('OpenTag (NTAG)')
-    expect(screen.getByRole('link', { name: 'Spool #5' }).parentElement).toHaveTextContent('Spool #5 already holds this tag')
-  })
-
-  it('waits for the reader and sends the 30 second window', async () => {
-    let sent: unknown
-    server.use(
-      http.post('*/api/v1/filament/rfid/scan', async ({ request }) => {
-        sent = await request.json()
-        await new Promise((resolve) => setTimeout(resolve, 150))
-        return HttpResponse.json({ status: 'timeout' })
-      }),
-    )
-    const { user } = await render(2)
-    await user.click(screen.getByRole('button', { name: 'Scan a tag' }))
-    expect(await screen.findByText('Hold the tag to the reader')).toBeInTheDocument()
-    await screen.findByText('No tag seen')
-    expect(sent).toMatchObject({ timeout_s: 30 })
-  })
-
-  it('test_a_scan_timeout_says_so', async () => {
-    server.use(http.post('*/api/v1/filament/rfid/scan', () => HttpResponse.json({ status: 'timeout' })))
-    const { user } = await render(2)
-    await user.click(screen.getByRole('button', { name: 'Scan a tag' }))
-    expect(await screen.findByText('No tag seen')).toBeInTheDocument()
-    expect(screen.getByLabelText('Tag UID')).toHaveValue('')
-  })
-
-  it('says a reader that cannot be reached apart from no tag seen', async () => {
-    server.use(
-      http.post('*/api/v1/filament/rfid/scan', () =>
-        HttpResponse.json({ title: 'Bad Gateway', status: 502, detail: 'Bambuddy refused' }, { status: 502, headers: { 'Content-Type': 'application/problem+json' } }),
-      ),
-    )
-    const { user } = await render(2)
-    await user.click(screen.getByRole('button', { name: 'Scan a tag' }))
-    expect(await screen.findByText('Could not reach the reader through Bambuddy')).toBeInTheDocument()
-    expect(screen.queryByText('No tag seen')).toBeNull()
-  })
-
   const LOCK = 'Weight locked: the AMS percentage never changes grams left'
 
   it('marks an open override binding, and says the weight is locked only when the spool is', async () => {
@@ -161,18 +116,6 @@ describe('TagPanel', () => {
     await user.type(screen.getByLabelText('Tag UID'), '04A1B2C3D4E5F6')
     await user.click(screen.getByRole('button', { name: 'Bind tag' }))
     await waitFor(() => expect(screen.queryByText('Override')).toBeNull())
-  })
-
-  it('does not say the spool you are on already holds the tag', async () => {
-    server.use(
-      http.post('*/api/v1/filament/rfid/scan', () =>
-        HttpResponse.json({ status: 'tag', tag_uid: '04A1B2C3', tray_uuid: null, kind: 'ntag_opentag', sb_spool: { id: spoolId(2), number: 2 } }),
-      ),
-    )
-    const { user } = await render(2)
-    await user.click(screen.getByRole('button', { name: 'Scan a tag' }))
-    await waitFor(() => expect(screen.getByLabelText('Tag UID')).toHaveValue('04A1B2C3'))
-    expect(screen.queryByText(/already holds this tag/)).toBeNull()
   })
 
   it('shows no override mark on a plain binding', async () => {

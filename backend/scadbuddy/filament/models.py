@@ -29,7 +29,6 @@ from pydantic import (
     model_validator,
 )
 
-from scadbuddy.bambuddy.models import SpoolBuddyDevice
 from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.label_templates import LabelTemplate, LabelTemplateChoice
 from scadbuddy.slicing.own_presets import sb_id
@@ -2180,7 +2179,6 @@ class RfidStatus(BaseModel):
     bambuddy_auto_add: bool | None = None
     saved_auto_add: bool | None = None
     detail: str | None = None
-    devices: list[SpoolBuddyDevice] = Field(default_factory=list)
 
 
 class RfidModeSet(BaseModel):
@@ -2198,66 +2196,8 @@ class RfidReconcileReport(BaseModel):
     slots: SlotReport | None = None
 
 
-#: A SpoolBuddy device id as Bambuddy mints them (``sb-`` and the MAC, in ``DeviceResponse``
-#: of ``rfid-routes.json``; its write and scan bodies cap it at 50 characters). It becomes
-#: a path segment of a Bambuddy call, so nothing outside this set may pass.
-DeviceId = Annotated[str, Field(pattern=r"^[A-Za-z0-9._:-]{1,50}$")]
-
-
 class SpoolRef(BaseModel):
     """An SB spool by its id and the number a person reads."""
 
     id: UUID
     number: int
-
-
-class ScanRequest(_In):
-    """The body of ``POST /filament/rfid/scan``: how long to wait for a tag (at most 50
-    seconds, below the ingress's 60), and the SpoolBuddy device to listen to (any device
-    when unset)."""
-
-    timeout_s: Annotated[int, Field(ge=1, le=50)] = 30
-    device_id: DeviceId | None = None
-
-
-class ScanResult(BaseModel):
-    """What a SpoolBuddy reader read: ``tag`` with the tag's keys, its ``kind`` and the SB
-    spool that holds it (the one whose open binding names the keys, else the one linked
-    to ``bambuddy_spool_id``), or ``timeout`` with nothing else set."""
-
-    status: Literal["tag", "timeout"]
-    tag_uid: str | None = None
-    tray_uuid: str | None = None
-    tag_type: str | None = None
-    kind: TagKind | None = None
-    bambuddy_spool_id: int | None = None
-    sb_spool: SpoolRef | None = None
-
-
-class NtagWrite(_In):
-    """The body of ``POST /filament/spools/{id}/ntag/write``. ``replace`` lets the write
-    go over a spool whose open tag was bound with ``override``."""
-
-    device_id: DeviceId
-    replace: bool = False
-
-
-class NtagCancel(_In):
-    """The body of ``POST /filament/spools/{id}/ntag/cancel``."""
-
-    device_id: DeviceId
-
-
-class NtagQueued(BaseModel):
-    """A write SpoolBuddy has queued; ``warnings`` are what Bambuddy says is missing from
-    the spool's record."""
-
-    status: Literal["queued"] = "queued"
-    warnings: list[str] = Field(default_factory=list)
-
-
-class NtagConfirm(BaseModel):
-    """Whether the written tag is now the spool's: ``bound`` with the new ``tag_uid``."""
-
-    bound: bool
-    tag_uid: str | None = None

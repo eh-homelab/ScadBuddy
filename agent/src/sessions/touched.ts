@@ -771,8 +771,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_sensor_save',
   'filament_sensor_archive',
   'filament_spool_import',
-  // #6264: the RFID override mode, its reconcile and the NTAG write calls touch the filament
-  // inventory (or a SpoolBuddy reader), and none is a recorded resource kind.
+  // #6264: the RFID override mode and its reconcile touch the filament inventory, and
+  // neither is a recorded resource kind.
   'filament_rfid_override_mode',
   'filament_rfid_reconcile',
   // #6265: "Sync now" writes Bambuddy and the sync's links and status, no recorded kind.
@@ -782,9 +782,6 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // #7273: a tag and an NFC job are no recorded resource kind.
   'nfc_read',
   'nfc_write',
-  'filament_spool_ntag_write',
-  'filament_spool_ntag_confirm',
-  'filament_spool_ntag_cancel',
   // Purchasing (#6266: suppliers, products, price points, invoices, the shopping list) is
   // no recorded resource kind either; an invoice's spools are in each spool's ledger.
   'filament_supplier_upsert',

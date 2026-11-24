@@ -1941,7 +1941,6 @@ dependencies = [
     { name = "temporalio", extra = ["opentelemetry"] },
     { name = "trimesh" },
     { name = "uvicorn", extra = ["standard"] },
-    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -1999,7 +1998,6 @@ requires-dist = [
     { name = "temporalio", extras = ["opentelemetry"], specifier = ">=1.33.0,<1.37" },
     { name = "trimesh", specifier = ">=4.5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-    { name = "websockets", specifier = ">=15" },
 ]
 
 [package.metadata.requires-dev]

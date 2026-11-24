@@ -4,15 +4,11 @@ changes ``filament_sync``. ``filament_nudges`` (`tests/api/conftest.py`) records
 
 from __future__ import annotations
 
-from typing import Any
-
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.filament import ntag
-from scadbuddy.filament.models import ScanResult
 from tests.api.test_filament import SPOOLS, _spool
 from tests.api.test_send import API, configure
 from tests.api.test_tray_spools import _path, _sb_spool, lan_printer  # noqa: F401
@@ -54,11 +50,10 @@ def test_the_ams_weights_sync_does_not_nudge(
 
 
 @respx.mock
-def test_the_bambuddy_import_and_the_rfid_scan_do_not_nudge(
+def test_the_bambuddy_import_does_not_nudge(
     client: TestClient, filament_nudges: list[bool], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Decision 163: the import pulls and the scan writes nothing, so neither nudges a
-    push pass."""
+    """Decision 163: the import pulls and writes nothing, so it does not nudge a push pass."""
     configure(client)
     filament_nudges.clear()
     respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[]))
@@ -66,13 +61,6 @@ def test_the_bambuddy_import_and_the_rfid_scan_do_not_nudge(
     imported = client.post("/api/v1/filament/bambuddy/import")
     assert imported.status_code == 200, imported.text
 
-    async def scan(*args: Any, **kwargs: Any) -> ScanResult:
-        return ScanResult(status="timeout")
-
-    monkeypatch.setattr(ntag, "scan", scan)
-    scanned = client.post("/api/v1/filament/rfid/scan", json={"timeout_s": 1})
-    assert scanned.status_code == 200, scanned.text
-    assert scanned.json()["status"] == "timeout"
     assert filament_nudges == []
 
 

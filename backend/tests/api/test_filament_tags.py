@@ -651,3 +651,15 @@ def test_a_failed_job_keeps_the_pages_error(client: TestClient) -> None:
     assert got.json()["result"] == {"error": "The person declined."}
     too_long = client.post(f"{JOBS}/{_armed(client)}/result", json={"error": "x" * 501})
     assert too_long.status_code == 422
+
+
+def test_the_spoolbuddy_routes_are_gone(client: TestClient) -> None:
+    spool = _spool(client)
+    base = f"{SPOOLS}/{spool['id']}/ntag"
+    for path in (
+        "/api/v1/filament/rfid/scan",
+        f"{base}/write",
+        f"{base}/confirm",
+        f"{base}/cancel",
+    ):
+        assert client.post(path, json={}).status_code in (404, 405), path

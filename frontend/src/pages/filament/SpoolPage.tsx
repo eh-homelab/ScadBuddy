@@ -48,7 +48,6 @@ import { GramsChart } from '../../components/filament/GramsChart'
 import { Section, SectionIndex } from '../../components/filament/SpoolSections'
 import { SpoolMetricsPanel } from '../../components/filament/SpoolMetricsPanel'
 import { SpoolTimeline } from '../../components/filament/SpoolTimeline'
-import { NtagPanel } from '../../components/filament/NtagPanel'
 import { TagPanel } from '../../components/filament/TagPanel'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
 import { LinksPanel } from '../../components/entities/LinksPanel'
@@ -855,8 +854,6 @@ export function SpoolPage() {
                       {saved.tag_encoded_at && <span>{`Tag written ${new Date(saved.tag_encoded_at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`}</span>}
                     </p>
                   )}
-                  <h3 className="mt-2 text-[13px] font-medium">Write a tag</h3>
-                  <NtagPanel spool={saved} onBound={() => void reload(true).catch((cause) => setError(message(cause)))} />
                 </>
               ) : (
                 <p className="text-[13px] text-muted-foreground">Save the spool first, then bind its tag.</p>

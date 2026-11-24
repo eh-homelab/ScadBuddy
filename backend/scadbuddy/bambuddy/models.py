@@ -1693,40 +1693,6 @@ class QueueItemCreate(BambuddyModel):
     cleanup_library_after_dispatch: bool = False
 
 
-class TagScan(BambuddyModel):
-    """One tag a SpoolBuddy reader read, from Bambuddy's WebSocket frame
-    ``spoolbuddy_tag_matched`` (``bb_spool_id`` is ``spool.id``) or
-    ``spoolbuddy_unknown_tag`` (``bb_spool_id`` is ``None``; it alone carries ``tag_type``).
-    The frames are in ``ws_events`` of ``tests/bambuddy/recordings/openapi/rfid-routes.json``
-    (``routes/spoolbuddy.py`` lines 667-690 and 788-797, v1.3.1)."""
-
-    device_id: str
-    tag_uid: str
-    tray_uuid: str | None = None
-    tag_type: str | None = None
-    bb_spool_id: int | None = None
-
-
-class SpoolBuddyDevice(BambuddyModel):
-    """A row of ``GET /api/v1/spoolbuddy/devices`` (``DeviceResponse`` in
-    ``tests/bambuddy/recordings/openapi/rfid-routes.json``, v1.3.1): the fields ScadBuddy
-    shows. ``device_id`` is the string the write and cancel routes take."""
-
-    id: int
-    device_id: str
-    hostname: str
-    has_nfc: bool = False
-    nfc_ok: bool = False
-    online: bool = False
-    last_seen: datetime | None = None
-    pending_command: str | None = None
-
-    @field_validator("last_seen")
-    @classmethod
-    def _seen_utc(cls, value: datetime | None) -> datetime | None:
-        return as_utc(value)
-
-
 class SlotConfigure(BaseModel):
     """The query of ``POST /api/v1/printers/{id}/slots/{ams}/{tray}/configure`` (#6264;
     the route's parameters in ``rfid-routes.json``, v1.3.1). ``tray_color`` is

@@ -299,10 +299,9 @@ same way, `vite.config.ts`).
   `components/filament/purchasing/` (`priceFormat.ts`).
   `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
   1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
-  Clear presets, `TagPanel` with "Tag is on spool #N — Move it here", which sends `override: false`, a "Scan a tag"
-  button (`scanTag`, 30 s), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
-  the override checkbox, on with a tray UUID and any kind but `ntag*` (ticking it sets the kind to `bambu_mifare`; the bind sends the flag only with that kind), and the Override mark, which is read again after every bind; `NtagPanel` writes an NTAG through a SpoolBuddy
-  reader and polls `confirmNtag` every 2 s for 60 s, says `Bound tag <uid>`, offers Cancel after the 60 s too and drops a queued write when the page unmounts, #6264) and `/filament/types/:id`
+  Clear presets, `TagPanel` with "Tag is on spool #N — Move it here", which sends `override: false`, a "Read or write with a phone"
+  link to the scan page (#7273), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
+  the override checkbox, on with a tray UUID and any kind but `ntag*` (ticking it sets the kind to `bambu_mifare`; the bind sends the flag only with that kind), and the Override mark, which is read again after every bind, #6264) and `/filament/types/:id`
   (`TypePage`; its Drying section, the temperature and hours a spool's drying form starts
   from unless the spool overrides them in Storage, the spool page saying where they came from
   and that a profile's are the AMS HT's (#6720, R-6714-18); its K table says who set each saved
@@ -345,7 +344,7 @@ same way, `vite.config.ts`).
   `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
   `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases; `rfid.ts` owns
-  `/filament/rfid/*` and `…/ntag/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
+  `/filament/rfid/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
   `e2e/filament-sensors.spec.ts` (a place's sensor, its limit and history, #6268) and
   `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
   total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy

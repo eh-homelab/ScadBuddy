@@ -258,16 +258,11 @@ export const claimNfcJob = (id: string, body: NfcJobClaimIn = {}) => request<Nfc
 /** Ends an armed job with what the tag gave, or with an `error`. */
 export const postNfcJobResult = (id: string, body: NfcJobResultIn) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/result`, json('POST', body))
 
-// -- NTAG through SpoolBuddy (#6264)--------------------------------------------------
+// -- The RFID override mode (#6264) --------------------------------------------------
 
-export type ScanResult = Schemas['ScanResult']
-export type NtagQueued = Schemas['NtagQueued']
-export type NtagConfirm = Schemas['NtagConfirm']
 export type RfidStatus = Schemas['RfidStatus']
 export type RfidReconcileReport = Schemas['RfidReconcileReport']
-export type SpoolBuddyDevice = Schemas['SpoolBuddyDevice']
 
-/** `devices` is read only by the GET: the PUT answers an empty list. */
 export const getRfidStatus = () => request<RfidStatus>(`${BASE}/rfid/status`)
 
 /** Waits up to 5 s for the write to land: `pending` with the detail `busy` means it applies on the next refresh. */
@@ -322,28 +317,6 @@ export const resetSyncLinks = (confirmInstance: string, expectKept: boolean) =>
     `${BASE}/sync/reset-links`,
     json('POST', { confirm_instance: confirmInstance, expect_kept: expectKept }),
   )
-
-/**
- * Waits up to `timeoutS` seconds (1 to 50) for a tag at a SpoolBuddy reader; a timeout is a 200 with
- * `status: 'timeout'`. The request stays open that long: pass a `signal` to stop waiting.
- */
-export const scanTag = (options: { timeoutS?: number; deviceId?: string } = {}, signal?: AbortSignal) =>
-  request<ScanResult>(`${BASE}/rfid/scan`, {
-    ...json('POST', { timeout_s: options.timeoutS, device_id: options.deviceId }),
-    signal,
-  })
-
-/** Queues one tag write on the device for the spool's Bambuddy record; binds nothing (see `confirmNtag`). */
-export const writeNtag = (spoolId: string, deviceId: string, replace = false) =>
-  request<NtagQueued>(`${BASE}/spools/${seg(spoolId)}/ntag/write`, json('POST', { device_id: deviceId, replace }))
-
-/** Binds the tag Bambuddy wrote, when it did; `bound: false` changes nothing. */
-export const confirmNtag = (spoolId: string) =>
-  request<NtagConfirm>(`${BASE}/spools/${seg(spoolId)}/ntag/confirm`, { method: 'POST' })
-
-/** Drops the write the device has queued. */
-export const cancelNtag = (spoolId: string, deviceId: string) =>
-  request<void>(`${BASE}/spools/${seg(spoolId)}/ntag/cancel`, json('POST', { device_id: deviceId }))
 
 export const unbindTag = (tagId: string) => request<TagBinding>(`${BASE}/tags/${seg(tagId)}/binding`, { method: 'DELETE' })
 

@@ -182,10 +182,11 @@ search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdf
   - `data_origin` says how the spool's data came in, in Bambuddy's words (`rfid_auto`,
     `rfid_linked`, `nfc_link`, `opentag3d`). It is read only. The pull takes Bambuddy's
     value; a person's tag bind sets `rfid_linked` when the tag's stored kind is a Bambu
-    tag, else `nfc_link`; a confirmed NTAG write sets `opentag3d`.
+    tag, else `nfc_link`; a tag written from the phone page (#7273) sets `openspool` or
+    `opentag3d`, the format it wrote.
     The push sends it when SB has one, and the tag push sends it to `link-tag`.
   - `added_full` (a person edits it) and `tag_encoded_at` (Bambuddy's `encode_time`, set
-    by a confirmed NTAG write) come from Bambuddy on the pull. Bambuddy takes no write of
+    by a tag written from the phone page) come from Bambuddy on the pull. Bambuddy takes no write of
     either, so they are never pushed. With the baseline below they are kept in the link's
     `bb_seen` (`PULL_SEEN_FIELDS`), and after a push the pull judges them against it, never
     against the push's echo (R-7149-8).

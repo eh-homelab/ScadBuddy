@@ -315,20 +315,6 @@ function effectiveKValues(spoolId: string): S['EffectiveKValue'][] {
 }
 
 const tagById = (id: string) => state.tags.find((tag) => tag.id === id)
-/** What the NTAG write route (`rfid.ts`) asks of a spool: its Bambuddy link, and whether its open tag was bound with `override`. */
-export const hasBambuddyLink = (spoolId: string) => state.bbLinks.has(spoolId)
-export const holdsOverrideTag = (spoolId: string) => state.bindings.some((one) => one.spool_id === spoolId && !one.unbound_at && one.override)
-/** `ntag/confirm` when Bambuddy holds the written tag: it becomes the spool's open tag (`rfid.ts`). */
-export function bindWrittenNtag(spoolId: string, tagUid: string) {
-  const row = findSpool(spoolId)
-  if (!row) return
-  const tag: S['Tag'] = { id: newId(), kind: 'ntag_opentag', tag_uid: tagUid, tray_uuid: null, raw_blob: null, note: null, created_at: now() }
-  state.tags.push(tag)
-  const open = state.bindings.find((one) => one.spool_id === spoolId && !one.unbound_at)
-  if (open) closeBinding(open, 'rebound')
-  state.bindings.push({ id: newId(), tag_id: tag.id, spool_id: spoolId, override: false, bound_at: now(), unbound_at: null, reason: null })
-  addEvent(spoolId, 'tag_bound', { data: { tag_id: tag.id } })
-}
 const openBinding = (tagId: string) => state.bindings.find((one) => one.tag_id === tagId && !one.unbound_at)
 const numberOf = (spoolId: string) => findSpool(spoolId)?.number ?? null
 
