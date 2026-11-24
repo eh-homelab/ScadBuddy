@@ -1162,12 +1162,9 @@ class Catalogue:
             except InvalidModelMetaError as error:
                 meta_error = error.reason
         inputs_version = self._inputs_version(template_id, parsed) if parsed is not None else 0
-        if not BIGINT_MIN <= inputs_version <= BIGINT_MAX:
-            # Kept as meta Postgres refuses (review A-I1): the column is bigint.
-            assert data is not None
-            meta, parsed, inputs_version = None, None, 0
-            meta_error = "not storable (INPUTS_VERSION is outside the bigint range)"
-            meta_text = _storable_text(data.decode("utf-8", "replace")[:META_TEXT_MAX])
+        # The column is bigint (review A-I1). Past its range the row keeps the value
+        # clamped to it, and its meta and name stay what `record` answers (#7317 Task 5).
+        inputs_version = min(max(inputs_version, BIGINT_MIN), BIGINT_MAX)
 
         builtin = is_builtin(template_id)
         rows = self.media_store.items(template_id)

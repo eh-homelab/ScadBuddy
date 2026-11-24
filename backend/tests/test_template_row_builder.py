@@ -181,14 +181,16 @@ def test_row_of_meta_that_is_not_json(catalogue: Catalogue, paths: DataPaths) ->
 
 @pytest.mark.requires_postgres
 @pytest.mark.parametrize(
-    ("declared", "stored"),
-    [(2**31, True), (2**63 - 1, True), (2**63, False)],
+    ("declared", "kept"),
+    [(2**31, 2**31), (2**63 - 1, 2**63 - 1), (2**63, 2**63 - 1)],
     ids=["above-int", "bigint-max", "above-bigint"],
 )
-def test_row_of_an_inputs_version_postgres_cannot_store(
-    catalogue: Catalogue, paths: DataPaths, pg_pool: PgPool, declared: int, stored: bool
+def test_row_of_an_inputs_version_past_bigint_is_clamped(
+    catalogue: Catalogue, paths: DataPaths, pg_pool: PgPool, declared: int, kept: int
 ) -> None:
-    # Review A-I1 (#7317): `inputs_version` is bigint; past it, as meta Postgres refuses.
+    # Review A-I1 (#7317): `inputs_version` is bigint. Past its range the row keeps the
+    # value clamped to it, and its meta and name stay what `record` answers (Task 5
+    # amendment 2).
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
     text = '{"name": "Demo", "pipeline": {"module": "pipeline/p.py", "api": 1}}'
     paths.model_meta("demo").write_text(text, encoding="utf-8")
@@ -197,14 +199,12 @@ def test_row_of_an_inputs_version_postgres_cannot_store(
         f"INPUTS_VERSION = {declared}\n", encoding="utf-8"
     )
     row = _row(catalogue, "demo")
-    if stored:
-        assert row.inputs_version == declared
-        assert row.meta is not None and row.meta_error is None
-    else:
-        assert row.inputs_version == 0
-        assert row.meta is None
-        assert row.meta_error is not None and row.meta_error.startswith("not storable")
-        assert row.meta_text == text
+    record = catalogue.record("demo")
+    assert row.inputs_version == kept
+    assert record.inputs_version == declared
+    assert row.meta == catalogue.read_raw_meta("demo")
+    assert row.meta_error is None and row.meta_text is None
+    assert row.name == record.name == "Demo"
     rows = TemplateRows(pg_pool)
     rows.put([row], [])
     assert rows.get("demo") == row
