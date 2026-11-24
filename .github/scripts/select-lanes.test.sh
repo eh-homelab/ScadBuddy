@@ -22,6 +22,8 @@ expect "true false false true"  deploy/security/apparmor/scadbuddy-intake-sandbo
 expect "false false false false" deploy/CLAUDE.md
 expect "true false true true"   workers/rust/vectors/slice_plate.json
 expect "true false false true"  frontend/page-csp.txt
+expect "true false false true"  workers/playwright-mcp/browser-vectors.json
+expect "false false false false" workers/playwright-mcp/options.mjs
 expect "true false false true"  THIRD_PARTY_NOTICES.md
 expect "true false false true"  .github/scripts/merge-test-durations.sh
 expect "true true false true"   backend/uv.lock

@@ -9,9 +9,11 @@ start (#5299 D6)."""
 
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -229,6 +231,23 @@ def test_background_tools_come_from_the_parent_unless_refused(agent: Agent) -> N
     assert agent.refused("POST", "/sessions", _new(background_tools=True)).status_code == 422
 
 
+# The bounds and cases the playwright-mcp wrapper checks too
+# (workers/playwright-mcp/options.test.mjs).
+BROWSER_VECTORS = json.loads(
+    (Path(__file__).parents[3] / "workers/playwright-mcp/browser-vectors.json").read_text()
+)
+
+
+def test_browser_bounds_are_the_shared_vectors() -> None:
+    assert BROWSER_VECTORS["bounds"] == {
+        "user_agent_pattern": crud_agent_sessions.BROWSER_UA_PATTERN,
+        "locale_pattern": crud_agent_sessions.BROWSER_LOCALE_PATTERN,
+        "locale_max": crud_agent_sessions.BROWSER_LOCALE_MAX,
+        "viewport_width": list(crud_agent_sessions.VIEWPORT_WIDTH),
+        "viewport_height": list(crud_agent_sessions.VIEWPORT_HEIGHT),
+    }
+
+
 BROWSER = {
     "user_agent": "Mozilla/5.0 (iPhone)",
     "viewport": {"width": 390, "height": 844},
@@ -277,6 +296,7 @@ def test_fork_inherits_browser(agent: Agent) -> None:
         {"locale": "a" * 36},
         {"locale": "en--GB"},
         {"proxy": "x"},
+        *(case["value"] for case in BROWSER_VECTORS["invalid"]),
     ],
 )
 def test_browser_out_of_bounds_is_422(
@@ -297,6 +317,7 @@ def test_browser_out_of_bounds_is_422(
         {"viewport": {"width": 320, "height": 320}},
         {"viewport": {"width": 3840, "height": 2160}},
         {"locale": "zh-Hant-TW"},
+        *(case["value"] for case in BROWSER_VECTORS["valid"]),
     ],
 )
 def test_browser_bound_edges_pass(agent: Agent, browser: dict[str, Any]) -> None:

@@ -1,10 +1,17 @@
 // The wrapper's header and flag parsing (#7027). `node --test`; CI runs it inside the
-// image (ci.yml `agent` job), so it imports nothing but options.mjs and node:*.
+// image (ci.yml `agent` job), so it imports nothing but options.mjs and node:*, and reads
+// browser-vectors.json beside it (the Dockerfile copies both).
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
   HEADER,
+  HEIGHT,
+  LOCALE_MAX,
+  LOCALE_PATTERN,
+  UA_PATTERN,
+  WIDTH,
   contextOptionsFor,
   isClientActivity,
   isResponse,
@@ -188,3 +195,35 @@ test('a response the server sends answers a request; its ping and notifications 
   assert.equal(isResponse({ jsonrpc: '2.0', id: 0, method: 'ping' }), false);
   assert.equal(isResponse({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }), false);
 });
+
+// The bounds the API holds too (backend/tests/crud/test_crud_agent_sessions.py reads the same file).
+const vectors = JSON.parse(readFileSync(new URL('./browser-vectors.json', import.meta.url), 'utf8'));
+
+test("the bounds are the shared vectors' (the API's)", () => {
+  assert.deepEqual(
+    {
+      user_agent_pattern: UA_PATTERN.source,
+      locale_pattern: LOCALE_PATTERN.source,
+      locale_max: LOCALE_MAX,
+      viewport_width: WIDTH,
+      viewport_height: HEIGHT,
+    },
+    vectors.bounds,
+  );
+});
+
+for (const { name, value } of vectors.valid) {
+  test(`shared vector, valid: ${name}`, () => {
+    const result = parsed(value);
+    assert.equal(result.warning, undefined);
+    assert.deepEqual(result.options, value);
+  });
+}
+
+for (const { name, value } of vectors.invalid) {
+  test(`shared vector, invalid: ${name}`, () => {
+    const result = parsed(value);
+    assert.equal(result.options, undefined);
+    assert.equal(typeof result.warning, 'string');
+  });
+}

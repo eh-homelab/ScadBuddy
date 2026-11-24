@@ -3,7 +3,8 @@
 //
 // The bounds are R-7027-2's, the same as the API's `SessionBrowser` and `Viewport`
 // (backend/scadbuddy/api/crud_agent_sessions.py, BROWSER_UA_PATTERN, BROWSER_LOCALE_PATTERN,
-// BROWSER_LOCALE_MAX, VIEWPORT_WIDTH, VIEWPORT_HEIGHT). Change both together. The API
+// BROWSER_LOCALE_MAX, VIEWPORT_WIDTH, VIEWPORT_HEIGHT). Change both together, and
+// browser-vectors.json, which both tests check against. The API
 // already refused anything outside them, so a value that fails here is a bug or a
 // forged header: the session gets the server's defaults, and the warning says why
 // without the value.
@@ -11,11 +12,11 @@
 export const HEADER = 'x-scadbuddy-browser';
 
 const HEADER_BYTES_MAX = 2048;
-const UA_PATTERN = /^[\x20-\x7E]{1,512}$/;
-const LOCALE_PATTERN = /^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/;
-const LOCALE_MAX = 35;
-const WIDTH = [320, 3840];
-const HEIGHT = [320, 2160];
+export const UA_PATTERN = /^[\x20-\x7E]{1,512}$/;
+export const LOCALE_PATTERN = /^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/;
+export const LOCALE_MAX = 35;
+export const WIDTH = [320, 3840];
+export const HEIGHT = [320, 2160];
 const KEYS = new Set(['user_agent', 'viewport', 'locale']);
 const VIEWPORT_KEYS = new Set(['width', 'height']);
 
