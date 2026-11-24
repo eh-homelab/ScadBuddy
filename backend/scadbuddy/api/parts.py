@@ -24,6 +24,7 @@ from scadbuddy.api.orders import _run, check_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.inventory.component import InventoryDep
 from scadbuddy.inventory.part_alias import PartHasNoOffer
+from scadbuddy.inventory.problems import refused
 from scadbuddy.inventory.stock import BadQuantity
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.orders.actor import current_actor
@@ -76,8 +77,12 @@ def _unprocessable(field: str, message: str) -> ApiError:
     )
 
 
-async def _alias[T](call: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """An alias call off the event loop, its refusal as the old routes answered it."""
+async def _alias[T](
+    call: Callable[..., T], *args: Any, quantity: str = "pack_price_minor", **kwargs: Any
+) -> T:
+    """An alias call off the event loop, its refusal as the old routes answered it;
+    `BadQuantity` on the body field `quantity` names. Any other store error the inventory
+    routes know is their problem (`inventory.problems.refused`), never a 500."""
     try:
         return await asyncio.to_thread(call, *args, **kwargs)
     except PartNotFoundError as error:
@@ -91,9 +96,12 @@ async def _alias[T](call: Callable[..., T], *args: Any, **kwargs: Any) -> T:
             "supplier", "a part with no supplier has no pack to change: name its supplier"
         ) from None
     except BadQuantity as error:
-        raise _unprocessable(
-            "pack_price_minor", f"a quantity or cost too large to keep: {error}"
-        ) from None
+        raise _unprocessable(quantity, f"a quantity or cost too large to keep: {error}") from None
+    except Exception as error:
+        problem = refused(error)
+        if problem is None:
+            raise
+        raise problem from None
 
 
 @router.get(
@@ -104,7 +112,9 @@ async def _alias[T](call: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         _ALIAS + "Every part (an unarchived item of a kind under `part`), by name: its pack (its "
         "offer's; a part with no supplier has no offer and reads as a pack of 1 at 0), its "
         "unit cost (the weighted average of the lots on hand, a decimal string in minor "
-        "units; with none on hand the pack price over its size), what is on hand (below "
+        "units; a lot of unknown cost with no cost entered is left out; with none on hand "
+        "the pack price over its size; with no price point either `cost_unknown` is true "
+        "and the unit cost reads 0), what is on hand (below "
         "zero when more was used than recorded) and `low` when that is at or below its "
         "`low_stock` level (0 never warns). With `low`, only the low ones."
     ),
@@ -124,8 +134,11 @@ async def list_parts(inventory: InventoryDep, low: bool = False) -> list[Invento
         + "An item of kind `hardware`. With a `supplier`, an offer at that supplier (matched "
         "by name in any case, else made) with the pack and a price point in the shop's "
         "`orders_currency`; with none, no offer, and the `link` becomes a `purchase` link. "
-        "`on_hand` above 0 is received as a `manual` lot at the pack's price over its size. "
-        "409 `part_exists` when another part has the name, in any case. 422 for a pack "
+        "`on_hand` above 0 is received as a `manual` lot (an `add` move) at the pack's price "
+        "over its size, of unknown cost with no supplier. 409 `part_exists` when another "
+        "part of the kind has the name, in any case. 422 (on `supplier`) for a pack (a size "
+        "other than 1 or a price other than 0) with no supplier: it has no offer to hold "
+        "it. 422 for a pack "
         "price past what a price point holds."
     ),
 )
@@ -145,7 +158,9 @@ async def create_part(
         _ALIAS
         + "Only what is sent changes. A new `supplier` moves the part to a new offer at that "
         "supplier (the old one is archived; its pack and price move with it); a blank one "
-        "archives the offer. A new pack price is a new price point in the part's currency. "
+        "archives the offer, and its link stays as a `purchase` link. With no supplier a "
+        "new `link` is a `purchase` link, and a blank one removes the purchase links these "
+        "routes wrote. A new pack price is a new price point in the part's currency. "
         "The unit cost is the lots' and does not move. 422 for a pack edit on a part with "
         "no supplier (it has no offer to hold the pack)."
     ),
@@ -187,7 +202,14 @@ async def add_stock(part_id: str, body: StockAdd, inventory: InventoryDep) -> In
 )
 async def adjust_stock(part_id: str, body: StockAdjust, inventory: InventoryDep) -> InventoryPart:
     check_path(part_id)
-    return await _alias(inventory.parts.adjust, part_id, body.on_hand, body.note, current_actor())
+    return await _alias(
+        inventory.parts.adjust,
+        part_id,
+        body.on_hand,
+        body.note,
+        current_actor(),
+        quantity="on_hand",
+    )
 
 
 @router.get(

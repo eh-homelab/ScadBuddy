@@ -2130,8 +2130,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   part-row routes (`/parts`, `/parts/{id}`, its `stock`, `adjust` and `moves`) are aliases
   of the inventory for one release (`inventory/part_alias.py` `PartAliases`): a part is an
   item of kind `hardware`, its pack and price its newest offer and price point. A part with
-  no supplier has no offer: it reads as a pack of 1 at 0, a pack edit is 422, and Add stock
-  takes the body's price and writes no price point (R-P2-25).
+  no supplier has no offer: it reads as a pack of 1 at 0, a pack on a create or an edit is 422
+  (R-P2-34), and Add stock takes the body's price and writes no price point (R-P2-25). The
+  unit cost leaves out lots of unknown cost with no cost entered; with none on hand and no
+  price point it is `cost_unknown` (R-P2-35).
   `Lifecycle.add_item` copies the model's rule; `accept_fulfilment` or `fulfil_items` making an
   item `fulfilled` takes its parts from the lots (`StockStore.take`, the part items locked
   first in `item_id` order by `lock_items`: each item, the lock every lot insert takes, then

@@ -386,6 +386,56 @@ def test_a_receive_waits_for_a_holder_of_lock_items(
     assert len(stock.lots(item)) == 1
 
 
+def _spy(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, UUID]], *names: str) -> None:
+    for name in names:
+        real = getattr(stock_module, name)
+
+        def spy(
+            conn: Conn, item_id: UUID, *a: Any, _r: Any = real, _n: str = name, **k: Any
+        ) -> Any:
+            calls.append((_n, item_id))
+            return _r(conn, item_id, *a, **k)
+
+        monkeypatch.setattr(stock_module, name, spy)
+
+
+def test_lock_items_locks_an_item_with_lots_in_the_same_order(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6: an item that has lots takes the open lock before its lots too, so a receive
+    waits for the holder whether the item has lots or not."""
+    item = _item(items)
+    _two_lots(stock, item)
+    calls: list[tuple[str, UUID]] = []
+    _spy(monkeypatch, calls, "_open_lock", "_lock_lots")
+    with pg_pool.connection() as held, held.transaction():
+        stock.lock_items(held, [item])
+        assert calls == [("_open_lock", item), ("_lock_lots", item)]
+        with (
+            pg_pool.connection() as other,
+            pytest.raises(psycopg.errors.LockNotAvailable),
+            other.transaction(),
+        ):
+            other.execute("SET LOCAL lock_timeout = '200ms'")
+            stock.receive_in(other, item, ReceiveLot(qty=Decimal(1)), BY, shop="USD")
+    assert len(stock.lots(item)) == 2
+
+
+def test_a_count_takes_the_open_lock_before_the_lots(
+    stock: StockStore, items: ItemStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6, R-P2-32: `count_item` keeps the order of `lock_items`, with or without lots."""
+    empty, stocked = _item(items, name="Empty"), _item(items, name="Stocked")
+    _two_lots(stock, stocked)
+    calls: list[tuple[str, UUID]] = []
+    _spy(monkeypatch, calls, "_open_lock", "_lock_lots")
+    stock.count_item(stocked, Decimal(25), "Shelf count", BY)
+    assert calls[:2] == [("_open_lock", stocked), ("_lock_lots", stocked)]
+    calls.clear()
+    stock.count_item(empty, Decimal(3), "Shelf count", BY)
+    assert calls[:2] == [("_open_lock", empty), ("_lock_lots", empty)]
+
+
 def test_a_whole_number_uom_refuses_a_fraction(
     stock: StockStore, items: ItemStore, kinds: KindStore, pg_pool: PgPool
 ) -> None:

@@ -117,6 +117,9 @@ class InventoryPart(BaseModel):
     pack_price_minor: Money
     #: One unit's cost in minor units, a decimal string with its fraction.
     unit_cost_minor: Decimal
+    #: Nothing says what a unit costs: no lot of known cost is on hand and the part has no
+    #: price point; `unit_cost_minor` then reads 0 (R-P2-35).
+    cost_unknown: bool = False
     on_hand: int
     low_stock: int
     created_at: datetime
@@ -156,6 +159,15 @@ class StockAdjust(BaseModel):
 
     on_hand: int = Field(ge=0, le=MAX_COUNT)
     note: Text = Field(min_length=1, max_length=1000)
+
+    @field_validator("note")
+    @classmethod
+    def _note(cls, note: str) -> str:
+        """A note of spaces only is no note (R-P2-16), as `CountInput` reads it."""
+        note = note.strip()
+        if not note:
+            raise ValueError("a note is not blank")
+        return note
 
 
 class StockMove(BaseModel):
