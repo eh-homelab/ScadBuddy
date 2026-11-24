@@ -35,7 +35,14 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
-from scadbuddy.bambuddy.models import BbLocation, BbSupplier, CatalogFilament, SpoolCatalogEntry
+from scadbuddy.bambuddy.models import (
+    BbLocation,
+    BbSupplier,
+    CatalogFilament,
+    LocalPreset,
+    SpoolCatalogEntry,
+    as_utc,
+)
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.cancel import CancelToken, check, watched
 from scadbuddy.core.settings import FilamentSync
@@ -714,27 +721,79 @@ def _reset_counts(conn: Conn, instance: str | None) -> LinksResetCounts:
     return LinksResetCounts(**counts)
 
 
+def _proof_by(
+    links: Mapping[int, datetime | None], held: Mapping[int, datetime | None] | None
+) -> tuple[bool, bool]:
+    """``(same, changed)``: the rule of `same_bambuddy` and `changed_since_pull` over the
+    links (a Bambuddy id to ScadBuddy's time of it) and what Bambuddy holds (an id to its
+    time; ``None``: the listing proves nothing)."""
+    if not links or held is None:
+        return False, False
+    exact = False
+    timed = 0
+    for bb_id, seen in links.items():
+        if bb_id not in held:
+            return False, False
+        now = held[bb_id]
+        if seen is None or now is None:
+            continue
+        if now < seen:
+            return False, False
+        timed += 1
+        exact = exact or now == seen
+    enough = timed * 2 >= len(links)
+    return exact and enough, enough and not exact
+
+
 def _proof(
     links: Mapping[int, datetime | None], rows: Sequence[BbSpool], bad: Sequence[int | None]
 ) -> tuple[bool, bool]:
     """``(same, changed)`` for `same_bambuddy` and `changed_since_pull`."""
-    if not links or bad:
-        return False, False
-    held = {row.id: row for row in rows}
-    exact = False
-    timed = 0
-    for bb_id, seen in links.items():
-        row = held.get(bb_id)
-        if row is None:
-            return False, False
-        if seen is None or row.updated_at is None:
-            continue
-        if row.updated_at < seen:
-            return False, False
-        timed += 1
-        exact = exact or row.updated_at == seen
-    enough = timed * 2 >= len(links)
-    return exact and enough, enough and not exact
+    return _proof_by(links, None if bad else {row.id: row.updated_at for row in rows})
+
+
+def _stamp(value: str | None) -> datetime | None:
+    """A Bambuddy local preset's ``updated_at`` as text (naive UTC, as Bambuddy sends
+    it), as an aware time; ``None`` when absent or not a time."""
+    if value is None:
+        return None
+    try:
+        return as_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+#: The configured Bambuddy's filament local presets, read for the proof from the presets
+#: when no spool is linked (#7343); ``None``: not read, or the read failed.
+PresetListing = Sequence[LocalPreset] | None
+
+
+def _preset_links(conn: Conn, instance: str | None) -> dict[int, datetime | None]:
+    """The presets' links a delete of ``instance``'s links drops (`_reset_counts`), each
+    Bambuddy id with Bambuddy's ``updated_at`` as ScadBuddy last took it (``bb_updated_at``):
+    the mirror's last write, or for a preset imported from Bambuddy, its last import."""
+    return {
+        row["bb_preset_id"]: _stamp(row["bb_updated_at"])
+        for row in conn.execute(
+            "SELECT bb_preset_id, bb_updated_at FROM filament_presets"
+            " WHERE bb_preset_id IS NOT NULL AND (bb_instance IS NULL OR bb_instance = %s)",
+            (instance,),
+        )
+    }
+
+
+def wants_preset_listing(store: Filament) -> bool:
+    """Whether the proof of the same Bambuddy stands on the presets (#7343): no spool is
+    linked, and a preset holds a Bambuddy id of the links' Bambuddy (`_preset_links`).
+    Then the reset reads Bambuddy's presets."""
+    with store.spools.transaction() as conn:
+        row = conn.execute(
+            "SELECT NOT EXISTS (SELECT 1 FROM filament_bb_links)"
+            " AND EXISTS (SELECT 1 FROM filament_presets p WHERE p.bb_preset_id IS NOT NULL"
+            " AND (p.bb_instance IS NULL OR p.bb_instance ="
+            " (SELECT instance FROM filament_bb_sync_state LIMIT 1))) AS w"
+        ).fetchone()
+    return bool(row is not None and row["w"])
 
 
 def same_bambuddy(
@@ -764,14 +823,30 @@ def changed_since_pull(
 
 
 def _proof_of(
-    conn: Conn, listing: tuple[Sequence[BbSpool], Sequence[int | None]]
+    conn: Conn,
+    listing: tuple[Sequence[BbSpool], Sequence[int | None]] | None,
+    presets: PresetListing,
+    instance: str | None,
 ) -> tuple[bool, bool]:
-    """`same_bambuddy` and `changed_since_pull` for the spool links as they stand."""
+    """`same_bambuddy` and `changed_since_pull` for the links as they stand: by the spool
+    links when there are any (``listing``, the configured Bambuddy's spools), else by the
+    presets' links of ``instance`` (``presets``, its filament local presets, #7343) under
+    the same rule. A preset's time is Bambuddy's ``updated_at`` as ScadBuddy last took it: the
+    mirror's last write (`preset_mirror._mirrored`), or for a preset imported from Bambuddy,
+    its last import (`sb_presets.import_presets`, `refresh_bambuddy`). Either is Bambuddy's
+    ``onupdate=func.now()``, so another Bambuddy would need a preset under the same id
+    written at the same recorded time. A preset with
+    no time (sent before the mirror kept one, and not written by the mirror since) is only
+    checked to be there, and counts against the rule that at least half the links are timed
+    on both sides."""
     links = {
         row["bb_spool_id"]: row["bb_updated_at"]
         for row in conn.execute("SELECT bb_spool_id, bb_updated_at FROM filament_bb_links")
     }
-    return _proof(links, *listing)
+    if links:
+        return (False, False) if listing is None else _proof(links, *listing)
+    held = None if presets is None else {p.id: _stamp(p.updated_at) for p in presets}
+    return _proof_by(_preset_links(conn, instance), held)
 
 
 #: What `parse_rows` makes of the configured Bambuddy's spools: the rows, and the ids of
@@ -780,17 +855,27 @@ Listing = tuple[Sequence[BbSpool], Sequence[int | None]] | None
 
 
 def reset_preview(
-    store: Filament, configured: str | None, listing: Listing, *, unreadable: bool = False
+    store: Filament,
+    configured: str | None,
+    listing: Listing,
+    *,
+    presets: PresetListing = None,
+    unreadable: bool = False,
 ) -> LinksResetPreview:
     """The dry run of `reset_links`: the links' instance, the configured one, what a
     reset would delete, and whether the configured Bambuddy, whose spools are
-    ``listing``, is the links' own (#6845), so a reset with ``expect_kept`` keeps the
-    links. ``unreadable``: the configured Bambuddy could not be read (``listing`` is
-    then ``None``), which the answer says (Decision 198). Reads only."""
+    ``listing`` and whose filament local presets are ``presets`` (read only when no spool
+    is linked, `wants_preset_listing`), is the links' own (#6845, #7343: `_proof_of`), so
+    a reset with ``expect_kept`` keeps the links. ``unreadable``: the configured Bambuddy
+    could not be read (``listing`` is then ``None``), which the answer says (Decision
+    198). Reads only."""
     with store.spools.transaction() as conn:
         state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
-        counts = _reset_counts(conn, state["instance"] if state is not None else None)
-        same, changed = (False, False) if listing is None else _proof_of(conn, listing)
+        instance = state["instance"] if state is not None else None
+        counts = _reset_counts(conn, instance)
+        same, changed = (
+            (False, False) if listing is None else _proof_of(conn, listing, presets, instance)
+        )
     return LinksResetPreview(
         instance=state["instance"] if state is not None else None,
         configured_instance=configured,
@@ -807,6 +892,7 @@ def reset_links(
     configured: str | None,
     listing: Listing,
     *,
+    presets: PresetListing = None,
     expect_kept: bool,
 ) -> LinksResetDone:
     """Reset the Bambuddy links after the Bambuddy URL changed, in one transaction under
@@ -815,8 +901,9 @@ def reset_links(
     ``confirm_instance``.
 
     With ``expect_kept`` (the preview proved the same Bambuddy, #6845 R-6845-6), the
-    configured Bambuddy, whose spools are ``listing`` (``None``: it could not be read),
-    must still be the links' own (`same_bambuddy`); then nothing is deleted: the state
+    configured Bambuddy, whose spools are ``listing`` (``None``: it could not be read)
+    and, when no spool is linked, whose filament local presets are ``presets`` (#7343),
+    must still be the links' own (`_proof_of`); then nothing is deleted: the state
     row records ``configured`` as the links' instance, so every link and intent stays
     (R-6845-3), and so does the usage mark, under ``configured`` (R-7002-6). When it is
     not, the reset is refused ``proof_changed`` and writes nothing, so a Bambuddy that
@@ -839,7 +926,11 @@ def reset_links(
         if confirm_instance != instance:
             raise ResetRefusedError("confirm_mismatch")
         if expect_kept:
-            if configured is None or listing is None or not _proof_of(conn, listing)[0]:
+            if (
+                configured is None
+                or listing is None
+                or not _proof_of(conn, listing, presets, instance)[0]
+            ):
                 raise ResetRefusedError("proof_changed")
             # The same Bambuddy: its usage mark stays and moves to the new name (R-7002-6).
             conn.execute(

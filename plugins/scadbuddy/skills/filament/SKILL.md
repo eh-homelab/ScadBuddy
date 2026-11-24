@@ -42,8 +42,11 @@ slot setup and NTAG writes write BB whatever `filament_sync` says.
   the same Bambuddy. Only then call it with `expect_kept: false`, which reads no Bambuddy and
   deletes the links, intents and error rows of that old instance (`kept: false`). ScadBuddy's
   filament presets' Bambuddy ids are links too (`presets` in the counts, #7176): when they are
-  the only links nothing can prove the same Bambuddy, so the reset deletes them, and the
-  preset mirror then creates each preset on the new Bambuddy. Either
+  the only spool-free links, the presets prove the same Bambuddy by the same rule (each linked
+  preset id listed, none older than Bambuddy's `updated_at` as ScadBuddy last took it: the
+  mirror's last write, or for a preset imported from Bambuddy, its last import, #7343), and
+  a keep moves their ids. A delete drops them, and the preset mirror then creates each preset on
+  the configured Bambuddy: say that on the same Bambuddy this holds every preset twice. Either
   way it asks for a full pass, and it never deletes an SB spool, type, supplier or
   location. It writes, so it needs approval. Pass `confirm_instance` as the status's
   `instance`; a 409 `confirm_mismatch`, `same_instance`, `nothing_to_reset` or
