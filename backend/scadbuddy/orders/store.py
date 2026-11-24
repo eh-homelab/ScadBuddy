@@ -207,8 +207,7 @@ _FULFILMENT = (
     "id, order_item_id, attempt, quantity, outcome, failure_reason, started_at, finished_at,"
     " notes, accepted_at, created_by, created_at, print_run_id, sliced_sha256, sliced_blob_key,"
     " printer, copies, print_request_id, printer_serial, printer_name, bambuddy_printer_id,"
-    " archive_ids, actual_seconds, actual_grams, purpose, revision_id, timelapse_scanned_at,"
-    " media_checked_at"
+    " archive_ids, actual_seconds, actual_grams, purpose, revision_id, media_checked_at"
 )
 _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
@@ -2470,14 +2469,36 @@ class OrderStore:
                 (at, fulfilment_id),
             )
 
-    def stamp_timelapse_scanned(self, fulfilment_id: str, at: datetime) -> None:
-        """The media import asked Bambuddy to scan the printer for the attempt's
-        timelapse at ``at`` (spec 2026-11-05 §4.3)."""
-        with self._write(None) as c:
-            c.execute(
-                "UPDATE order_item_fulfilments SET timelapse_scanned_at = %s WHERE id = %s",
-                (at, fulfilment_id),
-            )
+    def attempts_missing_media(
+        self, created_after: datetime, checked_before: datetime, limit: int
+    ) -> list[str]:
+        """The attempts made after ``created_after`` and not read for media since
+        ``checked_before`` that still lack a medium (spec 2026-11-05 §4.6): one of their
+        archives has no finish photo or no timelapse copy on the attempt or on its item (a
+        copy from before #5268), and the import did not refuse it as too large at ``limit``
+        bytes (the upload limit) or more (#7281 review). A settled run's attempt with no
+        archive copied yet counts too, as its outcome may have been missed. Least lately
+        read first."""
+        with self._read(None) as c:
+            rows = c.execute(
+                "SELECT f.id FROM order_item_fulfilments f"
+                " WHERE f.created_at > %(after)s"
+                " AND (f.media_checked_at IS NULL OR f.media_checked_at <= %(before)s)"
+                " AND ((f.archive_ids = '{}'"
+                "  AND f.print_run_id IS NOT NULL AND f.finished_at IS NOT NULL)"
+                "  OR EXISTS (SELECT 1 FROM unnest(f.archive_ids) a(id)"
+                "   CROSS JOIN (VALUES ('finished_photo'), ('timelapse')) m(media)"
+                "   WHERE NOT EXISTS (SELECT 1 FROM entity_attachments e"
+                "    WHERE e.subject IN ('order_item_fulfilment:' || f.id,"
+                "     'order_item:' || f.order_item_id)"
+                "    AND e.archive_id = a.id AND e.archive_media = m.media)"
+                "   AND NOT EXISTS (SELECT 1 FROM order_attempt_media_refusals r"
+                "    WHERE r.fulfilment_id = f.id AND r.archive_id = a.id"
+                "    AND r.archive_media = m.media AND r.limit_bytes >= %(limit)s)))"
+                " ORDER BY f.media_checked_at NULLS FIRST, f.created_at, f.id",
+                {"after": created_after, "before": checked_before, "limit": limit},
+            ).fetchall()
+        return [row["id"] for row in rows]
 
     def unaccept_fulfilment(self, conn: Conn, fulfilment_id: str) -> Fulfilment:
         """An unfulfil (#4952): the attempt stays, no longer counted as made."""
@@ -3217,13 +3238,22 @@ class OrderStore:
     ) -> set[tuple[int, ArchiveCopyMedia]]:
         """Each ``(archive_id, archive_media)`` the attempt has a copy of, or its item has
         (a copy from before #5268), whatever the file's name (spec 2026-11-05 §4.2)."""
+        return set(self.archive_media_attachments(fulfilment_id, item_id, conn=conn))
+
+    def archive_media_attachments(
+        self, fulfilment_id: str, item_id: str, *, conn: Conn | None = None
+    ) -> dict[tuple[int, ArchiveCopyMedia], str]:
+        """The id of the oldest attachment of each ``(archive_id, archive_media)`` the
+        attempt, or its item, has a copy of (spec 2026-11-05 §4.4)."""
         with self._read(conn) as c:
             rows = c.execute(
-                "SELECT DISTINCT archive_id, archive_media FROM entity_attachments"
-                " WHERE subject IN (%s, %s) AND archive_id IS NOT NULL",
+                "SELECT DISTINCT ON (archive_id, archive_media) archive_id, archive_media, id"
+                " FROM entity_attachments"
+                " WHERE subject IN (%s, %s) AND archive_id IS NOT NULL"
+                " ORDER BY archive_id, archive_media, created_at, id",
                 (fulfilment_subject(fulfilment_id), item_subject(item_id)),
             ).fetchall()
-        return {(r["archive_id"], r["archive_media"]) for r in rows}
+        return {(r["archive_id"], r["archive_media"]): str(r["id"]) for r in rows}
 
     def record_media_refusal(
         self,

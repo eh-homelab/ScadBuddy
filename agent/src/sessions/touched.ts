@@ -728,6 +728,17 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'unlink_tray_spool',
   // #7150: a spool made from a tray is an SB spool, which is no recorded kind either.
   'create_tray_spool',
+  // #7153: an AMS slot's control and an AMS unit's label reach the printer and Bambuddy; the
+  // label also names the unit's place, no recorded resource kind.
+  'printer_slot_configure',
+  'printer_slot_reset',
+  'printer_slot_refresh',
+  'printer_slot_load',
+  'printer_slot_unload',
+  'printer_slot_preset_set',
+  'printer_slot_preset_clear',
+  'printer_ams_label_set',
+  'printer_ams_label_clear',
   // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',

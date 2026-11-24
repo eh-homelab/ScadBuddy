@@ -2020,8 +2020,8 @@ const tools: Tool[] = [
       "(`source` `bambuddy`) that Bambuddy edited since takes Bambuddy's document as a new version. Every spool or type " +
       'preset that still names a Bambuddy local preset id names a ScadBuddy preset (`sb-<id>`) instead: the one already ' +
       "made for that id, else a new one made from Bambuddy's document. Answers `{adopted, updated, unresolved}`: how many " +
-      'presets it made, how many took a new version, and how many Bambuddy ids bindings still name (Bambuddy no longer ' +
-      'holds them, or they are not filament presets; those spools and types need a ScadBuddy preset). 409 when no Bambuddy is configured, and 409 `instance_changed` while ' +
+      'presets it made, how many took a new version, and how many Bambuddy ids bindings still name, for any cause (for ' +
+      'example, Bambuddy no longer holds them, or they are not filament presets; those spools and types need a ScadBuddy preset). 409 when no Bambuddy is configured, and 409 `instance_changed` while ' +
       'the links belong to another Bambuddy (filament_sync_reset_links first). Writes ScadBuddy only, never Bambuddy.',
     input: z.object({}),
     risk: 'write',

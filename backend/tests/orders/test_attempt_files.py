@@ -194,16 +194,14 @@ def test_the_media_present_are_the_attempts_and_its_items(shop: Shop) -> None:
     assert shop.rows.archive_media_present(other.id, other.order_item_id) == set()
 
 
-def test_an_attempt_records_its_check_and_its_scan(shop: Shop) -> None:
-    """#7231 (spec §4.3, §4.6)."""
+def test_an_attempt_records_its_check(shop: Shop) -> None:
+    """#7231 (spec §4.6)."""
     _, _, attempt = attempted(shop)
-    assert (attempt.media_checked_at, attempt.timelapse_scanned_at) == (None, None)
+    assert attempt.media_checked_at is None
     checked = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
-    scanned = datetime(2026, 11, 23, 11, 0, tzinfo=UTC)
 
     shop.rows.stamp_media_checked(attempt.id, checked)
-    shop.rows.stamp_timelapse_scanned(attempt.id, scanned)
 
     found = shop.rows.fulfilment(attempt.id)
     assert found is not None
-    assert (found.media_checked_at, found.timelapse_scanned_at) == (checked, scanned)
+    assert found.media_checked_at == checked

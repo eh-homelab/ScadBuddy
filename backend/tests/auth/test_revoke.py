@@ -405,7 +405,6 @@ PRINT_HELD = (
     "rack_nozzle_picks",
     "rack_nozzle_pick_spools",
     "rack_nozzle_prints",
-    "held_local_presets",
     "native_slices",
 )
 

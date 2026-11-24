@@ -50,6 +50,7 @@ from scadbuddy.orders.storefront.listings import (
     listing_not_found,
     picture_key,
     problem,
+    published_listing,
 )
 from scadbuddy.orders.storefront.wire import (
     FILE_PICTURE_ID,
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
     from scadbuddy.orders.bambuddy import ServedLibrary
     from scadbuddy.store.content import ContentStore
+    from scadbuddy.store.content_models import BlobStat
 
 logger = logging.getLogger(__name__)
 
@@ -528,6 +530,25 @@ async def pinned_plate_image(
             return picture
     payload = await read_held(_content(state), file_copy_key(pinned))
     return None if payload is None else await asyncio.to_thread(plate_image, payload, plate)
+
+
+async def held_preview(
+    state: AppState, store: ListingStore, listing_id: str, plate: int
+) -> BlobStat:
+    """The held GLB of plate ``plate`` of the published file listing ``listing_id``
+    (§6.3, §8.1), which a visitor's page recolours by each mesh's slot. 404
+    ``listing_not_found`` for a listing that is not a published file listing, and
+    ``preview_not_found`` for a plate with no held preview or one the store lost."""
+    listing = await asyncio.to_thread(published_listing, store, listing_id, source="library_file")
+    snapshot = listing.file_snapshot
+    assert snapshot is not None
+    held = snapshot.previews
+    stat = None if plate not in held else await _content(state).stat(held[plate])
+    if stat is None:
+        raise problem(
+            status.HTTP_404_NOT_FOUND, "preview_not_found", "This design has no such preview."
+        )
+    return stat
 
 
 # -- the checks of the listing's colours (§5.1 rows 6 to 9) ------------------------------------

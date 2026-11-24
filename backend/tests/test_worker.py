@@ -1777,12 +1777,13 @@ async def test_making_the_build_current_retries_until_the_server_takes_it(
         )
 
     assert calls == 3
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    records = [r for r in caplog.records if r.name == "scadbuddy.worker"]
+    warnings = [r for r in records if r.levelno == logging.WARNING]
     assert [r.__dict__["attempt"] for r in warnings] == [1, 2]
-    assert [r.getMessage() for r in caplog.records if r.levelno == logging.INFO] == [
+    assert [r.getMessage() for r in records if r.levelno == logging.INFO] == [
         "made this build current"
     ]
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert not [r for r in records if r.levelno >= logging.ERROR]
 
 
 async def test_making_the_build_current_does_not_give_up(
@@ -1807,10 +1808,11 @@ async def test_making_the_build_current_does_not_give_up(
         )
 
     assert calls == 21
-    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    records = [r for r in caplog.records if r.name == "scadbuddy.worker"]
+    errors = [r for r in records if r.levelno == logging.ERROR]
     assert errors
     assert {r.getMessage() for r in errors} == {"could not make this build current yet"}
-    assert caplog.records[-1].getMessage() == "made this build current"
+    assert records[-1].getMessage() == "made this build current"
 
 
 async def _no_current_build(*_: object, **__: object) -> tuple[str | None, bytes]:
@@ -1847,7 +1849,8 @@ async def test_a_superseded_build_stops_trying_to_be_current(
         )
     # Read at the start ("old"), before attempt 2 ("old"), before attempt 3 ("new").
     assert calls == 2
-    assert caplog.records[-1].getMessage() == (
+    records = [r for r in caplog.records if r.name == "scadbuddy.worker"]
+    assert records[-1].getMessage() == (
         "another build was made current; this one no longer tries to be"
     )
 

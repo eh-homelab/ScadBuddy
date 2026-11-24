@@ -557,6 +557,38 @@ fixes the material, as a colour parameter does today (`resolve_choice` with `slo
 The title has no colour, and the customer gets every slot (repo rule). The page never
 shows the filename, the file's own colours or a material.
 
+As built (PR 6): the edge's prefix is `/api/store/v1`, so a preview path is
+`/api/store/v1/listings/{id}/preview/{plate}.glb` (`storefront/wire.py`
+`listing_preview_path`) and the price is `POST /api/store/v1/listings/{id}/price`.
+`PublicSlot.default` is null when the listing offers no colour (it is then unavailable). A
+material is printable for a file listing when the listing offers a customer filament of it
+(each offered slot takes any colour of the print's one material, `file_choice`), so the
+first such material of the effective list gives the defaults (`listings.py`
+`_offered_file`). `previews` names only the plates publish held a GLB of (none for a file
+with no readable mesh). The CRUD route is `GET …/storefront/listings/{id}/preview/{plate}.glb`
+(`file_listings.py` `held_preview`, 404 `listing_not_found` or `preview_not_found`),
+streamed from the content store; the edge relays it as a stream. A render, a variant and
+the prepare run still take a template listing only (`published_listing`'s `source`); the
+public list and listing take either. On the page (`frontend/src/storefront/pages/FileCustomize.tsx`),
+`CustomizePage` hands a file listing to `FileCustomize` before its render effect ever sees
+it. The parts are colour parameters named `colours.<slot>` (`fileParts.ts` `partsView`), so
+`ListingView`, `colourPlan` and the clash text serve them unchanged; a pick of a colour that
+only another material offers moves each untouched part to the closest colour of that
+material, as for a template. The price read is debounced as a render is and follows the
+price key only (the listing's version and the colours), so a change that keeps the key reads
+nothing again. It keeps the last price on screen marked as updating until the new colours
+are priced; a `last` answer (§7.5) shows at once, marked as updating, and the page reads
+again after its `retry_after`. With no price known, "Working out the price…" shows from
+the change on, through the debounce. It stops at a `render_limited` or `rate_limited`
+refusal with its text, and keeps the last price on screen, not marked as updating, since
+no update will come. So does a read past the time limit, or one that fails after a `last`
+answer. That price is never shown as firm: the page says "This was our last price. We
+confirm the price before you pay." until the colours change or a new read is due. With no
+price on screen, the time limit shows "We price this design by hand". A plate chooser ("Plate 1", …)
+sits over the viewer when the file has more than one plate. The §11.1 "Public" tests are
+`tests/orders/storefront/test_public_files.py` and `tests/api/test_storefront_public_files.py`
+(the native-library client's fixtures would clash with `test_storefront_public.py`'s).
+
 ## 7. Pricing
 
 The pricing owner's constraints are the rule here. §15 maps each one to its section.
@@ -768,6 +800,16 @@ A file listing has no render, so its price is read by the listing and the colour
   finds a price, or joins a running slice, costs nothing, as a reused render does. So a
   visitor cannot keep the slicer busy by changing colours.
 - 409 `listing_changed` when `listing_updated_at` is not the listing's, as for a render.
+
+As built (PR 6): "always show a price". While the visitor's colours have no price yet
+(`slice_estimate` answers `pending`), the route answers `last`: the listing's last firm
+price of the file it sells now, of any colours (`SlicePrices.listing_last`, the newest
+`done` row of the pinned sha256, index `storefront_slice_prices_listing_last`; the
+listing's own row first, else another published listing's of the same file, since they share a price,
+§7.4), with the pending `retry_after`. The slice runs
+behind it as before, and a read again answers the colours' own price. A listing with no
+such row answers `pending`. `last` is never a cart line's price (`line_prices.py` reads
+`firm_price` only), as the template instant read's `last` (#6921) is not.
 
 ### 7.6 The cart and the checkout
 

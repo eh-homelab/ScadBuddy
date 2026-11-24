@@ -214,7 +214,7 @@ async def test_raise_errors_raises_and_logs_nothing(caplog: pytest.LogCaptureFix
         pytest.raises(RuntimeError, match="Temporal is down"),
     ):
         await nudger(client, URL).nudge(full=True, raise_errors=True)
-    assert caplog.records == []
+    assert [r for r in caplog.records if r.name == "scadbuddy.filament.bb_sync_nudge"] == []
 
 
 async def test_signal_running_signals_and_never_starts() -> None:
@@ -247,7 +247,7 @@ async def test_signal_running_with_no_workflow_is_quiet(caplog: pytest.LogCaptur
     client = FakeClient(fail=RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b""))
     with caplog.at_level(logging.WARNING, logger="scadbuddy.filament.bb_sync_nudge"):
         await nudger(client, URL).signal_running()
-    assert caplog.records == []
+    assert [r for r in caplog.records if r.name == "scadbuddy.filament.bb_sync_nudge"] == []
     assert client.starts == []
 
 

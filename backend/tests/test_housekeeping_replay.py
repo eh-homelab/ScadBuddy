@@ -38,8 +38,9 @@ which also runs ``AUTH_SESSIONS_SWEEP``, and ``payment_closes`` with
 and ``run_holds`` with ``RUN_HOLDS_PATCH`` (#6122), which also runs ``RUN_HOLDS_SWEEP``,
 and ``maintenance_import`` with ``MAINTENANCE_IMPORT_PATCH`` (#5774), which also runs
 ``MAINTENANCE_IMPORT_SWEEP``, and ``entity_orphans`` with ``ENTITY_ORPHANS_PATCH``
-(#6950), which also runs ``ENTITY_ORPHANS_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1`` runs
-the recording below).
+(#6950), which also runs ``ENTITY_ORPHANS_SWEEP``, and ``attempt_media`` with
+``ATTEMPT_MEDIA_PATCH`` (#7234), which also runs ``ATTEMPT_MEDIA_SWEEP``
+(``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
 them.
 """
@@ -89,6 +90,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "run_holds",
         "maintenance_import",
         "entity_orphans",
+        "attempt_media",
     ],
 )
 async def test_housekeeping_replays_its_recorded_history(name: str) -> None:
@@ -106,7 +108,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-async def test_record_entity_orphans(recording_temporal: str) -> None:
+async def test_record_attempt_media(recording_temporal: str) -> None:
     """Every sweep a stub, so only the workflow's own commands are recorded."""
 
     def stub(name: str) -> Any:
@@ -135,4 +137,4 @@ async def test_record_entity_orphans(recording_temporal: str) -> None:
         if e.HasField("activity_task_scheduled_event_attributes")
     ]
     assert names == list(SWEEPS)
-    (HISTORIES / "entity_orphans.json").write_text(history.to_json())
+    (HISTORIES / "attempt_media.json").write_text(history.to_json())
