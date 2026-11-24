@@ -64,7 +64,7 @@ describe('InventoryPage (#7067)', () => {
   })
 
   it('shows only the low items when asked, and an unknown value never as 0.00 (R-P2-35)', async () => {
-    const ring = seedItem({ kind_id: 'hardware', name: 'Split ring', low_stock: 10 })
+    const ring = seedItem({ kind_id: 'hardware', name: 'Split ring', low_stock: '10' })
     seedLot(ring.id, 4, null)
     const { user } = render()
     const row = (await screen.findByRole('link', { name: 'Split ring' })).closest('tr')!

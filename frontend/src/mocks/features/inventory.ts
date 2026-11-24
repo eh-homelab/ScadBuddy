@@ -1,17 +1,19 @@
 import { HttpResponse, http } from 'msw'
+import { addDecimals, cmpDecimals, divDecimal, mulDecimals, roundDecimal, subDecimals } from '../../lib/decimal'
 import type { components } from '../../api/schema'
 import { mockSettings } from '../handlers'
 import { schemaProblem } from './entities'
+import { locationExists } from './filament'
 import { supplierById } from './filamentPurchasing'
 import { SUPPLIER } from './filamentPurchasingSeed'
 import { INVENTORY } from './inventorySeed'
-import { BROWSER, now, problem, state as orders } from './orders/state'
+import { BROWSER, fieldProblem, now, problem, PROBLEMS as ORDER_PROBLEMS, state as orders } from './orders/state'
 
 /**
  * #7067 — the inventory (`backend/scadbuddy/api/inventory.py`, `inventory_stock.py`): item
  * kinds, items, supplier offers and their pack prices, lots, units and stock moves. Costs are
- * in minor units of the shop currency (`orders_currency`), kept to the millionth and answered
- * as decimal strings. A use takes FIFO (the named lot first); a shortfall goes on the newest
+ * in minor units of the shop currency (`orders_currency`), kept to the millionth as decimal
+ * strings (`lib/decimal`), never floats, and answered normalized as the backend's `_Decimals` does. A use takes FIFO (the named lot first); a shortfall goes on the newest
  * lot with `needs_review`, or on a new zero-cost lot of unknown cost. A move's cost is a
  * snapshot until "Re-cost past uses". The order-parts mock (`orders/parts.ts`) takes and gives
  * back stock through `takeStock` and `giveBack`.
@@ -30,8 +32,8 @@ type MockItem = {
   name: string
   manufacturer: string
   compatible_with: string[]
-  low_stock: number
-  life_hours: number | null
+  low_stock: string
+  life_hours: string | null
   life_months: number | null
   saleable: boolean | null
   source: string
@@ -46,16 +48,16 @@ type MockLot = {
   id: string
   item_id: string
   location_id: string | null
-  received_qty: number
-  unit_cost: number
+  received_qty: string
+  unit_cost: string
   cost_unknown: boolean
   cost_currency: string | null
-  foreign_unit_cost: number | null
+  foreign_unit_cost: string | null
   origin: S['Lot']['origin']
   note: string
   received_at: string
 }
-type MockUnit = Omit<S['Unit'], 'cost_minor' | 'life_hours'> & { cost: number; life_hours: number | null }
+type MockUnit = Omit<S['Unit'], 'cost_minor' | 'life_hours'> & { cost: string; life_hours: string | null }
 type MockMove = {
   id: string
   at: string
@@ -63,8 +65,8 @@ type MockMove = {
   lot_id: string | null
   unit_id: string | null
   kind: S['Move']['kind']
-  qty: number
-  unit_cost: number
+  qty: string
+  unit_cost: string
   cost_unknown: boolean
   needs_review: boolean
   reverses_move_id: string | null
@@ -139,8 +141,17 @@ function id(): string {
 }
 
 const shop = () => mockSettings().orders_currency
-const round6 = (n: number) => Math.round(n * 1e6) / 1e6
-const decimal = (n: number) => String(round6(n))
+/** A quantity or cost kept to the millionth, normalized (`"5.99"`, never `"5.990000"`). */
+const dec = (value: string | number) => roundDecimal(String(value), 6)
+const sum = (values: string[]) => dec(values.reduce(addDecimals, '0'))
+const neg = (value: string) => subDecimals('0', value)
+const above = (value: string, than = '0') => cmpDecimals(value, than) > 0
+const below = (value: string, than = '0') => cmpDecimals(value, than) < 0
+/** Lets the next recost answer 409 `recost_busy` once, as the backend does when new order moves keep reaching the lot. */
+let recostBusy = false
+export function failNextRecost(): void {
+  recostBusy = true
+}
 
 // -- seeds ----------------------------------------------------------------------------------
 
@@ -150,7 +161,7 @@ export function seedItem(fields: Partial<MockItem> & { name: string; kind_id: st
     id: id(),
     manufacturer: '',
     compatible_with: [],
-    low_stock: 0,
+    low_stock: '0',
     life_hours: null,
     life_months: null,
     saleable: null,
@@ -166,15 +177,16 @@ export function seedItem(fields: Partial<MockItem> & { name: string; kind_id: st
 }
 
 /** A received lot: `unit_cost_minor` null opens it with its cost unknown. */
-export function seedLot(itemId: string, qty: number, unitCostMinor: number | null, fields: Partial<MockLot> = {}): S['Lot'] {
+export function seedLot(itemId: string, qty: number | string, unitCostMinor: number | string | null, fields: Partial<MockLot> = {}): S['Lot'] {
   ready()
-  const lot = openLot(itemId, qty, unitCostMinor ?? 0, unitCostMinor === null, 'manual', fields)
+  const lot = openLot(itemId, dec(qty), dec(unitCostMinor ?? 0), unitCostMinor === null, 'manual', fields)
   return answerLot(lot)
 }
 
 export function seedOffer(fields: Partial<MockOffer> & { item_id: string; supplier_id: string; sku: string }, price?: { price: string; currency?: string; on_date?: string }): S['Offer'] {
   ready()
   const offer: MockOffer = { id: id(), url: null, pack_size: '1', pack_uom: 'each', note: null, archived_at: null, ...fields }
+  offer.pack_size = dec(offer.pack_size)
   inventoryMock.offers.push(offer)
   if (price) addPrice(offer.id, price.price, price.currency ?? shop(), price.on_date ?? SEEDED_AT.slice(0, 10))
   return answerOffer(offer)
@@ -182,17 +194,17 @@ export function seedOffer(fields: Partial<MockOffer> & { item_id: string; suppli
 
 export function seedUnit(itemId: string, fields: Partial<MockUnit> = {}): S['Unit'] {
   ready()
-  const unit = newUnit(itemId, fields.cost ?? 0, fields.cost_unknown ?? false, fields)
+  const unit = newUnit(itemId, dec(fields.cost ?? '0'), fields.cost_unknown ?? false, fields)
   return answerUnit(unit)
 }
 
 function seed() {
-  seedItem({ id: INVENTORY.HOOK, kind_id: 'hardware', name: 'Silver keychain hook', manufacturer: 'Generic', low_stock: 50 })
-  openLot(INVENTORY.HOOK, 200, 5.99, false, 'manual', { id: INVENTORY.HOOK_LOT, received_at: SEEDED_AT, note: 'Opening count' })
+  seedItem({ id: INVENTORY.HOOK, kind_id: 'hardware', name: 'Silver keychain hook', manufacturer: 'Generic', low_stock: '50' })
+  openLot(INVENTORY.HOOK, '200', '5.99', false, 'manual', { id: INVENTORY.HOOK_LOT, received_at: SEEDED_AT, note: 'Opening count' })
   seedOffer({ id: INVENTORY.HOOK_OFFER, item_id: INVENTORY.HOOK, supplier_id: SUPPLIER.AMAZON, sku: 'B0HOOK100', url: 'https://www.amazon.com/dp/B0HOOK100', pack_size: '100' }, { price: '5.99' })
   seedItem({ id: INVENTORY.NOZZLE, kind_id: 'nozzle', name: 'Hardened steel nozzle 0.4', manufacturer: 'Bambu Lab', compatible_with: ['H2C'] })
-  newUnit(INVENTORY.NOZZLE, 1999, false, { id: INVENTORY.NOZZLE_UNIT, serial: 'HS-0001', received_at: SEEDED_AT })
-  newUnit(INVENTORY.NOZZLE, 1999, false, { serial: 'HS-0002', received_at: SEEDED_AT })
+  newUnit(INVENTORY.NOZZLE, '1999', false, { id: INVENTORY.NOZZLE_UNIT, serial: 'HS-0001', received_at: SEEDED_AT })
+  newUnit(INVENTORY.NOZZLE, '1999', false, { serial: 'HS-0002', received_at: SEEDED_AT })
   seedItem({ id: INVENTORY.ENGRAVING, kind_id: 'service', name: 'Laser engraving' })
 }
 
@@ -211,6 +223,7 @@ function ready(): void {
 export function reset(): void {
   Object.assign(inventoryMock, fresh())
   seeded = false
+  recostBusy = false
   ready()
 }
 
@@ -265,27 +278,27 @@ export function itemsTypedLike(itemId: string): string[] {
 }
 
 const trackingOf = (item: MockItem): Tracking => kindOf(item.kind_id)?.tracking ?? 'none'
-const lotOnHand = (lotId: string) => round6(inventoryMock.moves.filter((m) => m.lot_id === lotId).reduce((sum, m) => sum + m.qty, 0))
+const lotOnHand = (lotId: string) => sum(inventoryMock.moves.filter((m) => m.lot_id === lotId).map((m) => m.qty))
 
 function answerItem(item: MockItem): S['Item'] {
   const k = kindOf(item.kind_id)!
   const tracking = k.tracking
-  let onHand = 0
-  let value = 0
+  let onHand = '0'
+  let value = '0'
   let unknown = false
   if (tracking === 'lot') {
     for (const lot of inventoryMock.lots.filter((l) => l.item_id === item.id)) {
       const held = lotOnHand(lot.id)
-      onHand += held
-      if (held > 0) {
-        value += held * lot.unit_cost
+      onHand = addDecimals(onHand, held)
+      if (above(held)) {
+        value = addDecimals(value, mulDecimals(held, lot.unit_cost))
         unknown ||= lot.cost_unknown
       }
     }
   } else if (tracking === 'unit') {
     for (const unit of inventoryMock.units.filter((u) => u.item_id === item.id && u.status === 'in_stock')) {
-      onHand += 1
-      value += unit.cost
+      onHand = addDecimals(onHand, '1')
+      value = addDecimals(value, unit.cost)
       unknown ||= unit.cost_unknown
     }
   }
@@ -298,8 +311,8 @@ function answerItem(item: MockItem): S['Item'] {
     name: item.name,
     manufacturer: item.manufacturer,
     compatible_with: item.compatible_with,
-    low_stock: decimal(item.low_stock),
-    life_hours: item.life_hours === null ? null : decimal(item.life_hours),
+    low_stock: item.low_stock,
+    life_hours: item.life_hours,
     life_months: item.life_months,
     saleable: item.saleable,
     effective_saleable: item.saleable ?? k.saleable,
@@ -308,10 +321,10 @@ function answerItem(item: MockItem): S['Item'] {
     edited_fields: item.edited_fields,
     note: item.note,
     archived_at: item.archived_at,
-    on_hand: decimal(onHand),
-    stock_value_minor: decimal(value),
+    on_hand: dec(onHand),
+    stock_value_minor: dec(value),
     cost_unknown: unknown,
-    low: tracking !== 'none' && item.low_stock > 0 && onHand <= item.low_stock,
+    low: tracking !== 'none' && above(item.low_stock) && !above(onHand, item.low_stock),
     offer_count: inventoryMock.offers.filter((o) => o.item_id === item.id && !o.archived_at).length,
   }
 }
@@ -344,7 +357,7 @@ function answerOffer(offer: MockOffer): S['Offer'] {
 }
 
 function addPrice(offerId: string, price: string, currency: string, onDate: string): S['OfferPricePoint'] {
-  const point: MockPrice = { id: id(), offer_id: offerId, price: String(Number(price)), currency, on_date: onDate, source: 'manual', invoice_line_id: null, written: inventoryMock.prices.length }
+  const point: MockPrice = { id: id(), offer_id: offerId, price: dec(price), currency, on_date: onDate, source: 'manual', invoice_line_id: null, written: inventoryMock.prices.length }
   inventoryMock.prices.push(point)
   return latestPrice(offerId)!.id === point.id ? latestPrice(offerId)! : { ...point }
 }
@@ -354,12 +367,12 @@ function answerLot(lot: MockLot): S['Lot'] {
     id: lot.id,
     item_id: lot.item_id,
     location_id: lot.location_id,
-    received_qty: decimal(lot.received_qty),
-    on_hand: decimal(lotOnHand(lot.id)),
-    unit_cost_minor: decimal(lot.unit_cost),
+    received_qty: lot.received_qty,
+    on_hand: lotOnHand(lot.id),
+    unit_cost_minor: lot.unit_cost,
     cost_unknown: lot.cost_unknown,
     cost_currency: lot.cost_currency,
-    foreign_unit_cost_minor: lot.foreign_unit_cost === null ? null : decimal(lot.foreign_unit_cost),
+    foreign_unit_cost_minor: lot.foreign_unit_cost,
     origin: lot.origin,
     invoice_line_id: null,
     production_run_id: null,
@@ -371,7 +384,7 @@ function answerLot(lot: MockLot): S['Lot'] {
 
 function answerUnit(unit: MockUnit): S['Unit'] {
   const { cost, life_hours, ...rest } = unit
-  return { ...rest, cost_minor: decimal(cost), life_hours: life_hours === null ? null : decimal(life_hours) }
+  return { ...rest, cost_minor: cost, life_hours }
 }
 
 function answerMove(m: MockMove): S['Move'] {
@@ -382,9 +395,9 @@ function answerMove(m: MockMove): S['Move'] {
     lot_id: m.lot_id,
     unit_id: m.unit_id,
     kind: m.kind,
-    qty: decimal(m.qty),
-    unit_cost_minor: decimal(m.unit_cost),
-    amount_minor: decimal(m.qty * m.unit_cost),
+    qty: m.qty,
+    unit_cost_minor: m.unit_cost,
+    amount_minor: dec(mulDecimals(m.qty, m.unit_cost)),
     cost_unknown: m.cost_unknown,
     needs_review: m.needs_review,
     reverses_move_id: m.reverses_move_id,
@@ -403,16 +416,28 @@ function answerMove(m: MockMove): S['Move'] {
 class Refused extends Error {
   readonly status: number
   readonly code: string
-  constructor(status: number, code: string, detail: string) {
+  readonly base: string
+  constructor(status: number, code: string, detail: string, base = PROBLEMS) {
     super(detail)
     this.status = status
     this.code = code
+    this.base = base
+  }
+}
+
+/** FastAPI's own 422 for a body field (no inventory code), as `fieldProblem` answers it. */
+class FieldRefused extends Error {
+  readonly field: string
+  constructor(field: string, msg: string) {
+    super(msg)
+    this.field = field
   }
 }
 
 function refused(request: Request, error: unknown) {
+  if (error instanceof FieldRefused) return fieldProblem(request, error.field, error.message)
   if (!(error instanceof Refused)) throw error
-  return problem(request, error.status, error.message, PROBLEMS + error.code, { code: error.code })
+  return problem(request, error.status, error.message, error.base + error.code, { code: error.code })
 }
 
 /** The answer of `run()`, or its refusal as the route's problem. */
@@ -453,11 +478,26 @@ function findUnit(unitId: string): MockUnit {
 }
 
 /** An `each` item takes whole quantities only. */
-function quantity(item: MockItem, value: unknown, field: string, allowZero = false): number {
-  const n = Number(value)
-  if (!Number.isFinite(n) || (allowZero ? n < 0 : n <= 0)) throw new Refused(422, 'bad_quantity', `${field}: a quantity above 0`)
-  if (kindOf(item.kind_id)?.uom === 'each' && !Number.isInteger(n)) throw new Refused(422, 'bad_quantity', `${field}: an \`each\` item takes whole quantities only`)
+function quantity(item: MockItem, value: unknown, field: string, allowZero = false): string {
+  const text = String(value ?? '').trim()
+  if (!/^-?\d+(\.\d+)?$/.test(text)) throw new Refused(422, 'bad_quantity', `${field}: a quantity above 0`)
+  const n = dec(text)
+  if (allowZero ? below(n) : !above(n)) throw new Refused(422, 'bad_quantity', `${field}: a quantity above 0`)
+  if (kindOf(item.kind_id)?.uom === 'each' && n.includes('.')) throw new Refused(422, 'bad_quantity', `${field}: an \`each\` item takes whole quantities only`)
   return n
+}
+
+/** A location id the request names must be one (404 `location_not_found`). */
+function place(locationId: string | null | undefined): string | null {
+  if (locationId && !locationExists(locationId)) throw new Refused(404, 'location_not_found', 'no location')
+  return locationId ?? null
+}
+
+/** No other unit of the item has the serial (409 `serial_exists`). */
+function freeSerial(itemId: string, serial: string | null, own: string | null = null): void {
+  if (serial && inventoryMock.units.some((u) => u.item_id === itemId && u.id !== own && u.serial === serial)) {
+    throw new Refused(409, 'serial_exists', 'another unit of the item has that serial')
+  }
 }
 
 function move(fields: Partial<MockMove> & Pick<MockMove, 'item_id' | 'kind' | 'qty' | 'unit_cost' | 'cost_unknown'>): MockMove {
@@ -466,14 +506,14 @@ function move(fields: Partial<MockMove> & Pick<MockMove, 'item_id' | 'kind' | 'q
   return m
 }
 
-function openLot(itemId: string, qty: number, unitCost: number, unknown: boolean, origin: MockLot['origin'], fields: Partial<MockLot> = {}): MockLot {
+function openLot(itemId: string, qty: string, unitCost: string, unknown: boolean, origin: MockLot['origin'], fields: Partial<MockLot> = {}): MockLot {
   const lot: MockLot = { id: id(), item_id: itemId, location_id: null, received_qty: qty, unit_cost: unitCost, cost_unknown: unknown, cost_currency: null, foreign_unit_cost: null, origin, note: '', received_at: now(), ...fields }
   inventoryMock.lots.push(lot)
-  if (qty !== 0) move({ item_id: itemId, lot_id: lot.id, kind: 'receive', qty, unit_cost: lot.unit_cost, cost_unknown: lot.cost_unknown, reason: lot.note })
+  if (cmpDecimals(qty, '0') !== 0) move({ item_id: itemId, lot_id: lot.id, kind: 'receive', qty, unit_cost: lot.unit_cost, cost_unknown: lot.cost_unknown, reason: lot.note })
   return lot
 }
 
-function newUnit(itemId: string, cost: number, unknown: boolean, fields: Partial<MockUnit> = {}): MockUnit {
+function newUnit(itemId: string, cost: string, unknown: boolean, fields: Partial<MockUnit> = {}): MockUnit {
   const unit: MockUnit = {
     id: id(),
     item_id: itemId,
@@ -498,7 +538,7 @@ function newUnit(itemId: string, cost: number, unknown: boolean, fields: Partial
     ...fields,
   }
   inventoryMock.units.push(unit)
-  move({ item_id: itemId, unit_id: unit.id, kind: 'receive', qty: 1, unit_cost: cost, cost_unknown: unknown })
+  move({ item_id: itemId, unit_id: unit.id, kind: 'receive', qty: '1', unit_cost: cost, cost_unknown: unknown })
   return unit
 }
 
@@ -518,15 +558,16 @@ export interface TakeContext {
  * what no lot holds goes on the newest lot below 0 with `needs_review`, or on a new zero-cost
  * `adjustment` lot of unknown cost when there is none.
  */
-export function takeStock(itemId: string, qty: number, context: TakeContext = {}): S['Move'][] {
+export function takeStock(itemId: string, qtyIn: number | string, context: TakeContext = {}): S['Move'][] {
   ready()
+  const qty = dec(qtyIn)
   const kindName = context.kind ?? 'use'
   const lots = fifo(itemId)
   const order: MockLot[] = []
   if (context.lot_id) {
     const named = lots.find((l) => l.id === context.lot_id)
     if (!named) throw new Refused(404, 'lot_not_found', `no lot '${context.lot_id}'`)
-    if (lotOnHand(named.id) <= 0) throw new Refused(409, 'lot_empty', 'the named lot has no stock on hand')
+    if (!above(lotOnHand(named.id))) throw new Refused(409, 'lot_empty', 'the named lot has no stock on hand')
     order.push(named)
   }
   order.push(...lots.filter((l) => l.id !== context.lot_id))
@@ -534,16 +575,16 @@ export function takeStock(itemId: string, qty: number, context: TakeContext = {}
   const made: MockMove[] = []
   let left = qty
   for (const lot of order) {
-    if (left <= 0) break
+    if (!above(left)) break
     const held = lotOnHand(lot.id)
-    if (held <= 0) continue
-    const take = Math.min(held, left)
-    made.push(move({ item_id: itemId, lot_id: lot.id, kind: kindName, qty: -take, unit_cost: lot.unit_cost, cost_unknown: lot.cost_unknown, ...fields }))
-    left = round6(left - take)
+    if (!above(held)) continue
+    const take = below(held, left) ? held : left
+    made.push(move({ item_id: itemId, lot_id: lot.id, kind: kindName, qty: neg(take), unit_cost: lot.unit_cost, cost_unknown: lot.cost_unknown, ...fields }))
+    left = dec(subDecimals(left, take))
   }
-  if (left > 0) {
-    const newest = lots[lots.length - 1] ?? openLot(itemId, 0, 0, true, 'adjustment')
-    made.push(move({ item_id: itemId, lot_id: newest.id, kind: kindName, qty: -left, unit_cost: newest.unit_cost, cost_unknown: newest.cost_unknown, needs_review: true, ...fields }))
+  if (above(left)) {
+    const newest = lots[lots.length - 1] ?? openLot(itemId, '0', '0', true, 'adjustment')
+    made.push(move({ item_id: itemId, lot_id: newest.id, kind: kindName, qty: neg(left), unit_cost: newest.unit_cost, cost_unknown: newest.cost_unknown, needs_review: true, ...fields }))
   }
   return made.map(answerMove)
 }
@@ -552,7 +593,7 @@ export function takeStock(itemId: string, qty: number, context: TakeContext = {}
 export function giveBack(itemId: string, orderItemId: string): void {
   ready()
   for (const use of openUses(orderItemId).filter((m) => m.item_id === itemId)) {
-    move({ item_id: itemId, lot_id: use.lot_id, kind: 'return', qty: -use.qty, unit_cost: use.unit_cost, cost_unknown: use.cost_unknown, reverses_move_id: use.id, order_id: use.order_id, order_item_id: orderItemId })
+    move({ item_id: itemId, lot_id: use.lot_id, kind: 'return', qty: dec(neg(use.qty)), unit_cost: use.unit_cost, cost_unknown: use.cost_unknown, reverses_move_id: use.id, order_id: use.order_id, order_item_id: orderItemId })
   }
 }
 
@@ -562,22 +603,22 @@ function openUses(orderItemId: string, moves: MockMove[] = inventoryMock.moves):
 }
 
 /** `stock.parts_moved`: the known-cost use and return moves' cost, rounded once; unknown while an open use is. */
-export function partsMovedOf(orderItemId: string, moves: MockMove[] = inventoryMock.moves): { minor: number; unknown: boolean; open: boolean } {
+export function partsMovedOf(orderItemId: string, moves: MockMove[] = inventoryMock.moves): { minor: string; unknown: boolean; open: boolean } {
   ready()
   const own = moves.filter((m) => m.order_item_id === orderItemId && (m.kind === 'use' || m.kind === 'return'))
-  const minor = Math.round(-own.filter((m) => !m.cost_unknown).reduce((sum, m) => sum + round6(m.qty * m.unit_cost), 0))
+  const minor = roundDecimal(neg(sum(own.filter((m) => !m.cost_unknown).map((m) => dec(mulDecimals(m.qty, m.unit_cost))))), 0)
   const open = openUses(orderItemId, moves)
   return { minor, unknown: open.some((m) => m.cost_unknown), open: open.length > 0 }
 }
 
 /** `estimate_unit_cost`: one unit at what the lots on hand cost now (known ones only), and whether some is unknown. */
-export function estimateUnitCost(itemId: string): { minor: number; unknown: boolean } {
+export function estimateUnitCost(itemId: string): { minor: string; unknown: boolean } {
   ready()
-  const held = fifo(itemId).map((lot) => ({ lot, qty: lotOnHand(lot.id) })).filter((x) => x.qty > 0)
-  if (held.length === 0) return { minor: 0, unknown: true }
-  const qty = held.reduce((sum, x) => sum + x.qty, 0)
+  const held = fifo(itemId).map((lot) => ({ lot, qty: lotOnHand(lot.id) })).filter((x) => above(x.qty))
+  if (held.length === 0) return { minor: '0', unknown: true }
+  const qty = sum(held.map((x) => x.qty))
   const known = held.filter((x) => !x.lot.cost_unknown)
-  return { minor: known.reduce((sum, x) => sum + x.qty * x.lot.unit_cost, 0) / qty, unknown: known.length < held.length }
+  return { minor: dec(divDecimal(sum(known.map((x) => mulDecimals(x.qty, x.lot.unit_cost))), qty, 6)), unknown: known.length < held.length }
 }
 
 /** Whether the item is one an order's parts may name: an item of a kind tracked in lots. */
@@ -591,34 +632,34 @@ function receiveLot(itemId: string, body: S['ReceiveLot']): MockLot {
   const item = counted(itemId, 'lot')
   const qty = quantity(item, body.qty, 'qty')
   if (body.unit_cost_minor != null && body.total_cost_minor != null) throw new Refused(422, 'bad_quantity', 'give unit_cost_minor or total_cost_minor, not both')
-  const each = body.unit_cost_minor != null ? Number(body.unit_cost_minor) : body.total_cost_minor != null ? Number(body.total_cost_minor) / qty : null
+  const each = body.unit_cost_minor != null ? dec(body.unit_cost_minor) : body.total_cost_minor != null ? dec(divDecimal(String(body.total_cost_minor), qty, 6)) : null
   const foreign = body.currency != null && body.currency !== shop()
-  const fields: Partial<MockLot> = { note: body.note ?? '', location_id: body.location_id ?? null, ...(body.received_at ? { received_at: body.received_at } : {}) }
-  if (each === null) return openLot(itemId, qty, 0, true, 'manual', fields)
-  if (foreign) return openLot(itemId, qty, 0, true, 'manual', { ...fields, cost_currency: body.currency!, foreign_unit_cost: round6(each) })
-  return openLot(itemId, qty, round6(each), false, 'manual', fields)
+  const fields: Partial<MockLot> = { note: body.note ?? '', location_id: place(body.location_id), ...(body.received_at ? { received_at: body.received_at } : {}) }
+  if (each === null) return openLot(itemId, qty, '0', true, 'manual', fields)
+  if (foreign) return openLot(itemId, qty, '0', true, 'manual', { ...fields, cost_currency: body.currency!, foreign_unit_cost: each })
+  return openLot(itemId, qty, each, false, 'manual', fields)
 }
 
 /** `count_item`: negative lots to 0 first, then the difference FIFO, or onto the newest lot. */
-function countItem(itemId: string, onHand: number, note: string): MockMove[] {
+function countItem(itemId: string, onHand: string, note: string): MockMove[] {
   const item = counted(itemId, 'lot')
   const target = quantity(item, onHand, 'on_hand', true)
   const made: MockMove[] = []
   for (const lot of fifo(itemId)) {
     const held = lotOnHand(lot.id)
-    if (held < 0) made.push(move({ item_id: itemId, lot_id: lot.id, kind: 'adjust', qty: -held, unit_cost: lot.unit_cost, cost_unknown: lot.cost_unknown, reason: note }))
+    if (below(held)) made.push(move({ item_id: itemId, lot_id: lot.id, kind: 'adjust', qty: dec(neg(held)), unit_cost: lot.unit_cost, cost_unknown: lot.cost_unknown, reason: note }))
   }
-  const total = round6(fifo(itemId).reduce((sum, l) => sum + lotOnHand(l.id), 0))
-  const diff = round6(target - total)
-  if (diff < 0) {
-    for (const m of takeStock(itemId, -diff, { kind: 'adjust', reason: note })) made.push(inventoryMock.moves.find((x) => x.id === m.id)!)
-  } else if (diff > 0) {
+  const total = sum(fifo(itemId).map((l) => lotOnHand(l.id)))
+  const diff = dec(subDecimals(target, total))
+  if (below(diff)) {
+    for (const m of takeStock(itemId, neg(diff), { kind: 'adjust', reason: note })) made.push(inventoryMock.moves.find((x) => x.id === m.id)!)
+  } else if (above(diff)) {
     const lots = fifo(itemId)
     const newest = lots[lots.length - 1]
     if (newest) made.push(move({ item_id: itemId, lot_id: newest.id, kind: 'adjust', qty: diff, unit_cost: newest.unit_cost, cost_unknown: newest.cost_unknown, reason: note }))
     else {
-      const lot = openLot(itemId, 0, 0, true, 'adjustment', { note })
-      made.push(move({ item_id: itemId, lot_id: lot.id, kind: 'adjust', qty: diff, unit_cost: 0, cost_unknown: true, reason: note }))
+      const lot = openLot(itemId, '0', '0', true, 'adjustment', { note })
+      made.push(move({ item_id: itemId, lot_id: lot.id, kind: 'adjust', qty: diff, unit_cost: '0', cost_unknown: true, reason: note }))
     }
   }
   return made
@@ -628,9 +669,13 @@ function countItem(itemId: string, onHand: number, note: string): MockMove[] {
 function recost(lotId: string): S['RecostResult'] {
   const lot = findLot(lotId)
   counted(lot.item_id, 'lot')
+  if (recostBusy) {
+    recostBusy = false
+    throw new Refused(409, 'recost_busy', `lot ${lotId} kept taking new order moves: try again`, ORDER_PROBLEMS)
+  }
   const before = inventoryMock.moves.map((m) => ({ ...m }))
   const changed = inventoryMock.moves.filter((m) => m.lot_id === lotId && ['use', 'return', 'adjust'].includes(m.kind) && (m.unit_cost !== lot.unit_cost || m.cost_unknown !== lot.cost_unknown))
-  const costs = [...new Set(changed.map((m) => m.unit_cost))].sort((a, b) => a - b)
+  const costs = [...new Set(changed.map((m) => m.unit_cost))].sort(cmpDecimals)
   for (const m of changed) Object.assign(m, { unit_cost: lot.unit_cost, cost_unknown: lot.cost_unknown })
   const touched = [...new Set(changed.map((m) => m.order_item_id).filter((x): x is string => !!x))]
   const rows = touched.flatMap((orderItemId) => {
@@ -638,9 +683,9 @@ function recost(lotId: string): S['RecostResult'] {
     const is = partsMovedOf(orderItemId)
     if (was.minor === is.minor && was.unknown === is.unknown) return []
     const orderId = changed.find((m) => m.order_item_id === orderItemId)?.order_id ?? null
-    return [{ order_id: orders.orders.some((o) => o.id === orderId) ? orderId : null, order_item_id: orderItemId, before_minor: decimal(was.minor), after_minor: decimal(is.minor), before_unknown: was.unknown, after_unknown: is.unknown }]
+    return [{ order_id: orders.orders.some((o) => o.id === orderId) ? orderId : null, order_item_id: orderItemId, before_minor: was.minor, after_minor: is.minor, before_unknown: was.unknown, after_unknown: is.unknown }]
   })
-  return { item_id: lot.item_id, unit_cost_minor: decimal(lot.unit_cost), cost_unknown: lot.cost_unknown, before_unit_costs_minor: costs.map(decimal), moves: changed.length, orders: rows }
+  return { item_id: lot.item_id, unit_cost_minor: lot.unit_cost, cost_unknown: lot.cost_unknown, before_unit_costs_minor: costs, moves: changed.length, orders: rows }
 }
 
 const STATUS_MOVE: Record<string, S['Move']['kind']> = { in_service: 'use', sold: 'sell', retired: 'retire', scrapped: 'scrap' }
@@ -651,8 +696,8 @@ function setUnitStatus(unitId: string, body: S['UnitStatusInput']): MockUnit {
   const from = unit.status
   const to = body.status
   if (from === to) return unit
-  if (from === 'in_stock') move({ item_id: unit.item_id, unit_id: unit.id, kind: STATUS_MOVE[to]!, qty: -1, unit_cost: unit.cost, cost_unknown: unit.cost_unknown, reason: body.note ?? '' })
-  else if (to === 'in_stock') move({ item_id: unit.item_id, unit_id: unit.id, kind: 'return', qty: 1, unit_cost: unit.cost, cost_unknown: unit.cost_unknown, reason: body.note ?? '' })
+  if (from === 'in_stock') move({ item_id: unit.item_id, unit_id: unit.id, kind: STATUS_MOVE[to]!, qty: '-1', unit_cost: unit.cost, cost_unknown: unit.cost_unknown, reason: body.note ?? '' })
+  else if (to === 'in_stock') move({ item_id: unit.item_id, unit_id: unit.id, kind: 'return', qty: '1', unit_cost: unit.cost, cost_unknown: unit.cost_unknown, reason: body.note ?? '' })
   unit.status = to
   if (to === 'in_service') unit.in_service_at = now()
   if (to === 'retired' || to === 'scrapped') unit.retired_at = now()
@@ -697,7 +742,7 @@ export const handlers = [
     return answer(
       request,
       () => {
-        if (!KIND_ID.test(input.id)) throw new Refused(422, 'bad_kind_id', 'id: a kind id is `^[a-z][a-z0-9_]{0,39}$`')
+        if (!KIND_ID.test(input.id)) throw new FieldRefused('id', "String should match pattern '^[a-z][a-z0-9_]{0,39}$'")
         if (kindOf(input.id)) throw new Refused(409, 'kind_exists', `an item kind has that id: ${input.id}`)
         kindProblem(input, null)
         const made: MockKind = {
@@ -790,7 +835,7 @@ export const handlers = [
           kind_id: k.id,
           name: input.name,
           manufacturer: input.manufacturer ?? '',
-          low_stock: Number(input.low_stock ?? 0),
+          low_stock: dec(input.low_stock ?? '0'),
           saleable: input.saleable ?? null,
           note: input.note ?? '',
         })
@@ -806,9 +851,9 @@ export const handlers = [
       if (input.name != null) item.name = input.name
       if (input.manufacturer != null) item.manufacturer = input.manufacturer
       if (input.note != null) item.note = input.note
-      if (input.low_stock != null) item.low_stock = Number(input.low_stock)
+      if (input.low_stock != null) item.low_stock = dec(input.low_stock)
       if ('saleable' in input) item.saleable = input.saleable ?? null
-      if ('life_hours' in input) item.life_hours = input.life_hours == null ? null : Number(input.life_hours)
+      if ('life_hours' in input) item.life_hours = input.life_hours == null ? null : dec(input.life_hours)
       if ('life_months' in input) item.life_months = input.life_months ?? null
       return answerItem(item)
     })
@@ -856,7 +901,7 @@ export const handlers = [
         if (inventoryMock.offers.some((o) => !o.archived_at && o.supplier_id === supplier.id && o.item_id === item.id && o.sku.toUpperCase() === sku.toUpperCase())) {
           throw new Refused(409, 'offer_exists', 'the item already has an unarchived offer with that SKU at the supplier')
         }
-        return seedOffer({ item_id: item.id, supplier_id: supplier.id, sku, url: input.url?.trim() || null, pack_size: String(input.pack_size ?? 1), pack_uom: input.pack_uom ?? 'each', note: input.note ?? null })
+        return seedOffer({ item_id: item.id, supplier_id: supplier.id, sku, url: input.url?.trim() || null, pack_size: dec(input.pack_size ?? '1'), pack_uom: input.pack_uom ?? 'each', note: input.note ?? null })
       },
       201,
     )
@@ -908,9 +953,9 @@ export const handlers = [
     const input = await body<S['LotPatch']>(request, 'patchLot')
     return answer(request, () => {
       const lot = findLot(String(p.id))
-      if (input.unit_cost_minor != null) Object.assign(lot, { unit_cost: round6(Number(input.unit_cost_minor)), cost_unknown: false })
+      if (input.unit_cost_minor != null) Object.assign(lot, { unit_cost: dec(input.unit_cost_minor), cost_unknown: false })
       if (input.note != null) lot.note = input.note
-      if ('location_id' in input) lot.location_id = input.location_id ?? null
+      if ('location_id' in input) lot.location_id = place(input.location_id)
       return answerLot(lot)
     })
   }),
@@ -925,8 +970,8 @@ export const handlers = [
   http.post(`${B}/items/:id/count`, async ({ request, params: p }) => {
     const input = await body<S['CountInput']>(request, 'count')
     return answer(request, () => {
-      if (!input.note?.trim()) throw new Refused(422, 'bad_note', 'note: a note is not blank')
-      return { moves: countItem(String(p.id), Number(input.on_hand), input.note).map(answerMove) }
+      if (!input.note?.trim()) throw new FieldRefused('note', 'Value error, a note is not blank')
+      return { moves: countItem(String(p.id), String(input.on_hand), input.note).map(answerMove) }
     })
   }),
 
@@ -944,8 +989,13 @@ export const handlers = [
       request,
       () => {
         const item = counted(String(p.id), 'unit')
-        const cost = input.cost_minor == null ? null : Number(input.cost_minor)
-        const made = Array.from({ length: input.count }, (_, at) => newUnit(item.id, cost ?? 0, cost === null, { serial: input.serials?.[at]?.trim() || null, name: input.name ?? '' }))
+        const cost = input.cost_minor == null ? null : dec(input.cost_minor)
+        const locationId = place(input.location_id)
+        const serials = Array.from({ length: input.count }, (_, at) => input.serials?.[at]?.trim() || null)
+        const named = serials.filter((x): x is string => !!x)
+        if (new Set(named).size < named.length) throw new Refused(409, 'serial_exists', 'another unit of the item has that serial')
+        for (const serial of named) freeSerial(item.id, serial)
+        const made = serials.map((serial) => newUnit(item.id, cost ?? '0', cost === null, { serial, name: input.name ?? '', location_id: locationId }))
         return { units: made.map(answerUnit) }
       },
       201,
@@ -957,8 +1007,12 @@ export const handlers = [
     return answer(request, () => {
       const unit = findUnit(String(p.id))
       if (input.name != null) unit.name = input.name
-      if ('serial' in input) unit.serial = input.serial?.trim() || null
-      if ('location_id' in input) unit.location_id = input.location_id ?? null
+      if ('serial' in input) {
+        const serial = input.serial?.trim() || null
+        freeSerial(unit.item_id, serial, unit.id)
+        unit.serial = serial
+      }
+      if ('location_id' in input) unit.location_id = place(input.location_id)
       return answerUnit(unit)
     })
   }),

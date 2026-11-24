@@ -55,12 +55,12 @@ describe('OrdersPage (#4249)', () => {
   })
 
   it('says which items are low and links to them in Inventory (#5543, #7067)', async () => {
-    const hook = seedItem({ kind_id: 'hardware', name: 'Silver hook', low_stock: 5 })
+    const hook = seedItem({ kind_id: 'hardware', name: 'Silver hook', low_stock: '5' })
     seedLot(hook.id, 2, 5.99)
-    const ring = seedItem({ kind_id: 'hardware', name: 'Ring', low_stock: 5 })
+    const ring = seedItem({ kind_id: 'hardware', name: 'Ring', low_stock: '5' })
     seedLot(ring.id, 50, 10)
     // R-P2-39: a low item outside the Part kind is not an order's part.
-    const box = seedItem({ kind_id: 'packaging', name: 'Mailer box', low_stock: 5 })
+    const box = seedItem({ kind_id: 'packaging', name: 'Mailer box', low_stock: '5' })
     seedLot(box.id, 1, 30)
     renderPage(<OrdersPage />, { route: '/orders' })
 

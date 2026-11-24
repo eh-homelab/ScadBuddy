@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { ItemPartRow, Order, OrderItem, PartRule, PartRuleLine } from '../../../api/types'
+import { addDecimals, mulDecimal, roundDecimal } from '../../../lib/decimal'
 import { mockSettings } from '../../handlers'
 import { estimateUnitCost, giveBack, inventoryItem, isPartItem, partsMovedOf, takeStock } from '../inventory'
 import { event, itemOf, lock, notEnded, transition } from './orders'
@@ -84,12 +85,13 @@ export function returnParts(order: Order, item: OrderItem): void {
   event(order, 'parts.returned', { item_id: item.id, currency: mockSettings().orders_currency })
 }
 
-/** `CostRows.parts` for `costs.ts`: the item's parts cost from its moves, and whether it is unknown.
- * Stock costs are in the shop's currency: in an order in another currency they are 0 and unknown. */
+/** `CostRows.parts` for `costs.ts`: the item's parts cost from its moves, whole minor units
+ * (summed as decimal strings, rounded once), and whether it is unknown. Stock costs are in the
+ * shop's currency: in an order in another currency they are 0 and unknown. */
 export function partsCostOf(itemId: string): { minor: number; unknown: boolean } {
   const moved = partsMovedOf(itemId)
   if (parts.foreign.has(itemId)) return { minor: 0, unknown: moved.open }
-  return { minor: moved.minor, unknown: moved.unknown }
+  return { minor: Number(moved.minor), unknown: moved.unknown }
 }
 
 /** `Lifecycle.parts_unit_cost`: one unit of the item's parts at what the lots cost now (known
@@ -98,14 +100,15 @@ export function partsCostOf(itemId: string): { minor: number; unknown: boolean }
 export function partsUnitOf(itemId: string, currency: string): { minor: number; unknown: boolean } {
   const rows = parts.items.get(itemId) ?? []
   if (currency !== mockSettings().orders_currency) return { minor: 0, unknown: rows.length > 0 }
-  let minor = 0
+  let minor = '0'
   let unknown = false
   for (const row of rows) {
     const each = estimateUnitCost(row.item_id)
-    minor += row.per_unit * each.minor
+    minor = addDecimals(minor, mulDecimal(each.minor, row.per_unit))
     unknown ||= each.unknown
   }
-  return { minor, unknown }
+  // Whole minor units, rounded once from the exact sum: the caller adds it to integer costs.
+  return { minor: Number(roundDecimal(minor, 0)), unknown }
 }
 
 function refusedPart(request: Request, error: unknown) {

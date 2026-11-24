@@ -128,6 +128,11 @@ const MOCK_SYNC_COLOURS = {
   ],
 } as const
 
+/** #7067 — whether a place exists, for the inventory mock's `location_not_found`. */
+export function locationExists(id: string): boolean {
+  return state.locations.some((place) => place.id === id)
+}
+
 export function reset() {
   state = seed()
   colourSyncs = []
