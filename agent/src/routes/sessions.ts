@@ -122,7 +122,7 @@ export type SessionView = {
   parent_id: string | null
   /** What its browser reports (#7027): its own options or its parent's; null for the defaults. */
   browser: SessionRecord['browser']
-  /** Classic or durable (plan 5d), set when the session started. */
+  /** Always `durable` (plan Step 6.3). */
   mode: SessionRecord['mode']
   turns: number
   cost_usd: number

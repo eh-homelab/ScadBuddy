@@ -125,10 +125,10 @@ import { FlowQueue } from '../flows/queue.js'
 // refused `unavailable` (spec 2026-10-13 §10.1). The claim is one conditional UPDATE, so
 // two sends, on one replica or two, cannot both win; the loser gets SessionError 'busy'.
 // A turn takes no lease: its end is the workflow's `finish_turn`, and a turn whose
-// workflow cannot end it is the sweep's (durableSweep.ts). A classic session an earlier
-// release left goes on as an AgentSession at its next send, its turns read from its
-// transcript; one whose classic turn still holds a live lease on an older pod is left to
-// that pod. On SIGTERM, `stopTurns` drains: no new send here, and the warm processes close.
+// workflow cannot end it is the sweep's (durableSweep.ts). A session row with no `runtime`
+// (one an earlier release started) goes on as an AgentSession at its next send, its turns
+// read from its transcript. On SIGTERM, `stopTurns` drains: no new send here, and the warm
+// processes close.
 //
 // Approvals (#258). A turn's outward call parks in the gate (`ai_pending_input`, spec
 // 2026-10-01 §6.6) until a person decides through the pending-input route; interrupt and
@@ -618,7 +618,7 @@ export type SendOptions = {
   /**
    * The flow run and step that send this turn (#2481), set only by the sessions tools
    * from a flow activity's own context (ToolContext.flowTurn): a durable turn carries
-   * it, so the run's grant may cover its calls. A classic turn ignores it. Such a turn is offered
+   * it, so the run's grant may cover its calls. Such a turn is offered
    * no background built-in (#5870, `turn_flow`).
    */
   flow?: FlowTurn
@@ -950,7 +950,7 @@ export class SessionManager {
   durableTurns: DurableTurns | undefined
   /**
    * This replica's warm Claude Code processes (warm.ts, spec 2026-10-13 §5.3):
-   * one per classic session, serving its turns until it no longer matches
+   * one per session, serving its turns until it no longer matches
    * them, goes idle, or is evicted (a handoff, done, an archive, a credential,
    * plugin or package change on any replica: warmEvict.ts; main.ts hears it on the change stream).
    */
@@ -968,8 +968,8 @@ export class SessionManager {
   /** Assembles each turn's query options (turnRunner.ts). */
   private readonly runner: TurnRunner
   /**
-   * What a turn on this replica's warm processes needs (turnCore.ts): a classic turn's, and
-   * an AgentSession's `session_turn` (temporal/session/turnHost.ts), so both run alike.
+   * What a turn on this replica's warm processes needs (turnCore.ts): an AgentSession's
+   * `session_turn` (sessions/turnHost.ts).
    */
   readonly turnCore: TurnCoreDeps
 
