@@ -257,6 +257,8 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "flow.changed",
         "preview_slice.progress",
         "preview_slice.settled",
+        # A task a flow asks a person (#7364).
+        "task.changed",
         "library.changed",
         "library.removed",
         "font.installed",
