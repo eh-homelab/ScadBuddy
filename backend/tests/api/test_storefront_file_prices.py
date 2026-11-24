@@ -280,10 +280,76 @@ def test_a_read_that_claims_a_slice_counts_as_a_render(
     assert priced(crud, listed, {0: pla_red, 1: pla_blue}, token=TOKEN_B)["source"] == "slice"
     assert priced(crud, listed, {0: pla_red, 1: pla_blue})["source"] == "slice"
     assert counted(crud) == 1
-    # New colours over the visitor's limit: 429, and no slice starts.
-    found = problem_of(read(crud, listed, {0: pla_blue, 1: pla_red}), "render_limited", 429)
-    assert found["limit"] == "per_minute"
+    # New colours over the visitor's limit: no slice starts.
+    read(crud, listed, {0: pla_blue, 1: pla_red})
     assert rows(crud, "SELECT count(*) AS n FROM storefront_slice_prices") == [{"n": 1}]
+
+
+def test_over_the_limit_the_last_price_shows_with_the_limits_wait(
+    crud: CrudCaller, listed: dict[str, Any], pla_red: str, pla_blue: str
+) -> None:
+    """#7523 item 1: over the limit, the listing's last price, to read again once the limit
+    passes; no slice starts."""
+    assert crud.api.put("/api/v1/settings", json={"storefront_renders_per_day": 1}).is_success
+    first = priced(crud, listed, {0: pla_red, 1: pla_blue})
+    r = read(crud, listed, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    last = r.json()
+    assert (last["source"], last["price_minor"]) == ("last", first["price_minor"])
+    assert last["retry_after"] > 3600
+    assert rows(crud, "SELECT count(*) AS n FROM storefront_slice_prices") == [{"n": 1}]
+
+
+def test_over_the_limit_with_no_last_price_is_429_and_the_order_is_taken(
+    crud: CrudCaller, listed: dict[str, Any], tmp_path: Path, pla_red: str, pla_blue: str
+) -> None:
+    """#7523 items 1 and 3: with no price to show, 429; the page says the design can still
+    be ordered, and the shop sends its price before the customer pays."""
+    assert crud.api.put("/api/v1/settings", json={"storefront_renders_per_minute": 1}).is_success
+    priced(crud, listed, {0: pla_red, 1: pla_blue})
+    other = upload(crud.api, two_colours(tmp_path / "other.3mf", top="#00AA00"))
+    fresh = publish(crud.api, create(crud.api, body(other, [pla_red, pla_blue]))["id"])
+    colours = {0: pla_red, 1: pla_blue}
+    found = problem_of(read(crud, fresh, colours), "render_limited", 429)
+    assert found["limit"] == "per_minute"
+    r = add(crud, fresh, colours)
+    assert r.status_code == 200, r.text
+    draft = r.json()
+    assert draft["items"][0]["price"] == "by_hand"
+    r = submit(crud, draft)
+    assert r.status_code == 200, r.text
+    assert r.json()["pay_now"] is False
+
+
+def test_another_listings_last_price_is_of_the_chosen_material(
+    crud: CrudCaller,
+    listed: dict[str, Any],
+    keychain: NativeFile,
+    pla_red: str,
+    pla_blue: str,
+) -> None:
+    """#7523 item 4: the first listing's PLA price is not a last price of the second's
+    PETG colours, and is one of its other PLA colours; another remembered setup is none."""
+    # More slices than the default limit of renders, which this test is not about.
+    assert crud.api.put("/api/v1/settings", json={"storefront_renders_per_minute": 50}).is_success
+    priced(crud, listed, {0: pla_red, 1: pla_blue})
+    petg = _filament(crud, "PETG", "#00FF00")
+    black = _filament(crud, "PETG", "#000000")
+    everything = body(keychain, [pla_red, pla_blue, petg, black], materials=["PLA", "PETG"])
+    second = publish(crud.api, create(crud.api, everything)["id"])
+    third = publish(crud.api, create(crud.api, everything)["id"])
+    r = read(crud, second, {0: petg, 1: black})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] != "last"
+    r = read(crud, second, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "last"
+    _state(crud.api).settings_store.set_library_choices(
+        keychain.id, ModelPrintChoices(process_overrides={"wall_loops": "6"})
+    )
+    r = read(crud, third, {0: pla_blue, 1: pla_blue})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "pending"
 
 
 def test_colours_of_two_materials_clash(

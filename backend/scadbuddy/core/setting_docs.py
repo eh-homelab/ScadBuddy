@@ -330,8 +330,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "storefront_warm_prices": SettingDoc(
             "Warm storefront prices",
-            "On, publish renders a listing's default variant and slices its price, and"
-            " Prepare colours slices each prepared variant's, before a visitor asks.",
+            "On, publish slices the price of a listing's default choices (a design's are"
+            " rendered first), and Prepare colours slices each prepared variant's, before a"
+            " visitor asks.",
         ),
         # -- Fonts ---------------------------------------------------------------------
         "google_fonts_api_key": SettingDoc(

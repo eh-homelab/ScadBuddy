@@ -1503,6 +1503,31 @@ def _offered_file(
     )
 
 
+def page_colours(
+    listing: Listing, filaments: Mapping[str, Filament], shop_materials: Sequence[str]
+) -> dict[int, str] | None:
+    """The filament of each part a visitor's page of the published file ``listing`` opens
+    on (#7523): the page knows a part by its colour (`fileParts.ts` `partFilaments`), so it
+    takes the first filament of the part's default colour in the default's material. None
+    when a part has none: the listing cannot be ordered."""
+    snapshot = listing.file_snapshot
+    assert snapshot is not None
+    shown = _offered_file(listing, snapshot, filaments, shop_materials)
+    by_id = {f.id: f for f in shown.filaments}
+    colours: dict[int, str] = {}
+    for part in shown.slots:
+        if part.default is None:
+            return None
+        start = by_id[part.default]
+        colours[part.slot] = next(
+            f.id
+            for f in shown.filaments
+            if f.colour.casefold() == start.colour.casefold()
+            and material_key(f.material) == material_key(start.material)
+        )
+    return colours
+
+
 def _offered(
     listing: Listing, filaments: Mapping[str, Filament], shop_materials: Sequence[str]
 ) -> _Offered:

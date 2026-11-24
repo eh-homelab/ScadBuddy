@@ -105,7 +105,11 @@ same way, `vite.config.ts`).
   price is `store.price` (`POST /listings/{id}/price`), the add sends `values` empty and
   `colours` by slot. A `last` price shows marked as updating while the page reads again; a
   read that ends with no price (a limit, a failure, too slow) keeps it on screen as `Estimate`
-  `held` ("This was our last price…"), neither updating nor firm. The mock lists `FILE` (`l4`) and every file listing the back office's
+  `held` ("This was our last price…"), neither updating nor firm; "We confirm the price before
+  you pay" only while the design can be ordered (`orderable`, #7523). Over a limit (429
+  `render_limited`, or a `last` with a wait over `LIMIT_WAIT_MS`) the page reads once more on
+  its own after the wait (at most `timing.limitMs`), then offers "Try again" once the wait is
+  over; a colour change drops the wait. The mock lists `FILE` (`l4`) and every file listing the back office's
   mock published in the tab (`storefront.ts` `publishedFiles`, from `sessionStorage`); e2e
   `e2e/storefront-sell.spec.ts` sells a library file, publishes it and opens its public page.
   The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)
