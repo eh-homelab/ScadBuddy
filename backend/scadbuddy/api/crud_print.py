@@ -280,7 +280,12 @@ from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool, T
 from scadbuddy.filament.print_uses import SlotUse
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
-from scadbuddy.library.settings_store import PRINT_SECRETS, PrintSettings, print_projection
+from scadbuddy.library.settings_store import (
+    PRINT_RUN_RETENTION_SECONDS,
+    PRINT_SECRETS,
+    PrintSettings,
+    print_projection,
+)
 from scadbuddy.print_watch.component import AutoImportsDep
 from scadbuddy.print_watch.lan import LanCapture, LanImport
 from scadbuddy.print_watch.lan_store import StoreLanRecorder
@@ -439,7 +444,7 @@ def _outcomes(runs: PrintRunsDep) -> PrintOutcomeStore:
 
 @router.post("/runs", name="crud_print_insert_run")
 async def insert_run(body: RunInsert, runs: PrintRunsDep, settings: SettingsStoreDep) -> PrintRun:
-    seconds = (await asyncio.to_thread(settings.load)).print_run_retention_seconds
+    seconds = await asyncio.to_thread(settings.get, PRINT_RUN_RETENTION_SECONDS)
     return await runs.store.insert_accepted(
         body.run_id,
         subject=PrintSubject.from_run_subject(body.subject),

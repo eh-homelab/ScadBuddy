@@ -40,6 +40,7 @@ from scadbuddy.library.outputs import (
     release_parts,
     require_output,
 )
+from scadbuddy.library.settings_store import PUBLIC_URL
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
@@ -178,7 +179,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                     "the job's extra files are no longer in the store; render again",
                 )
             files_dir = blobs.dir_for(chosen.files_key) / "files"
-        public_url = (await asyncio.to_thread(state.settings_store.load)).public_url
+        public_url = await asyncio.to_thread(state.settings_store.get, PUBLIC_URL)
         # Written into the saved 3MF, which a download then serves as it is (#2652). A
         # model.json made invalid since the render fails the save on purpose (#2868):
         # saved without them, the file would open in Bambu Studio missing the template's

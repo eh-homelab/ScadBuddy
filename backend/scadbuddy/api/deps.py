@@ -338,6 +338,8 @@ def _build_core(settings: Settings) -> AppState:
     projection = JobProjection(
         settings.database_url, pool_size=settings.database_pool_size, pool=settings_store.pool
     )
+    # The plain settings cached while the shared listener listens (#7384).
+    settings_store.follow(projection.pg_listener)
     pool = projection.pool
     # Registered on the shared listener before the bus (#2507): a commit's HEAD is
     # refreshed here before the bus delivers the events the writer published after

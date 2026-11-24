@@ -48,6 +48,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.events import EventBus, PrinterEvent, emit
 from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
+from scadbuddy.core.settings_cache import settings_written
 from scadbuddy.entities.registry import repoint_entity
 from scadbuddy.printers.models import (
     BambuddyView,
@@ -308,6 +309,10 @@ def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None
         " updated_at = now() WHERE name = ANY(%(names)s) AND value ? %(merged)s",
         {"into": into, "merged": merged, "names": list(PRINTER_LISTED_SETTINGS)},
     )
+    # Drop this process's cached settings (#7384). It runs before the caller's commit, so a
+    # read in between can keep the old rows until the trigger's NOTIFY, which also drops
+    # every other replica's.
+    settings_written()
 
 
 def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
@@ -322,6 +327,7 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
         " WHERE name = ANY(%s) AND value ? %s",
         (printer_id, [*PRINTER_KEYED_SETTINGS, *PRINTER_LISTED_SETTINGS], printer_id),
     )
+    settings_written()
     # A subject's remembered printer goes too (#6106): the dialog does not offer a gone
     # printer.
     conn.execute(

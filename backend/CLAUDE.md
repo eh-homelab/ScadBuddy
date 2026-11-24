@@ -1471,6 +1471,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   During a roll, a `plugin-oauth:` acquire whose grant row an SQL-path agent pod holds keeps
   one of its connections for up to the request's `wait_s` (at most `MAX_WAIT`, 25 s). At
   most `MAX_ROW_WAITS` (2) acquires of a process wait so; the rest poll without waiting.
+- One plain setting (#7384): `SettingsStore.get(KEY)` with a typed key of
+  `library/settings_store.py` (`Setting[T]`, e.g. `OPERATION_RETENTION_SECONDS`; never a
+  secret, an own-table or a registry field) answers as `load` does, from the API's cache of
+  the plain rows (`core/settings_cache.py`): no query while warm. The cache is kept only
+  while the process's one `PgListener` listens on `scadbuddy_settings`, which a trigger on
+  `settings` NOTIFYs at every write's commit (`20261124T1216Z_settings_changed_notify.sql`);
+  a TTL (10 s) backs a lost notification, and a writer in the process drops it itself
+  (`SettingsStore._changed`, `settings_written` for the printer registry). `load` and
+  `snapshot` never read the cache: they read the secrets and the other tables in one
+  snapshot. A hot path that needs one plain value calls `get`, not `load()`.
 - A dict read from a `jsonb` column (e.g. `storefront_listings.params`) has no key order:
   Postgres stores the keys shortest first. Never show or answer its keys in that order;
   order them by the template schema's parameters (#6302).
