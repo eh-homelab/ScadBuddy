@@ -60,6 +60,10 @@ from scadbuddy.workflows.attempt_media import AttemptMediaStep
 
 logger = logging.getLogger(__name__)
 
+#: The sweep looks at the attempts made this recently (spec 2026-11-05 §4.6).
+SWEEP_DAYS = timedelta(days=14)
+#: The sweep starts a step for an attempt last read for media at least this long ago.
+SWEEP_CHECK_EVERY = timedelta(hours=1)
 #: How long after its print completed an archive can still gain a timelapse (spec
 #: 2026-11-05 §4.4): Bambuddy writes it minutes after, and the UI says "waiting" till then.
 FRESH = timedelta(hours=1)
@@ -82,8 +86,7 @@ class ArchiveOffer(BaseModel):
     grams: float | None = None
     #: The photos Bambuddy took as the print finished, oldest first.
     finish_photos: list[str] = Field(default_factory=list)
-    #: Whether the archive has a timelapse to copy (pulled off the printer first,
-    #: ``POST /prints/{archive_id}/timelapse/pull``).
+    #: Whether the archive has a timelapse in Bambuddy to copy.
     timelapse: bool = False
     #: The attachment the attempt, or its item, holds of this archive's finish photo,
     #: if any: what is attached now, not what the import started by this read will
@@ -355,6 +358,28 @@ async def mirror_attempt(
     return AttemptMediaStep(missing=missing)
 
 
+async def sweep_media(
+    lifecycle: Lifecycle, integrations: OrderIntegrations, starter: MediaStarter, *, limit: int
+) -> int:
+    """The housekeeping sweep ``housekeeping_import_attempt_media`` (spec 2026-11-05 §4.6):
+    one step of ``AttemptMedia`` for each attempt of the last `SWEEP_DAYS` that still
+    lacks a medium and was not read for media in the last `SWEEP_CHECK_EVERY`. It catches
+    what the triggers missed (Temporal down, an outcome not heard, a timelapse Bambuddy
+    got later). A medium the import refused as too large at ``limit`` (the upload limit)
+    or a higher one is not missing (#7281 review). It asks Bambuddy nothing itself, and
+    nothing without a Bambuddy. A failed start is logged, and the next attempt is
+    started. The number of starts asked for."""
+    if not integrations.linked:
+        return 0
+    now = datetime.now(UTC)
+    attempts = await asyncio.to_thread(
+        lifecycle.store.attempts_missing_media, now - SWEEP_DAYS, now - SWEEP_CHECK_EVERY, limit
+    )
+    for fulfilment_id in attempts:
+        await start_media(starter, fulfilment_id, retries=False)
+    return len(attempts)
+
+
 def attempt_of(store: OrderStore, order_id: str, item_id: str, fulfilment_id: str) -> Fulfilment:
     """The attempt, refused with a 404 unless it is the item's and the item the order's."""
     item = store.item(item_id)
@@ -472,8 +497,7 @@ async def copy_in(
     elif not facts.timelapse:
         raise _refused(
             "no_timelapse",
-            f"archive {archive_id} has no timelapse: pull it off the printer first"
-            f" (POST /prints/{archive_id}/timelapse/pull)",
+            f"archive {archive_id} has no timelapse in Bambuddy",
         )
     claims.root.mkdir(parents=True, exist_ok=True)
     staging = claims.root / f".copy-{uuid.uuid4().hex}"

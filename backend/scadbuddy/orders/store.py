@@ -2469,6 +2469,37 @@ class OrderStore:
                 (at, fulfilment_id),
             )
 
+    def attempts_missing_media(
+        self, created_after: datetime, checked_before: datetime, limit: int
+    ) -> list[str]:
+        """The attempts made after ``created_after`` and not read for media since
+        ``checked_before`` that still lack a medium (spec 2026-11-05 §4.6): one of their
+        archives has no finish photo or no timelapse copy on the attempt or on its item (a
+        copy from before #5268), and the import did not refuse it as too large at ``limit``
+        bytes (the upload limit) or more (#7281 review). A settled run's attempt with no
+        archive copied yet counts too, as its outcome may have been missed. Least lately
+        read first."""
+        with self._read(None) as c:
+            rows = c.execute(
+                "SELECT f.id FROM order_item_fulfilments f"
+                " WHERE f.created_at > %(after)s"
+                " AND (f.media_checked_at IS NULL OR f.media_checked_at <= %(before)s)"
+                " AND ((f.archive_ids = '{}'"
+                "  AND f.print_run_id IS NOT NULL AND f.finished_at IS NOT NULL)"
+                "  OR EXISTS (SELECT 1 FROM unnest(f.archive_ids) a(id)"
+                "   CROSS JOIN (VALUES ('finished_photo'), ('timelapse')) m(media)"
+                "   WHERE NOT EXISTS (SELECT 1 FROM entity_attachments e"
+                "    WHERE e.subject IN ('order_item_fulfilment:' || f.id,"
+                "     'order_item:' || f.order_item_id)"
+                "    AND e.archive_id = a.id AND e.archive_media = m.media)"
+                "   AND NOT EXISTS (SELECT 1 FROM order_attempt_media_refusals r"
+                "    WHERE r.fulfilment_id = f.id AND r.archive_id = a.id"
+                "    AND r.archive_media = m.media AND r.limit_bytes >= %(limit)s)))"
+                " ORDER BY f.media_checked_at NULLS FIRST, f.created_at, f.id",
+                {"after": created_after, "before": checked_before, "limit": limit},
+            ).fetchall()
+        return [row["id"] for row in rows]
+
     def unaccept_fulfilment(self, conn: Conn, fulfilment_id: str) -> Fulfilment:
         """An unfulfil (#4952): the attempt stays, no longer counted as made."""
         row = conn.execute(
