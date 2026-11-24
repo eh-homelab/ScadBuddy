@@ -7,10 +7,9 @@ import { sessionHostQueue } from './names.js'
 // A replica's own queues (spec 2026-10-13 §5.2), two workers that stop together:
 //
 //   agent-tools.<identity>     A turn tool's pinned calls (#2320, #2581): http_request, the
-//                              browser and kept plugin clients, and the `turn_tools` listing,
-//                              which gets 5 s to start and one attempt; and a
-//                              session's Monitor commands (`bg_monitor_command`, which
-//                              run where its turns' Bash runs). The SDK's default limit.
+//                              browser and kept plugin clients; and a session's Monitor
+//                              commands (`bg_monitor_command`, which run where its turns'
+//                              Bash runs). The SDK's default limit.
 //                              Also the replica's own BridgeCall workflows (#5862): a browser
 //                              call to a tab on another replica runs its workflow tasks here,
 //                              where nothing waits on a versioned queue's routing.

@@ -531,7 +531,7 @@ function capped(text: string, max: number, what: string, cut: string[]): string 
   return storableCut(text, max)
 }
 
-/** Temporal's default limit on one payload (a durable turn's `turn_tools` result is one). */
+/** Temporal's default limit on one payload. */
 export const TEMPORAL_PAYLOAD_LIMIT = 2 * 1024 * 1024
 /**
  * The most all of a turn's packages may take in a turn's listing, in UTF-8 bytes (#4757

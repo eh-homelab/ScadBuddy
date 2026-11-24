@@ -1294,7 +1294,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const a = await replica('a', { slots: 1 })
     const { turn } = await startOn(a, 'hold the slot')
     await pollUntil(() => slowCalls, 1)
-    // A DurableSession's pinned call on the same replica (5 s to start, as `turn_tools` gets).
+    // A pinned call on the same replica (5 s to start).
     const pinned = await env.client.workflow.execute('pinnedCall', {
       taskQueue: PINNED_TEST_QUEUE,
       workflowId: `pinned-${Date.now()}`,
