@@ -1527,7 +1527,7 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     const bodies: unknown[] = []
     server.use(
       http.get(`${SPOOLS}/${SOURCE_ID}/copy`, () =>
-        HttpResponse.json({ spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false }, location_id: null, presets: [], k_values: [] }),
+        HttpResponse.json({ spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false }, location_id: null, presets: [], k_values: [], copy_of: SOURCE_ID }),
       ),
       http.post(BULK, async ({ request }) => {
         bodies.push(await request.json())
@@ -1537,7 +1537,8 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     const result = await runTool(tool('filament_spool_upsert'), { copy_of: SOURCE_ID, fields: { note: 'second' } }, ctx())
     expect(result.isError).toBeFalsy()
     expect(bodies).toEqual([
-      { spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false, note: 'second' }, location_id: null, presets: [], k_values: [], quantity: 1 },
+      // R-7150-13: the draft names its source (the route answers `copy_of`), so the backend keeps a copied migrated row so.
+      { spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false, note: 'second' }, location_id: null, presets: [], k_values: [], quantity: 1, copy_of: SOURCE_ID },
     ])
   })
 
