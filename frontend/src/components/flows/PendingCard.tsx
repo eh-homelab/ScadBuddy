@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { api } from '../../api/client'
-import type { FlowPending, FlowQueueEntry, FlowQueueStep } from '../../api/types'
+import type { FlowPending, FlowQueueEntry } from '../../api/types'
 import { decisionBody, respond as respondToAgent } from '../../agent/respond'
 import { USER_ONLY } from '../../agent/dom'
 import { Spinner } from '../ui/spinner'
@@ -11,24 +11,20 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { hopActor, hopUntilText, proposalDiff, waitingText } from '../../lib/flows'
 import { useAsync } from '../../lib/useAsync'
+import { usePassed } from '../../lib/usePassed'
+import { INSET, StepLine, WAITING, type CardProps } from './pendingParts'
+import { TaskCard } from './TaskCard'
 
 // A run's parked calls and their decide controls, on the run's page and the order's
 // (#4252, orders spec §7.4): moved here from `pages/WorkflowRunPage.tsx` unchanged.
 
-/** A box of text set apart: a proposal, what a session wrote. */
-const INSET = 'rounded-lg bg-muted/50 p-2 ring-1 ring-foreground/10'
-
-/** A call waiting on the person: a card marked as needing them. */
-const WAITING = 'mb-3 ring-destructive/40'
-
-interface CardProps {
-  entry: FlowPending
-  runId: string
-  step: FlowQueueStep | null
-  respond: (send: () => Promise<unknown>) => Promise<void>
+/** #7364 — a prompt is answered from its task's schema; any other call, as it was. */
+export function PendingCard(props: CardProps) {
+  const { task } = props.entry
+  return task ? <TaskCard {...props} key={task.id} task={task} /> : <CallCard {...props} />
 }
 
-export function PendingCard({ entry, runId, step, respond }: CardProps) {
+function CallCard({ entry, runId, step, respond }: CardProps) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -105,15 +101,6 @@ export function PendingCard({ entry, runId, step, respond }: CardProps) {
 
 export type ChildEntry = Extract<FlowQueueEntry, { source: 'child' }>
 
-/** #2482 — the run's step a call came from: its own, or the one that drives a child session. */
-function StepLine({ step, child = false }: { step: FlowQueueStep; child?: boolean }) {
-  return (
-    <p className="mb-2 text-[12px] text-muted-foreground">
-      {child ? 'From a session the run talks to, at step' : 'Step'} {step.seq} ({step.fn})
-    </p>
-  )
-}
-
 /**
  * #2482 — a child session's call in a flow turn, in the run's queue (spec 2026-10-11
  * §4.5): its summary, the step that drives the session, where it waits and why, and the
@@ -178,27 +165,6 @@ export function ChildCard({ entry, respond }: { entry: ChildEntry; respond: (sen
 /** Where an entry waits, why, and its way up: a run's own call's, or a child's. */
 type EscalationInfo = Pick<FlowPending, 'hop' | 'hop_until' | 'reason' | 'proposed'> & {
   hops: readonly { hop: string; action: string; actor: string }[]
-}
-
-/**
- * Whether `at` has passed, re-rendering when it does (#3350); false for no time. By the
- * browser's clock, which the agent no longer trusts for the hop itself (#3411): a fast one
- * hides the "you may decide it now" notice early. It says nothing the run page's decision
- * does not, so that is accepted.
- */
-function usePassed(at: string | null | undefined): boolean {
-  const due = at ? Date.parse(at) : Number.NaN
-  const [passed, setPassed] = useState(() => Number.isFinite(due) && due <= Date.now())
-  useEffect(() => {
-    if (!Number.isFinite(due)) return setPassed(false)
-    const left = due - Date.now()
-    setPassed(left <= 0)
-    if (left <= 0) return
-    // A hop lasts minutes; the cap only keeps setTimeout's 32-bit delay from overflowing.
-    const timer = setTimeout(() => setPassed(true), Math.min(left, 2 ** 31 - 1))
-    return () => clearTimeout(timer)
-  }, [due])
-  return passed
 }
 
 /** #2482 — where a call outside the run's grant waits, why, and what happened to it on the way. */

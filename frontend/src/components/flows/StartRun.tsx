@@ -1,4 +1,4 @@
-import { useId, useState, type FormEvent } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Spinner } from '../ui/spinner'
 import { GrantEditor } from './GrantEditor'
 import { useInputs } from './inputsForm'
+import { FormError, SchemaForm } from './SchemaForm'
 
 type Schema = Record<string, unknown> | null
 type Mode = 'inputs' | 'grant'
@@ -47,7 +48,7 @@ export function StartRun({
   const navigate = useNavigate()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
-  const [form, setForm] = useState<{ mode: Mode; name: string; fields: InputField[] } | null>(null)
+  const [form, setForm] = useState<{ mode: Mode; name: string; schema: Schema; fields: InputField[] } | null>(null)
 
   async function start(options: { inputs?: Record<string, unknown>; grant?: FlowGrantSpec }) {
     setBusy(true)
@@ -78,7 +79,7 @@ export function StartRun({
     }
     const fields = inputFields(found.schema)
     if (mode === 'inputs' && fields.length === 0) return void start({})
-    setForm({ mode, name: found.name, fields })
+    setForm({ mode, name: found.name, schema: found.schema ?? null, fields })
   }
 
   const close = () => {
@@ -112,7 +113,7 @@ export function StartRun({
       {form?.mode === 'inputs' && (
         <InputsDialog
           name={form.name}
-          fields={form.fields}
+          schema={form.schema}
           busy={busy}
           error={error}
           onStart={(inputs) => void start({ inputs })}
@@ -139,38 +140,21 @@ function refusal(caught: unknown): string {
   return Array.isArray(problems) && problems.length > 0 ? problems.map(String).join('\n') : caught.detail
 }
 
-function Refusal({ error }: { error?: string }) {
-  return error ? (
-    <p role="alert" className="text-[13px] whitespace-pre-wrap text-destructive">
-      {error}
-    </p>
-  ) : null
-}
-
 function InputsDialog({
   name,
-  fields,
+  schema,
   busy,
   error,
   onStart,
   onClose,
 }: {
   name: string
-  fields: InputField[]
+  schema: Schema
   busy: boolean
   error?: string
   onStart: (inputs: Record<string, unknown>) => void
   onClose: () => void
 }) {
-  const formId = useId()
-  const { parse, rendered } = useInputs(fields)
-
-  function submit(event: FormEvent) {
-    event.preventDefault()
-    const inputs = parse()
-    if (inputs) onStart(inputs)
-  }
-
   return (
     <Dialog open onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
@@ -181,19 +165,21 @@ function InputsDialog({
             left blank takes its default.
           </DialogDescription>
         </DialogHeader>
-        <form id={formId} noValidate onSubmit={submit} className="flex flex-col gap-4">
-          {rendered}
-          <Refusal error={error} />
-        </form>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose} disabled={busy}>
-            Cancel
-          </Button>
-          <Button type="submit" form={formId} disabled={busy} aria-busy={busy}>
-            {busy && <Spinner />}
-            Start run
-          </Button>
-        </DialogFooter>
+        <SchemaForm
+          schema={schema}
+          submitLabel="Start run"
+          busy={busy}
+          error={error}
+          onSubmit={onStart}
+          actions={(start) => (
+            <DialogFooter>
+              <Button variant="ghost" onClick={onClose} disabled={busy}>
+                Cancel
+              </Button>
+              {start}
+            </DialogFooter>
+          )}
+        />
       </DialogContent>
     </Dialog>
   )
@@ -237,7 +223,7 @@ function GrantDialog({
           }}
           onCancel={onClose}
         />
-        <Refusal error={error} />
+        <FormError error={error} />
       </DialogContent>
     </Dialog>
   )

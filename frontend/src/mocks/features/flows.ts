@@ -15,6 +15,7 @@ import type {
   FlowStep,
 } from '../../api/types'
 import { changeFlowTrigger, requestedTriggers } from './flowTriggers'
+import { onTaskAnswered, PROMPT_TASK_ID, taskQuestion } from './tasks'
 
 /**
  * #1057 — flow runs (backend `api/flows.py`): the list, one run's view, and a person's
@@ -48,6 +49,9 @@ import { changeFlowTrigger, requestedTriggers } from './flowTriggers'
  * (`DELETE /workflows/names/{name}`): hidden from `GET /workflows` unless `?archived=true`,
  * and its starts refused (409 `flow-archived`, `flow-deleted`). A new version brings a
  * deleted flow back; its versions and their scripts stay readable throughout.
+ *
+ * #7364 — `run-prompt` waits on a prompt: its task is `tasks.ts`'s, and an answer to it
+ * moves the run on.
  */
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 9, 10, 9, minutes)).toISOString()
@@ -209,6 +213,23 @@ function defaults(): FlowRun[] {
       steps: [step(1, 'render', 'succeeded')],
       result: 'result: 2',
       inputs: { slug: 'coaster', copies: 2, colour: 'red', dry_run: false, plates: [1] },
+      created_at: at(0),
+    }),
+    // #7364: a run that waits on a typed question.
+    run('run-prompt', {
+      status: 'waiting',
+      steps: [step(1, 'render', 'succeeded'), { ...step(2, 'prompt', 'running', false), call_id: PROMPT_TASK_ID }],
+      waiting_on: [
+        {
+          call_id: PROMPT_TASK_ID,
+          kind: 'answer',
+          fn: 'prompt',
+          prompt: 'Where do we send the pickup note?',
+          since: at(2),
+          proposed: false,
+          hops: [],
+        },
+      ],
       created_at: at(0),
     }),
   ]
@@ -495,7 +516,7 @@ function view(id: string): FlowRunView | undefined {
     hops,
     summary: summaries.get(`${id}:${call_id}`)?.summary ?? null,
     bound_hash: summaries.get(`${id}:${call_id}`)?.bound_hash ?? null,
-    task: null,
+    task: taskQuestion(call_id),
   }))
   return {
     id,
@@ -543,6 +564,8 @@ function resolve(id: string, callId: string): boolean {
   if (found.waiting_on.length === 0) found.status = 'running'
   return true
 }
+
+onTaskAnswered((task) => resolve(task.run_id, task.id))
 
 /** #4445: backend flows/operations.py PRINTER_CHANGED. */
 const PRINTER_CHANGED = 'https://scadbuddy.dev/problems/flow-printer-changed'

@@ -16,6 +16,7 @@ import {
   setFlowDetails,
   setFlowPendingSummary,
 } from '../mocks/features/flows'
+import { taskAnswers } from '../mocks/features/tasks'
 import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -117,6 +118,39 @@ describe('WorkflowRunPage', () => {
     expect(flowRequests()).toEqual([])
     release()
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Sending…' })).toBeNull())
+  })
+
+  // #7364 — a prompt: its task's form in place of the text box.
+  it("answers a prompt from its task's schema, and the run moves on", async () => {
+    const { user } = render('run-prompt')
+    const card = await screen.findByRole('region', { name: 'Waiting for your answer: Where do we send the pickup note?' })
+    expect(card).toHaveTextContent('Step 2 (prompt)')
+    expect(within(card).queryByRole('textbox', { name: 'Your answer' })).toBeNull()
+    await user.type(within(card).getByLabelText(/^Email/), 'jo@example.com')
+    await user.click(within(card).getByRole('button', { name: 'Answer' }))
+    await waitFor(() => expect(screen.getByTestId('flow-run-status')).toHaveTextContent('Running'))
+    expect(taskAnswers().map((a) => a.body)).toEqual([
+      { answer: { email: 'jo@example.com', language: 'English', also_sms: false } },
+    ])
+    expect(screen.queryByRole('button', { name: 'Answer' })).toBeNull()
+  })
+
+  it("keeps a prompt's draft when the run is read again (#7364)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const realtime = fakeRealtime()
+      const { user } = render('run-prompt')
+      const email = await screen.findByLabelText(/^Email/)
+      await user.type(email, 'jo@')
+      const read = vi.spyOn(api, 'getFlowRun')
+      await realtime.signal('workflow-run:run-prompt')
+      await waitFor(() => expect(read).toHaveBeenCalled())
+      await act(() => vi.advanceTimersByTimeAsync(500))
+      expect(screen.getByLabelText(/^Email/)).toBe(email)
+      expect(email).toHaveValue('jo@')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('approves an outward call', async () => {

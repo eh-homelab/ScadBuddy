@@ -146,6 +146,7 @@ import type {
   PrintRun,
   FlowDecided,
   FlowProposal,
+  Task,
   FlowRunQueue,
   FlowCommitMessage,
   FlowDefinition,
@@ -1150,6 +1151,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ call_id: callId, answer }),
     }),
+
+  /** #7364 — a flow prompt's task, its answer too. */
+  getTask: (id: string) => request<Task>(`/tasks/${seg(id)}`),
+
+  /**
+   * #7364 — answers a prompt. `key` is the answer's own: an answer that may have landed is
+   * sent again with it. A followed 202 ends without the task, so read `getTask` after it.
+   */
+  answerTask: (taskId: string, answer: Record<string, unknown>, key?: string) =>
+    command<Task | { run_id: string; task_id: string; outcome: 'answered' }>(
+      `/tasks/${seg(taskId)}/answer`,
+      { method: 'POST', body: JSON.stringify({ answer }) },
+      undefined,
+      key,
+    ),
 
   decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string, boundHash?: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {

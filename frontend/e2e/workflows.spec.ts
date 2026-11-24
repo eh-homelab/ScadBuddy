@@ -10,7 +10,7 @@ test.describe('workflows (#1057)', () => {
     await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Workflows' }).click()
     await expect(page).toHaveURL(/\/workflows$/)
     const runs = page.getByRole('list', { name: 'Flow runs' })
-    await expect(runs.locator('[data-run]')).toHaveCount(5)
+    await expect(runs.locator('[data-run]')).toHaveCount(6)
     await expect(page.locator('[data-run="run-ask"]')).toContainText('Waiting for your answer: Swap to pink?')
 
     await page.locator('[data-run="run-ask"]').getByRole('link', { name: 'swap v1' }).click()
@@ -19,6 +19,22 @@ test.describe('workflows (#1057)', () => {
     await page.getByRole('button', { name: 'Answer' }).click()
     await expect(page.getByTestId('flow-run-status')).toHaveText('Running')
     await expect(page.getByRole('textbox', { name: 'Your answer' })).toHaveCount(0)
+  })
+
+  // #7364 — a prompt is answered from its task's schema; the server's check speaks by field.
+  test('a prompt asks for its fields, and an answered run moves on', async ({ page }) => {
+    await page.goto('/workflows/runs/run-prompt')
+    const email = page.getByRole('textbox', { name: /^Email/ })
+    await email.fill('jo')
+    await page.getByLabel('Pickup time').fill('2026-12-01T17:30')
+    await page.getByRole('button', { name: 'Answer' }).click()
+    await expect(page.getByText('not a valid email')).toBeVisible()
+    await expect(email).toHaveValue('jo')
+    await expect(email).toBeFocused()
+    await email.fill('jo@example.com')
+    await page.getByRole('button', { name: 'Answer' }).click()
+    await expect(page.getByTestId('flow-run-status')).toHaveText('Running')
+    await expect(email).toHaveCount(0)
   })
 })
 
@@ -214,7 +230,7 @@ for (const { name, viewport } of [
       await expect(dialog.getByRole('button', { name: 'Forget run' })).toBeInViewport()
       await dialog.getByRole('button', { name: 'Forget run' }).click()
       await expect(page).toHaveURL(/\/workflows$/)
-      await expect(page.locator('[data-run]')).toHaveCount(4)
+      await expect(page.locator('[data-run]')).toHaveCount(5)
       await expect(page.locator('[data-run="run-done"]')).toHaveCount(0)
     })
 
