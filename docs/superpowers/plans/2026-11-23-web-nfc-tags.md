@@ -88,6 +88,7 @@
 - **R18. A tag's backups are paged**: `GET /tags/{tag_id}/backups` takes `limit` (default 50, 1 to 200) and `before` (a backup id; the page holds the rows older than it), newest first by `at DESC, id DESC`; the agent tool `filament_tag_backups` takes both.
 - **R19. A backup covers only the tag state it saved.** `records_for_spool` and `restore_records` refuse with 409 `backup_mismatch` when the body's `records` are not `same_records` as the backup's, so after a write, replaying its backup fails.
 - **R20. `tag-written` checks `sent` against the format `tag-records` would choose**, `pick_format(backup.records, <setting default>)`, not `format_of(sent)`; `unknown_format` stays for a `sent` that is not one known record. It runs the check after `read_on`'s bind, under the spool's lock, and a mismatch rolls the bind back.
+- **R21. The AMS's one ingest is `capture.reconcile`.** It is the only AMS path that marks a tag seen (through `tags.seen_on`). Other `holder_on` callers (the `trays` view, the link check) are lookups over stored state, not readings, so they mark nothing (Task 7 review).
 
 ## Review Focus
 
