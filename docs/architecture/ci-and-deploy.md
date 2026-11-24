@@ -96,6 +96,7 @@ Summary**, which needs every job except `lfs-fixtures` and `dispatch-review`
 |---|---|---|---|
 | layout | `layout` (`:99`) | reads the changed paths and picks the lanes | root `CLAUDE.md` |
 | lint | `lint` (`:199`) | actionlint, hadolint, shellcheck, the `lint-*.sh` scripts and every `.github/scripts/*.test.sh`, including the deploy workflow's shell tests (`:317`, `:322`) | root `CLAUDE.md` "Workflow/Dockerfile lint" |
+| markdown | `markdown` (`:457`) | markdownlint-cli2 over `docs/**/*.md` (`.markdownlint-cli2.jsonc`); on a docs-only change (`docs_only`, `select-lanes.sh`) the only job that checks it | root `CLAUDE.md` "CI and caching rules" |
 | frontend | `frontend` (`:447`), `frontend-unit` (`:515`), `frontend-e2e` (`:575`), `frontend-e2e-split` (`:696`) | typecheck, vitest, Playwright shards | [`frontend/CLAUDE.md`](../../frontend/CLAUDE.md) |
 | agent | `agent` (`:747`) | the agent's tests; builds the `agent` (`:850`), `sandbox` (`:899`) and `playwright-mcp` (#7027) targets | [`agent/CLAUDE.md`](../../agent/CLAUDE.md) |
 | agent_durable | `agent-durable` (`:936`) | builds the `agent-durable` target (`:1012`) | [`agent-durable/CLAUDE.md`](../../agent-durable/CLAUDE.md) |

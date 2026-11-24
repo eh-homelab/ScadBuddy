@@ -10,6 +10,10 @@
 #                  e2e and the bambuddy-fs live mount; every backend change, plus the
 #                  frontend and Go trees that run against it; and the
 #                  `profile-fetch-image` job (#6625)
+#   docs_only      every changed path is a Markdown file under docs/: the lint,
+#                  frontend, agent, models, freshness and Go jobs skip, and only the
+#                  `markdown` job checks the change. False with `all` and on an
+#                  empty diff.
 #
 # Each lane also selects on the shared build inputs (Dockerfile, .dockerignore) and
 # on its own wiring (ci.yml, this script, changed-paths.sh), as select-go.sh does.
@@ -18,6 +22,7 @@ set -euo pipefail
 lanes=(backend agent_durable rust image)
 if [ "${1:-}" = all ]; then
   for lane in "${lanes[@]}"; do echo "$lane=true"; done
+  echo "docs_only=false"
   exit 0
 fi
 
@@ -37,3 +42,8 @@ echo "backend=$b"
 echo "agent_durable=$(pick "$agent_durable")"
 echo "rust=$(pick "$rust")"
 if [ "$b" = true ]; then echo "image=true"; else echo "image=$(pick "$image_extra")"; fi
+if [ -n "$paths" ] && ! grep -qvE '^docs/.+\.md$' <<<"$paths"; then
+  echo "docs_only=true"
+else
+  echo "docs_only=false"
+fi

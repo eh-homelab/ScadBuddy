@@ -1092,6 +1092,86 @@ def test_a_run_s_per_print_copy_is_never_a_target(native_api: TestClient, tmp_pa
 
 
 @respx.mock
+def test_the_target_check_answers_what_the_import_would(
+    native_api: TestClient, tmp_path: Path
+) -> None:
+    """#7335: the dialog's focus check reads the file before an import: a standing file
+    is itself, a replaced one the import's own 404 with its replacement, a per-print copy
+    the import's 422."""
+    client = native_api
+    configure(client)
+    bambuddy()
+    path = _three_mf(tmp_path / "demo_elan.3mf")
+    old = _upload(client, path)
+    assert client.portal is not None
+    client.portal.call(_native(client).trash, [old.id])
+    with path.open("rb") as data:
+        copy: NativeFile = client.portal.call(
+            partial(_native(client).upload, path.name, data, None, print_subject="output:abc")
+        )
+    live = _upload(client, path)
+    url = "/api/v1/print-imports/library-files"
+
+    standing = client.get(f"{url}/{live.id}")
+    replaced = client.get(f"{url}/{old.id}")
+    per_print = client.get(f"{url}/{copy.id}")
+    missing = client.get(f"{url}/1999999999")
+
+    assert standing.status_code == 200
+    assert standing.json() == {"id": live.id, "filename": "demo_elan.3mf", "folder_id": None}
+    assert replaced.status_code == 404
+    assert replaced.json()["type"].endswith("/print-imports/library-file-gone")
+    assert replaced.json()["replacement"] == standing.json()
+    assert per_print.status_code == 422
+    assert "per-print copy" in per_print.json()["detail"]
+    assert (missing.status_code, missing.json()["replacement"]) == (404, None)
+
+
+@respx.mock
+def test_the_target_check_needs_the_native_library(client: TestClient) -> None:
+    configure(client)
+    bambuddy()
+
+    response = client.get("/api/v1/print-imports/library-files/1000000001")
+
+    assert response.status_code == 404
+    assert response.json()["replacement"] is None
+
+
+@respx.mock
+def test_a_per_print_copy_at_the_record_step_looks_for_no_replacement(
+    native_api: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7335 review: the record step refuses a per-print copy that appeared after the
+    first check; it has no replacement, so no lookup of one runs."""
+    client = native_api
+    configure(client)
+    bambuddy()
+    path = _three_mf(tmp_path / "demo_elan.3mf")
+    assert client.portal is not None
+    with path.open("rb") as data:
+        copy: NativeFile = client.portal.call(
+            partial(_native(client).upload, path.name, data, None, print_subject="output:abc")
+        )
+
+    async def stands(library: object, file_id: int) -> None:
+        return None
+
+    lookups: list[int] = []
+
+    async def spy(library: object, file_id: int) -> None:
+        lookups.append(file_id)
+
+    monkeypatch.setattr("scadbuddy.api.print_imports._require_native_file", stands)
+    monkeypatch.setattr("scadbuddy.api.print_imports._replacement", spy)
+
+    response = import_print(client, {"source": {"kind": "archive"}, "library_file_id": copy.id})
+
+    assert response.status_code == 422
+    assert lookups == []
+
+
+@respx.mock
 def test_a_library_target_needs_the_native_library(client: TestClient) -> None:
     configure(client)
     bambuddy()

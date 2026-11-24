@@ -76,7 +76,7 @@
 
 ---
 
-# PR A: backend routes and agent tools
+## PR A: backend routes and agent tools
 
 Branch: `feat/bambuddy-fs-routes` from `origin/main`, in a worktree. PR title:
 `feat(library): write routes for Bambuddy library files and folders (#2686)`. Body:
@@ -868,7 +868,7 @@ Then push and run `gh pr create` with the title above, body
 
 ---
 
-# PR B: the Go workspace, client, mount and CI
+## PR B: the Go workspace, client, mount and CI
 
 Branch: `feat/bambuddy-fs` from PR A's branch (stacked). PR title:
 `feat(bambuddy-fs): mount Bambuddy's library as a FUSE filesystem (#2686)`. Body:
@@ -1690,15 +1690,15 @@ The changes:
           echo "sha=$(git rev-parse --short HEAD)" | tee -a "$GITHUB_OUTPUT"
 ```
 
-  - **Regenerating from `head.json` on the head ref.** `head.json` is exported from
-    the merge ref, which is the API that will land. Generating from it on the head
-    ref is the intended result.
-  - **Pushing.** The push uses the app token, so `pull_request` workflows run on the
-    new commit. Remove the token from the worktree's remote config afterwards; it is
-    never written there, because the push names the URL.
-  - **Failing.** A final step fails the job when `state == 'stale'`, with `::error::`.
-    It says either "regenerated in <sha>; the next run verifies" or, without a token,
-    "run scripts/generate-go-client.sh and commit".
+- **Regenerating from `head.json` on the head ref.** `head.json` is exported from
+  the merge ref, which is the API that will land. Generating from it on the head
+  ref is the intended result.
+- **Pushing.** The push uses the app token, so `pull_request` workflows run on the
+  new commit. Remove the token from the worktree's remote config afterwards; it is
+  never written there, because the push names the URL.
+- **Failing.** A final step fails the job when `state == 'stale'`, with `::error::`.
+  It says either "regenerated in <sha>; the next run verifies" or, without a token,
+  "run scripts/generate-go-client.sh and commit".
 - **Diff comment.** Extend the "Post the API diff on the PR" body with a Go client
   section after the API diff, written from `steps.goclient.outputs.state`, the push
   step's `sha` and `$RUNNER_TEMP/client.stat`:

@@ -9,6 +9,7 @@ import { isTyping } from '../../lib/isTyping'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
 import { readPickerFilters, writePickerFilters, type PickerFilters } from '../../lib/filamentPickerFilters'
+import { loadKindPropertyTexts } from '../entities/api'
 import { loadTypeSkus, matchesSearch, namesNumber, parseSearch, spoolSearchDoc, traysBySpool, typeSearchDoc } from '../../lib/filamentSearch'
 import { ClearSwatch, Swatch } from '../print/Swatch'
 import { Button } from '@/components/ui/button'
@@ -26,6 +27,9 @@ interface Loaded {
   names: Map<string, string>
   trays: Map<string, string>
   skus: Map<string, string[]>
+  /** #7026: each spool's and type's property values as text, by id. */
+  spoolProperties: Map<string, string[]>
+  typeProperties: Map<string, string[]>
 }
 
 type State = { kind: 'loading' } | { kind: 'failed'; message: string } | { kind: 'open'; data: Loaded }
@@ -50,14 +54,20 @@ async function load(): Promise<Loaded> {
     listCatalog('subtypes'),
     listCatalog('brands'),
   ])
-  // Without the suppliers' products, everything but the SKU is still searched.
-  const skus = await loadTypeSkus().catch(() => new Map<string, string[]>())
+  // Without the suppliers' products or the properties, everything else is still searched.
+  const [skus, spoolProperties, typeProperties] = await Promise.all([
+    loadTypeSkus().catch(() => new Map<string, string[]>()),
+    loadKindPropertyTexts('spool'),
+    loadKindPropertyTexts('spool_type'),
+  ])
   return {
     spools: (view.spools ?? []).filter((row) => !row.spool.archived_at).sort(order),
     types: types.filter((type) => !type.archived_at).sort((a, b) => a.code.localeCompare(b.code)),
     names: new Map([...materials, ...subtypes, ...brands].map((row) => [row.id, row.name])),
     trays: traysBySpool(view),
     skus,
+    spoolProperties,
+    typeProperties,
   }
 }
 
@@ -142,6 +152,7 @@ function QuickFindList({ onDone }: { onDone: () => void }) {
         typeCode: spool.type_id ? typeCodes.get(spool.type_id) : null,
         skus: spool.type_id ? data.skus.get(spool.type_id) : undefined,
         tray: data.trays.get(spool.id),
+        properties: data.spoolProperties.get(spool.id),
       })
       return matchesSearch(doc, tokens)
     })
@@ -152,7 +163,7 @@ function QuickFindList({ onDone }: { onDone: () => void }) {
       (type) =>
         (!loadedOnly || loadedTypes.has(type.id)) &&
         (material === null || materialOfType(type) === material) &&
-        matchesSearch(typeSearchDoc(type, data.names, data.skus.get(type.id)), tokens),
+        matchesSearch(typeSearchDoc(type, data.names, data.skus.get(type.id), { properties: data.typeProperties.get(type.id) }), tokens),
     )
     return { materials, material, anyLoaded, loadedOnly, spools, types }
   }, [data, tokens, filters])

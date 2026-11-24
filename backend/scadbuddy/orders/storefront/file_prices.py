@@ -38,7 +38,7 @@ from scadbuddy.orders.storefront.renders import (
     listing_refusals,
     price_book,
 )
-from scadbuddy.orders.storefront.slice_price import NO_PRICE, slice_estimate
+from scadbuddy.orders.storefront.slice_price import NO_PRICE, last_answer, slice_estimate
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.orders.storefront.wire import FileSlot, FileSnapshot, Listing
 
@@ -178,7 +178,10 @@ async def listing_price(
     colours: Mapping[int, str],
 ) -> StoreEstimate:
     """The price of the visitor's colours on a file listing (#6710 §7.5): the slice price
-    of its held copy (`slice_estimate`), pending while it is worked out, or none. A read
+    of its held copy (`slice_estimate`), or none. While it is worked out, the listing's
+    last firm price of its file, of any colours (`SlicePrices.listing_last`), as ``last``
+    with the pending ``retry_after``, so the page always shows a price and reads again;
+    ``pending`` when the listing has none. A read
     that claims a new slice counts as one render of the visitor's and the client's limits
     (429 ``render_limited`` over them, and no slice starts); one that finds the price, or
     a slice that stands, costs nothing. Refusals as `checked_file_choice`."""
@@ -214,10 +217,18 @@ async def listing_price(
 
         return refund
 
-    return await slice_estimate(
+    answer = await slice_estimate(
         state,
         filaments=filaments,
         library_file=priced_file(choice.snapshot),
         listing_id=listing.id,
         charge=charge,
     )
+    if answer.source != "pending":
+        return answer
+    last = await asyncio.to_thread(
+        orders.slice_prices.listing_last, listing.id, choice.snapshot.sha256
+    )
+    if last is None:
+        return answer
+    return last_answer(last).model_copy(update={"retry_after": answer.retry_after})

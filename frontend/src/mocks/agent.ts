@@ -36,7 +36,6 @@ import {
   type SentImage,
   type ServerEvent,
   type SessionBrowserInput,
-  type SessionMode,
   type SessionStatus,
   type SessionSummary,
 } from '../agent/chat/protocol'
@@ -627,8 +626,6 @@ export function createMockAgentTransport({
           return
         }
         if (!s) {
-          // Plan Step 6.3: every session is an AgentSession; a frame's `mode` is ignored.
-          const mode: SessionMode = 'durable'
           s = {
             sessionId: nextId('chat'),
             title: msg.text.slice(0, 40),
@@ -640,7 +637,6 @@ export function createMockAgentTransport({
             turns: 0,
             costUsd: 0,
             budgetUsd,
-            mode,
             ...(msg.browser ? { browser: msg.browser } : {}),
           }
           sessions.set(s.sessionId, s)
@@ -651,7 +647,6 @@ export function createMockAgentTransport({
             owner: BROWSER_USER,
             title: s.title,
             budgetUsd,
-            mode,
           })
         }
         emit({
@@ -751,7 +746,7 @@ export function createMockAgentTransport({
   const snapshot = (): ServerEvent => ({
     v: PROTOCOL_VERSION,
     type: 'sessions.snapshot',
-    sessions: [...sessions.values()].filter((s) => !s.archivedAt).map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd, mode, offer }) => ({
+    sessions: [...sessions.values()].filter((s) => !s.archivedAt).map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd, offer }) => ({
       sessionId,
       title,
       origin,
@@ -761,7 +756,6 @@ export function createMockAgentTransport({
       updatedAt: new Date().toISOString(),
       costUsd,
       budgetUsd,
-      ...(mode ? { mode } : {}),
       offer: offer ?? null,
     })),
   })
@@ -784,13 +778,11 @@ export function createMockAgentTransport({
         costUsd: 0,
         budgetUsd,
         parentId: parent.sessionId,
-        // A fork runs in its parent's mode (#2688).
-        ...(parent.mode ? { mode: parent.mode } : {}),
       }
       sessions.set(child.sessionId, child)
       const conversation = new Set(['user.turn', 'assistant.text.delta', 'assistant.text.done', 'tool.call', 'tool.result'])
       child.log.push(
-        { v: PROTOCOL_VERSION, type: 'session.started', sessionId: child.sessionId, origin: child.origin, owner: BROWSER_USER, title: child.title, budgetUsd, ...(child.mode ? { mode: child.mode } : {}) },
+        { v: PROTOCOL_VERSION, type: 'session.started', sessionId: child.sessionId, origin: child.origin, owner: BROWSER_USER, title: child.title, budgetUsd },
         ...parent.log
           .slice(0, cut)
           .filter((e) => conversation.has(e.type))
@@ -839,9 +831,9 @@ export function createMockAgentTransport({
     },
     adopt(sessionId, title) {
       if (sessions.has(sessionId)) return
-      const s: MockSession = { sessionId, title, origin: 'chat', owner: BROWSER_USER, status: 'running', log: [], timers: [], turns: 0, costUsd: 0, budgetUsd, mode: 'durable' }
+      const s: MockSession = { sessionId, title, origin: 'chat', owner: BROWSER_USER, status: 'running', log: [], timers: [], turns: 0, costUsd: 0, budgetUsd }
       sessions.set(sessionId, s)
-      s.log.push({ v: PROTOCOL_VERSION, type: 'session.started', sessionId, origin: 'chat', owner: BROWSER_USER, title, budgetUsd, mode: 'durable' })
+      s.log.push({ v: PROTOCOL_VERSION, type: 'session.started', sessionId, origin: 'chat', owner: BROWSER_USER, title, budgetUsd })
       deliver(snapshot())
     },
     offerChat(title, to, forMs = 3_600_000) {

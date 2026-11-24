@@ -85,7 +85,6 @@ function patchOf(view: AiSessionView): SessionPatch {
     updatedAt: view.updated_at,
     costUsd: view.cost_usd,
     budgetUsd: view.budget_usd,
-    ...(view.mode ? { mode: view.mode } : {}),
     ...(view.archived === undefined ? {} : { archived: view.archived }),
     ...(view.offer === undefined ? {} : { offer: view.offer }),
   }
