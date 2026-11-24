@@ -899,7 +899,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   missing from a complete listing gets one `probe`, `GET` only (a supplier, location or
   insert type has no `GET` by id, so its listing is read again); only a definite 404 drops
   the link, and the next round makes the row again under its direction, while a spool that
-  names such a row waits (#6688, plan Decisions 187-192 and 200-205). `workflows/filament_sync.py` is the workflow `FilamentBbSync`, one per
+  names such a row waits (#6688, plan Decisions 187-192 and 200-205). A supplier is the
+  exception: it is made again only when it has a filament product, a filament invoice or an
+  open create intent; one with none of these stays unlinked (`bb_sync_plan.py`
+  `_suppliers`; inventory spec §6.5, D16, #7067). `workflows/filament_sync.py` is the workflow `FilamentBbSync`, one per
   Bambuddy instance, on the `bambuddy` queue (AUTO_UPGRADE; a change to its commands goes
   behind `workflow.patched`, and `tests/test_filament_sync_replay.py` replays
   `tests/fixtures/filament_sync_histories/`). The API nudges after a write on
@@ -1530,15 +1533,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (#6950, #7026, inventory spec
   `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3a, plan
   `docs/superpowers/plans/2026-11-21-inventory-phase-1-entities.md`): `refs.py`
-  (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table;
-  `EntityStore`: an `entities` row made by `ensure` only for an owner row that exists, and
-  `orphans`, the rows whose owner is gone), `attachments.py` (`EntityAttachmentStore` over
+  (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table,
+  `item`, `lot` and `unit` among them since #7067; `EntityStore`: an `entities` row made by
+  `ensure` only for an owner row that exists, and `orphans`, the rows whose owner is gone
+  and that no stock move names; `repoint_entity` also moves a merged entity's stock moves),
+  `attachments.py` (`EntityAttachmentStore` over
   `entity_attachments`, the old `order_attachments`: an order's files are its rows with an
   `order_id`, written only through the order routes, `ORDER_KINDS`; a print archive's files
   are Bambuddy's `print_attachments`, read in the same shape), `links.py` (`EntityLinkStore`
   over `entity_links`, http(s) URLs only), `sweep.py` (`sweep_orphan_entities`, the
   housekeeping step `ENTITY_ORPHANS_SWEEP`: an orphan's files and holds, then its row and
-  links; an order's kinds only once they hold no file), `properties.py` (#7026,
+  links; an order's kinds only once they hold no file; an orphan that a
+  `stock_moves.entity_id` names stays in place, since that foreign key keeps it as the
+  move's history, R-P2-4), `properties.py` (#7026,
   `entity_properties` and `entity_property_schemas`; the rules are in
   `docs/features/spools-and-filament.md` "Properties"), `operations.py` (the
   `entity_attachment_add` kind on the `library` queue), `activity.py`, `problems.py` and
