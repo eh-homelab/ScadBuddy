@@ -1662,35 +1662,98 @@ const tools: Tool[] = [
       "type's, else its subtype's, else its material's, else the Settings default); `null` records none. " +
       "`kind: consumed_reset` (no grams, temp_c or hours) starts the spool's used counter (`consumed_g`) again from 0 g; the " +
       'grams left stay. Only what the user says. Writes ScadBuddy only; a reset reaches Bambuddy at the next sync when weights ' +
-      'sync to it.',
+      'sync to it. `reading_g` (a weighing only, instead of `grams`) is the scale reading with the spool: the filament ' +
+      "is the reading less the spool's empty weight, and the answer carries `insert_weight` (#7280). With `reading_g`, the " +
+      'tool first reads the offer. There is an offer when the spool is new and unused, the reading is above its label ' +
+      'weight, and the derived weight (reading less label weight) is at most the label weight. `insert_weight.offer` says ' +
+      "what the insert's empty weight would become (`derived_g`, `new_empty_weight_g`, `current_empty_weight_g`, " +
+      '`current_basis`, `sample_count`). When there is an offer and `accept_insert_weight` is left out, the tool books ' +
+      'nothing (`event: null`): tell the person the numbers and that makers overfill by about 10-30 g, so the estimate is ' +
+      'slightly heavy, then call again with the same `reading_g` and `accept_insert_weight` true or false. ' +
+      '`checked_by_default` is advice only: pass `true` only when the user says to take it. `true` changes the insert in ' +
+      'ScadBuddy only and runs before the weighing, so the weighing uses the new empty weight; `false` books with the ' +
+      'current empty weight. With no offer, the weighing is booked at once, and `true` is refused with nothing booked.',
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried', 'consumed_reset']),
       source: z.enum(['person', 'scale']).default('person'),
       grams: z.number().min(0).optional(),
+      reading_g: z.number().positive().max(100000).optional().describe('Scale reading with the spool, in grams (weighed only)'),
+      accept_insert_weight: z.boolean().optional().describe("After an offer: true takes its empty weight for the insert, false declines it (needs reading_g)"),
       temp_c: z.number().int().min(0).nullable().optional().describe("Left out: the spool's drying default"),
       hours: z.string().nullable().optional().describe("A decimal, e.g. `8`; left out: the spool's drying default"),
       note: z.string().optional(),
     }),
     risk: 'write',
     source: SOURCE,
-    routes: ['POST /api/v1/filament/spools/{spool_id}/events'],
-    summarize: ({ spool_id, kind, grams }) =>
+    routes: [
+      'POST /api/v1/filament/spools/{spool_id}/events',
+      'GET /api/v1/filament/spools/{spool_id}/insert-weight-offer',
+      'POST /api/v1/filament/spools/{spool_id}/insert-weight',
+    ],
+    summarize: ({ spool_id, kind, grams, reading_g, accept_insert_weight }) =>
       kind === 'weighed'
-        ? `Record ${grams ?? '?'} g on spool ${spool_id}`
+        ? reading_g !== undefined
+          ? `Record a reading of ${reading_g} g on spool ${spool_id}${accept_insert_weight ? ' and take its insert weight' : ''}`
+          : `Record ${grams ?? '?'} g on spool ${spool_id}`
         : kind === 'consumed_reset'
           ? `Reset the used counter of spool ${spool_id}`
           : `Record a drying of spool ${spool_id}`,
-    handler: async ({ spool_id, ...body }, { backend }) =>
-      json(
-        await ok(
-          backend.POST('/api/v1/filament/spools/{spool_id}/events', {
-            params: { path: { spool_id } },
-            body,
+    handler: async ({ spool_id, reading_g, accept_insert_weight, ...body }, { backend }) => {
+      const path = { spool_id }
+      if (reading_g === undefined) {
+        if (accept_insert_weight) throw new ToolError('accept_insert_weight needs reading_g')
+        return json(
+          await ok(
+            backend.POST('/api/v1/filament/spools/{spool_id}/events', { params: { path }, body }),
+            `record on spool ${spool_id}`,
+          ),
+        )
+      }
+      if (body.kind !== 'weighed') throw new ToolError('reading_g is for a weighing (kind: weighed)')
+      if (body.grams !== undefined) throw new ToolError('give reading_g or grams, not both')
+      const check = await ok(
+        backend.GET('/api/v1/filament/spools/{spool_id}/insert-weight-offer', {
+          params: { path, query: { reading_g } },
+        }),
+        `check the insert weight of spool ${spool_id}`,
+      )
+      if (check.offer && accept_insert_weight === undefined) {
+        return json({
+          event: null,
+          filament_g: null,
+          insert_weight: check,
+          insert_weight_accepted: null,
+          next:
+            'Nothing was booked. Tell the person the offer, then call again with the same reading_g and ' +
+            'accept_insert_weight true or false.',
+        })
+      }
+      let filament_g = check.filament_g
+      let accepted: components['schemas']['InsertWeightAccepted'] | null = null
+      if (accept_insert_weight) {
+        if (!check.offer) throw new ToolError(`no insert weight offer: ${check.reason ?? 'none'}; nothing was booked`)
+        accepted = await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/insert-weight', {
+            params: { path },
+            body: { reading_g },
           }),
-          `record on spool ${spool_id}`,
-        ),
-      ),
+          `take the insert weight of spool ${spool_id}`,
+        )
+        filament_g = accepted.filament_g
+      }
+      if (filament_g === null) throw new ToolError('no empty weight known for this spool; pass grams')
+      const event = await ok(
+        backend.POST('/api/v1/filament/spools/{spool_id}/events', {
+          params: { path },
+          body: { ...body, grams: filament_g },
+        }),
+        accepted
+          ? `record on spool ${spool_id} (the insert's empty weight was already set; a retry with the same reading is safe)`
+          : `record on spool ${spool_id}`,
+      )
+      return json({ event, filament_g, insert_weight: check, insert_weight_accepted: accepted })
+    },
   }),
 
   defineTool({
@@ -2023,8 +2086,8 @@ const tools: Tool[] = [
       "(`source` `bambuddy`) that Bambuddy edited since takes Bambuddy's document as a new version. Every spool or type " +
       'preset that still names a Bambuddy local preset id names a ScadBuddy preset (`sb-<id>`) instead: the one already ' +
       "made for that id, else a new one made from Bambuddy's document. Answers `{adopted, updated, unresolved}`: how many " +
-      'presets it made, how many took a new version, and how many Bambuddy ids bindings still name (Bambuddy no longer ' +
-      'holds them, or they are not filament presets; those spools and types need a ScadBuddy preset). 409 when no Bambuddy is configured, and 409 `instance_changed` while ' +
+      'presets it made, how many took a new version, and how many Bambuddy ids bindings still name, for any cause (for ' +
+      'example, Bambuddy no longer holds them, or they are not filament presets; those spools and types need a ScadBuddy preset). 409 when no Bambuddy is configured, and 409 `instance_changed` while ' +
       'the links belong to another Bambuddy (filament_sync_reset_links first). Writes ScadBuddy only, never Bambuddy.',
     input: z.object({}),
     risk: 'write',

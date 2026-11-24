@@ -109,7 +109,6 @@ from typing import Any
 
 import pytest
 from temporalio import workflow
-from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client, WorkflowFailureError, WorkflowHistory
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import (
@@ -129,7 +128,7 @@ from scadbuddy.workflows.printing import (
     LanSequenceWorkflow,
     PrintRunWorkflow,
 )
-from tests.support.temporal import temporal_client
+from tests.support.temporal import cancel_recorded, temporal_client
 from tests.test_print_workflow import Fake, ended, run_input, start
 
 HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
@@ -284,22 +283,15 @@ async def _cancelled(client: Client, name: str) -> None:
         while step not in fake.calls:
             await asyncio.sleep(0.05)
         handle = client.get_workflow_handle(f"print-{arg.key}")
-        await handle.cancel()
-        while not any(
-            event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
-            for event in (await handle.fetch_history()).events
-        ):
-            await asyncio.sleep(0.05)
+        await cancel_recorded(handle)
         if step == "check":
             await accepting  # the check is cancelled, never completed
             gate.set()
-        else:
-            gate.set()
-            await accepting
-        if step == "check":
             with pytest.raises(WorkflowFailureError):
                 await ended(client, arg)
         else:
+            gate.set()
+            await accepting
             await ended(client, arg)
         history = await handle.fetch_history()
     (HISTORIES / f"{name}.json").write_text(history.to_json())

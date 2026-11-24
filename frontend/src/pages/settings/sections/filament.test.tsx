@@ -957,7 +957,7 @@ describe("Import Bambuddy's presets (#7244)", () => {
     await user.click(button)
     expect(
       await within(filament).findByText(
-        'Nothing imported. 1 Bambuddy preset that spools or types name could not be imported: Bambuddy no longer holds it, or it is not a filament preset. Choose a ScadBuddy preset for those spools and types.',
+        'Nothing imported. 1 Bambuddy preset that spools or types name could not be imported: for example, Bambuddy no longer holds it, or it is not a filament preset. Choose a ScadBuddy preset for those spools and types.',
       ),
     ).toBeInTheDocument()
     expect(calls).toBe(3)

@@ -184,7 +184,7 @@ function importLine(done: PresetImport): string {
   const one = unresolved === 1
   return (
     `${imported} ${plural(unresolved, 'Bambuddy preset', 'Bambuddy presets')} that spools or types name could not be imported: ` +
-    `Bambuddy no longer holds ${one ? 'it' : 'them'}, or ${one ? 'it is' : 'they are'} not a filament preset. ` +
+    `for example, Bambuddy no longer holds ${one ? 'it' : 'them'}, or ${one ? 'it is' : 'they are'} not a filament preset. ` +
     'Choose a ScadBuddy preset for those spools and types.'
   )
 }

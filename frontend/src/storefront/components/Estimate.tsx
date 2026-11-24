@@ -12,8 +12,11 @@ import type { StoreEstimate } from '../api/client'
  * is not yet the firm price of the choices on screen (a `last` price, or the price of the
  * choices before a change): it stays visible, marked as updating, until the render's
  * estimate answers. A `last` price is never shown as firm, whatever `updating` says.
+ *
+ * #6710: with `held` (a file listing's page), no update will come: the price stays, and the
+ * page says it is the last one, not the price of the choices on screen.
  */
-export function Estimate({ estimate, updating = false }: { estimate: StoreEstimate; updating?: boolean }) {
+export function Estimate({ estimate, updating = false, held = false }: { estimate: StoreEstimate; updating?: boolean; held?: boolean }) {
   if (estimate.source === 'pending') {
     return (
       <div className="sf-estimate" role="status">
@@ -31,6 +34,14 @@ export function Estimate({ estimate, updating = false }: { estimate: StoreEstima
     )
   }
   const price = formatMoney(estimate.price_minor ?? 0, estimate.currency ?? '', estimate.minor_exponent ?? 2)
+  if (held) {
+    return (
+      <div className="sf-estimate" role="status">
+        <p className="sf-estimate-price">{`${price} for one`}</p>
+        <p className="sf-estimate-note">This was our last price. We confirm the price before you pay.</p>
+      </div>
+    )
+  }
   if (updating || estimate.source === 'last') {
     return (
       <div className="sf-estimate sf-estimate-updating" role="status" aria-busy="true">

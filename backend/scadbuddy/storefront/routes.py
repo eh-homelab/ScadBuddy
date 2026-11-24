@@ -38,7 +38,7 @@ from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Final
 
 import anyio
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 
@@ -249,6 +249,32 @@ async def listing_price(
     return {k: v for k, v in answer.items() if k in ESTIMATE_FIELDS}
 
 
+@visitor_router.get("/listings/{listing_id}/preview/{plate}.glb")
+async def listing_preview(
+    listing_id: str,
+    plate: Annotated[int, Path(ge=1, le=9999)],
+    crud: Crud,
+    visitor_id: Visitor,
+    client: Client,
+) -> StreamingResponse:
+    """A file listing's held preview of ``plate`` (#6710 §6.3), relayed as a stream. An id
+    that is not a listing id is 404 before any call."""
+    if LISTING_ID.fullmatch(listing_id) is None:
+        raise ApiError(
+            404, "There is no such listing.", type_=f"{STOREFRONT_PROBLEMS}listing_not_found"
+        )
+    stream = await crud.listing_preview(listing_id, plate, visitor_id=visitor_id, client=client)
+    return _Relayed(stream, headers=_length(stream))
+
+
+def _length(stream: CrudStream) -> dict[str, str]:
+    """The CRUD side's ``Content-Length``, when the body is sent as it was."""
+    headers = stream.response.headers
+    if "content-length" in headers and "content-encoding" not in headers:
+        return {"Content-Length": headers["content-length"]}
+    return {}
+
+
 @visitor_router.get("/variants/{variant_key}/preview.glb")
 async def variant_preview(
     variant_key: str, crud: Crud, visitor_id: Visitor, client: Client
@@ -262,12 +288,7 @@ async def variant_preview(
             type_=f"{STOREFRONT_PROBLEMS}variant_not_found",
         )
     stream = await crud.variant_preview(variant_key, visitor_id=visitor_id, client=client)
-    headers = {}
-    if "content-length" in stream.response.headers and (
-        "content-encoding" not in stream.response.headers
-    ):
-        headers["Content-Length"] = stream.response.headers["content-length"]
-    return _Relayed(stream, headers=headers)
+    return _Relayed(stream, headers=_length(stream))
 
 
 @visitor_router.get("/draft")

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
 import { LinksPanel } from '../../components/entities/LinksPanel'
+import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
 import { api, ApiError } from '../../api/client'
 import {
   getType,
@@ -656,11 +657,14 @@ export function TypePage() {
       </section>
 
       {!creating && (
-        <section aria-label="Files and links" className="mt-6 flex flex-col gap-2">
-          <h2 className="text-sm font-semibold tracking-tight">Files and links</h2>
+        <section aria-label="Files, links and properties" className="mt-6 flex flex-col gap-2">
+          <h2 className="text-sm font-semibold tracking-tight">Files, links and properties</h2>
           <div className="grid gap-6 lg:grid-cols-2">
             <AttachmentsPanel entity={`spool_type:${madeId ?? id}`} />
-            <LinksPanel entity={`spool_type:${madeId ?? id}`} />
+            <div className="flex flex-col gap-6">
+              <LinksPanel entity={`spool_type:${madeId ?? id}`} />
+              <PropertiesPanel entity={`spool_type:${madeId ?? id}`} />
+            </div>
           </div>
         </section>
       )}

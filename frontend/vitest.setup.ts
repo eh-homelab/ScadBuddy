@@ -39,6 +39,10 @@ configure({
 // longer lands inside the first findByRole's 1 s wait in each file (#1485).
 getComputedStyle(document.documentElement)
 
+// jsdom has no canvas: its `getContext` prints "Not implemented" on every first call. Answer
+// null, which is what it returns, quietly; a test that needs a context spies on this.
+HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext
+
 /** `fetch` as MSW patched it, put back once the file is done. */
 let mswFetch: typeof fetch | undefined
 /** How long a test's requests still in flight are waited for once it ends (#3243). */

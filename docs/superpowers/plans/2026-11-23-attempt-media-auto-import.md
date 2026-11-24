@@ -125,8 +125,9 @@ double insert is impossible, and the attempt can record its last check (spec §4
 below record what that PR built; do not build them again.
 
 PR #7241 (merged) added `timelapse_scanned_at` and `stamp_timelapse_scanned` before the
-drop. A follow-up PR adds a new migration that drops the column and removes the store
-method and the model field. Merged migrations are never edited. Tracked as #7272.
+drop. #7341 (#7272) removed `stamp_timelapse_scanned` and `Fulfilment.timelapse_scanned_at`.
+The column stays until that release is on prod, because the previous build's replicas
+still select it. Then a new migration drops it (#7366). Merged migrations are never edited.
 
 **Files:**
 - Created: `backend/scadbuddy/migrations/20261123T1649Z_attempt_media_provenance.sql`
