@@ -31,12 +31,11 @@ import type { WarmEntry, WarmSessions, WarmTurn } from './warm.js'
 import { continuationMemory, warmAttempts, type WarmTurnRun } from './warmTurn.js'
 import type { Continuation } from '../temporal/session/models.js'
 
-// One classic turn on the session's warm Claude Code, whoever runs it (unified runtime spec
-// 2026-10-13 §5.2, §5.3): `SessionManager.runTurn` for a classic session, under its row lease,
-// and `TurnHost.run` (turnHost.ts) for an AgentSession's `session_turn` activity. Both get the
-// same assembly, warm process, fallback, events, audit and trace; what differs is around it:
-// how the turn is claimed and stopped, which gates its parked calls go to (`TurnGates`), and
-// how its end is written (`tallyTurn` gives both the cost, the turns and the closing events).
+// One turn on the session's warm Claude Code (unified runtime spec 2026-10-13 §5.2, §5.3), which
+// `TurnHost.run` (turnHost.ts) runs for a `session_turn` activity: its assembly, warm process,
+// fallback, events, audit and trace. How the turn is claimed and stopped, which gates its parked
+// calls go to (`TurnGates`), and how its end is written are the host's (`tallyTurn` gives the
+// cost, the turns and the closing events).
 
 /** A turn that ended on a failed model request (fallback.ts `onRefused`). */
 /** `shownAs`: the refused credential's `displayLabel` (#3710), for the error the person sees only. */

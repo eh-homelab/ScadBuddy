@@ -254,10 +254,11 @@ main on 2026-11-01:
 
 - **Every session is an `AgentSession` workflow**, `session-<id>` on the `agent-sessions`
   queue ([`agent/src/temporal/session/workflow.ts`](../../agent/src/temporal/session/workflow.ts)).
-  There is no session mode: since plan Step 6.3 nothing reads `ai_sessions.mode` or the
-  `session_mode` setting, the panel has no mode picker, and `sessions_start` takes `mode`
-  and ignores it. The Python `DurableSession` retired in Phase 8, and its open sessions
-  moved to `AgentSession` in Phase 7 (the prod backfill of plan Step 7.2 moved 62 of 62 and left
+  There is no session mode: plan Phase 10 dropped the `ai_sessions.mode` column and the
+  `session_mode` setting (migrations `20261101T2300Z_drop_session_mode.sql` and
+  `20261101T2000Z_drop_durable_settings.sql`), the panel has no mode picker, and
+  `sessions_start` takes `mode` and ignores it. The Python `DurableSession` retired in
+  Phase 8, and its open sessions moved to `AgentSession` in Phase 7 (the prod backfill of plan Step 7.2 moved 62 of 62 and left
   none open, as #2726's checklist records). `agent-durable` runs no turn and stays at zero
   replicas.
 - **Workers.** Turns run on the `scadbuddy-agent-worker` Deployment (role `worker`, §1),
@@ -904,10 +905,6 @@ classes named below are the agent's `Crud…` clients:
   characters (default 800, 0 for no cut, at most 100000), which Settings → Assistant →
   Hindsight memory writes through `PUT /api/v1/ai/settings/memory`
   ([§11](#11-automatic-hindsight-memory));
-  `session_mode` is no longer read: since plan Step 6.3 every session is an
-  `AgentSession` (spec 2026-10-13 §10.1), and its route and Settings section are gone;
-  `durable_subagents` is no longer read: it configured the retired Python turn's
-  subagent loopback, which plan Step 8.2 removed with its route and Settings section;
   and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
   `PUT /api/v1/ai/mcp/oidc` writes. `approval_expiry_seconds` has no route yet.

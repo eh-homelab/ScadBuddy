@@ -31,16 +31,16 @@ import { type Placement, type SessionDirectory, watchCaps } from '../workspace/d
 import type { TurnRows } from './turnRows.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
-// the `session_turn` activity runs (temporal/session/turnActivity.ts). The turn is a classic
-// one (turnCore.ts, as SessionManager.runTurn runs it) on the session's warm Claude Code:
+// the `session_turn` activity runs (temporal/session/turnActivity.ts). It is a
+// CoreTurn (turnCore.ts) on the session's warm Claude Code:
 //
 //   1. the claim: the row runs exactly this turn (`durable_turn_id`, DurableTurns.send's), and
 //      this placement of it (`turn_attempt`, the workflow's run id and cycle);
 //   2. assemble (TurnRunner), acquire the warm process, push the message;
-//   3. the events, as a classic turn writes them (sdkEvents.ts);
+//   3. the events (sdkEvents.ts);
 //   4. the turn's cost as it goes (FENCE_MS, and each finished request), so a placement that
 //      dies before its result still counts against the budget; at its end the cost and turns
-//      as a classic turn reckons them, as increments over what it wrote; the closing events
+//      (`tallyTurn`), as increments over what it wrote; the closing events
 //      (`tail`) are the workflow's `session.finish_turn`.
 //   5. the session's working directory (workspace/directory.ts, plan Step 9.5): made what its
 //      workspace holds before the message goes in, written back at each park and once the turn
