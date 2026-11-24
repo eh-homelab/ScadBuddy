@@ -247,7 +247,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   stock_moves (id), reason text NOT NULL DEFAULT '', order_id text, order_item_id text,
   production_run_id uuid, print_run_id text, entity_id uuid REFERENCES entities (id),
   actor jsonb NOT NULL, CHECK ((lot_id IS NULL) <> (unit_id IS NULL)), CHECK
-  (amount_minor = qty * unit_cost_minor))`; indexes `(item_id, at)`, `(order_item_id)
+  (amount_minor = round(qty * unit_cost_minor, 6)))` (R-P2-1); indexes `(item_id, at)`, `(order_item_id)
   WHERE order_item_id IS NOT NULL`, `(lot_id)`. No FK on `order_id`/`order_item_id`
   (a move outlives a deleted draft, as `part_stock_moves` l.39-42).
 - Seed rows of `item_kinds` (`builtin = true`), per Ruling 1: see Task 1 test.
@@ -454,8 +454,13 @@ The migration, in one file, in this order:
    - `return`: the `unit_cost_minor` of the `use` it reverses, so the pair nets to 0. Its
      `reverses_move_id` is the newest unreversed `use` of the same order item and part,
      matched before the costs are set.
-   Then `amount_minor = qty × unit_cost_minor`, and `cost_unknown = (kind in (use, return)
-   and the old amount_minor IS NULL and unit cost > 0)`.
+   Then `amount_minor = round(qty × unit_cost_minor, 6)` (R-P2-1), and `cost_unknown =
+   (parts.currency <> shop) OR (kind in (use, return) and the old amount_minor IS NULL and
+   unit cost > 0)`. The first term matches step 5's lot: a part in another currency keeps
+   that currency's minor units, which job cost must not add as the shop's. The second term
+   carries today's rule: `PartStore` writes a use or return with no `amount_minor` when it
+   took the units with no known cost (`orders/parts.py` `move`), so the converted move is
+   uncosted too.
 7. Delete every `order_cost_entries` row whose `source` is `part:<order item>:<part>` and
    whose order item has a converted `use` move (Pre-flight 5).
 8. `order_item_parts`: add `item_id uuid REFERENCES items (id)`, fill from the map, `SET NOT
@@ -759,3 +764,25 @@ task above follows them.
     the shop's `orders_currency` opens with its cost unknown, as today's parts in another
     currency are left uncosted. The `/parts` aliases write price points in the part's own
     currency.
+
+## Rulings made during implementation (controller, 2026-11-24)
+
+- **R-P2-1.** `stock_moves_amount` is `amount_minor = round(qty * unit_cost_minor, 6)`:
+  two `numeric(20,6)` factors give 12 decimals. Task 4 writes `round(qty × cost, 6)`.
+- **R-P2-2.** Built-in kinds have plain English names (Build plate, AMS part, Dry bin,
+  Spool part).
+- **R-P2-3.** `stock_units.printer_id` is `ON DELETE SET NULL`, so a printer delete never
+  fails.
+- **R-P2-4.** The entities orphan sweep skips an entity that a `stock_moves.entity_id`
+  names (Task 4; partial index `stock_moves_entity`).
+- **R-P2-5, R-P2-6.** `GET` and `PUT /entity-kinds/item/property-schema` answer 409
+  `schema_owned_by_item_kind` from layer 1: an item's schema is its item kind's
+  `attribute_schema`. Task 5 does not add the mapping again.
+- **R-P2-7.** The frontend mock answers that 409 from layer 1 too.
+- **R-P2-8, R-P2-9, R-P2-10.** A narrow exception to "no `bb_sync_*` changes", because
+  spec §6.5 states the rule: `bb_sync_plan._suppliers()` keeps only a supplier that is
+  linked, has a filament product (archived ones count), has a filament invoice (Decision 14
+  makes it a spool's purchase source), or has an open create intent. A supplier made for
+  item offers, or from `parts.supplier` (Task 6), never reaches Bambuddy.
+- The Task 6 step 6 `cost_unknown` rule gains the currency term (review of 6a0b012ae).
+
