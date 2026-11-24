@@ -407,7 +407,7 @@ def test_no_printer_model_is_not_logged_without_a_fetchable_type(
     invoice_id = _invoice(client, [_line(proposed_type=_type_body(client, "NEW-1", None))])
     done = client.post(f"{URL}/invoices/{invoice_id}/confirm")
     assert done.status_code == 200, done.text
-    assert caplog.records == []
+    assert _fetch_records(caplog) == []
 
 
 def test_no_printer_model_is_logged_once_per_confirm(
@@ -424,8 +424,14 @@ def test_no_printer_model_is_logged_once_per_confirm(
     )
     done = client.post(f"{URL}/invoices/{invoice_id}/confirm")
     assert done.status_code == 200, done.text
-    [warning] = caplog.records
+    [warning] = _fetch_records(caplog)
     assert "no printer has a model" in warning.getMessage()
+
+
+def _fetch_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """The profile fetch's own records: ``caplog`` also holds every other logger's
+    warnings, such as ``core/loop_watch.py``'s stall warning on a loaded runner."""
+    return [r for r in caplog.records if r.name == profile_fetch.__name__]
 
 
 # -- a run no worker serves (build Decision 62) ------------------------------------------
