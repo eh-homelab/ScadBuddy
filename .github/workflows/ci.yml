@@ -2276,6 +2276,9 @@ jobs:
           cache-from: type=gha,scope=camera
           cache-to: type=gha,scope=camera,mode=min
 
+      # No cache-to: a second write to the scope would replace the relay's cache entry. The
+      # recorder shares every layer of the relay's but its config COPY and its ENV TZ, which
+      # take no time to build.
       - name: Build the camera recorder image
         uses: docker/build-push-action@v7
         with:

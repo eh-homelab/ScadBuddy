@@ -2732,14 +2732,36 @@ holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 
 - **No database and no key.** Both controllers refuse to start when
   `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` is set (exit 2, #5295; `camera/settings.py`).
-- **Probes.** Each controller answers `/healthz` on 9090. It answers 503 when MediaMTX's
-  control API does not answer, or when the controller's change follower has stopped; before
-  the follower starts (the controller waits for the CRUD service, or reads its first list),
-  only MediaMTX counts
-  (`camera/process.py` `healthy`). Use it as the controller's liveness probe. The probe
-  restarts the controller's container only, so give the MediaMTX container an `exec` probe of
-  its own: `curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list`. `/metrics` on 9090
-  serves the recorders' series (the "Cameras" row of the printing dashboard).
+- **Probes.** Each controller answers `/healthz` on 9090 (`camera/process.py` `healthy`). It
+  answers 503 when MediaMTX's control API does not answer within 3 s (`CHECK_BUDGET`), when
+  MediaMTX's runtime list lacks a path the controller has put, when the change follower has
+  stopped, or (recorder) when its clock is more than 2 s off the API's. Before the follower
+  starts (the controller waits for the CRUD service, or reads its first list), the follower
+  does not count. A restart of MediaMTX's container alone loses every path; the missing-path
+  rule makes the probe restart the controller, which puts them all again at its start. A
+  path whose pull cannot connect still shows in the runtime list, with `ready: false`
+  (measured 2026-11-24 on v1.21.4, spec §2), so a printer that is off does not fail the probe.
+  Use it as the controller's liveness probe with `periodSeconds: 10`, `timeoutSeconds: 4`
+  (above the 3 s check) and `failureThreshold: 3`: it restarts the controller after 30 s of
+  failures. A path joins the controller's list only after MediaMTX's control API took it, so
+  a put that is still in flight never counts as missing; a path MediaMTX took a moment before
+  a probe could miss that one probe, and one failure restarts nothing. The probe restarts the
+  controller's container only, so give the MediaMTX container an `exec` probe of its own, with
+  the same numbers: `curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list`.
+- **Clock.** Segment times come from the recorders' clocks and print times from the API's
+  (spec §6.9), so every node runs NTP. The recorder compares its clock with the API's `Date`
+  header (1 s resolution; the CRUD listener is uvicorn, which sends it by default). More than
+  2 s off at start: it logs the offset and exits 2. Later, at each lease answer: `/healthz`
+  answers 503 and every feed report carries an `error` that names the offset, until it is
+  back within 2 s.
+- **Metrics.** `/metrics` on each controller's 9090: the relay's
+  `scadbuddy_camera_relay_pulling` and `scadbuddy_camera_relay_reconnects_total`, the
+  recorders' `scadbuddy_camera_segments_indexed_total`, `_upload_lag_seconds`,
+  `_backlog_bytes`, `_leader` and `_last_segment_age_seconds` (the "Cameras" row of the
+  printing dashboard). Scrape them as the workers are: a Service per Deployment
+  (`scadbuddy-camera-relay`, `scadbuddy-camera-recorder`) with a ServiceMonitor, as the
+  render worker's `servicemonitor-render.yaml` in eh-homelab/clusters. The dashboard's
+  queries need the scrape's `namespace` and `pod` labels.
 - **Pod security.** uid 10001, `runAsNonRoot`, `allowPrivilegeEscalation: false`, every
   capability dropped, read-only root file system. Measured 2026-11-24 in Docker
   (`--read-only --cap-drop ALL`): both MediaMTX configs start and the control API answers 200.

@@ -62,12 +62,32 @@ flowchart LR
   `127.0.0.1:9997`, and MediaMTX's hooks run `curl` against the controller's hook server on
   `127.0.0.1:9091` (`camera/process.py` `HOOK_PORT`), so both containers must share the pod's
   network. The recorder's two containers also share `/segments`, an `emptyDir`.
-- **Health.** Each controller answers `/healthz` and `/metrics` on port 9090. `/healthz`
-  answers 503 when MediaMTX's control API does not answer, or when the change follower has
-  stopped (`camera/process.py` `healthy`). Before the follower starts (the controller waits
-  for the CRUD service, or reads its first list), only MediaMTX counts, because a restart
-  cannot bring the API back. A liveness probe on `/healthz` restarts the controller's
-  container only; MediaMTX's container needs its own probe (README ["Printer cameras (#7328)"](../../README.md#printer-cameras-7328)).
+- **Health.** Each controller answers `/healthz` and `/metrics` on port 9090
+  (`camera/process.py` `serve_health`, `healthy`). `/healthz` answers 503 when:
+  - MediaMTX's control API does not answer within 3 s (`CHECK_BUDGET`);
+  - MediaMTX's runtime list (`GET /v3/paths/list`) lacks a path the controller has put
+    (`Relay.wanted`, `Recorder.wanted`). This is how a restart of MediaMTX's container alone,
+    which loses every path, is repaired: the probe restarts the controller, and the
+    controller puts every path again at its start;
+  - the change follower has stopped;
+  - (recorder) its clock is more than 2 s off the API's (see "Clock" below).
+
+  Before the follower starts (the controller waits for the CRUD service, or reads its first
+  list), the follower does not count: it answers 200 when MediaMTX answers and holds the
+  paths (and, in the recorder, the clock is within 2 s), because a restart cannot bring the
+  API back. A liveness probe on `/healthz`
+  restarts the controller's container only; MediaMTX's container needs its own probe
+  (README ["Printer cameras (#7328)"](../../README.md#printer-cameras-7328)).
+- **Clock (spec
+  [§6.9](../superpowers/specs/2026-11-23-printer-camera-recording-design.md#69-operation)).**
+  Segment times come from the recorders' clocks; print times come from the API's. The
+  recorder compares its clock with the `Date` header of the API's answers (1 s resolution;
+  the API's CRUD listener is uvicorn, which sends `Date` by default, `date_header=True`). At
+  start, after the CRUD service answers, a clock more than 2 s off refuses the start: the
+  recorder logs the offset and exits 2 (`Recorder.check_clock`). After that, each lease
+  answer updates the offset. While it is more than 2 s, `/healthz` answers 503 and every feed
+  report carries an `error` that names the offset (`Recorder._note_clock`,
+  `FeedSender.set_error`).
 
 ### MediaMTX facts (v1.21.4)
 
@@ -98,13 +118,18 @@ The hooks need `curl`, so the camera images take the release binary on
 
 - Tables: `camera_segments`, `camera_leases`, `camera_feeds`, and the column
   `printers.camera_recording` (`backend/scadbuddy/migrations/20261124T0059Z_camera_recording.sql`).
-- Events: `camera.feed` (a feed state changed) and `camera.reconnect` (`core/events.py`).
+- Events: `camera.feed` (a feed state changed, `core/events.py` `CameraFeedEvent`). The
+  change streams' filter also names `camera.reconnect` (`api/crud_camera.py` `CAMERA_KINDS`),
+  which nothing sends before phase 3.
 - Blobs: one object per segment, under `<prefix>/camera/` in the camera bucket. Only the
   recorder pods hold its keys.
-- Metrics (recorders, `camera/recorder.py`): `scadbuddy_camera_segments_indexed_total`,
+- Metrics. The relay (`camera/relay.py`): `scadbuddy_camera_relay_pulling` (1 while the
+  pull is ready, 0 while MediaMTX tries it) and `scadbuddy_camera_relay_reconnects_total`
+  (each time the pull is ready again after it was not; a replaced path counts too). The
+  recorders (`camera/recorder.py`): `scadbuddy_camera_segments_indexed_total`,
   `scadbuddy_camera_upload_lag_seconds`, `scadbuddy_camera_backlog_bytes`,
-  `scadbuddy_camera_leader`. The "Cameras" row of `deploy/grafana/scadbuddy-printing.json`
-  shows them.
+  `scadbuddy_camera_leader` and `scadbuddy_camera_last_segment_age_seconds`. All are per
+  printer. The "Cameras" row of `deploy/grafana/scadbuddy-printing.json` shows them.
 
 ## Tests
 
@@ -122,12 +147,11 @@ The hooks need `curl`, so the camera images take the release binary on
 
 - Phase 0's stream measurements (codec, frame rate, bitrate, keyframe interval, audio, how
   many RTSP clients the H2C accepts) are not made yet (spec §2).
-- The relay registers no metric. The spec's pull state and reconnects per printer (spec
-  [§6.9](../superpowers/specs/2026-11-23-printer-camera-recording-design.md#69-operation))
-  are not built, so the dashboard has no relay panel.
-- The recorder does not check its clock against the API's `Date` header yet (spec §6.9).
-- When MediaMTX's container restarts and the controller's does not, MediaMTX has no paths
-  until the controller's next full resync.
+- Liveness does not see a dead task inside a healthy controller: a printer's renewal or
+  upload task, a relay feed sender, or the hook server. Each loop logs and goes on after an
+  error, so only a bug ends one.
+- After MediaMTX's container restarts alone, recording stops until the controller's probe
+  fails enough times to restart it (3 failures, 10 s apart, in the README's probe numbers).
 - No retention: nothing is deleted until phase 5.
 - Deployment lives in eh-homelab/clusters; the issue that asks for it is drafted with the
   phase 1 PR.

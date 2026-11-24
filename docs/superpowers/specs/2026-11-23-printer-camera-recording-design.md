@@ -43,15 +43,16 @@ Why:
   these with `ffprobe` and writes them here, with the date and the method.
 - At 2 to 4 Mbit/s, one printer makes about 20 to 45 GB a day. Phase 0 replaces this
   estimate with the measured bitrate.
-- **Phase 0 has not run yet** (2026-11-24): none of the stream facts above is measured. The
-  phase 1 code assumes H.264 and copies it, with no re-encode.
+- **Phase 0 has not run yet** (2026-11-24): the stream facts listed as not measured above
+  are still not measured. The phase 1 code assumes H.264 and copies it, with no re-encode.
 
 ### MediaMTX v1.21.4 (phase 1)
 
 Phase 1 runs MediaMTX v1.21.4, pinned by sha256 in the Dockerfile's `mediamtx` stage
-([release](https://github.com/bluenviron/mediamtx/releases/tag/v1.21.4)). Each fact was
-measured in Docker with that version, on `bluenviron/mediamtx:1` (then v1.21.4), the release
-binary, or the `camera-relay`/`camera-recorder` images. The method follows each fact.
+([release](https://github.com/bluenviron/mediamtx/releases/tag/v1.21.4)). Each fact says how
+it was found: measured in Docker with that version (on `bluenviron/mediamtx:1`, then v1.21.4,
+the release binary, or the `camera-relay`/`camera-recorder` images), or read from the
+release's own files where it says "read".
 
 - **The official image has no shell and no curl.** `bluenviron/mediamtx:1.21.4` has one layer
   and the entrypoint `/mediamtx`; `docker run --entrypoint sh` and `--entrypoint curl` both
@@ -66,8 +67,9 @@ binary, or the `camera-relay`/`camera-recorder` images. The method follows each 
   these keys (2026-11-24, Tasks 7 and 8 of the plan, an ffmpeg test source). `runOnReady` and `runOnNotReady` still load but
   are deprecated: in the yml, MediaMTX logs `parameter 'runOnReady' is deprecated and has been
   replaced with 'runOnAvailable'`; through the control API it logs nothing (2026-11-24, Task 7).
-  The `deprecated: true` marks are in MediaMTX's
-  [OpenAPI](https://raw.githubusercontent.com/bluenviron/mediamtx/main/api/openapi.yaml).
+  The v1.21.4
+  [OpenAPI](https://github.com/bluenviron/mediamtx/blob/v1.21.4/api/openapi.yaml) marks
+  `runOnReady` and `runOnNotReady` `deprecated: true` (read 2026-11-24).
 - **`MTX_SEGMENT_DURATION` is in seconds**, as a decimal: a 14 s ffmpeg test source with
   `recordSegmentDuration: 4s` gave `4.8`, `4`, `4`, then `0.9` for the last segment when the
   stream stopped (2026-11-24, Task 8 of the plan, a `sh -c "echo … $MTX_SEGMENT_DURATION"` hook).
@@ -86,9 +88,10 @@ binary, or the `camera-relay`/`camera-recorder` images. The method follows each 
 - **Segment files are named in the container's local time** (`recordPath`
   `%Y-%m-%d_%H-%M-%S-%f`); under `TZ=UTC` the names were UTC (2026-11-24, Task 8 of the plan).
   So the recorder image sets `TZ=UTC`.
-- **`readTimeout` defaults to 10 s** (the v1.21.4 release's
-  [mediamtx.yml](https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml)). Both
-  configs pin it; the recorder's `ADOPT_AGE` (12 s) assumes it.
+- **`readTimeout` defaults to 10 s.** Read, not measured: the release tarball's
+  [mediamtx.yml](https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml) sets
+  `readTimeout: 10s` (read 2026-11-24). Both configs pin it; the recorder's `ADOPT_AGE`
+  (12 s) assumes it.
 - **A list entry is set from the environment by its index.** MediaMTX reads no `$VAR` in its
   yml ([configuration](https://mediamtx.org/docs/features/configuration)). With
   `MTX_AUTHINTERNALUSERS_0_USER` and `_PASS` set on the relay's config, an RTSP `DESCRIBE`
