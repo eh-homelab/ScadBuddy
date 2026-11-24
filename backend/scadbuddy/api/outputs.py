@@ -1132,6 +1132,10 @@ def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
     return metas
 
 
+#: How many damaged rows `GET /outputs/copy-status` names (``bytes.damaged_sample``).
+DAMAGED_SAMPLE = 50
+
+
 class OutputBytesStatus(BaseModel):
     """The last run of the copy of the saved outputs' bytes to the blob store (#7256): at an
     API start, or in a housekeeping sweep."""
@@ -1140,11 +1144,15 @@ class OutputBytesStatus(BaseModel):
     #: ``None`` while the run goes on, when it stopped before its end, when an output
     #: ``failed``, when it is ``incomplete``, or when it was ``refused``.
     finished_at: datetime | None
-    #: A folder could not be read (a failed stat). The next run tries again.
+    #: A folder could not be read (a failed stat), an output's folder is missing, or the
+    #: outputs folder is missing or lists no slug folder while rows exist (the run then
+    #: writes nothing). The next run tries again.
     incomplete: bool
     #: Why the run copied nothing: no blob store (``local``), the ``bambuddy`` store, or
     #: a quota the bytes do not fit in (with the shortfall). ``None`` when it ran.
     refused: str | None
+    #: Outputs whose row the run wrote with a blob it put or a key the row did not name
+    #: before.
     copied: int
     verified: int
     #: Outputs whose files did not change since the copy put their bytes.
@@ -1156,11 +1164,18 @@ class OutputBytesStatus(BaseModel):
     #: ``{output_id, role, error}`` for each output whose bytes could not be read, put or
     #: verified. The output gets no write; the next run tries again.
     failed: list[dict[str, Any]]
-    #: ``{output_id, role, error}`` for each missing byte file, and ``names`` too for a
-    #: ``files/`` folder with a name an output may not hold.
+    #: ``{output_id, role, error}`` for each missing byte file this run found, and
+    #: ``names`` too for a ``files/`` folder with a name an output may not hold. A later
+    #: run skips an output whose files did not change, so it does not name it again:
+    #: read ``damaged_rows`` and ``damaged_sample`` for every output that is damaged now.
     damaged: list[dict[str, Any]]
     #: How many rows the files still hold the bytes of now.
     pending: int
+    #: How many rows name damage now (their ``damaged`` is not empty), from every run.
+    damaged_rows: int = 0
+    #: ``{output_id, damaged}`` of the first `DAMAGED_SAMPLE` of those rows, by output
+    #: id: each ``damaged`` is ``[{role, error}]`` (``names`` too for ``files``).
+    damaged_sample: list[dict[str, Any]] = []
 
 
 class OutputCopyStatus(BaseModel):
@@ -1196,8 +1211,8 @@ async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
     """The last run of the copy of the outputs' files to rows (#7255), at an API start or in
     a housekeeping sweep: when it started and finished, what it copied, refreshed and
     dropped, the folders it could not copy and the side files it left out. 404 before any
-    run. ``bytes``: the last run of the copy of their bytes to the blob store (#7256), and
-    how many rows the files still hold the bytes of."""
+    run. ``bytes``: the last run of the copy of their bytes to the blob store (#7256), how
+    many rows the files still hold the bytes of, and the rows that name damage now."""
     rows = outputs.rows
     last = None if rows is None else await asyncio.to_thread(rows.last_run)
     if rows is None or last is None:
@@ -1205,6 +1220,8 @@ async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
     byte_run = await asyncio.to_thread(rows.last_byte_run)
     if byte_run is not None:
         byte_run["pending"] = await asyncio.to_thread(rows.pending_bytes)
+        count, sample = await asyncio.to_thread(rows.damage, DAMAGED_SAMPLE)
+        byte_run["damaged_rows"], byte_run["damaged_sample"] = count, sample
     return OutputCopyStatus.model_validate({**last, "bytes": byte_run})
 
 

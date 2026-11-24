@@ -193,7 +193,11 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    counted again until the sweep removes them. It is refused on `local` (no content store, plan
    Ruling R1) and on `bambuddy` (§6.4); a store migration to `bambuddy` is refused while
    any `output` blob exists. `GET /outputs/copy-status` answers its last run as `bytes`,
-   with `pending`, the rows whose bytes the files still hold.
+   with `pending`, the rows whose bytes the files still hold, and the rows' damage from
+   every run (`damaged_rows`, `damaged_sample`). A missing file never drops a key the row
+   names: it is `damaged`. An outputs folder that is missing or lists no slug folder
+   while rows exist, or an output's missing folder, makes the run `incomplete`, and those
+   rows get no write; a start copies the bytes only after a row copy run that finished.
 
    Derived rows are written only while the model sha256 the reader read is still the
    row's (or the files hold the bytes). When the copy moves a copied row's model key, it

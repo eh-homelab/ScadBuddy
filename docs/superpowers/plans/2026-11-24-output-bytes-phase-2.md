@@ -278,4 +278,4 @@ Behaviour (spec §4.5 phase 2, §6.3, §6.4, §6.5):
 ### After the tasks
 
 - Open one PR, `feat(outputs): output bytes in the blob store, phase 2 (#7254)`, body `Fixes #7256`, with this plan in it.
-- After it deploys: confirm the API pods run the new image, then read `GET /api/v1/outputs/copy-status`. Its `bytes` run must have started after the last old pod went, have a `finished_at`, no `refused`, no `failed`, and `pending` 0; the owner reviews `damaged`. A `refused` that names the quota is raised as a settings change, then the next sweep runs. Phase 3 (#7257) starts only from that state.
+- After it deploys: confirm the API pods run the new image, then read `GET /api/v1/outputs/copy-status`. Its `bytes` run must have started after the last old pod went, have a `finished_at`, no `refused`, no `failed`, and `pending` 0; the owner reviews `damaged_rows` and `damaged_sample` (the rows' damage from every run), not the run's `damaged`, which names only what that run found. A `refused` that names the quota is raised as a settings change, then the next sweep runs. Phase 3 (#7257) starts only from that state.

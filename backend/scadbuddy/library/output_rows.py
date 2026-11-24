@@ -865,6 +865,23 @@ class OutputRows:
         assert found is not None
         return int(found["n"])
 
+    def damage(self, limit: int) -> tuple[int, list[dict[str, Any]]]:
+        """How many rows name damage (``damaged`` not empty), and the first ``limit`` of
+        them by output id, as ``{output_id, damaged}``."""
+        with self._pool.connection() as conn:
+            count = conn.execute(
+                "SELECT count(*) AS n FROM outputs WHERE damaged <> '[]'::jsonb"
+            ).fetchone()
+            found = conn.execute(
+                "SELECT output_id, damaged FROM outputs WHERE damaged <> '[]'::jsonb"
+                " ORDER BY output_id LIMIT %s",
+                (limit,),
+            ).fetchall()
+        assert count is not None
+        return int(count["n"]), [
+            {"output_id": str(item["output_id"]), "damaged": item["damaged"]} for item in found
+        ]
+
     def start_byte_run(self) -> int:
         with self._pool.connection() as conn:
             found = conn.execute(

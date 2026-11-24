@@ -232,6 +232,15 @@ a row of `output_byte_runs`. It reconciles:
   the output `damaged` with the names, and it is not copied. A read, put or check that
   fails is `failed`, and the row keeps `bytes_at` NULL. A stat that fails with anything but
   a missing file makes the run `incomplete`.
+- A missing file never drops a key. When the row names a blob for that role, or a
+  `files/` name that went, the key and its hold stay, and the file is `damaged`.
+- A volume that is not there is not every output gone (phase 1's rule). An outputs folder
+  that is missing, or lists no slug folder while rows exist, makes the run `incomplete`,
+  and it writes nothing. An output whose folder is missing gets no write, and the run is
+  `incomplete`. At a start, the byte copy runs only after a row copy run that finished
+  (`finished_at` set, not `incomplete`); else the sweep runs it.
+- `copied` counts only the outputs where the run put a blob or named a key the row did
+  not name before.
 
 Refusals: before any put, the copy adds up the bytes and the count of the rows with
 `bytes_at` NULL (an output with a bad `files/` name adds nothing, as it is not copied) and checks them against `store_max_total_bytes` and `store_max_count`.
@@ -243,15 +252,20 @@ every run is refused.
 A run has a `finished_at` only when nothing was refused, failed or incomplete and it was
 not stopped. `GET /api/v1/outputs/copy-status` answers the last byte run as `bytes`
 (`null` before any), with `pending`, the count of rows whose bytes the files still hold
-now.
+now, and the rows' damage from every run: `damaged_rows`, the count of rows whose
+`damaged` is not empty, and `damaged_sample`, the first 50 of them by output id as
+`{output_id, damaged}`. The run's own `damaged` names only what that run found: a later
+run skips an output whose files did not change.
 
 After a roll-out of phase 2, confirm that every pod runs the new image (`kubectl -n
 bambuddy get pods -o jsonpath` on the images), then read `GET /api/v1/outputs/copy-status`.
 Check that `bytes` has a `finished_at`, is not `incomplete`, has no `refused`, started
 after the last pod on the older build went, and that `pending` counts no output but those
-that `damaged` names with `names` (a refused `files/` name keeps `bytes_at` NULL). Pods on an older
-build write the files only; the next sweep copies what they wrote. Read `damaged`: a
-person checks each output it names. An output with a refused `files/` name keeps its
+that `damaged_sample` names with `names` (a refused `files/` name keeps `bytes_at` NULL). Pods on an older
+build write the files only; the next sweep copies what they wrote. Read `damaged_rows`
+and `damaged_sample`, not the run's `damaged`: a person checks each output they name.
+When `damaged_rows` is more than the sample, list the rest with
+`SELECT output_id, damaged FROM outputs WHERE damaged <> '[]' ORDER BY output_id`. An output with a refused `files/` name keeps its
 folder as the only copy of its bytes until the name is fixed.
 
 ## Generated API files

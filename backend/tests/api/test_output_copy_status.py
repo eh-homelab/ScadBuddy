@@ -6,10 +6,12 @@ their bytes to the blob store (#7256). The tests' apps skip the start's copies
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.outputs import DAMAGED_SAMPLE
 from scadbuddy.library.output_rows import ByteWrite, OutputBlobs, OutputRow, OutputRows
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.glb import BoundingBox
@@ -155,3 +157,57 @@ def test_copy_status_bytes_null_before_any_byte_run(client: TestClient) -> None:
     rows.insert(_row("a" * 32))
     body = client.get("/api/v1/outputs/copy-status").json()
     assert body["bytes"] is None
+
+
+def _end_byte_run(rows: OutputRows, damaged: list[dict[str, Any]]) -> None:
+    rows.end_byte_run(
+        rows.start_byte_run(),
+        finished=True,
+        incomplete=False,
+        refused=None,
+        copied=0,
+        verified=0,
+        skipped=0,
+        needed_bytes=0,
+        needed_count=0,
+        failed=[],
+        damaged=damaged,
+    )
+
+
+def test_copy_status_reports_the_rows_damage(client: TestClient) -> None:
+    """#7256: the rows' damage, not only the last run's: a later run skips an output an
+    earlier run marked damaged, so its ``damaged`` no longer names it."""
+    rows = _rows(client)
+    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    preview = [{"role": "preview", "error": "no preview.glb"}]
+    model = [{"role": "model", "error": "no model.3mf"}]
+    writes = {"c" * 32: preview, "a" * 32: model, "b" * 32: []}
+    for output_id in writes:
+        rows.insert(_row(output_id))
+    rows.write_byte_copy(
+        [ByteWrite(output_id, OutputBlobs(), "stamp", found) for output_id, found in writes.items()]
+    )
+    _end_byte_run(rows, [])
+
+    byte_run = client.get("/api/v1/outputs/copy-status").json()["bytes"]
+    assert byte_run["damaged"] == []
+    assert byte_run["damaged_rows"] == 2
+    assert byte_run["damaged_sample"] == [
+        {"output_id": "a" * 32, "damaged": model},
+        {"output_id": "c" * 32, "damaged": preview},
+    ]
+
+
+def test_copy_status_damage_sample_is_bounded(client: TestClient) -> None:
+    rows = _rows(client)
+    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    damaged = [{"role": "preview", "error": "no preview.glb"}]
+    ids = [f"{n:032x}" for n in range(DAMAGED_SAMPLE + 1)]
+    for output_id in ids:
+        rows.insert(_row(output_id))
+    rows.write_byte_copy([ByteWrite(output_id, OutputBlobs(), "s", damaged) for output_id in ids])
+    _end_byte_run(rows, [])
+    byte_run = client.get("/api/v1/outputs/copy-status").json()["bytes"]
+    assert byte_run["damaged_rows"] == DAMAGED_SAMPLE + 1
+    assert [item["output_id"] for item in byte_run["damaged_sample"]] == ids[:DAMAGED_SAMPLE]
