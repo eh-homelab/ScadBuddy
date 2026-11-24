@@ -29,7 +29,7 @@ def _rows(last_run: dict[str, Any] | None = FINISHED_RUN) -> Any:
 def _state(rows: object | None = None) -> Any:
     return SimpleNamespace(
         outputs=SimpleNamespace(rows=_rows() if rows is None else rows),
-        projection=SimpleNamespace(pool=object()),
+        projection=SimpleNamespace(conninfo="postgresql://unused.invalid/scadbuddy"),
         store=SimpleNamespace(content=object()),
     )
 
@@ -63,12 +63,12 @@ async def test_the_sweep_runs_the_copy(
     with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
         await ActivityEnvironment().run(_sweep(state))
     assert len(calls) == 1
-    store, rows, content, pool, stop = calls[0]
-    assert (store, rows, content, pool) == (
+    store, rows, content, conninfo, stop = calls[0]
+    assert (store, rows, content, conninfo) == (
         state.outputs,
         state.outputs.rows,
         state.store.content,
-        state.projection.pool,
+        state.projection.conninfo,
     )
     assert isinstance(stop, threading.Event) and not stop.is_set()
     assert "copied the outputs' bytes to the blob store" in [r.getMessage() for r in caplog.records]
