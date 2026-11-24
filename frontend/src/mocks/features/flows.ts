@@ -495,6 +495,7 @@ function view(id: string): FlowRunView | undefined {
     hops,
     summary: summaries.get(`${id}:${call_id}`)?.summary ?? null,
     bound_hash: summaries.get(`${id}:${call_id}`)?.bound_hash ?? null,
+    task: null,
   }))
   return {
     id,
@@ -581,9 +582,16 @@ export const FLOW_HOST_FUNCTIONS: FlowHostInterface = {
     },
     {
       name: 'wait_for_human',
-      signature: 'async def wait_for_human(question: str, timeout_s: int) -> HumanAnswer',
+      signature: 'async def wait_for_human(question: str, timeout_s: int | None=...) -> HumanAnswer',
       parameters: ['question', 'timeout_s'],
-      doc: 'Ask a person `question` and wait up to `timeout_s` seconds (10 to 86400) for the answer.',
+      doc: 'Ask a person `question` and wait for the answer, with no limit unless `timeout_s` (at least 10 seconds) sets one.',
+    },
+    {
+      name: 'prompt',
+      signature:
+        'async def prompt(title: str, schema: dict[str, Any], context: list[dict[str, Any]] | None=..., place: str | None=..., ui: str | None=..., timeout_s: int | None=...) -> dict[str, Any]',
+      parameters: ['title', 'schema', 'context', 'place', 'ui', 'timeout_s'],
+      doc: 'Ask a person the question `title` and wait for a typed answer.',
     },
     {
       name: 'render',

@@ -156,7 +156,7 @@ from scadbuddy.workflows.client import (
     render_worker,
     routes_to,
 )
-from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_activities import FlowActivities, FlowTaskActivities
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
@@ -1663,6 +1663,7 @@ async def run_projects_worker(
             settings.temporal_address, settings.temporal_namespace, keys, runtime=runtime
         )
         store = RemoteFlowStore(crud)
+        tasks = RemoteTasks(crud)
         queue = settings.temporal_task_queue_projects
         kinds = {
             kind.name: kind
@@ -1671,7 +1672,7 @@ async def run_projects_worker(
                 keys,
                 approval_key(settings),
                 api=lambda: api_client(settings.api_internal_url, credential),
-                tasks=RemoteTasks(crud),
+                tasks=tasks,
             )
         }
         # The API ends its kinds' records and counts them (#2295, #5298); the dashboards
@@ -1684,7 +1685,13 @@ async def run_projects_worker(
         worker = projects_worker(
             client,
             queue,
-            [*FlowActivities(store).all(), *routes.all(), *grants.all(), *decisions],
+            [
+                *FlowActivities(store).all(),
+                *FlowTaskActivities(tasks).all(),
+                *routes.all(),
+                *grants.all(),
+                *decisions,
+            ],
             deployment_config=projects_deployment(build_id),
         )
         routed = asyncio.Event()

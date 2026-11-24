@@ -88,17 +88,40 @@ def resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None)
         patterns_deadline.reset(token)
 
 
-def _resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None) -> dict[str, Any]:
-    given = dict(values or {})
-    if schema is None:
-        if given:
-            raise InputsError(["this flow takes no inputs"])
-        return {}
-    properties: dict[str, Any] = schema.get("properties", {})
-    for name, prop in properties.items():
+def filled(schema: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    """``values`` as a script gets them, with every default filled in and every property
+    left out set to None. ``values`` fit ``schema`` already: nothing is checked against it,
+    so no pattern runs and a workflow may call this. :class:`InputsError` when the model
+    does not take one."""
+    return _typed(schema, _with_defaults(schema, values))
+
+
+def _with_defaults(schema: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    given = dict(values)
+    for name, prop in schema.get("properties", {}).items():
         has, default = _default(prop)
         if name not in given and has:
             given[name] = copy.deepcopy(default)
+    return given
+
+
+def _typed(schema: dict[str, Any], given: dict[str, Any]) -> dict[str, Any]:
+    """As the script's type says: an `integer` sent as 3.0 is 3, a `number` sent as 2 is 2.0."""
+    try:
+        return inputs_model(schema).model_validate(given).model_dump()
+    except ValidationError as err:
+        raise InputsError(
+            [f"{'.'.join(str(p) for p in e['loc']) or 'inputs'}: {e['msg']}" for e in err.errors()]
+        ) from None
+
+
+def _resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None) -> dict[str, Any]:
+    if schema is None:
+        if values:
+            raise InputsError(["this flow takes no inputs"])
+        return {}
+    given = _with_defaults(schema, values or {})
+    properties: dict[str, Any] = schema.get("properties", {})
     # The validator evaluates every keyword, so `pattern` would still run on a value its
     # `maxLength` refuses, and maxLength is what bounds the pattern's work (#2661): an
     # over-long input is said here, and checked for everything but its pattern.
@@ -119,10 +142,4 @@ def _resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None
     ]
     if problems:
         raise InputsError(problems)
-    # As the script's type says: an `integer` sent as 3.0 is 3, a `number` sent as 2 is 2.0.
-    try:
-        return inputs_model(schema).model_validate(given).model_dump()
-    except ValidationError as err:
-        raise InputsError(
-            [f"{'.'.join(str(p) for p in e['loc']) or 'inputs'}: {e['msg']}" for e in err.errors()]
-        ) from None
+    return _typed(schema, given)

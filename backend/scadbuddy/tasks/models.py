@@ -6,7 +6,14 @@ import json
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
 
 from scadbuddy.core.events import TASK_PLACE_CHAR, TASK_PLACE_MAX
 from scadbuddy.core.json_values import unstorable
@@ -18,6 +25,9 @@ TaskState = Literal["open", "answered", "cancelled", "expired"]
 MAX_JSON_BYTES = 16 * 1024
 MAX_UI_CHARS = 200
 MAX_BY_CHARS = 200
+#: A `TaskOpen`'s validation context that leaves its schema's defaults unchecked: that
+#: check runs patterns against a clock, which a workflow must not do.
+UNCHECKED_DEFAULTS = {"defaults": False}
 
 
 def json_fits(value: Any) -> bool:
@@ -71,11 +81,20 @@ class TaskOpen(_TaskFields):
 
     @field_validator("schema_")
     @classmethod
-    def _schema_fits_the_subset(cls, value: dict[str, Any]) -> dict[str, Any]:
-        problems = prompt_schema_problems(value)
+    def _schema_fits_the_subset(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
+        defaults = (info.context or {}).get("defaults", True)
+        problems = prompt_schema_problems(value, defaults=defaults)
         if problems:
             raise ValueError("; ".join(problems))
         return value
+
+
+def open_problems(error: ValidationError) -> str:
+    """Why a `TaskOpen` was refused: the fields and the rules, never a value."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in one['loc'])}: {one['msg'].removeprefix('Value error, ')}"
+        for one in error.errors(include_input=False)
+    )
 
 
 class Task(_TaskFields):

@@ -6,7 +6,7 @@ use, as it does for orders, printers and entities. `ROWS` closes it."""
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -17,7 +17,7 @@ from scadbuddy.api.deps import transactional_events
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.rows.component import ROWS
-from scadbuddy.tasks.models import Task
+from scadbuddy.tasks.models import Task, TaskOpen
 from scadbuddy.tasks.store import TaskStore
 
 
@@ -34,12 +34,34 @@ class TasksComponent:
         self._pool.open(wait=False)
         return self._store
 
+    # The store's writes as `RemoteTasks` has them, for the in-process worker.
+
+    async def open(self, task: TaskOpen, *, workflow_run_id: str | None = None) -> Task:
+        return await asyncio.to_thread(self.store.open, task, workflow_run_id=workflow_run_id)
+
+    async def close(
+        self,
+        task_id: str,
+        state: Literal["expired", "cancelled"],
+        *,
+        workflow_run_id: str | None = None,
+    ) -> Task | None:
+        held = await asyncio.to_thread(
+            self.store.close_or_current, task_id, state, workflow_run_id=workflow_run_id
+        )
+        return held if held is not None and held.state == state else None
+
     async def mark_answered(
-        self, task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str
+        self,
+        task_id: str,
+        answer: dict[str, Any],
+        by: str | None,
+        workflow_run_id: str,
+        *,
+        final: bool = False,
     ) -> Task:
-        """`TaskStore.mark_answered`, as `RemoteTasks` has it, for the in-process worker."""
         return await asyncio.to_thread(
-            self.store.mark_answered, task_id, answer, by, workflow_run_id
+            self.store.mark_answered, task_id, answer, by, workflow_run_id, final=final
         )
 
 

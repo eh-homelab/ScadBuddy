@@ -13,7 +13,7 @@ from scadbuddy.core.input_schema import (
     PATTERNS_BUDGET_S,
     schema_problems,
 )
-from scadbuddy.flows.inputs import InputsError, inputs_model, resolve_inputs
+from scadbuddy.flows.inputs import InputsError, filled, inputs_model, resolve_inputs
 from scadbuddy.flows.typecheck import check_script
 
 SCHEMA: dict[str, Any] = {
@@ -399,3 +399,35 @@ async def test_a_flow_without_a_schema_has_no_inputs_function() -> None:
 async def test_a_bad_schema_is_reported_against_inputs_json() -> None:
     problems = await check_script(_script("await sleep(1)"), {"type": "array"})
     assert problems and all(p.file == "inputs.json" for p in problems)
+
+
+def test_filled_gives_the_defaults_and_the_types_and_runs_no_pattern() -> None:
+    """A prompt's answer (#7364), which was checked before: a workflow fills it in."""
+    schema: dict[str, Any] = {
+        "type": "object",
+        "required": ["code"],
+        "properties": {
+            "code": {"type": "string", "pattern": "^never$", "maxLength": 5},
+            "copies": {"type": "integer", "default": 2},
+            "scale": {"type": "number"},
+            "sms": {"type": "boolean"},
+            "tags": {"type": "array", "items": {"type": "string"}, "default": []},
+            "note": {"type": "string"},
+        },
+    }
+    sent: dict[str, Any] = {"code": "other", "scale": 2}
+    got = filled(schema, sent)
+    assert got == {
+        "code": "other",
+        "copies": 2,
+        "scale": 2.0,
+        "sms": False,
+        "tags": [],
+        "note": None,
+    }
+    assert isinstance(got["scale"], float)
+    assert sent == {"code": "other", "scale": 2}
+    got["tags"].append("x")
+    assert filled(schema, sent)["tags"] == []
+    with pytest.raises(InputsError):
+        filled(schema, {"scale": 1})

@@ -113,6 +113,7 @@ from scadbuddy.orders.component import OrdersDep
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.tasks.component import TasksComponent, TasksDep
+from scadbuddy.tasks.models import Task
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
 from scadbuddy.workflows.flow_models import HopRecord
@@ -270,6 +271,9 @@ class PendingEntry(BaseModel):
     #: With `summary`: the input hash the approval binds (the printer the summary names),
     #: which an approval sends back as `bound_hash` (#4445).
     bound_hash: str | None = None
+    #: A prompt's task (#7364), which takes its answer at `POST /tasks/{id}/answer`; None
+    #: for a `wait_for_human`, whose answer is a text.
+    task: Task | None = None
 
 
 class GrantUseView(BaseModel):
@@ -962,8 +966,9 @@ async def get_flow_run(
     printers: PrintersDep,
     settings: SettingsStoreDep,
     state: StateDep,
+    tasks: TasksDep,
 ) -> RunView:
-    view = await _run_view(run_id, flows, printers, settings, _drafts(state))
+    view = await _run_view(run_id, flows, printers, settings, tasks, _drafts(state))
     if (fired := await triggers.store.fire_of_run(run_id)) is not None:
         fire, trigger = fired
         view.trigger = RunTrigger(
@@ -981,6 +986,7 @@ async def _run_view(
     flows: Flows,
     printers: Printers,
     settings: SettingsStore,
+    tasks: TasksComponent,
     drafts: DraftLookup | None = None,
 ) -> RunView:
     run = await flows.store.get_run(run_id)
@@ -1011,15 +1017,19 @@ async def _run_view(
         return view
     if flows.client is None:
         view.pending = [PendingEntry.model_validate(w.model_dump()) for w in run.waiting_on]
-        return view
-    view.pending, view.live = await _pending(
-        flows.client,
-        run,
-        _registry(printers),
-        approval_key(flows.settings),
-        _native(printers, settings),
-        drafts,
-    )
+    else:
+        view.pending, view.live = await _pending(
+            flows.client,
+            run,
+            _registry(printers),
+            approval_key(flows.settings),
+            _native(printers, settings),
+            drafts,
+        )
+    if asked := [entry for entry in view.pending if entry.kind == "answer"]:
+        found = await asyncio.to_thread(tasks.store.of_run, run.id, [e.call_id for e in asked])
+        for entry in asked:
+            entry.task = found.get(entry.call_id)
     return view
 
 

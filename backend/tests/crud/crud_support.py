@@ -78,6 +78,7 @@ from scadbuddy.crud.render import (
     RemoteGeometryIndex,
     RemoteJobProjection,
 )
+from scadbuddy.crud.tasks import RemoteTasks
 from scadbuddy.crud.wire import PREFIX
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import FILAMENT, Filament
@@ -256,7 +257,7 @@ def crud_app(
         ),
         FLOWS: SimpleNamespace(store=store, client=client, keys=keys),
         OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
-        TASKS: SimpleNamespace(store=tasks),
+        TASKS: SimpleNamespace(store=TaskStore(store._pool) if tasks is None else tasks),
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
@@ -306,6 +307,11 @@ async def served_crud(
     finally:
         await crud.aclose()
         await listener.stop(app)
+
+
+def remote_tasks(remote: RemoteFlowStore) -> RemoteTasks:
+    """The worker's tasks over the client of its flow store (#7364)."""
+    return RemoteTasks(remote._client)
 
 
 @asynccontextmanager

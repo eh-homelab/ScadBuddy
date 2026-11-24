@@ -30,8 +30,13 @@ on #4262's (a `turn_tool_tier` whose three attempts missed their beats, asked on
 with no heartbeat timeout, recorded by
 `test_a_tier_on_agent_replicas_that_never_beat_is_asked_again_without_beats`); `lowered` on
 #2171's (a tool lowered from outward while the run waited, run without approval, recorded by
-`test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call`). Never
-re-record them.
+`test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call`);
+`refused_wait` on the workflow before #7364 (a `wait_for_human` of more than a day, refused
+before it drew a call id, then an approved `queue_print`, whose activity id has the next one)
+and so `waited_default` (a `wait_for_human` with the hour of its default, then a `sleep`), each
+recorded once on that code, by a test that is not kept; `waited_open` on #7364's (a
+`wait_for_human` with no limit, answered) and `prompted` on #7364's (a prompt answered through
+its route, recorded by `tests/api/test_flow_prompt.py`). Never re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
@@ -70,6 +75,10 @@ NAMES = [
     "beatless",
     "lowered",
     "unregistered",
+    "refused_wait",
+    "waited_default",
+    "waited_open",
+    "prompted",
 ]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
@@ -126,6 +135,23 @@ async def test_answered(flows: Flows) -> None:
     )
     await flows.finished(run_id)
     await _record(flows, "answered", run_id)
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.requires_postgres
+async def test_waited_open(flows: Flows) -> None:
+    run_id = await flows.start(
+        script("a = await wait_for_human('Swap to pink?')", "return a['answer']")
+    )
+    run = await flows.row(run_id, lambda r: r.status == "waiting")
+    client = AgentClient(flows.client, f"flow-{run_id}")
+    for _ in range(100):
+        if await client.get_pending_callbacks():
+            break
+        await asyncio.sleep(0.1)
+    await client.provide_callback_result(run.waiting_on[0].call_id, result={"answer": "ok"})
+    assert (await flows.finished(run_id)).result == "result: 'ok'"
+    await _record(flows, "waited_open", run_id)
 
 
 @pytest.mark.requires_temporal

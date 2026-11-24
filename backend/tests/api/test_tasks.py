@@ -337,7 +337,7 @@ def test_a_failed_mark_answers_the_task_as_it_stands_and_is_not_made_again(
 ) -> None:
     marks: list[int] = []
 
-    def fails(self: TaskStore, *args: Any) -> Any:
+    def fails(self: TaskStore, *args: Any, **kwargs: Any) -> Any:
         marks.append(1)
         raise RuntimeError("the database is away")
 
