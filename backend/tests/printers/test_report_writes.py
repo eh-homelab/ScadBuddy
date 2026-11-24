@@ -5,6 +5,8 @@ written whole. The commit of a CRUD write is a span of its own (`traced_transact
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -13,7 +15,7 @@ import psycopg
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from scadbuddy.core.tracing import COMMIT_SPAN, traced_transaction
+from scadbuddy.core.tracing import COMMIT_SPAN, span, traced_transaction
 from scadbuddy.printers import run_hours
 from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.printers.reports import (
@@ -151,13 +153,81 @@ def test_a_stale_report_is_still_not_written(
     assert reports.get(pid) == (_report(), _at(10))
 
 
+def test_a_report_older_than_a_touch_is_not_written(
+    printers_with_kek: PrinterStore, pg_pool: PgPool
+) -> None:
+    pid = _linked(printers_with_kek)
+    reports = PrinterReportStore(pg_pool)
+    reports.advance(pid, _report(), _at(0))
+    reports.touch(pid, _at(10))
+    assert reports.advance(pid, _report(mc_percent=11), _at(5)) == Advance()
+    assert reports.get(pid) == (_report(), _at(10))
+
+
+def test_a_touch_between_the_two_reads_makes_the_report_stale(
+    printers_with_kek: PrinterStore, pg_pool: PgPool
+) -> None:
+    """A touch takes no advisory lock: one that commits after `advance_in`'s first read and
+    before its ``FOR UPDATE`` read must still stop the older report, or ``seen_at`` moves
+    back."""
+    pid = _linked(printers_with_kek)
+    reports = PrinterReportStore(pg_pool)
+    reports.advance(pid, _report(), _at(0))
+    answers: list[Advance] = []
+    with pg_pool.connection() as touching, touching.transaction():
+        touching.execute(
+            "UPDATE printer_reports SET seen_at = GREATEST(seen_at, %s) WHERE printer_id = %s",
+            (_at(10), pid),
+        )
+        late = threading.Thread(
+            target=lambda: answers.append(reports.advance(pid, _report(mc_percent=11), _at(5)))
+        )
+        late.start()
+        deadline = time.monotonic() + 10
+        with pg_pool.connection() as watching:
+            while time.monotonic() < deadline:
+                waiting = watching.execute(
+                    "SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+                    " AND query LIKE '%FOR UPDATE%' AND query LIKE '%printer_reports%'"
+                ).fetchone()
+                if waiting is not None:
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail("the late report never waited for the row lock")
+    late.join(timeout=10)
+    assert answers == [Advance()]
+    assert reports.get(pid) == (_report(), _at(10))
+
+
+def test_a_skip_never_leaves_a_counter_gap_past_the_refresh() -> None:
+    row = run_hours.RunHours(
+        run_seconds=Decimal(0),
+        unseen_seconds=Decimal(0),
+        counted_to=T0,
+        state="RUNNING",
+        subtask=JOB,
+    )
+    assert run_hours.unchanged_by(row, T0 + REFRESH_EVERY / 2, _report(), within=REFRESH_EVERY)
+    assert not run_hours.unchanged_by(row, T0 + REFRESH_EVERY, _report(), within=REFRESH_EVERY)
+    assert not run_hours.unchanged_by(
+        row, T0 + run_hours.GAP_LIMIT, _report(), within=run_hours.GAP_LIMIT * 2
+    )
+
+
 def test_the_commit_is_a_span(pg_pool: PgPool, spans: InMemorySpanExporter) -> None:
     spans.clear()
     with pg_pool.connection() as conn:
-        with traced_transaction(conn):
+        with span("request") as request, traced_transaction(conn):
             conn.execute("SELECT 1")
-        names = [s.name for s in spans.get_finished_spans()]
-        assert names.count(COMMIT_SPAN) == 1
+        commits = [s for s in spans.get_finished_spans() if s.name == COMMIT_SPAN]
+        assert len(commits) == 1
+        assert commits[0].parent is not None
+        assert commits[0].parent.span_id == request.get_span_context().span_id
+        spans.clear()
+        with conn.transaction(), traced_transaction(conn):
+            conn.execute("SELECT 1")
+        assert COMMIT_SPAN not in [s.name for s in spans.get_finished_spans()]
         spans.clear()
         with pytest.raises(psycopg.errors.DivisionByZero), traced_transaction(conn):
             conn.execute("SELECT 1 / 0")

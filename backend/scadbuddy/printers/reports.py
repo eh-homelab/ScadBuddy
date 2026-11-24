@@ -367,7 +367,9 @@ class PrinterReportStore:
         counts the whole stretch) and the ledger read alike. It takes no row lock, so its
         transaction writes nothing at all. The printer's advisory lock
         (`REPORT_LOCK_CLASS`), which every write takes first, makes it wait for a write
-        still in flight and read that one."""
+        still in flight and read that one. A `touch` takes no advisory lock, so the
+        stale check is made again on the row read ``FOR UPDATE``: a touch that commits
+        between the two reads makes the report stale, and it writes nothing."""
         if printer_uuid(printer_id) is None:
             return Advance()
         conn.execute(
@@ -383,10 +385,14 @@ class PrinterReportStore:
         if (
             old is not None
             and _unchanged(old, report, seen_at, running, ended)
-            and run_hours.unchanged_by(run_hours.read(conn, printer_id), seen_at, report)
+            and run_hours.unchanged_by(
+                run_hours.read(conn, printer_id), seen_at, report, within=REFRESH_EVERY
+            )
         ):
             return Advance()
         old = conn.execute(f"{read} WHERE printer_id = %s FOR UPDATE", (printer_id,)).fetchone()
+        if old is not None and stale(old["seen_at"], seen_at, old["now"]):
+            return Advance()  # a touch committed between the two reads
         before = None if old is None else old["running_subtask"]
         running, ended = advance_print(before, report)
         written = conn.execute(
