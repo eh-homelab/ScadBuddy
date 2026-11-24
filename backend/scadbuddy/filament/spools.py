@@ -722,7 +722,10 @@ class FilamentSpoolStore:
         `UniqueViolation` for a row the draft names that does not exist or two rows of
         one key. With ``copy_of`` a preset row that matches a ``migrated`` row of that
         spool is written ``migrated`` (R-7150-11, R-7150-13); `SpoolCopySourceError` when
-        it names no spool."""
+        it names no spool. The source's ``migrated`` rows are read here, when the create
+        runs, not when the draft was read: if the source's presets are re-set between the
+        copy and the save, an unchanged copied row stops being ``migrated``. That is
+        intended."""
         carried: set[_PresetValues] = set()
         if body.copy_of is not None:
             # One read: the source, and its migrated rows (none: one row of NULLs).

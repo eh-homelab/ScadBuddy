@@ -894,8 +894,8 @@ const tools: Tool[] = [
         // One key per call: a resend after a lost answer makes no second set of spools. A
         // resend reads the copy again, so its key names that draft too (R-7150-8): a changed
         // source is a new request, never a 422 for a key sent with another body.
-        // `copy_of` names the source, so a copied migrated preset row stays so (R-7150-13).
-        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1, ...(copy_of ? { copy_of } : {}) } as SpoolBulkCreate
+        // The draft carries `copy_of` (the copy route answers it), so a copied migrated preset row stays so (R-7150-13).
+        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1 } as SpoolBulkCreate
         const key = copy_of
           ? createHash('sha256').update(`${idempotencyKey(ctx)}\x1f${JSON.stringify(draft)}`).digest('hex')
           : idempotencyKey(ctx)
