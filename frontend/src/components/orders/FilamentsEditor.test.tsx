@@ -1,8 +1,10 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { http } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import { listTypes } from '../../api/filament'
 import { T } from '../../mocks/features/filament/seed'
+import { server } from '../../mocks/server'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { FILAMENT_PLA, seedOrders, state as orders } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
@@ -172,24 +174,40 @@ describe('FilamentsEditor (#4250)', () => {
     const types = await listTypes()
     const gold = types.find((type) => type.id === T.GOLD)!
     const clear = { ...gold, id: 'type-clear-gold', code: 'EL-PLA-SILK-GOLD-CLEAR', rgba: '#D4AF3780', filament_id: null }
-    /** The codes the open choice offers, in its order. */
-    const codes = () => within(screen.getByRole('dialog')).getAllByRole('radio').map((one) => one.closest('label')?.querySelector('.font-medium')?.textContent)
+    /** The type ids the open choice offers, in its order. */
+    const codes = () => within(screen.getByRole('dialog')).getAllByRole('radio').map((one) => one.id.replace(/^link-type-/, ''))
     const { user, rerender } = renderPage(<FilamentsEditor types={types} />)
     await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
     const dialog = await screen.findByRole('dialog', { name: 'This filament may already have a type' })
-    expect(codes()).toEqual(['EL-PLA-SILK-GOLD'])
+    expect(codes()).toEqual([T.GOLD])
 
     rerender(<FilamentsEditor types={[...types, clear]} />)
-    await waitFor(() => expect(codes()).toEqual(['EL-PLA-SILK-GOLD', 'EL-PLA-SILK-GOLD-CLEAR']))
+    await waitFor(() => expect(codes()).toEqual([T.GOLD, clear.id]))
     expect(within(dialog).getByText('Its opacity differs from this row')).toBeInTheDocument()
 
     rerender(<FilamentsEditor types={[...types.filter((type) => type.id !== T.GOLD), clear]} />)
-    await waitFor(() => expect(codes()).toEqual(['EL-PLA-SILK-GOLD-CLEAR']))
+    await waitFor(() => expect(codes()).toEqual([clear.id]))
     expect(within(screen.getByRole('dialog')).getByRole('radio', { name: /EL-PLA-SILK-GOLD-CLEAR/ })).toBeChecked()
 
     rerender(<FilamentsEditor types={types.map((type) => (type.id === T.GOLD ? { ...type, archived_at: '2026-11-23T00:00:00Z' } : type))} />)
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     rerender(<FilamentsEditor types={types} />)
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  // #7344 review: a reload during the click's catalog reads that leaves no candidate makes the type, not an empty choice.
+  it('makes the type when the types reloaded during the click leave no candidate', async () => {
+    const row = await api.createFilament({ material: 'PLA', subtype: 'Silk', brand: 'Elegoo', effect: 'silk', colour: '#D4AF37', cost_per_kg: '22' })
+    const types = await listTypes()
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    // Falls through to the feature's handler once released.
+    server.use(http.get('/api/v1/filament/catalog/:kind/resolve', () => held))
+    const { user, rerender } = renderPage(<FilamentsEditor types={types} />)
+    await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+    rerender(<FilamentsEditor types={types.filter((type) => type.id !== T.GOLD)} />)
+    release()
+    await waitFor(async () => expect((await listTypes()).some((type) => type.filament_id === row.id)).toBe(true))
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 })

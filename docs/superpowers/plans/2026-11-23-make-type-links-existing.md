@@ -34,7 +34,11 @@ the DEEPLEE rows said subtype `Silk` while the types said `Silk Dual`
   updates candidates, and the chosen one falls back to the first when it is gone. With no
   candidate left (all archived or deleted), the choice closes and does not open again by itself.
   The catalog ids are not read again: a catalog change while the dialog is open is rare, and
-  re-reading them on each reload would send three resolves per refresh.
+  re-reading them on each reload would send three resolves per refresh. The click ranks on the
+  newest `types` after its catalog reads, so a reload during them that leaves no candidate makes
+  the type instead of opening an empty choice. A chosen type that goes away leaves the shown
+  pick chosen, so its return moves nothing. `typeCandidates` (Task 1) is gone: the editor calls
+  `bookRowIds` and `rankCandidates` itself.
 - **R-7344-2**: `linksBookRow` stays, as the dialog's forecast only (the warning and the button's
   "Link" or "Set …'s cost" before the click). It copies `orders/store.py` `existing_filament`, and
   a comment at its one use says to change both together. After the click, the PATCH answer's

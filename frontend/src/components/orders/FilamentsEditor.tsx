@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { SpoolType } from '../../api/filament'
@@ -140,6 +140,11 @@ export function FilamentsEditor({
    */
   const candidates = choice && types ? rankCandidates(choice.row, choice.ids, types) : []
   if (choice && candidates.length === 0) setChoice(null)
+  /** The newest `types`, for a click whose catalog reads end after a reload. */
+  const latestTypes = useRef(types)
+  useEffect(() => {
+    latestTypes.current = types
+  })
   const [linked, setLinked] = useState<string | null>(null)
   const filaments = book.data?.filaments ?? []
   const emptyDensities = filaments.some((f) => !f.archived_at && !f.density_g_cm3)
@@ -189,7 +194,9 @@ export function FilamentsEditor({
     clearNotices()
     try {
       const ids = types ? await bookRowIds(filament) : null
-      if (ids && types && rankCandidates(filament, ids, types).length > 0) setChoice({ row: filament, ids })
+      // Ranked on the types of now, not of the click: an empty choice would close unseen.
+      const now = latestTypes.current
+      if (ids && now && rankCandidates(filament, ids, now).length > 0) setChoice({ row: filament, ids })
       else await makeNewType(filament)
     } catch (err) {
       setError(refusalText(err))
