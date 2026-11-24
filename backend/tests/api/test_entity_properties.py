@@ -86,6 +86,15 @@ def test_the_kind_read_returns_every_entitys_map(client: TestClient) -> None:
     assert found[two.split(":")[1]] == {"b": "x"}
 
 
+def test_a_patch_that_only_removes_on_a_bare_entity_is_empty(client: TestClient) -> None:
+    entity = _spool_type(client)
+    removed = _patch(client, entity, {"td": None, "mpn": None})
+    assert removed.status_code == 200, removed.text
+    assert removed.json() == {"properties": []}
+    found = client.get("/api/v1/entity-kinds/spool_type/properties").json()["properties"]
+    assert entity.split(":")[1] not in found
+
+
 def test_a_kind_with_no_properties_reads_empty(client: TestClient) -> None:
     got = client.get("/api/v1/entity-kinds/supplier/properties")
     assert got.status_code == 200, got.text

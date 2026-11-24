@@ -175,8 +175,14 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
       return { m, sessionId, requestId }
     }
 
-    it('the browser user approves a durable entry through respond, and the per-session read asks the workflow', async () => {
+    it('the browser user approves a durable entry through respond, and the per-session read lists its record', async () => {
       const { m, sessionId, requestId } = await durableSession(agentA)
+      // The stand-in writes no record; the read lists the record, not the workflow (#7311).
+      expect((await sessionPendingInput(m, BROWSER_USER, sessionId))?.entries).toEqual([])
+      await db.sql`
+        INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, input_hash, requested_by, responders, expires_at)
+        VALUES (${requestId}, ${sessionId}, ${sessionWorkflowId(sessionId)}, 'run-1', 'approval', 'print_output', '{}',
+                ${'a'.repeat(64)}, ${db.sql.json(agentA)}, ${['browser', 'grant']}, now() + interval '10 minutes')`
       expect((await sessionPendingInput(m, BROWSER_USER, sessionId))?.entries).toEqual([expect.objectContaining({ id: requestId })])
       expect(await respond(m, BROWSER_USER, requestId, { kind: 'approval', decision: 'approve' })).toEqual({
         id: requestId,

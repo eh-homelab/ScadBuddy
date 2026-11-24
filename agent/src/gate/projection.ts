@@ -1,9 +1,9 @@
 import { event, type InputEntry, type InputOutcome, type Owner, type QuestionView, type ServerEvent } from '../sessions/protocol.js'
 
-// The durable entries' projection, `ai_pending_input` (durable-agents spec §6.6, "Two
-// reads, two sources"): what GET /api/v1/ai/pending-input, the badge's read, unions
-// with the classic stores in one Postgres read, never a Query per workflow. The
-// agent-durable worker's open_input / resolve_input write it; this only reads.
+// The durable entries' record, `ai_pending_input` (durable-agents spec §6.6, "Two reads,
+// one source"): what GET /api/v1/ai/pending-input, the badge's read, and one session's
+// read (#7311) union with the classic stores, never a Query of a workflow. The gate's
+// open_input / resolve_input and a decision write it; this only reads.
 //
 // An entry past its `expires_at` is still listed while its run's worker is down (it
 // resolves it when it returns), marked `expiring`: the badge does not count it.

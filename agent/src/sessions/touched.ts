@@ -357,6 +357,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   entity_link_add: () => [],
   entity_link_update: () => [],
   entity_link_delete: () => [],
+  // An entity's properties and a kind's property schema (#7026) are records of their own; the
+  // properties show on the entity's page.
+  entity_property_set: () => [],
+  entity_property_schema_set: () => [],
   // A storefront listing (#6131) is a record of its own, on the Storefront page; the draft's
   // answer links it there.
   storefront_listing_draft: () => [],
