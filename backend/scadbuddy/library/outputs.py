@@ -298,6 +298,50 @@ def _read_if_there(path: Path) -> str | None:
         return None
 
 
+def _object(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("not an object")
+    return value
+
+
+def _list_of(check: Callable[[Any], object]) -> Callable[[Any], list[Any]]:
+    def checked(value: Any) -> list[Any]:
+        if not isinstance(value, list):
+            raise ValueError("not a list")
+        for item in value:
+            check(item)
+        return value
+
+    return checked
+
+
+def _record_object(value: Any) -> dict[str, Any]:
+    OutputRecord.model_validate(value)
+    return _object(value)
+
+
+def _backfill_object(value: Any) -> dict[str, Any]:
+    BackfillState.model_validate(value)
+    return _object(value)
+
+
+def _id_list(value: Any) -> list[Any]:
+    ids: list[Any] = _ID_LIST.validate_python(value)
+    return ids
+
+
+#: Each side file a row holds and the check its JSON must pass, as the readers read it.
+_SIDE_FILES: dict[str, Callable[[Any], Any]] = {
+    PARAMS_NAME: _object,
+    INPUTS_NAME: _object,
+    RECORD_NAME: _record_object,
+    MANIFEST_NAME: _list_of(ManifestObject.model_validate),
+    BOM_NAME: _list_of(BomEntry.model_validate),
+    ARRANGED_NAME: _id_list,
+    BACKFILL_NAME: _backfill_object,
+}
+
+
 class OutputStore:
     """``data/outputs/<slug>/<output-id>/`` — a persisted render plus its parameters."""
 
@@ -395,6 +439,58 @@ class OutputStore:
 
     def directory(self, output_id: str) -> Path:
         return self._find_dir(output_id)
+
+    def row_from_files(
+        self, directory: Path, slug: str
+    ) -> tuple[OutputRow | None, list[dict[str, Any]]]:
+        """The output's row from its files alone, for the copy into rows (#7255), and the
+        side files left out of it as ``{output_id, slug, file, error}``. ``None`` for a
+        folder whose ``meta.json`` is missing, unreadable or names another output."""
+        from scadbuddy.library.output_rows import OutputRow
+
+        output_id = directory.name
+        try:
+            meta = OutputMeta.model_validate_json(
+                (directory / META_NAME).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None, []
+        if meta.id != output_id or meta.slug != slug:
+            return None, []
+        values: dict[str, Any] = {}
+        damaged: list[dict[str, Any]] = []
+        for name, check in _SIDE_FILES.items():
+            values[name] = None
+            try:
+                values[name] = check(json.loads((directory / name).read_text(encoding="utf-8")))
+            except FileNotFoundError:
+                continue
+            # Undecodable, a directory, an I/O error, or JSON the readers refuse: the
+            # row goes without the file, and the run names it.
+            except (OSError, ValueError) as error:
+                damaged.append(
+                    {
+                        "output_id": output_id,
+                        "slug": slug,
+                        "file": name,
+                        "error": type(error).__name__,
+                    }
+                )
+        row = OutputRow(
+            output_id=output_id,
+            slug=slug,
+            meta=meta,
+            params=values[PARAMS_NAME] or {},
+            inputs=values[INPUTS_NAME],
+            record=values[RECORD_NAME],
+            manifest=values[MANIFEST_NAME],
+            bom=values[BOM_NAME],
+            arranged_from=values[ARRANGED_NAME],
+            backfill=values[BACKFILL_NAME],
+            has_plate_cover=_holds_plate_cover(directory / MODEL_NAME),
+            copied_at=meta.created_at,
+        )
+        return row, damaged
 
     def existing(self, output_ids: Iterable[str]) -> set[str]:
         """Those of ``output_ids`` the store still has: one query once a copy run

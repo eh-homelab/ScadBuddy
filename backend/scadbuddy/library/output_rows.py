@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 _COLUMNS = (
     "output_id, slug, meta, params, inputs, record, manifest, bom, arranged_from,"
-    " backfill, has_plate_cover, copied_at"
+    " backfill, has_plate_cover, copied_at, files_stamp"
 )
 
 
@@ -43,8 +43,10 @@ class OutputRow:
     arranged_from: list[str] | None
     backfill: dict[str, Any] | None
     has_plate_cover: bool
-    #: When the copy last wrote the row; `upsert` sets it, so the value given is ignored.
+    #: When a writer last wrote the row. The store sets it, so the value given is ignored.
     copied_at: datetime
+    #: The copy's stamp of the record files it read; ``None`` for a row a save wrote.
+    files_stamp: str | None = None
 
 
 def _json(value: Any) -> Jsonb | None:
@@ -71,6 +73,7 @@ def _row(data: DictRow) -> OutputRow:
         backfill=data["backfill"],
         has_plate_cover=data["has_plate_cover"],
         copied_at=data["copied_at"],
+        files_stamp=data["files_stamp"],
     )
 
 
@@ -97,13 +100,25 @@ _INSERT = (
     " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
-_UPSERT = (
-    _INSERT + " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug, meta = EXCLUDED.meta,"
-    " params = EXCLUDED.params, inputs = EXCLUDED.inputs, record = EXCLUDED.record,"
-    " manifest = EXCLUDED.manifest, bom = EXCLUDED.bom,"
-    " arranged_from = EXCLUDED.arranged_from, backfill = EXCLUDED.backfill,"
-    " has_plate_cover = EXCLUDED.has_plate_cover, created_at = EXCLUDED.created_at,"
-    " copied_at = clock_timestamp()"
+#: A save's row replaces a row the copy wrote (it has a stamp): the copy may have read
+#: the save's folder before the save wrote its row.
+_DROP_COPIED = "DELETE FROM outputs WHERE output_id = %s AND files_stamp IS NOT NULL"
+
+#: The copy's new row. A row a save wrote meanwhile wins.
+_COPY_INSERT = (
+    "INSERT INTO outputs (output_id, slug, meta, params, inputs, record, manifest, bom,"
+    " arranged_from, backfill, has_plate_cover, created_at, files_stamp, copied_at)"
+    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    " ON CONFLICT (output_id) DO NOTHING"
+)
+
+#: The copy's refresh: only a row no writer touched since the mark. A row deleted
+#: meanwhile stays deleted.
+_COPY_REFRESH = (
+    "UPDATE outputs SET slug = %s, meta = %s, params = %s, inputs = %s, record = %s,"
+    " manifest = %s, bom = %s, arranged_from = %s, backfill = %s, has_plate_cover = %s,"
+    " created_at = %s, files_stamp = %s, copied_at = %s"
+    " WHERE output_id = %s AND copied_at < %s"
 )
 
 
@@ -148,44 +163,94 @@ class OutputRows:
         return [_row(item) for item in found]
 
     def insert(self, row: OutputRow, conn: Connection[DictRow] | None = None) -> None:
-        """Add the row; a row with that id already is an error. With ``conn``, inside its
-        transaction."""
+        """Add a save's row. It replaces a row the copy wrote; another save's row with
+        that id is an error. With ``conn``, inside its transaction."""
         if conn is not None:
+            conn.execute(_DROP_COPIED, (row.output_id,))
             conn.execute(_INSERT, _values(row))
             return
-        with self._pool.connection() as own:
+        with self._pool.connection() as own, own.transaction():
+            own.execute(_DROP_COPIED, (row.output_id,))
             own.execute(_INSERT, _values(row))
 
-    def upsert(self, row: OutputRow) -> None:
-        """The copy's write: add the row or replace it, and set ``copied_at`` to now."""
+    def clock(self) -> datetime:
+        """The database's clock now, as every ``copied_at`` is: the copy's mark."""
         with self._pool.connection() as conn:
-            conn.execute(_UPSERT, _values(row))
+            found = conn.execute("SELECT clock_timestamp() AS now").fetchone()
+        assert found is not None
+        now: datetime = found["now"]
+        return now
 
-    def upsert_many(self, rows: Sequence[OutputRow]) -> None:
-        """`upsert` for each row, in one transaction: one commit for a batch of the copy."""
-        if not rows:
-            return
+    def write_copy(
+        self, new: Sequence[OutputRow], changed: Sequence[OutputRow], mark: datetime
+    ) -> tuple[set[str], set[str]]:
+        """One batch of the copy, in one transaction, with ``copied_at`` set to ``mark``
+        (taken before the batch's folders were read). A ``new`` row is added unless a
+        save added it meanwhile; a ``changed`` row is written only when no writer touched
+        it since ``mark``, and never when it was deleted. The ids added and refreshed."""
+        added: set[str] = set()
+        refreshed: set[str] = set()
+        if not new and not changed:
+            return added, refreshed
         with self._pool.connection() as conn, conn.transaction():
-            for row in rows:
-                conn.execute(_UPSERT, _values(row))
+            for row in new:
+                cursor = conn.execute(_COPY_INSERT, (*_values(row), row.files_stamp, mark))
+                if cursor.rowcount:
+                    added.add(row.output_id)
+            for row in changed:
+                cursor = conn.execute(
+                    _COPY_REFRESH,
+                    (*_values(row)[1:], row.files_stamp, mark, row.output_id, mark),
+                )
+                if cursor.rowcount:
+                    refreshed.add(row.output_id)
+        return added, refreshed
 
-    def copied_times(self) -> dict[str, datetime]:
-        """Each row's ``copied_at``, by output id: what the copy compares the files with."""
+    def undo_copy(self, output_ids: Iterable[str], mark: datetime) -> set[str]:
+        """Delete the rows the copy wrote at ``mark`` whose folder went after its read;
+        a row a writer touched since stays. The ids deleted."""
+        ids = list(output_ids)
+        if not ids:
+            return set()
         with self._pool.connection() as conn:
-            found = conn.execute("SELECT output_id, copied_at FROM outputs").fetchall()
-        return {str(item["output_id"]): item["copied_at"] for item in found}
+            found = conn.execute(
+                "DELETE FROM outputs WHERE output_id = ANY(%s) AND copied_at = %s"
+                " RETURNING output_id",
+                (ids, mark),
+            ).fetchall()
+        return {str(item["output_id"]) for item in found}
+
+    def drop_unseen(self, output_ids: Iterable[str], started: datetime) -> int:
+        """The copy's drop, in one statement: the rows of folders the walk did not see,
+        unless a writer touched them after the run started. How many went."""
+        ids = list(output_ids)
+        if not ids:
+            return 0
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM outputs WHERE output_id = ANY(%s) AND copied_at < %s",
+                (ids, started),
+            )
+            return cursor.rowcount
+
+    def stamps(self) -> dict[str, str | None]:
+        """Each row's ``files_stamp``, by output id: what the copy compares the files with."""
+        with self._pool.connection() as conn:
+            found = conn.execute("SELECT output_id, files_stamp FROM outputs").fetchall()
+        return {str(item["output_id"]): item["files_stamp"] for item in found}
 
     def update_meta(self, output_id: str, meta: OutputMeta) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE outputs SET meta = %s WHERE output_id = %s",
+                "UPDATE outputs SET meta = %s, copied_at = clock_timestamp() WHERE output_id = %s",
                 (_meta_json(meta), output_id),
             )
 
     def set_backfill(self, output_id: str, backfill: dict[str, Any] | None) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE outputs SET backfill = %s WHERE output_id = %s",
+                "UPDATE outputs SET backfill = %s, copied_at = clock_timestamp()"
+                " WHERE output_id = %s",
                 (_json(backfill), output_id),
             )
 
@@ -195,7 +260,7 @@ class OutputRows:
         with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE outputs SET record = COALESCE(record, %s), manifest = %s,"
-                " backfill = NULL WHERE output_id = %s",
+                " backfill = NULL, copied_at = clock_timestamp() WHERE output_id = %s",
                 (_json(record), _json(manifest), output_id),
             )
 

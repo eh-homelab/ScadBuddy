@@ -1329,7 +1329,8 @@ def test_a_weak_joint_names_no_object_outside_a_mesh_models_render(
     (paths.output_dir(model, arranged) / "arranged_from.json").write_text(json.dumps([plain]))
     row = _rows(client).get(arranged)
     assert row is not None
-    _rows(client).upsert(dataclasses.replace(row, arranged_from=[plain]))
+    _rows(client).delete(arranged)
+    _rows(client).insert(dataclasses.replace(row, arranged_from=[plain]))
     assert _joint_object(client, arranged) is None
 
 
@@ -1430,8 +1431,7 @@ def test_an_unattributed_analysis_is_not_cached(
 
 @pytest.mark.output_copy
 def test_the_start_copies_the_saved_outputs_to_rows(client: TestClient) -> None:
-    """#7255: the app's start runs one copy, which finishes, so a missing row is a
-    missing output from then on."""
+    """#7255: the app's start runs one copy, which finishes."""
     rows = _rows(client)
     deadline = time.monotonic() + 30
     while not rows.copied():
@@ -1439,4 +1439,3 @@ def test_the_start_copies_the_saved_outputs_to_rows(client: TestClient) -> None:
         time.sleep(0.1)
     last = rows.last_run()
     assert last is not None and last["finished_at"] is not None
-    assert client.get(f"/api/v1/outputs/{'0' * 32}").status_code == 404

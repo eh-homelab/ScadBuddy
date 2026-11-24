@@ -3,7 +3,7 @@ rows. The tables come first; the row store's tests follow."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 
 import psycopg
@@ -146,6 +146,21 @@ def test_update_meta_changes_name(rows: OutputRows) -> None:
     assert got.meta.name == "New"
 
 
+def test_every_live_writer_moves_copied_at(rows: OutputRows) -> None:
+    """A row a live writer touched after the copy's mark is one the copy leaves alone."""
+    rows.insert(make_row("o1"))
+    writes: list[Callable[[], None]] = [
+        lambda: rows.update_meta("o1", make_row("o1", name="New").meta),
+        lambda: rows.set_backfill("o1", {"job_id": "j"}),
+        lambda: rows.attach_backfill("o1", {"plate_key": "p"}, []),
+    ]
+    for write in writes:
+        mark = rows.clock()
+        write()
+        got = rows.get("o1")
+        assert got is not None and got.copied_at > mark
+
+
 def test_set_backfill_and_pending_backfills(rows: OutputRows) -> None:
     rows.insert(make_row("o1"))
     rows.insert(make_row("o2"))
@@ -174,21 +189,39 @@ def test_oldest_with_plate_cover_picks_oldest_flagged(rows: OutputRows) -> None:
     assert rows.oldest_with_plate_cover("ball") is None
 
 
-def test_upsert_sets_copied_at_and_ids_copied_before_finds_the_rest(
+def test_write_copy_sets_copied_at_and_ids_copied_before_finds_the_rest(
     rows: OutputRows,
 ) -> None:
-    rows.upsert(make_row("a"))
+    rows.write_copy([make_row("a")], [], rows.clock())
     # The mark is the database's clock, as the copy's is (`run_started_at`).
     mark = rows.run_started_at(rows.start_run())
-    rows.upsert(make_row("b"))
-    rows.upsert(make_row("a", name="again"))
+    assert rows.write_copy([make_row("b")], [make_row("a", name="again")], rows.clock()) == (
+        {"b"},
+        {"a"},
+    )
     assert rows.ids_copied_before(mark) == set()
-    rows.upsert(make_row("c"))
+    rows.write_copy([make_row("c")], [], rows.clock())
     later = rows.run_started_at(rows.start_run())
     assert rows.ids_copied_before(later) == {"a", "b", "c"}
     got = rows.get("a")
     assert got is not None
     assert got.meta.name == "again"
+
+
+def test_write_copy_skips_rows_written_after_its_mark(rows: OutputRows) -> None:
+    """A row a writer touched after the mark, or deleted, stays as that writer left it."""
+    rows.insert(make_row("renamed"))
+    rows.insert(make_row("deleted"))
+    mark = rows.clock()
+    rows.update_meta("renamed", make_row("renamed", name="live").meta)
+    rows.delete("deleted")
+    rows.insert(make_row("saved", name="live"))
+    stale = [make_row("renamed", name="old"), make_row("deleted", name="old")]
+    assert rows.write_copy([make_row("saved", name="old")], stale, mark) == (set(), set())
+    for output_id in ("renamed", "saved"):
+        got = rows.get(output_id)
+        assert got is not None and got.meta.name == "live"
+    assert rows.get("deleted") is None
 
 
 def test_attach_backfill_keeps_a_record_and_clears_the_backfill(rows: OutputRows) -> None:

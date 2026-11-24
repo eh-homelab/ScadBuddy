@@ -17,8 +17,12 @@ CREATE TABLE outputs (
     backfill jsonb,
     has_plate_cover boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL,
-    -- When the copy from the files last wrote the row.
-    copied_at timestamptz NOT NULL DEFAULT clock_timestamp()
+    -- When a writer last wrote the row: the copy from the files, or a save, rename or
+    -- backfill. The copy writes a row only where this is older than its own mark.
+    copied_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    -- The copy's stamp of the record files it read (names, sizes, mtimes). NULL for a
+    -- row a save wrote. The copy reads a folder again when its stamp differs.
+    files_stamp text
 );
 
 CREATE INDEX outputs_slug_created ON outputs (slug, created_at);

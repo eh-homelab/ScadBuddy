@@ -4,21 +4,26 @@ lists what it cannot read, runs on one replica at a time and stops when told."""
 
 from __future__ import annotations
 
+import dataclasses
+import errno
 import os
 import shutil
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.output_copy import COPY_LOCK, copy_outputs
-from scadbuddy.library.output_rows import OutputRows
+from scadbuddy.library.output_rows import OutputRow, OutputRows
 from scadbuddy.library.outputs import (
     BOM_NAME,
     META_NAME,
+    PARAMS_NAME,
+    RECORD_NAME,
     OutputMeta,
     OutputStore,
 )
@@ -93,7 +98,6 @@ def test_copy_refreshes_row_from_newer_meta(
     meta_path = paths.output_dir(metas[0].slug, metas[0].id) / META_NAME
     renamed = metas[0].model_copy(update={"name": "renamed by an old pod"})
     meta_path.write_text(renamed.model_dump_json(), encoding="utf-8")
-    _touch_later(meta_path)
     result = copy_outputs(store, rows, projection.pool)
     assert result is not None
     assert (result.copied, result.refreshed, result.dropped) == (0, 1, 0)
@@ -209,3 +213,291 @@ def test_copy_stops_unfinished_on_stop(
     assert rows.copied() is False
     last = rows.last_run()
     assert last is not None and last["finished_at"] is None
+
+
+def test_copy_refreshes_a_changed_file_whatever_its_mtime(
+    files: tuple[DataPaths, Job, list[OutputMeta]], projection: JobProjection
+) -> None:
+    """The files' stamp, not the NFS server's clock against the database's, says what
+    changed: a file whose mtime reads older than the row is still read again."""
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    copy_outputs(store, rows, projection.pool)
+    meta_path = paths.output_dir(metas[0].slug, metas[0].id) / META_NAME
+    renamed = metas[0].model_copy(update={"name": "renamed by a pod with a slow clock"})
+    meta_path.write_text(renamed.model_dump_json(), encoding="utf-8")
+    long_ago = time.time() - 365 * 24 * 3600
+    os.utime(meta_path, (long_ago, long_ago))
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.refreshed == 1
+    row = rows.get(metas[0].id)
+    assert row is not None and row.meta.name == "renamed by a pod with a slow clock"
+
+
+def _in_the_gap(
+    monkeypatch: pytest.MonkeyPatch,
+    store: OutputStore,
+    output_id: str,
+    action: Callable[[Path], Any],
+) -> None:
+    """Run ``action`` once, just after the copy read ``output_id``'s folder and before it
+    writes that folder's batch: what a live writer on another pod can do."""
+    read = store.row_from_files
+
+    def hooked(directory: Path, slug: str) -> Any:
+        got = read(directory, slug)
+        if directory.name == output_id:
+            action(directory)
+        return got
+
+    monkeypatch.setattr(store, "row_from_files", hooked)
+
+
+def _written_by_an_old_pod(paths: DataPaths, meta: OutputMeta) -> None:
+    meta_path = paths.output_dir(meta.slug, meta.id) / META_NAME
+    old = meta.model_copy(update={"name": "written by an old pod"})
+    meta_path.write_text(old.model_dump_json(), encoding="utf-8")
+    _touch_later(meta_path)
+
+
+def test_a_rename_in_the_gap_survives(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    copy_outputs(store, rows, projection.pool)
+    _written_by_an_old_pod(paths, metas[0])
+    _in_the_gap(monkeypatch, store, metas[0].id, lambda _: store.rename(metas[0].id, "live"))
+    copy_outputs(store, rows, projection.pool)
+    row = rows.get(metas[0].id)
+    assert row is not None and row.meta.name == "live"
+
+
+def test_a_delete_in_the_gap_stays_deleted(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    copy_outputs(store, rows, projection.pool)
+    _written_by_an_old_pod(paths, metas[0])
+    _in_the_gap(monkeypatch, store, metas[0].id, lambda _: store.delete(metas[0].id))
+    copy_outputs(store, rows, projection.pool)
+    assert rows.get(metas[0].id) is None
+    assert rows.get(metas[1].id) is not None
+
+
+def test_a_folder_deleted_in_the_gap_gets_no_row(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A folder with no row yet, removed after the read: the copy's insert is undone."""
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    _in_the_gap(monkeypatch, store, metas[0].id, shutil.rmtree)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert rows.get(metas[0].id) is None
+    assert rows.get(metas[1].id) is not None
+    assert result.copied == 1
+
+
+def _live_row(row: OutputRow, name: str) -> OutputRow:
+    return dataclasses.replace(row, meta=row.meta.model_copy(update={"name": name}))
+
+
+def test_a_create_in_the_gap_keeps_its_row(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live save's row wins over the copy's read of the same folder."""
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+
+    def save(directory: Path) -> None:
+        row, _ = OutputStore(paths).row_from_files(directory, metas[0].slug)
+        assert row is not None
+        rows.insert(_live_row(row, "saved live"))
+
+    _in_the_gap(monkeypatch, store, metas[0].id, save)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.copied == 1
+    row = rows.get(metas[0].id)
+    assert row is not None and row.meta.name == "saved live"
+
+
+def test_a_save_after_the_copy_wrote_its_folder_succeeds(
+    files: tuple[DataPaths, Job, list[OutputMeta]], projection: JobProjection
+) -> None:
+    """The copy read a save's folder before the save wrote its row: the save's insert
+    replaces the copy's row, and does not fail on the id."""
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    copy_outputs(store, rows, projection.pool)
+    row = rows.get(metas[0].id)
+    assert row is not None
+    rows.insert(_live_row(row, "saved live"))
+    got = rows.get(metas[0].id)
+    assert got is not None and got.meta.name == "saved live"
+
+
+def test_copy_marks_an_undecodable_side_file(
+    files: tuple[DataPaths, Job, list[OutputMeta]], projection: JobProjection
+) -> None:
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    (paths.output_dir(metas[0].slug, metas[0].id) / PARAMS_NAME).write_bytes(b"\xff\xfe{")
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.copied == 2
+    assert [(d["output_id"], d["file"], d["error"]) for d in result.damaged] == [
+        (metas[0].id, PARAMS_NAME, "UnicodeDecodeError")
+    ]
+    row = rows.get(metas[0].id)
+    assert row is not None and row.params == {}
+
+
+def test_copy_marks_a_directory_where_a_side_file_belongs(
+    files: tuple[DataPaths, Job, list[OutputMeta]], projection: JobProjection
+) -> None:
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    bom = paths.output_dir(metas[0].slug, metas[0].id) / BOM_NAME
+    bom.unlink()
+    bom.mkdir()
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.copied == 2
+    assert [(d["output_id"], d["file"], d["error"]) for d in result.damaged] == [
+        (metas[0].id, BOM_NAME, "IsADirectoryError")
+    ]
+    row = rows.get(metas[0].id)
+    assert row is not None and row.bom is None
+
+
+def test_copy_marks_a_side_file_it_cannot_read(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    broken = paths.output_dir(metas[0].slug, metas[0].id) / RECORD_NAME
+    read_text = Path.read_text
+
+    def failing(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == broken:
+            raise OSError(errno.EIO, "Input/output error")
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.copied == 2
+    assert [(d["output_id"], d["file"], d["error"]) for d in result.damaged] == [
+        (metas[0].id, RECORD_NAME, "OSError")
+    ]
+    row = rows.get(metas[0].id)
+    assert row is not None and row.record is None
+
+
+def test_a_stale_slug_folder_drops_nothing(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listing that fails part-way (ESTALE on one model) is no delete of its rows."""
+    paths, job, metas = files
+    store, rows = _stores(paths, projection)
+    other = store.create(job.model_copy(update={"slug": "other-model"}), name="other")
+    copy_outputs(store, rows, projection.pool)
+    stale = paths.outputs / job.slug
+    iterdir = Path.iterdir
+
+    def failing(self: Path) -> Iterator[Path]:
+        if self == stale:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", failing)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.dropped == 0
+    every = {*(m.id for m in metas), other.id}
+    assert rows.existing(every) == every
+
+
+def test_a_stale_output_folder_drops_nothing(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    copy_outputs(store, rows, projection.pool)
+    stale = paths.output_dir(metas[0].slug, metas[0].id)
+    stat = Path.stat
+
+    def failing(self: Path, **kwargs: Any) -> os.stat_result:
+        if self == stale:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", failing)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.dropped == 0
+    assert rows.get(metas[0].id) is not None
+
+
+def test_a_row_written_during_the_run_is_not_dropped(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A save on another pod whose folder the walk did not list keeps its row."""
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    new_id = "e" * 32
+
+    def save(directory: Path) -> None:
+        row, _ = OutputStore(paths).row_from_files(directory, metas[0].slug)
+        assert row is not None
+        meta = row.meta.model_copy(update={"id": new_id})
+        rows.insert(dataclasses.replace(row, output_id=new_id, meta=meta))
+
+    _in_the_gap(monkeypatch, store, metas[0].id, save)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.dropped == 0
+    assert rows.get(new_id) is not None
+
+
+def test_a_stop_mid_batch_writes_what_it_read(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _, metas = files
+    store, rows = _stores(paths, projection)
+    stop = threading.Event()
+    read = store.row_from_files
+
+    def hooked(directory: Path, slug: str) -> Any:
+        got = read(directory, slug)
+        stop.set()
+        return got
+
+    monkeypatch.setattr(store, "row_from_files", hooked)
+    result = copy_outputs(store, rows, projection.pool, stop)
+    assert result is not None
+    assert result.copied == 1
+    assert len(rows.existing(m.id for m in metas)) == 1
+    assert rows.copied() is False
