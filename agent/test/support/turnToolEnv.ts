@@ -5,8 +5,9 @@ import { MockActivityEnvironment } from '@temporalio/testing'
  * A mock `turn:` call's start-to-close: under vitest's `testTimeout` (20 s, vitest.config.ts),
  * so a hung call fails with the MCP timeout error that names it, not a generic test timeout
  * (#7441), and far above what a loaded runner takes (the #7342 call took 1.2 s there).
- * The bound is per call: in a test that makes several calls, a second hung call still
- * reaches the test timeout before its own MCP error can name it.
+ * The bound is per call and `testTimeout` per test body, so the 5 s between them is shared: a
+ * hung call that starts more than 5 s into its test (after slow earlier calls, say) reaches the
+ * test timeout before its own MCP error can name it.
  */
 export const TURN_TOOL_TEST_TIMEOUT_MS = 15_000
 
