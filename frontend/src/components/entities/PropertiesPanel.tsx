@@ -58,10 +58,17 @@ function draftOf(value: PropertyValue): Draft {
   }
 }
 
-/** A type change carries what it can: text to a one-item list, a one-item list back to text. */
+/**
+ * A type change carries what it can: text to a one-item list; a list to text as its non-empty
+ * items joined by ", ", or to a number as its first non-empty item, for the person to correct.
+ * Text is never split into items (R12).
+ */
 function retyped(draft: Draft, type: ValueType): Draft {
   if (type === 'list' && draft.type !== 'list' && draft.text !== '') return { ...draft, type, items: [draft.text] }
-  if (draft.type === 'list' && type !== 'list' && draft.items.length === 1) return { ...draft, type, text: draft.items[0]! }
+  if (draft.type === 'list' && (type === 'text' || type === 'number')) {
+    const items = draft.items.filter((item) => item !== '')
+    return { ...draft, type, text: type === 'text' ? items.join(', ') : (items[0] ?? '') }
+  }
   return { ...draft, type }
 }
 
@@ -408,7 +415,9 @@ function PropertyRow({
     cancel()
   }
 
+  // Any edit drops a held replace: its set was built from the form as it was.
   const editDraft = (next: Draft) => {
+    patch.cancel()
     setTouched(true)
     setDraft(next)
   }
@@ -422,7 +431,10 @@ function PropertyRow({
               <Input
                 ref={keyInput}
                 value={newKey}
-                onChange={(event) => setNewKey(event.target.value)}
+                onChange={(event) => {
+                  patch.cancel()
+                  setNewKey(event.target.value)
+                }}
                 aria-label={`Key of ${key}`}
                 list={keysId}
                 spellCheck={false}
@@ -515,6 +527,11 @@ function AddProperty({
   const [typePicked, setTypePicked] = useState(false)
   const patch = usePatch(onPatch)
   const doc = docs[key.trim()]
+  // Any edit drops a held replace: its set was built from the form as it was.
+  const editDraft = (next: Draft) => {
+    patch.cancel()
+    setDraft(next)
+  }
 
   function add(event: FormEvent) {
     event.preventDefault()
@@ -541,6 +558,7 @@ function AddProperty({
           ref={keyInput}
           value={key}
           onChange={(event) => {
+            patch.cancel()
             setKey(event.target.value)
             if (!typePicked) setDraft(retyped(draft, typeOfSchema(docs[event.target.value.trim()])))
           }}
@@ -554,11 +572,11 @@ function AddProperty({
           value={draft.type}
           onChange={(type) => {
             setTypePicked(true)
-            setDraft(retyped(draft, type))
+            editDraft(retyped(draft, type))
           }}
           label="New property type"
         />
-        <ValueField draft={draft} onChange={setDraft} label="New property value" />
+        <ValueField draft={draft} onChange={editDraft} label="New property value" />
         <Button type="submit" size="sm" disabled={patch.busy || locked || key.trim() === ''}>
           {patch.busy && <Spinner />}
           Add property
