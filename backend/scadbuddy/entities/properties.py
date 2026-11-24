@@ -319,6 +319,26 @@ def _schema_in(conn: Conn, kind: str) -> dict[str, Any]:
     return {"type": "object", "properties": {}} if row is None else dict(row["schema"])
 
 
+#: The entity kind whose schema is not its own row: an item's is its item kind's
+#: `attribute_schema`, merged down the kind tree (#7067, spec 6.4).
+ITEM = "item"
+
+
+class SchemaOwnedByKind(ValueError):  # noqa: N818
+    """An item's schema is its item kind's, set on the kind (#7067)."""
+
+
+def schema_for(conn: Conn, ref: EntityRef) -> dict[str, Any]:
+    """The schema that types `ref`'s properties: an item's kind's merged schema, else the
+    entity kind's own."""
+    if ref.kind == ITEM:
+        # Imported here: the inventory imports this module's schema check.
+        from scadbuddy.inventory.kinds import item_schema
+
+        return item_schema(conn, ref.ref)
+    return _schema_in(conn, ref.kind)
+
+
 _LIST = (
     "SELECT p.key, p.value, p.source, p.updated_at, p.updated_by FROM entity_properties p"
     ' WHERE p.entity_id = %s ORDER BY p.key COLLATE "C"'
@@ -347,11 +367,11 @@ class EntityPropertyStore:
         than `MAX_KEYS` keys after it and more than before it (a printer merge may leave an
         entity past the limit; it can still remove and change keys). The entity's
         properties after it, by key. A patch that only removes keys makes no entity row.
-        The kind's schema is read before the transaction, so a schema written meanwhile
-        types the next patch, not this one."""
+        The entity's schema (`schema_for`) is read before the transaction, so a schema
+        written meanwhile types the next patch, not this one."""
         # Every value is checked before the entity's lock, so a check holds no lock.
         with self.pool.connection() as conn:
-            schema = _schema_in(conn, ref.kind)
+            schema = schema_for(conn, ref)
         _checked(patch, schema)
         with self.pool.connection() as conn, conn.transaction():
             if all(value is None for value in patch.set.values()):
@@ -417,9 +437,12 @@ class EntityPropertyStore:
 
     def set_schema(self, kind: str, schema: dict[str, Any], by: Actor) -> dict[str, Any]:
         """A person's write of the kind's schema; `BadPropertySchema` leaves the old one,
-        and `UnknownEntityKind` refuses a kind the registry does not have."""
+        `UnknownEntityKind` refuses a kind the registry does not have, and
+        `SchemaOwnedByKind` refuses `item`, whose schema is each item kind's."""
         if kind not in KINDS:
             raise UnknownEntityKind(kind)
+        if kind == ITEM:
+            raise SchemaOwnedByKind(kind)
         check_schema(schema)
         with self.pool.connection() as conn:
             row = conn.execute(

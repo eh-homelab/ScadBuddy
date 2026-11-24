@@ -49,6 +49,9 @@ KINDS: dict[str, EntityKind] = {
         _kind("printer", "printers", "uuid"),
         _kind("part", "parts"),
         _kind("customer", "customers"),
+        _kind("item", "items", "uuid"),
+        _kind("lot", "stock_lots", "uuid"),
+        _kind("unit", "stock_units", "uuid"),
     )
 }
 
