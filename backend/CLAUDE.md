@@ -2071,7 +2071,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `library_filename`, `library_source`, check `order_items_library_file`); no reference,
   output or revisions (`lifecycle.py` `NO_REVISIONS`, `has_design`). `POST …/items` and
   `…/items/after-acceptance` take `library_file_id` (any other source or kind is 422), read
-  the file from the library that serves as the library print route does (`orders/bambuddy.py`
+  the file from the library that serves as the library print route does (`orders/served_library.py`
   `ServedLibrary`: 422 on `library_file_id` for one it lacks or does not print), then
   `Lifecycle.add_library_item`. The slice quote is `quote.py` `_library_quote`
   (`Slicer.start_library`; the first quote gives the item its slots, `library_colours`; the
@@ -2174,8 +2174,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
-  the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
-  live there too. The orders read ScadBuddy's own spools, never Bambuddy's (#6262 Task 9):
+  the running `bambuddy_url`; `NotLinked` without one). It is an adapter (#7467): a library
+  file's reads and the held copy's shelf go through `orders/served_library.py`
+  (`ServedLibrary`, `served_shelf`, `NativeShelf`, which load no Bambuddy client), and a
+  quote's slice through `orders/quote_preview.py`; each loads `orders/bambuddy.py` only
+  where Bambuddy's library serves or the slice is on Bambuddy's path
+  (`tests/test_orders_library_seam.py`). Never import it at a module's top. The orders read ScadBuddy's own spools, never Bambuddy's (#6262 Task 9):
   `OrdersComponent.inventory` is the filament component's `FilamentInventory`, and of
   spools `OrderIntegrations` keeps only `local_densities` (Bambuddy's local presets, `{}`
   when Bambuddy refuses) and `spool_assignments` (Bambuddy's tray assignments,
