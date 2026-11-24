@@ -29,7 +29,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.store.content_models import BlobRef
+from scadbuddy.store.content_models import BlobRef, ReuseLostError
 from scadbuddy.store.index import BlobIndex
 
 if TYPE_CHECKING:
@@ -71,9 +71,9 @@ def thumbnail_lock_key(output_id: str) -> str:
     writer of the thumbnail key or file in a process with a database takes it
     (`lock_thumbnail`): a thumbnail upload's step (`OutputRows.keep_thumbnail`), a drawn
     thumbnail's step (`OutputRows.draw_thumbnail`), a write of the file alone
-    (`OutputRows.write_thumbnail_file`) and the byte copy (Task 9). With no database
-    (tests and tools) there is no blob and no other replica, and the file is written with
-    no lock."""
+    (`OutputRows.write_thumbnail_file`) and the byte copy (`OutputRows.write_byte_copy`).
+    With no database (tests and tools) there is no blob and no other replica, and the
+    file is written with no lock."""
     return f"output-thumbnail:{output_id}"
 
 
@@ -113,6 +113,21 @@ class OutputBlobs:
 
 
 @dataclass(frozen=True)
+class ThumbnailSwap:
+    """A thumbnail file the byte copy put as ``staged`` (under `staged_thumbnail_key`).
+    The thumbnail key takes its object only in the batch's transaction, under the
+    output's thumbnail lock, and only while the key still names ``expected`` (its sha256
+    when the copy read the index; ``None``: no blob) and ``unchanged()`` says the file is
+    still the one the copy read. So it never writes over a newer put or file."""
+
+    staged: BlobRef
+    expected: str | None
+    slug: str
+    #: Blocking: a stat of the file.
+    unchanged: Callable[[], bool]
+
+
+@dataclass(frozen=True)
 class ByteWrite:
     """One output's result of the byte copy."""
 
@@ -120,8 +135,22 @@ class ByteWrite:
     blobs: OutputBlobs
     #: The copy's stamp of the byte files it read.
     stamp: str
-    #: ``[{role, error}]`` for the byte roles whose file was missing; empty when none.
+    #: ``[{role, error}]`` for the byte roles whose file was missing (``names`` too for
+    #: ``files``); empty when none.
     damaged: list[dict[str, Any]]
+    #: The byte copy's write (`OutputRows.write_byte_copy`): the row is written only while
+    #: its ``bytes_at`` is still ``bytes_at`` (no live writer since the copy read it), and
+    #: the thumbnail column only while it still names ``thumbnail_read``, under the
+    #: output's thumbnail lock.
+    guarded: bool = False
+    bytes_at: datetime | None = None
+    thumbnail_read: str | None = None
+    thumbnail_swap: ThumbnailSwap | None = None
+    #: The model key took another object: what was derived from the old one goes.
+    model_moved: bool = False
+    #: False: nothing was copied (a ``files/`` entry an output may not hold); only
+    #: ``bytes_stamp`` and ``damaged`` are written, and the files keep the bytes.
+    copied: bool = True
 
 
 _COLUMNS = (
@@ -347,6 +376,97 @@ def _insert(conn: Connection[DictRow], row: OutputRow) -> None:
     _hold_keys(conn, row.output_id, blobs.keys())
 
 
+def _swap_thumbnail(
+    conn: Connection[DictRow],
+    pool: ConnectionPool[Connection[DictRow]],
+    key: str,
+    swap: ThumbnailSwap,
+    replaced: list[tuple[str, BlobRef]],
+) -> bool:
+    """Point ``key`` at the swap's staged object, under the thumbnail lock the caller
+    holds, only while the key names ``swap.expected`` and the file is unchanged. Whether
+    it did. In a savepoint: a staged object freed meanwhile (`ReuseLostError`) leaves the
+    key as it was and the batch goes on."""
+    found = conn.execute("SELECT sha256 FROM store_blobs WHERE key = %s", (key,)).fetchone()
+    current = None if found is None else str(found["sha256"])
+    if current != swap.expected or not swap.unchanged():
+        return False
+    try:
+        with conn.transaction():
+            previous = BlobIndex(pool).put_in(
+                conn, key, swap.staged, slug=swap.slug, meta={}, reuse=True
+            )
+    except ReuseLostError:
+        logger.warning("a staged thumbnail was freed before the copy named it", extra={"key": key})
+        return False
+    if previous is not None and previous.backend_id != swap.staged.backend_id:
+        replaced.append((key, previous))
+    return True
+
+
+def _write_one(
+    conn: Connection[DictRow],
+    pool: ConnectionPool[Connection[DictRow]],
+    write: ByteWrite,
+    replaced: list[tuple[str, BlobRef]],
+) -> bool:
+    """One `ByteWrite`, in the caller's transaction. Whether the row was written."""
+    blobs = write.blobs
+    thumbnail = blobs.thumbnail
+    if write.guarded:
+        lock_thumbnail(conn, write.output_id)
+        found = conn.execute(
+            "SELECT thumbnail_blob, bytes_at FROM outputs WHERE output_id = %s FOR UPDATE",
+            (write.output_id,),
+        ).fetchone()
+        if found is None or found["bytes_at"] != write.bytes_at:
+            # Deleted, or a live writer put its bytes since the copy read the row.
+            return False
+        if not write.copied:
+            conn.execute(
+                "UPDATE outputs SET bytes_stamp = %s, damaged = %s WHERE output_id = %s",
+                (write.stamp, Jsonb(write.damaged), write.output_id),
+            )
+            return True
+        if found["thumbnail_blob"] != write.thumbnail_read:
+            # A thumbnail put since the copy read the row: its key stays.
+            thumbnail = found["thumbnail_blob"]
+        elif write.thumbnail_swap is not None:
+            key = output_blob_key(write.output_id, "thumbnail")
+            if not _swap_thumbnail(conn, pool, key, write.thumbnail_swap, replaced):
+                thumbnail = found["thumbnail_blob"]
+    cursor = conn.execute(
+        "UPDATE outputs SET model_blob = %s, preview_blob = %s, thumbnail_blob = %s,"
+        " bytes_stamp = %s, damaged = %s, bytes_at = clock_timestamp() WHERE output_id = %s",
+        (
+            blobs.model,
+            blobs.preview,
+            thumbnail,
+            write.stamp,
+            Jsonb(write.damaged),
+            write.output_id,
+        ),
+    )
+    if not cursor.rowcount:
+        return False
+    conn.execute("DELETE FROM output_files WHERE output_id = %s", (write.output_id,))
+    _write_files(conn, write.output_id, blobs.files)
+    keys = [key for key in (blobs.model, blobs.preview, thumbnail) if key is not None]
+    keys += [item.blob_key for item in blobs.files]
+    kept = list(keys)
+    if write.model_moved:
+        # Derived from the old model's bytes: a reader derives them again.
+        conn.execute("DELETE FROM output_derived WHERE output_id = %s", (write.output_id,))
+    else:
+        kept.append(plate_cover_key(write.output_id))
+    conn.execute(
+        f"{_RELEASE_BYTES} AND NOT key = ANY(%s)",
+        (OUTPUT_HOLDER, [write.output_id], kept),
+    )
+    _hold_keys(conn, write.output_id, keys)
+    return True
+
+
 #: The copy's new row. A row a save wrote meanwhile wins.
 _COPY_INSERT = (
     "INSERT INTO outputs (output_id, slug, meta, params, inputs, record, manifest, bom,"
@@ -521,8 +641,8 @@ class OutputRows:
     def write_thumbnail_file[T](self, output_id: str, write: Callable[[], T]) -> T:
         """``write`` of the thumbnail file alone (no blob store, no row yet, or a drawn
         thumbnail whose put failed), under the output's thumbnail lock, so the byte copy
-        puts the key from the file under the same lock (Task 9), never puts a file this
-        write replaces. Blocking."""
+        names the key from the file under the same lock (`ThumbnailSwap`), never a file
+        this write replaces. Blocking."""
 
         def step(conn: Connection[DictRow]) -> T:
             with conn.transaction():
@@ -653,42 +773,37 @@ class OutputRows:
         }
 
     def write_bytes(self, writes: Sequence[ByteWrite]) -> set[str]:
+        """`write_byte_copy`, for writes whose replaced thumbnail objects the caller does
+        not release (none is guarded with a swap). The ids whose row was written."""
+        written, _ = self.write_byte_copy(writes)
+        return written
+
+    def write_byte_copy(
+        self, writes: Sequence[ByteWrite]
+    ) -> tuple[set[str], list[tuple[str, BlobRef]]]:
         """One batch of the byte copy, in one transaction. Per write: the blob columns,
         ``bytes_stamp``, ``damaged`` and ``bytes_at``, its ``output_files`` rows
         replaced, a hold of each key, and the holds of byte keys it no longer names
-        released. A row deleted meanwhile gets nothing, no hold either. The ids whose
-        row still existed."""
+        released (the plate cover's stays, unless the model moved). A row deleted
+        meanwhile gets nothing, no hold either. A ``guarded`` write is skipped when a
+        live writer moved the row's ``bytes_at`` since the copy read it, and writes the
+        thumbnail column and key only under the output's thumbnail lock and only while
+        the column still names what the copy read (`ByteWrite`, `ThumbnailSwap`).
+
+        The ids whose row was written, and each ``(key, object)`` a thumbnail swap
+        replaced: the caller releases them after this commits
+        (`OutputBytes.release_replaced`), never inside the transaction. Blocking."""
         written: set[str] = set()
+        replaced: list[tuple[str, BlobRef]] = []
         if not writes:
-            return written
+            return written, replaced
+        # The thumbnail locks in one order, so two batches never wait on each other.
+        ordered = sorted(writes, key=lambda write: write.output_id)
         with self._pool.connection() as conn, conn.transaction():
-            for write in writes:
-                blobs = write.blobs
-                cursor = conn.execute(
-                    "UPDATE outputs SET model_blob = %s, preview_blob = %s,"
-                    " thumbnail_blob = %s, bytes_stamp = %s, damaged = %s,"
-                    " bytes_at = clock_timestamp() WHERE output_id = %s",
-                    (
-                        blobs.model,
-                        blobs.preview,
-                        blobs.thumbnail,
-                        write.stamp,
-                        Jsonb(write.damaged),
-                        write.output_id,
-                    ),
-                )
-                if not cursor.rowcount:
-                    continue
-                written.add(write.output_id)
-                conn.execute("DELETE FROM output_files WHERE output_id = %s", (write.output_id,))
-                _write_files(conn, write.output_id, blobs.files)
-                keys = blobs.keys()
-                conn.execute(
-                    f"{_RELEASE_BYTES} AND NOT key = ANY(%s)",
-                    (OUTPUT_HOLDER, [write.output_id], keys),
-                )
-                _hold_keys(conn, write.output_id, keys)
-        return written
+            for write in ordered:
+                if _write_one(conn, self._pool, write, replaced):
+                    written.add(write.output_id)
+        return written, replaced
 
     def pending_bytes(self) -> int:
         """How many rows the files still hold the bytes of."""

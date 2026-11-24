@@ -253,6 +253,13 @@ RUN_HOLDS_PATCH = "housekeeping-reap-print-run-holds"
 #: the sweeps' Schedule only, so it obeys their switch.
 OUTPUT_COPY_SWEEP = "housekeeping_copy_outputs"
 OUTPUT_COPY_PATCH = "housekeeping-copy-outputs"
+#: #7256: copy the saved outputs' bytes to the blob store and reconcile the rows' blob
+#: keys with the files (`library.output_byte_copy.copy_output_bytes`), as the API's start
+#: does once after the row copy. It catches the files that pods on an older build wrote
+#: only to the share (a thumbnail upload, a save). Its advisory lock keeps one run at a
+#: time. After the row copy, behind its own patch; on the sweeps' Schedule only.
+OUTPUT_BYTES_SWEEP = "housekeeping_copy_output_bytes"
+OUTPUT_BYTES_PATCH = "housekeeping-copy-output-bytes"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -263,6 +270,7 @@ SWEEPS = (
     BACKFILL_SWEEP,
     REAP_SWEEP,
     OUTPUT_COPY_SWEEP,
+    OUTPUT_BYTES_SWEEP,
     FLOWS_SWEEP,
     PREVIEWS_SWEEP,
     LOST_SLICES_SWEEP,
@@ -428,6 +436,9 @@ RUN_HOLDS_TIMEOUT = timedelta(minutes=2)
 #: One walk of every output folder: about ten stats each, a read of each folder whose
 #: stamp changed, and a batched write per batch of folders.
 OUTPUT_COPY_TIMEOUT = timedelta(minutes=15)
+#: The byte copy: a stat of each output's byte files, and on its first runs an upload and
+#: a read back of every byte not yet in the store.
+OUTPUT_BYTES_TIMEOUT = timedelta(minutes=30)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -486,6 +497,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return RUN_HOLDS_TIMEOUT
     if sweep == OUTPUT_COPY_SWEEP:
         return OUTPUT_COPY_TIMEOUT
+    if sweep == OUTPUT_BYTES_SWEEP:
+        return OUTPUT_BYTES_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -556,6 +569,8 @@ class Housekeeping:
             if sweep == RUN_HOLDS_SWEEP and not workflow.patched(RUN_HOLDS_PATCH):
                 continue
             if sweep == OUTPUT_COPY_SWEEP and not workflow.patched(OUTPUT_COPY_PATCH):
+                continue
+            if sweep == OUTPUT_BYTES_SWEEP and not workflow.patched(OUTPUT_BYTES_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

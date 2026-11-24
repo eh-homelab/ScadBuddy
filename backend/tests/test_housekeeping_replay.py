@@ -39,8 +39,9 @@ and ``run_holds`` with ``RUN_HOLDS_PATCH`` (#6122), which also runs ``RUN_HOLDS_
 and ``maintenance_import`` with ``MAINTENANCE_IMPORT_PATCH`` (#5774), which also runs
 ``MAINTENANCE_IMPORT_SWEEP``, and ``entity_orphans`` with ``ENTITY_ORPHANS_PATCH``
 (#6950), which also runs ``ENTITY_ORPHANS_SWEEP``, and ``output_copy`` with
-``OUTPUT_COPY_PATCH`` (#7255), which also runs ``OUTPUT_COPY_SWEEP``
-(``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
+``OUTPUT_COPY_PATCH`` (#7255), which also runs ``OUTPUT_COPY_SWEEP``, and
+``output_bytes`` with ``OUTPUT_BYTES_PATCH`` (#7256), which also runs
+``OUTPUT_BYTES_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
 them.
 """
@@ -91,6 +92,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "maintenance_import",
         "entity_orphans",
         "output_copy",
+        "output_bytes",
     ],
 )
 async def test_housekeeping_replays_its_recorded_history(name: str) -> None:
@@ -108,7 +110,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-async def test_record_output_copy(recording_temporal: str) -> None:
+async def test_record_output_bytes(recording_temporal: str) -> None:
     """Every sweep a stub, so only the workflow's own commands are recorded."""
 
     def stub(name: str) -> Any:
@@ -137,4 +139,4 @@ async def test_record_output_copy(recording_temporal: str) -> None:
         if e.HasField("activity_task_scheduled_event_attributes")
     ]
     assert names == list(SWEEPS)
-    (HISTORIES / "output_copy.json").write_text(history.to_json())
+    (HISTORIES / "output_bytes.json").write_text(history.to_json())

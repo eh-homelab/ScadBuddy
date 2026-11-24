@@ -275,19 +275,35 @@ class OutputBytes:
             key, "output", data, name=key, scope=BlobScope(slug=slug), expected=expected
         )
 
-    async def _put_file(self, key: str, path: Path, slug: str) -> BlobRef:
-        """Put the file. No read of it runs on the loop: botocore reads a file body on
-        the loop (its checksum and its signature), so a file of at most the backend's
-        `multipart_threshold` is read whole in a thread and put as bytes, and a larger
-        one goes up in parts, each read in a thread (`S3ContentBackend._multipart`)."""
+    async def _with_file[T](self, path: Path, use: Callable[[BlobData], Awaitable[T]]) -> T:
+        """``use`` of the file's bytes. No read of it runs on the loop: botocore reads a
+        file body on the loop (its checksum and its signature), so a file of at most the
+        backend's `multipart_threshold` is read whole in a thread and given as bytes, and a
+        larger one goes up in parts, each read in a thread (`S3ContentBackend._multipart`)."""
         whole = int(getattr(self.content.backend, "multipart_threshold", _WHOLE_PUT))
         data = await in_thread_closing(lambda: _read_for_put(path, whole), _close_opened)
         if isinstance(data, bytes):
-            return await self.put(key, data, slug=slug)
+            return await use(data)
         try:
-            return await self.put(key, data, slug=slug)
+            return await use(data)
         finally:
             await asyncio.to_thread(data.close)
+
+    async def _put_file(self, key: str, path: Path, slug: str) -> BlobRef:
+        return await self._with_file(path, lambda data: self.put(key, data, slug=slug))
+
+    async def put_file(self, key: str, path: Path, *, slug: str) -> BlobRef:
+        """Put the file under ``key``, read in threads (`_with_file`)."""
+        return await self._put_file(key, path, slug)
+
+    async def replace_file(
+        self, key: str, path: Path, *, slug: str, expected: str | None
+    ) -> BlobRef | None:
+        """`replace` with the file's bytes, read in threads (`_with_file`): ``None`` when
+        the key moved on from ``expected``."""
+        return await self._with_file(
+            path, lambda data: self.replace(key, data, slug=slug, expected=expected)
+        )
 
     async def put_folder(self, directory: Path, output_id: str, slug: str) -> OutputBlobs:
         """Put the folder's bytes, a file at a time and never read whole: ``model.3mf``
