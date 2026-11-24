@@ -27,6 +27,11 @@ const ScanPage = lazyRetry(async () => ({ default: (await import('./pages/filame
 const SupplierPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SupplierPage')).SupplierPage }))
 const InvoicePage = lazyRetry(async () => ({ default: (await import('./pages/filament/InvoicePage')).InvoicePage }))
 const FilamentPage = lazyRetry(async () => ({ default: (await import('./pages/filament/FilamentPage')).FilamentPage }))
+const InventoryPage = lazyRetry(async () => ({ default: (await import('./pages/inventory/InventoryPage')).InventoryPage }))
+const ItemPage = lazyRetry(async () => ({ default: (await import('./pages/inventory/ItemPage')).ItemPage }))
+const UnitPage = lazyRetry(async () => ({ default: (await import('./pages/inventory/UnitPage')).UnitPage }))
+const LotPage = lazyRetry(async () => ({ default: (await import('./pages/inventory/LotPage')).LotPage }))
+const KindsPage = lazyRetry(async () => ({ default: (await import('./pages/inventory/KindsPage')).KindsPage }))
 const FlowPage = lazyRetry(async () => ({ default: (await import('./pages/FlowPage')).FlowPage }))
 const HistoryPage = lazyRetry(async () => ({ default: (await import('./pages/HistoryPage')).HistoryPage }))
 const LibraryPage = lazyRetry(async () => ({ default: (await import('./pages/LibraryPage')).LibraryPage }))
@@ -138,6 +143,12 @@ export function App() {
         <Route path="filament/metrics" element={<FilamentPage tab="metrics" />} />
         <Route path="filament/shopping-list" element={<FilamentPage tab="shopping-list" />} />
         <Route path="filament/ledger" element={<FilamentPage tab="ledger" />} />
+        {/* #7067 — the Inventory area; a lot opens its item's page at the lot's row. */}
+        <Route path="inventory" element={<InventoryPage />} />
+        <Route path="inventory/kinds" element={<KindsPage />} />
+        <Route path="inventory/items/:id" element={<ItemPage />} />
+        <Route path="inventory/units/:id" element={<UnitPage />} />
+        <Route path="inventory/lots/:id" element={<LotPage />} />
         <Route path="x/:code" element={<CodePage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />

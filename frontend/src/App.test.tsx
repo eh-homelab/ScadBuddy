@@ -58,6 +58,9 @@ describe('App routes (#2356)', () => {
     // #6262 — `/filament` opens on the Spools tab.
     ['/filament', 'Filament'],
     ['/filament/ledger', 'Filament'],
+    // #7067 — the Inventory area.
+    ['/inventory', 'Inventory'],
+    ['/inventory/kinds', 'Item kinds'],
   ])('renders %s through its lazy chunk', async (route, heading) => {
     const { App } = await import('./App')
     const done = settled()

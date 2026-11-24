@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
 import { L, spoolId, T } from '../src/mocks/features/filament/seed'
 import { INVOICE, SUPPLIER } from '../src/mocks/features/filamentPurchasingSeed'
+import { INVENTORY } from '../src/mocks/features/inventorySeed'
 
 // #2454 review — every routed page names its tab from its <h1> (usePageTitle). A page
 // with no <h1> inside <main> would quietly get the bare "ScadBuddy" title: one per route
@@ -70,6 +71,13 @@ const PAGES = [
   '/filament/labels',
   // The phone page that reads tags (#7273): without Web NFC it shows how to open it on a phone.
   '/filament/scan',
+  // The Inventory area (#7067), with the mock's seeded items (src/mocks/features/inventorySeed.ts).
+  '/inventory',
+  '/inventory/kinds',
+  `/inventory/items/${INVENTORY.HOOK}`,
+  `/inventory/units/${INVENTORY.NOZZLE_UNIT}`,
+  // A lot opens its item's page, which names the tab.
+  `/inventory/lots/${INVENTORY.HOOK_LOT}`,
   // The component gallery (#3653): in the mocked build only, which this spec runs on.
   '/ui-gallery',
 ]
