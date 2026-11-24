@@ -312,6 +312,7 @@ function answerItem(item: MockItem): S['Item'] {
     stock_value_minor: decimal(value),
     cost_unknown: unknown,
     low: tracking !== 'none' && item.low_stock > 0 && onHand <= item.low_stock,
+    offer_count: inventoryMock.offers.filter((o) => o.item_id === item.id && !o.archived_at).length,
   }
 }
 
@@ -807,6 +808,8 @@ export const handlers = [
       if (input.note != null) item.note = input.note
       if (input.low_stock != null) item.low_stock = Number(input.low_stock)
       if ('saleable' in input) item.saleable = input.saleable ?? null
+      if ('life_hours' in input) item.life_hours = input.life_hours == null ? null : Number(input.life_hours)
+      if ('life_months' in input) item.life_months = input.life_months ?? null
       return answerItem(item)
     })
   }),

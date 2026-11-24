@@ -59,12 +59,15 @@ describe('OrdersPage (#4249)', () => {
     seedLot(hook.id, 2, 5.99)
     const ring = seedItem({ kind_id: 'hardware', name: 'Ring', low_stock: 5 })
     seedLot(ring.id, 50, 10)
+    // R-P2-39: a low item outside the Part kind is not an order's part.
+    const box = seedItem({ kind_id: 'packaging', name: 'Mailer box', low_stock: 5 })
+    seedLot(box.id, 1, 30)
     renderPage(<OrdersPage />, { route: '/orders' })
 
     const banner = await screen.findByTestId('low-stock')
     expect(banner).toHaveTextContent('Low stock: Silver hook (2).')
     expect(within(banner).getByRole('link', { name: 'Silver hook' })).toHaveAttribute('href', `/inventory/items/${hook.id}`)
-    expect(within(banner).getByRole('link', { name: 'Inventory' })).toHaveAttribute('href', '/inventory?low=true')
+    expect(within(banner).getByRole('link', { name: 'Inventory' })).toHaveAttribute('href', '/inventory?kind=part&low=true')
   })
 
   it('shows no low-stock line while no item is low (#5543)', async () => {

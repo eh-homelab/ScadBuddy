@@ -1,8 +1,7 @@
 import { PlusIcon } from 'lucide-react'
-import { useEffect, useId, useMemo, useState, type FormEvent } from 'react'
+import { useId, useMemo, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
-import { listSuppliers } from '../../api/filamentPurchasing'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { PartRules } from '../../components/orders/PartRules'
 import { DataTable, type Column } from '../../components/records/DataTable'
@@ -33,7 +32,6 @@ export function InventoryPage() {
   const money = useMoney()
   const kinds = useAsync(() => inventoryApi.kinds(), [])
   const items = useAsync(() => inventoryApi.items({ kind, q, low }), [kind, q, low])
-  const offers = useOfferCounts()
   const [adding, setAdding] = useState(false)
   const byId = useMemo(() => new Map((kinds.data ?? []).map((k) => [k.id, k])), [kinds.data])
 
@@ -77,11 +75,7 @@ export function InventoryPage() {
       key: 'offers',
       header: 'Offers',
       className: 'text-muted-foreground',
-      cell: (item) => {
-        if (!offers) return null
-        const count = offers.get(item.id) ?? 0
-        return count === 0 ? 'no supplier' : `${count} ${count === 1 ? 'offer' : 'offers'}`
-      },
+      cell: (item) => (item.offer_count === 0 ? 'no supplier' : `${item.offer_count} ${item.offer_count === 1 ? 'offer' : 'offers'}`),
     },
   ]
 
@@ -131,13 +125,24 @@ export function InventoryPage() {
             ) : (
               <DataTable label="Items" columns={columns} rows={items.data ?? []} rowKey={(item) => item.id} empty={q || low || kind ? 'No item matches.' : 'No items yet. Add the hooks, nozzles or boxes you buy.'} />
             )}
-            {/* #5543 — moved from the parts page (#7067): the parts each unit of a model uses. */}
-            <PartRules />
+            {/* #5543 — moved from the parts page (#7067): the parts each unit of a model uses,
+                under the Part kind and the kinds below it only (R-P2-39). */}
+            {kind && underPart(kind, byId) && <PartRules />}
           </div>
         </div>
       </div>
     </div>
   )
+}
+
+/** Whether the kind is `part` or below it (R-P2-39). */
+function underPart(kindId: string, byId: Map<string, ItemKind>): boolean {
+  const seen = new Set<string>()
+  for (let at: string | null | undefined = kindId; at && !seen.has(at); at = byId.get(at)?.parent_id) {
+    if (at === 'part') return true
+    seen.add(at)
+  }
+  return false
 }
 
 const treeLink = (active: boolean) => cn('block truncate rounded-md px-2 py-1 hover:bg-muted', active ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground')
@@ -155,31 +160,6 @@ function KindLinks({ nodes, current, depth = 0 }: { nodes: KindNode[]; current: 
       ))}
     </ul>
   )
-}
-
-/**
- * How many unarchived offers each item has, by item id: read per supplier, as the items list
- * carries no offer count (`GET /inventory/items`). Null until read, or when a read fails.
- */
-function useOfferCounts(): Map<string, number> | null {
-  const [counts, setCounts] = useState<Map<string, number> | null>(null)
-  useEffect(() => {
-    let live = true
-    listSuppliers({ includeArchived: true })
-      .then((suppliers) => Promise.all(suppliers.map((supplier) => inventoryApi.supplierOffers(supplier.id))))
-      .then(
-        (lists) => {
-          const found = new Map<string, number>()
-          for (const offer of lists.flat()) found.set(offer.item_id, (found.get(offer.item_id) ?? 0) + 1)
-          if (live) setCounts(found)
-        },
-        () => undefined,
-      )
-    return () => {
-      live = false
-    }
-  }, [])
-  return counts
 }
 
 /** A new item of a kind; its page opens when it is made. Filament waits for its own phase (#7068). */

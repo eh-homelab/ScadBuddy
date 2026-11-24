@@ -80,3 +80,9 @@ export function unitLabel(unit: Unit, at: number): string {
   return unit.serial || unit.name || `Unit ${at + 1}`
 }
 
+
+/** A service life: "500 print hours", "12 months", or both; "not set" for neither. */
+export function lifeText(hours: string | null, months: number | null): string {
+  const parts = [hours !== null ? `${hours} print hours` : null, months !== null ? `${months} ${months === 1 ? 'month' : 'months'}` : null].filter(Boolean)
+  return parts.length ? parts.join(' or ') : 'not set'
+}

@@ -12,6 +12,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { inventoryApi, type Item, type Lot, type Move, type Offer, type RecostResult, type Unit, type UnitStatus } from './api'
+import { PlaceSelect } from './PlaceSelect'
+import { placeName, usePlaces, type Place } from './places'
 import { dayText, dec, majorToMinor, minorText, minorToMajor, packCost, pricedOffer, qtyText, STATUS_LABELS, unitLabel, valueText } from './format'
 
 const failed = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
@@ -94,6 +96,8 @@ function useRefreshOn(version: number, refresh: () => void) {
 export function LotStock({ item, offers, money, named, version, onChanged }: { item: Item; offers: Offer[]; money: ShopMoney; named: string | null; version: number; onChanged: () => void }) {
   const lots = useAsync(() => inventoryApi.lots(item.id), [item.id])
   useRefreshOn(version, lots.refresh)
+  const places = usePlaces()
+  const [placing, setPlacing] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<Open>(null)
   const [editing, setEditing] = useState<string | null>(null)
@@ -135,6 +139,30 @@ export function LotStock({ item, offers, money, named, version, onChanged }: { i
                 bought at {lot.foreign_unit_cost_minor} minor units of {lot.cost_currency}
               </span>
             )}
+          </span>
+        ),
+    },
+    {
+      key: 'place',
+      header: 'Place',
+      className: 'break-words',
+      cell: (lot) =>
+        placing === lot.id ? (
+          <LotPlaceEditor
+            lot={lot}
+            places={places.data ?? []}
+            onCancel={() => setPlacing(null)}
+            onSaved={() => {
+              setPlacing(null)
+              onChanged()
+            }}
+          />
+        ) : (
+          <span className="flex flex-wrap items-center gap-1">
+            {placeName(places.data, lot.location_id)}
+            <Button size="xs" variant="ghost" onClick={() => setPlacing(lot.id)}>
+              Edit place
+            </Button>
           </span>
         ),
     },
@@ -181,7 +209,7 @@ export function LotStock({ item, offers, money, named, version, onChanged }: { i
         ))}
       </div>
       {!priced && <p className="text-[13px] text-muted-foreground">No supplier offer gives a price in {money.currency ?? 'the shop currency'}: enter what a lot cost when you receive it, or leave it empty and set the cost later.</p>}
-      {open === 'receive' && <ReceiveLotForm item={item} offer={priced} money={money} onDone={done} />}
+      {open === 'receive' && <ReceiveLotForm item={item} offer={priced} money={money} places={places.data ?? []} onDone={done} />}
       {open === 'use' && <UseForm item={item} onDone={done} />}
       {open === 'count' && <CountForm item={item} onDone={done} />}
       {costed && !recost && <p className="text-[13px] text-muted-foreground">Past uses keep the cost they were taken at. "Re-cost past uses" gives them this lot's cost now, and changes the parts cost of the orders that used them.</p>}
@@ -239,6 +267,28 @@ function LotCostEditor({ lot, money, onCancel, onSaved }: { lot: Lot; money: Sho
   )
 }
 
+/** R-P2-38 — a lot's place (`PATCH /inventory/lots/{id}` `location_id`; null clears it). */
+function LotPlaceEditor({ lot, places, onCancel, onSaved }: { lot: Lot; places: Place[]; onCancel: () => void; onSaved: () => void }) {
+  const [place, setPlace] = useState<string | null>(lot.location_id)
+  const write = useWrite(onSaved)
+  return (
+    <span className="flex flex-wrap items-center gap-1">
+      <PlaceSelect label="Place of the lot" places={places} value={place} onChange={setPlace} />
+      <Button size="xs" disabled={write.busy} onClick={() => void write.run(() => inventoryApi.patchLot(lot.id, { location_id: place }), 'The place could not be saved. Try again.')}>
+        Save place
+      </Button>
+      <Button size="xs" variant="ghost" onClick={onCancel}>
+        Cancel
+      </Button>
+      {write.error && (
+        <span role="alert" className="w-full text-warn">
+          {write.error}
+        </span>
+      )}
+    </span>
+  )
+}
+
 /** What "Re-cost past uses" changed: the moves, and each order item's parts cost before and after. */
 function RecostSummary({ result, money }: { result: RecostResult; money: ShopMoney }) {
   return (
@@ -267,8 +317,9 @@ function RecostSummary({ result, money }: { result: RecostResult; money: ShopMon
   )
 }
 
-function ReceiveLotForm({ item, offer, money, onDone }: { item: Item; offer: Offer | undefined; money: ShopMoney; onDone: () => void }) {
+function ReceiveLotForm({ item, offer, money, places, onDone }: { item: Item; offer: Offer | undefined; money: ShopMoney; places: Place[]; onDone: () => void }) {
   const id = useId()
+  const [place, setPlace] = useState<string | null>(null)
   const [qty, setQty] = useState(offer ? offer.pack_size : '')
   const [cost, setCost] = useState<string | null>(null)
   const [note, setNote] = useState('')
@@ -285,7 +336,7 @@ function ReceiveLotForm({ item, offer, money, onDone }: { item: Item; offer: Off
       total = majorToMinor(shown, money.exponent)
       if (total === null) return write.fail(`Enter the total cost, such as 12.50, with up to ${money.exponent} decimals, or leave it empty.`)
     }
-    void write.run(() => inventoryApi.receiveLot(item.id, { qty: parsedQty, ...(total !== null ? { total_cost_minor: total } : {}), note: note.trim() }), 'The lot could not be received. Try again.')
+    void write.run(() => inventoryApi.receiveLot(item.id, { qty: parsedQty, ...(total !== null ? { total_cost_minor: total } : {}), ...(place ? { location_id: place } : {}), note: note.trim() }), 'The lot could not be received. Try again.')
   }
 
   return (
@@ -295,6 +346,9 @@ function ReceiveLotForm({ item, offer, money, onDone }: { item: Item; offer: Off
       </Field>
       <Field label={`Total cost (${money.currency ?? 'shop currency'})`} id={`${id}-cost`}>
         <Input id={`${id}-cost`} inputMode="decimal" className="w-28 text-right tabular-nums" value={shown} placeholder="unknown" onChange={(e) => setCost(e.target.value)} />
+      </Field>
+      <Field label="Place" id={`${id}-place`}>
+        <PlaceSelect id={`${id}-place`} label="Place" places={places} value={place} onChange={setPlace} />
       </Field>
       <Field label="Note" id={`${id}-note`}>
         <Input id={`${id}-note`} className="w-56" value={note} onChange={(e) => setNote(e.target.value)} />
@@ -371,6 +425,7 @@ function CountForm({ item, onDone }: { item: Item; onDone: () => void }) {
 export function UnitStock({ item, money, version, onChanged }: { item: Item; money: ShopMoney; version: number; onChanged: () => void }) {
   const units = useAsync(() => inventoryApi.units(item.id), [item.id])
   useRefreshOn(version, units.refresh)
+  const places = usePlaces()
   const [error, setError] = useState<string | null>(null)
   const [receiving, setReceiving] = useState(false)
 
@@ -414,6 +469,7 @@ export function UnitStock({ item, money, version, onChanged }: { item: Item; mon
         </Select>
       ),
     },
+    { key: 'place', header: 'Place', className: 'break-words', cell: (unit) => placeName(places.data, unit.location_id) },
     { key: 'cost', header: 'Cost', className: 'sb-num', cell: (unit) => minorText(unit.cost_minor, money, unit.cost_unknown) },
     { key: 'received', header: 'Received', cell: (unit) => dayText(unit.received_at) },
   ]
@@ -430,6 +486,7 @@ export function UnitStock({ item, money, version, onChanged }: { item: Item; mon
         <ReceiveUnitsForm
           item={item}
           money={money}
+          places={places.data ?? []}
           onDone={() => {
             setReceiving(false)
             onChanged()
@@ -446,8 +503,9 @@ export function UnitStock({ item, money, version, onChanged }: { item: Item; mon
   )
 }
 
-function ReceiveUnitsForm({ item, money, onDone }: { item: Item; money: ShopMoney; onDone: () => void }) {
+function ReceiveUnitsForm({ item, money, places, onDone }: { item: Item; money: ShopMoney; places: Place[]; onDone: () => void }) {
   const id = useId()
+  const [place, setPlace] = useState<string | null>(null)
   const [count, setCount] = useState('1')
   const [cost, setCost] = useState('')
   const [serials, setSerials] = useState('')
@@ -464,7 +522,7 @@ function ReceiveUnitsForm({ item, money, onDone }: { item: Item; money: ShopMone
     const listed = serials.split('\n').map((line) => line.trim())
     const named = listed.some((line) => line !== '')
     if (named && listed.length !== n) return write.fail(`Give one serial a line for each of the ${n} units, or none.`)
-    void write.run(() => inventoryApi.receiveUnits(item.id, { count: n, ...(each !== null ? { cost_minor: each } : {}), ...(named ? { serials: listed } : {}) }), 'The units could not be received. Try again.')
+    void write.run(() => inventoryApi.receiveUnits(item.id, { count: n, ...(each !== null ? { cost_minor: each } : {}), ...(named ? { serials: listed } : {}), ...(place ? { location_id: place } : {}) }), 'The units could not be received. Try again.')
   }
 
   return (
@@ -477,6 +535,9 @@ function ReceiveUnitsForm({ item, money, onDone }: { item: Item; money: ShopMone
       </Field>
       <Field label="Serials, one a line" id={`${id}-serials`}>
         <textarea id={`${id}-serials`} rows={Math.min(Math.max(Number(count) || 1, 1), 6)} className="w-48 rounded-md border bg-transparent px-2 py-1" value={serials} onChange={(e) => setSerials(e.target.value)} />
+      </Field>
+      <Field label="Place" id={`${id}-place`}>
+        <PlaceSelect id={`${id}-place`} label="Place" places={places} value={place} onChange={setPlace} />
       </Field>
       <Button type="submit" size="sm" disabled={write.busy}>
         Receive units

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
 import { INVENTORY, inventoryMock, seedItem, seedLot } from '../../mocks/features/inventory'
+import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { InventoryPage } from './InventoryPage'
 
@@ -74,12 +75,15 @@ describe('InventoryPage (#7067)', () => {
     await waitFor(async () => expect(await names()).toEqual(['Split ring']))
   })
 
-  it('says which items have no supplier offer (R-P2-25)', async () => {
+  it('says which items have no supplier offer, from the items list alone (R-P2-25, R-P2-37)', async () => {
+    const read: string[] = []
+    server.events.on('request:start', ({ request }) => read.push(new URL(request.url).pathname))
     render()
     const nozzle = (await screen.findByRole('link', { name: 'Hardened steel nozzle 0.4' })).closest('tr')!
     await waitFor(() => expect(nozzle).toHaveTextContent('no supplier'))
     const hook = screen.getByRole('link', { name: 'Silver keychain hook' }).closest('tr')!
     await waitFor(() => expect(hook).toHaveTextContent('1 offer'))
+    expect(read.filter((path) => path.includes('/suppliers'))).toEqual([])
   })
 
   it('adds an item of a kind and opens its page', async () => {
@@ -95,7 +99,7 @@ describe('InventoryPage (#7067)', () => {
 
   it('saves a model rule over the lot items (#5543, moved from the parts page)', async () => {
     const hook = seedItem({ kind_id: 'hardware', name: 'Silver hook' })
-    const { user } = render()
+    const { user } = render('/inventory?kind=part')
     await table()
     const rules = screen.getByRole('region', { name: 'Model rules' })
 
@@ -115,7 +119,7 @@ describe('InventoryPage (#7067)', () => {
   })
 
   it('never saves the opened rule under a slug typed since (#5549 review)', async () => {
-    const { user } = render()
+    const { user } = render('/inventory?kind=hardware')
     await table()
     const rules = screen.getByRole('region', { name: 'Model rules' })
     const field = within(rules).getByLabelText('Model slug')
@@ -126,5 +130,15 @@ describe('InventoryPage (#7067)', () => {
     await user.type(field, 'coaster')
     expect(within(rules).getByRole('button', { name: 'Save rule' })).toBeDisabled()
     expect(within(rules).getByText(/Open coaster's rule first/)).toBeInTheDocument()
+  })
+
+  it('shows the model rules only for the Part kind and the kinds below it (R-P2-39)', async () => {
+    const { user } = render('/inventory?kind=service')
+    await table()
+    expect(screen.queryByRole('region', { name: 'Model rules' })).toBeNull()
+    await user.click(within(screen.getByRole('navigation', { name: 'Kinds' })).getByRole('link', { name: 'Hardware' }))
+    expect(await screen.findByRole('region', { name: 'Model rules' })).toBeInTheDocument()
+    await user.click(within(screen.getByRole('navigation', { name: 'Kinds' })).getByRole('link', { name: 'All items' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Model rules' })).toBeNull())
   })
 })

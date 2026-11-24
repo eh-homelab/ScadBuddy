@@ -3,6 +3,7 @@ import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
 import { INVENTORY, inventoryMock, seedItem, seedLot, takeStock } from '../../mocks/features/inventory'
+import { L } from '../../mocks/features/filament/seed'
 import { ITEM_APPROVED, ORDER_ACCEPTED } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
@@ -151,5 +152,36 @@ describe('ItemPage (#7067)', () => {
   it('says when there is no such item', async () => {
     render('ab700000-0000-4000-8000-0000000000ff')
     expect(await screen.findByRole('alert')).toHaveTextContent('No such item')
+  })
+
+  it("sets a lot's place, and receives a lot into a place (R-P2-38)", async () => {
+    const { user } = render(INVENTORY.HOOK)
+    const row = await screen.findByTestId(`lot-row-${INVENTORY.HOOK_LOT}`)
+    expect(row).toHaveTextContent('none')
+    await user.click(within(row).getByRole('button', { name: 'Edit place' }))
+    await choose(user, within(row).getByRole('combobox', { name: 'Place of the lot' }), 'Workshop / Shelf A')
+    await user.click(within(row).getByRole('button', { name: 'Save place' }))
+    await waitFor(() => expect(screen.getByTestId(`lot-row-${INVENTORY.HOOK_LOT}`)).toHaveTextContent('Workshop / Shelf A'))
+    expect(bodyOf('patchLot')).toEqual([{ location_id: L.SHELF_A }])
+
+    await user.click(screen.getByRole('button', { name: 'Receive' }))
+    const form = screen.getByRole('form', { name: 'Receive a lot' })
+    await choose(user, within(form).getByRole('combobox', { name: 'Place' }), 'Workshop / Dry box 1')
+    await user.click(within(form).getByRole('button', { name: 'Receive lot' }))
+    await waitFor(() => expect(bodyOf('receiveLot')).toHaveLength(1))
+    expect(bodyOf('receiveLot')[0]).toMatchObject({ location_id: L.DRY_BOX })
+  })
+
+  it('shows and edits the service life (R-P2-38)', async () => {
+    const plate = seedItem({ kind_id: 'build_plate', name: 'Textured plate', life_months: 12 })
+    const { user } = render(plate.id)
+    expect(await screen.findByText('12 months')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Edit details' }))
+    const form = screen.getByRole('form', { name: 'Item details' })
+    const hours = within(form).getByLabelText('Life in print hours')
+    await user.type(hours, '500')
+    await user.click(within(form).getByRole('button', { name: 'Save details' }))
+    await waitFor(() => expect(bodyOf('patchItem')).toHaveLength(1))
+    expect(bodyOf('patchItem')[0]).toMatchObject({ life_hours: '500', life_months: 12 })
   })
 })

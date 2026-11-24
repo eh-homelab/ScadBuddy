@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { inventoryApi, type Item, type ItemKind } from './api'
-import { dec, qtyText, valueText } from './format'
+import { dec, lifeText, qtyText, valueText } from './format'
 import { ItemOffers } from './ItemOffers'
 import { LotStock, MovesTable, UnitStock } from './ItemStock'
 
@@ -151,6 +151,12 @@ export function ItemPage() {
             </div>
           </>
         )}
+        {(current.life_hours !== null || current.life_months !== null) && (
+          <div>
+            <dt className="text-muted-foreground">Service life</dt>
+            <dd>{lifeText(current.life_hours, current.life_months)}</dd>
+          </div>
+        )}
         {current.compatible_with.length > 0 && (
           <div>
             <dt className="text-muted-foreground">Fits</dt>
@@ -194,6 +200,8 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
   const [lowStock, setLowStock] = useState(dec(item.low_stock))
   const [saleable, setSaleable] = useState<Saleable>(item.saleable === null ? 'kind' : item.saleable ? 'yes' : 'no')
   const [note, setNote] = useState(item.note)
+  const [lifeHours, setLifeHours] = useState(item.life_hours ?? '')
+  const [lifeMonths, setLifeMonths] = useState(item.life_months === null ? '' : String(item.life_months))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -201,6 +209,10 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
     event.preventDefault()
     if (!name.trim()) return setError('Give the item a name.')
     if (!/^\d+(\.\d+)?$/.test(lowStock.trim())) return setError('Low stock is a number, 0 or more.')
+    const hours = lifeHours.trim()
+    if (hours && !(/^\d+(\.\d{1,2})?$/.test(hours) && Number(hours) > 0)) return setError('The life in print hours is a number above 0, such as 500, or empty.')
+    const months = lifeMonths.trim()
+    if (months && !(/^\d+$/.test(months) && Number(months) > 0 && Number(months) <= 1200)) return setError('The life in months is a whole number from 1 to 1200, or empty.')
     setBusy(true)
     setError(null)
     try {
@@ -210,6 +222,8 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
         low_stock: lowStock.trim(),
         saleable: saleable === 'kind' ? null : saleable === 'yes',
         note,
+        life_hours: hours || null,
+        life_months: months ? Number(months) : null,
       })
       onDone()
     } catch (cause) {
@@ -247,6 +261,14 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
               ))}
             </SelectContent>
           </Select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor={`${id}-hours`}>Life in print hours</Label>
+          <Input id={`${id}-hours`} inputMode="decimal" value={lifeHours} onChange={(e) => setLifeHours(e.target.value)} className="w-24" />
+        </div>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor={`${id}-months`}>Life in months</Label>
+          <Input id={`${id}-months`} inputMode="numeric" value={lifeMonths} onChange={(e) => setLifeMonths(e.target.value)} className="w-24" />
         </div>
       </div>
       <div className="flex flex-col gap-1">

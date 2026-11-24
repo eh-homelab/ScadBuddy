@@ -14,7 +14,9 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { inventoryApi, type Unit, type UnitStatus } from './api'
-import { dayText, minorText, STATUS_LABELS } from './format'
+import { dayText, lifeText, minorText, STATUS_LABELS } from './format'
+import { PlaceSelect } from './PlaceSelect'
+import { placeName, usePlaces, type Place } from './places'
 
 /**
  * #7067 — one unit at `/inventory/units/:id`: a nozzle, a build plate, a tool. Its status and
@@ -27,6 +29,7 @@ export function UnitPage() {
   const unit = useAsync(() => inventoryApi.unit(id), [id])
   const itemId = unit.data?.item_id
   const item = useAsync(() => (itemId ? inventoryApi.item(itemId) : Promise.resolve(null)), [itemId])
+  const places = usePlaces()
 
   if (!unit.data) {
     const missing = unit.error instanceof ApiError && unit.error.status === 404
@@ -76,12 +79,16 @@ export function UnitPage() {
           <dd>
             {shown.location_id ? (
               <Link to={filamentLinks.location(shown.location_id)} className="underline underline-offset-4">
-                Open the place
+                {placeName(places.data, shown.location_id)}
               </Link>
             ) : (
               'none'
             )}
           </dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Service life</dt>
+          <dd>{lifeText(shown.life_hours, shown.life_months)}</dd>
         </div>
         {shown.in_service_at && (
           <div>
@@ -96,7 +103,10 @@ export function UnitPage() {
           </div>
         )}
       </dl>
-      <StatusForm unit={shown} onChanged={(next) => unit.setData(next, { supersede: true })} />
+      <div className="flex flex-col gap-4">
+        <DetailsForm key={shown.id} unit={shown} places={places.data ?? []} onChanged={(next) => unit.setData(next, { supersede: true })} />
+        <StatusForm unit={shown} onChanged={(next) => unit.setData(next, { supersede: true })} />
+      </div>
       <section aria-label="Files, links and properties" className="mt-8 flex flex-col gap-2">
         <h2 className="text-sm font-semibold tracking-tight">Files, links and properties</h2>
         <PropertiesPanel entity={`unit:${shown.id}`} />
@@ -106,6 +116,65 @@ export function UnitPage() {
         </div>
       </section>
     </Shell>
+  )
+}
+
+/** R-P2-38 — a unit's name, serial and place after it was received (`PATCH /inventory/units/{id}`). */
+function DetailsForm({ unit, places, onChanged }: { unit: Unit; places: Place[]; onChanged: (unit: Unit) => void }) {
+  const id = useId()
+  const [name, setName] = useState(unit.name)
+  const [serial, setSerial] = useState(unit.serial ?? '')
+  const [place, setPlace] = useState<string | null>(unit.location_id)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    setSaved(false)
+    try {
+      onChanged(await inventoryApi.patchUnit(unit.id, { name: name.trim(), serial: serial.trim() || null, location_id: place }))
+      setSaved(true)
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.detail : 'The unit could not be saved. Try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <form aria-label="Unit details" onSubmit={(event) => void submit(event)} className="flex flex-col gap-2 rounded-md border p-3 text-[13px]">
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="flex flex-col gap-1">
+          <Label htmlFor={`${id}-name`}>Name</Label>
+          <Input id={`${id}-name`} value={name} onChange={(e) => setName(e.target.value)} className="w-48" />
+        </div>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor={`${id}-serial`}>Serial</Label>
+          <Input id={`${id}-serial`} value={serial} onChange={(e) => setSerial(e.target.value)} className="w-40" />
+        </div>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor={`${id}-place`}>Place</Label>
+          <PlaceSelect id={`${id}-place`} label="Place" places={places} value={place} onChange={setPlace} />
+        </div>
+        <Button type="submit" size="sm" disabled={busy}>
+          Save unit
+        </Button>
+        {saved && (
+          <span role="status" className="text-muted-foreground">
+            Saved.
+          </span>
+        )}
+      </div>
+      <p className="text-muted-foreground">A serial is unique within the item. No stock moves.</p>
+      {error && (
+        <p role="alert" className="text-warn">
+          {error}
+        </p>
+      )}
+    </form>
   )
 }
 
