@@ -388,6 +388,33 @@ describe('PendingCard, a prompt (#7364)', () => {
     expect(document.body).toHaveFocus()
   })
 
+  it('does not take back a focus the person left for no control', async () => {
+    const { user, again } = draw()
+    await user.type(email(), 'jo')
+    await user.click(document.body)
+    expect(document.body).toHaveFocus()
+    again(question({ state: 'expired', updated_at: new Date(Date.now() + 1000).toISOString() }))
+    expect(document.body).toHaveFocus()
+  })
+
+  it('keeps the focus for a person whose window is elsewhere', async () => {
+    const { user, again } = draw()
+    await user.type(email(), 'jo')
+    const windowFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false)
+    stops.push(() => windowFocus.mockRestore())
+    fireEvent.blur(email())
+    again(question({ state: 'expired', updated_at: new Date(Date.now() + 1000).toISOString() }))
+    expect(screen.getByRole('region', { name: 'Where do we send the pickup note?' })).toHaveFocus()
+  })
+
+  it('moves to the card without scrolling the page', async () => {
+    const { user, again } = draw()
+    await user.type(email(), 'jo')
+    const focus = vi.spyOn(screen.getByRole('region'), 'focus')
+    again(question({ state: 'expired', updated_at: new Date(Date.now() + 1000).toISOString() }))
+    expect(focus.mock.calls).toEqual([[{ preventScroll: true }]])
+  })
+
   it('takes no focus from a page the person has not touched', () => {
     const { again } = draw()
     again(question({ state: 'expired', updated_at: new Date(Date.now() + 1000).toISOString() }))
@@ -643,12 +670,13 @@ describe('PendingCard and the assistant', () => {
     await waitFor(() => expect(bridge.liveNames()).toContain('click'))
     const outcome = await bridge.call(tool, args)
     expect(!outcome.ok && outcome.error.code).toBe('refused')
+    return !outcome.ok && outcome.error.message
   }
 
   it('may not fill or send a prompt’s form, or read its draft', async () => {
     const { user } = draw()
     await user.type(email(), 'draft@example.com')
-    await refused('fill', { label: 'Email *email', value: 'agent@example.com' })
+    expect(await refused('fill', { label: 'Email *email', value: 'agent@example.com' })).toBe('This is for the user to fill in.')
     await refused('fill', { label: 'Languagelanguage', value: 'French' })
     await refused('click', { role: 'button', name: 'Answer' })
     await refused('click', { role: 'checkbox', name: 'Also send a text messagealso_sms' })

@@ -59,12 +59,18 @@ export function TaskCard({ entry, task: listed, step, respond }: CardProps & { t
 
   // The form takes the focus it holds with it: the card has it then.
   useEffect(() => {
-    if (!open && inside.current && document.activeElement === document.body) card.current?.focus()
+    if (!open && inside.current && document.activeElement === document.body) {
+      card.current?.focus({ preventScroll: true })
+    }
   }, [open])
 
-  function onBlur({ relatedTarget }: FocusEvent) {
-    // With no target the focus goes nowhere: the button it was on is now disabled.
-    if (relatedTarget && !card.current?.contains(relatedTarget)) inside.current = false
+  function onBlur({ target, relatedTarget }: FocusEvent) {
+    // With no next target the person left for a blank part of the page, unless the window
+    // lost the focus or the button it was on is now disabled.
+    const left = relatedTarget
+      ? !card.current?.contains(relatedTarget)
+      : document.hasFocus() && !target.matches(':disabled')
+    if (left) inside.current = false
   }
 
   const heading = open ? waitingText({ ...entry, prompt: task.title }) : task.title
@@ -156,7 +162,8 @@ function AnswerForm({
   }
 
   return (
-    // A person's answer: the assistant may neither write, send nor read it (spec §6.6).
+    // A person's answer (spec §6.6): the assistant cannot press or fill the form, or read the
+    // text typed in it. A checkbox's state stays in its snapshot, as for every user-only control.
     <div ref={form} {...USER_ONLY}>
       <SchemaForm
         answer

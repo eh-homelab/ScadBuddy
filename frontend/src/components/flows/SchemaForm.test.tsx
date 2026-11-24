@@ -155,6 +155,11 @@ describe('SchemaForm (#7364)', () => {
     for (const label of [screen.getByText(/^x+/), screen.getByText(/^y+/)]) expect(label).toHaveClass('min-w-0', 'break-words')
   })
 
+  it('wraps a long problem, of a field and of the whole form', () => {
+    draw({ a: { type: 'string' } }, { problems: [{ field: 'a', message: 'x'.repeat(300) }, { field: 'y'.repeat(300), message: 'is odd' }] })
+    for (const said of [screen.getByText(/^x+/), screen.getByText(/^y+/)]) expect(said).toHaveClass('min-w-0', 'break-words')
+  })
+
   it('keeps what was typed when problems come back, and moves to the first bad field', async () => {
     const { user, again } = draw({
       note: { type: 'string' },

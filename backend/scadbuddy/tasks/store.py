@@ -156,7 +156,9 @@ class TaskStore:
         answer and who gave it, and leaves an expired task as it stands. From an execution
         that the row of an open run does not know yet, it raises `RunBehindError`. From one
         that the row of an ended run does not know, it is answered with the task as it
-        stands: nothing follows an ended run, so a refusal would never end."""
+        stands: the sweep follows no run that ended, so a refusal might never end. (A Reset
+        through ScadBuddy whose commit was lost is the exception: its retry moves such a
+        row, #7413.)"""
         with self._pool.connection() as conn, conn.transaction():
             run = self._run_of(conn, task_id, workflow_run_id)
             row = conn.execute(

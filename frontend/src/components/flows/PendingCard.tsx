@@ -56,7 +56,7 @@ function CallCard({ entry, runId, step, respond }: CardProps) {
               void act(() => api.answerFlowRun(runId, entry.call_id, text))
             }}
             className="flex flex-col gap-2"
-            // A person's answer: the assistant may neither write, send nor read it (#7364).
+            // A person's answer: the assistant cannot press or fill the form, or read the text typed in it (#7364).
             {...USER_ONLY}
           >
             <Textarea aria-label="Your answer" value={text} onChange={(e) => setText(e.target.value)} rows={2} />

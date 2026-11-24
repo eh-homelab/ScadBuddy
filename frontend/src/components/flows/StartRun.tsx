@@ -208,7 +208,7 @@ function GrantDialog({
           <DialogDescription>What the run&apos;s outward calls may do without asking you.</DialogDescription>
         </DialogHeader>
         {fields.length > 0 && (
-          <section aria-label="Inputs" className="flex flex-col gap-4">
+          <section aria-label="Inputs" className="flex min-w-0 flex-col gap-4">
             <h3 className="text-[13px] font-medium">Inputs</h3>
             {rendered}
           </section>

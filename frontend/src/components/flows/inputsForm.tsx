@@ -123,7 +123,7 @@ function Field({
     </p>
   )
   const problem = error && (
-    <p id={`${id}-error`} className="text-[12px] text-destructive first-letter:uppercase">
+    <p id={`${id}-error`} className="min-w-0 text-[12px] break-words text-destructive first-letter:uppercase">
       {error}
     </p>
   )

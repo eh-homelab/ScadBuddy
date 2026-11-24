@@ -9,7 +9,7 @@ import { useInputs } from './inputsForm'
 /** Why the server refused the form. */
 export function FormError({ error }: { error?: string }) {
   return error ? (
-    <p role="alert" className="text-[13px] whitespace-pre-wrap text-destructive">
+    <p role="alert" className="min-w-0 text-[13px] break-words whitespace-pre-wrap text-destructive">
       {error}
     </p>
   ) : null
@@ -70,7 +70,7 @@ export function SchemaForm({
   )
   return (
     <>
-      <form ref={form} id={id} noValidate onSubmit={submit} className={cn('flex flex-col gap-4', answer && 'max-w-lg')}>
+      <form ref={form} id={id} noValidate onSubmit={submit} className={cn('flex min-w-0 flex-col gap-4', answer && 'max-w-lg')}>
         {rendered}
         {undrawn.map((label, i) => (
           <div key={i} className="flex flex-col gap-1.5 text-sm">
