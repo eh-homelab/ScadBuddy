@@ -137,10 +137,12 @@ what its `meta.json`, `params.json`, `inputs.json`, `record.json`, `manifest.jso
 files, then the row in one transaction; when the row fails, the save fails and its folder
 is removed (`OutputStore._insert_row`). Its last print stays in `output_last_prints`.
 
-Each API start copies the folders to rows (`scadbuddy/library/output_copy.py`
-`copy_outputs`, one replica at a time under an advisory lock), and then copies them again
-each `SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS` (600 by default; 0 is the start's run only,
-`scadbuddy/main.py` `_copy_outputs_logged`). Each run is a row of `output_copy_runs`.
+Each API start copies the folders to rows once (`scadbuddy/library/output_copy.py`
+`copy_outputs`, one replica at a time under an advisory lock; a run that does not get the
+lock does nothing). The housekeeping sweep `housekeeping_copy_outputs` copies them again
+on each run of the sweeps' Schedule (`workflows/housekeeping.py` `OUTPUT_COPY_SWEEP`, every
+`asset_sweep_interval`; with the sweeps off, `asset_sweep_interval` 0, only the start
+copies). Each run is a row of `output_copy_runs`.
 `GET /api/v1/outputs/copy-status` answers the last run. Until a run finishes, a lookup
 that finds no row falls back to the files; after one, a missing row is a missing output.
 A run whose walk may have missed folders does not finish: it records its counts with
@@ -165,8 +167,8 @@ reconciles:
 - A folder with no readable `meta.json` gets no row and goes on the run's `not_copied`
   list; a side file that cannot be read is left out of its row and named on `damaged`.
 - Pods on an older build save and delete outputs in the files only, during a roll-out
-  and after a rollback. The periodic run gives their saves rows and drops the rows of
-  their deletes within one interval.
+  and after a rollback. The next housekeeping sweep gives their saves rows and drops the
+  rows of their deletes.
 
 After a roll-out, confirm that every pod runs the new image (`kubectl -n bambuddy get
 pods -o jsonpath` on the images), then read `GET /api/v1/outputs/copy-status`. Check that

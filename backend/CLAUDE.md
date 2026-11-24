@@ -285,7 +285,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   AUTO_UPGRADE through a `Versioned*` subclass (`main.LIBRARY_WORKFLOWS`; an unversioned
   worker cannot complete a workflow that declares a behavior), so each stays
   replay-compatible behind `patched`; a new one needs its own behavior or the worker
-  refuses to build. Sweeps off (`asset_sweep_interval` 0) deletes the
+  refuses to build. The output copy (#7255, `OUTPUT_COPY_SWEEP`, after `REAP_SWEEP`,
+  behind its patch, the sweeps' Schedule only) runs `library/output_copy.py`
+  `copy_outputs`, as the API's start does once, so the writes of pods on an older build
+  reach the `outputs` rows at the next housekeeping sweep; its advisory lock makes a
+  second run at once do nothing. Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`

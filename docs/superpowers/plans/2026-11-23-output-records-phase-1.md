@@ -4,7 +4,7 @@
 
 **Goal:** Every output's record is a row in `outputs`, and a lookup by id is one indexed read, so no hot path globs `data/outputs/*/<id>/` on NFS (#7255, epic #7254).
 
-**Architecture:** A new synchronous row store `OutputRows` (psycopg pool, like `OutputIndex`) holds the record; `OutputStore` reads it and writes it next to the files it still writes (bytes move in phase 2, #7256). A reconciling copy fills and refreshes rows from the folders at every API start and then once each `SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS` (600 by default, 0 is start only), under an advisory lock, and records each run; once a run has finished (its walk saw every folder), a missing row is a missing output and nothing globs.
+**Architecture:** A new synchronous row store `OutputRows` (psycopg pool, like `OutputIndex`) holds the record; `OutputStore` reads it and writes it next to the files it still writes (bytes move in phase 2, #7256). A reconciling copy fills and refreshes rows from the folders at every API start and in every housekeeping sweep (`OUTPUT_COPY_SWEEP`, on the sweeps' Schedule), under an advisory lock, and records each run; once a run has finished (its walk saw every folder), a missing row is a missing output and nothing globs.
 
 **Tech Stack:** Python 3.12, psycopg 3 + psycopg_pool, pydantic, FastAPI, pytest with the repo's Postgres fixtures.
 
@@ -110,11 +110,11 @@ Behaviour (spec §4.5 phase 1, §6.1, §6.6):
 - [ ] **Step 4:** Run the new tests and every existing output test: `tests/test_output_*.py`, `tests/test_packing_and_outputs.py`, `tests/test_arrange_outputs.py`, `tests/api/test_recent_outputs.py`, `tests/api/test_pipeline_api.py`, and any test `grep -rl "OutputStore\|outputs\." tests` adds; expect PASS.
 - [ ] **Step 5:** Commit `feat(outputs): OutputStore reads and writes output rows (#7255)`.
 
-### Task 4: The reconciling copy at every API start, and each interval after
+### Task 4: The reconciling copy at every API start, and in every housekeeping sweep
 
 **Files:**
 - Create: `backend/scadbuddy/library/output_copy.py`
-- Modify: `backend/scadbuddy/main.py` (start it next to `_index_outputs_logged`, line ~2376, as a background task that honours `stop` and runs the copy again each `output_copy_interval_seconds`, a bootstrap setting in `core/settings.py` and `core/setting_docs.py`)
+- Modify: `backend/scadbuddy/main.py` (start it next to `_index_outputs_logged`, line ~2376, as a background task that honours `stop`; the housekeeping activity `OUTPUT_COPY_SWEEP` runs it again, `workflows/housekeeping.py`, behind `workflow.patched`, with a replay history)
 - Test: `backend/tests/test_output_copy.py`
 
 **Interfaces:**
@@ -124,7 +124,7 @@ Behaviour (spec §4.5 phase 1, §6.1, §6.6):
 Behaviour (spec §6.1, §6.3, §6.5):
 - Take `pg_try_advisory_lock(hashtextextended('scadbuddy:outputs:copy', 0))` on a dedicated connection; if not got, log and return None.
 - `start_run()`; walk `paths.outputs/<slug>/<id>/` (the one place that still scans). For each folder: no readable `meta.json` → `not_copied` (the folder's `<slug>/<id>`); a row missing → `write_copy` insert (`copied`); a row whose `files_stamp` differs from the folder's (a sha256 of the sorted name, size and `mtime_ns` of the record files `meta.json`, `params.json`, `inputs.json`, `record.json`, `manifest.json`, `bom.json`, `arranged_from.json`, `backfill.json`) → `write_copy` refresh (`refreshed`); both under the batch's mark, with `undo_copy` after each batch and once more for the inserted rows at the run's end; an unreadable side file → row written, entry in `damaged` naming the file. Rows in `ids_copied_before(run start)` whose folder the walk did not see → `drop_unseen` (`dropped`), not when a listing or a stat failed. `finish_run(...)`; when a listing or a stat failed, or the outputs folder read empty while rows exist, `end_incomplete_run(...)` instead, so the run does not end the fallback. Honour `stop` between folders (an unfinished run has no `finished_at`, so `copied()` stays false).
-- Log one line with the counts; failures are logged and the next run retries. The loop waits `output_copy_interval_seconds` between runs (0: the start's run only) and ends when `stop` is set at shutdown.
+- Log one line with the counts; failures are logged and the next run retries. The start's run ends when `stop` is set at shutdown; the sweep's run ends when the worker's stop sets its own.
 
 - [ ] **Step 1:** Write tests: `test_copy_fills_missing_rows_and_finishes_run`, `test_copy_refreshes_row_from_newer_meta`, `test_copy_second_run_changes_nothing`, `test_copy_lists_unreadable_folder`, `test_copy_marks_damaged_side_file`, `test_copy_drops_rows_whose_folder_is_gone`, `test_copy_runs_once_under_lock` (hold the lock on another connection; `copy_outputs` returns None), `test_copy_stops_unfinished_on_stop`.
 - [ ] **Step 2:** Run them; expect FAIL.
@@ -153,4 +153,4 @@ Behaviour (spec §6.1, §6.3, §6.5):
 ### After the tasks
 
 - Open one PR for the branch, `feat(outputs): output records in Postgres, phase 1 (#7254)`, body `Fixes #7255` and the session marker; the shepherd lands it.
-- After it deploys: confirm the API pods run the new image (memory: confirm rollout by pod images), then read `GET /api/v1/outputs/copy-status`. Check that its run has a `finished_at`, is not `incomplete`, and started after the last pod on the older build went: the periodic copy (`SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS`, 600 by default) is what gives the older pods' saves their rows and drops their deletes' rows. Then time `GET /api/v1/print/library` again against the numbers in the spec §1.
+- After it deploys: confirm the API pods run the new image (memory: confirm rollout by pod images), then read `GET /api/v1/outputs/copy-status`. Check that its run has a `finished_at`, is not `incomplete`, and started after the last pod on the older build went: the housekeeping sweep `OUTPUT_COPY_SWEEP` is what gives the older pods' saves their rows and drops their deletes' rows, at the next sweep after the roll-out. Then time `GET /api/v1/print/library` again against the numbers in the spec §1.

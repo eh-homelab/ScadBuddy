@@ -149,11 +149,11 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    own connection and only logs a failure; see §6.6), and still writes the files. Lookups by id, `list_for`, `name_and_slug`, `_existing`, the cover
    choice and `pending_backfills` read rows. A copy fills a row for every
    existing output from its `meta.json` and the other small files (idempotent). It is
-   not an operation kind: it runs as a task at each API start and then once each
-   `SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS` (600 by default; 0 is the start's run
-   only), under an advisory lock (`library/output_copy.py`, `main.py`
-   `_copy_outputs_logged`). Until a run finishes, a missing row falls back to the
-   files. This phase removes the glob from the hot path.
+   not an operation kind: it runs as a task at each API start, and as the housekeeping
+   sweep `housekeeping_copy_outputs` (`workflows/housekeeping.py` `OUTPUT_COPY_SWEEP`)
+   on the sweeps' Schedule, under an advisory lock (`library/output_copy.py`,
+   `main.py` `_copy_outputs_logged`). Until a run finishes, a missing row falls back to
+   the files. This phase removes the glob from the hot path.
 2. **Bytes** (#7256). Creates also put the 3MF, preview, thumbnail and `files/` as blobs. Move
    each path-based reader (downloads, preview, thumbnail, `files/`, `analyze_3mf`,
    `read_provenance`, `stamp`, `plates_of`, `analyzers/gather.py`,
@@ -234,11 +234,12 @@ Each phase ships as one or more PRs, each releasable on its own.
    `meta.json` is gone; the run's end checks the rows it inserted once more. A row whose
    folder the walk did not see is dropped only when its `copied_at` is before the run's
    start. When a listing or a stat fails (ESTALE, EIO), the run drops nothing and is
-   `incomplete`. The copy runs at every start and then once each
-   `SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS`. That periodic run, not a manual re-run, is
-   what catches the writes of old pods: a save, a delete, a rename or a backfill change
-   that a pod on the older build wrote during the roll-out, or after a rollback, reaches
-   the rows within one interval. After a roll-out, confirm the pod images, then read
+   `incomplete`. The copy runs at every start and in every housekeeping sweep
+   (`OUTPUT_COPY_SWEEP`, on the sweeps' Schedule; sweeps off, `asset_sweep_interval` 0,
+   leaves only the start's run). That sweep, not a manual re-run, is what catches the
+   writes of old pods: a save, a delete, a rename or a backfill change that a pod on the
+   older build wrote during the roll-out, or after a rollback, reaches the rows at the
+   next housekeeping sweep. After a roll-out, confirm the pod images, then read
    `GET /outputs/copy-status` and check that a finished run started after the last old
    pod went. "A second run changes nothing" holds only when no folder changed between
    runs.
