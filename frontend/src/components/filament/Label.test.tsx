@@ -76,6 +76,19 @@ describe('a label measured in the browser', () => {
     expect(text.style.fontFamily).toMatch(/Helvetica/)
   })
 
+  it('measures every digit as wide as the widest, as tabular-nums renders it', () => {
+    resetMeasuring()
+    // A 1 is 40 px wide, every other digit 60: tabular-nums gives the 1 the 60 px as well.
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      font: '',
+      measureText: (text: string) => ({ width: [...text].reduce((sum, c) => sum + (c === '1' ? 40 : 60), 0) }),
+    } as unknown as CanvasRenderingContext2D)
+    const big = { ...spool('Red'), number: 11111 } as SpoolDetail
+    render(<Label spool={big} svg="<svg></svg>" />)
+    const size = parseFloat(screen.getByText('#11111').style.fontSize)
+    expect(size * 0.6 * '#11111'.length).toBeCloseTo(23.5, 1)
+  })
+
   it('keeps the cap when the measured text fits', () => {
     stubCanvas()
     render(<Label spool={spool('Red')} svg="<svg></svg>" />)

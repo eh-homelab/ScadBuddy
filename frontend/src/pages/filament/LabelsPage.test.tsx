@@ -230,6 +230,12 @@ describe('the label template (#7157)', () => {
     expect(button).toBeDisabled()
     expect(button).toHaveAccessibleDescription('A PDF of place labels needs a label address. Set one in Settings, or an https public URL.')
     unmount()
+    // The same for the printers' places, when `printerLabels` answers no address.
+    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: null, labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }], no_report: [] })))
+    const printers = renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByRole('button', { name: 'Download PDF' })).toBeDisabled()
+    printers.unmount()
     // Spool labels need no address: their PDF stays on offer.
     serve()
     renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })

@@ -36,7 +36,12 @@ function boldWidth100(text: string): number | null {
   }
   if (!measuring) return null
   measuring.font = `bold 100px ${BIG_FONT_FAMILY}`
-  const width = measuring.measureText(text).width
+  // The span renders with `tabular-nums`: every digit takes the widest digit's width. The canvas has
+  // no numeric-variant setting everywhere, so measure the digits that way here.
+  const ctx = measuring
+  const digits = text.match(/\d/g) ?? []
+  const widest = digits.length ? Math.max(...'0123456789'.split('').map((d) => ctx.measureText(d).width)) : 0
+  const width = ctx.measureText(text.replace(/\d/g, '')).width + widest * digits.length
   return width > 0 ? width : null
 }
 
