@@ -7,7 +7,7 @@ import { defineTool, json, type ToolContext } from './registry.js'
 // NFC job (backend filament/tags.py `create_job`); the /filament/scan page shows it, the
 // person taps Arm and holds a tag, and the page posts what the tag held.
 
-const ENDED = new Set(['done', 'failed', 'expired'])
+const ENDED = new Set(['done', 'failed', 'expired', 'cancelled'])
 const SOURCE = 'NDEF records read from a physical tag, which anyone holding the tag could have written'
 const HOW =
   "The user must have ScadBuddy's /filament/scan page open in Chrome on Android. It shows the job; the user " +
@@ -24,14 +24,27 @@ const RECORD = z.object({
   data_hex: z.string().max(1776).regex(/^([0-9a-fA-F]{2})*$/).describe('The payload as hex'),
 })
 
-type Job = { id: string; state: string; result?: Record<string, unknown> | null }
+const ROUTES = [
+  'POST /api/v1/filament/nfc-jobs',
+  'GET /api/v1/filament/nfc-jobs/{job_id}',
+  'POST /api/v1/filament/nfc-jobs/{job_id}/cancel',
+] as const
 
-/** Queue the job, then wait as activity_watch does until it ends, the call is aborted or the time is up. */
+type Job = { id: string; state: string; expires_at: string; result?: Record<string, unknown> | null }
+
+/**
+ * Queue the job, then wait as activity_watch does until it ends, the call is aborted or the
+ * job's own time is up. The wait runs to the server's `expires_at` and one poll past it
+ * (#7273 I1), so the answer is the job's real state, never a guess. A job still open then, or
+ * when the call is aborted, is cancelled first, so no page can arm it later (M1).
+ */
 async function runJob(ctx: ToolContext, body: { kind: 'read' | 'write'; ttl_s: number; records?: z.infer<typeof RECORD>[] }) {
-  const deadline = Date.now() + body.ttl_s * 1000
   const made: Job = await ok(ctx.backend.POST('/api/v1/filament/nfc-jobs', { body }), `queue an NFC ${body.kind}`)
   const job_id = made.id
-  let found = made
+  const path = { params: { path: { job_id } } }
+  const read = async () => ok(ctx.backend.GET('/api/v1/filament/nfc-jobs/{job_id}', path), `read NFC job ${job_id}`)
+  const deadline = Date.parse(made.expires_at) + ctx.pollIntervalMs
+  let found: Job = made
   while (!ENDED.has(found.state) && Date.now() < deadline && !ctx.signal.aborted) {
     try {
       await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
@@ -39,13 +52,13 @@ async function runJob(ctx: ToolContext, body: { kind: 'read' | 'write'; ttl_s: n
       if (ctx.signal.aborted) break
       throw err
     }
-    found = await ok(
-      ctx.backend.GET('/api/v1/filament/nfc-jobs/{job_id}', { params: { path: { job_id } } }),
-      `read NFC job ${job_id}`,
-    )
+    found = await read()
     await ctx.progress(0, undefined, found.state)
   }
-  if (!ENDED.has(found.state) && !ctx.signal.aborted) return json({ job_id, state: 'expired' })
+  if (!ENDED.has(found.state)) {
+    await ok(ctx.backend.POST('/api/v1/filament/nfc-jobs/{job_id}/cancel', path), `cancel NFC job ${job_id}`)
+    found = await read()
+  }
   return json({ job_id, state: found.state, result: found.result ?? null })
 }
 
@@ -61,7 +74,7 @@ export const nfcTools = [
     // #7273 R8: it makes a job row (and its result records the tag as seen); the tap is the person's own act.
     risk: 'write',
     source: SOURCE,
-    routes: ['POST /api/v1/filament/nfc-jobs', 'GET /api/v1/filament/nfc-jobs/{job_id}'],
+    routes: ROUTES,
     waitsMs: ({ timeout_s }) => timeout_s * 1000,
     handler: async ({ timeout_s }, ctx) => runJob(ctx, { kind: 'read', ttl_s: timeout_s }),
   }),
@@ -77,7 +90,7 @@ export const nfcTools = [
     // arm-and-tap on the page is its approval, so no pending action is needed" (#7273 R8).
     approval: 'none',
     source: SOURCE,
-    routes: ['POST /api/v1/filament/nfc-jobs', 'GET /api/v1/filament/nfc-jobs/{job_id}'],
+    routes: ROUTES,
     waitsMs: ({ timeout_s }) => timeout_s * 1000,
     handler: async ({ records, timeout_s }, ctx) => runJob(ctx, { kind: 'write', records, ttl_s: timeout_s }),
   }),

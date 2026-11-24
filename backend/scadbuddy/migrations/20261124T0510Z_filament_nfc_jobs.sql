@@ -6,7 +6,7 @@ CREATE TABLE filament_nfc_jobs (
     created_by text NOT NULL,
     armed_by text,
     state text NOT NULL DEFAULT 'pending'
-        CHECK (state IN ('pending', 'armed', 'done', 'failed', 'expired')),
+        CHECK (state IN ('pending', 'armed', 'done', 'failed', 'expired', 'cancelled')),
     result jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     expires_at timestamptz NOT NULL,

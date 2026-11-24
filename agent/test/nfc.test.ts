@@ -33,8 +33,20 @@ function ctx(signal: AbortSignal = new AbortController().signal): ToolContext {
   }
 }
 
-function job(state: string, extra: Record<string, unknown> = {}) {
-  return { id: JOB, kind: 'read', records: null, state, result: null, created_by: 'test', armed_by: null, ...extra }
+/** A job whose server-side deadline is `inMs` from now (#7273 I1: the tool waits for it). */
+function job(state: string, extra: Record<string, unknown> = {}, inMs = 600_000) {
+  const expires_at = new Date(Date.now() + inMs).toISOString()
+  return {
+    id: JOB,
+    kind: 'read',
+    records: null,
+    state,
+    result: null,
+    created_by: 'test',
+    armed_by: null,
+    expires_at,
+    ...extra,
+  }
 }
 
 describe('NFC job tools', () => {
@@ -99,23 +111,64 @@ describe('NFC job tools', () => {
     expect(none.isError).toBe(true)
   })
 
-  it('answers expired when its own time is up first', async () => {
+  it("waits until the server's expires_at, not its own timeout, and answers the job's real state", async () => {
+    // #7273 I1: the job is made after the call starts, so it ends later than timeout_s from then.
+    const started = Date.now()
+    const result = { next: 'bind_or_create', uid: '04AA', records: [] }
+    let cancels = 0
     server.use(
-      http.post(JOBS, () => HttpResponse.json(job('pending'), { status: 201 })),
-      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job('armed'))),
+      http.post(JOBS, () => HttpResponse.json(job('pending', {}, 1_500), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () =>
+        HttpResponse.json(Date.now() - started < 1_200 ? job('armed') : job('done', { result })),
+      ),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancels += 1
+        return HttpResponse.json(job('cancelled'))
+      }),
     )
-    const got = await runTool(tool('nfc_read'), { timeout_s: 1 }, { ...ctx(), pollIntervalMs: 100 })
-    expect(firstText(got)).toEqual({ job_id: JOB, state: 'expired' })
+    const got = await runTool(tool('nfc_read'), { timeout_s: 1 }, { ...ctx(), pollIntervalMs: 50 })
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'done', result })
+    expect(cancels).toBe(0)
   })
 
-  it('stops waiting when the call is aborted', async () => {
-    server.use(http.post(JOBS, () => HttpResponse.json(job('pending'), { status: 201 })))
+  it('cancels a job still open past its expires_at and answers what the server then says', async () => {
+    // #7273 M1: no page may arm the job once the agent stopped waiting for it.
+    let cancelled = false
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending', {}, 100), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job(cancelled ? 'cancelled' : 'armed'))),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancelled = true
+        return HttpResponse.json(job('cancelled'))
+      }),
+    )
+    const got = await runTool(tool('nfc_read'), { timeout_s: 1 }, { ...ctx(), pollIntervalMs: 20 })
+    expect(cancelled).toBe(true)
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'cancelled', result: null })
+  })
+
+  it('cancels the job when the call is aborted', async () => {
+    let cancelled = false
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending'), { status: 201 })),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancelled = true
+        return HttpResponse.json(job('cancelled'))
+      }),
+      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job(cancelled ? 'cancelled' : 'pending'))),
+    )
     const abort = new AbortController()
     setTimeout(() => abort.abort(), 30)
     const started = Date.now()
     const got = await runTool(tool('nfc_read'), { timeout_s: 600 }, { ...ctx(abort.signal), pollIntervalMs: 1000 })
     expect(Date.now() - started).toBeLessThan(900)
-    // Aborted in the first wait: the state the job was made in.
-    expect(firstText(got)).toEqual({ job_id: JOB, state: 'pending', result: null })
+    expect(cancelled).toBe(true)
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'cancelled', result: null })
+  })
+
+  it('names the cancel route among its routes', () => {
+    for (const name of ['nfc_read', 'nfc_write']) {
+      expect(tool(name).routes).toContain('POST /api/v1/filament/nfc-jobs/{job_id}/cancel')
+    }
   })
 })

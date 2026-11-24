@@ -512,6 +512,26 @@ class JobNotArmedError(ValueError):
         super().__init__("no armed NFC job of this kind: it is pending, ended or unknown")
 
 
+class RecordsMismatchError(ValueError):
+    """A write job's claim names no hash, or not the hash of the job's records (#7273 R22)."""
+
+    code = "records_mismatch"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "`records_sha256` is not the hash of this write job's records: show the job again"
+        )
+
+
+class RecordsHashNotTakenError(ValueError):
+    """A read job's claim names a records hash; a read job has no records."""
+
+    code = "records_sha256_not_taken"
+
+    def __init__(self) -> None:
+        super().__init__("a read job has no records, so its claim takes no `records_sha256`")
+
+
 _JOB_COLUMNS: Final = (
     "id, kind, records, created_by, state, result, created_at, expires_at, armed_by"
 )
@@ -584,14 +604,25 @@ def _set_job(conn: Conn, job_id: UUID, state: m.NfcJobState, result: dict[str, A
     return _job_of(row)
 
 
-def claim_job(spools: FilamentSpoolStore, job_id: UUID, *, actor: str) -> m.NfcJob:
+def claim_job(
+    spools: FilamentSpoolStore, job_id: UUID, body: m.NfcJobClaimIn | None, *, actor: str
+) -> m.NfcJob:
     """Arm a pending job for the page whose person tapped Arm. `JobNotPendingError` for a
-    job in any other state, so one page runs it; `NfcJobNotFoundError` for no such job."""
+    job in any other state, so one page runs it; `NfcJobNotFoundError` for no such job. A
+    write job is armed only with the hash of its records (#7273 R22): a missing or other
+    one is `RecordsMismatchError`, and the job stays pending. A read job takes no hash
+    (`RecordsHashNotTakenError`)."""
+    sent = None if body is None else body.records_sha256
     with spools.transaction() as conn:
         expire_jobs(conn)
         job = _locked_job(conn, job_id)
         if job.state != "pending":
             raise JobNotPendingError()
+        if job.records is None:
+            if sent is not None:
+                raise RecordsHashNotTakenError()
+        elif sent != m.records_sha256(job.records):
+            raise RecordsMismatchError()
         row = conn.execute(
             "UPDATE filament_nfc_jobs SET state = 'armed', armed_by = %s WHERE id = %s"
             f" RETURNING {_JOB_COLUMNS}",
@@ -612,7 +643,8 @@ def finish_job(
     """End an armed job with what the page got from the tag. `NfcJobNotFoundError` for no
     such job, `JobNotArmedError` for a job that is not armed. A read goes through `read_on`. A write
     needs its own ``agent_write`` backup (`BackupMismatchError`), and is done only when the
-    read-back equals the records the job sent."""
+    read-back equals the records the job sent. Either way the tag is marked seen with the
+    read-back, so a failed write still records what the tag holds."""
     with spools.transaction() as conn:
         expire_jobs(conn)
         job = _locked_job(conn, job_id)
@@ -621,18 +653,37 @@ def finish_job(
         if body.error is not None:
             return _set_job(conn, job_id, "failed", {"error": body.error})
         records = [r.model_dump() for r in body.records]
+        uid = clean_tag_uid(body.uid)
         reading = TagRead(source="agent", uid=body.uid, records=tuple(body.records))
         if job.kind == "read":
             found = read_on(conn, reading, actor=actor, defaults=defaults)
-            result = found.model_dump(mode="json") | {"uid": body.uid, "records": records}
+            result = found.model_dump(mode="json") | {"uid": uid, "records": records}
             return _set_job(conn, job_id, "done", result)
         if body.backup_id is None or body.uid is None:
             raise BackupMismatchError()
         valid_backup(conn, body.backup_id, body.uid, "agent_write", job_id=job_id)
-        result = {"uid": body.uid, "records": records, "backup_id": str(body.backup_id)}
+        result = {"uid": uid, "records": records, "backup_id": str(body.backup_id)}
+        seen_on(conn, reading)
         if not same_records(job.records or [], body.records):
             return _set_job(
                 conn, job_id, "failed", {"error": str(ReadBackMismatchError())} | result
             )
-        seen_on(conn, reading)
         return _set_job(conn, job_id, "done", result)
+
+
+def cancel_job(spools: FilamentSpoolStore, job_id: UUID) -> m.NfcJob:
+    """End a pending or armed job as ``cancelled``: its agent stopped waiting, so no page
+    may arm it or post its result (#7273 M1). A job that has ended already is answered as
+    it is, unchanged. `NfcJobNotFoundError` for no such job."""
+    with spools.transaction() as conn:
+        expire_jobs(conn)
+        job = _locked_job(conn, job_id)
+        if job.state not in ("pending", "armed"):
+            return job
+        row = conn.execute(
+            f"UPDATE filament_nfc_jobs SET state = 'cancelled' WHERE id = %s"
+            f" RETURNING {_JOB_COLUMNS}",
+            (job_id,),
+        ).fetchone()
+    assert row is not None
+    return _job_of(row)

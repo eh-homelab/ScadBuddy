@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Sequence
 from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
 import psycopg
@@ -426,9 +429,16 @@ def _armed(client: TestClient, kind: str = "write") -> str:
     made = client.post(JOBS, json=body)
     assert made.status_code == 201, made.text
     job_id: str = made.json()["id"]
-    claimed = client.post(f"{JOBS}/{job_id}/claim")
+    claim = None if kind == "read" else {"records_sha256": _sha256(made.json()["records"])}
+    claimed = client.post(f"{JOBS}/{job_id}/claim", json=claim)
     assert claimed.status_code == 200, claimed.text
     return job_id
+
+
+def _sha256(records: list[dict[str, Any]]) -> str:
+    """#7273 R22: the hash the phone page sends, of the records as the job's GET gives them."""
+    canonical = json.dumps(records, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _agent_backup(client: TestClient, job_id: str) -> str:
@@ -449,7 +459,7 @@ def test_a_read_job_runs_through_the_read_function(client: TestClient) -> None:
     armed = client.post(f"{JOBS}/{job['id']}/claim").json()
     assert armed["state"] == "armed" and armed["armed_by"]
     assert client.get(JOBS, params={"state": "pending"}).json() == []
-    done = client.post(f"{JOBS}/{job['id']}/result", json={"uid": "04AA", "records": [_REC]})
+    done = client.post(f"{JOBS}/{job['id']}/result", json={"uid": "04:aa", "records": [_REC]})
     assert done.status_code == 200, done.text
     result = done.json()["result"]
     assert done.json()["state"] == "done" and result["next"] == "bind_or_create"
@@ -473,6 +483,47 @@ def test_an_unknown_job_is_404(client: TestClient) -> None:
     assert client.get(unknown).status_code == 404
     assert client.post(f"{unknown}/claim").status_code == 404
     assert client.post(f"{unknown}/result", json={"error": "x"}).status_code == 404
+    assert client.post(f"{unknown}/cancel").status_code == 404
+
+
+def test_a_write_claim_carries_the_hash_of_the_records_shown(client: TestClient) -> None:
+    # #7273 R22: a missing or wrong hash is 409 `records_mismatch`, and the job stays pending.
+    job = client.post(JOBS, json={"kind": "write", "records": [_REC]}).json()
+    shown = client.get(f"{JOBS}/{job['id']}").json()["records"]
+    for claim in (None, {}, {"records_sha256": _sha256([_OTHER])}):
+        got = client.post(f"{JOBS}/{job['id']}/claim", json=claim)
+        assert got.status_code == 409 and got.json()["code"] == "records_mismatch", claim
+        assert client.get(f"{JOBS}/{job['id']}").json()["state"] == "pending"
+    assert client.post(f"{JOBS}/{job['id']}/claim", json={"records_sha256": "x"}).status_code == 422
+    armed = client.post(f"{JOBS}/{job['id']}/claim", json={"records_sha256": _sha256(shown)})
+    assert armed.status_code == 200, armed.text
+    assert armed.json()["state"] == "armed"
+
+
+def test_a_read_claim_with_a_records_hash_is_422(client: TestClient) -> None:
+    job_id = client.post(JOBS, json={"kind": "read"}).json()["id"]
+    got = client.post(f"{JOBS}/{job_id}/claim", json={"records_sha256": _sha256([])})
+    assert got.status_code == 422 and got.json()["code"] == "records_sha256_not_taken"
+    assert client.get(f"{JOBS}/{job_id}").json()["state"] == "pending"
+
+
+def test_cancel_ends_an_open_job_and_answers_an_ended_one_as_it_is(client: TestClient) -> None:
+    # #7273 M1: the agent cancels a job it stopped waiting for; no page can arm it then.
+    pending = client.post(JOBS, json={"kind": "read"}).json()["id"]
+    armed = _armed(client)
+    for job_id in (pending, armed):
+        got = client.post(f"{JOBS}/{job_id}/cancel")
+        assert got.status_code == 200, got.text
+        assert got.json()["state"] == "cancelled" and got.json()["result"] is None
+    assert client.get(JOBS, params={"state": "pending"}).json() == []
+    claim = client.post(f"{JOBS}/{pending}/claim")
+    assert claim.status_code == 409 and claim.json()["code"] == "job_not_pending"
+    late = client.post(f"{JOBS}/{armed}/result", json={"error": "late"})
+    assert late.status_code == 409 and late.json()["code"] == "job_not_armed"
+    ended = _armed(client, "read")
+    failed = client.post(f"{JOBS}/{ended}/result", json={"error": "declined"}).json()
+    again = client.post(f"{JOBS}/{ended}/cancel")
+    assert again.status_code == 200 and again.json() == failed
 
 
 def test_a_write_job_needs_its_own_agent_write_backup(client: TestClient) -> None:
@@ -500,7 +551,7 @@ def test_a_write_job_is_done_only_when_the_read_back_matches(client: TestClient)
     assert done.status_code == 200, done.text
     assert done.json()["state"] == "done"
     result = done.json()["result"]
-    assert result["uid"] == "04:aa" and result["backup_id"] == backup
+    assert result["uid"] == "04AA" and result["backup_id"] == backup
     assert [r["data_hex"] for r in result["records"]] == ["7b7d"] and "error" not in result
 
     other = _armed(client)

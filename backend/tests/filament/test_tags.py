@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 from uuid import UUID, uuid4
@@ -15,6 +16,7 @@ from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.models import (
     Material,
     NdefRecord,
+    NfcJobClaimIn,
     NfcJobIn,
     NfcJobResultIn,
     SpoolCreate,
@@ -22,6 +24,7 @@ from scadbuddy.filament.models import (
     TagBackupIn,
     TagRecordsIn,
     TagWrittenIn,
+    records_sha256,
 )
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore, TagKeysClashError
 from scadbuddy.filament.tags import TagRead
@@ -420,7 +423,8 @@ def _armed_job(store: FilamentSpoolStore, kind: str = "write") -> UUID:
     job = tags.create_job(
         store, NfcJobIn.model_validate({"kind": kind, "records": records}), actor="agent"
     )
-    return tags.claim_job(store, job.id, actor="ann").id
+    claim = None if records is None else NfcJobClaimIn(records_sha256=records_sha256(records))
+    return tags.claim_job(store, job.id, claim, actor="ann").id
 
 
 def test_an_agent_backup_must_match_its_job(pg_pool: PgPool) -> None:
@@ -460,15 +464,16 @@ def test_a_job_goes_pending_armed_done(pg_pool: PgPool) -> None:
     job = tags.create_job(store, NfcJobIn(kind="read"), actor="agent")
     assert job.state == "pending" and job.created_by == "agent" and job.armed_by is None
     assert [j.id for j in tags.pending_jobs(store)] == [job.id]
-    armed = tags.claim_job(store, job.id, actor="ann")
+    armed = tags.claim_job(store, job.id, None, actor="ann")
     assert armed.state == "armed" and armed.armed_by == "ann"
     with pytest.raises(tags.JobNotPendingError):
-        tags.claim_job(store, job.id, actor="bob")
+        tags.claim_job(store, job.id, None, actor="bob")
     done = tags.finish_job(
-        store, job.id, NfcJobResultIn(uid="04aa", records=[]), actor="ann", defaults=DEFAULTS
+        store, job.id, NfcJobResultIn(uid="04:aa", records=[]), actor="ann", defaults=DEFAULTS
     )
     assert done.state == "done" and done.result is not None
-    assert done.result["next"] == "bind_or_create" and done.result["uid"] == "04aa"
+    # #7273 M2: the result names the UID as it is stored, not as the page sent it.
+    assert done.result["next"] == "bind_or_create" and done.result["uid"] == "04AA"
     assert tags.get_job(store, job.id) == done
     with pytest.raises(tags.JobNotArmedError):
         tags.finish_job(store, job.id, NfcJobResultIn(error="x"), actor="ann", defaults=DEFAULTS)
@@ -514,6 +519,104 @@ def test_a_write_job_checks_the_read_back(pg_pool: PgPool) -> None:
     assert done.state == "done" and done.result is not None
     assert done.result["backup_id"] == str(backup.id)
     assert _tag(pg_pool, backup.tag_id)["last_seen_records"][0]["data_hex"] == "7b7d"
+
+
+def test_a_mismatched_read_back_still_marks_the_tag_seen(pg_pool: PgPool) -> None:
+    # #7273 M3: the tag is recorded with what it holds, and the job fails.
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    backup = tags.back_up(
+        store, TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job), actor="ann"
+    )
+    read_back = [NdefRecord(record_type="mime", data_hex="5b5d")]
+    failed = tags.finish_job(
+        store,
+        job,
+        NfcJobResultIn(uid="04:aa", records=read_back, backup_id=backup.id),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert failed.state == "failed" and failed.result is not None
+    assert failed.result["uid"] == "04AA"
+    seen = _tag(pg_pool, backup.tag_id)
+    assert seen["last_seen_source"] == "agent"
+    assert seen["last_seen_records"][0]["data_hex"] == "5b5d"
+
+
+def test_records_sha256_hashes_the_canonical_json_of_the_records() -> None:
+    # #7273 R22: the phone page computes the same bytes with crypto.subtle.
+    records = [
+        NdefRecord(record_type="mime", media_type="application/json", data_hex="7B7D"),
+        NdefRecord(record_type="text", lang="en", encoding="utf-8", data_hex="c3a9"),
+    ]
+    canonical = (
+        '[{"data_hex":"7b7d","encoding":null,"id":null,"lang":null,'
+        '"media_type":"application/json","record_type":"mime"},'
+        '{"data_hex":"c3a9","encoding":"utf-8","id":null,"lang":"en",'
+        '"media_type":null,"record_type":"text"}]'
+    )
+    assert records_sha256(records) == hashlib.sha256(canonical.encode()).hexdigest()
+    # Non-ASCII text is written as UTF-8, not escaped.
+    raw = (
+        '[{"data_hex":"","encoding":null,"id":"é","lang":null,"media_type":null,'
+        '"record_type":"mime"}]'
+    )
+    assert records_sha256([NdefRecord(record_type="mime", id="é", data_hex="")]) == (
+        hashlib.sha256(raw.encode()).hexdigest()
+    )
+
+
+def test_a_write_job_is_armed_only_for_the_records_shown(pg_pool: PgPool) -> None:
+    # #7273 R22: the claim names the hash of the records the page showed.
+    store = FilamentSpoolStore(pg_pool)
+    records = [NdefRecord(record_type="mime", data_hex="7b7d")]
+    job = tags.create_job(store, NfcJobIn(kind="write", records=records), actor="agent").id
+    other = records_sha256([NdefRecord(record_type="mime", data_hex="5b5d")])
+    for claim in (None, NfcJobClaimIn(), NfcJobClaimIn(records_sha256=other)):
+        with pytest.raises(tags.RecordsMismatchError):
+            tags.claim_job(store, job, claim, actor="ann")
+        found = tags.get_job(store, job)
+        assert found is not None and found.state == "pending" and found.armed_by is None
+    right = NfcJobClaimIn(records_sha256=records_sha256(records).upper())
+    assert tags.claim_job(store, job, right, actor="ann").state == "armed"
+
+
+def test_a_read_job_claim_takes_no_records_hash(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = tags.create_job(store, NfcJobIn(kind="read"), actor="agent").id
+    with pytest.raises(tags.RecordsHashNotTakenError):
+        tags.claim_job(store, job, NfcJobClaimIn(records_sha256="0" * 64), actor="ann")
+    found = tags.get_job(store, job)
+    assert found is not None and found.state == "pending"
+    assert tags.claim_job(store, job, NfcJobClaimIn(), actor="ann").state == "armed"
+
+
+def test_cancel_ends_an_open_job_and_leaves_an_ended_one(pg_pool: PgPool) -> None:
+    # #7273 M1: an agent that stops waiting cancels its job, so no page arms it later.
+    store = FilamentSpoolStore(pg_pool)
+    pending = tags.create_job(store, NfcJobIn(kind="read"), actor="agent").id
+    armed = _armed_job(store)
+    ended = _armed_job(store, "read")
+    failed = tags.finish_job(
+        store, ended, NfcJobResultIn(error="declined"), actor="ann", defaults=DEFAULTS
+    )
+    for job_id in (pending, armed):
+        cancelled = tags.cancel_job(store, job_id)
+        assert cancelled.state == "cancelled" and cancelled.result is None
+    assert tags.pending_jobs(store) == []
+    with pytest.raises(tags.JobNotPendingError):
+        tags.claim_job(store, pending, None, actor="ann")
+    with pytest.raises(tags.JobNotArmedError):
+        tags.back_up(
+            store,
+            TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=armed),
+            actor="ann",
+        )
+    with pytest.raises(tags.JobNotArmedError):
+        tags.finish_job(store, armed, NfcJobResultIn(error="x"), actor="ann", defaults=DEFAULTS)
+    assert tags.cancel_job(store, ended) == failed
+    with pytest.raises(tags.NfcJobNotFoundError):
+        tags.cancel_job(store, uuid4())
 
 
 def test_the_job_id_goes_with_agent_write_only() -> None:

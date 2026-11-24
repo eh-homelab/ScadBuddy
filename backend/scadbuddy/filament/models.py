@@ -10,6 +10,8 @@ are typed so. Every colour is an `Rgba`: ``#rrggbb`` is stored as ``#RRGGBBFF``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -1938,7 +1940,8 @@ class TagWrittenIn(_In):
 
 
 NfcJobKind = Literal["read", "write"]
-NfcJobState = Literal["pending", "armed", "done", "failed", "expired"]
+#: ``cancelled``: the agent stopped waiting for it (#7273 M1).
+NfcJobState = Literal["pending", "armed", "done", "failed", "expired", "cancelled"]
 
 
 class NfcJobIn(_In):
@@ -1968,6 +1971,42 @@ class NfcJob(BaseModel):
     created_at: datetime
     expires_at: datetime
     armed_by: str | None
+
+
+def records_sha256(records: Sequence[NdefRecord]) -> str:
+    """The SHA-256, as lower-case hex, of the canonical JSON of ``records`` (`NfcJobClaimIn`)."""
+    canonical = json.dumps(
+        [r.model_dump(mode="json") for r in records],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class NfcJobClaimIn(_In):
+    """The phone page arms a job (#7273 R22). For a ``write`` job, ``records_sha256`` is
+    required: the SHA-256 (hex) of the records the page showed the person, so that the
+    person's tap approves exactly those records. A ``read`` job takes none.
+
+    The hashed bytes are the UTF-8 of the job's ``records`` array exactly as
+    ``GET /nfc-jobs/{job_id}`` returns it, written as canonical JSON: the array in its own
+    order; in each record object, every key it has (``data_hex``, ``encoding``, ``id``,
+    ``lang``, ``media_type``, ``record_type``, with ``null`` for an absent value) in sorted
+    order; no spaces or newlines (separators ``,`` and ``:``); strings as ``JSON.stringify``
+    writes them (non-ASCII characters as themselves, not ``\\u`` escapes). One record
+    ``{"record_type": "mime", "data_hex": "7b7d"}`` is hashed as
+    ``[{"data_hex":"7b7d","encoding":null,"id":null,"lang":null,"media_type":null,"record_type":"mime"}]``.
+    In a browser: ``JSON.stringify`` of the records with each object's keys sorted, then
+    ``crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))``. The server's side
+    is `records_sha256`."""
+
+    records_sha256: Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")] | None = None
+
+    @field_validator("records_sha256")
+    @classmethod
+    def _lower(cls, value: str | None) -> str | None:
+        return None if value is None else value.lower()
 
 
 class NfcJobResultIn(_In):

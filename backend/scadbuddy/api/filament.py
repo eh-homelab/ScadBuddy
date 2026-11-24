@@ -1987,8 +1987,8 @@ async def list_nfc_jobs(filament: FilamentDep, state: Literal["pending"]) -> lis
     response_model=m.NfcJob,
     summary="Read an NFC job",
     description=(
-        "One job: its `state` (`pending`, `armed`, `done`, `failed` or `expired`) and, once it "
-        "ended, its `result`. 404 for none."
+        "One job: its `state` (`pending`, `armed`, `done`, `failed`, `expired` or "
+        "`cancelled`) and, once it ended, its `result`. 404 for none."
     ),
 )
 async def get_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
@@ -2003,17 +2003,49 @@ async def get_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
     response_model=m.NfcJob,
     summary="Arm an NFC job",
     description=(
-        "The phone page arms a pending job when its person taps Arm; only one page can. 404 "
-        "for no job, 409 `job_not_pending` for a job that is not pending."
+        "The phone page arms a pending job when its person taps Arm; only one page can. A "
+        "`write` job's claim carries `records_sha256`, the SHA-256 of the canonical JSON of "
+        "the records the page showed (the body's schema says how it is written, #7273 R22); "
+        "a missing or other hash is 409 `records_mismatch` and the job stays pending. A "
+        "`read` job's claim takes no body, or one with no hash: a hash is 422 "
+        "`records_sha256_not_taken`. 404 for no job, 409 `job_not_pending` for a job that is "
+        "not pending."
     ),
 )
-async def claim_nfc_job(filament: FilamentDep, caller: CallerDep, job_id: UUID) -> m.NfcJob:
+async def claim_nfc_job(
+    filament: FilamentDep,
+    caller: CallerDep,
+    job_id: UUID,
+    body: m.NfcJobClaimIn | None = None,
+) -> m.NfcJob:
     try:
-        return await asyncio.to_thread(tags.claim_job, filament.spools, job_id, actor=actor(caller))
+        return await asyncio.to_thread(
+            tags.claim_job, filament.spools, job_id, body, actor=actor(caller)
+        )
     except tags.NfcJobNotFoundError:
         raise _no_job(job_id) from None
-    except tags.JobNotPendingError as exc:
+    except tags.RecordsHashNotTakenError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code=exc.code) from None
+    except (tags.JobNotPendingError, tags.RecordsMismatchError) as exc:
         raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+
+
+@router.post(
+    "/nfc-jobs/{job_id}/cancel",
+    response_model=m.NfcJob,
+    summary="Cancel an NFC job",
+    description=(
+        "The agent that asked for a job stops waiting for it (#7273): a `pending` or `armed` "
+        "job becomes `cancelled`, so no page can arm it or post its result. A job that has "
+        "ended already (`done`, `failed`, `expired` or `cancelled`) is answered as it is, "
+        "unchanged. 404 for no job."
+    ),
+)
+async def cancel_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
+    try:
+        return await asyncio.to_thread(tags.cancel_job, filament.spools, job_id)
+    except tags.NfcJobNotFoundError:
+        raise _no_job(job_id) from None
 
 
 @router.post(
