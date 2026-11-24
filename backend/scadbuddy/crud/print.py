@@ -1408,7 +1408,7 @@ def _when(value: str | None) -> datetime | None:
 _refuse(RemoteRackUsage, "RackUsageStore", RACK_API_ONLY)
 
 
-# -- filament (#6262, #6265, #6268, #6646, #6772, #7176) --------------------------------------
+# -- filament (#6262, #6265, #6268, #6646, #6772, #7176) ------------------------------
 
 
 class RemoteFilamentTrays:
