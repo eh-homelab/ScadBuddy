@@ -404,6 +404,23 @@ def test_create_from_slot_refuses_what_link_refuses(client: TestClient, lan_prin
     assert _filament(client).spools.list() == []
 
 
+def test_a_tray_colour_that_is_no_rgba_is_a_short_422(
+    client: TestClient, lan_printer: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-7150-5: a tray whose stored colour is not `#RRGGBBAA` makes no spool; the
+    answer is a 422 with a short reason, never a 409 carrying the validator's text."""
+    import scadbuddy.api.tray_spools as routes
+
+    def bad_colour(status: Any) -> list[Any]:
+        return [t.model_copy(update={"rgba": "#XYZ"}) for t in seen_trays(status)]
+
+    monkeypatch.setattr(routes, "seen_trays", bad_colour)
+    refused = _new(client, lan_printer, 1)
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == "the tray's colour '#XYZ' is not #RRGGBBAA"
+    assert _filament(client).spools.list() == []
+
+
 def test_a_copy_leaves_the_tray_behind(client: TestClient, lan_printer: str) -> None:
     made = _new(client, lan_printer, 1).json()
     draft = client.get(f"/api/v1/filament/spools/{made['id']}/copy").json()
