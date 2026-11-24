@@ -304,7 +304,7 @@ const flowReads = new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch })
 const events = new ChangeStream(config.backendUrl, { fetch: crudFetch })
 // The pending-input tables' change ticks (#815, gate/changes.ts), for the badge's stream.
 const pendingChanges = new PendingChanges(events)
-// This replica's own queue: a pinned turn tool's calls (#2320), a classic session's
+// This replica's own queue: a pinned turn tool's calls (#2320), a session's
 // Monitor commands, which run where its turns' Bash runs, the browser_* calls other
 // replicas make for a tab connected here (#4780), and the BridgeCall workflows this
 // replica starts for a tab on another one (#5862).
@@ -591,7 +591,7 @@ const sessions = new SessionManager({
   // Every usable credential in priority order, with fallback; disables,
   // cooldowns, recoveries and fallbacks are audited (#1093).
   credentials: new CredentialPool({ repo: credentials, audit }),
-  // One warm Claude Code per classic session (unified runtime spec 2026-10-13
+  // One warm Claude Code per session (unified runtime spec 2026-10-13
   // §5.3, sessions/warm.ts), sized by the runtime settings (sessions/runtimeSettings.ts).
   warm: { maxEntries: runtime.warm_max_per_replica, idleMs: runtime.warm_idle_seconds * 1000, log: (message) => console.log(message) },
 })
@@ -1005,7 +1005,7 @@ const sessionWorker =
 // This replica's own queues (temporal/session/hostWorkers.ts), unversioned (plan Phase 11): a queue
 // only one replica polls is no member of a newer build, so once that build is current Temporal
 // would hand a versioned one's tasks to no one while its replica still runs. A pinned turn tool's calls
-// (#2320), a classic session's Monitor commands and this replica's BridgeCalls on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
+// (#2320), a session's Monitor commands and this replica's BridgeCalls on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
 // cache's largest setting plus two for releases. Their work dies with the pod; a call scheduled after
 // that fails at its schedule-to-start (a turn) or schedule-to-close (a pinned call) timeout.
 const hostWorkers =
@@ -1018,7 +1018,7 @@ const hostWorkers =
         pinned: {
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
-          // A classic session's Monitor commands, in its directory on this replica.
+          // A session's Monitor commands, in its directory on this replica.
           ...(background ? { bg_monitor_command: background.bg_monitor_command } : {}),
           // Other replicas' browser_* calls for a tab connected here (#4780).
           // Its tabs are claimed once this worker polls (startHosting, below).

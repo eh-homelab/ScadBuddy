@@ -438,8 +438,8 @@ opens every one and seals it again byte for byte).
     `decideInput` decides it in one transaction, then the Signal `input_decided` wakes the
     workflow, which also re-reads it through `gate.read_input`, plan Step 9.7), the Temporal
     client of a session's gate handlers (`durable.ts` `DurableGate`), the `done` summaries and
-    attention limits (`questions.ts`, `doneSummary.ts`, `waiting.ts`; `gate/classic.ts` and
-    `questions/` were folded in, #5110) and the orphan sweep (`sweep.ts`). The workflow's half is
+    attention limits (`questions.ts`, `doneSummary.ts`, `waiting.ts`; #5110 folded the
+    old question stores in) and the orphan sweep (`sweep.ts`). The workflow's half is
     `temporal/session/gate.ts` (`SessionGate`) and `gateActivities.ts`. `routes/pendingInput.ts` serves
     both reads and `respond`. `input.requested` / `input.resolved` are logged and never
     sent on the chat socket (`routes/chat.ts` `sentToPanel`).
