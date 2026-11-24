@@ -55,7 +55,7 @@ def offer_not_found(offer_id: object) -> ApiError:
 
 
 def lot_not_found(lot_id: object) -> ApiError:
-    return problem(_404, "lot_not_found", f"no lot {str(lot_id)!r} (of this item)")
+    return problem(_404, "lot_not_found", f"no lot {str(lot_id)!r}")
 
 
 def unit_not_found(unit_id: object) -> ApiError:
@@ -63,20 +63,18 @@ def unit_not_found(unit_id: object) -> ApiError:
 
 
 def supplier_not_found(supplier_id: object) -> ApiError:
-    return problem(
-        _404, "supplier_not_found", f"no supplier {str(supplier_id)!r}, or it is archived"
-    )
+    return problem(_404, "supplier_not_found", f"no supplier {str(supplier_id)!r}")
 
 
 #: Each store error and its problem: (status, code, what the detail says before the
 #: error's own text).
 _CODES: tuple[tuple[type[Exception], int, str, str], ...] = (
     (KindNotFound, _404, "kind_not_found", "no item kind"),
-    (ItemNotFound, _404, "item_not_found", "no item (or it is archived)"),
+    (ItemNotFound, _404, "item_not_found", "no item"),
     (OfferNotFound, _404, "offer_not_found", "no offer"),
-    (LotNotFound, _404, "lot_not_found", "no lot (of this item)"),
+    (LotNotFound, _404, "lot_not_found", "no lot"),
     (UnitNotFound, _404, "unit_not_found", "no unit"),
-    (SupplierNotFound, _404, "supplier_not_found", "no supplier (or it is archived)"),
+    (SupplierNotFound, _404, "supplier_not_found", "no supplier, or it is archived"),
     (LocationNotFound, _404, "location_not_found", "no location"),
     (KindExists, _409, "kind_exists", "an item kind has that id"),
     (KindInUse, _409, "kind_in_use", "the kind's items or built-in status forbid it"),
@@ -118,7 +116,8 @@ _CODES: tuple[tuple[type[Exception], int, str, str], ...] = (
         BadQuantity,
         _422,
         "bad_quantity",
-        "a quantity is above 0 with at most six decimal places, and whole for an `each` item",
+        "a quantity or a cost is out of range: at most six decimal places, whole for an"
+        " `each` item, and small enough that a stock move's amount fits",
     ),
 )
 
