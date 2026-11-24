@@ -23,6 +23,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.mesh_blobs import HOLDER, MeshPointer
 from scadbuddy.library.presets import ParamPresetCreate
+from scadbuddy.main import create_app
 from scadbuddy.meshmodel import ingest
 from scadbuddy.meshmodel import operations as mesh_operations
 from scadbuddy.meshmodel.scene import MAX_OBJECTS, load_scene, text_sha256
@@ -552,6 +553,33 @@ def test_deleting_an_object_removes_the_meshes_only_it_used(
     done = edit(client, slug, {"edit": "delete", "object": "o2"})
     assert done.status_code == 200, done.text
     assert sorted(p.name for p in meshes.iterdir()) == ["o1-p1.3mf", "o1-p1.3mf.blob"]
+
+
+def test_the_apps_start_converts_meshes_tracked_as_bytes(
+    settings: Settings, paths: DataPaths
+) -> None:
+    """#7313: the first start on a volume from before it stores each mesh git tracks
+    as bytes, holds it, and leaves a pointer in git and the mesh on the volume."""
+    mesh = b"PK\x03\x04an old mesh"
+    history = ModelHistory(paths.models)
+    history.ensure_repo()
+    target = paths.model_dir("old") / "meshes" / "o1-p1.3mf"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(mesh)
+    history._run("add", "-f", "--", "old")
+    history._run("commit", "--no-verify", "-m", "Add old")
+
+    with TestClient(create_app(settings)):
+        tracked = history._out("ls-tree", "-r", "--name-only", "HEAD", "--", "old").splitlines()
+    assert tracked == ["old/meshes/o1-p1.3mf.blob"]
+    assert target.read_bytes() == mesh
+    pointer = MeshPointer.loads(target.with_name("o1-p1.3mf.blob").read_bytes())
+    with psycopg.connect(settings.database_url) as conn:
+        row = conn.execute(
+            "SELECT key FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (HOLDER, pointer.sha256),
+        ).fetchone()
+    assert row is not None and row[0] == blob_key(pointer.sha256)
 
 
 def test_a_mesh_is_a_held_blob_and_a_pointer_in_git(

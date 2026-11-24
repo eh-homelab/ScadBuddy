@@ -159,6 +159,8 @@ class ModelHistory(GitRepo):
         #: The meshes a restore under way fetched, by path, to put in place once the
         #: revision is checked out (`_after_checkout`); None for one already in place.
         self._restoring: dict[str, Path | None] = {}
+        #: Each mesh this process stored: its file then, and its pointer (`_point`).
+        self._stored: dict[str, tuple[tuple[int, int, int, int], MeshPointer]] = {}
 
     def _gitignore_body(self) -> str:
         return _gitignore_body(self.wrapper_prefix)
@@ -188,7 +190,11 @@ class ModelHistory(GitRepo):
                 continue
             self._point(mesh)
         for pointer in pointers:
-            if not (self.root / pointer.removesuffix(POINTER_SUFFIX)).is_file():
+            if (self.root / pointer.removesuffix(POINTER_SUFFIX)).is_file():
+                continue
+            if "." in targets:  # a start (`ensure_repo`), not an action that removed it
+                self._refill(pointer)
+            else:
                 (self.root / pointer).unlink(missing_ok=True)
         if legacy:
             self._run("rm", "--cached", "--quiet", "--ignore-unmatch", "--", *sorted(legacy))
@@ -225,28 +231,37 @@ class ModelHistory(GitRepo):
         return meshes, pointers
 
     def _point(self, mesh: str) -> None:
-        """Store ``mesh``'s bytes and write its pointer, unless the pointer is newer
-        than the mesh and of its size: then it already names these bytes."""
+        """Store ``mesh``'s bytes and write its pointer. Only a mesh this process stored
+        itself, and whose file is that one still, is not read again: a pointer is never
+        taken on its own file's times, which a checkout or a rollback moves."""
         path = self.root / mesh
         pointer_path = self.root / f"{mesh}{POINTER_SUFFIX}"
         stat = path.stat()
+        seen = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
         current: MeshPointer | None = None
         with contextlib.suppress(OSError, ValueError):
             current = MeshPointer.loads(pointer_path.read_bytes())
-            if current.size == stat.st_size and stat.st_mtime_ns < pointer_path.stat().st_mtime_ns:
-                return
+        if current is not None and self._stored.get(mesh) == (seen, current):
+            return
         if self.meshes is None:
             raise GitError(
                 f"{mesh} is a mesh, whose bytes are kept in the blob store, and this"
                 " process has no blob store"
             )
-        sha256 = sha256_file(path)
-        self.meshes.put(path, sha256)
-        pointer = MeshPointer(sha256=sha256, size=stat.st_size)
-        if current == pointer:
-            os.utime(pointer_path)
-        else:
+        pointer = self.meshes.put(path)
+        if current != pointer:
             pointer_path.write_bytes(pointer.dumps())
+        self._stored[mesh] = (seen, pointer)
+
+    def _refill(self, pointer: str) -> None:
+        """At a start, the mesh a pointer names and the volume lacks (one restored from
+        the off-box copy, #4974), from the store. A pointer stays when the store lacks
+        the mesh too: a start deletes nothing."""
+        try:
+            named = MeshPointer.loads((self.root / pointer).read_bytes())
+            self._store().get(named.sha256, self.root / pointer.removesuffix(POINTER_SUFFIX))
+        except (GitError, OSError, ValueError):
+            logger.exception("could not fill in a mesh", extra={"pointer": pointer})
 
     def _store(self) -> MeshStore:
         if self.meshes is None:
@@ -284,14 +299,17 @@ class ModelHistory(GitRepo):
         """Each mesh a pointer at ``resolved`` names under ``path``, fetched under
         ``scratch``; None for one the working tree already holds."""
         fetched: dict[str, Path | None] = {}
+        tracked = set(self._tracked_meshes([path]))
         for pointer in self._files_at(resolved, path):
             if not is_pointer_path(pointer):
                 continue
             mesh = pointer.removesuffix(POINTER_SUFFIX)
             named = self._pointer_at(resolved, pointer)
             current = self.root / mesh
+            # One HEAD tracks as bytes is removed with what the revision does not have.
             if (
-                current.is_file()
+                mesh not in tracked
+                and current.is_file()
                 and current.stat().st_size == named.size
                 and sha256_file(current) == named.sha256
             ):
@@ -314,8 +332,6 @@ class ModelHistory(GitRepo):
         for mesh, fetched in self._restoring.items():
             if fetched is not None:
                 os.replace(fetched, self.root / mesh)
-            # Newer than its mesh, so `_point` takes it as naming these bytes.
-            os.utime(self.root / f"{mesh}{POINTER_SUFFIX}")
 
     def mesh_digest(self, commit: str | None, path: str) -> str | None:
         """The sha256 of the mesh at ``path`` at ``commit``: from its pointer, or from
@@ -355,7 +371,22 @@ class ModelHistory(GitRepo):
         being left untracked, which is what makes the first built-in sync land on top
         of revision 1 on a fresh volume. See :meth:`GitRepo.ensure_repo`.
         """
+        self._store_tracked()
         return super().ensure_repo()
+
+    def _store_tracked(self) -> None:
+        """The meshes still tracked as bytes, stored before :meth:`ensure_repo` takes the
+        write lock to convert them (#7313): another replica's commit waits only
+        ``timeout`` for it, and these can run to hundreds of MB. Under the lock each is
+        then only hashed and found stored."""
+        if self.meshes is None or not self.available:
+            return
+        try:
+            for mesh in self._tracked_meshes(["."]):
+                if (self.root / mesh).is_file():
+                    self.meshes.put(self.root / mesh)
+        except (GitError, OSError):
+            logger.exception("could not store the meshes tracked as bytes")
 
     def maintain(self, *, loose_objects: int | None = None, packs: int | None = None) -> bool:
         """Pack the repository when it has piled up loose objects or packs (#2289):

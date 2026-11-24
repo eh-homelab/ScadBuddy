@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -264,6 +266,77 @@ def test_the_start_without_a_store_leaves_tracked_meshes_alone(models: Path) -> 
     assert "carrot/meshes/o1-p1.3mf" in _tracked(history)
 
 
+def test_a_pointer_newer_than_a_mesh_of_its_size_is_not_trusted(
+    models: Path, history: ModelHistory
+) -> None:
+    """A pointer is never taken on file times alone: a revision naming other bytes
+    than the mesh it was committed with could not be noticed later."""
+    _mesh_model(models, "carrot")
+    history.commit("Add carrot", "carrot")
+    other = bytes(reversed(MESH_A))
+    _write(models, "carrot/meshes/o1-p1.3mf", other)
+    os.utime(models / "carrot/meshes/o1-p1.3mf", (1, 1))
+    history.commit("Edit carrot", "carrot")
+    pointer = MeshPointer.loads(history.show("HEAD", "carrot/meshes/o1-p1.3mf.blob"))
+    assert pointer.sha256 == _sha(other)
+
+
+def test_a_start_fills_in_meshes_the_volume_lost(models: Path, history: ModelHistory) -> None:
+    """A volume restored from the off-box copy holds the pointers and no mesh."""
+    _mesh_model(models, "carrot")
+    head = history.commit("Add carrot", "carrot")
+    (models / "carrot/meshes/o1-p1.3mf").unlink()
+    assert history.ensure_repo() is None
+    assert history.head() == head
+    assert (models / "carrot/meshes/o1-p1.3mf").read_bytes() == MESH_A
+
+
+def test_a_start_keeps_the_pointer_of_a_mesh_the_store_lacks(
+    models: Path, history: ModelHistory, store: MemoryMeshStore
+) -> None:
+    _mesh_model(models, "carrot")
+    head = history.commit("Add carrot", "carrot")
+    (models / "carrot/meshes/o1-p1.3mf").unlink()
+    store.blobs.clear()
+    assert history.ensure_repo() is None
+    assert history.head() == head
+    assert "carrot/meshes/o1-p1.3mf.blob" in _tracked(history)
+
+
+def test_a_restore_over_a_mesh_tracked_as_bytes_keeps_it(
+    models: Path, history: ModelHistory
+) -> None:
+    _mesh_model(models, "carrot")
+    first = history.commit("Add carrot", "carrot")
+    assert first is not None
+    # HEAD holds the same mesh as bytes, as a replica on the old code can leave it.
+    (models / "carrot/meshes/o1-p1.3mf.blob").unlink()
+    history._run("add", "-A", "--", "carrot")
+    _legacy_commit(history, "carrot", "carrot/meshes/o1-p1.3mf")
+    history.restore("carrot", first)
+    assert (models / "carrot/meshes/o1-p1.3mf").read_bytes() == MESH_A
+    assert "carrot/meshes/o1-p1.3mf.blob" in _tracked(history)
+
+
+def test_the_conversion_stores_meshes_before_it_takes_the_write_lock(
+    models: Path, history: ModelHistory, store: MemoryMeshStore
+) -> None:
+    """Another replica's commit waits only `git_timeout` for the lock."""
+    _mesh_model(models, "carrot")
+    _legacy_commit(history, "carrot", "carrot")
+    held: list[bool] = []
+    put = store.put
+
+    def watched(*args: Any) -> Any:
+        held.append(history._lock.locked())
+        return put(*args)
+
+    store.put = watched  # type: ignore[assignment,method-assign]
+    history.ensure_repo()
+    assert held[0] is False
+    assert history.log("carrot")[0].message == CONVERT_MESSAGE
+
+
 def test_the_gitignore_keeps_meshes_out(models: Path, history: ModelHistory) -> None:
     body = (models / ".gitignore").read_text()
     assert "*/meshes/*.3mf" in body.splitlines()
@@ -282,6 +355,24 @@ def catalogue(tmp_path: Path, store: MemoryMeshStore) -> Catalogue:
     history.meshes = store
     history.ensure_repo()
     return Catalogue(paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+
+
+def test_an_unchanged_builtin_with_a_mesh_is_not_copied_again(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    """The mirror has a pointer beside the mesh; the image has the mesh alone."""
+    bundled = tmp_path / "bundled"
+    _mesh_model(bundled, "demo")
+    assert catalogue.sync_builtins(bundled) is not None
+    mesh = catalogue.paths.models / "_builtin/demo/meshes/o1-p1.3mf"
+    first = mesh.stat().st_ino
+    assert mesh.with_name("o1-p1.3mf.blob").is_file()
+    assert catalogue.sync_builtins(bundled) is None
+    assert mesh.stat().st_ino == first
+    # A changed mesh still is.
+    _mesh_model(bundled, "demo", MESH_B)
+    assert catalogue.sync_builtins(bundled) is not None
+    assert mesh.read_bytes() == MESH_B
 
 
 def test_a_duplicate_copies_the_meshes(catalogue: Catalogue) -> None:

@@ -83,6 +83,7 @@ from scadbuddy.library.media import (
     readable_media,
 )
 from scadbuddy.library.media_store import MediaStore
+from scadbuddy.library.mesh_blobs import is_pointer_name
 from scadbuddy.library.pipelines import inputs_version_of
 from scadbuddy.library.presets import (
     PresetStore,
@@ -3182,7 +3183,8 @@ def _stat(path: Path) -> tuple[int, int]:
 
 def _tree(directory: Path, read: Callable[[Path], object] = Path.read_bytes) -> dict[str, object]:
     """``read`` of every file under ``directory`` by relative path, dotfiles left out
-    as the copy leaves them out. Empty when there is no such directory."""
+    as the copy leaves them out, and a mesh's pointer, which the history writes beside
+    it in the mirror (#7313). Empty when there is no such directory."""
     if not directory.is_dir():
         return {}
     return {
@@ -3190,6 +3192,7 @@ def _tree(directory: Path, read: Callable[[Path], object] = Path.read_bytes) -> 
         for path in directory.rglob("*")
         if path.is_file()
         and not any(part.startswith(".") for part in path.relative_to(directory).parts)
+        and not is_pointer_name(path.relative_to(directory).as_posix())
     }
 
 

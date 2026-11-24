@@ -131,8 +131,9 @@ def copy_verified(source: Path, dest: Path, sha256: str) -> None:
 class MeshStore(Protocol):
     """Where `ModelHistory` keeps meshes' bytes. Sync: the history runs on a thread."""
 
-    def put(self, path: Path, sha256: str) -> None:
-        """Keep the file at ``path`` (whose sha256 is ``sha256``), held for good."""
+    def put(self, path: Path) -> MeshPointer:
+        """Keep the file at ``path``, held for good; the pointer that names the bytes
+        kept. `GitError` when the store cannot."""
         ...
 
     def get(self, sha256: str, dest: Path) -> None:

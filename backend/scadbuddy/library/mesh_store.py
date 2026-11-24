@@ -7,14 +7,17 @@ reaches `library/libraries.py`, which imports the history."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
 
+from scadbuddy.core.gitrepo import GitError
 from scadbuddy.library.mesh_blobs import (
     HOLDER,
     MESH_TIMEOUT,
     MeshBlobMissingError,
+    MeshPointer,
     copy_verified,
 )
 from scadbuddy.orders.attachments import blob_key, blob_path, keep_file
@@ -42,12 +45,19 @@ class LoopMeshStore:
         self.loop = loop
         self.timeout = timeout
 
-    def put(self, path: Path, sha256: str) -> None:
-        # Kept first, then held: `keep_file` touches the blob, which keeps it from the
-        # sweeps until the hold is written (`BlobStore.claim`).
+    def put(self, path: Path) -> MeshPointer:
+        # One handle: what is hashed is what is kept, whatever replaces the file.
         with path.open("rb") as source:
+            sha256 = hashlib.file_digest(source, "sha256").hexdigest()
+            size = source.tell()
+            # Kept first, then held: `keep_file` touches the blob, which keeps it from
+            # the sweeps until the hold is written (`BlobStore.claim`).
             key = self._run(keep_file(self.blobs, source, sha256))
-        self.refs.add(key, HOLDER, sha256)
+        try:
+            self.refs.add(key, HOLDER, sha256)
+        except Exception as error:
+            raise GitError(f"could not hold a mesh in the blob store: {error}") from error
+        return MeshPointer(sha256=sha256, size=size)
 
     def get(self, sha256: str, dest: Path) -> None:
         found = self._run(blob_path(self.blobs, blob_key(sha256)))
@@ -63,4 +73,13 @@ class LoopMeshStore:
         if running is self.loop:
             coro.close()
             raise RuntimeError("the mesh store is called from a thread, never its own loop")
-        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(self.timeout)
+        if not self.loop.is_running():
+            coro.close()
+            raise GitError("the blob store's event loop is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        try:
+            return future.result(self.timeout)
+        except Exception as error:
+            # Whatever the store raised, as the error a commit undoes its change on.
+            future.cancel()
+            raise GitError(f"the blob store failed: {error}") from error

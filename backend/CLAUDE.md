@@ -242,7 +242,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `_after_checkout`) and `library/upstream.py` `plan_merge` (meshes compared by sha256)
   fill meshes back in; a revision from before then still holds the bytes and is read as
   it is. The start's `ensure_repo` turns meshes still tracked as bytes into pointers in
-  one commit, `CONVERT_MESSAGE`. With no mesh store, a commit with a new mesh fails.
+  one commit, `CONVERT_MESSAGE`, stored before it takes the write lock
+  (`_store_tracked`), and fills in a mesh whose pointer the volume holds alone (`_refill`;
+  it never removes a pointer). A pointer is not trusted on file times (`_point`). A store
+  failure is a `GitError`, so a commit undoes its change. With no mesh store, a commit with a new mesh fails.
   `render/geometry.py` `weak_joints` finds where a print snaps; `render/meshmatch.py`
   matches points and triangles in numpy (trimesh's proximity needs rtree, not installed).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,

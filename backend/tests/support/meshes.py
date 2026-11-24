@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from scadbuddy.library.mesh_blobs import MeshBlobMissingError
+from scadbuddy.library.mesh_blobs import MeshBlobMissingError, MeshPointer
 
 
 class MemoryMeshStore:
@@ -14,11 +14,12 @@ class MemoryMeshStore:
         self.blobs: dict[str, bytes] = {}
         self.puts = 0
 
-    def put(self, path: Path, sha256: str) -> None:
+    def put(self, path: Path) -> MeshPointer:
         data = path.read_bytes()
-        assert hashlib.sha256(data).hexdigest() == sha256
+        sha256 = hashlib.sha256(data).hexdigest()
         self.puts += 1
         self.blobs[sha256] = data
+        return MeshPointer(sha256=sha256, size=len(data))
 
     def get(self, sha256: str, dest: Path) -> None:
         if sha256 not in self.blobs:
