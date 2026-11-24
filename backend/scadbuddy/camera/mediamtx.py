@@ -40,6 +40,23 @@ class MediaMtx:
             if page >= body.get("pageCount", 1):
                 return found
 
+    async def ready(self) -> dict[str, bool]:
+        """Each running path's ``ready`` flag, from the runtime list ``/v3/paths/list``
+        (fields ``name`` and ``ready``, measured on MediaMTX v1.21.4)."""
+        found: dict[str, bool] = {}
+        page = 0
+        while True:
+            response = await self._http.get(
+                "/v3/paths/list", params={"page": page, "itemsPerPage": PAGE}
+            )
+            response.raise_for_status()
+            body = response.json()
+            for item in body.get("items") or []:
+                found[item["name"]] = item.get("ready") is True
+            page += 1
+            if page >= body.get("pageCount", 1):
+                return found
+
     async def put_path(self, name: str, conf: dict[str, Any]) -> None:
         """Add the path, or replace it when it exists."""
         quoted = quote(name, safe="")

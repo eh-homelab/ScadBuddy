@@ -19,7 +19,7 @@ from scadbuddy.camera.relay import (
     rtsps_source,
     serve_hooks,
 )
-from scadbuddy.crud.client import CrudClient, CrudUnavailableError
+from scadbuddy.crud.client import CrudClient
 from tests.camera.test_follow import Token, frame, sse, until
 
 BASE = "/api/v1/internal/crud/camera-relay"
@@ -44,6 +44,8 @@ class FakeApi:
         self.feeds: list[tuple[str, dict[str, Any]]] = []
         self.stream: list[bytes] = []
         self.hold = asyncio.Event()
+        #: The next feed POSTs that answer 503.
+        self.feed_failures = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix(BASE)
@@ -53,6 +55,9 @@ class FakeApi:
             return httpx.Response(200, headers=CRUD, json=self.sources)
         parts = path.split("/")
         if request.method == "POST" and parts[-1] == "feed":
+            if self.feed_failures > 0:
+                self.feed_failures -= 1
+                return httpx.Response(503, headers=CRUD, json={"detail": "down"})
             self.feeds.append((parts[2], json.loads(request.content)))
             return httpx.Response(204, headers=CRUD)
         found = [s for s in self.sources if s.get("printer_id") == parts[2]]
@@ -79,10 +84,19 @@ class FakeMtx:
         self.paths: dict[str, dict[str, Any]] = paths or {}
         self.calls: list[tuple[str, str]] = []
         self.fail = False
+        #: The runtime ``ready`` flag per path; false when absent.
+        self.ready: dict[str, bool] = {}
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         name = path.rsplit("/", 1)[-1]
+        if path == "/v3/paths/list":
+            # The runtime list's fields, measured on MediaMTX v1.21.4.
+            runtime = [
+                {"name": n, "confName": n, "ready": self.ready.get(n, False), "online": True}
+                for n in self.paths
+            ]
+            return httpx.Response(200, json={"pageCount": 1, "items": runtime})
         if path.endswith("/list"):
             # As MediaMTX 1.x does (measured 2026-11-24, bluenviron/mediamtx:1).
             items = [
@@ -113,7 +127,7 @@ class FakeMtx:
 
 
 def relay(api: FakeApi, mtx: FakeMtx) -> Relay:
-    return Relay(api.client(), mtx.client())
+    return Relay(api.client(), mtx.client(), retry_min=0.01, retry_max=0.02)
 
 
 def test_source_url_embeds_the_code() -> None:
@@ -126,7 +140,8 @@ def test_source_url_embeds_the_code() -> None:
 async def test_reconcile_all_adds_and_removes() -> None:
     api = FakeApi([source("p1"), source("p2", host="10.0.0.6")])
     mtx = FakeMtx({"old": {"source": "rtsps://bblp:x@10.0.0.9:322/streaming/live/1"}})
-    await relay(api, mtx).reconcile_all()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
     assert set(mtx.paths) == {"p1", "p2"}
     conf = mtx.paths["p1"]
     assert conf["source"] == "rtsps://bblp:12345678@10.0.0.5:322/streaming/live/1"
@@ -134,6 +149,7 @@ async def test_reconcile_all_adds_and_removes() -> None:
     assert conf["sourceOnDemand"] is False
     assert conf["runOnReady"] == f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/ready"
     assert conf["runOnNotReady"] == f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/not_ready"
+    await subject.flushed()
     assert api.states("old") == ["stopped"]
 
 
@@ -142,10 +158,12 @@ async def test_reconcile_all_is_idempotent() -> None:
     mtx = FakeMtx()
     subject = relay(api, mtx)
     await subject.reconcile_all()
+    await subject.flushed()
     calls, feeds = list(mtx.calls), list(api.feeds)
     await subject.reconcile_all()
     await subject.reconcile("p1")
     assert mtx.calls == calls
+    await subject.flushed()
     assert api.feeds == feeds
 
 
@@ -170,34 +188,73 @@ async def test_reconcile_removes_unqualified() -> None:
     await subject.reconcile("p1")
     assert mtx.paths == {}
     assert ("delete", "p1") in mtx.calls
+    await subject.flushed()
     assert api.states("p1")[-1] == "stopped"
     # A late hook for the removed path reports nothing.
     await subject.on_hook("p1", "not_ready")
+    await subject.flushed()
     assert api.states("p1")[-1] == "stopped"
 
 
-async def test_stopped_is_reported_again_after_a_failed_report() -> None:
+async def test_stopped_is_retried_until_it_lands() -> None:
     api = FakeApi([source("p1")])
     mtx = FakeMtx()
     subject = relay(api, mtx)
     await subject.reconcile_all()
+    await subject.flushed()
     api.sources = []
-    handle = api.handle
-
-    def refuse_feed(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/feed"):
-            return httpx.Response(503, headers=CRUD, json={"detail": "down"})
-        return handle(request)
-
-    api.handle = refuse_feed  # type: ignore[method-assign]
-    with pytest.raises(CrudUnavailableError):
-        await subject.reconcile_all()
+    api.feed_failures = 3
+    await subject.reconcile_all()
     assert mtx.paths == {}
-    api.handle = handle  # type: ignore[method-assign]
-    await subject.reconcile_all()
+    await subject.flushed()
     assert api.states("p1") == ["retrying", "stopped"]
     await subject.reconcile_all()
+    await subject.flushed()
     assert api.states("p1") == ["retrying", "stopped"]
+
+
+async def test_failed_hook_report_is_retried() -> None:
+    api = FakeApi([source("p1")])
+    subject = relay(api, FakeMtx())
+    await subject.reconcile_all()
+    await subject.flushed()
+    api.feed_failures = 2
+    await subject.on_hook("p1", "ready")
+    await subject.flushed()
+    assert api.states("p1") == ["retrying", "pulling"]
+
+
+async def test_newer_state_replaces_a_pending_retry() -> None:
+    api = FakeApi([source("p1")])
+    subject = Relay(api.client(), FakeMtx().client(), retry_min=0.2, retry_max=0.2)
+    await subject.reconcile_all()
+    await subject.flushed()
+    api.feed_failures = 1
+    await subject.on_hook("p1", "ready")
+    await until(lambda: api.feed_failures == 0)
+    await subject.on_hook("p1", "not_ready")
+    await subject.flushed()
+    # ``pulling`` failed and waits; ``retrying`` is the latest, and the only one sent.
+    assert api.states("p1") == ["retrying"]
+
+
+async def test_reconcile_reports_runtime_state() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    await subject.flushed()
+    await subject.on_hook("p1", "ready")
+    await subject.flushed()
+    # The not_ready hook was lost: the runtime list says not ready.
+    await subject.reconcile_all()
+    await subject.flushed()
+    assert api.states("p1") == ["retrying", "pulling", "retrying"]
+    # A lost ready hook, the other way.
+    mtx.ready["p1"] = True
+    await subject.reconcile_all()
+    await subject.flushed()
+    assert api.states("p1") == ["retrying", "pulling", "retrying", "pulling"]
 
 
 async def test_reconcile_replaces_on_change() -> None:
@@ -215,10 +272,10 @@ async def test_hook_reports_pulling_and_retrying() -> None:
     api = FakeApi([source("p1")])
     subject = relay(api, FakeMtx())
     await subject.reconcile_all()
-    await subject.on_hook("p1", "ready")
-    await subject.on_hook("p1", "ready")
-    await subject.on_hook("p1", "not_ready")
-    await subject.on_hook("p1", "ready")
+    await subject.flushed()
+    for event in ("ready", "ready", "not_ready", "ready"):
+        await subject.on_hook("p1", event)
+        await subject.flushed()
     assert api.states("p1") == ["retrying", "pulling", "retrying", "pulling"]
     assert all(body["part"] == "relay" for _, body in api.feeds)
 
@@ -237,6 +294,7 @@ async def test_hook_server_calls_on_hook() -> None:
         server.close()
     assert ok.status_code == 204
     assert bad.status_code == 404
+    await subject.flushed()
     assert api.states("p1") == ["retrying", "pulling"]
 
 

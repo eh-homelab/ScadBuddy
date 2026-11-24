@@ -223,3 +223,19 @@ async def test_follower_resync_first() -> None:
     await asyncio.sleep(0.05)
     task.cancel()
     assert resyncs == [1]
+
+
+async def test_follower_without_resync_first_does_not_resync() -> None:
+    hold = asyncio.Event()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return sse([frame("ready", {"resync": False, "reconnect": False}, "5")], hold)
+
+    resyncs: list[int] = []
+    task = asyncio.create_task(follower(handler, [], resyncs).run())
+    await until(lambda: requests)
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert resyncs == []

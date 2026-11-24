@@ -5,7 +5,10 @@ It reads the qualifying printers from the API's ``camera-relay`` CRUD routes
 (`api/crud_camera_relay.py`) and gives MediaMTX one RTSPS pull per printer, through its control
 API only (`mediamtx.MediaMtx`). The path name is the printer id. MediaMTX calls the local hook
 server (`HOOK_HOST`:`HOOK_PORT`) when a pull becomes ready or not ready, and the relay reports
-the feed state to the API, on change only.
+the feed state to the API, on change only. A report that does not land is sent again in the
+background with back-off until it does; the newest state wins. Each `Relay.reconcile_all`
+also reads MediaMTX's runtime list and sets each path's state from its ``ready`` flag, so a
+lost hook is corrected at the next resync.
 
 An access code never reaches a log or the disk. The relay parses the API's sources itself and
 raises `SourceError`, which names the fields only, never their values; a MediaMTX failure
@@ -48,6 +51,9 @@ HOOK_HOST: Final = "127.0.0.1"
 HOOK_PORT: Final = 9091
 HEALTH_PORT: Final = 9090
 HOOK_URL: Final = f"http://{HOOK_HOST}:{HOOK_PORT}/hook"
+#: The back-off of a feed report that did not land.
+RETRY_MIN: Final = 0.5
+RETRY_MAX: Final = 30.0
 #: The user name of a Bambu printer's camera.
 RELAY_USER: Final = "bblp"
 
@@ -89,6 +95,8 @@ class Relay:
         mtx: MediaMtx,
         *,
         source_for: Callable[[CameraSourceWithCode], str] = rtsps_source,
+        retry_min: float = RETRY_MIN,
+        retry_max: float = RETRY_MAX,
     ) -> None:
         self._crud = crud
         self._mtx = mtx
@@ -101,8 +109,14 @@ class Relay:
         #: /v3/config/paths/list``), so the relay compares with its own copy. After a
         #: restart it has none, and puts each path once again.
         self._confs: dict[str, dict[str, Any]] = {}
-        #: The last feed state reported per printer.
+        #: The feed state the relay wants the API to hold, per printer.
+        self._desired: dict[str, FeedState] = {}
+        #: The last feed state the API took, per printer.
         self._reported: dict[str, FeedState] = {}
+        #: One sender per printer whose desired state has not landed yet.
+        self._senders: dict[str, asyncio.Task[None]] = {}
+        self._retry_min = retry_min
+        self._retry_max = retry_max
         self._lock = asyncio.Lock()
 
     def _conf(self, source: CameraSourceWithCode) -> dict[str, Any]:
@@ -132,7 +146,7 @@ class Relay:
         assert self._held is not None
         self._held.add(name)
         # Until MediaMTX calls the ready hook, the pull is being tried.
-        await self._report(name, "retrying")
+        self._want(name, "retrying")
 
     async def _remove(self, name: str, present: bool) -> None:
         """Delete the path when MediaMTX has it, and report ``stopped``: also when a
@@ -145,21 +159,62 @@ class Relay:
             self._confs.pop(name, None)
             if self._held is not None:
                 self._held.discard(name)
-        if present or self._reported.get(name, "stopped") != "stopped":
-            await self._report(name, "stopped")
+        if present or self._desired.get(name, "stopped") != "stopped":
+            self._want(name, "stopped")
 
-    async def _report(self, printer_id: str, state: FeedState) -> None:
-        if self._reported.get(printer_id) == state:
-            return
-        body = FeedReport(part="relay", state=state).model_dump(mode="json", exclude_none=True)
-        await self._crud.request(
-            "POST", f"{BASE}/printers/{quote(printer_id, safe='')}/feed", json=body
-        )
-        self._reported[printer_id] = state
+    def _want(self, printer_id: str, state: FeedState) -> None:
+        """Record the state the API should hold. A sender posts it in the background,
+        again with back-off until it lands; a newer state replaces one still waiting."""
+        self._desired[printer_id] = state
+        sender = self._senders.get(printer_id)
+        if self._reported.get(printer_id) != state and (sender is None or sender.done()):
+            self._senders[printer_id] = asyncio.create_task(self._send(printer_id))
+
+    async def _send(self, printer_id: str) -> None:
+        delay = self._retry_min
+        path = f"{BASE}/printers/{quote(printer_id, safe='')}/feed"
+        while (state := self._desired[printer_id]) != self._reported.get(printer_id):
+            body = FeedReport(part="relay", state=state).model_dump(mode="json", exclude_none=True)
+            try:
+                await self._crud.request("POST", path, json=body)
+            except Exception as error:
+                logger.warning(
+                    "camera relay: feed state %s for %s did not land (%s); retrying",
+                    state,
+                    printer_id,
+                    type(error).__name__,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, self._retry_max)
+                continue
+            self._reported[printer_id] = state
+            delay = self._retry_min
+
+    async def flushed(self) -> None:
+        """Wait until every desired feed state has landed."""
+        while pending := [t for t in self._senders.values() if not t.done()]:
+            await asyncio.gather(*pending)
+
+    async def aclose(self) -> None:
+        """Stop the senders."""
+        for sender in self._senders.values():
+            sender.cancel()
+        await asyncio.gather(*self._senders.values(), return_exceptions=True)
+
+    async def _runtime(self) -> None:
+        """Set each held path's desired state from MediaMTX's runtime ``ready`` flag: a
+        lost hook, or a hook that came before a replace, is corrected here."""
+        try:
+            ready = await self._mtx.ready()
+        except httpx.HTTPError as error:
+            raise MediaMtxError(f"MediaMTX did not list its running paths: {_why(error)}") from None
+        for name in sorted(self._held or ()):
+            self._want(name, "pulling" if ready.get(name) else "retrying")
 
     async def reconcile_all(self) -> None:
         """Make MediaMTX's paths match the API's list. A path that has not changed is left
-        alone, so a resync after a quiet run costs one list on each side."""
+        alone, so a resync after a quiet run costs one list on each side and MediaMTX's
+        runtime list (`_runtime`), which sets each held path's feed state."""
         async with self._lock:
             response = await self._crud.request("GET", f"{BASE}/printers")
             try:
@@ -180,10 +235,11 @@ class Relay:
             existing = await self._existing()
             self._held = set(existing)
             kept = {str(item.get("printer_id")) for item in items}
-            for name in sorted((set(existing) | set(self._reported)) - kept):
+            for name in sorted((set(existing) | set(self._desired)) - kept):
                 await self._remove(name, name in existing)
             for printer_id, parsed in sources.items():
                 await self._put(printer_id, self._conf(parsed), printer_id in existing)
+            await self._runtime()
             if unreadable:
                 raise SourceError("; ".join(str(error) for error in unreadable))
 
@@ -217,7 +273,7 @@ class Relay:
         async with self._lock:
             if self._held is None or printer_id not in self._held:
                 return
-            await self._report(printer_id, "pulling" if event == "ready" else "retrying")
+            self._want(printer_id, "pulling" if event == "ready" else "retrying")
 
 
 def _why(error: httpx.HTTPError) -> str:
@@ -244,16 +300,7 @@ async def serve_hooks(relay: Relay, host: str, port: int) -> asyncio.Server:
                 event = parts[3]
                 if event in ("ready", "not_ready"):
                     status = b"204 No Content"
-                    try:
-                        await relay.on_hook(parts[2], event)  # type: ignore[arg-type]
-                    except Exception as error:
-                        status = b"503 Service Unavailable"
-                        logger.warning(
-                            "camera relay: could not report %s for %s (%s)",
-                            event,
-                            parts[2],
-                            type(error).__name__,
-                        )
+                    await relay.on_hook(parts[2], event)  # type: ignore[arg-type]
         with suppress(Exception):
             writer.write(
                 b"HTTP/1.1 " + status + b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -315,6 +362,7 @@ async def run(settings: RelaySettings, *, stop: asyncio.Event | None = None) -> 
         if follower is not None:
             follower.cancel()
             await asyncio.gather(follower, return_exceptions=True)
+        await relay.aclose()
         if hooks is not None:
             hooks.close()
         health.close()

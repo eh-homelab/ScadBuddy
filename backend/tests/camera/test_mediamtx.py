@@ -57,3 +57,13 @@ async def test_delete_path_ignores_404() -> None:
     await mtx.delete_path("p1")
     await mtx.delete_path("p1")
     assert stored == {}
+
+
+async def test_ready_reads_the_runtime_list() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v3/paths/list"
+        items = [{"name": "p1", "ready": True}, {"name": "p2", "ready": False}]
+        return httpx.Response(200, json={"pageCount": 1, "itemCount": 2, "items": items})
+
+    mtx = MediaMtx("http://mtx", transport=httpx.MockTransport(handle))
+    assert await mtx.ready() == {"p1": True, "p2": False}
