@@ -39,8 +39,10 @@ Attempt media: with Bambuddy linked, an attempt that names an archive gets the a
 latest finish photo and its timelapse as attachments with no click. The `AttemptMedia`
 workflow imports them (`backend/scadbuddy/workflows/attempt_media.py`, `orders/archives.py`
 `mirror_attempt`); a hand attempt, a heard print outcome, a read of the attempt's archives
-and a housekeeping sweep start it. The order page's row shows what is attached and offers
-a copy only for what is still missing ([orders spec §8.2](../superpowers/specs/2026-10-18-orders-design.md#82-archives)).
+and a housekeeping sweep start it. A medium larger than the upload limit is recorded in
+`order_attempt_media_refusals`, and no import tries it again until the limit is higher.
+The order page's row shows what is attached, says to attach a refused medium by hand, and
+offers a copy only for what is still missing ([orders spec §8.2](../superpowers/specs/2026-10-18-orders-design.md#82-archives)).
 
 ## Code
 

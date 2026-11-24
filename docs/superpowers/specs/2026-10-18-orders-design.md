@@ -1247,9 +1247,13 @@ for a click. Each attempt has one `AttemptMedia` workflow on the `library` queue
 archive's latest `finish_` photo (the last by name) and its timelapse that the attempt, or
 its item, does not have yet (`mirror_media`). Three triggers start it: a hand attempt with
 `archive_id` (`record_fulfilment`, `update_fulfilment`, after `_with_archive_facts`), a
-heard `print.outcome` (`mirror_run`), both with steps now, at +2 min and at +15 min; and
+heard `print.outcome` (`mirror_run`), both with steps now, at +2 min and at +15 min (a
+signal-with-start of `with_retries`, so a one-step run they join steps again); and
 `GET …/fulfilments/{f}/archives`, one step, only when an archive offers a medium the
-attempt lacks. No route waits on a download. The housekeeping sweep
+attempt lacks. A step finds a medium missing when it is neither attached nor refused, and
+its archive offers it or completed under an hour ago or has no completion time yet. A medium refused as larger than the upload limit is a row of
+`order_attempt_media_refusals`; the steps, the read and the sweep skip it while the limit
+is no higher than that row's `limit_bytes`. No route waits on a download. The housekeeping sweep
 `housekeeping_import_attempt_media` (#7234, on the prune Schedule) starts one step for each
 attempt of the last 14 days that still lacks a medium and was not checked in the last hour
 (`media_checked_at`). Every copy, imported or by hand, carries `archive_id` and
@@ -1257,7 +1261,9 @@ attempt of the last 14 days that still lacks a medium and was not checked in the
 line `source: archive` (#7232), and a partial unique index on
 `(subject, archive_id, archive_media, filename)` makes a race between two copies one row.
 `GET …/archives` answers `finished_attachment_id` and `timelapse_attachment_id` per
-archive: what is attached now, not what the import it started will attach. ScadBuddy
+archive: what is attached now, not what the import it started will attach; and
+`finished_too_large` and `timelapse_too_large`, a refusal at the current limit, which the
+order page shows as "over the upload limit; attach it by hand". ScadBuddy
 imports only a timelapse that Bambuddy's archive already has; it never asks Bambuddy to
 scan the printer (spec 2026-11-05 §9). `ArchiveCopy.what` takes `finished_photo` or
 `timelapse` only (#7232).

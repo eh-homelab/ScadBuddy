@@ -1676,21 +1676,34 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   activity `attempt_media_step`, is `orders/archives.py` `mirror_attempt`: `mirror_archives`,
   then `mirror_media` (each medium its own try, written by the attempt's `created_by`, as
   there is no system actor, Ruling 12), then `media_checked_at` stamped. The triggers: a
-  hand attempt with `archive_id` (`api/orders.py` `_with_archive_facts`, after the facts) and
-  a heard `print.outcome` (`mirror_run`) start it with retries (steps now, at +2 min and at
-  +15 min, ending once nothing is missing); `GET …/fulfilments/{f}/archives` starts one step
-  when an archive offers a medium the attempt lacks; and the housekeeping sweep
-  `housekeeping_import_attempt_media` (#7234, `ATTEMPT_MEDIA_SWEEP` in `SWEEPS` and
-  `PRUNE_SWEEPS`, behind `ATTEMPT_MEDIA_PATCH`; `sweep_media` over
-  `OrderStore.attempts_missing_media`) starts one step for each attempt of the last 14 days
-  that still lacks a medium and was not checked in the last hour. Provenance: every copy,
+  hand attempt with `archive_id` (`api/orders.py` `_with_archive_facts`, after the facts, and
+  only while a Bambuddy is linked) and a heard `print.outcome` (`mirror_run`, also when its
+  archive read failed) start it with retries (steps now, at +2 min and at +15 min, ending
+  once nothing is missing). A start with retries is a signal-with-start of `with_retries`
+  (`RETRIES_SIGNAL`), so a one-step run it joins steps again at +2 and +15 min from the
+  signal. `GET …/fulfilments/{f}/archives` starts one step when an archive offers a medium
+  the attempt lacks; and the housekeeping sweep `housekeeping_import_attempt_media` (#7234,
+  `ATTEMPT_MEDIA_SWEEP` in `SWEEPS` and `PRUNE_SWEEPS`, behind `ATTEMPT_MEDIA_PATCH`;
+  `sweep_media` over `OrderStore.attempts_missing_media`) starts one step for each attempt of
+  the last 14 days that still lacks a medium and was not checked in the last hour. A step's
+  `missing` (`_missing`) is true when no archive was read, or an archive lacks a medium
+  that is neither present nor refused, and the archive offers it or may still offer it (its
+  `completed_at` is null or under an hour old, `FRESH`). Refusals: a medium the import refused as larger than the
+  upload limit is a row of `order_attempt_media_refusals` (`fulfilment_id`, `archive_id`,
+  `archive_media`, `limit_bytes`, `refused_at`; `record_media_refusal`). While
+  `media_upload_max_bytes` is at most `limit_bytes`, the steps, the read and the sweep skip
+  it and it is not missing (`media_refused`; `attempt_archives` and `sweep_media` take a
+  required keyword `limit`); a higher limit tries it again. The copy route ignores the table.
+  Provenance: every copy,
   imported or by the copy route, writes `entity_attachments.archive_id` and `archive_media`
   (`finished_photo` or `timelapse`), and its audit line carries `source: archive`; a medium
   is present when the attempt or its item has a row with that pair, whatever its name
   (`archive_media_present`), so nothing is downloaded to find that out. A partial unique
   index on `(subject, archive_id, archive_media, filename)` makes a race one row: the loser
   writes nothing and `copy_in` answers the winner's row. The read answers
-  `finished_attachment_id` and `timelapse_attachment_id` per archive, what is attached now.
+  `finished_attachment_id` and `timelapse_attachment_id` per archive, what is attached now,
+  and `finished_too_large` and `timelapse_too_large`, a refusal at the current limit; the
+  order page then says to attach that medium by hand and offers no copy.
   Trap: `GET …/fulfilments/{f}/archives` is not a pure read. It copies the archives' facts
   and can start an import that downloads a timelapse of up to `media_upload_max_bytes`. Only
   a timelapse Bambuddy's archive already has is imported; ScadBuddy never asks Bambuddy to
