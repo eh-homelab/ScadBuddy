@@ -2238,6 +2238,10 @@ def reap_orphan_holds(
     with no meta.json and no hold at all, past the same grace (#5448: a save that claimed
     its id and stopped before it held its Parts).
 
+    An output that has an ``outputs`` row is live, whatever its folder holds (#7256): the
+    reaper never releases its holds or removes its folder (one query, when the store has
+    rows).
+
     It never mistakes a missing directory for deleted outputs. An output's hold is
     released only when the reaper knows the output's slug (``output_hold_slugs``) and
     listed that slug's directory. A slug directory that is missing (not yet copied onto
@@ -2253,6 +2257,14 @@ def reap_orphan_holds(
         released = _reap_orphan_holds(refs, store, grace)
         current.set_attribute("scadbuddy.outputs", released)
         return released
+
+
+def _with_rows(store: OutputStore, output_ids: Iterable[str]) -> set[str]:
+    """The ids of ``output_ids`` that have an ``outputs`` row, in one query; none when
+    the store has no rows."""
+    if store.rows is None:
+        return set()
+    return store.rows.existing(output_ids)
 
 
 def _reap_orphan_holds(refs: BlobRefs, store: OutputStore, grace: timedelta) -> int:
@@ -2280,14 +2292,19 @@ def _reap_orphan_holds(refs: BlobRefs, store: OutputStore, grace: timedelta) -> 
                 extra={"root": str(root), "path": error.filename},
             )
             return 0
-        _remove_unheld_directories(bare, holding, grace)
+        with_rows = _with_rows(store, (directory.name for directory in bare))
+        _remove_unheld_directories(bare, holding | with_rows, grace)
         return 0
     live, bare = _live_outputs(root) if root.is_dir() else ({}, [])
-    _remove_unheld_directories(bare, holding, grace)
     live_slug = {output_id: slug for slug, ids in live.items() for output_id in ids}
+    # An output that has a row is live, whatever its folder holds (#7256): one query.
+    with_rows = _with_rows(
+        store, [*(held - live_slug.keys()), *(directory.name for directory in bare)]
+    )
+    _remove_unheld_directories(bare, holding | with_rows, grace)
     # Holds taken before slugs were recorded: a live output tells its own slug.
     _record_slugs(refs, {output_id: live_slug[output_id] for output_id in held & live_slug.keys()})
-    candidates = sorted(held - live_slug.keys())
+    candidates = sorted(held - live_slug.keys() - with_rows)
     with refs.pool.connection() as conn:
         slug_rows = conn.execute(
             "SELECT output_id, slug FROM output_hold_slugs WHERE output_id = ANY(%s)",
