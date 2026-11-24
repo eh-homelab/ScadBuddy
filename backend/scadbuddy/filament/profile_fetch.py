@@ -46,9 +46,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
-from temporalio.api.enums.v1 import TaskQueueKind, TaskQueueType
-from temporalio.api.taskqueue.v1 import TaskQueue
-from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.api.enums.v1 import TaskQueueType
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
@@ -87,6 +85,7 @@ from scadbuddy.profile_fetch.workflow import (
     TOO_LONG,
 )
 from scadbuddy.slicing.own_presets import sb_ref
+from scadbuddy.workflows.pollers import queue_pollers
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -100,8 +99,8 @@ Status = Literal["running", "imported", "partial", "failed"]
 HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
-#: How long an import waits for the mirror of what it wrote (#7176); the next kept-preset
-#: refresh sends what is left. 120 s: Bambuddy's listing and three writes, each up to the
+#: How long an import waits for the mirror of what it wrote (#7176); the Schedule's next
+#: pull sends what is left. 120 s: Bambuddy's listing and three writes, each up to the
 #: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`). It leaves 7 of
 #: `profile_fetch/workflow.py` `IMPORT_REQUEST_TIMEOUT`'s 9 minutes to the K-table reads, 14
 #: of them at 30 s each.
@@ -355,7 +354,9 @@ class QueueProbe(Protocol):
 
 class PollerCache:
     """DescribeTaskQueue's answer per queue, kept `POLLERS_CACHE_SECONDS`: each read of
-    a fetch's status (a page polls it) would otherwise ask Temporal twice."""
+    a fetch's status (a page polls it) would otherwise ask every partition of the
+    workflow task queue, and of the activity one when the first has no poller: up to
+    `2 * TASK_QUEUE_PARTITIONS` calls (`workflows/pollers.py`)."""
 
     def __init__(
         self,
@@ -404,20 +405,12 @@ class TemporalQueueProbe:
         await self.client.get_workflow_handle(fetch_workflow_id(run_id)).cancel()
 
     async def _read(self) -> bool:
+        # Every partition's pollers: a live worker can be absent from the root's (#7350).
         for kind in (
             TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
             TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY,
         ):
-            described = await self.client.workflow_service.describe_task_queue(
-                DescribeTaskQueueRequest(
-                    namespace=self.client.namespace,
-                    task_queue=TaskQueue(
-                        name=self.task_queue, kind=TaskQueueKind.TASK_QUEUE_KIND_NORMAL
-                    ),
-                    task_queue_type=kind,
-                )
-            )
-            if described.pollers:
+            if await queue_pollers(self.client, self.task_queue, kind):
                 return True
         return False
 
@@ -915,13 +908,13 @@ async def _import_once(
         settings = await asyncio.to_thread(state.settings_store.load)
         own = FilamentPresetStore(pool, lambda: state.store.blobs)
         # Bounded, so the worker's import call never waits on a slow Bambuddy; what is
-        # left is sent by the next kept-preset refresh.
+        # left is sent by the Schedule's next pull.
         try:
             await asyncio.wait_for(
                 mirror_pending(pool, own, settings, ending.written), IMPORT_MIRROR_TIMEOUT
             )
         except TimeoutError:
-            logger.warning("the preset mirror ran past the import's bound; the refresh sends")
+            logger.warning("the preset mirror ran past the import's bound; the next pull sends")
     if first_presets == [True]:
         # A type's first presets fill its empty fields from their profile (#6714, R-6714-a);
         # after the commit, and a failure never fails the import.

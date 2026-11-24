@@ -68,7 +68,7 @@ def test_without_a_url_the_seam_is_not_linked() -> None:
         assert seam is NOT_LINKED
         assert seam.linked is False
     with pytest.raises(NotLinkedError):
-        asyncio.run(NOT_LINKED.local_densities())
+        asyncio.run(NOT_LINKED.spool_assignments())
 
 
 def test_with_a_url_the_seam_is_bambuddys() -> None:

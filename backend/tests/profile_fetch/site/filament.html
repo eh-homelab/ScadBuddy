@@ -6,20 +6,15 @@
   </head>
   <body>
     <h1>Inland PLA+ White</h1>
-    <!-- 3dfp.mjs `add`: the "Add to My Spools" button, absent once the spool is added. -->
-    <div id="actions" data-in-spools="__IN_SPOOLS__"></div>
+    <!-- 3dfp.mjs `add`: the "Add to My Spools" button. 3DFP shows it every time, and
+         each click adds one more record (measured 2026-11-23, #7228). -->
+    <div id="actions"></div>
     <script>
-      const actions = document.getElementById("actions");
-      if (actions.dataset.inSpools === "false") {
-        const add = document.createElement("button");
-        add.type = "button";
-        add.textContent = "Add to My Spools";
-        add.onclick = async () => {
-          await fetch("/api/spools/__ID__", { method: "POST" });
-          add.remove();
-        };
-        actions.appendChild(add);
-      }
+      const add = document.createElement("button");
+      add.type = "button";
+      add.textContent = "Add to My Spools";
+      add.onclick = () => fetch("/api/spools/__ID__", { method: "POST" });
+      document.getElementById("actions").appendChild(add);
     </script>
   </body>
 </html>
