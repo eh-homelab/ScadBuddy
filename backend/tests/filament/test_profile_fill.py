@@ -9,11 +9,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-import httpx
 import pytest
-import respx
 
-from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.filament import models as m
 from scadbuddy.filament.profile_fill import (
     Unread,
@@ -162,43 +159,11 @@ async def test_an_unknown_id_or_no_tree_is_a_reason(table: DensityTable) -> None
     assert "profile" in read.reason
 
 
-@respx.mock
-async def test_a_local_preset_is_read_from_bambuddy_over_its_parent(table: DensityTable) -> None:
-    respx.get(f"{BASE}/api/v1/local-presets/2").mock(
-        return_value=httpx.Response(200, json=local_preset())
-    )
-    async with BambuddyClient(BambuddyConfig(base_url=BASE, api_key="k")) as client:
-        read = await read_profile(preset("H2C", "0.4", "2"), table, client)
-    assert not isinstance(read, Unread)
-    assert read.source.origin == "bambuddy_local"
-    assert read.source.name == "Cookiecad PETG Magic Dark Magic (3DFP 7JdoWkaDB) @H2C"
-    assert profile_values(read.values) == {
-        "nozzle_temp_min": 220,
-        "nozzle_temp_max": 240,
-        "bed_temp_min": 70,
-        "bed_temp_max": 80,
-        "density_g_cm3": Decimal("1.275"),
-        # Not in the preset's own setting: its parent's, through the tree.
-        "diameter_mm": Decimal("1.75"),
-        # `["65","65","55","55"]` and `["12",…]`: the AMS HT's idle values (R-6714-9).
-        "drying_temp_c": 65,
-        "drying_hours": Decimal("12"),
-    }
-    assert cost_hint(read.values) == "30"
-
-
-@respx.mock
-async def test_a_local_preset_bambuddy_refuses_or_cannot_reach_is_a_reason(
-    table: DensityTable,
-) -> None:
-    respx.get(f"{BASE}/api/v1/local-presets/2").mock(return_value=httpx.Response(404))
-    async with BambuddyClient(BambuddyConfig(base_url=BASE, api_key="k")) as client:
-        read = await read_profile(preset("H2C", "0.4", "2"), table, client)
-    assert isinstance(read, Unread)
-    assert "local preset 2" in read.reason
+async def test_a_bambuddy_local_preset_is_not_read(table: DensityTable) -> None:
+    """ScadBuddy reads no Bambuddy local preset (#7244): the reason says to import it."""
     read = await read_profile(preset("H2C", "0.4", "2"), table, None)
     assert isinstance(read, Unread)
-    assert "no Bambuddy" in read.reason
+    assert "Bambuddy local preset" in read.reason and "import Bambuddy's presets" in read.reason
 
 
 @pytest.mark.parametrize(

@@ -233,6 +233,11 @@ export const getSyncStatus = () => request<SyncStatus>(`${BASE}/sync/status`)
  */
 export const runSync = () => request<Schemas['SyncRun']>(`${BASE}/sync/run`, { method: 'POST' })
 
+export type PresetImport = Schemas['PresetImport']
+
+/** #7244 — bring Bambuddy's filament presets into ScadBuddy's own once, whatever the presets direction says. */
+export const importBambuddyPresets = () => request<PresetImport>(`${BASE}/presets/bambuddy-import`, { method: 'POST' })
+
 export type SyncPass = Schemas['SyncPass']
 export type SyncPassPage = Schemas['SyncPassPage']
 

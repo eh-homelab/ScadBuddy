@@ -99,8 +99,8 @@ Status = Literal["running", "imported", "partial", "failed"]
 HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
-#: How long an import waits for the mirror of what it wrote (#7176); the next kept-preset
-#: refresh sends what is left. 120 s: Bambuddy's listing and three writes, each up to the
+#: How long an import waits for the mirror of what it wrote (#7176); the Schedule's next
+#: pull sends what is left. 120 s: Bambuddy's listing and three writes, each up to the
 #: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`). It leaves 7 of
 #: `profile_fetch/workflow.py` `IMPORT_REQUEST_TIMEOUT`'s 9 minutes to the K-table reads, 14
 #: of them at 30 s each.
@@ -908,13 +908,13 @@ async def _import_once(
         settings = await asyncio.to_thread(state.settings_store.load)
         own = FilamentPresetStore(pool, lambda: state.store.blobs)
         # Bounded, so the worker's import call never waits on a slow Bambuddy; what is
-        # left is sent by the next kept-preset refresh.
+        # left is sent by the Schedule's next pull.
         try:
             await asyncio.wait_for(
                 mirror_pending(pool, own, settings, ending.written), IMPORT_MIRROR_TIMEOUT
             )
         except TimeoutError:
-            logger.warning("the preset mirror ran past the import's bound; the refresh sends")
+            logger.warning("the preset mirror ran past the import's bound; the next pull sends")
     if first_presets == [True]:
         # A type's first presets fill its empty fields from their profile (#6714, R-6714-a);
         # after the commit, and a failure never fails the import.
