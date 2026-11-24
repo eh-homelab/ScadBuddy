@@ -11,7 +11,16 @@ import threading
 import time
 import uuid
 import zipfile
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -31,7 +40,9 @@ from scadbuddy.library.output_bytes import FILES_DIR as FILES_DIR
 from scadbuddy.library.output_bytes import MODEL_NAME as MODEL_NAME
 from scadbuddy.library.output_bytes import PREVIEW_NAME as PREVIEW_NAME
 from scadbuddy.library.output_bytes import THUMBNAIL_NAME as THUMBNAIL_NAME
+from scadbuddy.library.output_bytes import OutputBytes, OutputStream
 from scadbuddy.library.output_rows import OUTPUT_HOLDER as OUTPUT_HOLDER
+from scadbuddy.library.output_rows import Role
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
@@ -49,6 +60,7 @@ from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.store.content import BlobCorruptError, BlobMissingError
 
 if TYPE_CHECKING:
     from scadbuddy.library.output_index import OutputIndex
@@ -74,6 +86,16 @@ BACKFILL_NAME = "backfill.json"
 _ID_LIST = TypeAdapter(list[str])
 #: How many outputs whose thumbnail draw came to nothing a process remembers (#4775).
 UNDRAWABLE_MAX = 4096
+#: Each byte role's file; its suffix is the suffix of the role's temporary file (#7256).
+ROLE_FILES: dict[Role, str] = {
+    "model": MODEL_NAME,
+    "preview": PREVIEW_NAME,
+    "thumbnail": THUMBNAIL_NAME,
+}
+#: A blob the row names that the store cannot give whole: the reader takes the file.
+_LOST = (BlobMissingError, BlobCorruptError)
+#: How much of a file a stream reads at a time.
+_FILE_CHUNK = 1024 * 1024
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
 
@@ -284,6 +306,44 @@ class _ResolvedCover:
     archive: Path | None
 
 
+def thumbnail_file_version(path: Path) -> str | None:
+    """The file's identity: every write puts a new file in place (a new inode, by a
+    rename or a link), and its time and size tell apart an inode used again."""
+    try:
+        stat = path.stat()
+    except OSError:  # as `is_file()` before it: no readable file is no thumbnail
+        return None
+    return f"{stat.st_ino:x}-{stat.st_mtime_ns:x}-{stat.st_size:x}"
+
+
+async def _file_chunks(path: Path) -> AsyncGenerator[bytes]:
+    file = await asyncio.to_thread(path.open, "rb")
+    try:
+        while chunk := await asyncio.to_thread(file.read, _FILE_CHUNK):
+            yield chunk
+    finally:
+        await asyncio.to_thread(file.close)
+
+
+def _file_stream(path: Path) -> OutputStream | None:
+    """The file's bytes as a stream, ``None`` when there is no file. Blocking (one stat);
+    the file is opened when the stream is first read."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+    return OutputStream(size=stat.st_size, sha256=None, chunks=_file_chunks(path))
+
+
+def _warn_lost(output_id: str, role: str, key: str, error: Exception) -> None:
+    logger.warning(
+        "an output's blob is lost; reading its file",
+        extra={"output_id": output_id, "role": role, "key": key, "error": str(error)},
+    )
+
+
 class OutputFiles(Protocol):
     async def model_3mf(self, output_id: str) -> bytes | None:
         """The output's stored ``model.3mf``; ``None`` when it has none (or is gone)."""
@@ -356,6 +416,9 @@ class OutputStore:
         #: Every output as a row of ``outputs`` (#7255), the record a lookup by id reads.
         #: ``None`` keeps the files as the only record (tests and tools with no database).
         self.rows: OutputRows | None = None
+        #: The outputs' bytes as blobs (#7256), read before the files. ``None``: the
+        #: files only, as on the `local` and `bambuddy` stores (`output_bytes.usable`).
+        self.bytes: OutputBytes | None = None
         # The fallback-cover resolution per slug (#179). Finding it means reading
         # every output record and opening 3MFs, and the catalogue asks on every
         # listing, so it is done once per state of the model's outputs.
@@ -593,6 +656,17 @@ class OutputStore:
         return [_with_last_print(meta, rows.get(meta.id)) for meta in metas]
 
     async def model_3mf(self, output_id: str) -> bytes | None:
+        """The output's ``model.3mf``: the blob, else the file (#7256)."""
+        try:
+            key = await asyncio.to_thread(self._blob_key, output_id, "model")
+        except OutputNotFoundError:
+            return None
+        if key is not None:
+            assert self.bytes is not None
+            try:
+                return await self.bytes.read(key)
+            except _LOST as error:
+                _warn_lost(output_id, "model", key, error)
         return await asyncio.to_thread(self._model_3mf, output_id)
 
     def _model_3mf(self, output_id: str) -> bytes | None:
@@ -1020,6 +1094,12 @@ class OutputStore:
         return OutputRecord.model_validate_json(text)
 
     def files(self, output_id: str) -> list[str]:
+        """The names of the output's ``files/``: its ``output_files`` rows once its bytes
+        are blobs (#7256), else the folder's."""
+        if self.bytes is not None and self.rows is not None:
+            row = self._row_of(output_id)
+            if row is not None and row.bytes_at is not None:
+                return [item.name for item in self.rows.files(output_id)]
         directory = self.directory(output_id) / FILES_DIR
         if not directory.is_dir():
             return []
@@ -1033,6 +1113,147 @@ class OutputStore:
         if not path.is_file():
             raise OutputNotFoundError(name)
         return path
+
+    async def open_file(self, output_id: str, name: str) -> OutputStream:
+        """An extra file of the output: its blob once its bytes are blobs (#7256), else
+        the file (`file_path`). The name is checked before anything is read. Raises
+        `OutputNotFoundError` as `file_path` does. The caller closes the stream."""
+        if not re.fullmatch(FILE_NAME_PATTERN, name):
+            raise OutputNotFoundError(name)
+        key = await asyncio.to_thread(self._file_key, output_id, name)
+        if key is not None:
+            assert self.bytes is not None
+            try:
+                return await self.bytes.stream(key)
+            except _LOST as error:
+                _warn_lost(output_id, "files", key, error)
+        path = await asyncio.to_thread(self.file_path, output_id, name)
+        stream = await asyncio.to_thread(_file_stream, path)
+        if stream is None:
+            raise OutputNotFoundError(name)
+        return stream
+
+    def _file_key(self, output_id: str, name: str) -> str | None:
+        """The blob key of the ``files/`` entry ``name``; ``None`` while the files hold
+        it. Blocking."""
+        if self.bytes is None or self.rows is None:
+            return None
+        row = self._row_of(output_id)
+        if row is None or row.bytes_at is None:
+            return None
+        found = self.rows.file(output_id, name)
+        return None if found is None else found.blob_key
+
+    def _blob_key(self, output_id: str, role: Role) -> str | None:
+        """The blob key the output's row names for ``role``; ``None`` when the store has
+        no blobs or the row names none, and the file holds the bytes. One read of the
+        row, and no glob once a copy run finished (`_row_of`). Blocking."""
+        if self.bytes is None:
+            return None
+        row = self._row_of(output_id)
+        if row is None:
+            return None
+        key: str | None = getattr(row.blobs, role)
+        return key
+
+    def _role_file(self, output_id: str, role: Role) -> Path | None:
+        """The role's NFS file; ``None`` when there is no such file or no output.
+        Blocking."""
+        try:
+            path = self._find_dir(output_id) / ROLE_FILES[role]
+        except OutputNotFoundError:
+            return None
+        return path if path.is_file() else None
+
+    async def open_role(self, output_id: str, role: Role) -> OutputStream | None:
+        """The role's bytes: the blob the row names, else the file (#7256). A blob the
+        store lost is logged, and the file is read. ``None`` when neither exists. The
+        caller closes the stream (`OutputStream.aclose`), read or not."""
+        try:
+            key = await asyncio.to_thread(self._blob_key, output_id, role)
+        except OutputNotFoundError:
+            return None
+        if key is not None:
+            assert self.bytes is not None
+            try:
+                return await self.bytes.stream(key)
+            except _LOST as error:
+                _warn_lost(output_id, role, key, error)
+        path = await asyncio.to_thread(self._role_file, output_id, role)
+        return None if path is None else await asyncio.to_thread(_file_stream, path)
+
+    def local_role(self, output_id: str, role: Role) -> AbstractAsyncContextManager[Path | None]:
+        """A path that holds the role's bytes while the block runs: the blob's temporary
+        file (removed on exit), else the NFS file itself (never copied), else ``None``.
+        A sync reader runs on it in a thread (Ruling R6): ``async with
+        outputs.local_role(id, role) as path: await asyncio.to_thread(reader, path)``."""
+        return self._local_role(output_id, role)
+
+    @contextlib.asynccontextmanager
+    async def _local_role(self, output_id: str, role: Role) -> AsyncIterator[Path | None]:
+        async with AsyncExitStack() as stack:
+            path: Path | None = None
+            try:
+                key = await asyncio.to_thread(self._blob_key, output_id, role)
+            except OutputNotFoundError:
+                key = None
+            if key is not None:
+                assert self.bytes is not None
+                suffix = Path(ROLE_FILES[role]).suffix
+                try:
+                    path = await stack.enter_async_context(self.bytes.local_file(key, suffix))
+                except _LOST as error:
+                    _warn_lost(output_id, role, key, error)
+            if path is None:
+                path = await asyncio.to_thread(self._role_file, output_id, role)
+            # Outside the `try` above: an error of the caller's block is never a lost blob.
+            yield path
+
+    def _indexed(self, output_id: str, role: Role) -> tuple[int, str] | None:
+        """The size and sha256 of the role's blob from the index; ``None`` when the row
+        names none or the index has no such key. Blocking."""
+        key = self._blob_key(output_id, role)
+        if key is None:
+            return None
+        assert self.bytes is not None
+        ref = self.bytes.ref(key)
+        return None if ref is None else (ref.size, ref.sha256)
+
+    def role_size(self, output_id: str, role: Role) -> int | None:
+        """The role's size: the blob's from the index, else the file's. ``None`` when
+        neither exists. Blocking."""
+        try:
+            indexed = self._indexed(output_id, role)
+        except OutputNotFoundError:
+            return None
+        if indexed is not None:
+            return indexed[0]
+        path = self._role_file(output_id, role)
+        if path is None:
+            return None
+        try:
+            return path.stat().st_size
+        except OSError:
+            return None
+
+    def has_role(self, output_id: str, role: Role) -> bool:
+        """Whether the role has bytes: a blob in the index, or a file. Blocking."""
+        try:
+            indexed = self._indexed(output_id, role)
+        except OutputNotFoundError:
+            return False
+        return indexed is not None or self._role_file(output_id, role) is not None
+
+    def thumbnail_version(self, output_id: str) -> str | None:
+        """What changes when the thumbnail changes: the blob's sha256 prefix, else the
+        file's identity (`thumbnail_file_version`). ``None``: no thumbnail. Blocking."""
+        try:
+            indexed = self._indexed(output_id, "thumbnail")
+            if indexed is not None:
+                return indexed[1][:16]
+            return thumbnail_file_version(self.thumbnail_path(output_id))
+        except OutputNotFoundError:
+            return None
 
     def rename(self, output_id: str, name: str | None) -> OutputMeta:
         """Give the output ``name``, or none (#2288). Only its meta changes, in

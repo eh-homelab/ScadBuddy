@@ -123,6 +123,7 @@ from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
+from scadbuddy.library.output_bytes import OutputBytes, usable
 from scadbuddy.library.output_copy import copy_outputs
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
@@ -2341,6 +2342,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     state.blobs = state.store.blobs
     state.render.snapshots = state.store.snapshots
+    # #7256: the outputs' bytes are read from the blob store first, never on `local`
+    # (no content store) or `bambuddy`.
+    if usable(state.store.content):
+        assert state.store.content is not None
+        state.outputs.bytes = OutputBytes(state.store.content)
     # From the store's construction to the `try` below, whose `finally` owns shutdown:
     # a failure anywhere here (a refused OpenSCAD probe, a render service or bus that
     # will not start) releases what is open, the store and its pool included, rather

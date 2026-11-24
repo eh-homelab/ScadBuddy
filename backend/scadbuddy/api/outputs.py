@@ -111,6 +111,7 @@ from scadbuddy.library.outputs import (
     OutputNotFoundError,
     OutputStore,
     require_output,
+    thumbnail_file_version,
 )
 from scadbuddy.meshmodel.locate import attribute
 from scadbuddy.operations.claims import ClaimStore
@@ -238,7 +239,7 @@ def _detail(
     failed_before_queueing: bool,
 ) -> OutputDetail:
     params = store.params(meta.id)
-    thumbnail_version = _thumbnail_version(store.thumbnail_path(meta.id))
+    thumbnail_version = thumbnail_file_version(store.thumbnail_path(meta.id))
     return OutputDetail(
         **meta.model_dump(),
         has_thumbnail=thumbnail_version is not None or store.drawable_thumbnail(meta.id),
@@ -254,16 +255,6 @@ def _detail(
         library_files=library_files,
         failed_before_queueing=failed_before_queueing,
     )
-
-
-def _thumbnail_version(path: Path) -> str | None:
-    """The file's identity: every write puts a new file in place (a new inode, by a
-    rename or a link), and its time and size tell apart an inode used again."""
-    try:
-        stat = path.stat()
-    except OSError:  # as `is_file()` before it: no readable file is no thumbnail
-        return None
-    return f"{stat.st_ino:x}-{stat.st_mtime_ns:x}-{stat.st_size:x}"
 
 
 async def _failed_before_queueing(runs: PrintRunStore, metas: list[OutputMeta]) -> set[str]:
