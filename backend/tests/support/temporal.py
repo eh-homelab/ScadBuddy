@@ -134,19 +134,16 @@ def temporal_server(db_file: Path | None = None) -> Iterator[str]:
         yield address
 
 
-#: What keeps the dev server small over a session (#7527). Every api test adds task
-#: queues, and the server kept each one's partitions: it grew about 3 MiB a queue, to
-#: 1.5-2 GiB per xdist worker by the end of a CI shard, and four of them took the
-#: shard's container to its 13 GiB cap. Measured on the spark with temporal CLI 1.10.1
+#: What keeps the dev server small over a session (#7527, #7549). Every api test adds
+#: task queues, and the server kept each one: it grew about 3 MiB a queue, to 1.5-2 GiB
+#: per xdist worker by the end of a CI shard, and four of them took the shard's
+#: container to its 13 GiB cap. Measured on the spark with temporal CLI 1.10.1
 #: (`grow.py` in #7527: a versioned worker on a new queue per step, one workflow each),
-#: the server's RSS after 400 queues was 1327 MiB as it was, 522 MiB with one partition
-#: per queue and a 10 s idle time, and 375 MiB with GOGC=25 too. One partition also
-#: leaves no non-root partition to lag a new routing (`routes_to`).
-DEV_SERVER_DYNAMIC_CONFIG = (
-    "matching.numTaskqueueReadPartitions=1",
-    "matching.numTaskqueueWritePartitions=1",
-    'matching.maxTaskQueueIdleTime="10s"',
-)
+#: the server's RSS after 400 queues was 1327 MiB with the defaults and 581 MiB with a
+#: 10 s idle time and `DEV_SERVER_GOGC`. One partition per queue held 373 MiB, but real
+#: servers keep four, and the tests must meet their multi-partition reads (`queue_pollers`,
+#: #7350) and a non-root partition's lag (`routes_to`, #4255), so the partitions stay.
+DEV_SERVER_DYNAMIC_CONFIG = ('matching.maxTaskQueueIdleTime="10s"',)
 DEV_SERVER_GOGC = "25"
 
 
