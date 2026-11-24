@@ -430,6 +430,16 @@ export type KProfileNotes = Schemas['KProfileNotes']
 export type KProfileWriteResult = Schemas['KProfileWriteResult']
 export type KProfileSet = Schemas['KProfileSet']
 export type KProfileRemove = Schemas['KProfileRemove']
+/** #7153: a printer's AMS slots through Bambuddy. */
+export type AmsView = Schemas['AmsView']
+export type AmsUnitView = Schemas['AmsUnitView']
+export type SlotView = Schemas['SlotView']
+export type SlotConfigureBody = Schemas['SlotConfigureBody']
+export type SlotConfigured = Schemas['SlotConfigured']
+export type SlotCommandSent = Schemas['SlotCommandSent']
+export type SlotPresetBody = Schemas['SlotPresetBody']
+export type SavedSlotPreset = Schemas['SavedSlotPreset']
+export type AmsLabelSaved = Schemas['AmsLabelSaved']
 /** The LAN link as typed: the access code goes once and never comes back. */
 export type LanLink = Schemas['LanLink']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
