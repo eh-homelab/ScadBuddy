@@ -1,0 +1,103 @@
+"""The camera recorders' CRUD routes (plan 2026-11-23 camera recording, phase 1): under
+``/api/v1/internal/crud/camera/``, for the ``camera`` credential only (`crud_router`). Area
+``printers``. No route returns an access code (`api/crud_camera_relay.py` does).
+
+- ``GET …/printers`` and ``…/printers/{printer_id}``: the printers that qualify
+  (`CameraStore.sources`); 404 ``not_recorded`` for one that does not;
+- ``POST …/printers/{printer_id}/segments``: index uploaded segments, in at most
+  `MAX_SEGMENTS` per call; 409 ``not_leader`` when the recorder holds no live lease;
+- ``POST …/printers/{printer_id}/lease``: acquire, renew or release the lease;
+- ``POST …/printers/{printer_id}/feed``: the recorder's feed state; 204. A change of
+  state emits ``camera.feed``.
+
+The lease and the index use the API process clock, never a time from the request.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import Annotated, Literal
+
+from fastapi import status
+from pydantic import BaseModel, Field
+
+from scadbuddy.api.deps import StateDep
+from scadbuddy.camera.models import CameraSource, FeedReport, LeaseAnswer, SegmentIn
+from scadbuddy.camera.store import CameraStore, NotLeaderError
+from scadbuddy.core.events import CameraFeedEvent, emit
+from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.guard import crud_router
+from scadbuddy.printers.component import PRINTERS
+
+MAX_SEGMENTS = 500
+
+router = crud_router("camera")
+
+
+class SegmentsAsk(BaseModel):
+    recorder: str = Field(min_length=1, max_length=128)
+    segments: Annotated[list[SegmentIn], Field(max_length=MAX_SEGMENTS)]
+
+
+class Indexed(BaseModel):
+    indexed: int
+
+
+class LeaseAsk(BaseModel):
+    recorder: str = Field(min_length=1, max_length=128)
+    action: Literal["acquire", "renew", "release"]
+
+
+def camera_store(state: StateDep) -> CameraStore:
+    printers = state.components.get(PRINTERS)
+    return CameraStore(printers.store.pool, printers.store)
+
+
+@router.get("/printers", name="crud_camera_printers")
+async def list_sources(state: StateDep) -> list[CameraSource]:
+    return await asyncio.to_thread(camera_store(state).sources)
+
+
+@router.get("/printers/{printer_id}", name="crud_camera_printer")
+async def get_source(printer_id: str, state: StateDep) -> CameraSource:
+    found = await asyncio.to_thread(camera_store(state).sources, printer_id)
+    if not found:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, "This printer is not recorded.", reason="not_recorded"
+        )
+    return found[0]
+
+
+@router.post("/printers/{printer_id}/segments", name="crud_camera_segments")
+async def post_segments(printer_id: str, body: SegmentsAsk, state: StateDep) -> Indexed:
+    try:
+        indexed = await asyncio.to_thread(
+            camera_store(state).index, printer_id, body.recorder, body.segments, datetime.now(UTC)
+        )
+    except NotLeaderError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, "This recorder does not hold the lease.", reason="not_leader"
+        ) from None
+    return Indexed(indexed=indexed)
+
+
+@router.post("/printers/{printer_id}/lease", name="crud_camera_lease")
+async def post_lease(printer_id: str, body: LeaseAsk, state: StateDep) -> LeaseAnswer:
+    return await asyncio.to_thread(
+        camera_store(state).lease, printer_id, body.recorder, body.action, datetime.now(UTC)
+    )
+
+
+@router.post(
+    "/printers/{printer_id}/feed",
+    status_code=status.HTTP_204_NO_CONTENT,
+    name="crud_camera_feed",
+)
+async def post_feed(printer_id: str, body: FeedReport, state: StateDep) -> None:
+    await report_feed(state, printer_id, body.model_copy(update={"part": "recorder"}))
+
+
+async def report_feed(state: StateDep, printer_id: str, report: FeedReport) -> None:
+    if await asyncio.to_thread(camera_store(state).report_feed, printer_id, report):
+        emit(state.events, CameraFeedEvent(printer_id=printer_id))
