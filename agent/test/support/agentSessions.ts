@@ -14,6 +14,7 @@ import type { SessionManager, SessionManagerDeps, SessionRecord, Turn } from '..
 import { readRuntimeSettings, RUNTIME_DEFAULTS } from '../../src/sessions/runtimeSettings.js'
 import { TurnHost } from '../../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../../src/temporal/names.js'
+import { queuePollers } from '../../src/temporal/pollers.js'
 import { acquireActivities, releaseActivities } from '../../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../../src/temporal/session/gateActivities.js'
@@ -168,12 +169,8 @@ export function agentSessions(): void {
           [TASK_QUEUE, 2],
           [hostQueue, 2],
         ].map(async ([queue, type]) => {
-          const { pollers } = await env.client.workflowService.describeTaskQueue({
-            namespace: 'default',
-            taskQueue: { name: queue as string },
-            taskQueueType: type as number,
-          })
-          return (pollers ?? []).length > 0
+          // Every partition, as DurableTurns.unready reads them (temporal/pollers.ts, #7306).
+          return (await queuePollers(env.client, queue as string, type as number, Date.now() + 10_000)).length > 0
         }),
       )
       if (polled.every(Boolean)) break

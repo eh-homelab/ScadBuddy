@@ -122,7 +122,7 @@ def _request(operation: str, kind: str, *, size: int | None = None) -> Iterator[
 
 
 def _kind_of(prefix: str, key: str) -> str:
-    """The kind of object a key names (`object_key`), or ``staging``; never the key."""
+    """The kind of object a key names (`object_key`), ``staging`` or ``other``; never the key."""
     first = key.removeprefix(f"{prefix}/").split("/", 1)[0]
     return first if first in get_args(BlobKind) or first == "staging" else "other"
 

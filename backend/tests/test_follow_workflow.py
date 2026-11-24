@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import timedelta
 from typing import Any
@@ -24,6 +24,7 @@ from scadbuddy.workflows.follow import (
     follow_queue,
 )
 from tests.support.temporal import temporal_client
+from tests.support.waits import until
 
 pytestmark = pytest.mark.requires_temporal
 
@@ -72,10 +73,8 @@ async def client() -> AsyncIterator[Client]:
         yield connected
 
 
-async def _until(predicate: object, timeout: float = 10) -> None:
-    async with asyncio.timeout(timeout):
-        while not predicate():  # type: ignore[operator]
-            await asyncio.sleep(0.02)
+async def _until(predicate: Callable[[], bool], timeout: float = 10) -> None:
+    await until(predicate, timeout, interval=0.02)
 
 
 async def test_it_completes_when_the_follow_ends(client: Client) -> None:

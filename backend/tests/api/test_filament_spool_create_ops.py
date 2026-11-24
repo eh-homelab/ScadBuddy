@@ -218,9 +218,9 @@ def test_a_copy_leaves_added_full_behind(client: TestClient) -> None:
     assert twin["added_full"] is None
 
 
-def test_a_copy_keeps_a_migrated_preset_row_migrated(client: TestClient, pg_conninfo: str) -> None:
-    """R-7150-11: the copy's first type drops the copied migrated row, as the source's
-    would, and keeps the person's own row."""
+def _migrated_source(client: TestClient, pg_conninfo: str) -> tuple[str, dict[str, Any]]:
+    """A spool with a migrated 0.4 row and the person's own 0.6 row: its id and the 0.6
+    row."""
     source = _spool(client)
     one = f"{SPOOLS}/{source['id']}"
     own = PRESET | {"nozzle_diameter": "0.6", "slicer_filament": "P6"}
@@ -231,17 +231,55 @@ def test_a_copy_keeps_a_migrated_preset_row_migrated(client: TestClient, pg_conn
             " WHERE spool_id = %s AND nozzle_diameter = '0.4'",
             (source["id"],),
         )
-    draft = client.get(f"{one}/copy").json()
-    assert [(r["nozzle_diameter"], r["migrated"]) for r in draft["presets"]] == [
-        ("0.4", True),
-        ("0.6", False),
-    ]
+    return str(source["id"]), own
+
+
+def _own_after_first_type(client: TestClient, spool_id: str) -> list[str]:
+    """The spool's own preset rows left once it takes its first type."""
+    one = f"{SPOOLS}/{spool_id}"
+    assert client.patch(one, json={"type_id": _type(client)["id"]}).status_code == 200
+    return [r["slicer_filament"] for r in client.get(f"{one}/presets").json() if r["overridden"]]
+
+
+def test_a_copy_keeps_a_migrated_preset_row_migrated(client: TestClient, pg_conninfo: str) -> None:
+    """R-7150-11, R-7150-13: the draft names its source (`copy_of`), and the server marks
+    a row that matches the source's migrated row; the copy's first type drops it, as the
+    source's would, and keeps the person's own row."""
+    source, _ = _migrated_source(client, pg_conninfo)
+    draft = client.get(f"{SPOOLS}/{source}/copy").json()
+    assert draft["copy_of"] == source
+    assert all("migrated" not in r for r in draft["presets"])
     (twin,) = _bulk(client, draft | {"quantity": 1}, key="copy-migrated").json()
-    copied = f"{SPOOLS}/{twin['id']}"
-    kind = _type(client)
-    assert client.patch(copied, json={"type_id": kind["id"]}).status_code == 200
-    left = [r for r in client.get(f"{copied}/presets").json() if r["overridden"]]
-    assert [r["slicer_filament"] for r in left] == ["P6"]
+    assert _own_after_first_type(client, twin["id"]) == ["P6"]
+
+
+def test_an_edited_copied_row_is_the_persons(client: TestClient, pg_conninfo: str) -> None:
+    """R-7150-11: a copied migrated row the person changed is theirs, so the first type
+    keeps it."""
+    source, own = _migrated_source(client, pg_conninfo)
+    draft = client.get(f"{SPOOLS}/{source}/copy").json()
+    edited = PRESET | {"slicer_filament": "P4"}
+    body = draft | {"quantity": 1, "presets": [edited, own]}
+    (twin,) = _bulk(client, body, key="copy-edited").json()
+    assert _own_after_first_type(client, twin["id"]) == ["P4", "P6"]
+
+
+def test_a_client_never_marks_a_row_migrated(client: TestClient, pg_conninfo: str) -> None:
+    """R-7150-13: a row sent with `migrated` is a 422, with or without `copy_of`; without
+    `copy_of` a row equal to some spool's migrated row is the person's; a `copy_of` that
+    names no spool is a 422. Nothing is written on a refusal."""
+    source, own = _migrated_source(client, pg_conninfo)
+    draft = client.get(f"{SPOOLS}/{source}/copy").json()
+    marked = [PRESET | {"migrated": True}, own]
+    for n, body in enumerate((draft, {"spool": draft["spool"]})):
+        refused = _bulk(client, body | {"presets": marked, "quantity": 1}, key=f"marked-{n}")
+        assert refused.status_code == 422, refused.text
+    unknown = _bulk(client, draft | {"copy_of": MISSING}, key="copy-of-missing")
+    assert unknown.status_code == 422, unknown.text
+    assert len(client.get(SPOOLS).json()) == 1
+    plain = {"spool": draft["spool"], "presets": [PRESET, own], "quantity": 1}
+    (made,) = _bulk(client, plain, key="no-copy-of").json()
+    assert _own_after_first_type(client, made["id"]) == ["P1", "P6"]
 
 
 def test_a_copy_of_no_spool_is_404(client: TestClient) -> None:

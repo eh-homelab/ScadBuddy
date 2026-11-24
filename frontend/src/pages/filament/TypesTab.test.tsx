@@ -9,6 +9,7 @@ import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { M, ST, T } from '../../mocks/features/filament/seed'
 import { FILAMENT_PETG } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
+import { filamentLabel } from '../../components/orders/FilamentsEditor'
 import { TypesTab } from './TypesTab'
 
 const types = () => screen.findByRole('table', { name: 'Types' })
@@ -210,6 +211,41 @@ describe('the Types tab', () => {
         })
         expect(patches).toEqual([{ cost_per_kg: '21' }])
         expect(within(screen.getByTestId(`filament-${row.id}`)).getByRole('button', { name: /Make a type/ })).toBeInTheDocument()
+      })
+
+      // #7344: the price book matches the alpha, so a type that differs only in it cannot link this row.
+      it('offers a type that differs only in opacity, says first that it cannot link this row, and only sets its cost', async () => {
+        const row = await api.createFilament({ material: 'PLA', subtype: 'Silk', brand: 'Elegoo', effect: 'silk', colour: '#D4AF37', alpha: 128, cost_per_kg: '24' })
+        const patches = await typePatches(async () => {
+          const { user } = renderPage(<TypesTab />)
+          await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+          const dialog = await dialogOf()
+          expect(within(dialog).getByRole('radio', { name: /EL-PLA-SILK-GOLD/ })).toBeChecked()
+          expect(within(dialog).getByText('Its opacity differs from this row')).toBeInTheDocument()
+          expect(within(dialog).getByText(/this row still has no type\. Setting its cost gives 24 per kg to its own price book row/)).toBeInTheDocument()
+          expect(within(dialog).queryByRole('button', { name: 'Link EL-PLA-SILK-GOLD' })).toBeNull()
+          await user.click(within(dialog).getByRole('button', { name: "Set EL-PLA-SILK-GOLD's cost" }))
+          expect(await screen.findByRole('status', { name: 'Type link' })).toHaveTextContent(/EL-PLA-SILK-GOLD now costs 24 per kg.*its own price book row/)
+        })
+        expect(patches).toEqual([{ cost_per_kg: '24' }])
+        expect(within(screen.getByTestId(`filament-${row.id}`)).getByRole('button', { name: /Make a type/ })).toBeInTheDocument()
+      })
+
+      // #7344: the dialog's warning is a forecast of the server's match; the PATCH answer's `filament_id` is the truth.
+      it('says which row the server linked, not what the dialog forecast', async () => {
+        const row = await api.createFilament({ material: 'PLA', brand: 'Elegoo', colour: '#D4AF37', cost_per_kg: '21' })
+        server.use(
+          http.patch('/api/v1/filament/types/:id', async ({ request, params }) => {
+            const type = (await listTypes()).find((one) => one.id === params.id)
+            return HttpResponse.json({ ...type, ...((await request.json()) as object), filament_id: row.id })
+          }),
+        )
+        const { user } = renderPage(<TypesTab />)
+        await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+        const dialog = await dialogOf()
+        expect(within(dialog).getByText(/this row still has no type/)).toBeInTheDocument()
+        await user.click(within(dialog).getByRole('button', { name: "Set EL-PLA-SILK-GOLD's cost" }))
+        expect(await screen.findByRole('status', { name: 'Type link' })).toHaveTextContent(`Linked EL-PLA-SILK-GOLD to ${filamentLabel(row)}.`)
       })
 
       it('makes a new type anyway when asked, and nothing on Cancel', async () => {

@@ -145,6 +145,7 @@ export function rankCandidates(row: Pick<Filament, 'colour' | 'alpha'>, ids: Boo
  * by its material, subtype and brand names (upper-cased, no aliases), its RGB and its
  * alpha, and not its effect (`types.py` `_link_price_book`, `orders/store.py`
  * `existing_filament`). `names` holds the catalog names by id; an id it lacks never links.
+ * It is the dialog's forecast; the PATCH answer's `filament_id` says what the server linked (#7344).
  */
 export function linksBookRow(row: Pick<Filament, 'material' | 'subtype' | 'brand' | 'colour' | 'alpha'>, type: SpoolType, names: ReadonlyMap<string, string>): boolean {
   const name = (id: string | null) => (id === null ? '' : (names.get(id) ?? null))
@@ -178,15 +179,10 @@ export async function bookRowIds(row: Pick<Filament, 'brand' | 'material' | 'sub
   }
 }
 
-/** #7159 — the types `row` may already be, from the loaded `types` (no new route, R-7159-5). */
-export async function typeCandidates(row: Filament, types: readonly SpoolType[]): Promise<TypeCandidate[]> {
-  return rankCandidates(row, await bookRowIds(row), types)
-}
-
 /**
  * #7159 R-7159-4 — link an existing type instead of making one: only its `cost_per_kg` is
  * set, from the row. The server then links the book row of the type's own identity, and
- * gives that row this cost (`linksBookRow` says whether it is this row). When it is another
+ * gives that row this cost (`linksBookRow` forecasts whether it is this row). When it is another
  * row, the server adds it if the book has none. The answer's `filament_id` says which.
  */
 export function linkTypeToBook(type: SpoolType, row: Pick<Filament, 'cost_per_kg'>): Promise<SpoolType> {
