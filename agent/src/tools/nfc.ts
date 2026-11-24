@@ -56,8 +56,15 @@ async function runJob(ctx: ToolContext, body: { kind: 'read' | 'write'; ttl_s: n
     await ctx.progress(0, undefined, found.state)
   }
   if (!ENDED.has(found.state)) {
-    await ok(ctx.backend.POST('/api/v1/filament/nfc-jobs/{job_id}/cancel', path), `cancel NFC job ${job_id}`)
-    found = await read()
+    // The answer comes even when the cancel or the read after it fails: the last state read,
+    // and why the cancel did not go through, so the agent knows the job may still be open.
+    try {
+      await ok(ctx.backend.POST('/api/v1/filament/nfc-jobs/{job_id}/cancel', path), `cancel NFC job ${job_id}`)
+      found = await read()
+    } catch (err) {
+      const cancel_failed = err instanceof Error ? err.message : String(err)
+      return json({ job_id, state: found.state, result: found.result ?? null, cancel_failed })
+    }
   }
   return json({ job_id, state: found.state, result: found.result ?? null })
 }

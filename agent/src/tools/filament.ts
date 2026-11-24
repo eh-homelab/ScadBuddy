@@ -22,9 +22,9 @@ import { defineTool, idempotencyKey, json, ToolError, type Tool } from './regist
 // spool picks from, the spool types, and the spools with their tags and ledger. Write
 // tier: nothing leaves ScadBuddy at the call, except a tag change's push, which the
 // `filament_sync.tags` setting gates. The RFID tools that write Bambuddy itself (the override
-// mode, the reconcile, the NTAG write and cancel) are `outward`, gated as the virtual-printer
-// tools are (printers.ts), because they change Bambuddy's settings, an AMS slot or a tag.
-// Routes: backend/scadbuddy/api/filament.py.
+// mode and the reconcile) are `outward`, gated as the virtual-printer tools are (printers.ts),
+// because they change Bambuddy's settings or an AMS slot. A tag is written through the phone
+// page's NFC jobs (nfc.ts, #7273). Routes: backend/scadbuddy/api/filament.py.
 
 const SOURCE = "ScadBuddy's own filament inventory"
 

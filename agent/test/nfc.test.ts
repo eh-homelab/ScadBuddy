@@ -166,6 +166,19 @@ describe('NFC job tools', () => {
     expect(firstText(got)).toEqual({ job_id: JOB, state: 'cancelled', result: null })
   })
 
+  it('still answers when the cancel on abort fails, with the last state it read and why', async () => {
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending'), { status: 201 })),
+      http.post(`${JOBS}/${JOB}/cancel`, () => HttpResponse.json({ title: 'Internal Server Error', status: 500, detail: 'down' }, { status: 500 })),
+      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job('pending'))),
+    )
+    const abort = new AbortController()
+    setTimeout(() => abort.abort(), 30)
+    const got = await runTool(tool('nfc_read'), { timeout_s: 600 }, { ...ctx(abort.signal), pollIntervalMs: 1000 })
+    expect(got.isError).toBeFalsy()
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'pending', result: null, cancel_failed: expect.stringContaining('HTTP 500') })
+  })
+
   it('names the cancel route among its routes', () => {
     for (const name of ['nfc_read', 'nfc_write']) {
       expect(tool(name).routes).toContain('POST /api/v1/filament/nfc-jobs/{job_id}/cancel')
