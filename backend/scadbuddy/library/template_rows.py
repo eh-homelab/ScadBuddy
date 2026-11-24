@@ -131,7 +131,7 @@ def template_stamp(
     def add(name: str, path: Path) -> None:
         try:
             info = os.stat(path)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             return
         found.append((name, info.st_size, info.st_mtime_ns))
 

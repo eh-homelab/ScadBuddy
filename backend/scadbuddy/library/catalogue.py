@@ -1113,7 +1113,7 @@ class Catalogue:
         source = self.paths.model_source(template_id)
         try:
             info = source.stat()
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             return None
         if not stat.S_ISREG(info.st_mode):
             return None

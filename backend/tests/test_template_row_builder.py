@@ -203,6 +203,13 @@ def test_no_model_scad_is_no_row(catalogue: Catalogue, paths: DataPaths) -> None
     assert catalogue.template_row("demo", version=None, head=None) is None
 
 
+def test_a_template_path_that_is_a_file_is_no_row(catalogue: Catalogue, paths: DataPaths) -> None:
+    # Review M2: NotADirectoryError answers as a missing file does.
+    paths.model_dir("stray").write_text("not a folder", encoding="utf-8")
+    assert catalogue.template_row("stray", version=None, head=None) is None
+    assert template_stamp(paths, "stray", [], None) == template_stamp(paths, "absent", [], None)
+
+
 def test_stamp_is_stable_when_nothing_changes(catalogue: Catalogue) -> None:
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"), readme="x")
     catalogue.add_media("demo", _stage(catalogue, PNG, "image", "png"))
