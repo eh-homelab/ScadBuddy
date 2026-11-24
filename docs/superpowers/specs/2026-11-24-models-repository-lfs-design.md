@@ -59,8 +59,9 @@ configuration (`GIT_CONFIG_GLOBAL=/dev/null`, hooks off) and the filter passed w
 - `git push --no-verify` sends no LFS object. `git lfs push <url> <commit>` must run first.
   After both, a clone gives the real bytes (2 MB file, `file://` remote).
 - A `.lfsconfig` in the repository redirects the endpoint. `-c lfs.url=` overrides it.
-- With the attribute set and no filter configured, `git archive` fails with an error. It
-  does not give a pointer silently (`filter.lfs.required=true`).
+- With `filter.lfs.required=true` and a filter that cannot run, `git archive` fails with an
+  error. So every git call passes both: git ignores an attribute whose filter is not
+  configured at all.
 
 The app image is Debian 13; `apt-cache policy git-lfs` there gives 3.6.1. The API pods reach
 `lfs.github.com` and `github-cloud.s3.amazonaws.com`. GitHub takes
