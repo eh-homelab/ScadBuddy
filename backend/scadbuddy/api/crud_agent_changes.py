@@ -79,9 +79,11 @@ async def change_stream(
     last_event_id: str | None,
     *,
     keep: Callable[[Change], bool] | None,
+    group: tuple[str, int] | None = None,
 ) -> StreamingResponse:
     """The stream of ``hub``'s changes that ``keep`` accepts (all when None); the agent's
-    route and the camera routes share it."""
+    route and the camera routes share it. A ``group`` (name, most) is a budget of its own
+    (`ChangeHub.open`)."""
     log = state.events
     if not isinstance(log, PgNotifyEventBus):
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "this process has no event log")
@@ -91,7 +93,7 @@ async def change_stream(
     # Read before the stream subscribes, so every live event comes after its place.
     start = await log.newest() or START if last_event_id is None else None
     try:
-        stream = hub.open(key, keep)
+        stream = hub.open(key, keep, group=group)
     except StreamsFullError as error:
         raise ApiError(status.HTTP_429_TOO_MANY_REQUESTS, str(error)) from None
 

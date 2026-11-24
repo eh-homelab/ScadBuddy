@@ -40,6 +40,9 @@ MAX_SEGMENTS = 500
 #: The ``scadbuddy_events`` kinds the camera callers' streams carry. ``camera.reconnect`` is
 #: sent from phase 3; the filter names it now.
 CAMERA_KINDS = frozenset({"printer.changed", "camera.reconnect"})
+#: The streams both camera callers may hold together: their own budget, counted by caller
+#: and not by credential, never taken from the agent's.
+CAMERA_STREAMS_MAX = 8
 
 router = crud_router("camera")
 
@@ -71,7 +74,9 @@ def keep_camera(change: Change) -> bool:
 async def camera_changes(
     request: Request, state: AppState, hub: ChangeHub, last_event_id: str | None
 ) -> StreamingResponse:
-    return await change_stream(request, state, hub, last_event_id, keep=keep_camera)
+    return await change_stream(
+        request, state, hub, last_event_id, keep=keep_camera, group=("camera", CAMERA_STREAMS_MAX)
+    )
 
 
 def camera_store(state: StateDep) -> CameraStore:

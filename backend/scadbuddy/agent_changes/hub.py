@@ -43,10 +43,13 @@ row's ``logged_at`` too old); this stream needs none while the lock holds. A wri
 :meth:`ChangeStream.offer` and in replay, so a replay never returns a change that live
 delivery drops. A live change it drops moves no place. A replay moves the place past every
 event it scans, kept or not, and counts every scanned event against :data:`REPLAY_MAX`.
-Frame ids stay the ids of logged events, so they stay monotonic, and a ``Last-Event-ID`` is
-always a kept event's id.
+Every frame id is a logged event's id, so ids stay monotonic and a ``Last-Event-ID`` always
+names a place in the log. Because a dropped live change moves no place, a filtered client
+usually resyncs after a long quiet run, so its controllers must not depend on replay.
 
-**Bounds.** At most :data:`STREAMS_PER_CREDENTIAL` streams per service credential and peer
+**Bounds.** A ``group`` of streams (the camera callers') has its own cap, counted by group
+and not by credential, and is outside the figures below. At most
+:data:`STREAMS_PER_CREDENTIAL` streams per service credential and peer
 address (`api/crud_agent_changes.py` `stream_key`) and :data:`STREAMS_MAX` in all are open at
 once; another is refused 429. The process's shutdown ends
 every stream (:meth:`ChangeHub.shutdown`), so a stream never holds the server's drain.
@@ -140,6 +143,8 @@ class ChangeStream:
         self._limit = limit
         #: Which changes this stream carries, live and in replay; None keeps every one.
         self.keep = keep
+        #: The budget this stream counts against, or None for the agent's own (set by `open`).
+        self.group: str | None = None
         self._items: deque[Item] = deque()
         self._wake = asyncio.Event()
         #: Times its reader fell behind past the queue's bound (tests, logs).
@@ -212,14 +217,29 @@ class ChangeHub:
 
         return heard
 
-    def open(self, key: str, keep: Callable[[Change], bool] | None = None) -> ChangeStream:
+    def open(
+        self,
+        key: str,
+        keep: Callable[[Change], bool] | None = None,
+        *,
+        group: tuple[str, int] | None = None,
+    ) -> ChangeStream:
+        """A stream counted by ``key`` and the process total. A ``group`` (name, most) is its own
+        budget instead: its streams count only against that group, whatever their ``key``, and
+        never against the total, so a group cannot use up the agent's streams."""
         if self._closed:
             raise StreamsFullError("the process is shutting down")
-        if len(self._streams) >= self._total:
-            raise StreamsFullError(f"{self._total} change streams are open")
-        if sum(1 for s in self._streams if s.key == key) >= self._per_credential:
-            raise StreamsFullError(f"this credential has {self._per_credential} streams open")
+        if group is not None:
+            name, most = group
+            if sum(1 for s in self._streams if s.group == name) >= most:
+                raise StreamsFullError(f"{most} change streams are open for {name}")
+        else:
+            if sum(1 for s in self._streams if s.group is None) >= self._total:
+                raise StreamsFullError(f"{self._total} change streams are open")
+            if sum(1 for s in self._streams if s.key == key) >= self._per_credential:
+                raise StreamsFullError(f"this credential has {self._per_credential} streams open")
         stream = ChangeStream(key, self._queue_max, keep)
+        stream.group = group[0] if group else None
         self._streams.add(stream)
         return stream
 
