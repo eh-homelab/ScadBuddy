@@ -254,6 +254,49 @@ def test_stamp_raises_on_an_os_error_other_than_not_found(
     assert raised.value.errno == errno.ESTALE
 
 
+def _meta_reads(
+    monkeypatch: pytest.MonkeyPatch, meta: Path, answer: Exception | None = None
+) -> list[str]:
+    """Count the reads of ``meta``, and raise ``answer`` from each when given."""
+    reads: list[str] = []
+    for name in ("read_bytes", "read_text"):
+        real = getattr(Path, name)
+
+        def read(self: Path, *args: Any, _real: Any = real, _name: str = name, **kw: Any) -> Any:
+            if self == meta:
+                reads.append(_name)
+                if answer is not None:
+                    raise answer
+            return _real(self, *args, **kw)
+
+        monkeypatch.setattr(Path, name, read)
+    return reads
+
+
+def test_row_reads_meta_that_is_not_json_once(
+    catalogue: Catalogue, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review M1: a second read could see another file, or none.
+    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
+    paths.model_meta("demo").write_text("{not json", encoding="utf-8")
+    reads = _meta_reads(monkeypatch, paths.model_meta("demo"))
+    row = _row(catalogue, "demo")
+    assert row.meta_text == "{not json"
+    assert len(reads) == 1
+
+
+def test_row_of_meta_deleted_while_read_is_a_missing_meta(
+    catalogue: Catalogue, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
+    _meta_reads(monkeypatch, paths.model_meta("demo"), FileNotFoundError("gone"))
+    row = _row(catalogue, "demo")
+    assert row.meta == {}
+    assert row.meta_error is None
+    assert row.meta_text is None
+    assert row.name == "demo"
+
+
 @pytest.mark.requires_postgres
 @pytest.mark.parametrize(
     "text",

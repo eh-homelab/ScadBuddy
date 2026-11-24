@@ -940,11 +940,7 @@ class Catalogue:
         meta_path = self.paths.model_meta(slug)
         if not meta_path.is_file():
             return {}
-        try:
-            loaded: Any = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
-            raise InvalidModelMetaError(slug, f"not JSON ({error})") from None
-        return loaded if isinstance(loaded, dict) else {}
+        return _raw_meta_of(slug, meta_path.read_bytes())
 
     def _meta(self, slug: str, raw: dict[str, Any]) -> ModelMeta:
         """``raw`` as this model's metadata, or :class:`InvalidModelMetaError`."""
@@ -1130,19 +1126,21 @@ class Catalogue:
         meta_error: str | None = None
         meta_text: str | None = None
         parsed: ModelMeta | None = None
+        # One read: a second could see another file, or none (review M1).
         try:
-            meta = self.read_raw_meta(template_id)
-        except InvalidModelMetaError as error:
-            meta_error = error.reason
-            text = self.paths.model_meta(template_id).read_bytes().decode("utf-8", "replace")
-            meta_text = _storable_text(text[:META_TEXT_MAX])
-        else:
+            data: bytes | None = self.paths.model_meta(template_id).read_bytes()
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+            data = None
+        try:
+            meta = {} if data is None else _raw_meta_of(template_id, data)
             if (problem := _unstorable(meta)) is not None:
-                # Read as if not JSON: Postgres refuses the dict (review I1).
-                meta = None
-                meta_error = f"not storable ({problem})"
-                text = self.paths.model_meta(template_id).read_bytes().decode("utf-8", "replace")
-                meta_text = _storable_text(text[:META_TEXT_MAX])
+                # Kept as if not JSON: Postgres refuses the dict (review I1).
+                raise InvalidModelMetaError(template_id, f"not storable ({problem})")
+        except InvalidModelMetaError as error:
+            assert data is not None
+            meta = None
+            meta_error = error.reason
+            meta_text = _storable_text(data.decode("utf-8", "replace")[:META_TEXT_MAX])
         if meta is not None:
             try:
                 parsed = self._meta(template_id, _as_recorded(template_id, meta))
@@ -3310,6 +3308,15 @@ class _MediaEdit:
 def _default_name(slug: str) -> str:
     """The name a template whose ``model.json`` names none shows: its slug."""
     return slug.removeprefix(BUILTIN_PREFIX)
+
+
+def _raw_meta_of(slug: str, data: bytes) -> dict[str, Any]:
+    """The ``model.json`` bytes ``data`` as `Catalogue.read_raw_meta` answers them."""
+    try:
+        loaded: Any = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise InvalidModelMetaError(slug, f"not JSON ({error})") from None
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _storable_text(text: str) -> str:
