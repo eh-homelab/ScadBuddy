@@ -118,20 +118,23 @@ describe('PrinterAmsSlots (#7153)', () => {
     )
   })
 
-  it('saves the preset a spool sent', async () => {
+  it('saves a spool’s ScadBuddy preset with the source the route names', async () => {
     const { user } = await opened()
     const form = await configureForm(user, 'AMS-A slot 4')
+    await choose(user, within(form).getByRole('combobox', { name: 'Preset source' }), 'Orca cloud')
     await user.click(within(form).getByRole('combobox', { name: 'From a spool' }))
     const [, first] = await screen.findAllByRole('option')
     await user.click(first!)
+    // The spool's preset names its own source, so the form offers none.
+    expect(within(form).queryByRole('combobox', { name: 'Preset source' })).not.toBeInTheDocument()
     await confirm(user, form, 'AMS-A slot 4')
     await waitFor(() =>
       expect(amsPresetsSaved()).toEqual([
-        { preset_id: 'GFA00', preset_name: 'Bambu PLA Basic', preset_source: 'cloud', tray_info_idx: 'GFA00' },
+        { preset_id: '141', preset_name: 'Shop PLA', preset_source: 'local', tray_info_idx: '141' },
       ]),
     )
     const slot = await screen.findByRole('button', { name: 'AMS-A slot 4' })
-    await waitFor(() => expect(slot).toHaveTextContent('Saved: Bambu PLA Basic'))
+    await waitFor(() => expect(slot).toHaveTextContent('Saved: Shop PLA'))
   })
 
   it('clears the saved preset when the configure sent none', async () => {

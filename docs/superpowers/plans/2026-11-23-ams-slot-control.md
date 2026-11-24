@@ -106,9 +106,15 @@ Each is posted on #7153.
 - **R-7153-7 (slot presets).** The slicer preset a slot shows is BB's slot-preset
   mapping. `PUT …/trays/{ams}/{tray}/preset` saves it (`preset_id`, `preset_name`,
   `preset_source`, and the `tray_info_idx` the slot was configured with), `DELETE`
-  clears it. Configure does not save it: the UI saves it after a configure that named a
-  preset, so a refused preset write never hides a configure that went out. Both touch
-  BB's database only, so they read no print state.
+  clears it. Configure does not save it: the UI saves it after every configure, so a
+  refused preset write never hides a configure that went out. It saves the preset the
+  configure sent, whether typed by hand or a spool's type preset, and clears the saved
+  preset when the configure sent none. For a spool's preset the configure's answer names
+  the source (`preset_source`): `local` for a ScadBuddy preset (`sb-<id>`, sent as its
+  mirror's id, which `POST /local-presets/` made) or a bare BB local preset id, else
+  `cloud`; the UI uses the form's source only for an id typed by hand, and hides that
+  choice while "From a spool" is picked. Both touch BB's database only, so they read no
+  print state.
 - **R-7153-8 (AMS labels, in step with SB's place).** `PUT /printers/{id}/ams/{ams}/label`
   writes BB's label first (with the unit's serial from BB's status), then renames SB's
   place of the unit (`LocationStore.ensure_ams_unit_on`) to the label. A refused BB write

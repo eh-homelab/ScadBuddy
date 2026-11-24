@@ -99,11 +99,12 @@ function AmsBody({ row }: { row: PrinterRow }) {
         let warn = false
         try {
           // The saved preset follows what the slot was sent: a spool's type preset too, and none clears it.
+          // A spool's preset carries its source from the backend; the form's choice is for an id typed by hand.
           if (sent.preset_id) {
             await api.setSlotPreset(row.id, unit.ams_id, slot.tray_id, {
               preset_id: sent.preset_id,
               preset_name: sent.preset_name,
-              preset_source: pending.presetSource ?? 'cloud',
+              preset_source: sent.preset_source ?? pending.presetSource ?? 'cloud',
               tray_info_idx: sent.preset_id,
             })
           } else if (slot.saved_preset) {
@@ -393,7 +394,7 @@ function ConfigureForm({
 }: {
   slot: SlotView
   onCancel: () => void
-  onSubmit: (body: SlotConfigureBody, presetSource: PresetSource) => void
+  onSubmit: (body: SlotConfigureBody, presetSource?: PresetSource) => void
 }) {
   const spools = useAsync(() => listSpools(), [])
   const [spool, setSpool] = useState('')
@@ -420,7 +421,7 @@ function ConfigureForm({
           nozzle_temp_max: high ? Number(high) : null,
         }
     if (nozzle) body.nozzle_diameter = nozzle as SlotConfigureBody['nozzle_diameter']
-    onSubmit(body, presetSource)
+    onSubmit(body, fromSpool ? undefined : presetSource)
   }
 
   const spoolChoices = [
@@ -453,16 +454,18 @@ function ConfigureForm({
           <LabeledInput label="Nozzle max (°C)" type="number" min={0} max={500} required value={high} onChange={(e) => setHigh(e.target.value)} />
         </>
       )}
-      <div className="grid gap-1.5">
-        <span className="text-xs font-normal">Preset source</span>
-        <ChoiceSelect
-          aria-label="Preset source"
-          size="sm"
-          value={presetSource}
-          onValueChange={(value) => setPresetSource(value as PresetSource)}
-          choices={PRESET_SOURCES}
-        />
-      </div>
+      {!fromSpool && (
+        <div className="grid gap-1.5">
+          <span className="text-xs font-normal">Preset source</span>
+          <ChoiceSelect
+            aria-label="Preset source"
+            size="sm"
+            value={presetSource}
+            onValueChange={(value) => setPresetSource(value as PresetSource)}
+            choices={PRESET_SOURCES}
+          />
+        </div>
+      )}
       <div className="grid gap-1.5">
         <span className="text-xs font-normal">Nozzle</span>
         <ChoiceSelect aria-label="Nozzle" size="sm" value={nozzle} onValueChange={setNozzle} choices={NOZZLES} />

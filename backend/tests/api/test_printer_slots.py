@@ -18,9 +18,12 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.resolver import PRINTER_MODEL
 from scadbuddy.filament.component import FILAMENT, Filament
-from scadbuddy.filament.models import Material, SpoolCreate, SpoolKValueCreate
+from scadbuddy.filament.models import Material, SpoolCreate, SpoolKValueCreate, SpoolPresetCreate
+from scadbuddy.filament.sb_presets import create_on
 from scadbuddy.printers.models import PrinterCreate
+from scadbuddy.slicing.own_presets import sb_ref
 from tests.api.test_printer_kprofiles import SERIAL, linked, store
 from tests.api.test_send import API, configure
 
@@ -290,6 +293,74 @@ def test_configure_from_any_spool_takes_its_values(client: TestClient) -> None:
     assert response.json()["spool_id"] == str(spool.id)
 
 
+def preset_spool(client: TestClient, ref: str) -> UUID:
+    """A PLA spool whose own preset for the H2C's 0.4 nozzle is ``ref``."""
+    store_ = filament(client)
+    pla = next(
+        r.id
+        for r in store_.catalog.list("materials")
+        if isinstance(r, Material) and r.name == "PLA"
+    )
+    spool = store_.spools.create(
+        SpoolCreate(material_id=pla, rgba="#112233FF", nozzle_temp_min=190, nozzle_temp_max=220),
+        actor="ann",
+    )
+    store_.spools.set_presets(
+        spool.id,
+        [
+            SpoolPresetCreate(
+                printer_model=PRINTER_MODEL,
+                nozzle_diameter="0.4",
+                slicer_filament=ref,
+                slicer_filament_name="My PLA",
+            )
+        ],
+        actor="ann",
+    )
+    return spool.id
+
+
+@respx.mock
+def test_configure_says_where_a_spools_preset_lives(client: TestClient) -> None:
+    """A ScadBuddy preset is its mirror, a Bambuddy local preset, as is a bare Bambuddy
+    local preset id; any other ref is Bambu's. A hand-typed id names no source."""
+    pid = linked(client, 3)
+    status_route()
+    route = respx.post(f"{API}/printers/3/slots/0/1/configure").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+    with filament(client).spools.transaction() as conn:
+        own = create_on(
+            conn,
+            name="Mirrored",
+            source="manual",
+            key=f"attachment-{1:064d}",
+            sha256=f"{1:064d}",
+            doc={"name": "Mirrored"},
+            made_by="test",
+            bb_preset_id=141,
+        )
+    cases = [(sb_ref(own), "141", "local"), ("57", "57", "local"), ("GFA00", "GFA00", "cloud")]
+    for ref, sent_id, source in cases:
+        spool = preset_spool(client, ref)
+        response = client.post(
+            f"{slot(pid)}/configure", json={"spool_id": str(spool), "nozzle_diameter": "0.4"}
+        )
+        assert response.status_code == 200, response.text
+        assert dict(route.calls.last.request.url.params)["tray_info_idx"] == sent_id
+        assert (response.json()["preset_id"], response.json()["preset_source"]) == (
+            sent_id,
+            source,
+        )
+
+    typed = client.post(
+        f"{slot(pid)}/configure",
+        json={"spool_id": str(spool), "nozzle_diameter": "0.4", "preset_id": "PFUS1234"},
+    )
+    assert typed.status_code == 200, typed.text
+    assert (typed.json()["preset_id"], typed.json()["preset_source"]) == ("PFUS1234", None)
+
+
 def single_nozzle() -> dict[str, Any]:
     """An X1C-like status: one 0.4 nozzle, Bambuddy's empty second ``nozzles`` entry, no
     AMS map and no Filament Track Switch."""
@@ -324,6 +395,26 @@ def k_spool(client: TestClient, printer: str, extruder: int) -> UUID:
         actor="ann",
     )
     return spool.id
+
+
+@respx.mock
+def test_a_load_names_the_hotend_as_configure_does(client: TestClient) -> None:
+    """The load reads the hotend through `slot_extruder`, as configure does. The Filament
+    Track Switch counts as a second nozzle (`two_nozzles`), so with it and no AMS map the
+    load never guesses extruder 0: it is 409 ``extruder_unknown``, and no load is sent."""
+    pid = linked(client, 3)
+    body = single_nozzle()
+    body["fila_switch"] = RECORDED["fila_switch"]
+    status_route(body)
+    load = respx.post(f"{API}/printers/3/ams/load").mock(
+        return_value=httpx.Response(200, json=DONE)
+    )
+
+    response = client.post(f"{slot(pid)}/load")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "extruder_unknown"
+    assert not load.called
 
 
 @respx.mock

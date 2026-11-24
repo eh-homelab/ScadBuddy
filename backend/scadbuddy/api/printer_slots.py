@@ -22,7 +22,6 @@ from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.api.filament import nudge_after_write
 from scadbuddy.bambuddy import slot_control as sc
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
-from scadbuddy.bambuddy.extruders import extruder_of
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.trays import (
     EXTERNAL,
@@ -95,7 +94,7 @@ async def _command(
             # Only with the Filament Track Switch does Bambuddy need the hotend
             # (``routes/printers.py`` line 4770, v1.3.1).
             switch = status.fila_switch is not None and status.fila_switch.installed
-            extruder = extruder_of(ams_id, tray_id, status) if switch else None
+            extruder = sc.slot_extruder(status, ams_id, tray_id) if switch else None
             if switch and extruder is None:
                 raise sc.refused(
                     "extruder_unknown",

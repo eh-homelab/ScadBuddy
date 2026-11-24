@@ -7,7 +7,8 @@ import type { AmsUnitView, AmsView, SlotConfigureBody, SlotPresetBody, SlotView 
  * spools and an empty slot, and an empty external holder; any other printer is not linked, a 409,
  * as the route answers. `setAmsPrinting(true)` makes the printer print, so every printer write is
  * the route's 409 `printer_busy`; `setAmsAdminOnly(true)` makes a label or saved-preset write
- * Bambuddy's admin-only scope problem. A configure from a spool sends its type's preset, `GFA00`.
+ * Bambuddy's admin-only scope problem. A configure from a spool sends its type's ScadBuddy preset
+ * (`sb-<id>`) by its mirror's Bambuddy local preset id, `141`, so the route names its source `local`.
  */
 
 export const H2C = '00000000-0000-4000-8000-000000000001'
@@ -185,8 +186,8 @@ export const handlers = [
         filled: true,
         material: body.material ?? 'PLA',
         colour: colour.length === 7 ? `${colour}FF` : colour,
-        preset_id: body.preset_id ?? (fromSpool ? 'GFA00' : ''),
-        preset_name: body.preset_name ?? (fromSpool ? 'Bambu PLA Basic' : (body.material ?? 'PLA')),
+        preset_id: body.preset_id ?? (fromSpool ? '141' : ''),
+        preset_name: body.preset_name ?? (fromSpool ? 'Shop PLA' : (body.material ?? 'PLA')),
         nozzle_temp_min: body.nozzle_temp_min ?? 190,
         nozzle_temp_max: body.nozzle_temp_max ?? 230,
       })
@@ -198,6 +199,7 @@ export const handlers = [
         colour: target.colour,
         preset_id: target.preset_id,
         preset_name: target.preset_name,
+        preset_source: fromSpool && body.preset_id == null ? 'local' : null,
         nozzle_temp_min: target.nozzle_temp_min,
         nozzle_temp_max: target.nozzle_temp_max,
         nozzle_diameter: body.nozzle_diameter ?? '0.4',

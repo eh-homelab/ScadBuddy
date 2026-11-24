@@ -26,6 +26,7 @@ from scadbuddy.filament.presets import preset_for
 from scadbuddy.printers.lan_models import BUSY_STATES
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.store import PrinterStore, printer_uuid
+from scadbuddy.slicing.own_presets import sb_id
 
 #: A command that reaches the printer, each with its own checks (R-7153-3).
 Action = Literal["configure", "reset", "refresh", "load", "unload"]
@@ -80,6 +81,9 @@ class SlotConfigureBody(_Strict):
     k_value: float | None = Field(default=None, ge=0, lt=10)
 
 
+PresetSource = Literal["cloud", "local", "builtin", "orca_cloud"]
+
+
 class SlotConfigured(BaseModel):
     """What was sent to the slot."""
 
@@ -90,6 +94,10 @@ class SlotConfigured(BaseModel):
     colour: str
     preset_id: str
     preset_name: str
+    #: Where Bambuddy keeps ``preset_id`` when it came from the spool's preset: ``local``
+    #: for a ScadBuddy preset's mirror or a Bambuddy local preset id, else ``cloud``.
+    #: ``None`` for an id sent in the body, or none.
+    preset_source: PresetSource | None = None
     nozzle_temp_min: int
     nozzle_temp_max: int
     nozzle_diameter: str
@@ -112,7 +120,7 @@ class SlotPresetBody(_Strict):
 
     preset_id: str = Field(min_length=1, max_length=64, pattern=PRESET_ID)
     preset_name: Annotated[str, Field(min_length=1, max_length=128), AfterValidator(_printable)]
-    preset_source: Literal["cloud", "local", "builtin", "orca_cloud"] = "cloud"
+    preset_source: PresetSource = "cloud"
     #: The filament id the slot was configured with, so Bambuddy notices a later
     #: configure from elsewhere (``routes/printers.py`` line 2745, v1.3.1).
     tray_info_idx: str | None = Field(default=None, max_length=32, pattern=PRESET_ID)
@@ -325,6 +333,16 @@ def nozzle_of(status: PrinterStatus, ams_id: int, tray_id: int) -> str | None:
     return status.nozzles[extruder].nozzle_diameter or None
 
 
+def preset_source_of(slicer_filament: str) -> PresetSource:
+    """Where Bambuddy keeps a spool preset's ref: a ScadBuddy preset (``sb-<id>``) is its
+    mirror, which `preset_mirror` creates with ``POST /local-presets/``, and a bare
+    number is a Bambuddy local preset's id (as `sb_presets` reads them); any other ref
+    (``GFA00``, a ``PFUS…`` user preset) is Bambu's."""
+    if sb_id(slicer_filament) is not None or slicer_filament.strip().isdigit():
+        return "local"
+    return "cloud"
+
+
 def configure_values(
     body: SlotConfigureBody,
     status: PrinterStatus,
@@ -354,13 +372,15 @@ def configure_values(
     preset_name = body.preset_name
     low, high = body.nozzle_temp_min, body.nozzle_temp_max
     cali_idx, setting_id, k_value = body.cali_idx, body.setting_id, body.k_value
+    source: PresetSource | None = None
     if spool is not None:
         preset = preset_for(presets, PRINTER_MODEL, nozzle)
         ref = None if preset is None else preset.for_bambuddy()
         material = material or spool.names.material
         colour = colour or spool.effective.rgba
-        if preset_id is None and ref is not None:
+        if preset_id is None and preset is not None and ref is not None:
             preset_id = ref
+            source = preset_source_of(preset.slicer_filament)
         if preset_name is None:
             preset_name = (
                 preset.slicer_filament_name if preset is not None and ref is not None else None
@@ -424,6 +444,7 @@ def configure_values(
         colour=rgba,
         preset_id=preset_id or "",
         preset_name=name,
+        preset_source=source,
         nozzle_temp_min=low,
         nozzle_temp_max=high,
         nozzle_diameter=nozzle,
