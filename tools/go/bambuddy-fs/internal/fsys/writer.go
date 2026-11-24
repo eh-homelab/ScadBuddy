@@ -22,7 +22,8 @@ import (
 // Writes (spec §8). Bambuddy has no in-place write, so a file is written to a temp
 // file under the cache directory and uploaded when it is closed, and writing over a
 // name uploads a new file and then deletes the old one. A failed upload's file moves
-// to the unsent queue (unsent.go, #2865), and a later write of it works on a copy.
+// to the unsent queue (unsent.go, #2865), as every write does under --write-back (#7286),
+// and a later write of it works on a copy.
 
 // uploadTimeout bounds an upload, which runs detached from the request that started
 // it, so a signal that interrupts close(2) does not lose the file.
@@ -303,7 +304,8 @@ func (h *pendingHandle) Fsync(context.Context, uint32) syscall.Errno {
 // without waiting, so the upload is here for the caller to learn its outcome. A flush
 // with nothing new (closing a duplicate descriptor, or a second handle's close) sends
 // nothing, and a reader's flush never uploads. An upload that fails but is queued
-// (pending.queue) is a success.
+// (pending.queue) is a success. With --write-back the flush only queues the contents,
+// and the retrier sends them once the last handle is released (#7286).
 func (h *pendingHandle) Flush(ctx context.Context) syscall.Errno {
 	if !h.write {
 		return 0
@@ -330,7 +332,8 @@ func (p *pending) tracedUpload(ctx context.Context, name string) syscall.Errno {
 // flush could neither send nor queue (one more try), or what a mapping wrote after the
 // last close. If that fails too and no handle has opened meanwhile, the contents are
 // kept under refused/ (keepRefused) and a file never uploaded leaves its folder. The
-// queued entries it held go back to the retrier.
+// queued entries it held go back to the retrier. With --write-back it queues what is
+// left instead of uploading it (#7286).
 func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 	p, n, t := h.p, h.p.node, h.p.node.tree
 	if t.released != nil {
@@ -431,8 +434,8 @@ func (n *file) drop() {
 // conflict copy if a file it does not replace has taken the name (tree.target), makes
 // them the new ID's cached contents, and only then deletes the files they replace that
 // are still in place. If a delete fails the new file stays, and the error says the old
-// one remains. A failure is queued (pending.queue); a refusal stays unsent. The caller
-// holds p.mu.
+// one remains. A failure is queued (pending.queue); a refusal stays unsent. With
+// --write-back nothing is sent: the contents are queued at once. The caller holds p.mu.
 //
 // The node takes the new file's ID unless an old file remains: a stored file's inode
 // number names its ID, so the parent's entry is invalidated and the name is looked up
@@ -449,6 +452,20 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 		return 0
 	}
 	if errno := p.ensure(ctx); errno != 0 {
+		return errno
+	}
+	if t.opts.WriteBack {
+		if p.key == "" {
+			p.key = api.NewKey()
+		}
+		n.mu.Lock()
+		bases, over := slices.Clone(p.bases), slices.Clone(p.over)
+		n.mu.Unlock()
+		errno := p.queue(n.current(), bases, over, nil, attempt{Key: p.key})
+		if errno == 0 {
+			// Only a write it queued: one removed while open queues nothing.
+			telemetry.SetOnSpan(ctx, telemetry.WriteBack())
+		}
 		return errno
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadTimeout)
@@ -527,9 +544,10 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 	return errno
 }
 
-// queue keeps contents whose upload failed for the retrier: the temp file moves into
-// the unsent queue, under the state directory, superseding the queued saves the write
-// held (over), and the write goes on from a copy of it. The caller holds p.mu.
+// queue keeps contents whose upload failed (cause), or that --write-back queues before
+// any attempt (cause nil), for the retrier: the temp file moves into the unsent queue,
+// under the state directory, superseding the queued saves the write held (over), and
+// the write goes on from a copy of it. The caller holds p.mu.
 //
 // Once the contents are fsync'd there, the failure is answered with success: the bytes
 // are safe, and the retrier sends them under whatever name and folder they then have.
@@ -541,8 +559,10 @@ func (p *pending) queue(cur api.File, bases []base, over []*entry, cause error, 
 	size := p.size.Load()
 	rec := record{
 		FolderID: cur.FolderID, Name: cur.Name, Size: size, Created: now.UTC(),
-		Attempts: 1, LastError: cause.Error(), LastAttempt: now.UTC(), Bases: bases, SavedAt: now,
-		Attempt: &sent,
+		Bases: bases, SavedAt: now, Attempt: &sent,
+	}
+	if cause != nil {
+		rec.Attempts, rec.LastError, rec.LastAttempt = 1, cause.Error(), now.UTC()
 	}
 	e, f, err := q.add(p.tmp, p.path, size, rec, over...)
 	if err != nil {
@@ -563,6 +583,12 @@ func (p *pending) queue(cur api.File, bases []base, over []*entry, cause error, 
 	}), e)
 	n.mu.Unlock()
 	n.bind(e)
+	if cause == nil {
+		telemetry.Queued(telemetry.QueuedWriteBack)
+		slog.Info("write queued; the retrier sends it", "path", e.dir, "folder", cur.FolderID, "name", cur.Name)
+		return 0
+	}
+	telemetry.Queued(telemetry.QueuedUploadFailed)
 	slog.Warn("upload failed; the contents are kept and will be sent again", "path", e.dir, "folder", cur.FolderID, "name", cur.Name, "err", cause)
 	return 0
 }
