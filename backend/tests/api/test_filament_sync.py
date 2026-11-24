@@ -600,6 +600,93 @@ def test_the_preview_of_a_row_older_than_its_link_has_no_proof_and_no_reason(
     assert preview.json()["bambuddy_unreadable"] is False
 
 
+def _preset_link(pg_conninfo: str, bb_id: int, stamp: str) -> None:
+    """A ScadBuddy preset the mirror sent to Bambuddy ``OLD`` as ``bb_id``, stamped with
+    the ``updated_at`` Bambuddy answered; the only link."""
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "INSERT INTO filament_presets (name, source, blob_key, sha256, mirrored_sha256,"
+            " bb_preset_id, bb_instance, bb_updated_at) VALUES ('Only', 'manual', 'k', %s, %s,"
+            " %s, %s, %s)",
+            ("a" * 64, "a" * 64, bb_id, OLD, stamp),
+        )
+        conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (OLD,))
+
+
+def _presets(*rows: dict[str, Any]) -> respx.Route:
+    """The configured Bambuddy's local presets, as the reset reads them for the proof."""
+    return respx.get(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(
+            200, json={"filament": list(rows), "printer": [], "process": []}
+        )
+    )
+
+
+@respx.mock
+def test_with_only_preset_links_the_presets_prove_the_same_bambuddy(
+    client: TestClient, pg_conninfo: str, filament_nudges: list[bool]
+) -> None:
+    """#7343 item 1: no spool links; the configured Bambuddy lists the linked preset as
+    ScadBuddy stamped it, so the dry run offers the keep and the reset moves the id to the
+    configured Bambuddy instead of deleting it (which would duplicate every preset)."""
+    configure(client)
+    _preset_link(pg_conninfo, 7, "2026-11-23T08:00:00")
+    _listing()
+    presets = _presets(
+        {
+            "id": 7,
+            "name": "Only",
+            "preset_type": "filament",
+            "source": "manual",
+            "updated_at": "2026-11-23T08:00:00",
+        }
+    )
+
+    preview = client.get(RESET)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["same_bambuddy"] is True
+    assert preview.json()["counts"]["presets"] == 1
+
+    reset = client.post(RESET, json={"confirm_instance": OLD, "expect_kept": True})
+
+    assert reset.status_code == 200, reset.text
+    assert reset.json()["kept"] is True
+    assert presets.call_count == 2
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute("SELECT bb_preset_id, bb_instance FROM filament_presets").fetchone()
+    assert row == (7, instance_for(BASE))
+
+
+@respx.mock
+def test_a_preset_listing_that_cannot_be_read_offers_the_delete(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """The presets are the only links and Bambuddy's preset listing fails: the dry run
+    says Bambuddy could not be read and offers the delete only."""
+    configure(client)
+    _preset_link(pg_conninfo, 7, "2026-11-23T08:00:00")
+    _listing()
+    respx.get(f"{API}/local-presets/").mock(return_value=httpx.Response(503))
+
+    preview = client.get(RESET)
+
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["same_bambuddy"] is False
+    assert preview.json()["bambuddy_unreadable"] is True
+
+
+@respx.mock
+def test_spool_links_need_no_preset_listing(client: TestClient, pg_conninfo: str) -> None:
+    """With spool links the spools prove the same Bambuddy; the presets are not read."""
+    configure(client)
+    _linked(client, pg_conninfo)
+    _listing()
+    presets = _presets()
+
+    assert client.get(RESET).status_code == 200
+    assert not presets.called
+
+
 @respx.mock
 def test_a_kept_reset_whose_proof_changed_is_409(
     client: TestClient, pg_conninfo: str, filament_nudges: list[bool]

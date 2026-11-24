@@ -143,3 +143,34 @@ Without a Bambuddy URL the mirror does nothing.
 - [x] `filament/preset_mirror.py`: mirror one, mirror pending; after the fetch, in the refresh.
 - [x] `profile_fetch.import_run` writes ScadBuddy presets (Decisions 3, 12, 13); tests.
 - [x] Close #7174 (superseded) and #7142 when it lands.
+
+## Follow-ups from the #7201 review (#7343)
+
+- **R-7343-1 (the reset's proof from the presets).** The proof is sound, so it is built:
+  when no spool is linked, the reset reads the configured Bambuddy's local presets (`GET
+  /local-presets/`, only to decide whether the linked ids are that Bambuddy's) and applies
+  the spool rule (`bb_sync_results._proof_by`): every linked `bb_preset_id` listed, none
+  older than ScadBuddy's `bb_updated_at`, one exactly equal, at least half timed on both
+  sides. The time it compares is new: each mirror write now keeps the `updated_at` that
+  Bambuddy's `POST` or `PUT` answers as `bb_updated_at` (Bambuddy's column is
+  `onupdate=func.now()`, `backend/app/models/local_preset.py` line 40 at
+  maziggy/bambuddy@b7d894b5, and both routes `db.refresh` before they answer). Ids alone
+  would prove nothing (any Bambuddy numbers its presets from 1), and a preset mirrored
+  before this change has no time, so it is only checked to be there and cannot prove alone;
+  it gets one at its next send. A failed preset read is `bambuddy_unreadable`, as a failed
+  spool read is. The delete stays possible, so the dialog, the agent tool and the skill also
+  say that a delete of preset links on the same Bambuddy makes it hold every preset twice.
+- **R-7343-2 (a lost create left behind).** When `made_after` matches nothing, the ids of the
+  preset's name above the floor that no ScadBuddy preset holds are named in the preset's
+  `mirror_error` once the create succeeds. It is a note, not a failure: the preset counts
+  as sent, and the next successful send clears it. ScadBuddy deletes nothing in Bambuddy.
+- **R-7343-3 (`IMPORT_MIRROR_TIMEOUT`).** The comment counts every call: one listing, one
+  write per preset (a 404 `PUT` adds a `POST`), and one `GET` per same-name preset above the
+  floor only after a lost create. 120 s stays: it is a cut-off, the refresh sends the rest.
+- **R-7343-4 (`GET` returns `setting` as `POST` stored it).** It does: `create_local_preset`
+  stores `json.dumps(data.setting)` (`backend/app/api/routes/local_presets.py` line 115)
+  and `get_local_preset` answers `json.loads(preset.setting)` (line 73), `setting: dict` on
+  both schemas (`backend/app/schemas/local_preset.py` lines 37, 45), at
+  maziggy/bambuddy@b7d894b5 (v1.3.2; unchanged since edf244c4 of 2026-02-09 but for the
+  session scope, d8375fab). `extract_core_fields` only reads the dict. So `made_after`'s
+  comparison is unchanged; both sides strip the credential keys as they parse.

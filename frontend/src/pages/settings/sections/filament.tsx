@@ -311,7 +311,7 @@ function resetProblem(cause: unknown): string {
  * that dry run read, so a stale page cannot reset another Bambuddy's links. No ScadBuddy row is
  * deleted. Then a full pass links the new Bambuddy afresh.
  * #6845 — when the dry run says `same_bambuddy` (the Bambuddy set up now holds the linked spools as
- * ScadBuddy last saw them), the reset sends `expect_kept`, deletes nothing and keeps every link, and the
+ * ScadBuddy last saw them; with no spool linked, the linked filament presets, #7343), the reset sends `expect_kept`, deletes nothing and keeps every link, and the
  * dialog says so. When the server can no longer prove it (`proof_changed`, R-6845-6), nothing is deleted:
  * the dialog reads the dry run again and says why. A Bambuddy the dry run could not read
  * (`bambuddy_unreadable`) gets the delete, with a note.
@@ -384,7 +384,7 @@ function ResetLinks({ onReset }: { onReset: (done: LinksResetDone) => void }) {
             <AlertDialogTitle>{same ? 'Keep the Bambuddy links?' : 'Reset the Bambuddy links?'}</AlertDialogTitle>
             <AlertDialogDescription>
               {same
-                ? 'The Bambuddy set up now holds the linked spools as ScadBuddy last saw them, so it is the same Bambuddy at a new address. Nothing is deleted: every link now belongs to it.'
+                ? 'The Bambuddy set up now holds the linked spools (or, with no spool linked, the linked filament presets) as ScadBuddy last saw them, so it is the same Bambuddy at a new address. Nothing is deleted: every link now belongs to it.'
                 : 'ScadBuddy forgets which Bambuddy rows its own rows match. No ScadBuddy spool, type, supplier or location is deleted, and nothing is deleted in either Bambuddy.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -392,9 +392,15 @@ function ResetLinks({ onReset }: { onReset: (done: LinksResetDone) => void }) {
             <div className="flex flex-col gap-2 text-sm">
               {preview.changed_since_pull && (
                 <p className="text-warn">
-                  Every linked spool ScadBuddy could compare (a time on both sides) changed in Bambuddy since the last
-                  pull, so ScadBuddy cannot prove this is the same Bambuddy. Only the reset is offered. Reset only if it is
-                  another Bambuddy.
+                  Every linked spool (or, with no spool linked, filament preset) ScadBuddy could compare (a time on both
+                  sides) changed in Bambuddy since ScadBuddy last saw it, so ScadBuddy cannot prove this is the same
+                  Bambuddy. Only the reset is offered. Reset only if it is another Bambuddy.
+                </p>
+              )}
+              {preview.counts.presets > 0 && (
+                <p className="text-warn">
+                  Each filament preset is then copied to the Bambuddy set up now again. If it is the same Bambuddy at a new
+                  address, it then holds those presets twice, and its spools and AMS slots keep naming the old copies.
                 </p>
               )}
               {preview.bambuddy_unreadable && (

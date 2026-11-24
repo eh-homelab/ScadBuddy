@@ -93,10 +93,12 @@ from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.bb_sync_passes import PAGE_MAX, BadPassCursorError
 from scadbuddy.filament.bb_sync_results import (
     Listing,
+    PresetListing,
     ResetRefusedError,
     reset_links,
     reset_preview,
     sync_status,
+    wants_preset_listing,
 )
 from scadbuddy.filament.catalog import (
     CATALOGS,
@@ -2628,24 +2630,30 @@ def _configured(url: str | None) -> str | None:
     return instance_for(url) if url else None
 
 
-async def _listing(settings: StoredSettings) -> tuple[Listing, bool]:
+async def _listing(
+    settings: StoredSettings, filament: Filament
+) -> tuple[Listing, PresetListing, bool]:
     """The configured Bambuddy's spools, archived ones too, parsed one by one, for the
-    proof that it is the links' own Bambuddy (#6845 R-6845-4), and whether it could not
-    be read. ``None`` with no Bambuddy configured, or when the read failed: then the
-    preview offers the delete only and a reset that expects the links kept is refused
-    (Decision 198)."""
+    proof that it is the links' own Bambuddy (#6845 R-6845-4), its filament local presets
+    when no spool is linked but a preset is (`wants_preset_listing`, #7343: the presets
+    then prove it), and whether it could not be read. ``None`` with no Bambuddy
+    configured, or when a read failed: then the preview offers the delete only and a
+    reset that expects the links kept is refused (Decision 198). Both reads are ``GET``s,
+    and the presets read only decides whether the linked ids are this Bambuddy's."""
     if not settings.bambuddy_url:
-        return None, False
+        return None, None, False
+    presets_too = await asyncio.to_thread(wants_preset_listing, filament)
     try:
         async with client_for(settings) as client:
             rows = await client.spool_rows(include_archived=True)
+            presets = (await client.local_presets()).filament if presets_too else None
     except ApiError as failed:
         logger.warning(
-            "the configured Bambuddy's spools could not be read for the links' proof",
+            "the configured Bambuddy could not be read for the links' proof",
             extra={"status": failed.status},
         )
-        return None, True
-    return parse_rows(rows), False
+        return None, None, True
+    return parse_rows(rows), presets, False
 
 
 @router.get(
@@ -2663,12 +2671,16 @@ async def _listing(settings: StoredSettings) -> tuple[Listing, bool]:
         "Bambuddy spools the pull `ignored`. `same_bambuddy` (#6845) is true when the "
         "configured Bambuddy is the one the links were made against: it holds every linked "
         "spool, none older than ScadBuddy last saw it, at least one exactly as then, and at "
-        "least half the links have a time on both sides. A reset with `expect_kept` true "
+        "least half the links have a time on both sides. When no spool is linked, "
+        "ScadBuddy's filament presets prove it by the same rule (#7343): the configured "
+        "Bambuddy lists each linked preset id, none older than Bambuddy's time of the "
+        "mirror's last write. A reset with `expect_kept` true "
         "then deletes nothing and keeps every link; when it is false a reset deletes the "
         "counts, and the next passes link again only what the pull matches (a spool by its "
         "RFID tag, a supplier, location or insert type by its name), so every untagged "
         "spool is made again on the side its direction sends it to. Reads ScadBuddy and "
-        "the configured Bambuddy's spools (`GET`). When Bambuddy cannot be read the answer "
+        "the configured Bambuddy's spools (`GET`), and its local presets (`GET`) only when "
+        "presets are linked and no spool is. When Bambuddy cannot be read the answer "
         "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. "
         "`changed_since_pull` is true when `same_bambuddy` is false although the "
         "configured Bambuddy holds every linked spool and none is older than its link, and "
@@ -2685,13 +2697,14 @@ async def preview_filament_sync_reset(
     filament: FilamentDep, store: SettingsStoreDep
 ) -> LinksResetPreview:
     settings = await asyncio.to_thread(store.load)
-    listing, unreadable = await _listing(settings)
+    listing, presets, unreadable = await _listing(settings, filament)
     return await asyncio.to_thread(
         partial(
             reset_preview,
             filament,
             _configured(settings.bambuddy_url),
             listing,
+            presets=presets,
             unreadable=unreadable,
         )
     )
@@ -2703,7 +2716,8 @@ async def preview_filament_sync_reset(
     summary="Reset the Bambuddy links after the Bambuddy URL changed",
     description=(
         "`expect_kept` is the dry run's `same_bambuddy` (#6845). When it is true, it first "
-        "reads the configured Bambuddy's spools (`GET`) and checks again that it is the "
+        "reads the configured Bambuddy's spools (`GET`; its local presets too when they are "
+        "the proof, #7343) and checks again that it is the "
         "one the links were made against; then it deletes nothing: the links, intents and "
         "error rows stay, they now belong to the configured Bambuddy, and the answer has "
         "`kept` true and zero counts. When that read fails or no longer proves it, the "
@@ -2731,7 +2745,9 @@ async def reset_filament_sync_links(
     filament: FilamentDep, store: SettingsStoreDep, state: StateDep, body: LinksResetRequest
 ) -> LinksResetDone:
     settings = await asyncio.to_thread(store.load)
-    listing = (await _listing(settings))[0] if body.expect_kept else None
+    listing, presets, _ = (
+        await _listing(settings, filament) if body.expect_kept else (None, None, False)
+    )
     try:
         done = await asyncio.to_thread(
             partial(
@@ -2740,6 +2756,7 @@ async def reset_filament_sync_links(
                 body.confirm_instance,
                 _configured(settings.bambuddy_url),
                 listing,
+                presets=presets,
                 expect_kept=body.expect_kept,
             )
         )

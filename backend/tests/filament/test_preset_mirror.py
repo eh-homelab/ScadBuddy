@@ -15,7 +15,8 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
-from scadbuddy.filament.bb_sync_results import reset_links, reset_preview
+from scadbuddy.bambuddy.models import LocalPreset, LocalPresetCatalogue
+from scadbuddy.filament.bb_sync_results import ResetRefusedError, reset_links, reset_preview
 from scadbuddy.filament.preset_mirror import (
     LOCK,
     mirror_pending,
@@ -458,8 +459,8 @@ async def test_with_only_preset_links_a_url_change_waits_for_the_reset(
 ) -> None:
     """No spool, supplier or other row links Bambuddy; the mirror made the only links.
     The first create records their Bambuddy, so after the URL changes the mirror sends
-    nothing until a person resets the links, which drops the ids (no spool link proves
-    the same Bambuddy); then each preset is created on the new one."""
+    nothing until a person resets the links; a confirmed delete drops the ids, and each
+    preset is created on the new one."""
     blobs = LocalBlobStore(tmp_path / "blobs")
     store = FilamentPresetStore(pg_pool, lambda: blobs)
     made = await _make(pg_pool, blobs, {"name": "Only"})
@@ -502,3 +503,163 @@ async def test_with_only_preset_links_a_url_change_waits_for_the_reset(
     row = _row(pg_pool, made)
     assert (row["bb_preset_id"], row["bb_instance"], row["mirrored_sha256"]) == (31, HERE, sha256)
     assert _instance(pg_pool) == HERE
+
+
+#: When the mirror's write last changed a preset in Bambuddy, naive UTC as Bambuddy sends it.
+STAMP = "2026-11-23T08:00:00"
+
+
+def _stamped(preset_id: int, name: str, updated_at: str = STAMP) -> dict[str, Any]:
+    return {**_preset_json(preset_id, name), "updated_at": updated_at}
+
+
+def _stamp_of(pool: PgPool, preset_id: int) -> str | None:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT bb_updated_at FROM filament_presets WHERE id = %s", (preset_id,)
+        ).fetchone()
+    assert row is not None
+    return row["bb_updated_at"]  # type: ignore[no-any-return]
+
+
+@respx.mock
+async def test_the_mirror_keeps_bambuddys_time_of_each_write(
+    pg_pool: PgPool, tmp_path: Path, client: BambuddyClient
+) -> None:
+    """#7343: each create and rewrite keeps the `updated_at` Bambuddy answers, which a
+    reset after a URL change compares to prove the same Bambuddy from the presets."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    store = FilamentPresetStore(pg_pool, lambda: blobs)
+    made = await _make(pg_pool, blobs, {"name": "Stamped"})
+    listed()
+    respx.post(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(200, json=_stamped(60, "Stamped"))
+    )
+    assert await mirror_with(client, pg_pool, store, HERE) == 1
+    assert _stamp_of(pg_pool, made) == STAMP
+
+    second = {"name": "Stamped", "nozzle_temperature_range_low": ["200"]}
+    key, sha256 = await keep_document(blobs, document_bytes(second))
+    with pg_pool.connection() as conn, conn.transaction():
+        version_on(conn, made, name="Stamped", key=key, sha256=sha256, doc=second, made_by="t")
+    respx.put(f"{API}/local-presets/60").mock(
+        return_value=httpx.Response(200, json=_stamped(60, "Stamped", "2026-11-23T09:00:00"))
+    )
+    assert await mirror_with(client, pg_pool, store, HERE) == 1
+    assert _stamp_of(pg_pool, made) == "2026-11-23T09:00:00"
+
+
+def _catalogue(*presets: dict[str, Any]) -> list[LocalPreset]:
+    return LocalPresetCatalogue.model_validate(
+        {"filament": list(presets), "printer": [], "process": []}
+    ).filament
+
+
+async def _preset_links_only(pool: PgPool, blobs: LocalBlobStore) -> tuple[int, int]:
+    """Two presets the mirror sent to Bambuddy ``OLD`` (ids 7 and 8, both stamped), the
+    only links; the URL then changed."""
+    first = await _make(pool, blobs, {"name": "One"}, bb_id=7, instance=OLD)
+    second = await _make(pool, blobs, {"name": "Two"}, bb_id=8, instance=OLD)
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_presets SET mirrored_sha256 = sha256, bb_updated_at = %s", (STAMP,)
+        )
+    _links_name(pool, OLD)
+    return first, second
+
+
+async def test_with_only_preset_links_the_presets_prove_the_same_bambuddy(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """#7343 item 1: no spool links; the configured Bambuddy lists every linked preset id,
+    none older than ScadBuddy's stamp and one exactly as stamped, so the reset keeps the
+    links: the ids move to the configured Bambuddy and nothing is created again."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    first, second = await _preset_links_only(pg_pool, blobs)
+    presets = _catalogue(_stamped(7, "One"), _stamped(8, "Two", "2026-11-23T10:00:00"))
+
+    preview = reset_preview(_filament(pg_pool), HERE, ([], []), presets=presets)
+    assert (preview.same_bambuddy, preview.changed_since_pull) == (True, False)
+
+    done = reset_links(_filament(pg_pool), OLD, HERE, ([], []), presets=presets, expect_kept=True)
+    assert (done.kept, done.configured_instance) == (True, HERE)
+    rows = [_row(pg_pool, i) for i in (first, second)]
+    assert [(r["bb_preset_id"], r["bb_instance"]) for r in rows] == [(7, HERE), (8, HERE)]
+    assert [r["mirrored_sha256"] == r["sha256"] for r in rows] == [True, True]
+    assert _instance(pg_pool) == HERE
+
+
+@pytest.mark.parametrize(
+    ("listed_presets", "changed"),
+    [
+        # Another Bambuddy: preset 8 is not there.
+        ([_stamped(7, "One")], False),
+        # A row older than ScadBuddy's stamp: an older copy, or another Bambuddy.
+        ([_stamped(7, "One"), _stamped(8, "Two", "2026-11-23T07:00:00")], False),
+        # Both edited in Bambuddy since: nothing matches exactly.
+        (
+            [
+                _stamped(7, "One", "2026-11-23T09:00:00"),
+                _stamped(8, "Two", "2026-11-23T09:00:00"),
+            ],
+            True,
+        ),
+    ],
+)
+async def test_presets_that_do_not_prove_the_same_bambuddy_offer_the_delete_only(
+    pg_pool: PgPool, tmp_path: Path, listed_presets: list[dict[str, Any]], changed: bool
+) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    await _preset_links_only(pg_pool, blobs)
+    presets = _catalogue(*listed_presets)
+
+    preview = reset_preview(_filament(pg_pool), HERE, ([], []), presets=presets)
+    assert (preview.same_bambuddy, preview.changed_since_pull) == (False, changed)
+    with pytest.raises(ResetRefusedError) as refused:
+        reset_links(_filament(pg_pool), OLD, HERE, ([], []), presets=presets, expect_kept=True)
+    assert refused.value.code == "proof_changed"
+    assert _instance(pg_pool) == OLD
+
+
+async def test_untimed_preset_links_prove_nothing(pg_pool: PgPool, tmp_path: Path) -> None:
+    """Presets the mirror sent before it kept Bambuddy's time have no stamp: at least
+    half the links must be timed on both sides, as for spools, or nothing is proven."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    await _preset_links_only(pg_pool, blobs)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_presets SET bb_updated_at = NULL")
+    presets = _catalogue(_stamped(7, "One"), _stamped(8, "Two"))
+    preview = reset_preview(_filament(pg_pool), HERE, ([], []), presets=presets)
+    assert preview.same_bambuddy is False
+
+
+@respx.mock
+async def test_a_lost_create_left_behind_a_newer_version_is_named_on_the_preset(
+    pg_pool: PgPool, tmp_path: Path, client: BambuddyClient
+) -> None:
+    """#7343 item 2: a create's answer was lost, then a new version was written, so no
+    preset above the floor holds the document now sent and it is created again. The
+    copy the lost create made stays in Bambuddy untracked: its id is the preset's
+    `mirror_error` note. An id of that name another ScadBuddy preset holds is not named."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    store = FilamentPresetStore(pg_pool, lambda: blobs)
+    made = await _make(pg_pool, blobs, {"name": "Twice", "nozzle_temperature_range_low": ["200"]})
+    await _make(
+        pg_pool, blobs, {"name": "Twice", "filament_type": ["PETG"]}, bb_id=41, instance=HERE
+    )
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_presets SET mirrored_sha256 = sha256 WHERE bb_preset_id = 41")
+        conn.execute("UPDATE filament_presets SET mirror_create_floor = 40 WHERE id = %s", (made,))
+    listed(_preset_json(41, "Twice"), _preset_json(42, "Twice"))
+    detail(41, "Twice", {"name": "Twice", "filament_type": ["PETG"]})
+    detail(42, "Twice", {"name": "Twice"})
+    create = respx.post(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(200, json=_preset_json(43, "Twice"))
+    )
+    assert await mirror_with(client, pg_pool, store, HERE) == 1
+    assert create.call_count == 1
+    row = _row(pg_pool, made)
+    assert (row["bb_preset_id"], row["mirrored_sha256"]) == (43, row["sha256"])
+    assert row["mirror_error"] is not None
+    assert "42" in row["mirror_error"]
+    assert "41" not in row["mirror_error"]

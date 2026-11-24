@@ -21,19 +21,23 @@ sync's are (`bambuddy_pull.ANY_LINK`): the write that stores it records its Bamb
 the links' one when none is recorded (`sb_presets.record_instance_on`), so the links'
 instance is recorded even when presets are the only links. After the Bambuddy URL changes
 the mirror waits, as the filament sync does, until a person resets the links (#6773): a
-reset that finds the same Bambuddy (proved by the spool links, so never when presets are
-the only links) moves the ids to the new URL's instance (`bb_sync_results.reset_links`),
-and one that deletes the links drops them, so each preset is created on the new
-Bambuddy. A preset whose id is still another Bambuddy's (a mirror that raced a reset
-stored it) is created on the configured one, never rewritten there by id. Bambuddy's
-``PUT`` merges the document over the OrcaSlicer base its ``inherits`` names, while its
-``POST`` keeps it as sent (`BambuddyClient.update_local_preset`), so a rewritten copy can
-carry inherited keys the first one lacked. Before a ``POST`` the mirror keeps the highest
+reset that finds the same Bambuddy (proved by the spool links, or by the presets when no
+spool is linked: each send keeps Bambuddy's ``updated_at`` of its write as
+``bb_updated_at``, #7343) moves the ids to the new URL's instance
+(`bb_sync_results.reset_links`), and one that deletes the links drops them, so each
+preset is created on the new Bambuddy. A preset whose id is still another Bambuddy's (a
+mirror that raced a reset stored it) is created on the configured one, never rewritten
+there by id. Bambuddy's ``PUT`` merges the document over the OrcaSlicer base its
+``inherits`` names, while its ``POST`` keeps it as sent
+(`BambuddyClient.update_local_preset`), so a rewritten copy can carry inherited keys the
+first one lacked. Before a ``POST`` the mirror keeps the highest
 id Bambuddy lists (``mirror_create_floor``), so when the answer is lost the next send
 takes the one preset above it that has the same name and holds the document sent
-(`_Listing.made_after`) instead of making a second one. One preset's failure, a Bambuddy
-id another ScadBuddy preset holds included, is its own ``mirror_error`` and never stops
-the presets after it.
+(`_Listing.made_after`) instead of making a second one. When a version was written after
+the lost create, nothing above the floor holds it: the preset is created again and its
+``mirror_error`` names the untracked copy of its name the lost create left (#7343). One
+preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its own
+``mirror_error`` and never stops the presets after it.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Collection
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import status
@@ -110,23 +115,64 @@ def _pending(
         ).fetchall()
 
 
+@dataclass(frozen=True)
+class _Sent:
+    """What a send left in Bambuddy: the id that holds the document, Bambuddy's
+    ``updated_at`` of that write (its answer's), and the ids of the preset's name above
+    its create floor that no ScadBuddy preset holds (`_untracked`)."""
+
+    bb_id: int
+    updated_at: str | None
+    stray: tuple[int, ...] = ()
+
+
+def _stray_note(name: str, stray: Collection[int]) -> str:
+    """The ``mirror_error`` note of a lost create's copy left in Bambuddy (#7343)."""
+    ids = ", ".join(str(i) for i in sorted(stray))
+    return (
+        f"Bambuddy also holds preset {ids} named {name!r}, which no ScadBuddy preset tracks:"
+        " most likely a copy an earlier create made when its answer was lost, before this"
+        " version was written. Delete it in Bambuddy if it is not in use."
+    )
+
+
 def _mirrored(
-    pool: ConnectionPool[Conn], preset_id: int, sha256: str, bb_id: int, instance: str
+    pool: ConnectionPool[Conn], preset_id: int, sha256: str, sent: _Sent, instance: str, name: str
 ) -> None:
-    """Bambuddy ``instance`` holds document ``sha256`` as its preset ``bb_id``. The id is
-    kept whatever the document; the document counts as sent only while the preset still
-    holds it: a version written meanwhile stays pending. With the id, ``instance`` is
-    recorded as the links' Bambuddy when none is (`record_instance_on`)."""
+    """Bambuddy ``instance`` holds document ``sha256`` as its preset ``sent.bb_id``. The
+    id and Bambuddy's time of the write (``bb_updated_at``, what a reset of the links
+    compares to prove the same Bambuddy from the presets, #7343) are kept whatever the
+    document; the document counts as sent only while the preset still holds it: a version
+    written meanwhile stays pending. ``mirror_error`` is cleared, or names the untracked
+    copies of a lost create (`_stray_note`). With the id, ``instance`` is recorded as the
+    links' Bambuddy when none is (`record_instance_on`)."""
+    note = _stray_note(name, sent.stray)[:MAX_ERROR] if sent.stray else None
     with pool.connection() as conn, conn.transaction():
         conn.execute(
             "UPDATE filament_presets SET bb_preset_id = %s, bb_instance = %s,"
-            " mirror_create_floor = NULL,"
+            " bb_updated_at = %s, mirror_create_floor = NULL,"
             " mirrored_sha256 = CASE WHEN sha256 = %s THEN %s ELSE mirrored_sha256 END,"
-            " mirror_error = NULL, mirror_error_at = NULL"
+            " mirror_error = %s,"
+            " mirror_error_at = CASE WHEN %s::text IS NULL THEN NULL ELSE now() END"
             " WHERE id = %s",
-            (bb_id, instance, sha256, sha256, preset_id),
+            (sent.bb_id, instance, sent.updated_at, sha256, sha256, note, note, preset_id),
         )
         record_instance_on(conn, instance)
+
+
+def _untracked(pool: ConnectionPool[Conn], ids: Collection[int]) -> tuple[int, ...]:
+    """Those of Bambuddy's ``ids`` that no ScadBuddy preset holds."""
+    if not ids:
+        return ()
+    with pool.connection() as conn:
+        held = {
+            row["bb_preset_id"]
+            for row in conn.execute(
+                "SELECT bb_preset_id FROM filament_presets WHERE bb_preset_id = ANY(%s)",
+                (sorted(ids),),
+            )
+        }
+    return tuple(sorted(set(ids) - held))
 
 
 def _create_floor(pool: ConnectionPool[Conn], preset_id: int, floor: int) -> None:
@@ -157,20 +203,34 @@ class _Listing:
             self._presets = (await self._client.local_presets()).filament
         return self._presets
 
-    async def made_after(self, name: str, doc: dict[str, Any], floor: int) -> int | None:
+    async def made_after(
+        self, name: str, doc: dict[str, Any], floor: int
+    ) -> tuple[int | None, list[int]]:
         """The one preset named ``name`` with an id above ``floor`` whose document is
-        ``doc``, else ``None``. Bambuddy's ``POST`` stores the document as sent
-        (`BambuddyClient.create_local_preset`), so a lost create of ``doc`` reads back as
-        ``doc``; another type's preset of the same name holds another document. A
-        version written since the lost create matches nothing, and the preset is created
-        again."""
+        ``doc`` (else ``None``), and every id of that name above ``floor``. One
+        ``GET /local-presets/{id}`` per such id.
+
+        Bambuddy's ``POST`` keeps the document as sent and its ``GET`` answers it as kept,
+        so a lost create of ``doc`` reads back equal to ``doc``: ``create_local_preset``
+        stores ``json.dumps(data.setting)`` (``backend/app/api/routes/local_presets.py``
+        line 115) and ``get_local_preset`` answers ``json.loads(preset.setting)`` (line
+        73), ``setting`` a plain ``dict`` both ways (``backend/app/schemas/local_preset.py``
+        lines 37 and 45), at maziggy/bambuddy@b7d894b5 (v1.3.2, read 2026-11-23; the two
+        routes are unchanged since edf244c4 of 2026-02-09 but for the session scope,
+        d8375fab). Both sides lose the print-host credential keys as they are parsed
+        (`LocalPresetDetail`, `FilamentPresetStore.read`). Another type's preset of the
+        same name holds another document. A version written since the lost create
+        matches nothing: the preset is created again, and `_send` names the copy the lost
+        create left (#7343)."""
         found = []
+        above = []
         for preset in await self._all():
             if preset.name == name and preset.id > floor:
+                above.append(preset.id)
                 detail = await self._client.local_preset(preset.id)
                 if detail.setting == doc:
                     found.append(preset.id)
-        return found[0] if len(found) == 1 else None
+        return (found[0] if len(found) == 1 else None), above
 
     async def floor(self) -> int:
         """The highest id listed or made in this run, 0 for none."""
@@ -188,24 +248,29 @@ async def _send(
     row: dict[str, Any],
     doc: dict[str, Any],
     instance: str,
-) -> int:
-    """The Bambuddy id that holds ``doc`` once sent. An id is rewritten in place only on
-    the Bambuddy it belongs to."""
+) -> _Sent:
+    """What holds ``doc`` in Bambuddy once sent. An id is rewritten in place only on the
+    Bambuddy it belongs to."""
     bb_id = row["bb_preset_id"] if row["bb_instance"] in (None, instance) else None
+    stray: tuple[int, ...] = ()
     if bb_id is None and row["mirror_create_floor"] is not None:
         # A create whose answer was lost: the preset it made, when Bambuddy lists one.
-        bb_id = await listing.made_after(row["name"], doc, row["mirror_create_floor"])
+        bb_id, above = await listing.made_after(row["name"], doc, row["mirror_create_floor"])
+        if bb_id is None:
+            # None holds this document: a copy of an older version the lost create made
+            # stays in Bambuddy, which the preset's note names (#7343).
+            stray = await asyncio.to_thread(_untracked, pool, above)
     if bb_id is not None:
         try:
-            await client.update_local_preset(bb_id, row["name"], doc)
-            return int(bb_id)
+            put = await client.update_local_preset(bb_id, row["name"], doc)
+            return _Sent(int(bb_id), put.updated_at)
         except ApiError as error:
             if error.status != status.HTTP_404_NOT_FOUND:
                 raise
     await asyncio.to_thread(_create_floor, pool, row["id"], await listing.floor())
     made = await client.create_local_preset(row["name"], "filament", doc)
     await listing.made(made)
-    return made.id
+    return _Sent(made.id, made.updated_at, stray)
 
 
 async def mirror_with(
@@ -250,8 +315,11 @@ async def _mirror_locked(
             await asyncio.to_thread(_failed, pool, row["id"], "the preset's document is missing")
             continue
         try:
-            bb_id = await _send(client, pool, listing, row, doc, instance)
-            await asyncio.to_thread(_mirrored, pool, row["id"], row["sha256"], bb_id, instance)
+            held = await _send(client, pool, listing, row, doc, instance)
+            bb_id = held.bb_id
+            await asyncio.to_thread(
+                _mirrored, pool, row["id"], row["sha256"], held, instance, row["name"]
+            )
         except UniqueViolation:
             # Another ScadBuddy preset holds that Bambuddy id: this one's error, and the
             # presets after it are still sent.

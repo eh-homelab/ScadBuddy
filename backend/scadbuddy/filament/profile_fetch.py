@@ -101,8 +101,16 @@ HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
 #: How long an import waits for the mirror of what it wrote (#7176); the next kept-preset
-#: refresh sends what is left. 120 s: Bambuddy's listing and three writes, each up to the
-#: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`). It leaves 7 of
+#: refresh sends what is left. The mirror's calls (`preset_mirror.py`), each up to the
+#: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`): one listing (`_Listing`, read
+#: once per run, before a create or a lost create's match); per preset the run wrote (one
+#: per printer model and nozzle) one write, a ``PUT``, a ``POST``, or a ``PUT`` that
+#: answers 404 then a ``POST``; and only for a preset whose last create's answer was lost,
+#: one ``GET /local-presets/{id}`` per preset of its name above that create's floor
+#: (`_Listing.made_after`), usually one. So 120 s holds the listing and three calls even at
+#: their limit (one preset rewritten, or two created), and many more at the speed Bambuddy
+#: answers. It is a cut-off, not a sum of the worst case: a run past it stops and the
+#: refresh sends the rest, so it is not raised. It leaves 7 of
 #: `profile_fetch/workflow.py` `IMPORT_REQUEST_TIMEOUT`'s 9 minutes to the K-table reads, 14
 #: of them at 30 s each.
 IMPORT_MIRROR_TIMEOUT: Final = 120.0

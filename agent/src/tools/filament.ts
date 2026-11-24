@@ -1490,7 +1490,9 @@ const tools: Tool[] = [
       'filament_sync_status says `instance_changed: true`, and the pull is stopped too. Call it first with ' +
       "`expect_kept: true`: it reads the configured Bambuddy's spools, and when that Bambuddy holds every linked " +
       'spool as ScadBuddy last saw it (the same Bambuddy at a new address), nothing is deleted: every link now ' +
-      'belongs to it, and the answer has `kept: true` and zero counts. When it cannot prove that (Bambuddy could ' +
+      'belongs to it, and the answer has `kept: true` and zero counts. When no spool is linked, ScadBuddy\'s filament ' +
+      "presets prove it the same way (it then also reads Bambuddy's local presets: each linked preset id there, none " +
+      "older than Bambuddy's time of the mirror's last write, #7343). When it cannot prove that (Bambuddy could " +
       'not be read, or it is another Bambuddy, or every linked spool ScadBuddy could compare (a time on both sides) was edited in Bambuddy since the last pull so ' +
       'none matches what ScadBuddy saw and the proof has nothing to stand on), it answers 409 `proof_changed` and ' +
       'deletes nothing; tell the user which case it is if you know (the dry run `GET /filament/sync/reset-links` ' +
@@ -1499,7 +1501,7 @@ const tools: Tool[] = [
       'which reads no Bambuddy and deletes, in one transaction, every spool link, the ' +
       'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the colour ' +
       "links, the old Bambuddy's ids of ScadBuddy's filament presets (the mirror then creates each one on the new " +
-      'Bambuddy), the open ' +
+      'Bambuddy; when that is the same Bambuddy at a new address, it then holds every preset twice, so tell the user), the open ' +
       'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then the full ' +
       'pass links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
       'is deleted. After a delete (`kept: false`) a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
