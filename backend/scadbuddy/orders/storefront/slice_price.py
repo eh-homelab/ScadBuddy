@@ -450,15 +450,17 @@ class SlicePrices:
         return _row(found)
 
     def listing_last(self, listing_id: str, model_sha256: str) -> PriceRow | None:
-        """A file listing's last firm price (#6710 §7.5): its newest ``done`` row of the
-        file ``model_sha256``, of any colours. None when it has none."""
+        """A file listing's last firm price (#6710 §7.5): the newest ``done`` row of the
+        file ``model_sha256``, of any colours, the listing's own before another's: two
+        listings of one file share a price (`key_subject`), and its row names only the one
+        that made it. None when the file has none."""
         with self._pool.connection() as conn:
             found = conn.execute(
                 f"SELECT {_COLUMNS} FROM storefront_slice_prices"
-                " WHERE listing_id = %s AND model_sha256 = %s AND status = 'done'"
+                " WHERE model_sha256 = %s AND status = 'done' AND listing_id IS NOT NULL"
                 " AND currency IS NOT NULL AND total_minor IS NOT NULL"
-                " ORDER BY finished_at DESC LIMIT 1",
-                (listing_id, model_sha256),
+                " ORDER BY (listing_id = %s) DESC, finished_at DESC LIMIT 1",
+                (model_sha256, listing_id),
             ).fetchone()
         return _row(found)
 

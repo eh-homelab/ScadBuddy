@@ -62,13 +62,21 @@ def test_the_preview_route_streams_the_held_glb(
     assert r.content == _bytes(crud.api, key)
 
 
-@pytest.mark.parametrize("plate", ["2", "0"])
 def test_a_plate_with_no_preview_is_404(
-    crud: CrudCaller, keychain: NativeFile, pla_red: str, plate: str
+    crud: CrudCaller, keychain: NativeFile, pla_red: str
 ) -> None:
     listing = publish(crud.api, create(crud.api, body(keychain, [pla_red]))["id"])
-    r = crud.get(f"/listings/{listing['id']}/preview/{plate}.glb")
-    assert r.status_code in (404, 422), r.text
+    r = crud.get(f"/listings/{listing['id']}/preview/2.glb")
+    assert r.status_code == 404, r.text
+    assert r.json()["type"].endswith("/preview_not_found")
+
+
+def test_a_plate_number_below_one_is_422(
+    crud: CrudCaller, keychain: NativeFile, pla_red: str
+) -> None:
+    listing = publish(crud.api, create(crud.api, body(keychain, [pla_red]))["id"])
+    r = crud.get(f"/listings/{listing['id']}/preview/0.glb")
+    assert r.status_code == 422, r.text
 
 
 def test_an_unpublished_file_listing_has_no_preview(

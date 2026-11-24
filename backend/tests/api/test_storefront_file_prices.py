@@ -198,6 +198,32 @@ def test_new_colours_show_the_listings_last_price_while_theirs_is_worked_out(
     assert own["source"] == "slice" and own["price_key"] != first["price_key"]
 
 
+def test_a_second_listing_of_the_file_shows_the_files_last_price(
+    crud: CrudCaller,
+    listed: dict[str, Any],
+    keychain: NativeFile,
+    pla_red: str,
+    pla_blue: str,
+) -> None:
+    """Two listings of one file share a price (`key_subject`), and its row names the one
+    that made it: the other listing's last price is that row's too, until it has its own."""
+    # Four slices: the default limit of renders is not what this test is about.
+    assert crud.api.put("/api/v1/settings", json={"storefront_renders_per_minute": 50}).is_success
+    first = priced(crud, listed, {0: pla_red, 1: pla_blue})
+    second = publish(crud.api, create(crud.api, body(keychain, [pla_red, pla_blue]))["id"])
+    assert priced(crud, second, {0: pla_red, 1: pla_blue}) == first
+    r = read(crud, second, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    assert (r.json()["source"], r.json()["price_key"]) == ("last", first["price_key"])
+    own = priced(crud, second, {0: pla_blue, 1: pla_red})
+    newer = priced(crud, listed, {0: pla_red, 1: pla_red})
+    assert newer["source"] == "slice"
+    # The listing's own row comes before a newer one of another listing.
+    r = read(crud, second, {0: pla_blue, 1: pla_blue})
+    assert r.status_code == 200, r.text
+    assert (r.json()["source"], r.json()["price_key"]) == ("last", own["price_key"])
+
+
 def test_a_listing_with_no_price_yet_answers_pending(
     crud: CrudCaller, listed: dict[str, Any], tmp_path: Path, pla_red: str, pla_blue: str
 ) -> None:

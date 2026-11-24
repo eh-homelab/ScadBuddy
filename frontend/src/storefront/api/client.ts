@@ -201,7 +201,8 @@ export const store = {
   /**
    * #6710 §7.5: the price of a file listing's colours (a listing filament per part, by slot).
    * A read: no `Idempotency-Key`. `slice` is firm, `pending` is read again after its
-   * `retry_after`, `none` is priced by hand. One that claims a new slice counts as a render.
+   * `retry_after`, as is `last` (the file's last price, of other colours, shown as updating
+   * meanwhile), `none` is priced by hand. One that claims a new slice counts as a render.
    */
   price: (listingId: string, input: FilePriceInput) =>
     call<StoreEstimate>(`/listings/${encodeURIComponent(listingId)}/price`, { method: 'POST', json: input }),
