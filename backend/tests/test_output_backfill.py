@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
@@ -803,7 +804,7 @@ def _age_holds(refs: BlobRefs, output_id: str, hours: int) -> None:
 
 @pytest.mark.requires_postgres
 async def test_the_reaper_releases_old_holds_of_outputs_with_no_record(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_conninfo: str, spans: InMemorySpanExporter
 ) -> None:
     """#1007: a delete racing a write can leave Parts held by an output with no
     meta.json; the reaper releases them, and only them."""
@@ -816,7 +817,12 @@ async def test_the_reaper_releases_old_holds_of_outputs_with_no_record(
         hold_parts(refs, "saving", written.manifest, old.slug)  # held, meta.json not written yet
         _age_holds(refs, old.id, 2)
         _age_holds(refs, "gone", 2)
+        spans.clear()
         assert reap_orphan_holds(refs, store) == 1
+        (reap,) = [s for s in spans.get_finished_spans() if s.name == "outputs.reap_orphan_holds"]
+        assert reap.attributes is not None
+        assert reap.attributes["scadbuddy.released"] == 1
+        assert "scadbuddy.outputs" not in reap.attributes
         holders = _holders(refs, part)
         assert (OUTPUT_HOLDER, "gone") not in holders
         assert (OUTPUT_HOLDER, old.id) in holders
