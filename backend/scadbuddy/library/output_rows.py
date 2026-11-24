@@ -356,10 +356,29 @@ class OutputRows:
                 (copied, refreshed, dropped, Jsonb(not_copied), Jsonb(damaged), run_id),
             )
 
+    def end_incomplete_run(
+        self,
+        run_id: int,
+        *,
+        copied: int,
+        refreshed: int,
+        dropped: int,
+        not_copied: list[str],
+        damaged: list[dict[str, Any]],
+    ) -> None:
+        """The end of a run whose walk may have missed folders: its counts and
+        ``incomplete``, and no ``finished_at``, so it does not make `copied` true."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE output_copy_runs SET incomplete = true, copied = %s, refreshed = %s,"
+                " dropped = %s, not_copied = %s, damaged = %s WHERE id = %s",
+                (copied, refreshed, dropped, Jsonb(not_copied), Jsonb(damaged), run_id),
+            )
+
     def last_run(self) -> dict[str, Any] | None:
         with self._pool.connection() as conn:
             found = conn.execute(
-                "SELECT id, started_at, finished_at, copied, refreshed, dropped, not_copied,"
-                " damaged FROM output_copy_runs ORDER BY id DESC LIMIT 1"
+                "SELECT id, started_at, finished_at, incomplete, copied, refreshed, dropped,"
+                " not_copied, damaged FROM output_copy_runs ORDER BY id DESC LIMIT 1"
             ).fetchone()
         return None if found is None else dict(found)

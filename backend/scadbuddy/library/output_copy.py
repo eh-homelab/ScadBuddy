@@ -7,7 +7,9 @@ folder's is written again, and a row whose folder the walk did not see goes. A f
 with no readable ``meta.json`` gets no row and goes on the run's "not copied" list; a
 side file that cannot be read is left out of the row and named on the "damaged" list.
 The first run that finishes makes `OutputRows.copied` true, which ends the fallback to
-the files.
+the files. A run whose walk may have missed folders (a listing failed with ESTALE or
+EIO, or the outputs folder read empty while rows exist) does not finish: it is recorded
+as ``incomplete``, so the fallback stays.
 
 Live writers on other pods run during the copy. Each one sets ``copied_at`` to the
 database's clock. The copy takes a mark from that clock before it reads a batch, and
@@ -87,6 +89,8 @@ class CopyResult:
     not_copied: list[str] = field(default_factory=list)
     #: ``{output_id, slug, file, error}`` for each side file left out of its row.
     damaged: list[dict[str, Any]] = field(default_factory=list)
+    #: The walk may have missed folders: the run is recorded with no ``finished_at``.
+    incomplete: bool = False
 
 
 def files_stamp(directory: Path) -> str:
@@ -269,6 +273,7 @@ def _copy(store: OutputStore, rows: OutputRows, stop: threading.Event | None) ->
     stale = rows.ids_copied_before(started) - seen
     if not walk.complete:
         # A listing that failed part-way may have missed folders that are there.
+        result.incomplete = True
         logger.warning(
             "a listing of the outputs failed; dropped no row this run",
             extra={"rows": len(stale)},
@@ -276,12 +281,16 @@ def _copy(store: OutputStore, rows: OutputRows, stop: threading.Event | None) ->
     elif stale and not seen:
         # An outputs folder that reads empty is a volume not there, not every output
         # deleted: keep the rows.
+        result.incomplete = True
         logger.warning(
             "the outputs folder lists no output; kept every row", extra={"rows": len(stale)}
         )
     else:
         result.dropped = rows.drop_unseen(stale, started)
-    rows.finish_run(
+    # A walk that may have missed folders must not end the fallback to the files: the
+    # outputs it missed have no row yet.
+    end = rows.end_incomplete_run if result.incomplete else rows.finish_run
+    end(
         run_id,
         copied=result.copied,
         refreshed=result.refreshed,

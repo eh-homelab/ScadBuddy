@@ -1107,8 +1107,13 @@ class OutputCopyStatus(BaseModel):
     """The last run of the start's copy of the saved outputs' files to rows (#7255)."""
 
     started_at: datetime
-    #: ``None`` while the run goes on, or when it stopped before its end.
+    #: ``None`` while the run goes on, when it stopped before its end, or when it is
+    #: ``incomplete``.
     finished_at: datetime | None
+    #: The run walked to its end but may have missed folders (a listing failed, or the
+    #: outputs folder read empty while rows exist). It does not end the fallback to the
+    #: files; the next run tries again.
+    incomplete: bool
     copied: int
     refreshed: int
     dropped: int

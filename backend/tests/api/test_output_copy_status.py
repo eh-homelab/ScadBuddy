@@ -34,6 +34,7 @@ def test_copy_status_reports_last_run(client: TestClient) -> None:
     assert (body["copied"], body["refreshed"], body["dropped"]) == (3, 2, 1)
     assert body["not_copied"] == ["box/" + "b" * 32]
     assert body["damaged"] == damaged
+    assert body["incomplete"] is False
     assert "id" not in body
 
     # A run that has not finished is the last run: it has no end and counts nothing yet.
@@ -42,6 +43,19 @@ def test_copy_status_reports_last_run(client: TestClient) -> None:
     assert later["finished_at"] is None
     assert (later["copied"], later["refreshed"], later["dropped"]) == (0, 0, 0)
     assert later["not_copied"] == [] and later["damaged"] == []
+    assert later["incomplete"] is False
+
+
+def test_copy_status_shows_an_incomplete_run(client: TestClient) -> None:
+    """A walk that failed part-way records its counts and ``incomplete``, and no end."""
+    rows = _rows(client)
+    run = rows.start_run()
+    rows.end_incomplete_run(run, copied=4, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    body = client.get("/api/v1/outputs/copy-status").json()
+    assert body["incomplete"] is True
+    assert body["finished_at"] is None
+    assert body["copied"] == 4
+    assert rows.copied() is False
 
 
 def test_copy_status_404_before_any_run(client: TestClient) -> None:

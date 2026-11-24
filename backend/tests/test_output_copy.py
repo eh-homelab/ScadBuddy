@@ -535,3 +535,65 @@ def test_a_stop_mid_batch_writes_what_it_read(
     assert result.copied == 1
     assert len(rows.existing(m.id for m in metas)) == 1
     assert rows.copied() is False
+
+
+def test_a_first_run_with_a_stale_folder_does_not_end_the_fallback(
+    files: tuple[DataPaths, Job, list[OutputMeta]],
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A walk that missed folders leaves outputs with no row: the run is recorded as
+    incomplete, with no ``finished_at``, so a missing row still falls back to the files."""
+    paths, job, metas = files
+    store, rows = _stores(paths, projection)
+    other = OutputStore(paths).create(
+        job.model_copy(update={"slug": "other-model"}), name="other"
+    )
+    stale = paths.outputs / job.slug
+    iterdir = Path.iterdir
+
+    def failing(self: Path) -> Iterator[Path]:
+        if self == stale:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", failing)
+    result = copy_outputs(store, rows, projection.pool)
+    monkeypatch.undo()
+    assert result is not None
+    assert result.incomplete is True
+    assert result.copied == 1
+    assert rows.copied() is False
+    last = rows.last_run()
+    assert last is not None
+    assert last["finished_at"] is None
+    assert last["incomplete"] is True
+    assert last["copied"] == 1
+    assert rows.get(other.id) is not None
+    # The outputs the walk missed still read from their files.
+    assert store.get(metas[0].id).id == metas[0].id
+
+
+def test_an_outputs_folder_that_reads_empty_is_an_incomplete_run(
+    files: tuple[DataPaths, Job, list[OutputMeta]], projection: JobProjection
+) -> None:
+    paths, _, _ = files
+    store, rows = _stores(paths, projection)
+    copy_outputs(store, rows, projection.pool)
+    shutil.rmtree(paths.outputs)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None
+    assert result.incomplete is True
+    last = rows.last_run()
+    assert last is not None and last["incomplete"] is True and last["finished_at"] is None
+
+
+def test_a_complete_run_is_not_incomplete(
+    files: tuple[DataPaths, Job, list[OutputMeta]], projection: JobProjection
+) -> None:
+    paths, _, _ = files
+    store, rows = _stores(paths, projection)
+    result = copy_outputs(store, rows, projection.pool)
+    assert result is not None and result.incomplete is False
+    last = rows.last_run()
+    assert last is not None and last["incomplete"] is False

@@ -32,7 +32,13 @@ CREATE INDEX outputs_backfill ON outputs (output_id) WHERE backfill IS NOT NULL;
 CREATE TABLE output_copy_runs (
     id bigserial PRIMARY KEY,
     started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    -- Set only by a run whose walk saw every folder: the first one ends the fallback
+    -- to the files.
     finished_at timestamptz,
+    -- True for a run that walked to its end but may have missed folders (a listing
+    -- failed, or the outputs folder read empty while rows exist). It has no
+    -- `finished_at`.
+    incomplete boolean NOT NULL DEFAULT false,
     copied int NOT NULL DEFAULT 0,
     refreshed int NOT NULL DEFAULT 0,
     dropped int NOT NULL DEFAULT 0,
