@@ -54,6 +54,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.models import LocalPresetDetail
 from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.attachments import blob_path, keep_file
 from scadbuddy.slicing.own_presets import OwnRow, facts, sb_id, sb_ref
@@ -607,6 +608,14 @@ def bound_bb_ids(pool: ConnectionPool[Conn]) -> set[int]:
 ADOPT_RETRY_S: Final = 300.0
 
 
+def links_elsewhere_on(pool: ConnectionPool[Conn], configured: str) -> bool:
+    """Whether the Bambuddy links' recorded instance is another than ``configured``
+    (#6845 R-6845-5, Decision 12): `bambuddy_pull.links_elsewhere` on a pool."""
+    with pool.connection() as conn:
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+    return state is not None and state["instance"] not in (None, configured)
+
+
 async def adopt_at_start(
     pool: ConnectionPool[Conn],
     blobs: Callable[[], BlobStore],
@@ -616,7 +625,9 @@ async def adopt_at_start(
     """The API's start step (`slicing/component.py`): while a binding names a Bambuddy local
     id, `adopt_held` from the configured Bambuddy, whatever ``filament_sync.presets`` says
     (#7244: the bindings made before ScadBuddy stopped reading Bambuddy's local presets
-    become ``sb-`` refs). Nothing bound, no Bambuddy call. A failed try is logged and tried
+    become ``sb-`` refs). Nothing bound, no Bambuddy call; links recorded for another
+    Bambuddy than the configured one, no call either (`links_elsewhere_on`), since a local id
+    means something only on the Bambuddy that issued it. A failed try is logged and tried
     again every ``retry_s`` until one ends; ids Bambuddy no longer holds are logged and left,
     each an error the print dialog shows. Never raises."""
     while True:
@@ -629,6 +640,18 @@ async def adopt_at_start(
                 logger.warning(
                     "bindings name Bambuddy local presets and no Bambuddy is configured;"
                     " the native slicer refuses them",
+                    extra={"count": len(ids)},
+                )
+                return
+            if await asyncio.to_thread(
+                links_elsewhere_on, pool, instance_for(settings.bambuddy_url)
+            ):
+                # A Bambuddy local id means something only on the Bambuddy that issued it:
+                # another one's preset of the same id is another filament (#7244 review).
+                logger.warning(
+                    "bindings name Bambuddy local presets of another Bambuddy than the"
+                    " configured one; left, and the native slicer refuses them until the"
+                    " links are reset and the presets imported",
                     extra={"count": len(ids)},
                 )
                 return

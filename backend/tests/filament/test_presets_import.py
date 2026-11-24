@@ -195,3 +195,19 @@ async def test_the_start_tries_again_after_a_failure(pg_pool: PgPool, tmp_path: 
         await adopt_at_start(pg_pool, lambda: blobs, lambda: SETTINGS, retry_s=0)
     [(ref, _)] = _bindings(pg_pool, bound)
     assert sb_id(ref) is not None
+
+
+async def test_the_start_asks_no_other_bambuddy_than_the_links_one(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """A Bambuddy local id means something only on the Bambuddy that issued it: with the
+    links recorded for another one, the start reads nothing and the binding stays, an error
+    the print dialog shows (#7244 review)."""
+    bound = _type(pg_pool, "PLA-E")
+    _bind(pg_pool, bound, "9")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_sync_state SET instance = 'aaaaaaaaaaaa'")
+    with respx.mock() as router:
+        await adopt_at_start(pg_pool, lambda: LocalBlobStore(tmp_path), lambda: SETTINGS, retry_s=0)
+        assert router.calls.call_count == 0
+    assert _bindings(pg_pool, bound) == [("9", None)]
