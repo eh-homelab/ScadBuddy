@@ -1649,6 +1649,48 @@ class ConsumedResetDone(BaseModel):
     not_found: list[UUID]
 
 
+#: The most spools one bulk edit, archive or restore names (#7151), as `ConsumedReset`.
+BULK_IDS_MAX: Final = 500
+
+
+class SpoolIds(_In):
+    """The spools a bulk archive or restore acts on (#7151, R-7151-2): an explicit list."""
+
+    spool_ids: list[UUID] = Field(min_length=1, max_length=BULK_IDS_MAX)
+
+
+class SpoolBulkUpdate(SpoolIds):
+    """A bulk edit (#7151, R-7151-1): ``patch`` on each spool named, all or none. The
+    patch is a PATCH's, less ``archived`` (the archive routes do that), and sets at least
+    one field."""
+
+    patch: SpoolPatch
+
+    @model_validator(mode="after")
+    def _fields(self) -> SpoolBulkUpdate:
+        if "archived" in self.patch.model_fields_set:
+            raise ValueError("a bulk edit does not archive; use bulk-archive or bulk-restore")
+        if not self.patch.model_fields_set:
+            raise ValueError("the patch sets no field")
+        return self
+
+
+class SpoolBulkUpdated(BaseModel):
+    """The spools a bulk edit changed (or found already so), and the ids that name none."""
+
+    updated: list[UUID]
+    not_found: list[UUID]
+
+
+class SpoolsArchived(BaseModel):
+    """A bulk archive's or restore's answer (#7151, R-7151-2), each list in id order:
+    the spools it archived or restored, those already so, and the ids that name none."""
+
+    changed: list[UUID]
+    unchanged: list[UUID]
+    not_found: list[UUID]
+
+
 class SpoolArchive(_In):
     #: ``True`` takes the spool off the lists, ``False`` puts it back.
     archived: bool = True

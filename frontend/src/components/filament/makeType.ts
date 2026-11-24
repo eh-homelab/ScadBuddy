@@ -97,6 +97,102 @@ export async function makeTypeFromBook(row: Filament): Promise<SpoolType> {
   })
 }
 
+/**
+ * #7159 — the row's catalog ids as `resolveCatalog` finds them by key and alias. `null` is a
+ * name the row leaves empty; `false` is a name the catalog lacks, which no type can hold.
+ * An effect the catalog lacks is `null`, as `makeTypeFromBook` leaves it empty.
+ */
+export interface BookRowIds {
+  brandId: string | null | false
+  materialId: string | false
+  subtypeId: string | null | false
+  effectId: string | null
+}
+
+/** What of a candidate is not the row's. */
+export type CandidateDiff = 'material' | 'subtype' | 'effect' | 'alpha'
+
+/** A type the row may already be: `exact` when its material, subtype, colour (alpha too) and effect are the row's; else `differs` names the rest. */
+export interface TypeCandidate {
+  type: SpoolType
+  exact: boolean
+  differs: CandidateDiff[]
+}
+
+const rgbOf = (hex: string) => hex.slice(0, 7).toUpperCase()
+
+/**
+ * #7159 R-7159-1, R-7159-2 — the unarchived types of the row's brand and RGB (the alpha
+ * ignored), whatever their material, subtype or effect; the exact matches first, then by code.
+ */
+export function rankCandidates(row: Pick<Filament, 'colour' | 'alpha'>, ids: BookRowIds, types: readonly SpoolType[]): TypeCandidate[] {
+  const alpha = row.alpha.toString(16).padStart(2, '0').toUpperCase()
+  return types
+    .filter((type) => !type.archived_at && type.brand_id === ids.brandId && rgbOf(type.rgba) === rgbOf(row.colour))
+    .map((type) => {
+      const differs: CandidateDiff[] = []
+      if (type.material_id !== ids.materialId) differs.push('material')
+      if (type.subtype_id !== ids.subtypeId) differs.push('subtype')
+      if (type.effect_id !== ids.effectId) differs.push('effect')
+      if (type.rgba.slice(7, 9).toUpperCase() !== alpha) differs.push('alpha')
+      return { type, exact: differs.length === 0, differs }
+    })
+    .sort((a, b) => Number(b.exact) - Number(a.exact) || a.type.code.localeCompare(b.type.code))
+}
+
+/**
+ * #7159 — whether setting `type`'s cost links `row`: the server finds the type's book row
+ * by its material, subtype and brand names (upper-cased, no aliases), its RGB and its
+ * alpha, and not its effect (`types.py` `_link_price_book`, `orders/store.py`
+ * `existing_filament`). `names` holds the catalog names by id; an id it lacks never links.
+ */
+export function linksBookRow(row: Pick<Filament, 'material' | 'subtype' | 'brand' | 'colour' | 'alpha'>, type: SpoolType, names: ReadonlyMap<string, string>): boolean {
+  const name = (id: string | null) => (id === null ? '' : (names.get(id) ?? null))
+  const same = (text: string | null, id: string | null) => {
+    const held = name(id)
+    return held !== null && (text ?? '').toUpperCase() === held.toUpperCase()
+  }
+  const alpha = row.alpha.toString(16).padStart(2, '0').toUpperCase()
+  return (
+    same(row.material, type.material_id) &&
+    same(row.subtype, type.subtype_id) &&
+    same(row.brand, type.brand_id) &&
+    rgbOf(type.rgba) === rgbOf(row.colour) &&
+    type.rgba.slice(7, 9).toUpperCase() === alpha
+  )
+}
+
+/** #7159 — the row's brand, material, subtype and effect, resolved by key and alias; it adds no catalog row. */
+export async function bookRowIds(row: Pick<Filament, 'brand' | 'material' | 'subtype' | 'effect'>): Promise<BookRowIds> {
+  const [brand, material, effect] = await Promise.all([
+    row.brand ? resolved('brands', row.brand) : null,
+    resolved('materials', row.material),
+    row.effect ? resolved('effects', row.effect) : null,
+  ])
+  const subtype = row.subtype && material ? await resolved('subtypes', row.subtype, material.id) : null
+  return {
+    brandId: row.brand ? (brand?.id ?? false) : null,
+    materialId: material?.id ?? false,
+    subtypeId: row.subtype ? (subtype?.id ?? false) : null,
+    effectId: effect?.id ?? null,
+  }
+}
+
+/** #7159 — the types `row` may already be, from the loaded `types` (no new route, R-7159-5). */
+export async function typeCandidates(row: Filament, types: readonly SpoolType[]): Promise<TypeCandidate[]> {
+  return rankCandidates(row, await bookRowIds(row), types)
+}
+
+/**
+ * #7159 R-7159-4 — link an existing type instead of making one: only its `cost_per_kg` is
+ * set, from the row. The server then links the book row of the type's own identity, and
+ * gives that row this cost (`linksBookRow` says whether it is this row). When it is another
+ * row, the server adds it if the book has none. The answer's `filament_id` says which.
+ */
+export function linkTypeToBook(type: SpoolType, row: Pick<Filament, 'cost_per_kg'>): Promise<SpoolType> {
+  return upsertType({ cost_per_kg: row.cost_per_kg }, type.id)
+}
+
 /** The spool fields a type holds: once a spool has the type they are the type's, so the spool's own are cleared. */
 const TYPE_FIELDS = [
   'brand_id',

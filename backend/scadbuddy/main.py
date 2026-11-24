@@ -90,6 +90,7 @@ from scadbuddy.bambuddy.runs import PrintRunStore, reap_run_holds
 from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
+from scadbuddy.core.loop_watch import LoopWatch
 from scadbuddy.core.metrics import HttpMetrics
 from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -2384,6 +2385,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     printing: asyncio.Task[None] | None = None
     upkeep: asyncio.Task[None] | None = None
     try:
+        # #7245: the API's own loop and default executor, as each worker watches its own
+        # (#3788). Its request handlers, its library worker and its in-process workers
+        # share them.
+        await components.enter_async_context(LoopWatch(state.metrics))
         # Every component's `run` (`core/components.py`), now that the database and
         # the bus are up. One that fails exits those already running and fails the
         # boot; closed below, before the queue it may be using.

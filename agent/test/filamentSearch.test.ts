@@ -92,6 +92,12 @@ function backend() {
     http.get(`${BACKEND}/api/v1/filament/inventory`, () =>
       HttpResponse.json({ spools: [], trays: [{ printer_id: 'p', printer_name: 'H2C', trays: [{ ams_id: 0, tray_id: 1, label: 'AMS-A slot 2', spool_id: 's4' }] }] }),
     ),
+    http.get(`${BACKEND}/api/v1/filament/tags`, () =>
+      HttpResponse.json([
+        { id: 'g1', tag_uid: '04A1B2C3D4E5F6', tray_uuid: null, binding: { spool_id: 's4' }, spool_number: 4 },
+        { id: 'g2', tag_uid: 'AABBCCDD', tray_uuid: null, binding: null, spool_number: null },
+      ]),
+    ),
   )
 }
 
@@ -114,6 +120,9 @@ describe('filament_spool_list q', () => {
     expect(await run('a00-r3')).toEqual([87])
     expect(await run('el-pla-silk')).toEqual([4])
     expect(await run('h2c slot 2')).toEqual([4])
+    // #7151: by its open tag's UID, as a reader prints it; a tag on no spool finds none.
+    expect(await run('04:A1:B2:C3')).toEqual([4])
+    expect(await run('aabbccdd')).toEqual([])
   })
 
   it('still searches the spools when the SKUs and trays cannot be read', async () => {
