@@ -184,9 +184,11 @@ class Config:
     #: #7316: the directory is this process's alone (a node-local emptyDir), so a hit
     #: is read in place after its check, with no private copy. The API only.
     download_cache_private: bool = False
-    #: #7316: where the API spools private copies of cached downloads (``blob-spool``,
-    #: ``library-spool`` for the library route's hits). Unset, under the data volume's
-    #: ``cache/``. Only unnamed files of this process's own go here.
+    #: #7316: where the API spools private copies of cached downloads (``blob-spool``)
+    #: and every read of a Bambuddy library file (``library-spool``). Unset, under the
+    #: data volume's ``cache/``. Only unnamed files of this process's own go here.
+    #: `build_store` reads it once, onto the download cache, so with no download cache
+    #: (a cap of 0) a library read spools under ``cache/``.
     spool_dir: Path | None = None
 
     @property

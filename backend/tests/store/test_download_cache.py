@@ -11,7 +11,7 @@ import time
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import aclosing
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import anyio
 import pytest
@@ -324,6 +324,30 @@ def test_a_private_caches_bad_entry_is_dropped_and_a_miss(tmp_path: Path) -> Non
     assert cache.read_checked(_sha(data), tmp_path / "spool", what="test") is None
     assert not cache.has(_sha(data))
     assert cache.read_checked(_sha(b"never kept"), tmp_path / "spool", what="test") is None
+
+
+def test_a_private_caches_bad_entry_replaced_meanwhile_keeps_the_new_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7316 review: a good entry a concurrent fill renamed in while a bad one was being
+    checked is not dropped; only the inode that was read is."""
+    cache = DownloadCache(tmp_path / "mine", max_bytes=1 << 20, private=True)
+    data = b"the file"
+    sha = _sha(data)
+    cache.put(sha, data)
+    cache.path(sha).write_bytes(b"rot")
+    real = cache.open
+
+    def open_then_refill(sha256: str | None, *, what: str) -> BinaryIO | None:
+        handle = real(sha256, what=what)
+        fresh = tmp_path / "fresh"
+        fresh.write_bytes(data)
+        fresh.replace(cache.path(sha))
+        return handle
+
+    monkeypatch.setattr(cache, "open", open_then_refill)
+    assert cache.read_checked(sha, tmp_path / "spool", what="test") is None
+    assert cache.path(sha).read_bytes() == data
 
 
 def test_a_file_too_large_to_keep_is_not_written_out_to_find_that_out(

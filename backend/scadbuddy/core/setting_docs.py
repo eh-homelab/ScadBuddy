@@ -900,8 +900,8 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "spool_dir": SettingDoc(
             "Download spool folder",
-            "Where the API keeps its temporary copies of cached downloads. Unset, they go"
-            " under the data volume's cache folder.",
+            "Where the API keeps its temporary copies of cached downloads and of the"
+            " library files it reads. Unset, they go under the data volume's cache folder.",
         ),
         "storefront_public_url": SettingDoc(
             "Storefront URL",

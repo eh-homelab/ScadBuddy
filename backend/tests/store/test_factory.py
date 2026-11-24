@@ -164,6 +164,22 @@ async def test_the_blob_spool_is_on_the_data_volume_unless_a_spool_dir_is_set(
     await moved.aclose()
 
 
+async def test_the_download_cache_carries_the_spool_root_every_library_read_uses(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """#7316 review: the spool root is resolved once, here, so no library-read caller
+    passes it (or forgets to)."""
+    downloads_dir = tmp_path / "d"
+    _, default = _build(tmp_path, pool, "s3", S3_READY, downloads_dir=downloads_dir)
+    assert default.downloads is not None and default.downloads.spool == tmp_path / "cache"
+    await default.aclose()
+    node = tmp_path / "node"
+    config = Config(data_dir=tmp_path, spool_dir=node)
+    _, moved = _build(tmp_path, pool, "s3", S3_READY, config, downloads_dir=downloads_dir)
+    assert moved.downloads is not None and moved.downloads.spool == node
+    await moved.aclose()
+
+
 async def test_a_download_cache_is_shared_unless_the_caller_says_it_is_private(
     tmp_path: Path, pool: Pool
 ) -> None:

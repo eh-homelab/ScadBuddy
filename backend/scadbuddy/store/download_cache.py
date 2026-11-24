@@ -206,6 +206,10 @@ class DownloadCache:
     #: share): nothing else can write an entry, so :meth:`read_checked` reads a hit in
     #: place after its check, with no private copy (SCADBUDDY_DOWNLOAD_CACHE_PRIVATE).
     private: bool = False
+    #: #7316: the root every library read of this process spools under
+    #: (SCADBUDDY_SPOOL_DIR, else the data volume's ``cache/``), resolved once by
+    #: `build_store`, so no caller passes it. None: the caller's own cache (tests).
+    spool: Path | None = None
 
     @property
     def max_entry_bytes(self) -> int:
@@ -318,12 +322,16 @@ class DownloadCache:
             if digest.hexdigest() == sha256:
                 handle.seek(0)
                 return handle
-            self.discard(sha256)
+            read = os.fstat(handle.fileno())
         except OSError:
             logger.warning(
                 "could not read a cached download", extra={"sha256": sha256}, exc_info=True
             )
+            handle.close()
+            return None
         handle.close()
+        # Only the file that was read: a good entry a fill renamed in since is kept.
+        self.discard_if(sha256, read)
         return None
 
     def size(self, sha256: str) -> int | None:
@@ -342,6 +350,15 @@ class DownloadCache:
         logger.warning(
             "dropped a download cache entry that was not its sha256", extra={"sha256": sha256}
         )
+
+    def discard_if(self, sha256: str, read: os.stat_result) -> None:
+        """:meth:`discard` the entry only while it is still the file ``read`` describes."""
+        try:
+            now = self.path(sha256).stat()
+        except FileNotFoundError:
+            return
+        if (now.st_dev, now.st_ino) == (read.st_dev, read.st_ino):
+            self.discard(sha256)
 
     @contextlib.contextmanager
     def fill(self, sha256: str) -> Iterator[Fill]:

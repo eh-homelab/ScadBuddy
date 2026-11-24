@@ -16,7 +16,6 @@ import logging
 import os
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Sequence
 from functools import partial
-from pathlib import Path as FsPath
 from typing import Annotated, BinaryIO, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
@@ -27,7 +26,6 @@ from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.api.accepted_fixes import Amend, FixesDep
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
-    ConfigDep,
     DownloadsDep,
     OutputsDep,
     PathsDep,
@@ -97,10 +95,10 @@ from scadbuddy.bambuddy.library_listing import (
     search_library,
 )
 from scadbuddy.bambuddy.library_view import (
-    SPOOL_DIRNAME,
     NotViewableError,
     library_filaments,
     library_preview,
+    library_spool,
 )
 from scadbuddy.bambuddy.preview import (
     TOOLPATH_HEADERS,
@@ -887,7 +885,6 @@ async def get_library_preview(
     file_id: FileIdPath,
     store: SettingsStoreDep,
     paths: PathsDep,
-    config: ConfigDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
@@ -901,14 +898,7 @@ async def get_library_preview(
     try:
         if native is not None:
             data = await library_preview(
-                None,
-                paths.cache,
-                file_id,
-                plate,
-                budget,
-                downloads,
-                files=native,
-                spool_dir=config.spool_dir,
+                None, paths.cache, file_id, plate, budget, downloads, files=native
             )
         else:
             async with client_for(store.load()) as client:
@@ -920,7 +910,6 @@ async def get_library_preview(
                     budget,
                     downloads,
                     files=reads_for(file_id, client, None),
-                    spool_dir=config.spool_dir,
                 )
     except NotViewableError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
@@ -946,7 +935,6 @@ async def get_library_file(
     request: Request,
     store: SettingsStoreDep,
     paths: PathsDep,
-    config: ConfigDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
 ) -> Response:
@@ -973,7 +961,7 @@ async def get_library_file(
         # One kept but too large to copy before its first byte is not kept again.
         keep = sha is not None and (kept_size is None or kept_size <= CACHED_COPY_MAX_BYTES)
         if sha is not None and kept_size is not None and kept_size <= CACHED_COPY_MAX_BYTES:
-            spool = (config.spool_dir or paths.cache) / SPOOL_DIRNAME
+            spool = library_spool(paths.cache, downloads)
             copy = await asyncio.to_thread(downloads.read_checked, sha, spool, what="library_file")
             if copy is not None:
                 size = await asyncio.to_thread(lambda: os.fstat(copy.fileno()).st_size)
@@ -1198,7 +1186,6 @@ async def native_library_source(
     *,
     budget: ReadBudget,
     downloads: DownloadCache | None,
-    spool_dir: FsPath | None = None,
 ) -> LibrarySource:
     """File ``file_id`` as a native run's dialog reads it (#3818 tier A, D3): from the
     native library, its slots from the file itself, with no Bambuddy client."""
@@ -1209,13 +1196,7 @@ async def native_library_source(
         uploads=uploads,
         settings=store.load(),
         filaments=partial(
-            library_filaments,
-            None,
-            paths.cache,
-            budget=budget,
-            downloads=downloads,
-            files=files,
-            spool_dir=spool_dir,
+            library_filaments, None, paths.cache, budget=budget, downloads=downloads, files=files
         ),
         files=files,
     )
@@ -1232,7 +1213,6 @@ async def get_library_choices(
     uploads: UploadsDep,
     rack: RackUsageDep,
     paths: PathsDep,
-    config: ConfigDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
@@ -1257,14 +1237,7 @@ async def get_library_choices(
     route = await opening_route(settings, printers, printer=opening, printer_id=opening_id)
     if route is not None:
         own = await native_library_source(
-            file_id,
-            native,
-            store,
-            uploads,
-            paths,
-            budget=budget,
-            downloads=downloads,
-            spool_dir=config.spool_dir,
+            file_id, native, store, uploads, paths, budget=budget, downloads=downloads
         )
         native_view = await native_choices(
             own,
@@ -1295,7 +1268,6 @@ async def get_library_choices(
                 budget=budget,
                 downloads=downloads,
                 files=files,
-                spool_dir=config.spool_dir,
             ),
             files=files,
         )
@@ -1336,7 +1308,6 @@ async def get_library_filaments(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     paths: PathsDep,
-    config: ConfigDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
@@ -1357,14 +1328,7 @@ async def get_library_filaments(
     route = await opening_route(settings, printers, printer=printer, printer_id=printer_id)
     if route is not None:
         source = await native_library_source(
-            file_id,
-            native,
-            store,
-            uploads,
-            paths,
-            budget=budget,
-            downloads=downloads,
-            spool_dir=config.spool_dir,
+            file_id, native, store, uploads, paths, budget=budget, downloads=downloads
         )
         return await native_filaments(
             source,
@@ -1392,7 +1356,6 @@ async def get_library_filaments(
                 budget=budget,
                 downloads=downloads,
                 files=files,
-                spool_dir=config.spool_dir,
             ),
             files=files,
             reads=filament.reads,
@@ -1422,7 +1385,6 @@ async def post_library_run(
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     store: SettingsStoreDep,
     paths: PathsDep,
-    config: ConfigDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
@@ -1450,7 +1412,6 @@ async def post_library_run(
         http=http,
         native=await library.serving_native(),
         amend=fixes.for_library(file_id),
-        spool_dir=config.spool_dir,
     )
 
 
@@ -1469,7 +1430,6 @@ async def start_library_run(
     native: LibraryReads | None = None,
     amend: Amend | None = None,
     api: bool | None = None,
-    spool_dir: FsPath | None = None,
 ) -> PrintRun | JSONResponse:
     """A library file's run, as ``POST /print/library/{file_id}/run`` starts it: the route
     and a batch's Queue all both start one here, so neither depends on the other's
@@ -1483,9 +1443,7 @@ async def start_library_run(
     check_served(file_id, native)
 
     async def prepare(source: SourceSpec) -> SourceSpec:
-        filaments = await _run_filaments(
-            store, paths, budget, file_id, downloads, native, spool_dir
-        )
+        filaments = await _run_filaments(store, paths, budget, file_id, downloads, native)
         return source.model_copy(update={"filaments": filaments})
 
     return await accept_run(
@@ -1510,7 +1468,6 @@ async def _run_filaments(
     file_id: int,
     downloads: DownloadCache | None,
     native: LibraryReads | None = None,
-    spool_dir: FsPath | None = None,
 ) -> LocalFilaments | None:
     """The slots a run of library file ``file_id`` reads (#2550): from the cache the
     dialog filled, or a download of the file that fills it. Only for a file Bambuddy
@@ -1526,7 +1483,7 @@ async def _run_filaments(
             if not file.file_hash:
                 return None
             return await library_filaments(
-                client, paths.cache, file, budget, downloads, files=files, spool_dir=spool_dir
+                client, paths.cache, file, budget, downloads, files=files
             )
     except ApiError:
         return None
@@ -1704,7 +1661,6 @@ async def post_library_check(
     uploads: UploadsDep,
     rack: RackUsageDep,
     paths: PathsDep,
-    config: ConfigDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
@@ -1750,7 +1706,6 @@ async def post_library_check(
                 budget=budget,
                 downloads=downloads,
                 files=files,
-                spool_dir=config.spool_dir,
             ),
             files=files,
             printers=printers.store,

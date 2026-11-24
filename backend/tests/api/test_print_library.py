@@ -13,7 +13,6 @@ import time
 import zipfile
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -2625,9 +2624,10 @@ def test_a_cached_library_files_copy_is_spooled_under_the_spool_dir(
     library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
     state: AppState = getattr(app.state, STATE_ATTR)
     node = tmp_path / "node"
-    state.config = replace(state.config, spool_dir=node)
     downloads = state.store.downloads
     assert downloads is not None
+    # The root `build_store` resolves from SCADBUDDY_SPOOL_DIR (test_spool_dir.py).
+    downloads.spool = node
     real = downloads.private_copy
     into: list[Path] = []
 
@@ -2652,7 +2652,8 @@ def test_a_library_views_spool_is_under_the_spool_dir(
     library_file(89, content=scadbuddy_3mf(tmp_path))
     state: AppState = getattr(app.state, STATE_ATTR)
     node = tmp_path / "node"
-    state.config = replace(state.config, spool_dir=node)
+    assert state.store.downloads is not None
+    state.store.downloads.spool = node
 
     assert client.get("/api/v1/print/library/89/preview.glb").status_code == 200
     assert (node / "library-spool").is_dir()

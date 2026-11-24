@@ -78,8 +78,9 @@ def build_store(
     None for none: the API passes its default, a worker only one it is set (README).
     ``downloads_private`` says that directory is this process's alone (#7316), so a hit
     is read in place; only the API passes it, never a worker, which runs template code.
-    A hit's private copy otherwise goes under ``config.spool_dir`` (default the data
-    volume's ``cache/``).
+    The spool root (``config.spool_dir``, default the data volume's ``cache/``) is
+    resolved here once, onto the download cache: a hit's private copy and every library
+    read spool under it, and no caller passes it.
     ``index`` is the blob index: the API's `BlobIndex` on ``pool``, the render worker's
     `crud/render.py` `RemoteBlobIndex` (#5298). ``folders`` keeps a Bambuddy store's
     folders: SQL on ``pool`` unless given (the render worker's `RemoteStoreFolders`).
@@ -87,12 +88,14 @@ def build_store(
     `RemoteAssetRows.drop_copy`, None on the API (`RemoteAssets`). ``pool`` is None on the
     render worker, which holds no database."""
     local = LocalBlobStore(paths.blobs)
+    spool_root = config.spool_dir or paths.cache
     downloads = (
         DownloadCache(
             downloads_dir,
             max_bytes=config.download_cache_max_bytes,
             min_age=config.activity_timeout,
             private=downloads_private,
+            spool=spool_root,
         )
         if downloads_dir is not None and config.download_cache_max_bytes > 0
         else None
@@ -107,7 +110,7 @@ def build_store(
         max_count=config.store_max_count,
         metrics=metrics,
         downloads=downloads,
-        spool=(config.spool_dir or paths.cache) / "blob-spool",
+        spool=spool_root / "blob-spool",
     )
     blobs = CachedBlobStore(
         local,
