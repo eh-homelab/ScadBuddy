@@ -279,8 +279,10 @@ module path), `where` (a station name, nullable), `assignee` (nullable principal
 **The life of a prompt:**
 
 1. The flow calls `prompt(title, schema=…, context=…, where=…, ui=…, timeout_s=…)`. The
-   host function posts the task through a CRUD route and waits for a Temporal update named
-   by the task id. Unlike `wait_for_human` (a harness callback capped at one day), a prompt
+   host function posts the task through a CRUD route and waits on a temporal-agent-harness
+   callback whose call id is the task id; the answer arrives as the harness's own Update
+   (`provide_callback_result`), the path `wait_for_human` answers take today. Unlike
+   `wait_for_human` (a harness callback capped at one day), a prompt
    has no cap: with no `timeout_s` it waits until answered or cancelled. With one, the task
    becomes `expired` and `prompt()` raises `TimeoutError`, which the script may catch.
 2. The CRUD service stores the row and publishes `task.changed` on the bus. The realtime
@@ -289,8 +291,9 @@ module path), `where` (a station name, nullable), `assignee` (nullable principal
 4. On submit the CRUD service validates the answer against the stored schema (JSON Schema,
    draft 2020-12, with `format` checks on). A failure is a 422 naming the field, and the task
    stays open. A pass stores the answer and sends the update to the run.
-5. `prompt()` returns the answer validated into a model built from the schema (the
-   `inputs_model` path flow inputs use), so the script reads `answer.email`.
+5. `prompt()` returns the answer as a dict, validated again in the run with a model built
+   from the schema (the `inputs_model` path flow inputs use), so the script reads
+   `answer["email"]`.
 
 The same, as a sequence:
 
@@ -357,8 +360,9 @@ person (designer's call, secure by default: no shared login to audit around).
 
 **Where tasks show:**
 
-- **Needs you** (`lib/needsYou.ts`): open tasks join the bell, the toast, the page
-  notification and the push (#6399), with the id `task:<id>`.
+- **Needs you** (`lib/needsYou.ts`): an open task is a parked call in the run's
+  `waiting_on`, which already reaches the bell, the toast, the page notification and the push
+  through the agent's pending-input list (#6399); A1 adds no new source.
 - **Station view** `/station/<where>`: open tasks for that place, oldest first, large touch
   targets, the scan field always focused. A station is a `filament_locations` row with a
   station flag (designer's call: the location tree is the shop's places, #6949).
