@@ -10,6 +10,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import zipfile
@@ -35,6 +36,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 from scadbuddy import main as scadbuddy_main
+from scadbuddy.api.deps import AppState
 from scadbuddy.api.jobs import forget_unreadable_notes_logs
 from scadbuddy.bambuddy.catalogue import forget_catalogues
 from scadbuddy.bambuddy.print_run import forget_out_of_memory_logs
@@ -84,6 +86,21 @@ def _agent_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
     (`tests/api/test_agent_migrations_at_start.py`)."""
     if request.node.get_closest_marker("agent_migrations") is None:
         monkeypatch.setattr(scadbuddy_main, "_migrate_agent_at_start", lambda state: None)
+
+
+@pytest.fixture(autouse=True)
+def app_template_copy_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#7317: the app's start copy of the templates' files to rows does nothing, unless
+    the test is marked `template_copy`. It walks every template and writes their rows at
+    a time the test does not choose, beside the writes the test makes itself, and holds
+    the per-database copy lock that a test calling `copy_templates` takes too."""
+    if request.node.get_closest_marker("template_copy") is not None:
+        return
+
+    async def off(state: AppState, *, stop: threading.Event) -> None:
+        return None
+
+    monkeypatch.setattr(scadbuddy_main, "_copy_templates_logged", off)
 
 
 @pytest.fixture(autouse=True)
@@ -523,6 +540,7 @@ import os
 import pathlib
 import shutil
 import sys
+import threading
 import time
 
 args = sys.argv[1:]
@@ -780,6 +798,7 @@ import json
 import pathlib
 import shutil
 import sys
+import threading
 
 args = sys.argv[1:]
 settings = json.loads(pathlib.Path(sys.argv[0]).with_name("fake-env.json").read_text())

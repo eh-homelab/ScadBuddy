@@ -278,6 +278,9 @@ def test_copy_runs_once_under_its_lock(world: World) -> None:
         before = world.rows.last_run()
         assert copy_templates(world.catalogue, world.rows, world.refresh, world.pool) is None
         assert world.rows.last_run() == before
+        # Released here, not by the close: a closed connection's backend frees its
+        # session locks while it exits, after the client has gone on (final review I1).
+        other.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (COPY_LOCK,))
     assert copy_templates(world.catalogue, world.rows, world.refresh, world.pool) is not None
 
 

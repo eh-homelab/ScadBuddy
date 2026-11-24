@@ -1431,7 +1431,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `template_copy.py` (`copy_templates`, at each API start and in the housekeeping sweep
   `TEMPLATE_COPY_SWEEP`, under the advisory lock `COPY_LOCK`, `BATCH` templates per hold
   of the write lock; `GET /model-records/copy-status` answers its last run). A test's app
-  skips the start copy unless the test is marked `template_copy` (`tests/api/conftest.py`).
+  skips the start copy unless the test is marked `template_copy` (`tests/conftest.py`).
 - `backend/scadbuddy/editor/` — the language server's guards (#95): `nonet.py`, the
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with
