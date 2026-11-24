@@ -62,9 +62,10 @@ FOLLOW_WAIT = COMMAND_ANSWER_DEADLINE
 #: The workflow task timeout of a short workflow (#7288): `Operation`, `SliceWorkflow`,
 #: `SensorNotifyPass`. Under slow persistence Temporal 1.32.1 records a task as started
 #: and then never hands it to the poller, so the task waits out its timeout (10 s by
-#: default) before it is tried again. Measured on prod 2026-11-24 over the histories since
-#: 2026-11-20 (`temporal workflow show`, WORKFLOW_TASK_STARTED to COMPLETED): `Operation`
-#: p99 0.86 s, max 1.15 s (605 tasks); every `library` and `bambuddy` short workflow max
+#: default) before it is tried again. Measured on prod 2026-11-24 (`temporal workflow
+#: show`, WORKFLOW_TASK_STARTED to COMPLETED): `Operation` p99 0.86 s, max 1.15 s (605
+#: tasks in the 121 histories since 2026-11-22; `SliceWorkflow`'s 33 runs go back to
+#: 2026-11-20); every `library` and `bambuddy` short workflow max
 #: 1.16 s, except 2 of 2,922 `library` tasks at 4.0 s and 4.6 s (Housekeeping and
 #: SpoolRefresh, which keep the default); the API pod logged 1.0-2.9 s event-loop stalls
 #: (`core/loop_watch.py`) in its first minutes. A cold first task (fresh process, the
