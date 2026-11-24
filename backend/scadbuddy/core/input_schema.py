@@ -14,8 +14,9 @@ The subset keeps one Python type and one form control per input:
   with its own ``required`` and ``additionalProperties: false``: one level, never two.
 
 The API runs every ``pattern`` on the values it checks, so a pattern is bounded
-(`MAX_PATTERN`), needs a ``maxLength`` (`MAX_PATTERNED_LENGTH`) and runs with a deadline
-(`PATTERN_TIMEOUT_S`, `PATTERNS_BUDGET_S`; #2661).
+(`MAX_PATTERN`), its counted repeats too (`MAX_PATTERN_SIZE`, #7394), needs a ``maxLength``
+(`MAX_PATTERNED_LENGTH`) and runs with a deadline (`PATTERN_TIMEOUT_S`, `PATTERNS_BUDGET_S`;
+#2661).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import json
 import keyword
 import re
+import re._parser as re_parser  # type: ignore[import-not-found]  # no typeshed stub; sre_parse warns
 import time
 from collections.abc import Collection, Iterator
 from contextvars import ContextVar
@@ -36,6 +38,13 @@ from pydantic import BaseModel
 MAX_SCHEMA_BYTES = 16_384
 MAX_INPUTS = 50
 MAX_PATTERN = 256
+#: How large a pattern may be with each counted repeat multiplied out, nested ones together
+#: (#7394): `regex` compiles a repeat by its count, outside the match's deadline, on the API
+#: process. Measured 2026-11-24 (regex in the locked backend environment): `(a{100}){100}`
+#: (10,000) compiles in 0.003 s, `((a{100}){100}){100}` in 0.33 s, and `a{4294967294}`, which
+#: `re` accepts, did not end in 5 s.
+MAX_PATTERN_SIZE: Final = 10_000
+_REPEATS = (re_parser.MAX_REPEAT, re_parser.MIN_REPEAT, re_parser.POSSESSIVE_REPEAT)
 #: The longest value a ``pattern`` runs against, which such an input must declare as its
 #: ``maxLength`` (#2661): every check runs the regex in the API process.
 MAX_PATTERNED_LENGTH = 1024
@@ -184,6 +193,11 @@ def _property_problems(name: str, prop: Any, *, stored: bool = False) -> list[st
         if len(str(where["pattern"])) > MAX_PATTERN:
             # Every check runs it: a pasted one is bounded.
             problems.append(f"a pattern is at most {MAX_PATTERN} characters")
+        elif _pattern_size(str(where["pattern"])) > MAX_PATTERN_SIZE:
+            # A short one with a large count (`a{4294967294}`) still takes long to compile.
+            problems.append(
+                f"a pattern repeats at most {MAX_PATTERN_SIZE} times, nested counts multiplied"
+            )
         # And so is what it runs against: a short backtracking pattern on a long value is
         # still slow (#2661).
         length = where.get("maxLength")
@@ -198,6 +212,31 @@ def _property_problems(name: str, prop: Any, *, stored: bool = False) -> list[st
         except jsonschema.ValidationError as err:
             problems.append(f"default does not fit: {err.message}")
     return problems
+
+
+def _pattern_size(pattern: str) -> int:
+    """How many items ``pattern`` holds once each counted repeat is multiplied out (an
+    open-ended one by its minimum), parsed as `re` reads it, without compiling it (#7394).
+    One `re` does not parse is sized 0: the metaschema's `regex` format refuses it."""
+    try:
+        return _size(re_parser.parse(pattern))
+    except (re.error, RecursionError, OverflowError):
+        return 0
+
+
+def _size(part: object) -> int:
+    if isinstance(part, re_parser.SubPattern):
+        total = 0
+        for op, arg in part:
+            if op in _REPEATS:
+                low, high, inner = arg
+                total += max(low if high == re_parser.MAXREPEAT else high, 1) * _size(inner)
+            else:
+                total += max(_size(arg), 1)
+        return total
+    if isinstance(part, (tuple, list)):
+        return sum(_size(item) for item in part)
+    return 0
 
 
 def _pattern(

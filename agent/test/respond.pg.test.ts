@@ -344,7 +344,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
   // classic stores (rows an earlier release left) and the durable projection; a durable
   // entry past its timer is `expiring`.
   it('lists durable entries from the projection beside classic ones, never their input, and marks an overdue one expiring', async () => {
-    const { m, session, turn } = await setUp()
+    const { m, session, turn, ids, post } = await setUp()
     // A classic approval an earlier release left, on a session of its own.
     const { session: old } = await m.start(browser, { origin: 'chat', title: 'old' })
     await db.sql`UPDATE ai_sessions SET runtime = NULL, status = 'waiting_approval' WHERE id = ${old.id}`
@@ -377,7 +377,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     expect(entries.filter((e) => e.session_id === session.id)).toHaveLength(3)
     expect(entries.filter((e) => e.session_id === old.id).map((e) => e.id)).toEqual([`approval:${classic.id}`])
 
-    // One session's entries: its workflow's.
+    // One session's entries: its record's, as the aggregate lists them.
     const app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
@@ -396,9 +396,12 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     expect(page.entries.every((e) => e.session_id === session.id)).toBe(true)
     expect((await app.request(`/api/v1/ai/sessions/${session.id}/pending-input`)).status).toBe(403)
     expect((await app.request(`/api/v1/ai/sessions/${randomUUID()}/pending-input`, { headers: READ })).status).toBe(404)
-    // A session whose workflow is not there (never started) has none to ask.
-    expect((await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })).status).toBe(404)
-    // With no Temporal configured, no session's workflow can be asked.
+    // A session whose workflow is not there (never started, or archived after Temporal's
+    // retention) lists its record, as the aggregate does, with no Query (#7311).
+    const gone = await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })
+    expect(gone.status).toBe(200)
+    expect(((await gone.json()) as { entries: { id: string }[] }).entries.map((e) => e.id)).toEqual(mine.map((e) => e.id))
+    // With no Temporal configured, the record still answers.
     const bare = manager({ sql: db.sql, paths: await tempPaths(), run: parks })
     withoutTemporal(bare)
     const noTemporal = createApp({
@@ -411,7 +414,16 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
       approvals: bare.approvals,
       sessions: bare,
     })
-    expect((await noTemporal.request(`/api/v1/ai/sessions/${session.id}/pending-input`, { headers: READ })).status).toBe(503)
+    const bareRead = await noTemporal.request(`/api/v1/ai/sessions/${session.id}/pending-input`, { headers: READ })
+    expect(bareRead.status).toBe(200)
+    expect(((await bareRead.json()) as { entries: unknown[] }).entries).toHaveLength(3)
+    // A decided entry leaves both lists: its decision removes its row (R5).
+    expect((await post(ids.approval, { kind: 'approval', decision: 'deny' })).status).toBe(200)
+    expect(await ended(ids.approval)).toMatchObject({ outcome: 'denied' })
+    const open = [ids.attention, ids.question].sort()
+    const left = await app.request(`/api/v1/ai/sessions/${session.id}/pending-input`, { headers: READ })
+    expect(((await left.json()) as { entries: { id: string }[] }).entries.map((e) => e.id).sort()).toEqual(open)
+    expect((await pendingInput(m)).entries.filter((e) => e.session_id === session.id).map((e) => e.id).sort()).toEqual(open)
     await m.interrupt(session.id, browser)
     await turn.done
   })

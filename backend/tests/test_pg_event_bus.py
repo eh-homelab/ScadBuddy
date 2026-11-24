@@ -207,6 +207,7 @@ async def test_a_bus_hears_what_it_publishes_as_soon_as_it_has_started(
         await bus.aclose()
 
 
+@pytest.mark.pg_empty
 @pytest.mark.requires_postgres
 async def test_starting_before_the_store_migrated_says_so(pg_conninfo: str) -> None:
     """The ordering the lifespan relies on, asserted: an unmigrated database is a

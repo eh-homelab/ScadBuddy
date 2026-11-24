@@ -294,11 +294,11 @@ ROOT_ROUTE_MODULES = frozenset({"health", "metrics", "telemetry"})
 
 
 def _api_router() -> APIRouter:
-    """Every other module in `scadbuddy.api` that defines a ``router``, under
+    """Every other module in `scadbuddy.api` that defines a ``router``, included under
     :data:`API_PREFIX`: a new route module is mounted without an edit here. The order
     is by name and does not matter, because no two routes match the same request
     (`tests/api/test_routes.py`)."""
-    router = APIRouter(prefix=API_PREFIX)
+    router = APIRouter()
     for info in sorted(pkgutil.iter_modules(scadbuddy.api.__path__), key=lambda i: i.name):
         if info.name in ROOT_ROUTE_MODULES:
             continue
@@ -2649,7 +2649,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     app.include_router(metrics.router)
     # The browser trace relay: at the root like the two above, before the SPA's mount.
     app.include_router(telemetry.router)
-    app.include_router(_api_router())
+    # The prefix is given here, not to the router: with none, FastAPI (0.165) builds every
+    # route's context to check for an empty path, and drops them.
+    app.include_router(_api_router(), prefix=API_PREFIX)
     _name_in_openapi(
         app,
         models.PastedSource,

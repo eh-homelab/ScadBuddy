@@ -188,6 +188,7 @@ async def test_an_open_pick_stops_counting_once_it_is_older_than_the_pending_age
     assert (await store.usage([A]))[A] == Usage()
 
 
+@pytest.mark.pg_empty
 async def test_a_print_settled_before_the_pending_migration_closes_its_pick(
     pg_conninfo: str,
 ) -> None:

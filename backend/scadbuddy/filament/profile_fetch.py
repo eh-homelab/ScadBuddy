@@ -355,8 +355,8 @@ class QueueProbe(Protocol):
 class PollerCache:
     """DescribeTaskQueue's answer per queue, kept `POLLERS_CACHE_SECONDS`: each read of
     a fetch's status (a page polls it) would otherwise ask every partition of the
-    workflow task queue, and of the activity one when the first has no poller: up to
-    `2 * TASK_QUEUE_PARTITIONS` calls (`workflows/pollers.py`)."""
+    workflow task queue and of the activity one: `2 * TASK_QUEUE_PARTITIONS` calls, sent
+    at once (`workflows/pollers.py`)."""
 
     def __init__(
         self,
@@ -406,13 +406,12 @@ class TemporalQueueProbe:
 
     async def _read(self) -> bool:
         # Every partition's pollers: a live worker can be absent from the root's (#7350).
-        for kind in (
-            TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-            TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY,
-        ):
-            if await queue_pollers(self.client, self.task_queue, kind):
-                return True
-        return False
+        # Both types at once, so a miss waits for one round of reads, not two (#7425).
+        answers = await asyncio.gather(
+            queue_pollers(self.client, self.task_queue, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW),
+            queue_pollers(self.client, self.task_queue, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY),
+        )
+        return any(answers)
 
 
 def starter(state: AppState) -> Starter:

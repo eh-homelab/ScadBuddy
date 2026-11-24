@@ -365,6 +365,11 @@ class EntityPropertyStore:
                 entity_id = self.entities.ensure(conn, ref)
             # One writer at a time per entity, so the key count holds.
             conn.execute("SELECT 1 FROM entities WHERE id = %s FOR UPDATE", (entity_id,))
+            # A printer merge (`repoint_entity`) may have deleted the owner while this
+            # waited; `ensure`'s insert then made a row for a gone ref, which the sweep
+            # would delete with the write.
+            if not self.entities.exists(conn, ref):
+                raise EntityNotFound(str(ref))
             before = conn.execute(
                 "SELECT count(*) AS n FROM entity_properties WHERE entity_id = %s",
                 (entity_id,),

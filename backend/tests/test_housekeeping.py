@@ -540,8 +540,9 @@ async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
     # (15 minutes), #5282's idle storefront carts (5 minutes) and #5283's storefront mail
     # (10 minutes) joined the prune Schedule; 110 since #4699's print watcher (15 minutes);
     # 112 since #6122's run holds reaper (2 minutes); 117 since #7234's attempt media
-    # sweep (5 minutes).
-    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=117)
+    # sweep (5 minutes); 127 since #7314's meshes, which the git remote's push sends
+    # first (10 minutes).
+    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=127)
     assert sweeps_action.execution_timeout == housekeeping_timeout(SWEEPS)
     assert sweeps_action.execution_timeout > 3 * SWEEP_TIMEOUT + PRUNE_TIMEOUT
 

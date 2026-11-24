@@ -142,6 +142,7 @@ def _printer(conn: psycopg.Connection[Any], serial: str, bambuddy_id: int | None
     return str(row[0])
 
 
+@pytest.mark.pg_empty
 def test_the_migration_backfills_the_registry_id(pg_conninfo: str) -> None:
     """Part 1: each row whose Bambuddy printer the registry links gets that registry
     printer; one the registry lacks keeps only its Bambuddy id."""
@@ -161,6 +162,7 @@ def test_the_migration_backfills_the_registry_id(pg_conninfo: str) -> None:
             conn.execute("INSERT INTO printer_bed_types (bed_type) VALUES ('Cool Plate')")
 
 
+@pytest.mark.pg_empty
 def test_the_backfill_puts_every_plate_on_its_registry_printer(pg_conninfo: str) -> None:
     """#5153: a row the old build wrote after part 1's backfill gets its registry printer;
     where its printer also has a registry-keyed row, the newer of the two is kept; a row
@@ -201,6 +203,7 @@ def test_the_backfill_puts_every_plate_on_its_registry_printer(pg_conninfo: str)
         ]
 
 
+@pytest.mark.pg_empty
 def test_the_backfill_touches_only_the_matching_printers_rows(pg_conninfo: str) -> None:
     """#5153: the de-duplicate and delete statements match a stale row only to the
     printer that links its Bambuddy id: a part-1 row (both keys) of another Bambuddy id is
@@ -225,6 +228,7 @@ def test_the_backfill_touches_only_the_matching_printers_rows(pg_conninfo: str) 
         assert rows == [(part1, 1, "Part 1"), (other, 2, "Other's stale")]
 
 
+@pytest.mark.pg_empty
 def test_the_contract_step_moves_the_last_bambuddy_rows_then_drops_the_column(
     pg_conninfo: str,
 ) -> None:
