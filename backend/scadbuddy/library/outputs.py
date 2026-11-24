@@ -2038,7 +2038,8 @@ class OutputStore:
         (`staged_thumbnail_key`); then one step under the output's thumbnail lock
         (`OutputRows.draw_thumbnail`) points the thumbnail key at it, writes the file
         (`write_drawn_thumbnail`) and names the key in the row, only when neither the key
-        nor the file is there. A failed put is logged, and the file alone is written
+        nor the file is there; with the key there (a lost blob's), the file alone. A
+        failed put is logged, and the file alone is written
         under the lock (True when it was this draw's): the row names no new blob, so
         readers take the file, and the byte copy puts it later. With no blob store or no
         row, the file alone, under the lock when there are rows."""

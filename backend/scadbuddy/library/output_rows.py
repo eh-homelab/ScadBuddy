@@ -485,11 +485,12 @@ class OutputRows:
         write: Callable[[], bool],
     ) -> bool:
         """A drawn thumbnail's step (#4775), in one transaction under the output's
-        thumbnail lock, only while the output has no thumbnail: no index row of ``key``
-        and no file. ``key`` takes the object of ``staged``, then ``write`` writes the
-        file only when there is none (False: an upload's file is there, and the key goes
-        back), then the row names ``key`` and holds it. Whether this draw is the
-        thumbnail now. Blocking."""
+        thumbnail lock. With no index row of ``key``, ``key`` takes the object of
+        ``staged``, then ``write`` writes the file only when there is none (False: an
+        upload's file is there, and the key goes back), then the row names ``key`` and
+        holds it. With an index row of ``key`` (an upload's, or a blob the store lost),
+        the key stays and ``write`` writes the file alone, only when there is none.
+        Whether this draw is the thumbnail file now. Blocking."""
 
         def step(conn: Connection[DictRow]) -> bool:
             try:
@@ -504,7 +505,9 @@ class OutputRows:
                         "SELECT 1 FROM store_blobs WHERE key = %s", (key,)
                     ).fetchone()
                     if there is not None:
-                        return False
+                        # The key is there: the file alone, when there is none. A key
+                        # whose blob the store lost then reads this file.
+                        return write()
                     BlobIndex(self._pool).put_in(conn, key, staged, slug=slug, meta={}, reuse=True)
                     if not write():
                         raise _FileThereError
