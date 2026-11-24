@@ -19,7 +19,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from scadbuddy.core.gitrepo import GitError
+from scadbuddy.core.gitrepo import GitError, GitTimeoutError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
 from scadbuddy.library.history import ModelHistory
@@ -480,3 +480,75 @@ def test_the_built_in_media_refresh_runs_under_the_write_lock(
     _image(world.catalogue, "builtin:keychain")
 
     assert held == [(["builtin:keychain"], "no_commit", True)]
+
+
+def test_a_commit_that_cannot_take_the_write_lock_is_counted(
+    world: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Final review M1 (#7317): `_commit` writes the files first. When the lock wait then
+    fails, nothing refreshes the row, so the miss is logged with the template and counted
+    under ``no_commit``: the next copy's repair is not read as a missed writer."""
+    history = world.history
+    assert history is not None
+    world.failures.clear()
+
+    def no_lock(*_: object, **__: object) -> None:
+        raise GitTimeoutError("waited 10s for the in-process write lock")
+
+    monkeypatch.setattr(history, "_exclusive", no_lock)
+
+    record = world.catalogue.write_readme("demo", "# Demo\n")
+
+    assert record.has_readme
+    assert world.failures == ["no_commit"]
+    assert any("demo" in str(getattr(entry, "templates", "")) for entry in caplog.records), (
+        "the log names the template"
+    )
+
+
+def test_a_failed_commit_under_the_lock_is_not_counted_twice(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review M1 (#7317): a commit that fails under the lock has refreshed the row
+    already (`_refresh_uncommitted`); `_commit` counts nothing more."""
+    history = world.history
+    assert history is not None
+    world.failures.clear()
+
+    def broken(*_: object, **__: object) -> None:
+        raise GitError("git commit failed")
+
+    monkeypatch.setattr(history, "_commit_locked", broken)
+
+    world.catalogue.write_readme("demo", "# Demo\n")
+
+    assert world.failures == []
+    assert _strip(world.rows.get("demo")) == _strip(_expected(world, "demo"))
+
+
+def test_a_refresh_keeps_the_stored_version_when_git_does_not_answer(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review M2 (#7317), as the copy's Task 5 B-M2 fix: a no-commit refresh whose
+    last-commit read fails keeps the row's stored version, never None, and counts the
+    failure under ``no_commit``."""
+    history = world.history
+    assert history is not None
+    item = _image(world.catalogue, "demo")
+    before = world.rows.get("demo")
+    assert before is not None and before.version is not None
+    world.failures.clear()
+
+    def no_answer(*_: object, **__: object) -> str | None:
+        raise GitError("git log failed")
+
+    monkeypatch.setattr(history, "last_commit_checked", no_answer)
+    monkeypatch.setattr(history, "last_commit", lambda *_: None)
+
+    world.catalogue.set_caption("demo", item, "Kept")
+
+    after = world.rows.get("demo")
+    assert after is not None
+    assert after.version == before.version
+    assert after.files_stamp != before.files_stamp
+    assert world.failures == ["no_commit"]

@@ -772,18 +772,35 @@ class Catalogue:
         the way in is ordinary filesystem I/O -- a PVC that has gone read-only or
         full since boot would otherwise 500 a source edit that had already been
         written to disk, telling the client it failed when it did not.
+
+        A lock wait that fails leaves the rows unrefreshed (#7317, final review M1):
+        under the lock the history refreshes them whether or not a commit lands, but
+        here nothing does, so the miss is logged and counted under ``no_commit``.
         """
         try:
             if self.history is None or not self.history.available:
                 return None
+            locked = False
+
+            def held() -> None:
+                # Runs first under the write lock, on every commit attempt.
+                nonlocal locked
+                locked = True
+
             try:
-                return self.history.commit(message, *slugs)
+                return self.history.commit(message, *slugs, prepare=held)
             except (GitError, OSError):
                 # NOT `extra={"message": ...}`: `message` is a reserved LogRecord
                 # attribute, and logging raises KeyError on the collision -- which
                 # would turn this whole tolerate-and-continue branch into the crash
                 # it exists to prevent.
                 logger.exception("could not record a revision", extra={"revision_message": message})
+                if not locked and self.refresh is not None:
+                    logger.error(
+                        "could not refresh the templates' rows: the write lock was not taken",
+                        extra={"templates": list(slugs), "refresh_path": "no_commit"},
+                    )
+                    self.refresh.count_failure("no_commit")
                 return None
         finally:
             # The files are written whether or not the revision was recorded.

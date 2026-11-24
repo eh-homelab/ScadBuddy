@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from scadbuddy.core.gitrepo import GitError
 from scadbuddy.core.paths import model_path
 from scadbuddy.core.tracing import span
 from scadbuddy.library.history import RefreshPath
@@ -94,21 +95,34 @@ class TemplateRefresh:
     def refresh_locked(self, models: list[str], *, path: RefreshPath) -> None:
         """Read and write the rows of ``models`` in a transaction of their own. The
         caller holds the write lock (or, without git, there is no other writer). Each
-        version is the template's last commit, None without git. Never raises."""
+        version is the template's last commit, None without git. When git does not
+        answer for one, its row keeps the stored version and the miss is counted (final
+        review M2, as the copy's Task 5 B-M2). Never raises."""
         try:
             history = self.catalogue.history
             versions: dict[str, str | None] = {}
+            unanswered: list[str] = []
             head: str | None = None
             if history is not None and history.available:
-                versions = {
-                    template_id: history.last_commit(model_path(template_id))
-                    for template_id in models
-                }
+                for template_id in models:
+                    try:
+                        versions[template_id] = history.last_commit_checked(model_path(template_id))
+                    except GitError:
+                        unanswered.append(template_id)
+                        stored = self.rows.get(template_id)
+                        versions[template_id] = None if stored is None else stored.version
                 head = history.head()
             rows, gone = self.read(models, versions, head, path=path)
             self.rows.put(rows, gone)
         except Exception:
             self._failed(models, path)
+            return
+        if unanswered:
+            logger.error(
+                "git did not answer a template's last commit; its row keeps the stored version",
+                extra={"templates": unanswered, "refresh_path": path},
+            )
+            self.count_failure(path)
 
     def _failed(self, models: Sequence[str], path: str) -> None:
         logger.exception(

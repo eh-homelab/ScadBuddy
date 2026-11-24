@@ -146,7 +146,11 @@ phase 1 nothing reads the rows yet; the readers move to them in phase 2.
   `TemplateRefresh.refresh_locked`); without git, `Catalogue.notify_change` refreshes them.
 - A failed refresh never fails the write. It is logged with the template ids and counted in
   `scadbuddy_template_refresh_failures_total` (label `path`: `commit`, `no_commit` or
-  `no_git`; `scadbuddy/core/metrics.py`). The next copy run repairs the row.
+  `no_git`; `scadbuddy/core/metrics.py`). The next copy run repairs the row. Two other
+  misses are counted under `no_commit` too: a commit that wrote its
+  files but did not get the write lock, so nothing refreshed its rows
+  (`scadbuddy/library/catalogue.py` `Catalogue._commit`), and a no-commit refresh for which
+  git did not name a version, so the row keeps its stored one.
 - Each API start copies the files to rows once (`scadbuddy/library/template_copy.py`
   `copy_templates`, one replica at a time under the advisory lock `COPY_LOCK`; a run that
   does not get it does nothing). The housekeeping sweep `housekeeping_copy_templates`
