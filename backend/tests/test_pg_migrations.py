@@ -1245,7 +1245,8 @@ def test_the_parts_migration_keeps_stock_cost_and_history(pg_conninfo: str) -> N
             " FROM stock_lots WHERE item_id = %s",
             (_P1,),
         ).fetchall()
-        assert lot == [("opening", 7, 7, 599, False, "USD")]
+        # A shop-currency lot has no `cost_currency` (R-P2-12).
+        assert lot == [("opening", 7, 7, 599, False, None)]
         assert _moves(conn, _P1) == [
             ("receive", 10, 599, 5990, False, None),
             ("use", -3, 599, -1797, False, "oi1"),
@@ -1277,8 +1278,9 @@ def test_the_parts_migration_keeps_stock_cost_and_history(pg_conninfo: str) -> N
 
 @pytest.mark.requires_postgres
 def test_a_part_in_another_currency_opens_a_cost_unknown_lot(pg_conninfo: str) -> None:
-    """D11, R-7067-11: a EUR part in a USD shop keeps its cost, but as unknown in the
-    shop's currency; its pack price stays a EUR price point."""
+    """D11, R-7067-11, R-P2-22: a EUR part in a USD shop opens as a foreign receive does:
+    cost 0 and unknown in the shop's currency, its EUR cost kept beside; its moves are at 0
+    and unknown; its pack price stays a EUR price point."""
     with psycopg.connect(pg_conninfo) as conn:
         _before_parts(conn)
         conn.execute("INSERT INTO settings (name, value) VALUES ('orders_currency', '\"USD\"')")
@@ -1298,8 +1300,10 @@ def test_a_part_in_another_currency_opens_a_cost_unknown_lot(pg_conninfo: str) -
         assert conn.execute(
             "SELECT unit_cost_minor, cost_unknown, cost_currency, foreign_unit_cost_minor"
             " FROM stock_lots"
-        ).fetchall() == [(Decimal("120.5"), True, "EUR", Decimal("120.5"))]
-        assert conn.execute("SELECT cost_unknown FROM stock_moves").fetchall() == [(True,)]
+        ).fetchall() == [(0, True, "EUR", Decimal("120.5"))]
+        assert conn.execute(
+            "SELECT unit_cost_minor, amount_minor, cost_unknown FROM stock_moves"
+        ).fetchall() == [(0, 0, True)]
         assert conn.execute(
             "SELECT price, currency, on_date::text, source FROM offer_price_points"
         ).fetchall() == [(Decimal("24.1"), "EUR", "2026-11-02", "manual")]
@@ -1437,12 +1441,18 @@ def test_suppliers_are_matched_by_name_or_made(pg_conninfo: str) -> None:
     one is made; a part with no supplier gets no offer, and its link becomes a `purchase`
     link on its item. Each offer carries the part's pack and price."""
     p3 = "5f0e9c1a-3333-4a2b-8c3d-000000000003"
+    p4 = "5f0e9c1a-4444-4a2b-8c3d-000000000004"
+    p5 = "5f0e9c1a-5555-4a2b-8c3d-000000000005"
     with psycopg.connect(pg_conninfo) as conn:
         _before_parts(conn)
         bambu = conn.execute(
             "INSERT INTO filament_suppliers (name) VALUES ('Bambu Lab') RETURNING id"
         ).fetchone()
         assert bambu is not None
+        conn.execute(
+            "INSERT INTO filament_suppliers (name, archived_at) VALUES ('Amazon', now()),"
+            " (' Acme ', NULL)"
+        )
         _part(
             conn,
             _P1,
@@ -1454,14 +1464,41 @@ def test_suppliers_are_matched_by_name_or_made(pg_conninfo: str) -> None:
         )
         _part(conn, _P2, "Ring", on_hand=0, unit_cost="1", supplier="Amazon", pack_size=100)
         _part(conn, p3, "Magnet", on_hand=0, unit_cost="1", link="https://example.com/magnet")
+        _part(conn, p4, "Nut", on_hand=0, unit_cost="1", supplier=" Bambu Lab ")
+        _part(conn, p5, "Bolt", on_hand=0, unit_cost="1", supplier="acme")
         migrate(conn)
+        # An archived "Amazon" does not match, so a new one is made; " Acme " and
+        # " Bambu Lab " match after `btrim` on both sides.
         assert conn.execute(
-            "SELECT name FROM filament_suppliers ORDER BY upper(name)"
-        ).fetchall() == [("Amazon",), ("Bambu Lab",)]
+            "SELECT name, archived_at IS NOT NULL FROM filament_suppliers"
+            " ORDER BY upper(btrim(name)), archived_at NULLS FIRST"
+        ).fetchall() == [
+            (" Acme ", False),
+            ("Amazon", False),
+            ("Amazon", True),
+            ("Bambu Lab", False),
+        ]
+        assert conn.execute(
+            "SELECT o.item_id::text, s.id = %s FROM supplier_offers o"
+            " JOIN filament_suppliers s ON s.id = o.supplier_id"
+            " WHERE o.item_id = ANY(%s::uuid[]) ORDER BY o.item_id",
+            (bambu[0], [_P1, p4]),
+        ).fetchall() == sorted([(_P1, True), (p4, True)])
+        assert conn.execute(
+            "SELECT s.name FROM supplier_offers o JOIN filament_suppliers s"
+            " ON s.id = o.supplier_id WHERE o.item_id = %s",
+            (p5,),
+        ).fetchall() == [(" Acme ",)]
+        # A part with no supplier has no offer.
+        assert conn.execute(
+            "SELECT count(*) FROM supplier_offers WHERE item_id = %s", (p3,)
+        ).fetchone() == (0,)
         offers = conn.execute(
             "SELECT o.item_id::text, s.name, o.sku, o.url, o.pack_size, p.price, p.currency"
             " FROM supplier_offers o JOIN filament_suppliers s ON s.id = o.supplier_id"
-            " JOIN offer_price_points p ON p.offer_id = o.id ORDER BY s.name"
+            " JOIN offer_price_points p ON p.offer_id = o.id"
+            " WHERE o.item_id = ANY(%s::uuid[]) ORDER BY s.name",
+            ([_P1, _P2],),
         ).fetchall()
         assert offers == [
             (_P2, "Amazon", f"PART-{_P2[:8]}", None, 100, Decimal("5.99"), "USD"),
@@ -1493,3 +1530,187 @@ def test_a_supplier_the_parts_migration_made_stays_out_of_bambuddy(pg_conninfo: 
         assert conn.execute("SELECT count(*) AS n FROM supplier_offers").fetchone() == {"n": 1}
         # A supplier Bambuddy knows is planned; the migration's is not.
         assert [item.name for item in _suppliers(conn)] == ["Linked"]
+
+
+@pytest.mark.requires_postgres
+def test_a_removed_part_cost_entry_converts_at_zero(pg_conninfo: str) -> None:
+    """R-P2-21: a costed use whose `part:` entry a person removed cost the order nothing,
+    so it converts at 0, and so does its return; the reason says why. A use whose entry is
+    there keeps its cost."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_parts(conn)
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind)"
+            " VALUES ('oi3', 'o1', 2, 1, 'Keychain', 'custom')"
+        )
+        _part(conn, _P1, "Hook", on_hand=3, unit_cost="500")
+        _old_move(conn, _P1, 1, "add", 10, "500", 5000)
+        # oi1: costed, its entry removed, never returned.
+        _old_move(conn, _P1, 2, "use", -2, "500", 1000, item="oi1", note="fulfil")
+        # oi2: costed, its entry removed, then unfulfilled (the return found no entry).
+        _old_move(conn, _P1, 3, "use", -1, "500", 500, item="oi2")
+        _old_move(conn, _P1, 4, "return", 1, "500", None, item="oi2")
+        # oi3: costed, its entry still there.
+        _old_move(conn, _P1, 5, "use", -4, "500", 2000, item="oi3")
+        _cost_entry(conn, "oi3", _P1, 2000)
+        _old_move(conn, _P1, 6, "use", -1, "500", 500, item="oi2")
+        _cost_entry(conn, "oi2", _P1, 500)
+        migrate(conn)
+        rows = conn.execute(
+            "SELECT order_item_id, kind, unit_cost_minor, amount_minor, cost_unknown,"
+            " reason LIKE '%%cost entry was removed%%' FROM stock_moves"
+            " WHERE order_item_id IS NOT NULL ORDER BY at"
+        ).fetchall()
+        assert rows == [
+            ("oi1", "use", 0, 0, False, True),
+            ("oi2", "use", 0, 0, False, True),
+            ("oi2", "return", 0, 0, False, True),
+            ("oi3", "use", 500, -2000, False, False),
+            ("oi2", "use", 500, -500, False, False),
+        ]
+        assert conn.execute(
+            "SELECT reason FROM stock_moves WHERE order_item_id = 'oi1'"
+        ).fetchone() == (
+            "fulfil (Cost 0: its part cost entry was removed from the order before parts"
+            " became items, #7067.)",
+        )
+
+
+@pytest.mark.requires_postgres
+def test_a_null_amount_foreign_use_and_a_rounds_to_zero_use(pg_conninfo: str) -> None:
+    """R-P2-23: a use with no amount is unknown when its cost is a whole minor unit or
+    more, or when its part is in another currency; one that rounds to 0 is a known 0."""
+    p3 = "5f0e9c1a-3333-4a2b-8c3d-000000000003"
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_parts(conn)
+        _part(conn, _P1, "Magnet", on_hand=-1, unit_cost="0.1", currency="EUR")
+        _part(conn, _P2, "Washer", on_hand=-1, unit_cost="0.4")
+        _part(conn, p3, "Ring", on_hand=-1, unit_cost="0.6")
+        _old_move(conn, _P1, 1, "use", -1, "0.1", None, item="oi1")
+        _old_move(conn, _P2, 2, "use", -1, "0.4", None, item="oi1")
+        _old_move(conn, p3, 3, "use", -1, "0.6", None, item="oi1")
+        migrate(conn)
+        assert conn.execute(
+            "SELECT item_id::text, unit_cost_minor, cost_unknown FROM stock_moves ORDER BY at"
+        ).fetchall() == [
+            (_P1, 0, True),
+            (_P2, Decimal("0.4"), False),
+            (p3, Decimal("0.6"), True),
+        ]
+
+
+@pytest.mark.requires_postgres
+def test_a_non_uuid_part_id_gets_a_new_item_id(pg_conninfo: str) -> None:
+    """A part id that is no uuid's text maps to a new uuid, and its order parts, rule
+    lines and entity follow the map; an upper-case uuid keeps its value."""
+    upper = _P2.upper()
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_parts(conn)
+        _part(conn, "legacy-1", "Hook", on_hand=1, unit_cost="5")
+        _part(conn, upper, "Ring", on_hand=1, unit_cost="5")
+        conn.execute(
+            "INSERT INTO order_item_parts (order_item_id, part_id, per_unit)"
+            " VALUES ('oi1', 'legacy-1', 2), ('oi1', %s, 1)",
+            (upper,),
+        )
+        conn.execute(
+            "INSERT INTO model_part_rules (slug, lines, updated_by) VALUES ('tag', %s, '{}')",
+            (
+                Jsonb(
+                    [
+                        {
+                            "per_unit": 1,
+                            "part_id": "legacy-1",
+                            "when": [{"colour": "#000000", "part_id": upper}],
+                        }
+                    ]
+                ),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO entities (kind, ref) VALUES ('part', 'legacy-1'), ('part', %s)", (upper,)
+        )
+        migrate(conn)
+        mapped: dict[str, str] = dict(
+            conn.execute("SELECT part_id, item_id::text FROM part_item_map").fetchall()
+        )
+        new = mapped["legacy-1"]
+        assert new not in ("legacy-1", _P2)
+        assert mapped[upper] == _P2
+        assert conn.execute("SELECT id::text FROM items ORDER BY name").fetchall() == [
+            (new,),
+            (_P2,),
+        ]
+        assert sorted(
+            conn.execute("SELECT item_id::text, per_unit FROM order_item_parts").fetchall()
+        ) == sorted([(new, 2), (_P2, 1)])
+        (lines,) = conn.execute("SELECT lines FROM model_part_rules").fetchone() or (None,)
+        assert lines == [
+            {"per_unit": 1, "item_id": new, "when": [{"colour": "#000000", "item_id": _P2}]}
+        ]
+        assert sorted(conn.execute("SELECT kind, ref FROM entities").fetchall()) == sorted(
+            [("item", new), ("item", _P2)]
+        )
+
+
+@pytest.mark.requires_postgres
+def test_step_7_keeps_a_non_part_cost_entry(pg_conninfo: str) -> None:
+    """Only the `part:` entry a converted use replaces goes; other entries stay."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_parts(conn)
+        _part(conn, _P1, "Hook", on_hand=-2, unit_cost="500")
+        _old_move(conn, _P1, 1, "use", -2, "500", 1000, item="oi1")
+        _cost_entry(conn, "oi1", _P1, 1000)
+        conn.execute(
+            "INSERT INTO order_cost_entries (order_id, order_item_id, kind, amount_minor, source,"
+            " created_by) VALUES ('o1', 'oi1', 'material', 300, 'manual:glue', '{}'),"
+            " ('o1', 'oi1', 'other', 200, NULL, '{}'),"
+            " ('o1', 'oi2', 'material', 400, %s, '{}')",
+            (f"part:oi2:{_P2}",),
+        )
+        migrate(conn)
+        assert sorted(
+            conn.execute("SELECT coalesce(source, ''), amount_minor FROM order_cost_entries")
+        ) == sorted([("manual:glue", 300), ("", 200), (f"part:oi2:{_P2}", 400)])
+
+
+@pytest.mark.requires_postgres
+def test_a_return_pairs_per_part_and_an_unpaired_return_converts(pg_conninfo: str) -> None:
+    """Two parts used and returned on one order item each pair with their own use at their
+    own cost; a return with no use converts at its own cost and reverses nothing."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_parts(conn)
+        _part(conn, _P1, "Hook", on_hand=1, unit_cost="510")
+        _part(conn, _P2, "Ring", on_hand=0, unit_cost="900")
+        _old_move(conn, _P1, 1, "use", -2, "500", 1000, item="oi1")
+        _old_move(conn, _P2, 2, "use", -3, "900", 2700, item="oi1")
+        _old_move(conn, _P2, 3, "return", 3, "900", 2700, item="oi1")
+        _old_move(conn, _P1, 4, "return", 2, "505", 1000, item="oi1")
+        _old_move(conn, _P1, 5, "return", 1, "510", None, item="oi2")
+        migrate(conn)
+        rows = conn.execute(
+            "SELECT r.item_id::text, r.order_item_id, r.unit_cost_minor, u.item_id::text,"
+            " u.unit_cost_minor FROM stock_moves r LEFT JOIN stock_moves u"
+            " ON u.id = r.reverses_move_id WHERE r.kind = 'return' ORDER BY r.at"
+        ).fetchall()
+        assert rows == [
+            (_P2, "oi1", 900, _P2, 900),
+            (_P1, "oi1", 500, _P1, 500),
+            (_P1, "oi2", 510, None, None),
+        ]
+
+
+@pytest.mark.requires_postgres
+def test_an_orphan_part_entity_raises(pg_conninfo: str) -> None:
+    """R-P2-24: a part entity whose ref names no part stops the migration, and nothing of
+    it is applied."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_parts(conn)
+        _part(conn, _P1, "Hook", on_hand=0, unit_cost="5")
+        conn.execute("INSERT INTO entities (kind, ref) VALUES ('part', 'gone')")
+        conn.commit()
+        with pytest.raises(psycopg.errors.RaiseException, match="part entity gone names no part"):
+            migrate(conn)
+        conn.rollback()
+        assert conn.execute("SELECT count(*) FROM parts").fetchone() == (1,)
+        assert conn.execute("SELECT to_regclass('part_item_map')").fetchone() == (None,)

@@ -8,6 +8,10 @@
 -- `part:` cost entries that the moves replace are deleted. `parts` and `part_stock_moves`
 -- are renamed `*_retired`; a follow-up drops them after a prod check (Ruling 6).
 
+-- No part write may commit while the rows move (R-P2-20). A pod of the previous build
+-- waits here, then fails on its next part write, as the tables are renamed below.
+LOCK TABLE parts, part_stock_moves, order_item_parts, model_part_rules IN EXCLUSIVE MODE;
+
 -- The shop's currency (`orders_currency`, default USD: `core/settings.py`). A part in
 -- another currency keeps its cost, but that cost is unknown in the shop's (D11,
 -- R-7067-11).
@@ -46,7 +50,7 @@ SELECT upper(btrim(supplier)) AS key,
     NULL::uuid AS supplier_id
 FROM parts WHERE btrim(supplier) <> '' GROUP BY 1;
 UPDATE parts_migration_suppliers t SET supplier_id = s.id
-FROM filament_suppliers s WHERE s.archived_at IS NULL AND upper(s.name) = t.key;
+FROM filament_suppliers s WHERE s.archived_at IS NULL AND upper(btrim(s.name)) = t.key;
 UPDATE parts_migration_suppliers SET supplier_id = gen_random_uuid() WHERE supplier_id IS NULL;
 INSERT INTO filament_suppliers (id, name)
 SELECT t.supplier_id, t.name FROM parts_migration_suppliers t
@@ -84,7 +88,22 @@ JOIN parts p ON p.id = m.part_id;
 
 -- 10 (before 4, so that step 4 finds the item's entity that a part's entity became). The
 -- entities of the parts, and their files' subjects, name the items. Links and properties
--- hang off the entity row, so they follow it.
+-- hang off the entity row, so they follow it. A part entity whose ref names no part has
+-- no item to move to: the migration stops rather than leave it unknown (R-P2-24).
+DO $$
+DECLARE
+    orphan text;
+BEGIN
+    SELECT e.ref INTO orphan FROM entities e
+    WHERE e.kind = 'part' AND NOT EXISTS (SELECT 1 FROM parts p WHERE p.id = e.ref)
+    ORDER BY e.ref LIMIT 1;
+    IF orphan IS NOT NULL THEN
+        RAISE EXCEPTION
+            'part entity % names no part: delete it before parts become items (#7067, R-P2-24)',
+            orphan;
+    END IF;
+END
+$$;
 UPDATE entities e SET kind = 'item', ref = m.item_id::text
 FROM part_item_map m WHERE e.kind = 'part' AND e.ref = m.part_id;
 UPDATE entity_attachments a SET subject = 'item:' || m.item_id::text
@@ -108,12 +127,17 @@ WHERE btrim(p.supplier) = '' AND p.link <> '';
 
 -- 5. One opening lot per part. Its intake is the part's on hand: a part's first count is
 -- an `adjust`, not an `add` (`PartStore._create`), and the history before the lot is kept
--- as its moves (step 6). A part in another currency than the shop's opens with its cost
--- unknown; `foreign_unit_cost_minor` keeps that cost as a foreign receive does (R-P2-11).
+-- as its moves (step 6). A part in another currency than the shop's opens as a foreign
+-- receive does (R-P2-11, R-P2-22): cost 0 and unknown in the shop's currency, its own cost
+-- kept in `foreign_unit_cost_minor` and `cost_currency`. A shop-currency lot has no
+-- `cost_currency` (R-P2-12).
 INSERT INTO stock_lots (item_id, received_qty, on_hand, unit_cost_minor, cost_unknown,
     cost_currency, foreign_unit_cost_minor, origin, note, received_at, created_by)
-SELECT m.item_id, p.on_hand, p.on_hand, p.unit_cost_minor, p.currency <> s.currency,
-    p.currency, CASE WHEN p.currency <> s.currency THEN p.unit_cost_minor END,
+SELECT m.item_id, p.on_hand, p.on_hand,
+    CASE WHEN p.currency <> s.currency THEN 0 ELSE p.unit_cost_minor END,
+    p.currency <> s.currency,
+    CASE WHEN p.currency <> s.currency THEN p.currency END,
+    CASE WHEN p.currency <> s.currency THEN p.unit_cost_minor END,
     'opening', 'The stock of the part before parts became items (#7067)', p.created_at, a.actor
 FROM parts p
 JOIN part_item_map m ON m.part_id = p.id
@@ -133,9 +157,13 @@ SELECT gen_random_uuid() AS id, sm.id AS old_id, sm.part_id, m.item_id,
         THEN round(sm.amount_minor::numeric / sm.delta, 6)
         ELSE sm.unit_cost_after_minor END AS unit_cost_minor,
     sm.amount_minor AS old_amount_minor, sm.note, sm.order_id, sm.order_item_id,
-    sm.created_by, sm.created_at, NULL::uuid AS reverses_move_id
+    sm.created_by, sm.created_at, NULL::uuid AS reverses_move_id,
+    false AS entry_removed
 FROM part_stock_moves sm JOIN part_item_map m ON m.part_id = sm.part_id
 WHERE sm.delta <> 0;
+CREATE INDEX ON parts_migration_moves (part_id, order_item_id, created_at);
+CREATE INDEX ON parts_migration_moves (reverses_move_id);
+ANALYZE parts_migration_moves;
 
 -- A `return` reverses the newest `use` of its order item and part before it that no
 -- return reversed yet, and takes that use's unit cost, so the pair nets to 0. A return
@@ -167,21 +195,53 @@ BEGIN
 END
 $$;
 
--- A move's cost is unknown when its part's currency is not the shop's (its minor units
--- are not the shop's), or when it is a use or return that `PartStore.move` wrote with no
--- amount at a cost above 0 (it took the units with no cost the order could carry).
+-- A costed use whose `part:<order item>:<part>` cost entry a person removed costed the
+-- order nothing, so it converts at 0, and so does its return (R-P2-21: job cost never
+-- rises in silence). Its entry is gone now when no return reversed it; when one did, the
+-- return carries no amount (`OrderLifecycle._return_parts` found no entry to delete),
+-- while a return after an entry that was there carries its amount.
+UPDATE parts_migration_moves u SET entry_removed = true, unit_cost_minor = 0
+WHERE u.kind = 'use' AND u.old_amount_minor IS NOT NULL
+    AND CASE
+        WHEN EXISTS (SELECT 1 FROM parts_migration_moves r WHERE r.reverses_move_id = u.id)
+        THEN EXISTS (
+            SELECT 1 FROM parts_migration_moves r
+            WHERE r.reverses_move_id = u.id AND r.old_amount_minor IS NULL
+        )
+        ELSE NOT EXISTS (
+            SELECT 1 FROM order_cost_entries e
+            WHERE e.kind = 'material'
+                AND e.source = 'part:' || u.order_item_id || ':' || u.part_id
+        )
+    END;
+UPDATE parts_migration_moves r SET entry_removed = true, unit_cost_minor = 0
+FROM parts_migration_moves u WHERE r.reverses_move_id = u.id AND u.entry_removed;
+UPDATE parts_migration_moves
+SET note = note || CASE WHEN note = '' THEN '' ELSE ' ' END
+    || '(Cost 0: its part cost entry was removed from the order before parts became items, #7067.)'
+WHERE entry_removed;
+
+-- A part in another currency than the shop's moves at 0 on its lot, as the lot does
+-- (R-P2-22). A move's cost is unknown when its part's currency is not the shop's, or when
+-- it is a use or return that `PartStore.move` wrote with no amount though it cost a whole
+-- minor unit or more (it took the units with no cost the order could carry; one that
+-- rounds to 0 stays a known 0, R-P2-23).
 INSERT INTO stock_moves (id, at, item_id, lot_id, kind, qty, unit_cost_minor, amount_minor,
     cost_unknown, reverses_move_id, reason, order_id, order_item_id, actor)
-SELECT mv.id, mv.created_at, mv.item_id, l.id, mv.kind, mv.qty, mv.unit_cost_minor,
-    round(mv.qty * mv.unit_cost_minor, 6),
+SELECT mv.id, mv.created_at, mv.item_id, l.id, mv.kind, mv.qty, c.unit_cost_minor,
+    round(mv.qty * c.unit_cost_minor, 6),
     p.currency <> s.currency
         OR (mv.kind IN ('use', 'return') AND mv.old_amount_minor IS NULL
-            AND mv.unit_cost_minor > 0),
+            AND round(abs(mv.qty) * mv.unit_cost_minor) > 0),
     mv.reverses_move_id, mv.note, mv.order_id, mv.order_item_id, mv.created_by
 FROM parts_migration_moves mv
 JOIN parts p ON p.id = mv.part_id
 JOIN stock_lots l ON l.item_id = mv.item_id AND l.origin = 'opening'
-CROSS JOIN parts_migration_shop s;
+CROSS JOIN parts_migration_shop s
+CROSS JOIN LATERAL (
+    SELECT CASE WHEN p.currency <> s.currency THEN 0 ELSE mv.unit_cost_minor END
+        AS unit_cost_minor
+) c;
 
 -- 7. The `part:<order item>:<part>` cost entries that a converted `use` replaces: job
 -- cost reads the use's move now, so no order counts a part twice (Pre-flight 5).
