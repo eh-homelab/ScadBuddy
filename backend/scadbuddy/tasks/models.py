@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from scadbuddy.core.events import TASK_PLACE_CHAR
+from scadbuddy.core.events import TASK_PLACE_CHAR, TASK_PLACE_MAX
 from scadbuddy.core.json_values import unstorable
 from scadbuddy.tasks.schema import prompt_schema_problems
 
@@ -27,7 +27,7 @@ class _TaskFields(BaseModel):
     #: Where the task is shown. It becomes part of a realtime topic, so it holds no
     #: control character.
     place: str | None = Field(
-        default=None, min_length=1, max_length=100, pattern=rf"^{TASK_PLACE_CHAR}+$"
+        default=None, min_length=1, max_length=TASK_PLACE_MAX, pattern=rf"^{TASK_PLACE_CHAR}+$"
     )
     ui: str | None = None
     expires_at: datetime | None = None

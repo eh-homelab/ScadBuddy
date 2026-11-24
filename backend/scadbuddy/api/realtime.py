@@ -116,6 +116,7 @@ from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Person
 from scadbuddy.core.events import (
     TASK_PLACE_CHAR,
+    TASK_PLACE_MAX,
     ActivityEvent,
     AgentOperationEvent,
     AnalyzerDecisionEvent,
@@ -226,7 +227,7 @@ _TOPIC = re.compile(
             # A task (#7364): its id is the harness call id, a UUID; ``tasks:<place>`` is
             # the tasks shown in one place.
             f"task:{FLOW_RUN_ID_PATTERN}",
-            f"tasks:{TASK_PLACE_CHAR}{{1,100}}",
+            f"tasks:{TASK_PLACE_CHAR}{{1,{TASK_PLACE_MAX}}}",
             # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
             r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
             *sorted(COLLECTION_TOPICS),

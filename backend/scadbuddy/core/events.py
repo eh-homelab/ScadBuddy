@@ -236,6 +236,8 @@ class FlowChanged(BaseEvent):
 #: One character of a task's ``place``, which becomes part of a realtime topic: no
 #: control character. `tasks.models` and `api.realtime` share it.
 TASK_PLACE_CHAR = r"[^\x00-\x1f\x7f-\x9f]"
+#: The most characters a task's ``place`` holds.
+TASK_PLACE_MAX = 100
 
 
 class TaskChanged(BaseEvent):
