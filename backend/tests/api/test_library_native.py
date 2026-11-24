@@ -82,6 +82,8 @@ def _native_settings(settings: Settings, s3: S3Settings, **extra: Any) -> Settin
 @pytest.fixture
 def native_client(settings: Settings, s3: S3Settings) -> Iterator[TestClient]:
     with TestClient(create_app(_native_settings(settings, s3))) as client:
+        # #7256: an s3 store reads the outputs' bytes from its blobs.
+        assert getattr(client.app.state, STATE_ATTR).outputs.bytes is not None  # type: ignore[attr-defined]
         yield client
 
 

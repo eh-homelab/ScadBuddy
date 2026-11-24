@@ -55,6 +55,18 @@ def local_content(
     )
 
 
+async def flip_first_byte(content: ContentStore, key: str) -> None:
+    """Corrupt a blob of a local ``content`` behind the index's back; its length stays
+    the same, so only the sha256 check finds it."""
+    found = await content.stat(key)
+    assert found is not None
+    assert isinstance(content.backend, LocalContentBackend)
+    path = content.backend.root / found.ref.backend_id
+    data = bytearray(path.read_bytes())
+    data[0] ^= 0xFF
+    path.write_bytes(bytes(data))
+
+
 def s3_content(
     settings: S3Settings, pool: Pool, *, max_total_bytes: int = 0, max_count: int = 0
 ) -> ContentStore:

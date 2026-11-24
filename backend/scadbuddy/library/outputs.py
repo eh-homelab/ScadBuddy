@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 import uuid
@@ -24,7 +25,7 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
@@ -92,7 +93,9 @@ ROLE_FILES: dict[Role, str] = {
     "preview": PREVIEW_NAME,
     "thumbnail": THUMBNAIL_NAME,
 }
-#: A blob the row names that the store cannot give whole: the reader takes the file.
+#: A blob the row names that the store cannot give whole: the reader takes the file. A
+#: stream raises it before its first chunk only for a missing blob or a corrupt blob of at
+#: most `output_bytes._PREFETCH` bytes; a larger corrupt blob raises it mid-stream.
 _LOST = (BlobMissingError, BlobCorruptError)
 #: How much of a file a stream reads at a time.
 _FILE_CHUNK = 1024 * 1024
@@ -310,31 +313,49 @@ def thumbnail_file_version(path: Path) -> str | None:
     """The file's identity: every write puts a new file in place (a new inode, by a
     rename or a link), and its time and size tell apart an inode used again."""
     try:
-        stat = path.stat()
+        info = path.stat()
     except OSError:  # as `is_file()` before it: no readable file is no thumbnail
         return None
-    return f"{stat.st_ino:x}-{stat.st_mtime_ns:x}-{stat.st_size:x}"
+    return f"{info.st_ino:x}-{info.st_mtime_ns:x}-{info.st_size:x}"
 
 
-async def _file_chunks(path: Path) -> AsyncGenerator[bytes]:
-    file = await asyncio.to_thread(path.open, "rb")
+async def _file_chunks(file: BinaryIO) -> AsyncGenerator[bytes]:
+    """The open file's bytes. It does not close the file: the stream's close does."""
+    while chunk := await asyncio.to_thread(file.read, _FILE_CHUNK):
+        yield chunk
+
+
+def _open_regular(path: Path) -> tuple[BinaryIO, int] | None:
+    """The file open for reading and its size from its own descriptor, so the size is
+    the size of the file that is read. ``None`` when there is no regular file. Blocking."""
     try:
-        while chunk := await asyncio.to_thread(file.read, _FILE_CHUNK):
-            yield chunk
-    finally:
-        await asyncio.to_thread(file.close)
-
-
-def _file_stream(path: Path) -> OutputStream | None:
-    """The file's bytes as a stream, ``None`` when there is no file. Blocking (one stat);
-    the file is opened when the stream is first read."""
-    try:
-        stat = path.stat()
+        file = path.open("rb")
     except OSError:
         return None
-    if not path.is_file():
+    try:
+        info = os.fstat(file.fileno())
+    except OSError:
+        file.close()
         return None
-    return OutputStream(size=stat.st_size, sha256=None, chunks=_file_chunks(path))
+    if not stat.S_ISREG(info.st_mode):
+        file.close()
+        return None
+    return file, info.st_size
+
+
+async def _file_stream(path: Path) -> OutputStream | None:
+    """The file's bytes as a stream, ``None`` when there is no regular file. The file is
+    opened in a thread before this returns; the stream's close closes it."""
+    opened = await asyncio.to_thread(_open_regular, path)
+    if opened is None:
+        return None
+    file, size = opened
+    return OutputStream(
+        size=size,
+        sha256=None,
+        chunks=_file_chunks(file),
+        _on_close=lambda: asyncio.to_thread(file.close),
+    )
 
 
 def _warn_lost(output_id: str, role: str, key: str, error: Exception) -> None:
@@ -1116,8 +1137,11 @@ class OutputStore:
 
     async def open_file(self, output_id: str, name: str) -> OutputStream:
         """An extra file of the output: its blob once its bytes are blobs (#7256), else
-        the file (`file_path`). The name is checked before anything is read. Raises
-        `OutputNotFoundError` as `file_path` does. The caller closes the stream."""
+        the file (`file_path`). The name is checked before anything is read. A missing
+        blob, or a corrupt blob of at most `output_bytes._PREFETCH` bytes, is logged, and
+        the file is read; a larger corrupt blob raises `BlobCorruptError` mid-stream, as
+        in `open_role`. Raises `OutputNotFoundError` as `file_path` does. The caller
+        closes the stream."""
         if not re.fullmatch(FILE_NAME_PATTERN, name):
             raise OutputNotFoundError(name)
         key = await asyncio.to_thread(self._file_key, output_id, name)
@@ -1128,7 +1152,7 @@ class OutputStore:
             except _LOST as error:
                 _warn_lost(output_id, "files", key, error)
         path = await asyncio.to_thread(self.file_path, output_id, name)
-        stream = await asyncio.to_thread(_file_stream, path)
+        stream = await _file_stream(path)
         if stream is None:
             raise OutputNotFoundError(name)
         return stream
@@ -1146,12 +1170,14 @@ class OutputStore:
 
     def _blob_key(self, output_id: str, role: Role) -> str | None:
         """The blob key the output's row names for ``role``; ``None`` when the store has
-        no blobs or the row names none, and the file holds the bytes. One read of the
+        no blobs, the row has no ``bytes_at`` yet or the row names none: the file then
+        holds the bytes. One read of the
         row, and no glob once a copy run finished (`_row_of`). Blocking."""
         if self.bytes is None:
             return None
         row = self._row_of(output_id)
-        if row is None:
+        if row is None or row.bytes_at is None:
+            # The files hold the bytes until the row is copied, as in `_file_key`.
             return None
         key: str | None = getattr(row.blobs, role)
         return key
@@ -1166,9 +1192,12 @@ class OutputStore:
         return path if path.is_file() else None
 
     async def open_role(self, output_id: str, role: Role) -> OutputStream | None:
-        """The role's bytes: the blob the row names, else the file (#7256). A blob the
-        store lost is logged, and the file is read. ``None`` when neither exists. The
-        caller closes the stream (`OutputStream.aclose`), read or not."""
+        """The role's bytes: the blob the row names, else the file (#7256). A missing
+        blob, or a corrupt blob of at most `output_bytes._PREFETCH` bytes, is logged, and
+        the file is read. A larger corrupt blob raises `BlobCorruptError` from the
+        stream's chunks after its last chunk but one, so the response ends short.
+        ``None`` when neither exists. The caller closes the stream
+        (`OutputStream.aclose`), read or not."""
         try:
             key = await asyncio.to_thread(self._blob_key, output_id, role)
         except OutputNotFoundError:
@@ -1180,7 +1209,7 @@ class OutputStore:
             except _LOST as error:
                 _warn_lost(output_id, role, key, error)
         path = await asyncio.to_thread(self._role_file, output_id, role)
-        return None if path is None else await asyncio.to_thread(_file_stream, path)
+        return None if path is None else await _file_stream(path)
 
     def local_role(self, output_id: str, role: Role) -> AbstractAsyncContextManager[Path | None]:
         """A path that holds the role's bytes while the block runs: the blob's temporary

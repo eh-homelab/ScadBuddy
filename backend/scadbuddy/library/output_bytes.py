@@ -20,7 +20,7 @@ import contextlib
 import os
 import re
 import tempfile
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,13 +71,19 @@ class OutputStream:
     sha256: str | None
     chunks: AsyncGenerator[bytes]
     _source: AsyncGenerator[bytes] | None = field(default=None, repr=False)
+    #: Called last by `aclose`: a file stream closes its file here.
+    _on_close: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
 
     async def aclose(self) -> None:
         try:
             await self.chunks.aclose()
         finally:
-            if self._source is not None:
-                await self._source.aclose()
+            try:
+                if self._source is not None:
+                    await self._source.aclose()
+            finally:
+                if self._on_close is not None:
+                    await self._on_close()
 
     async def __aenter__(self) -> Self:
         return self
@@ -91,14 +97,29 @@ class OutputStream:
         await self.aclose()
 
 
-async def _rest(first: bytes, chunks: AsyncGenerator[bytes]) -> AsyncGenerator[bytes]:
+#: A blob this small is checked whole before `OutputBytes.stream` returns.
+_PREFETCH = 1 << 20
+
+
+async def _held(
+    read: list[bytes], ended: bool, source: AsyncGenerator[bytes]
+) -> AsyncGenerator[bytes]:
+    """Each chunk goes only once the next one came, so the last waits for the sha256
+    check: a corrupt or cut blob ends the response short, never clean."""
     try:
-        if first:
-            yield first
-        async for chunk in chunks:
+        if ended:
+            for chunk in read:
+                yield chunk
+            return
+        held = read.pop()
+        for chunk in read:
             yield chunk
+        async for chunk in source:
+            yield held
+            held = chunk
+        yield held
     finally:
-        await chunks.aclose()
+        await source.aclose()
 
 
 def put_names(directory: Path) -> list[str]:
@@ -199,20 +220,33 @@ class OutputBytes:
         return ref
 
     async def stream(self, key: str) -> OutputStream:
-        """The blob's bytes. The first chunk is read before this returns, so a missing
-        blob raises `BlobMissingError` here, not in the middle of a response. The caller
-        closes the stream (`OutputStream.aclose`), read or not."""
+        """The blob's bytes. Up to `_PREFETCH` bytes are read before this returns. So a
+        missing blob, and a corrupt blob of at most `_PREFETCH` bytes, raise here
+        (`BlobMissingError`, `BlobCorruptError`), never in the middle of a response. A
+        larger corrupt blob raises at the end of its stream, and the last chunk is held
+        back until the check passes. The caller closes the stream
+        (`OutputStream.aclose`), read or not."""
         ref = await self._ref(key)
-        chunks = self.content.get(ref)
+        source = self.content.get(ref)
+        read: list[bytes] = []
+        size = 0
+        ended = False
         try:
-            first = await anext(chunks)
-        except StopAsyncIteration:
-            first = b""
+            while size < _PREFETCH:
+                try:
+                    chunk = await anext(source)
+                except StopAsyncIteration:
+                    ended = True
+                    break
+                read.append(chunk)
+                size += len(chunk)
         except BaseException:
-            await chunks.aclose()
+            await source.aclose()
             raise
+        if not read:
+            ended = True
         return OutputStream(
-            size=ref.size, sha256=ref.sha256, chunks=_rest(first, chunks), _source=chunks
+            size=ref.size, sha256=ref.sha256, chunks=_held(read, ended, source), _source=source
         )
 
     async def read(self, key: str) -> bytes:

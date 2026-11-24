@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from scadbuddy.library.output_bytes import OutputBytes
-from scadbuddy.library.output_rows import ByteWrite, OutputRows, output_blob_key
+from scadbuddy.library.output_rows import ByteWrite, OutputRows, output_blob_key, output_file_key
 from scadbuddy.library.outputs import (
     FILES_DIR,
     MODEL_NAME,
@@ -26,7 +26,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 from tests.support.arrange import finished_job
-from tests.support.store import local_content, store_pool
+from tests.support.store import flip_first_byte, local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -140,13 +140,94 @@ async def test_open_role_falls_back_when_blob_missing(
     ref = await content.stat(output_blob_key(meta.id, "model"))
     assert ref is not None
     await content.backend.remove(ref.ref.backend_id)
-    data = (store.directory(meta.id) / MODEL_NAME).read_bytes()
+    model = store.directory(meta.id) / MODEL_NAME
+    # The file's own bytes, so a read of the blob cannot pass as one of the file.
+    model.write_bytes(b"file bytes")
     with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
-        assert await _read(store, meta.id) == data
-        assert await store.model_3mf(meta.id) == data
+        assert await _read(store, meta.id) == b"file bytes"
+        assert await store.model_3mf(meta.id) == b"file bytes"
         async with store.local_role(meta.id, "model") as path:
-            assert path == store.directory(meta.id) / MODEL_NAME
+            assert path == model
+            assert path.read_bytes() == b"file bytes"
     assert "blob" in caplog.text
+
+
+async def test_open_file_falls_back_when_blob_missing(
+    copied: tuple[OutputStore, OutputMeta], content: ContentStore
+) -> None:
+    store, meta = copied
+    found = await content.stat(output_file_key(meta.id, 0))
+    assert found is not None
+    await content.backend.remove(found.ref.backend_id)
+    (store.directory(meta.id) / FILES_DIR / "a.stl").write_bytes(b"file stl")
+    async with await store.open_file(meta.id, "a.stl") as stream:
+        assert b"".join([chunk async for chunk in stream.chunks]) == b"file stl"
+
+
+async def test_open_role_falls_back_when_blob_corrupt(
+    copied: tuple[OutputStore, OutputMeta], content: ContentStore
+) -> None:
+    store, meta = copied
+    await flip_first_byte(content, output_blob_key(meta.id, "model"))
+    (store.directory(meta.id) / MODEL_NAME).write_bytes(b"file bytes")
+    assert await _read(store, meta.id) == b"file bytes"
+
+
+async def test_local_role_falls_back_when_blob_corrupt(
+    copied: tuple[OutputStore, OutputMeta], content: ContentStore
+) -> None:
+    store, meta = copied
+    await flip_first_byte(content, output_blob_key(meta.id, "model"))
+    model = store.directory(meta.id) / MODEL_NAME
+    model.write_bytes(b"file bytes")
+    async with store.local_role(meta.id, "model") as path:
+        assert path == model
+    assert list(content.spool.iterdir()) == []
+
+
+async def test_model_3mf_falls_back_when_blob_corrupt(
+    copied: tuple[OutputStore, OutputMeta], content: ContentStore
+) -> None:
+    store, meta = copied
+    await flip_first_byte(content, output_blob_key(meta.id, "model"))
+    (store.directory(meta.id) / MODEL_NAME).write_bytes(b"file bytes")
+    assert await store.model_3mf(meta.id) == b"file bytes"
+
+
+async def test_open_role_reads_file_while_bytes_at_null(
+    tmp_path: Path, projection: JobProjection, content: ContentStore
+) -> None:
+    store, meta = await _saved(tmp_path, projection, content)
+    assert store.bytes is not None and store.rows is not None
+    key = output_blob_key(meta.id, "model")
+    await store.bytes.put(key, b"blob bytes", slug=meta.slug)
+    # A live writer names a blob on a row the byte copy has not copied yet.
+    assert store.rows.set_blob(meta.id, "model", key)
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is None
+    (store.directory(meta.id) / MODEL_NAME).write_bytes(b"newer file")
+    assert await _read(store, meta.id) == b"newer file"
+    assert await store.model_3mf(meta.id) == b"newer file"
+
+
+async def test_file_stream_closes_its_file_unread(
+    tmp_path: Path, projection: JobProjection, content: ContentStore
+) -> None:
+    store, meta = await _saved(tmp_path, projection, content)
+    stream = await store.open_role(meta.id, "model")
+    assert stream is not None and stream.sha256 is None
+    assert stream.size == (store.directory(meta.id) / MODEL_NAME).stat().st_size
+    assert stream._on_close is not None
+    closed: list[bool] = []
+    on_close = stream._on_close
+
+    async def recorded() -> None:
+        await on_close()
+        closed.append(True)
+
+    stream._on_close = recorded
+    await stream.aclose()
+    assert closed == [True]
 
 
 async def test_local_role_gives_blob_temp_file(

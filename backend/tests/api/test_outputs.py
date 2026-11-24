@@ -1439,3 +1439,8 @@ def test_the_start_copies_the_saved_outputs_to_rows(client: TestClient) -> None:
         time.sleep(0.1)
     last = rows.last_run()
     assert last is not None and last["finished_at"] is not None
+
+
+def test_local_store_keeps_output_bytes_in_files(client: TestClient) -> None:
+    # #7256, Ruling R1: the `local` store has no content store, so no output blobs.
+    assert getattr(client.app.state, STATE_ATTR).outputs.bytes is None  # type: ignore[attr-defined]

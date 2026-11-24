@@ -13,11 +13,11 @@ from typing import Any
 
 import pytest
 
-from scadbuddy.library.output_bytes import OutputBytes, OutputFileNameError, usable
+from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes, OutputFileNameError, usable
 from scadbuddy.library.output_rows import OutputFileBlob, output_blob_key, output_file_key
-from scadbuddy.store.content import BlobMissingError, BlobRef, ContentStore
+from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobRef, ContentStore
 from scadbuddy.store.index import Pool
-from tests.support.store import local_content, store_pool
+from tests.support.store import flip_first_byte, local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -157,9 +157,46 @@ async def test_stream_raises_missing_before_first_chunk(
         await blobs.stream(output_blob_key("gone", "model"))
 
 
-async def test_stream_aclose_closes_source_unread(blobs: OutputBytes) -> None:
+async def test_stream_raises_corrupt_small_blob_before_first_chunk(
+    blobs: OutputBytes, content: ContentStore
+) -> None:
     key = output_blob_key("o1", "model")
     await blobs.put(key, b"3mf bytes", slug="cube")
+    await flip_first_byte(content, key)
+    with pytest.raises(BlobCorruptError):
+        await blobs.stream(key)
+
+
+async def test_stream_holds_last_chunk_when_blob_corrupt(
+    blobs: OutputBytes, content: ContentStore
+) -> None:
+    key = output_blob_key("o1", "model")
+    size = 3 * _PREFETCH + 5
+    await blobs.put(key, b"x" * size, slug="cube")
+    await flip_first_byte(content, key)
+    stream = await blobs.stream(key)
+    assert stream.size == size
+    got = 0
+    async with stream:
+        with pytest.raises(BlobCorruptError):
+            async for chunk in stream.chunks:
+                got += len(chunk)
+    # The last chunk waited for the check: the body ends short, never clean.
+    assert 0 < got < size
+
+
+async def test_stream_gives_large_blob_whole(blobs: OutputBytes) -> None:
+    key = output_blob_key("o1", "model")
+    data = bytes(range(256)) * (_PREFETCH // 128 + 3)
+    await blobs.put(key, data, slug="cube")
+    async with await blobs.stream(key) as stream:
+        assert b"".join([chunk async for chunk in stream.chunks]) == data
+
+
+async def test_stream_aclose_closes_source_unread(blobs: OutputBytes) -> None:
+    key = output_blob_key("o1", "model")
+    # Past the prefetch, so the backend's read is still open when `stream` returns.
+    await blobs.put(key, b"x" * (_PREFETCH + 1), slug="cube")
     stream = await blobs.stream(key)
     source = stream._source
     assert isinstance(source, AsyncGeneratorType) and source.ag_frame is not None
