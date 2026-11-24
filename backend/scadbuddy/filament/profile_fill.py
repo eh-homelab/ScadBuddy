@@ -3,10 +3,11 @@
 
 The profile is the preset of the type's slicer presets that :func:`choose_preset` picks
 (the H2C 0.4 mm one, else any 0.4 mm one, else the first). It is read in the order
-`orders/density.py` reads a density: a numeric id is a Bambuddy local preset, read while
-Bambuddy is linked, over its ``inherits`` preset in the image's tree; any other id is the
-tree's preset of that ``filament_id`` for the printer and nozzle (else its ``@base``), or
-of that ``setting_id``, flattened through ``inherits``. A read that fails leaves the type
+`orders/density.py` reads a density: ``sb-<id>`` is ScadBuddy's own preset over its
+``inherits`` preset in the image's tree; a numeric Bambuddy local id is not read (#7244:
+ScadBuddy reads no Bambuddy local preset); any other id is the tree's preset of that
+``filament_id`` for the printer and nozzle (else its ``@base``), or of that
+``setting_id``, flattened through ``inherits``. A read that fails leaves the type
 alone and says why.
 
 :func:`profile_values` maps it onto the type: the nozzle range from
@@ -33,13 +34,13 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal, Protocol, Self
+from typing import Any, Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ValidationError, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
-from scadbuddy.bambuddy.models import KProfile, LocalPresetDetail, Spool
+from scadbuddy.bambuddy.models import KProfile, Spool
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
 from scadbuddy.filament.types import (
@@ -98,9 +99,9 @@ class ProfileSource(BaseModel):
 
     #: The type preset's ``slicer_filament``.
     preset_id: str
-    #: The profile's name: the local preset's, ScadBuddy's preset's, or the tree's preset's.
+    #: The profile's name: ScadBuddy's preset's, or the tree's preset's.
     name: str
-    origin: Literal["bambuddy_local", "scadbuddy", "system"]
+    origin: Literal["scadbuddy", "system"]
     printer_model: str
     nozzle_diameter: str
 
@@ -116,10 +117,6 @@ class Unread:
     """Why no profile was read."""
 
     reason: str
-
-
-class LocalPresets(Protocol):
-    async def local_preset(self, preset_id: int) -> LocalPresetDetail: ...
 
 
 def _nozzle(value: str) -> Decimal | None:
@@ -242,7 +239,6 @@ def _over_parent(setting: Mapping[str, Any], table: DensityTable | None) -> dict
 async def read_profile(
     preset: m.TypePreset,
     table: DensityTable | None,
-    local: LocalPresets | None,
     own: OwnPresets | None = None,
 ) -> Profile | Unread:
     """The profile ``preset`` names, in `orders/density.py`'s order (R-6714-2); a
@@ -269,18 +265,10 @@ async def read_profile(
             ),
         )
     if preset_id.isdigit():
-        if local is None:
-            return Unread(
-                f"preset {preset_id} is a Bambuddy local preset, and no Bambuddy is linked"
-            )
-        try:
-            detail = await local.local_preset(int(preset_id))
-        except ApiError as error:
-            return Unread(f"Bambuddy did not give local preset {preset_id}: {error.detail}")
-        except ValidationError:
-            return Unread(f"Bambuddy answered local preset {preset_id} in another shape")
-        values = await asyncio.to_thread(_over_parent, detail.setting, table)
-        return Profile(values, ProfileSource(name=detail.name, origin="bambuddy_local", **source))
+        return Unread(
+            f"preset {preset_id} is a Bambuddy local preset, which ScadBuddy no longer reads:"
+            " import Bambuddy's presets (Settings, Printing, Filament), then bind one"
+        )
     profiles = None if table is None else table.profiles
     if table is None or profiles is None:
         return Unread(f"this image has no slicer profiles to read preset {preset_id} from")
@@ -379,26 +367,9 @@ class _Reads:
 
     def __init__(self, client: BambuddyClient | None) -> None:
         self.client = client
-        self._presets: dict[int, LocalPresetDetail | ApiError | ValidationError] = {}
         self._spools: dict[int, Spool] | Unread | None = None
         self._k_tables: dict[tuple[int, str], _KTable | Unread] = {}
         self.printers: list[LinkedPrinter] | None = None
-
-    async def local_preset(self, preset_id: int) -> LocalPresetDetail:
-        assert self.client is not None
-        if preset_id not in self._presets:
-            try:
-                self._presets[preset_id] = await self.client.local_preset(preset_id)
-            except (ApiError, ValidationError) as error:
-                self._presets[preset_id] = error
-        found = self._presets[preset_id]
-        if isinstance(found, Exception):
-            raise found
-        return found
-
-    @property
-    def local(self) -> LocalPresets | None:
-        return None if self.client is None else self
 
     async def spools(self) -> dict[int, Spool] | Unread:
         """Bambuddy's spools by id; a row of another shape is left out."""
@@ -645,7 +616,7 @@ class TypeFiller:
         if chosen is None:
             result.reason = "the type has no slicer preset"
             return result, None
-        read = await read_profile(chosen, table, reads.local, self.own)
+        read = await read_profile(chosen, table, self.own)
         if isinstance(read, Unread):
             result.reason = read.reason
             return result, None

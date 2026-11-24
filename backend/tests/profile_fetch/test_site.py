@@ -47,6 +47,7 @@ def _quick(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(site, "BOT_CHECK_SECONDS", 1.0)
     monkeypatch.setattr(site, "STEP_TIMEOUT_MS", 3_000)
     monkeypatch.setattr(site, "LOGIN_WAIT_MS", 1_500)
+    monkeypatch.setattr(site, "RECORD_WAIT_MS", 500)
 
 
 @pytest.fixture
@@ -197,8 +198,31 @@ async def test_a_navigation_error_during_the_login_is_browser(
 async def test_add_clicks_add_to_my_spools_once(
     browser: ThreeDfpSite, replica: ReplicaServer
 ) -> None:
+    """3DFP shows "Add to My Spools" every time; the second call finds the record on
+    the My Spools page and adds nothing (#7228)."""
     await browser.login()
     await browser.ensure_in_my_spools(30173)
+    await browser.ensure_in_my_spools(30173)
+    assert replica.site.adds == [30173]
+
+
+async def test_a_filament_already_in_my_spools_adds_nothing(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    replica.site.in_spools.add(30173)
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    assert replica.site.adds == []
+    exported = await browser.export(30173, "H2C", "0.4")
+    assert exported.name == EXPORT_NAME
+
+
+async def test_a_my_spools_404_for_a_known_filament_adds_it(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    """R-7228-2: a 404 from the My Spools page means no record, so the step adds one."""
+    replica.site.no_record_status = 404
+    await browser.login()
     await browser.ensure_in_my_spools(30173)
     assert replica.site.adds == [30173]
 
@@ -339,6 +363,19 @@ async def test_a_redirect_to_login_logs_in_again(
     exported = await browser.export(30173, "H2C", "0.4")
     assert exported.name == EXPORT_NAME
     assert replica.site.logins == 2
+
+
+async def test_a_redirect_to_login_at_the_my_spools_check_logs_in_again(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    """The My Spools read signs in again when the session ended (#7228): it never
+    reads the login page as "no record", so it adds nothing for a filament that has one."""
+    replica.site.in_spools.add(30173)
+    await browser.login()
+    replica.site.expire_sessions()
+    await browser.ensure_in_my_spools(30173)
+    assert replica.site.logins == 2
+    assert replica.site.adds == []
 
 
 async def test_the_user_agent_is_not_headless(

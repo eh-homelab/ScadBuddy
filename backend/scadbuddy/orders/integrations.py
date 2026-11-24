@@ -211,11 +211,6 @@ class OrderIntegrations(Protocol):
     @property
     def linked(self) -> bool: ...
 
-    async def local_densities(self) -> dict[str, LocalDensity]:
-        """Bambuddy's local filament presets with a density, by the id an SB spool's
-        preset names them by (#6136); :class:`NotLinkedError` without a Bambuddy."""
-        ...
-
     async def spool_assignments(self) -> list[SpoolAssignment]:
         """Bambuddy's tray assignments, which place a linked SB spool no registry printer
         reports (plan Decision 3, until #6263); none when Bambuddy refuses, so the spools
@@ -274,9 +269,6 @@ class NotLinked:
     @property
     def linked(self) -> bool:
         return False
-
-    async def local_densities(self) -> dict[str, LocalDensity]:
-        raise NotLinkedError
 
     async def spool_assignments(self) -> list[SpoolAssignment]:
         raise NotLinkedError

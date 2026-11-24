@@ -70,7 +70,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from scadbuddy.slicing.held_presets import HeldPresets
     from scadbuddy.slicing.own_presets import OwnPresets
 
 #: One flattened preset: every option, ``inherits`` and ``include`` resolved and gone.
@@ -306,28 +305,20 @@ class Profiles:
     """The image's BBL presets, each kind indexed by name and ``setting_id`` on its
     first use. Every read is file I/O: an async caller runs it in a thread.
 
-    ``held`` is the kept copy of Bambuddy's local presets (#4645,
-    `slicing/held_presets.py`), which a native run offers and slices over this tree; it
-    rides here because every reader of the tree on a native run (the catalogue, the
-    values, the slice's files) reads it too. ``None``: only the tree's presets.
-
     ``own`` is ScadBuddy's own filament presets (#7176, `slicing/own_presets.py`), which a
-    native run offers and slices over this tree as it does the kept copy's."""
+    native run offers and slices over this tree; it rides here because every reader of the
+    tree on a native run (the catalogue, the slice's files) reads it too. ``None``: only
+    the tree's presets. No Bambuddy local preset is read (#7244)."""
 
-    def __init__(
-        self, root: Path, *, held: HeldPresets | None = None, own: OwnPresets | None = None
-    ) -> None:
+    def __init__(self, root: Path, *, own: OwnPresets | None = None) -> None:
         self.root = root
-        self.held = held
         self.own = own
         self._indexes: dict[Kind, _Index] = {}
 
     @classmethod
-    def installed(
-        cls, root: Path, *, held: HeldPresets | None = None, own: OwnPresets | None = None
-    ) -> Profiles | None:
+    def installed(cls, root: Path, *, own: OwnPresets | None = None) -> Profiles | None:
         """The tree under ``root``, or ``None`` without one (a dev run outside the image)."""
-        return cls(root, held=held, own=own) if (root / f"{VENDOR}.json").is_file() else None
+        return cls(root, own=own) if (root / f"{VENDOR}.json").is_file() else None
 
     @cached_property
     def version(self) -> str:
@@ -362,11 +353,11 @@ class Profiles:
         return self._flat("filament", ref_or_name)
 
     def flatten_over(self, kind: Kind, name: str, doc: dict[str, Any]) -> Flat:
-        """``doc``, a ``kind`` preset outside the tree named ``name`` (a user's own, held
-        by Bambuddy), flattened over the tree's preset its ``inherits`` names and that
-        one's chain, child over parent as :func:`flatten` applies it. That is how Bambu
-        Studio loads a user preset (``PresetCollection::load_presets``, Preset.cpp,
-        v02.08.02.61,
+        """``doc``, a ``kind`` preset outside the tree named ``name`` (a user's own: one of
+        ScadBuddy's filament presets, #7176), flattened over the tree's preset its
+        ``inherits`` names and that one's chain, child over parent as :func:`flatten`
+        applies it. That is how Bambu Studio loads a user preset
+        (``PresetCollection::load_presets``, Preset.cpp, v02.08.02.61,
         https://github.com/bambulab/BambuStudio/blob/v02.08.02.61/src/libslic3r/Preset.cpp):
         a copy of the system preset ``inherits`` names (``find_preset`` by name; none
         found skips the preset), the preset's own values written over it by
