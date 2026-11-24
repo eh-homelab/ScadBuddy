@@ -132,6 +132,38 @@ class LocationStore:
         with self._pool.connection() as conn:
             return self._get(conn, location_id)
 
+    def ams_units(self, printer_id: UUID) -> dict[int, m.Location]:
+        """The printer's unarchived AMS unit places (no tray), by unit (#7153)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM filament_locations WHERE printer_id = %s"
+                " AND ams_id IS NOT NULL AND tray_id IS NULL AND archived_at IS NULL",
+                (printer_id,),
+            ).fetchall()
+        return {row["ams_id"]: m.Location.model_validate(row) for row in rows}
+
+    def name_ams_unit(self, printer_id: UUID, ams_id: int, name: str | None) -> m.Location:
+        """The printer's AMS unit place, made if missing (`ensure_ams_unit_on`), named
+        ``name``, or ``<printer> <unit>`` again for ``None`` (#7153, R-7153-8).
+        A printer's places are outside the name index (`filament_locations_name` is
+        ``WHERE printer_id IS NULL``), so no name clashes. `NoAmsKindError`."""
+        with self._pool.connection() as conn, conn.transaction():
+            unit = self.ensure_ams_unit_on(conn, printer_id, ams_id)
+            if name is None:
+                printer = conn.execute(
+                    "SELECT name FROM printers WHERE id = %s", (printer_id,)
+                ).fetchone()
+                if printer is None:
+                    raise CatalogRefError()
+                name = f"{printer['name']} {unit_label(ams_id)}"
+            row = conn.execute(
+                "UPDATE filament_locations SET name = %s, updated_at = now() WHERE id = %s"
+                f" RETURNING {_COLUMNS}",
+                (name, unit),
+            ).fetchone()
+        assert row is not None
+        return m.Location.model_validate(row)
+
     def get_many(self, location_ids: Sequence[UUID]) -> dict[UUID, m.Location]:
         """Each place among ``location_ids`` that exists, by id, in one query (the labels
         PDF, #7157)."""

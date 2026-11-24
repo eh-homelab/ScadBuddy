@@ -293,7 +293,9 @@ async def _name_native_outputs(
 ) -> None:
     """Each entry's ``output_id`` from its row (`LibraryEntry` carries none of its own)."""
     rows = await traced_thread(
-        "native_library.files_by_ids", native.rows.files_by_ids, [entry.id for entry in entries]
+        "native_library.files_by_ids",
+        native.rows.listed_files_by_ids,
+        [entry.id for entry in entries],
     )
     made = await native_outputs_for_files(outputs, rows)
     for entry in entries:

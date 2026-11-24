@@ -209,6 +209,97 @@ describe('filament type tools', () => {
     expect((await runTool(tool('filament_type_upsert'), { archived: true }, ctx())).isError).toBe(true)
   })
 
+  it('sets properties after the type is saved, and answers them (#7026)', async () => {
+    const calls: string[] = []
+    const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`
+    server.use(
+      http.post(TYPES, async ({ request }) => {
+        calls.push(`POST ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ id: ROW }, { status: 201 })
+      }),
+      http.patch(PROPS, async ({ request }) => {
+        calls.push(`PATCH ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ properties: [{ key: 'gtin', value: ['0123'], source: 'manual' }] })
+      }),
+    )
+    const added = await runTool(tool('filament_type_upsert'), { fields: { code: 'PLA-RED' }, properties: { gtin: ['0123'], td: null } }, ctx())
+    expect(added.isError).toBeFalsy()
+    expect(firstText(added)).toMatchObject({ id: ROW, properties: [{ key: 'gtin', value: ['0123'] }] })
+    expect(calls).toEqual(['POST {"code":"PLA-RED"}', 'PATCH {"set":{"gtin":["0123"],"td":null}}'])
+  })
+
+  it('says the type was saved and the properties were not when the properties are refused (#7026)', async () => {
+    server.use(
+      http.patch(TYPE, () => HttpResponse.json({ id: ROW })),
+      http.patch(`${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`, () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/entities/bad_property_value', title: 'Bad property value', status: 422, detail: 'td: not a number' },
+          { status: 422 },
+        ),
+      ),
+    )
+    const result = await runTool(tool('filament_type_upsert'), { type_id: ROW, fields: { note: 'x' }, properties: { td: 'thick' } }, ctx())
+    expect(result.isError).toBe(true)
+    const text = String(firstText(result))
+    expect(text).toContain(`spool type ${ROW} was saved`)
+    expect(text).toContain('properties were not')
+    expect(text).toContain('td: not a number')
+    expect(text).toContain(`entity_property_set on spool_type:${ROW}`)
+  })
+
+  it('sends no type PATCH for a properties-only edit, and both writes in order with fields (#7026)', async () => {
+    const calls: string[] = []
+    const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`
+    server.use(
+      http.patch(TYPE, async ({ request }) => {
+        calls.push(`PATCH type ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ id: ROW })
+      }),
+      http.get(TYPE, () => {
+        calls.push('GET type')
+        return HttpResponse.json({ id: ROW, code: 'PLA-RED' })
+      }),
+      http.patch(PROPS, async ({ request }) => {
+        calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ properties: [{ key: 'mpn', value: 'M1', source: 'manual' }] })
+      }),
+    )
+    const only = await runTool(tool('filament_type_upsert'), { type_id: ROW, properties: { mpn: 'M1' } }, ctx())
+    expect(firstText(only)).toMatchObject({ id: ROW, code: 'PLA-RED', properties: [{ key: 'mpn' }] })
+    expect(calls).toEqual(['PATCH props {"set":{"mpn":"M1"}}', 'GET type'])
+    calls.length = 0
+    await runTool(tool('filament_type_upsert'), { type_id: ROW, fields: { note: 'n' }, properties: { mpn: 'M1' } }, ctx())
+    expect(calls).toEqual(['PATCH type {"note":"n"}', 'PATCH props {"set":{"mpn":"M1"}}'])
+    expect(tool('filament_type_upsert').summarize({ type_id: ROW, properties: { mpn: 'M1', td: null } })).toBe(
+      `Edit spool type ${ROW}; properties: set mpn; remove td`,
+    )
+    calls.length = 0
+    await runTool(tool('filament_type_upsert'), { type_id: ROW, archived: true, properties: { mpn: 'M1' } }, ctx())
+    expect(calls).toEqual(['PATCH type {"archived":true}', 'PATCH props {"set":{"mpn":"M1"}}'])
+  })
+
+  it('answers a refused properties-only edit with the API detail and no "was saved" lead (#7026)', async () => {
+    const refusal = () =>
+      HttpResponse.json(
+        { type: 'https://scadbuddy.dev/problems/entities/bad_property_value', title: 'Bad property value', status: 422, detail: 'td: not a number' },
+        { status: 422 },
+      )
+    server.use(
+      http.patch(`${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`, refusal),
+      http.patch(`${BACKEND}/api/v1/entities/${encodeURIComponent(`spool:${ROW}`)}/properties`, refusal),
+    )
+    for (const [name, args] of [
+      ['filament_type_upsert', { type_id: ROW, properties: { td: 'thick' } }],
+      ['filament_spool_upsert', { spool_id: ROW, properties: { td: 'thick' } }],
+    ] as const) {
+      const result = await runTool(tool(name), args, ctx())
+      expect(result.isError, name).toBe(true)
+      const text = String(firstText(result))
+      expect(text, name).toContain('td: not a number')
+      expect(text, name).not.toContain('was saved')
+    }
+  })
+
   it('replaces the presets and the K values', async () => {
     const bodies: unknown[] = []
     server.use(
@@ -579,6 +670,55 @@ describe('filament spool tools', () => {
     expect(calls).toEqual([['add', fields], ['edit', { rgba: null }], ['archive', { archived: true }], ['delete']])
   })
 
+  it("sets a spool's properties after the spool write, and reports a refused set (#7026)", async () => {
+    const calls: string[] = []
+    const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`spool:${ROW}`)}/properties`
+    let refuse = false
+    server.use(
+      http.patch(SPOOL, async ({ request }) => {
+        calls.push(`PATCH spool ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ id: ROW })
+      }),
+      http.patch(PROPS, async ({ request }) => {
+        calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
+        if (refuse) return HttpResponse.json({ detail: 'lot_number: too long' }, { status: 422 })
+        return HttpResponse.json({ properties: [{ key: 'lot_number', value: 'L-2207', source: 'manual' }] })
+      }),
+    )
+    const edited = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, fields: { note: 'n' }, properties: { lot_number: 'L-2207' } }, ctx())
+    expect(firstText(edited)).toMatchObject({ id: ROW, properties: [{ key: 'lot_number', value: 'L-2207' }] })
+    expect(calls).toEqual(['PATCH spool {"note":"n"}', 'PATCH props {"set":{"lot_number":"L-2207"}}'])
+    refuse = true
+    const refused = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, fields: { note: 'n' }, properties: { lot_number: 'x' } }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(String(firstText(refused))).toContain(`spool ${ROW} was saved`)
+    expect(String(firstText(refused))).toContain('lot_number: too long')
+  })
+
+  it('sends no spool PATCH for a properties-only edit (#7026)', async () => {
+    const calls: string[] = []
+    server.use(
+      http.patch(SPOOL, () => {
+        calls.push('PATCH spool')
+        return HttpResponse.json({ id: ROW })
+      }),
+      http.get(SPOOL, () => {
+        calls.push('GET spool')
+        return HttpResponse.json({ id: ROW, number: 4 })
+      }),
+      http.patch(`${BACKEND}/api/v1/entities/${encodeURIComponent(`spool:${ROW}`)}/properties`, async ({ request }) => {
+        calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ properties: [] })
+      }),
+    )
+    const only = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, properties: { lot_number: null } }, ctx())
+    expect(firstText(only)).toMatchObject({ id: ROW, number: 4, properties: [] })
+    expect(calls).toEqual(['PATCH props {"set":{"lot_number":null}}', 'GET spool'])
+    expect(tool('filament_spool_upsert').summarize({ spool_id: ROW, properties: { lot_number: null } })).toBe(
+      `Edit spool ${ROW}; properties: remove lot_number`,
+    )
+  })
+
   it("replaces a spool's own presets and K values", async () => {
     const calls: unknown[] = []
     server.use(
@@ -627,6 +767,162 @@ describe('filament spool tools', () => {
       { kind: 'weighed', source: 'person', grams: 640 },
     ])
     expect((await runTool(tool('filament_spool_bind_tag'), { spool_id: ROW }, ctx())).isError).toBe(true)
+  })
+})
+
+describe('filament_spool_add_event with a new spool reading (#7280)', () => {
+  const OFFER = {
+    spool_id: ROW,
+    insert_type_id: ROW,
+    insert_name: 'Bambu insert',
+    reading_g: 1150,
+    label_weight_g: 1000,
+    derived_g: 150,
+    new_empty_weight_g: 150,
+    current_empty_weight_g: 200,
+    current_basis: 'placeholder',
+    placeholder: true,
+    sample_count: 1,
+    checked_by_default: true,
+  }
+  const CHECK = { offer: OFFER, reason: null, insert_type_id: ROW, empty_weight_g: 200, filament_g: 950 }
+
+  function mock(check: Record<string, unknown>, order: string[], bodies: unknown[]) {
+    server.use(
+      http.get(`${SPOOL}/insert-weight-offer`, ({ request }) => {
+        order.push(`offer ${new URL(request.url).searchParams.get('reading_g')}`)
+        return HttpResponse.json(check)
+      }),
+      http.post(`${SPOOL}/insert-weight`, async ({ request }) => {
+        order.push('accept')
+        bodies.push(await request.json())
+        return HttpResponse.json({ insert_type: {}, empty_weight_g: 150, sample_count: 1, filament_g: 1000 })
+      }),
+      http.post(`${SPOOL}/events`, async ({ request }) => {
+        order.push('event')
+        bodies.push(await request.json())
+        return HttpResponse.json({ kind: 'weighed' }, { status: 201 })
+      }),
+    )
+  }
+
+  it('with an offer and no decision, reads the offer and books nothing', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(CHECK, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 1150 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 1150'])
+    expect(bodies).toEqual([])
+    const out = firstText(res) as Record<string, unknown>
+    expect(out.event).toBeNull()
+    expect(out.filament_g).toBeNull()
+    expect((out.insert_weight as { offer: unknown }).offer).toMatchObject(OFFER)
+    expect(out.insert_weight_accepted).toBeNull()
+    expect(JSON.stringify(out)).toContain('accept_insert_weight')
+  })
+
+  it('declines the offer and books the check filament', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(CHECK, order, bodies)
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: false },
+      ctx(),
+    )
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 1150', 'event'])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'person', grams: 950 }])
+    const out = firstText(res) as Record<string, unknown>
+    expect(out.filament_g).toBe(950)
+    expect(out.event).toEqual({ kind: 'weighed' })
+    expect(out.insert_weight_accepted).toBeNull()
+  })
+
+  it('with no offer, books the check filament at once', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock({ offer: null, reason: 'used', insert_type_id: ROW, empty_weight_g: 200, filament_g: 950 }, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 1150 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 1150', 'event'])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'person', grams: 950 }])
+    expect((firstText(res) as Record<string, unknown>).filament_g).toBe(950)
+  })
+
+  it('says a retry is safe when the booking fails after the accept', async () => {
+    const order: string[] = []
+    mock(CHECK, order, [])
+    server.use(http.post(`${SPOOL}/events`, () => HttpResponse.json({ detail: 'boom' }, { status: 500 })))
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true },
+      ctx(),
+    )
+    expect(res.isError).toBe(true)
+    const text = JSON.stringify(res)
+    expect(text).toContain("insert's empty weight was already set")
+    expect(text).toContain('retry with the same reading')
+  })
+
+  it('accepts before it books, with the accepted filament', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(CHECK, order, bodies)
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true },
+      ctx(),
+    )
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 1150', 'accept', 'event'])
+    expect(bodies).toEqual([{ reading_g: 1150 }, { kind: 'weighed', source: 'person', grams: 1000 }])
+    const out = firstText(res) as Record<string, { empty_weight_g: number }>
+    expect(out.insert_weight_accepted?.empty_weight_g).toBe(150)
+  })
+
+  it('books nothing when accept has no offer', async () => {
+    const order: string[] = []
+    mock({ offer: null, reason: 'used', insert_type_id: ROW, empty_weight_g: 200, filament_g: 950 }, order, [])
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true },
+      ctx(),
+    )
+    expect(res.isError).toBe(true)
+    expect(JSON.stringify(res)).toContain('used')
+    expect(order).toEqual(['offer 1150'])
+  })
+
+  it('refuses bad combinations before any call', async () => {
+    const order: string[] = []
+    mock(CHECK, order, [])
+    const run = (input: Record<string, unknown>) => runTool(tool('filament_spool_add_event'), { spool_id: ROW, ...input }, ctx())
+    expect((await run({ kind: 'weighed', reading_g: 1150, grams: 900 })).isError).toBe(true)
+    expect((await run({ kind: 'dried', reading_g: 1150 })).isError).toBe(true)
+    expect((await run({ kind: 'dried', accept_insert_weight: true })).isError).toBe(true)
+    expect((await run({ kind: 'weighed', grams: 900, accept_insert_weight: true })).isError).toBe(true)
+    expect(order).toEqual([])
+  })
+
+  it('refuses a reading when no empty weight is known', async () => {
+    const order: string[] = []
+    mock({ offer: null, reason: 'no_insert', insert_type_id: null, empty_weight_g: null, filament_g: null }, order, [])
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 1150 }, ctx())
+    expect(res.isError).toBe(true)
+    expect(JSON.stringify(res)).toContain('pass grams')
+    expect(order).toEqual(['offer 1150'])
+  })
+
+  it('books grams alone as before', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(CHECK, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', grams: 900 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['event'])
+    expect(firstText(res)).toEqual({ kind: 'weighed' })
   })
 })
 
@@ -1575,6 +1871,50 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     expect(keys).toHaveLength(2)
     expect(keys[1]).toMatch(/^[0-9a-f]{64}$/)
     expect(keys[1]).not.toBe(keys[0])
+  })
+
+  it('sets properties on each spool a bulk add made, and answers them (#7026)', async () => {
+    const set: string[] = []
+    server.use(
+      http.post(BULK, () => HttpResponse.json([{ id: ROW, number: 1 }, { id: SOURCE_ID, number: 2 }], { status: 201 })),
+      http.patch(`${BACKEND}/api/v1/entities/:ref/properties`, async ({ params, request }) => {
+        set.push(`${String(params.ref)} ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ properties: [{ key: 'mpn', value: 'M1', source: 'manual' }] })
+      }),
+    )
+    const result = await runTool(tool('filament_spool_upsert'), { quantity: 2, fields: { type_id: ROW }, properties: { mpn: 'M1' } }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject([
+      { id: ROW, properties: [{ key: 'mpn' }] },
+      { id: SOURCE_ID, properties: [{ key: 'mpn' }] },
+    ])
+    expect(set).toEqual([`spool:${ROW} {"set":{"mpn":"M1"}}`, `spool:${SOURCE_ID} {"set":{"mpn":"M1"}}`])
+  })
+
+  it('names every spool a bulk add made when a property write fails part way (#7026)', async () => {
+    const THIRD = '00000000-0000-4000-8000-000000000003'
+    const set: string[] = []
+    server.use(
+      http.post(BULK, () =>
+        HttpResponse.json([{ id: ROW, number: 1 }, { id: SOURCE_ID, number: 2 }, { id: THIRD, number: 3 }], { status: 201 }),
+      ),
+      http.patch(`${BACKEND}/api/v1/entities/:ref/properties`, ({ params }) => {
+        set.push(String(params.ref))
+        return set.length === 1
+          ? HttpResponse.json({ properties: [{ key: 'td', value: 1.5, source: 'manual' }] })
+          : HttpResponse.json({ detail: { problem: 'bad_property_value', message: 'td must be a number' } }, { status: 422 })
+      }),
+    )
+    const result = await runTool(tool('filament_spool_upsert'), { quantity: 3, fields: { type_id: ROW }, properties: { td: 'abc' } }, ctx())
+    expect(result.isError).toBe(true)
+    const text = JSON.stringify(result.content)
+    expect(text).toContain(`3 spools were saved (${ROW}, ${SOURCE_ID}, ${THIRD})`)
+    expect(text).toContain(`the properties were set on ${ROW}`)
+    expect(text).toContain(`not on spool:${SOURCE_ID}, spool:${THIRD}`)
+    expect(text).toContain('entity_property_set')
+    expect(text).toContain('not this tool again')
+    // It stops at the first failure: a refused value would be refused for the rest too.
+    expect(set).toEqual([`spool:${ROW}`, `spool:${SOURCE_ID}`])
   })
 
   it('refuses quantity or copy_of on an edit before calling the backend', async () => {

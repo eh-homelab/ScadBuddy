@@ -86,7 +86,7 @@ describe('the workspace tools', () => {
     }
     const result = await runTool(byName('workspace_list'), {}, ctx)
     expect(result.isError).toBe(true)
-    expect(String(firstText(result))).toMatch(/needs the agent database/)
+    expect(String(firstText(result))).toMatch(/started without the workspace store/)
   })
 })
 
@@ -138,7 +138,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
       signal: new AbortController().signal,
     }
     const result = await runTool(byName('set_readme'), { slug: 'box', workspace_path: 'r.md', workspace_sha256: 'a'.repeat(64) }, ctx)
-    expect(String(firstText(result))).toMatch(/needs the agent database/)
+    expect(String(firstText(result))).toMatch(/started without the workspace store/)
   })
 })
 

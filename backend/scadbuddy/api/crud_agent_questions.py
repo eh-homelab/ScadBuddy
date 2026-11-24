@@ -98,8 +98,14 @@ class Summaries(BaseModel):
 
 
 @router.post("/questions/pending", name="crud_agent_questions_pending")
-async def pending(body: Who, state: StateDep) -> Summaries:
-    rows = await _in_conn(state, lambda conn: questions.pending(conn, body.kind, body.id))
+async def pending(
+    body: Who,
+    state: StateDep,
+    session_id: Annotated[str | None, Query(pattern=UUID_PATTERN)] = None,
+) -> Summaries:
+    rows = await _in_conn(
+        state, lambda conn: questions.pending(conn, body.kind, body.id, session_id)
+    )
     return Summaries(questions=[Summary.model_validate(r) for r in rows])
 
 

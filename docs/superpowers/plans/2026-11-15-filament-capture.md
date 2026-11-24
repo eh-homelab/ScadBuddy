@@ -279,7 +279,7 @@ backend/CLAUDE.md                        filament layout line                   
 
 ---
 
-# Part 1 — built now
+## Part 1 — built now
 
 ### Task 1: Measure the archive window and the clock skew (read-only)
 
@@ -519,7 +519,7 @@ The rules the walk adds to #6261's (spec §5.5, as Task 1A wrote it):
 - [ ] **Step 4: Run** `tests/filament tests/bambuddy` → PASS.
 - [ ] **Step 5: Commit** `feat(filament): book Bambuddy's usage rows as print ends (#6263)`.
 
-# Part 2 — after #6262 merges
+## Part 2 — after #6262 merges
 
 Start only once #6262 is on main, and rebase Part 1 onto it first. Each task below names
 the #6262 code it uses. Check that each name exists on main before you write the first
@@ -673,7 +673,7 @@ test. If one is missing or differs, stop and report.
 - [ ] **Step 4: Run** `tests/test_spool_refresh_replay.py tests/test_spool_refresh_workflow.py tests/filament/test_capture.py` → PASS. Every history replays.
 - [ ] **Step 5: Commit** `feat(filament): reconcile trays with the ledger on the spool refresh (#6263)`.
 
-# Last
+## Last
 
 ### Task 9: Notes, whole-branch check and PR
 

@@ -17,6 +17,7 @@ const part = (label: string, start: string) => ({ kind: 'choice' as const, label
 /** #6258: blue and orange only in PLA, teal and rust only in PETG, black in both. */
 const LISTING: Listing = {
   id: 'l',
+  source: 'template',
   title: 'Charm',
   description: '',
   params: { body_colour: part('Body colour', BLUE), rim_colour: part('Rim colour', BLUE), loop_colour: part('Loop colour', BLACK) },
