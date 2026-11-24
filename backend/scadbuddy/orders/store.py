@@ -207,8 +207,7 @@ _FULFILMENT = (
     "id, order_item_id, attempt, quantity, outcome, failure_reason, started_at, finished_at,"
     " notes, accepted_at, created_by, created_at, print_run_id, sliced_sha256, sliced_blob_key,"
     " printer, copies, print_request_id, printer_serial, printer_name, bambuddy_printer_id,"
-    " archive_ids, actual_seconds, actual_grams, purpose, revision_id, timelapse_scanned_at,"
-    " media_checked_at"
+    " archive_ids, actual_seconds, actual_grams, purpose, revision_id, media_checked_at"
 )
 _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
@@ -2467,15 +2466,6 @@ class OrderStore:
         with self._write(None) as c:
             c.execute(
                 "UPDATE order_item_fulfilments SET media_checked_at = %s WHERE id = %s",
-                (at, fulfilment_id),
-            )
-
-    def stamp_timelapse_scanned(self, fulfilment_id: str, at: datetime) -> None:
-        """The media import asked Bambuddy to scan the printer for the attempt's
-        timelapse at ``at`` (spec 2026-11-05 §4.3)."""
-        with self._write(None) as c:
-            c.execute(
-                "UPDATE order_item_fulfilments SET timelapse_scanned_at = %s WHERE id = %s",
                 (at, fulfilment_id),
             )
 
