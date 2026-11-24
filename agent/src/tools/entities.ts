@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { filamentPaths } from './filamentLinks.js'
+import { inventoryPaths } from './inventoryLinks.js'
 import { defineTool, json, ToolError } from './registry.js'
 
 // Files and links on any entity (#6950, phase 1): the generic `/entities/{ref}` routes
@@ -13,13 +14,13 @@ const entity = z
   .string()
   .min(1)
   .max(200)
-  .describe('The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `customer:<id>`, `order:<id>`')
+  .describe('The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `lot:<id>`, `unit:<id>`, `customer:<id>`, `order:<id>`')
 /** An order's files change only on its order page (order_attachment_update/_delete). */
 const fileOwner = z
   .string()
   .min(1)
   .max(200)
-  .describe("The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `customer:<id>`. Not an order's: change those with order_attachment_update/order_attachment_delete")
+  .describe("The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `lot:<id>`, `unit:<id>`, `customer:<id>`. Not an order's: change those with order_attachment_update/order_attachment_delete")
 const attachmentId = z.string().min(1).max(100).describe("An attachment's id, as entity_attachment_list gives it")
 const linkId = z.string().min(1).max(100).describe("A link's id, as entity_link_list gives it")
 const role = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text: `reference`, `issue`, `finished`, `packed`, `receipt`, `invoice`, `manual`, `photo`, `label`, `other`')
@@ -54,7 +55,8 @@ export const PROPERTY_RULES =
   'keys. The whole set applies or none of it (422 `bad_property_value` names the key). A rename is one set: the ' +
   'old key `null` and the new key its value. Suggested keys, which the kind\'s schema documents and checks: on a ' +
   'spool type `mpn`, `gtin` and `asin` (the last two lists), `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool ' +
-  '`lot_number` (entity_property_schema_get lists them). Any other key is kept as given.'
+  "`lot_number`; on an inventory item the keys its kind's schema types (entity_property_schema_get lists them). " +
+  'Any other key is kept as given.'
 
 const code = (k: string) => `\`${k}\``
 /** The keywords the backend allows (entities/properties.py TOP_KEYWORDS, KEY_KEYWORDS): `type` is described apart. */
@@ -98,7 +100,7 @@ export function propertyChanges(set: PropertySet | undefined): string {
   return `; properties: ${parts.join('; ')}`
 }
 
-/** The page of an entity that has one (the filament kinds); others have none. */
+/** The page of an entity that has one (the filament and inventory kinds); others have none. */
 function uiPath(ref: string): string | undefined {
   const at = ref.indexOf(':')
   const kind = ref.slice(0, at)
@@ -115,6 +117,12 @@ function uiPath(ref: string): string | undefined {
       return filamentPaths.invoice(id)
     case 'location':
       return filamentPaths.location(id)
+    case 'item':
+      return inventoryPaths.item(id)
+    case 'lot':
+      return inventoryPaths.lot(id)
+    case 'unit':
+      return inventoryPaths.unit(id)
     default:
       return undefined
   }
@@ -291,13 +299,23 @@ export const entityTools = [
     description:
       "A kind's property schema: a JSON Schema (Draft 2020-12) object whose `properties` document and type the keys the " +
       'kind knows (their titles and help), and `keys_in_use`, each key its entities have with a count. The schema never ' +
-      "refuses a key it does not know. An item's schema is its item kind's `attribute_schema`, not a schema of the kind " +
-      '`item` (409 `schema_owned_by_item_kind`).',
-    input: z.object({ kind: propertyKind }),
+      "refuses a key it does not know. Give `kind` for a kind's schema, or `entity` (`kind:ref`) for the schema that " +
+      "entity's properties follow. An item's schema is its item kind's `attribute_schema` merged down the kind tree, " +
+      "read with `entity: \"item:<id>\"` or inventory_kind_list; `kind: \"item\"` is 409 `schema_owned_by_item_kind`, and " +
+      'inventory_kind_upsert changes it.',
+    input: z.object({ kind: propertyKind.optional(), entity: entity.optional().describe("An entity, `kind:ref`, for the schema its own properties follow") }),
     risk: 'read',
-    routes: ['GET /api/v1/entity-kinds/{kind}/property-schema'],
-    handler: async ({ kind }, { backend }) =>
-      json(await ok(backend.GET('/api/v1/entity-kinds/{kind}/property-schema', { params: { path: { kind } } }), `read the ${kind} property schema`)),
+    routes: ['GET /api/v1/entity-kinds/{kind}/property-schema', 'GET /api/v1/entities/{ref}/property-schema'],
+    handler: async ({ kind, entity: ref }, { backend }) => {
+      if ((kind === undefined) === (ref === undefined)) throw new ToolError('give `kind` or `entity`, not both')
+      if (ref !== undefined) {
+        return withPage(
+          ref,
+          await onEntity(ref, backend.GET('/api/v1/entities/{ref}/property-schema', { params: { path: { ref } } }), `read the property schema of ${ref}`),
+        )
+      }
+      return json(await ok(backend.GET('/api/v1/entity-kinds/{kind}/property-schema', { params: { path: { kind: kind! } } }), `read the ${kind} property schema`))
+    },
   }),
   defineTool({
     name: 'entity_property_schema_set',
@@ -307,7 +325,8 @@ export const entityTools = [
       'A JSON Schema (Draft 2020-12) object of plain keywords only: at the top ' + SCHEMA_TOP_KEYWORDS.map(code).join(', ') +
       '; per key a `type` (a scalar or `array`, or a list of them with `"null"`) with ' + SCHEMA_KEY_KEYWORDS.map(code).join(', ') +
       '; `format` is never `regex`; `items` (string-typed only, with the same keywords but `items`). An `enum` or `const` must fit its key, and no bound may cross its pair or a cap. ' +
-      'Any other keyword is 422 `bad_property_schema`, naming it. Writes ' +
+      'Any other keyword is 422 `bad_property_schema`, naming it. An inventory item kind\'s schema is its ' +
+      '`attribute_schema`, which inventory_kind_upsert changes (`kind: "item"` is 409 `schema_owned_by_item_kind`). Writes ' +
       'ScadBuddy only.',
     input: z.object({ kind: propertyKind, schema: z.record(z.string(), z.unknown()).describe('The whole schema') }),
     risk: 'write',
