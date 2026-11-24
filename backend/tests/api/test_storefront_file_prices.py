@@ -240,6 +240,18 @@ def test_an_unpublished_listings_price_is_never_anothers_last_price(
     assert r.json()["source"] == "pending"
 
 
+def test_a_price_that_names_no_listing_is_never_a_last_price(
+    crud: CrudCaller, listed: dict[str, Any], pla_red: str, pla_blue: str
+) -> None:
+    """A row made before its listing was recorded names none: it is no listing's last price."""
+    priced(crud, listed, {0: pla_red, 1: pla_blue})
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute("UPDATE storefront_slice_prices SET listing_id = NULL")
+    r = read(crud, listed, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "pending"
+
+
 def test_a_listing_with_no_price_yet_answers_pending(
     crud: CrudCaller, listed: dict[str, Any], tmp_path: Path, pla_red: str, pla_blue: str
 ) -> None:
