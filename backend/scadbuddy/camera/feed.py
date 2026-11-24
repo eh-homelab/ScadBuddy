@@ -77,11 +77,20 @@ class FeedSender:
             if state != "stopped":
                 self.want(printer_id, state)
 
+    def forget(self, printer_id: str) -> None:
+        """Drop the printer's desired state: a state still waiting is not posted again. A
+        recorder calls it when it no longer leads the printer, so a former leader does not
+        overwrite the new leader's report."""
+        self._desired.pop(printer_id, None)
+        self._reported.pop(printer_id, None)
+
     async def _send(self, printer_id: str) -> None:
         delay = self._retry_min
         path = f"{self._base}/printers/{quote(printer_id, safe='')}/feed"
-        while (sent := (self._desired[printer_id], self._error)) != self._reported.get(printer_id):
-            state, error = sent
+        while (state := self._desired.get(printer_id)) is not None and (
+            sent := (state, self._error)
+        ) != self._reported.get(printer_id):
+            error = self._error
             report = FeedReport(part=self._part, state=state, error=error, recorder=self._recorder)
             body = report.model_dump(mode="json", exclude_none=True)
             try:

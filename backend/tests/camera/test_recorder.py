@@ -55,6 +55,9 @@ class FakeCamera:
         self.unput: list[str] = []
         self.down = False
         self.index_down = False
+        self.feed_down = False
+        #: Printers deleted from the API: their lease and feed calls answer 404.
+        self.gone: set[str] = set()
         #: The API's clock against this host's, in seconds; ``None`` sends no ``Date``.
         self.skew: float | None = None
         #: How stale the ``Date`` header is: uvicorn refreshes it once a second.
@@ -83,6 +86,9 @@ class FakeCamera:
             return httpx.Response(503, headers=CRUD, json={"detail": "down"})
         body = json.loads(request.content) if request.content else {}
         printer_id = parts[2]
+        if printer_id in self.gone and len(parts) == 4 and parts[3] in ("lease", "feed"):
+            problem = {"detail": "There is no such printer.", "reason": "printer_not_found"}
+            return httpx.Response(404, headers=CRUD, json=problem)
         if len(parts) == 3:
             if printer_id not in self.printers:
                 problem = {"detail": "not recorded", "reason": "not_recorded"}
@@ -95,6 +101,8 @@ class FakeCamera:
                 return httpx.Response(503, headers=CRUD, json={"detail": "down"})
             return self.segments(printer_id, body)
         if parts[3] == "feed":
+            if self.feed_down:
+                return httpx.Response(503, headers=CRUD, json={"detail": "down"})
             self.feeds.append((printer_id, body))
             self.events.append(f"feed {body['state']}")
             return httpx.Response(204, headers=CRUD)
@@ -976,4 +984,43 @@ async def test_clock_error_does_not_repost_a_stopped_printer(
     rig.recorder._feed.set_error("the recorder's clock is +5.0 s off the API's")
     await rig.recorder.flushed()
     assert len(api.feeds) == stopped
+    await rig.recorder.aclose()
+
+
+async def test_a_404_on_the_lease_ends_leadership_at_once(
+    tmp_path: Path, api: FakeCamera, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The printer was deleted: the recorder leads it no more, and uploads nothing."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.recorder.tick(P1)
+    assert LEADER.labels(P1, "rec-a")._value.get() == 1
+    api.gone.add(P1)
+    await rig.segment(0)
+    await rig.recorder.tick(P1)
+    assert LEADER.labels(P1, "rec-a")._value.get() == 0
+    assert api.bucket.objects == {}
+    assert rig.files() == [name(0)]
+    await rig.recorder.aclose()
+
+
+async def test_a_former_leader_drops_its_feed_state(tmp_path: Path, api: FakeCamera) -> None:
+    """A recorder reports only as leader: once the lease moves, it stops posting the state it
+    wanted as leader, so the new leader's report is the only writer."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    api.feed_down = True
+    await rig.segment(0)
+    await rig.recorder.tick(P1)
+    await asyncio.sleep(0.05)  # the sender retries "pulling" in the background
+    assert rig.recorder._feed.desired(P1) == "pulling"
+    api.leases[P1] = ("rec-b", api.now + LEASE)
+    rig.clock.now += LEASE.total_seconds()
+    await rig.recorder.renew(P1)
+    assert LEADER.labels(P1, "rec-a")._value.get() == 0
+    assert rig.recorder._feed.desired(P1) is None
+    api.feed_down = False
+    await asyncio.wait_for(rig.recorder.flushed(), 1)
+    await asyncio.sleep(0.05)
+    assert api.feeds == []
     await rig.recorder.aclose()

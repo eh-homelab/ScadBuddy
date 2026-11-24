@@ -22,10 +22,12 @@ it. The local disk holds at most ``SCADBUDDY_CAMERA_DISK_MAX_BYTES`` of segments
 oldest unuploaded segments go first.
 
 The leader reports the feed state (part ``recorder``) on change only: ``pulling`` while
-segments arrive, ``stalled`` after `STALL_SECONDS` with no new segment. A printer that is no
-longer recorded is flushed (when this recorder leads it, for at most `STOP_FLUSH_SECONDS`),
-released, removed from MediaMTX and reported ``stopped``. On SIGTERM the led printers are
-flushed together and released, within `SHUTDOWN_SECONDS`.
+segments arrive, ``stalled`` after `STALL_SECONDS` with no new segment. A recorder that stops
+leading drops the state it has not posted yet (`FeedSender.forget`), so it does not overwrite
+the new leader's report. A 404 on a lease call (the printer was deleted) ends the leadership
+at once. A printer that is no longer recorded is flushed (when this recorder leads it, for at
+most `STOP_FLUSH_SECONDS`), released, removed from MediaMTX and reported ``stopped``. On
+SIGTERM the led printers are flushed together and released, within `SHUTDOWN_SECONDS`.
 
 A container restart keeps the pod's name, and so the recorder's. At start the recorder
 releases every lease under its name and acquires none for `START_HOLDOFF` seconds, so the
@@ -656,6 +658,9 @@ class Recorder:
         )
 
     def _lead(self, printer_id: str, feed: _Feed, held: bool, sent: float | None = None) -> None:
+        if feed.held and not held:
+            # Only the leader reports: the new leader's report must not be overwritten.
+            self._feed.forget(printer_id)
         feed.held = held
         if held:
             feed.renewed_at = sent
@@ -687,6 +692,14 @@ class Recorder:
             async with asyncio.timeout(self._tick_seconds or TICK_SECONDS):
                 answer = await self._lease(printer_id, "renew" if feed.held else "acquire")
         except Exception as error:
+            if isinstance(error, CrudRefusedError) and error.status == 404:
+                # The printer was deleted: lead it no more. Its change event stops the path.
+                if feed.held:
+                    self._lead(printer_id, feed, False)
+                    logger.warning(
+                        "camera recorder: the API has no printer %s; standby now", printer_id
+                    )
+                return
             # No answer: keep every segment. Past the lease period, lead no more.
             logger.warning(
                 "camera recorder: the lease call for %s failed (%s); keeping %d segments",
