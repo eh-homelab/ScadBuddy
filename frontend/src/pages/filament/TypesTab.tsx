@@ -88,9 +88,10 @@ export function TypesTab() {
       const [types, spools, materials, subtypes, brands] = await Promise.all([
         listTypes({ includeArchived: true }),
         listSpools({ includeArchived: false }),
-        listCatalog('materials'),
-        listCatalog('subtypes'),
-        listCatalog('brands'),
+        // Archived names too: a type may still name an archived catalog row (#7159 shows them).
+        listCatalog('materials', { includeArchived: true }),
+        listCatalog('subtypes', { includeArchived: true }),
+        listCatalog('brands', { includeArchived: true }),
       ])
       if (mine !== latest.current) return
       const count = new Map<string, number>()
@@ -277,7 +278,7 @@ export function TypesTab() {
       </section>
       <section aria-label="Price book" className="flex flex-col gap-2">
         <h2 className="text-sm font-semibold tracking-tight">Price book</h2>
-        <FilamentsEditor types={data?.types} onTypesChanged={() => void load()} />
+        <FilamentsEditor types={data?.types} names={data?.names} spoolsOf={data?.spoolsOf} onTypesChanged={() => void load()} />
       </section>
     </div>
   )

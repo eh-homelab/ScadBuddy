@@ -43,6 +43,15 @@ class _Waits:
         return "answered"
 
     @workflow.update
+    async def plain_wait_for_go(self) -> str:
+        """`wait_condition` with no `handler_wait`, so the test sees whether it raised."""
+        try:
+            await workflow.wait_condition(lambda: self.go)
+        except asyncio.CancelledError:
+            return "raised"
+        return "answered"
+
+    @workflow.update
     async def cancelled_while_false(self) -> str:
         def never() -> bool:
             self.checked = True
@@ -84,7 +93,8 @@ async def test_a_workflow_cancel_while_the_condition_is_false_leaves_the_handler
 ) -> None:
     """The wait began before the cancel and its condition held after it: temporalio
     1.36's `wait_condition` raises then, and the handler answers instead. A cancel that
-    arrives while the condition is false does not end the wait."""
+    arrives while the condition is false does not end the wait. A plain `wait_condition`
+    under the same cancel must raise, so an SDK that drops the raise fails here too."""
     queue = f"hw-{uuid.uuid4().hex[:8]}"
     async with Worker(
         client, task_queue=queue, workflows=[_Waits], workflow_runner=UnsandboxedWorkflowRunner()
@@ -93,6 +103,9 @@ async def test_a_workflow_cancel_while_the_condition_is_false_leaves_the_handler
         update = await handle.start_update(
             _Waits.wait_for_go, wait_for_stage=WorkflowUpdateStage.ACCEPTED
         )
+        plain = await handle.start_update(
+            _Waits.plain_wait_for_go, wait_for_stage=WorkflowUpdateStage.ACCEPTED
+        )
         await handle.cancel()
         async with asyncio.timeout(10):
             while not await handle.query(_Waits.saw_cancel):
@@ -100,6 +113,7 @@ async def test_a_workflow_cancel_while_the_condition_is_false_leaves_the_handler
         await handle.signal(_Waits.release)
 
         assert await asyncio.wait_for(update.result(), timeout=10) == "answered"
+        assert await asyncio.wait_for(plain.result(), timeout=10) == "raised"
         assert await handle.result() == "done"
 
 
@@ -119,5 +133,6 @@ async def test_a_cancel_of_the_waiting_task_with_the_condition_false_is_raised(
         await handle.cancel()
         await handle.signal(_Waits.release)
 
-        assert answer == "raised", "'never waited': the task never entered the wait"
+        assert answer != "never waited", "the task never entered the wait"
+        assert answer == "raised"
         assert await handle.result() == "done"

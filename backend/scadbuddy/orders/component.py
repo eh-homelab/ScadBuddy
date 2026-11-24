@@ -37,6 +37,7 @@ from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.definitions import FlowDefinitions
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.orders.archives import mirror_run
+from scadbuddy.orders.attempt_media import MediaStarter, TemporalMediaStarter
 from scadbuddy.orders.builtin_flow import ensure_builtin_flow
 from scadbuddy.orders.density import DensityTable, density_table
 from scadbuddy.orders.integrations import OrderIntegrations, choose
@@ -83,6 +84,7 @@ class OrdersComponent:
         self.flows = flows
         self._store: OrderStore | None = None
         self._lifecycle: Lifecycle | None = None
+        self._media_starter: MediaStarter | None = None
         self._listings: ListingStore | None = None
         self._mail: StorefrontMail | None = None
         self._integrations: tuple[str | None, OrderIntegrations] | None = None
@@ -206,6 +208,16 @@ class OrdersComponent:
         )
 
     @property
+    def media_starter(self) -> MediaStarter:
+        """Starts an attempt's media import on the ``library`` queue (#7233); one starter,
+        built on first use."""
+        if self._media_starter is None:
+            self._media_starter = TemporalMediaStarter(
+                self.core.print_runs.client, self.core.settings.temporal_task_queue_library
+            )
+        return self._media_starter
+
+    @property
     def lifecycle(self) -> Lifecycle:
         if self._lifecycle is None:
             self._lifecycle = Lifecycle(self.store, self.core.events, self.refs, self.rules)
@@ -242,13 +254,16 @@ async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
             name="register built-in flow",
         )
     # The print path's follow (#4719): an item follows the print its attempt started.
-    # §8.2: a settled print's attempt copies its Bambuddy archives.
+    # §8.2: a settled print's attempt copies its Bambuddy archives, then starts its
+    # media import (#7233).
     # #5283: a commit that queued storefront mail sends it on this loop, off the request.
     orders.mail.bind(asyncio.get_running_loop())
     remove = listen_for_prints(
         orders.core.events,
         orders.lifecycle,
-        lambda run_id: mirror_run(orders.lifecycle, orders.integrations, run_id),
+        lambda run_id: mirror_run(
+            orders.lifecycle, orders.integrations, run_id, orders.media_starter
+        ),
     )
     try:
         yield

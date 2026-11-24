@@ -18,6 +18,7 @@ from scadbuddy.profile_fetch.steps import SiteError
 from scadbuddy.profile_fetch.wire import CreateAnswer, CreateAsk, SearchAnswer, SearchAsk
 from tests.profile_fetch.test_activities import SEARCH_ANSWER, FakeSite
 from tests.profile_fetch.test_remote import INJECTED, TOKEN, Service, _with_remote
+from tests.support.waits import until
 
 ASK = CreateAsk(
     brand="SUNLU",
@@ -362,6 +363,4 @@ async def test_a_worker_gone_as_the_lock_frees_runs_nothing_and_gives_it_back() 
 
 async def _until(ready: Any) -> None:
     """Wait (bounded, no fixed sleep) until ``ready()`` holds."""
-    async with asyncio.timeout(5):
-        while not ready():
-            await asyncio.sleep(0.01)
+    await until(ready, 5)

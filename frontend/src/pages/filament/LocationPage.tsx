@@ -1,4 +1,4 @@
-import { ChevronLeftIcon, PlusIcon, PrinterIcon } from 'lucide-react'
+import { ChevronLeftIcon, LogOutIcon, PlusIcon, PrinterIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { ApiError, api } from '../../api/client'
@@ -30,6 +30,20 @@ export function LocationPage() {
       void navigate(filamentLinks.spool(made.id))
     } catch (cause) {
       setSlotError(cause instanceof ApiError ? cause.detail : 'ScadBuddy could not make the spool. Try again.')
+    } finally {
+      setMaking(false)
+    }
+  }
+
+  /** #7151 — unassign: the tray's spool moves to no place, then the place is read again. */
+  async function unassign(printerId: string, amsId: number, trayId: number) {
+    setMaking(true)
+    setSlotError(null)
+    try {
+      await api.unlinkTraySpool(printerId, amsId, trayId)
+      setPlace(await getLocation(id))
+    } catch (cause) {
+      setSlotError(cause instanceof ApiError ? cause.detail : 'ScadBuddy could not take the spool out. Try again.')
     } finally {
       setMaking(false)
     }
@@ -137,6 +151,7 @@ export function LocationPage() {
                 <p className="text-muted-foreground">Nothing is here.</p>
               )
             ) : (
+              <>
               <ul className="flex flex-col gap-1">
                 {place.spools.map((spool) => (
                   <li key={spool.id} className="min-w-0">
@@ -151,6 +166,20 @@ export function LocationPage() {
                   </li>
                 ))}
               </ul>
+              {place.printer_id && place.ams_id != null && place.tray_id != null && (
+                <div className="flex flex-col items-start gap-2 pt-1">
+                  <Button type="button" size="sm" variant="outline" disabled={making} onClick={() => void unassign(place.printer_id!, place.ams_id!, place.tray_id!)}>
+                    <LogOutIcon /> Take the spool out of this tray
+                  </Button>
+                  <p className="text-muted-foreground">The spool stays in the list with no place, until you link it or move it again.</p>
+                  {slotError && (
+                    <p role="alert" className="text-warn">
+                      {slotError}
+                    </p>
+                  )}
+                </div>
+              )}
+              </>
             )}
           </section>
           <section aria-label="Files and links" className="flex flex-col gap-2">

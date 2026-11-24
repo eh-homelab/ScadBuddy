@@ -65,6 +65,7 @@ from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.archives import AttemptArchives, attempt_archives, mirror_archives
+from scadbuddy.orders.attempt_media import start_media
 from scadbuddy.orders.bambuddy import ServedLibrary
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.costs import (
@@ -78,7 +79,7 @@ from scadbuddy.orders.costs import (
 from scadbuddy.orders.density import DensityTable, ProfileDensity, used_density
 from scadbuddy.orders.estimate import EstimatedPart, OrderEstimate, filament_estimate
 from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
-from scadbuddy.orders.integrations import ArchiveMedia, SpoolGroup
+from scadbuddy.orders.integrations import SpoolGroup
 from scadbuddy.orders.lifecycle import (
     FulfilLine,
     FulfilmentInput,
@@ -98,6 +99,7 @@ from scadbuddy.orders.lifecycle import (
 )
 from scadbuddy.orders.models import (
     Approval,
+    ArchiveCopyMedia,
     Attachment,
     Charge,
     ChargeInput,
@@ -3067,10 +3069,15 @@ async def _with_archive_facts(orders: OrdersComponent, attempt: Fulfilment) -> F
     """A hand attempt with what its archives say copied onto it (#6132): job cost needs
     its grams and seconds when the quote has none. Logged, never raised: the attempt is
     recorded, and its archives are read again when they are shown. A read slower than
-    ``ARCHIVE_READ_TIMEOUT`` is stopped, and the attempt is answered as written (#6145)."""
+    ``ARCHIVE_READ_TIMEOUT`` is stopped, and the attempt is answered as written (#6145).
+    After the facts it starts the attempt's media import, with retries (#7233, spec
+    2026-11-05 §4.1): one Temporal call, logged on failure, never a download. Without a
+    Bambuddy there is nothing to import, and nothing is started."""
     if not attempt.archive_ids or attempt.print_run_id is not None:
         return attempt
+    written, linked = attempt, False
     try:
+        linked = orders.integrations.linked
         written, _ = await mirror_archives(
             orders.lifecycle, orders.integrations, attempt, ARCHIVE_READ_TIMEOUT
         )
@@ -3079,10 +3086,10 @@ async def _with_archive_facts(orders: OrdersComponent, attempt: Fulfilment) -> F
             "a hand attempt's print archives were not read within %s s; recorded without them",
             ARCHIVE_READ_TIMEOUT,
         )
-        return attempt
     except Exception:
         logger.warning("could not copy a hand attempt's print archives", exc_info=True)
-        return attempt
+    if linked:
+        await start_media(orders.media_starter, attempt.id, retries=True)
     return written
 
 
@@ -3095,7 +3102,8 @@ async def _with_archive_facts(orders: OrdersComponent, attempt: Fulfilment) -> F
         "An attempt by hand. With `archive_id`, the archive's grams, seconds and print "
         "times are copied onto the attempt at once when a Bambuddy is linked (#6132); a "
         f"failed read, or one slower than {ARCHIVE_READ_TIMEOUT:g} s, records the attempt "
-        "without them."
+        "without them. Its finish photo and timelapse are then imported in the background "
+        "(#7233); the answer does not wait for them."
     ),
 )
 async def record_fulfilment(
@@ -3136,7 +3144,7 @@ class ArchiveCopy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    what: ArchiveMedia
+    what: ArchiveCopyMedia
     #: A ``finish_`` photo of the archive (``AttemptArchives``' ``finish_photos``);
     #: left out, its latest. Only for ``finished_photo``.
     name: str | None = Field(
@@ -3161,13 +3169,21 @@ async def get_attempt_archives(
     """The archives the attempt's print run made in Bambuddy (one per plate, §8.2), with
     what each offers to copy: its ``finish_`` photos and whether it has a timelapse.
     Reading them copies what they say onto the attempt once its print settled
-    (``archive_ids``, the printer's times, ``actual_seconds``, ``actual_grams``).
+    (``archive_ids``, the printer's times, ``actual_seconds``, ``actual_grams``), and,
+    when an archive offers a medium the attempt does not have yet, starts one step of the
+    attempt's media import (#7233); the read never waits on the download.
     ``linked`` is false, with no archives, without Bambuddy; an attempt by hand naming no
     archive, or one Bambuddy has linked no archive to yet, has none. 404 for an attempt
     not the item's."""
     check_path(order_id, item_id, fulfilment_id)
     return await attempt_archives(
-        orders.lifecycle, orders.integrations, order_id, item_id, fulfilment_id
+        orders.lifecycle,
+        orders.integrations,
+        order_id,
+        item_id,
+        fulfilment_id,
+        orders.media_starter,
+        limit=orders.core.settings.media_upload_max_bytes,
     )
 
 

@@ -11,6 +11,7 @@ import type { Tier } from '../auth/principal.js'
 import type { FlowTurn } from '../tools/registry.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
 import { TASK_QUEUE } from '../temporal/names.js'
+import { queuePollers } from '../temporal/pollers.js'
 import { liveHostQueues } from '../temporal/session/affinity.js'
 import { EDIT_QUEUED_UPDATE, QUEUE_MESSAGE_UPDATE, REMOVE_QUEUED_UPDATE, SESSION_QUEUE, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { NOT_QUEUED, QUEUE_FULL, type QueueAnswer, type QueuedMessage, type QueueState } from '../temporal/session/models.js'
@@ -191,12 +192,6 @@ const CLOSE_MARGIN_MS = 1_000
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
 
-/** A protobuf Timestamp (`seconds` may be a Long) as epoch ms; 0 when absent. */
-/** A protobuf timestamp (a poller's `lastAccessTime`) as epoch milliseconds; 0 when absent. */
-export function seenAtMs(ts: { seconds?: unknown; nanos?: number | null } | null | undefined): number {
-  return ts ? Number(String(ts.seconds ?? 0)) * 1000 + Math.floor((ts.nanos ?? 0) / 1e6) : 0
-}
-
 /** The `send_message` Update went unanswered: neither taken nor refused, as far as this service knows. */
 class OutcomeUnknown extends Error {}
 
@@ -301,15 +296,9 @@ export class DurableTurns {
 
   /** Whether a worker polled `queue` (of `type`) within POLLER_FRESH_MS. */
   async #polled(queue: string, type: number): Promise<boolean> {
-    const { pollers } = await this.#client.withDeadline(Date.now() + READY_DEADLINE_MS, () =>
-      this.#client.workflowService.describeTaskQueue({
-        namespace: this.#client.options.namespace,
-        taskQueue: { name: queue },
-        taskQueueType: type,
-      }),
-    )
+    const pollers = await queuePollers(this.#client, queue, type, Date.now() + READY_DEADLINE_MS)
     const now = Date.now()
-    return (pollers ?? []).some((p) => now - seenAtMs(p.lastAccessTime) < POLLER_FRESH_MS)
+    return pollers.some((p) => now - p.seenAtMs < POLLER_FRESH_MS)
   }
 
   /**
