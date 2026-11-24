@@ -36,6 +36,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 from tests.support.arrange import finished_job
+from tests.support.saved_outputs import save_files
 from tests.support.store import local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -78,9 +79,9 @@ async def _copied(
     store = OutputStore(paths)
     store.rows = OutputRows(projection.pool)
     store.bytes = OutputBytes(content)
-    meta = store.create(job, name="first")
+    meta = save_files(store, job, name="first")
     blobs = await store.bytes.put_folder(store.directory(meta.id), meta.id, meta.slug)
-    store.rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", [])])
+    store.rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
     return store, meta
 
 
@@ -219,7 +220,7 @@ async def test_plate_cover_from_model_blob(
     rows = OutputRows(projection.pool)
     store.rows = rows
     store.bytes = OutputBytes(content)
-    meta = store.create(job, name="first")
+    meta = save_files(store, job, name="first")
     directory = store.directory(meta.id)
     _with_cover(directory / MODEL_NAME)
     with projection.pool.connection() as conn:
@@ -227,11 +228,9 @@ async def test_plate_cover_from_model_blob(
     run = rows.start_run()
     rows.finish_run(run, copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
     blobs = await store.bytes.put_folder(directory, meta.id, meta.slug)
-    rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", [])])
+    rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
     (directory / MODEL_NAME).unlink()
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
-    # The sync form reads the NFS file only, which is gone.
-    assert store.plate_cover(meta.slug) is None
 
 
 async def test_plate_cover_from_file_before_the_copy(
@@ -241,7 +240,7 @@ async def test_plate_cover_from_file_before_the_copy(
     store = OutputStore(paths)
     store.rows = OutputRows(projection.pool)
     store.bytes = OutputBytes(content)
-    meta = store.create(job, name="first")
+    meta = save_files(store, job, name="first")
     _with_cover(store.directory(meta.id) / MODEL_NAME)
     store.forget_plate_cover(meta.slug)
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
@@ -267,7 +266,7 @@ async def _covered(
     rows = OutputRows(projection.pool)
     store.rows = rows
     store.bytes = OutputBytes(content)
-    meta = store.create(job, name="first")
+    meta = save_files(store, job, name="first")
     directory = store.directory(meta.id)
     if cover:
         _with_cover(directory / MODEL_NAME)
@@ -278,7 +277,7 @@ async def _covered(
     run = rows.start_run()
     rows.finish_run(run, copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
     blobs = await store.bytes.put_folder(directory, meta.id, meta.slug)
-    rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", [])])
+    rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
     (directory / MODEL_NAME).unlink()
     return store, meta
 

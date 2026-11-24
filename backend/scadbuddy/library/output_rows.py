@@ -823,12 +823,6 @@ class OutputRows:
             for item in found
         }
 
-    def write_bytes(self, writes: Sequence[ByteWrite]) -> set[str]:
-        """`write_byte_copy`, for writes whose replaced thumbnail objects the caller does
-        not release (none is guarded with a swap). The ids whose row was written."""
-        written, _ = self.write_byte_copy(writes)
-        return written
-
     def write_byte_copy(
         self, writes: Sequence[ByteWrite]
     ) -> tuple[set[str], list[tuple[str, BlobRef]]]:

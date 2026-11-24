@@ -46,6 +46,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import BlobRef, ContentStore
 from scadbuddy.store.index import Pool
 from tests.support.arrange import finished_job
+from tests.support.saved_outputs import save_files
 from tests.support.store import local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -117,16 +118,16 @@ async def tree(tmp_path: Path, projection: JobProjection) -> Tree:
     store = OutputStore(paths)
     rows = OutputRows(projection.pool)
     store.rows = rows
-    plain = store.create(job, name="plain")
+    plain = save_files(store, job, name="plain")
     (store.directory(plain.id) / THUMBNAIL_NAME).write_bytes(b"plain thumbnail")
-    arranged = store.create(job, name="arranged", arranged_from=[plain.id])
-    with_files = store.create(job, name="with files")
+    arranged = save_files(store, job, name="arranged", arranged_from=[plain.id])
+    with_files = save_files(store, job, name="with files")
     (store.directory(with_files.id) / FILES_DIR).mkdir()
     (store.directory(with_files.id) / FILES_DIR / "a.stl").write_bytes(b"a stl")
     (store.directory(with_files.id) / FILES_DIR / "b.step").write_bytes(b"b step")
-    backfill = store.create(job, name="backfill")
+    backfill = save_files(store, job, name="backfill")
     (store.directory(backfill.id) / BACKFILL_NAME).write_text('{"job_id": "j9"}')
-    no_preview = store.create(job, name="no preview")
+    no_preview = save_files(store, job, name="no preview")
     (store.directory(no_preview.id) / PREVIEW_NAME).unlink()
     metas = {
         "plain": plain,

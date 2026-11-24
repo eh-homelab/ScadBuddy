@@ -42,6 +42,7 @@ from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
+from tests.support.saved_outputs import save_files
 from tests.test_geometry import carrot
 
 
@@ -1094,7 +1095,7 @@ def test_the_store_leaves_nothing_behind_for_inputs_it_refuses(
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     job = state.render.store.read(job_id)
     with pytest.raises(InputsError):
-        state.outputs.create(job, inputs={"params": {"width": "12"}})
+        save_files(state.outputs, job, inputs={"params": {"width": "12"}})
     output_dir = paths.outputs / model
     assert not output_dir.exists() or not any(output_dir.iterdir())
 

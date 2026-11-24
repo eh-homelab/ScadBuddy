@@ -37,6 +37,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.arrange import finished_job
 from tests.support.media import MemoryMediaStore
+from tests.support.saved_outputs import save_files
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -73,7 +74,7 @@ def finish_copy(store: OutputStore) -> None:
 async def saved(tmp_path: Path, projection: JobProjection) -> tuple[OutputStore, OutputMeta, Job]:
     paths, job, _ = await finished_job(tmp_path)
     store = _store(paths, projection)
-    meta = store.create(job, name="first", inputs={"v": 1, "values": {"width": 12}})
+    meta = save_files(store, job, name="first", inputs={"v": 1, "values": {"width": 12}})
     return store, meta, job
 
 
@@ -159,14 +160,14 @@ async def test_create_fails_and_cleans_up_when_row_insert_fails(
 ) -> None:
     store, _, job = saved
     taken = "a" * 32
-    other = store.create(job, output_id="b" * 32)
+    other = save_files(store, job, output_id="b" * 32)
     row = rows_of(store).get(other.id)
     assert row is not None
     rows_of(store).insert(
         replace(row, output_id=taken, meta=row.meta.model_copy(update={"id": taken}))
     )
     with pytest.raises(psycopg.errors.UniqueViolation):
-        store.create(job, output_id=taken)
+        save_files(store, job, output_id=taken)
     assert not store.paths.output_dir(job.slug, taken).exists()
     # The other save's row stays: the clean-up deletes only a row the copy wrote.
     assert rows_of(store).get(taken) is not None
@@ -187,7 +188,7 @@ async def test_a_failed_save_leaves_no_row_the_copy_wrote(
     monkeypatch.setattr(rows, "insert", failing)
     output_id = "c" * 32
     with pytest.raises(psycopg.OperationalError):
-        store.create(job, output_id=output_id)
+        save_files(store, job, output_id=output_id)
     assert not store.paths.output_dir(job.slug, output_id).exists()
     assert rows.get(output_id) is None
 
@@ -238,7 +239,7 @@ async def test_delete_and_forget_indexed_drop_rows(
     saved: tuple[OutputStore, OutputMeta, Job],
 ) -> None:
     store, meta, job = saved
-    other = store.create(job, name="other")
+    other = save_files(store, job, name="other")
     store.delete(meta.id)
     assert rows_of(store).get(meta.id) is None
     assert rows_of(store).get(other.id) is not None
@@ -327,7 +328,7 @@ async def test_a_model_delete_whose_move_fails_puts_its_output_rows_back(
     concurrent delete), the model and its outputs stay, so their rows come back from
     the files, as the copy writes them."""
     store, meta, job = saved
-    second = store.create(job, name="second")
+    second = save_files(store, job, name="second")
     finish_copy(store)
     catalogue = _catalogue(store)
     model_dir = store.paths.model_dir(job.slug)
@@ -438,7 +439,7 @@ async def test_a_save_orders_by_the_rows_after_a_copy(
         return real_glob(self, pattern)
 
     monkeypatch.setattr(Path, "glob", no_meta_glob)
-    later = store.create(job, name="second")
+    later = save_files(store, job, name="second")
     assert later.created_at > meta.created_at
     assert [m.id for m in store.list_for(job.slug)] == [later.id, meta.id]
 

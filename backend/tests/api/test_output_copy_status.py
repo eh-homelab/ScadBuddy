@@ -100,7 +100,7 @@ def test_copy_status_reports_byte_run_and_pending(client: TestClient) -> None:
     rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
     for output_id in ("a" * 32, "b" * 32):
         rows.insert(_row(output_id))
-    rows.write_bytes([ByteWrite("a" * 32, OutputBlobs(), "stamp", [])])
+    rows.write_byte_copy([ByteWrite("a" * 32, OutputBlobs(), "stamp", [])])
     failed = [{"output_id": "b" * 32, "role": "model", "error": "OSError"}]
     damaged = [{"output_id": "c" * 32, "role": "preview", "error": "missing"}]
     run = rows.start_byte_run()

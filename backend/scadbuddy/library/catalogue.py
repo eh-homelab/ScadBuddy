@@ -902,18 +902,11 @@ class Catalogue:
                 return directory / item.poster, content_type_of(item.poster)
         return None
 
-    def thumbnail(self, slug: str) -> tuple[bytes, str] | None:
-        """The catalogue thumbnail and its content type: the template's cover, else
-        the first generated output's plate cover, else the default-render preview,
-        else None."""
-        with span("catalogue.thumbnail", attributes={"scadbuddy.slug": slug}) as current:
-            found = self._thumbnail(slug)
-            current.set_attribute("scadbuddy.found", found is not None)
-            return found
-
     async def read_thumbnail(self, slug: str) -> tuple[bytes, str] | None:
-        """`thumbnail`, with the plate cover read from the output's model blob
-        (`OutputStore.read_plate_cover`, #7256). The file reads run in threads."""
+        """The catalogue thumbnail and its content type: the template's cover, else
+        the first generated output's plate cover (`OutputStore.read_plate_cover`, from
+        the output's blobs, #7256), else the default-render preview, else None. The file
+        reads run in threads."""
         with span("catalogue.thumbnail", attributes={"scadbuddy.slug": slug}) as current:
             found = await asyncio.to_thread(self._own_cover, slug)
             if found is None and self.outputs is not None:
@@ -923,16 +916,6 @@ class Catalogue:
                 found = await asyncio.to_thread(self._preview, slug)
             current.set_attribute("scadbuddy.found", found is not None)
             return found
-
-    def _thumbnail(self, slug: str) -> tuple[bytes, str] | None:
-        found = self._own_cover(slug)
-        if found is not None:
-            return found
-        if self.outputs is not None:
-            plate = self.outputs.plate_cover(slug)
-            if plate is not None:
-                return plate, "image/png"
-        return self._preview(slug)
 
     def _own_cover(self, slug: str) -> tuple[bytes, str] | None:
         """The template's own cover image and its content type. Blocking."""

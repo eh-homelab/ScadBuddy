@@ -917,36 +917,6 @@ class OutputStore:
             return False
         return True
 
-    def create(
-        self,
-        job: Job,
-        *,
-        name: str | None = None,
-        public_url: str | None = None,
-        inputs: Mapping[str, Any] | None = None,
-        index: int = 0,
-        files_dir: Path | None = None,
-        arranged_from: Sequence[str] = (),
-        output_id: str | None = None,
-        print_settings: Mapping[str, ProcessValue] | None = None,
-        source: OutputSource = BACK_OFFICE,
-    ) -> OutputMeta:
-        """Save the job's output ``index`` with its bytes in files only: `commit` of
-        `prepare`, with no blobs. Blocking. `save` also puts the bytes in the blob store."""
-        prepared = self.prepare(
-            job,
-            name=name,
-            public_url=public_url,
-            inputs=inputs,
-            index=index,
-            files_dir=files_dir,
-            arranged_from=arranged_from,
-            output_id=output_id,
-            print_settings=print_settings,
-            source=source,
-        )
-        return self.commit(prepared, None)
-
     async def save(
         self,
         job: Job,
@@ -961,15 +931,15 @@ class OutputStore:
         print_settings: Mapping[str, ProcessValue] | None = None,
         source: OutputSource = BACK_OFFICE,
     ) -> OutputMeta:
-        """`create`, with the bytes put in the blob store between `prepare` and `commit`
-        (#7256, spec §6.6), so the row, its ``output_files`` rows and the holds of its keys
-        are one transaction. With no blob store (`local`, `bambuddy`) or no rows, it puts
-        nothing. A failed put or commit removes the folder (`discard`) and raises again,
-        a `StoreFullError` among them; the blobs it put are held by nothing, so the sweep
-        removes them. A cancel during the puts stops the save at once, with no discard:
-        the folder stays with no ``meta.json``, and the hold reaper removes it and its
-        holds later (#1007). A cancel during `prepare` or `commit` cannot stop their
-        thread, which may still finish the output."""
+        """Save the job's output ``index``: `prepare` its folder, put its bytes in the blob
+        store, then `commit` (#7256, spec §6.6), so the row, its ``output_files`` rows and
+        the holds of its keys are one transaction. With no blob store (`local`, `bambuddy`)
+        or no rows, it puts nothing. A failed put or commit removes the folder (`discard`)
+        and raises again, a `StoreFullError` among them; the blobs it put are held by
+        nothing, so the sweep removes them. A cancel during the puts stops the save at once,
+        with no discard: the folder stays with no ``meta.json``, and the hold reaper removes
+        it and its holds later (#1007). A cancel during `prepare` or `commit` cannot stop
+        their thread, which may still finish the output."""
         prepared = await asyncio.to_thread(
             self.prepare,
             job,
@@ -1743,11 +1713,11 @@ class OutputStore:
             return slug in self._covers
 
     def has_plate_cover(self, slug: str) -> bool:
-        """Whether :meth:`plate_cover` has an image to give, without reading it."""
+        """Whether :meth:`read_plate_cover` has an image to give, without reading it."""
         return self.plate_cover_output(slug) is not None
 
     def plate_cover_output(self, slug: str) -> str | None:
-        """The id of the output whose plate image :meth:`plate_cover` gives, from the
+        """The id of the output whose plate image :meth:`read_plate_cover` gives, from the
         same cached resolution -- so the catalogue can tell when the fallback moves to
         another output, which is no commit and so no change of the model's version."""
         if self._copied():
@@ -1757,27 +1727,13 @@ class OutputStore:
         # outputs/<slug>/<output-id>/model.3mf
         return archive.parent.name if archive is not None else None
 
-    def plate_cover(self, slug: str) -> bytes | None:
-        """The first generated output's ``plate_1.png`` -- the catalogue thumbnail of
-        a model that has none of its own (#179).
-
-        Read out of the output's 3MF, where the renderer already put it, rather than
-        copied beside the model: the model's directory is versioned, and a render is
-        not a catalogue change. Only the resolved archive is opened. Blocking, and the
-        NFS file only: an async caller takes `read_plate_cover`, which reads the blob.
-        """
-        archive_path = self.plate_cover_archive(slug)
-        if archive_path is None:
-            return None
-        try:
-            return _read_plate_cover(archive_path)
-        except (OSError, KeyError, zipfile.BadZipFile):
-            # Deleted or replaced since it was resolved; the next ask rescans.
-            self.forget_plate_cover(slug)
-            return None
-
     async def read_plate_cover(self, slug: str) -> bytes | None:
-        """`plate_cover`, derived once per output (#7256): the cover is kept as a small
+        """The first generated output's ``plate_1.png``: the catalogue thumbnail of a
+        model that has none of its own (#179). It is read out of the output's 3MF, where
+        the renderer already put it, rather than copied beside the model: the model's
+        directory is versioned, and a render is not a catalogue change.
+
+        Derived once per output (#7256): the cover is kept as a small
         blob (`plate_cover_key`, held by the output), and "this 3MF has no cover" as an
         ``output_derived`` row, so neither is read out of the 3MF again. The 3MF is read
         only when neither is kept: from the output's model blob through a temporary
@@ -1820,7 +1776,7 @@ class OutputStore:
 
     async def _derive_plate_cover(self, slug: str, output_id: str) -> bytes | None:
         """The cover read out of the output's 3MF, then kept (`_keep_plate_cover`).
-        The file's errors are as `plate_cover`'s: deleted or replaced since it was
+        A file that fails to read was deleted or replaced since it was
         resolved, and the next ask resolves again. An error of the blob read is logged
         once. Only a missing object (`_object_missing`) is kept as no cover, so it is not
         asked again. A refusal (401, 403, other 4xx), a full spool or a transport error is
@@ -1922,7 +1878,7 @@ class OutputStore:
         once and cached: in ``output_derived`` (#7256), else in the file cache beside
         the output.
 
-        ``model.3mf`` is not rewritten after `create` stamps it -- a send re-places
+        ``model.3mf`` is not rewritten after a save stamps it -- a send re-places
         a copy in memory -- so the cache only goes stale when the analysis itself
         changes, which :data:`~scadbuddy.render.geometry.ANALYSIS_VERSION` tracks.
         A miss reads the 3MF from its blob through a temporary file, else from its

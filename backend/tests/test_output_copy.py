@@ -33,6 +33,7 @@ from scadbuddy.library.outputs import (
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.projection import JobProjection
 from tests.support.arrange import finished_job
+from tests.support.saved_outputs import save_files
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -52,7 +53,7 @@ async def files(tmp_path: Path) -> tuple[DataPaths, Job, list[OutputMeta]]:
     """Two outputs saved as files only, as a build before the rows saved them."""
     paths, job, _ = await finished_job(tmp_path)
     store = OutputStore(paths)
-    metas = [store.create(job, name="first"), store.create(job, name="second")]
+    metas = [save_files(store, job, name="first"), save_files(store, job, name="second")]
     return paths, job, metas
 
 
@@ -419,7 +420,7 @@ def test_a_stale_slug_folder_drops_nothing(
     """A listing that fails part-way (ESTALE on one model) is no delete of its rows."""
     paths, job, metas = files
     store, rows = _stores(paths, projection)
-    other = store.create(job.model_copy(update={"slug": "other-model"}), name="other")
+    other = save_files(store, job.model_copy(update={"slug": "other-model"}), name="other")
     copy_outputs(store, rows, projection.pool)
     stale = paths.outputs / job.slug
     iterdir = Path.iterdir
@@ -549,7 +550,9 @@ def test_a_first_run_with_a_stale_folder_does_not_end_the_fallback(
     incomplete, with no ``finished_at``, so a missing row still falls back to the files."""
     paths, job, metas = files
     store, rows = _stores(paths, projection)
-    other = OutputStore(paths).create(job.model_copy(update={"slug": "other-model"}), name="other")
+    other = save_files(
+        OutputStore(paths), job.model_copy(update={"slug": "other-model"}), name="other"
+    )
     stale = paths.outputs / job.slug
     iterdir = Path.iterdir
 

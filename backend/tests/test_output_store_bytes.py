@@ -47,6 +47,7 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import StoreFullError
 from scadbuddy.store.index import BlobIndex, Pool
 from tests.support.arrange import finished_job
+from tests.support.saved_outputs import save_files
 from tests.support.store import flip_first_byte, local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -86,7 +87,7 @@ async def _saved(
     store.rows = OutputRows(projection.pool)
     if content is not None:
         store.bytes = OutputBytes(content)
-    meta = store.create(job, name="first")
+    meta = save_files(store, job, name="first")
     directory = store.directory(meta.id)
     (directory / THUMBNAIL_NAME).write_bytes(b"thumbnail png")
     (directory / FILES_DIR).mkdir(exist_ok=True)
@@ -98,7 +99,7 @@ async def _copy_bytes(store: OutputStore, meta: OutputMeta) -> None:
     """What the byte copy does: put the folder, then name the blobs in the row."""
     assert store.bytes is not None and store.rows is not None
     blobs = await store.bytes.put_folder(store.directory(meta.id), meta.id, meta.slug)
-    store.rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", [])])
+    store.rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
 
 
 @pytest.fixture

@@ -19,6 +19,7 @@ from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from tests.support.arrange import finished_job
+from tests.support.saved_outputs import save_files
 from tests.support.store import local_content, store_pool
 
 
@@ -52,9 +53,9 @@ async def blob_output(tmp_path: Path, pg_conninfo: str) -> AsyncIterator[BlobOut
                 store = OutputStore(paths)
                 store.rows = OutputRows(jobs.pool)
                 store.bytes = OutputBytes(content)
-                meta = store.create(job, name="first")
+                meta = save_files(store, job, name="first")
                 blobs = await store.bytes.put_folder(store.directory(meta.id), meta.id, meta.slug)
-                store.rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", [])])
+                store.rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
                 yield BlobOutput(store, meta, content, jobs.pool, job)
             finally:
                 await content.aclose()

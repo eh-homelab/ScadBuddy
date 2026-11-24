@@ -179,7 +179,7 @@ def test_variant_preview_streams_blob(
             assert portal is not None
             blobs = portal.call(outputs.bytes.put_folder, directory, output_id, listing["slug"])
             assert outputs.rows is not None
-            outputs.rows.write_bytes([ByteWrite(output_id, blobs, "stamp", [])])
+            outputs.rows.write_byte_copy([ByteWrite(output_id, blobs, "stamp", [])])
             (directory / PREVIEW_NAME).unlink()
             r = crud.get(f"/variants/{key}/preview.glb", token=TOKEN_C)
             assert r.status_code == 200, r.text

@@ -762,7 +762,7 @@ class PrintLinkStore:
     def _linked(self, archive_id: int) -> LinkedPrint | None:
         # Nothing here makes an archive unique to one output: two outputs whose sliced
         # files hash the same can both match it by hash, and the earliest link then owns
-        # it for the proxy. `OutputStore.create` stamps the output id into each source
+        # it for the proxy. `OutputStore.save` stamps the output id into each source
         # 3MF (`render/provenance.py`), so the same parameters rendered twice differ at
         # the source; whether the sliced file keeps that stamp is the #306 spike's to
         # confirm. If it does not, one output's prints can show under another's id.

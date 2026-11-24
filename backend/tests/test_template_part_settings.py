@@ -17,6 +17,7 @@ from scadbuddy.library.outputs import PARAMS_NAME, OutputStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.arrange import finished_job
 from tests.support.media import MemoryMediaStore
+from tests.support.saved_outputs import save_files
 
 #: A template with one colour parameter, ``base_color``.
 SOURCE = 'base_color = "#FFFFFF"; // color\ncolor(base_color) cube(1);\n'
@@ -183,8 +184,8 @@ async def test_an_arranged_output_takes_no_template_part_settings(tmp_path: Path
     and it may be filed under any template, so no colour of it is the template's."""
     paths, job, _ = await finished_job(tmp_path)
     store = OutputStore(paths)
-    plain = store.create(job, name="plain", index=0)
-    arranged = store.create(job, name="arranged", index=0, arranged_from=[plain.id])
+    plain = save_files(store, job, name="plain", index=0)
+    arranged = save_files(store, job, name="arranged", index=0, arranged_from=[plain.id])
     meta = json.loads(paths.model_meta("demo").read_text(encoding="utf-8"))
     meta["part_print_settings"] = {"label_color": {"top_shell_layers": 8}}
     paths.model_meta("demo").write_text(json.dumps(meta), encoding="utf-8")
