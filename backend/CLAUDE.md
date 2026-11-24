@@ -1199,7 +1199,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `matched_by` `import`, beside its `print_imports` row (`PrintLinkStore.record_import`).
   #6394: or to a native library file that stands and is no run's per-print copy (a 422:
   the sweep would trash it), checked again in the import's transaction
-  (`require_import_target`) (`library_file_id`, subject `library:<id>`;
+  (`require_import_target`) (a file trashed and added again is a 404 `library-file-gone`
+  whose `replacement` is the live file of the same SHA-256, which the dialog offers, #7335)
+  (`library_file_id`, subject `library:<id>`;
   `print_imports.subject` is the target, while `library_file_id` and `source` stay where
   the 3MF was read from, and `slug` is NULL). The print watcher and `slugs_by_hash` read
   model imports only. A link of ScadBuddy's own print of that file takes the import's row
