@@ -12,6 +12,7 @@ import stat
 import threading
 import time
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import (
     AsyncGenerator,
@@ -28,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol
 
+from botocore.exceptions import ClientError
 from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
@@ -56,10 +58,11 @@ from scadbuddy.library.output_rows import (
     OutputBlobs,
     Role,
     output_blob_key,
+    plate_cover_key,
     staged_thumbnail_key,
 )
 from scadbuddy.library.slugs import InvalidSlugError, slugify
-from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
+from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL, plates_of
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.inputs import legacy_inputs, normalize_inputs
@@ -93,6 +96,13 @@ GEOMETRY_NAME = "geometry.json"
 #: The ``output_derived`` kinds of `OutputStore.geometry` and `OutputStore.attributed`.
 GEOMETRY_KIND = "geometry"
 ATTRIBUTED_KIND = "attributed"
+#: The ``output_derived`` kinds of the whole output (plate 0), each derived once from a
+#: 3MF that is never rewritten (#7256): the plate cover's blob key (`read_plate_cover`)
+#: and the plates' names (`plate_names`). Change a version with what derives it.
+PLATE_COVER_KIND = "plate_cover"
+PLATE_COVER_VERSION = "1"
+PLATE_NAMES_KIND = "plate_names"
+PLATE_NAMES_VERSION = "1"
 #: A pipeline output's bill of materials, what reproduces it (§8.4), and its extra files.
 BOM_NAME = "bom.json"
 RECORD_NAME = "record.json"
@@ -102,6 +112,7 @@ ARRANGED_NAME = "arranged_from.json"
 #: once attached; kept with an ``error`` when the re-render did not finish.
 BACKFILL_NAME = "backfill.json"
 _ID_LIST = TypeAdapter(list[str])
+_PLATE_NAMES = TypeAdapter(dict[int, str])
 #: How many outputs whose thumbnail draw came to nothing a process remembers (#4775).
 UNDRAWABLE_MAX = 4096
 #: Each byte role's file; its suffix is the suffix of the role's temporary file (#7256).
@@ -116,6 +127,11 @@ ROLE_FILES: dict[Role, str] = {
 #: corrupt blob, or a transport error past the prefetch, raises it mid-stream. An S3 5xx
 #: answer counts as a transport error (`output_bytes.server_error`); a 4xx does not.
 _LOST: tuple[type[Exception], ...] = (BlobMissingError, BlobCorruptError, *TRANSPORT_ERRORS)
+
+
+#: What a plate cover's read of the model blob can raise past `local_role`'s fallback: the
+#: spool's errors, an S3 answer, and the transport's.
+_COVER_READ_ERRORS: tuple[type[Exception], ...] = (OSError, ClientError, *TRANSPORT_ERRORS)
 
 
 def _lost(error: Exception) -> bool:
@@ -632,6 +648,11 @@ class OutputStore:
 
     def directory(self, output_id: str) -> Path:
         return self._find_dir(output_id)
+
+    def directory_from_files(self, output_id: str) -> Path:
+        """The output's folder found from the files alone, asking no row: for a caller
+        whose row read just failed."""
+        return self._files_dir(output_id)
 
     def row_from_files(
         self, directory: Path, slug: str
@@ -1462,6 +1483,17 @@ class OutputStore:
         except OutputNotFoundError:
             return None
 
+    def blob_versions(self, output_ids: Sequence[str]) -> dict[tuple[str, Role], str]:
+        """`role_version` of every role whose blob the rows name, for a whole listing, in
+        one query of the rows and the index (`OutputRows.blob_shas`). A role left out
+        takes `role_version` (its file, or its row's key when the index lost it).
+        Blocking."""
+        if self.rows is None or self.bytes is None:
+            return {}
+        return {
+            key: blob_version(sha256) for key, sha256 in self.rows.blob_shas(output_ids).items()
+        }
+
     def blob_sha(self, output_id: str, role: Role) -> str | None:
         """The sha256 of the blob the row names for ``role``, from the index alone, with no
         backend read: a conditional GET's tag. ``None``: no such blob. Blocking."""
@@ -1695,20 +1727,124 @@ class OutputStore:
             return None
 
     async def read_plate_cover(self, slug: str) -> bytes | None:
-        """`plate_cover`, with the 3MF read from the output's model blob through a
-        temporary file, else from its NFS file (#7256)."""
+        """`plate_cover`, derived once per output (#7256): the cover is kept as a small
+        blob (`plate_cover_key`, held by the output), and "this 3MF has no cover" as an
+        ``output_derived`` row, so neither is read out of the 3MF again. The 3MF is read
+        only when neither is kept: from the output's model blob through a temporary
+        file, else from its NFS file. With no blob store or no rows, the NFS file, read
+        in place."""
         output_id = await asyncio.to_thread(self.plate_cover_output, slug)
         if output_id is None:
             return None
+        kept = await asyncio.to_thread(self._kept_plate_cover, output_id)
+        if kept is not None:
+            key = kept.get("key")
+            if not isinstance(key, str):
+                return None  # this 3MF has no cover
+            assert self.bytes is not None
+            try:
+                return await self.bytes.read(key)
+            except Exception as error:
+                if not _lost(error):
+                    raise
+                _warn_lost(output_id, PLATE_COVER_KIND, key, error)
+        return await self._derive_plate_cover(slug, output_id)
+
+    def _kept_plate_cover(self, output_id: str) -> dict[str, Any] | None:
+        """The output's kept plate cover (``{"key": str | None}``), or ``None`` when it
+        is not kept yet or cannot be. Blocking."""
+        if self.bytes is None or self.rows is None:
+            return None
+        found = self.rows.derived(output_id, PLATE_COVER_KIND, 0)
+        if found is None or found[0] != PLATE_COVER_VERSION or not isinstance(found[1], dict):
+            return None
+        return found[1]
+
+    async def _derive_plate_cover(self, slug: str, output_id: str) -> bytes | None:
+        """The cover read out of the output's 3MF, then kept (`_keep_plate_cover`).
+        The file's errors are as `plate_cover`'s: deleted or replaced since it was
+        resolved, and the next ask resolves again. An error of the blob read is logged
+        once: a 4xx answer (a request the store refuses) is kept as no cover, so it is
+        not asked again; a full spool or a transport error is not kept."""
         try:
             async with self.local_role(output_id, "model") as path:
                 if path is None:
-                    raise FileNotFoundError(output_id)
-                return await asyncio.to_thread(_read_plate_cover, path)
-        except (OSError, KeyError, zipfile.BadZipFile):
-            # Deleted or replaced since it was resolved; the next ask rescans.
-            await asyncio.to_thread(self.forget_plate_cover, slug)
+                    await asyncio.to_thread(self.forget_plate_cover, slug)
+                    return None
+                try:
+                    png = await asyncio.to_thread(_read_plate_cover, path)
+                except (KeyError, zipfile.BadZipFile):
+                    await self._keep_plate_cover(slug, output_id, None)
+                    return None
+                except OSError:
+                    await asyncio.to_thread(self.forget_plate_cover, slug)
+                    return None
+        except _COVER_READ_ERRORS as error:
+            logger.warning(
+                "could not read an output's 3MF for its plate cover",
+                extra={"output_id": output_id, "error": str(error)},
+            )
+            if isinstance(error, ClientError) and not server_error(error):
+                await self._keep_plate_cover(slug, output_id, None)
             return None
+        await self._keep_plate_cover(slug, output_id, png)
+        return png
+
+    async def _keep_plate_cover(self, slug: str, output_id: str, png: bytes | None) -> None:
+        """Keep the cover as its blob and row, or "no cover" as a row alone. A failure is
+        logged: the cover read is still the answer, and the next ask derives again."""
+        if self.bytes is None or self.rows is None:
+            return
+        rows = self.rows
+        try:
+            key: str | None = None
+            if png is not None:
+                key = plate_cover_key(output_id)
+                await self.bytes.put(key, png, slug=slug)
+            await asyncio.to_thread(rows.keep_plate_cover, output_id, PLATE_COVER_VERSION, key)
+        except Exception:
+            logger.warning(
+                "could not keep an output's plate cover",
+                extra={"output_id": output_id},
+                exc_info=True,
+            )
+
+    async def plate_names(self, output_id: str) -> dict[int, str]:
+        """Each plate's name in the output's 3MF, derived once (#7256): kept in
+        ``output_derived`` (kind ``plate_names``) on the first read, which reads the 3MF
+        from its blob through a temporary file, else from its file, in a thread.
+        Advisory: an unreadable 3MF names nothing, and nothing is kept."""
+        rows = self.rows
+        if rows is not None:
+            found = await asyncio.to_thread(rows.derived, output_id, PLATE_NAMES_KIND, 0)
+            if found is not None and found[0] == PLATE_NAMES_VERSION:
+                with contextlib.suppress(ValidationError):
+                    return _PLATE_NAMES.validate_python(found[1])
+        try:
+            async with self.local_role(output_id, "model") as path:
+                if path is None:
+                    return {}
+                plates = await asyncio.to_thread(plates_of, path)
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile, ET.ParseError, ClientError):
+            return {}
+        names = {plate.index: plate.name for plate in plates if plate.name}
+        if rows is not None:
+            try:
+                await asyncio.to_thread(
+                    rows.write_derived,
+                    output_id,
+                    PLATE_NAMES_KIND,
+                    0,
+                    PLATE_NAMES_VERSION,
+                    {str(index): name for index, name in names.items()},
+                )
+            except Exception:
+                logger.warning(
+                    "could not keep an output's plate names",
+                    extra={"output_id": output_id},
+                    exc_info=True,
+                )
+        return names
 
     async def geometry(self, output_id: str, plate: int = 1) -> GeometryAnalysis:
         """The mesh analysis of one plate of the output's 3MF (#284, #289), computed
@@ -1762,8 +1898,19 @@ class OutputStore:
                 str(ANALYSIS_VERSION),
                 analysis.model_dump(mode="json"),
             )
-        # Written aside and renamed, so a concurrent reader never sees half a file.
-        _replace(self._geometry_path(output_id, plate), analysis.model_dump_json(indent=2) + "\n")
+        # Written aside and renamed, so a concurrent reader never sees half a file. A
+        # failed write (no folder: the bytes are only blobs) loses only that cache; the
+        # analysis is still the answer.
+        try:
+            _replace(
+                self._geometry_path(output_id, plate), analysis.model_dump_json(indent=2) + "\n"
+            )
+        except (OSError, OutputNotFoundError):
+            logger.debug(
+                "could not write an output's geometry file cache",
+                extra={"output_id": output_id},
+                exc_info=True,
+            )
 
     def attributed(self, output_id: str, plate: int, model_version: str) -> GeometryAnalysis | None:
         """The cached analysis whose weak joints name their scene objects at
@@ -1810,10 +1957,11 @@ class OutputStore:
         the blob both. A failed put changes nothing and raises (`StoreFullError` among
         them). A failed file write raises too and leaves the old key and the old file,
         which still agree; the new blob is held by nothing, and the sweep removes it.
-        With no blob store or no row yet, the file only; the byte copy takes it later."""
+        With no blob store or no row yet, the file only, under the same lock when there
+        is a database (`OutputRows.write_thumbnail_file`); the byte copy takes it later."""
         slug = await asyncio.to_thread(self._blob_slug, output_id)
         if slug is None:
-            await asyncio.to_thread(self.write_thumbnail, output_id, png)
+            await asyncio.to_thread(self._write_thumbnail_file, output_id, png)
             return
         assert self.bytes is not None and self.rows is not None
         rows = self.rows
@@ -1830,6 +1978,14 @@ class OutputStore:
         )
         if previous is not None and previous.backend_id != staged.backend_id:
             await self.bytes.release_replaced(key, previous)
+
+    def _write_thumbnail_file(self, output_id: str, png: bytes) -> None:
+        """`write_thumbnail` under the output's thumbnail lock when there are rows.
+        Blocking."""
+        if self.rows is None:
+            self.write_thumbnail(output_id, png)
+            return
+        self.rows.write_thumbnail_file(output_id, lambda: self.write_thumbnail(output_id, png))
 
     def _blob_slug(self, output_id: str) -> str | None:
         """The output's slug when its bytes go to the blob store too; ``None`` with no
@@ -1877,27 +2033,47 @@ class OutputStore:
         return True
 
     async def put_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
-        """`write_drawn_thumbnail`, then, when the file was this draw's, its blob, only
-        when no blob has the key: an upload that landed first stays, file and blob. A
-        failed put is logged and the drawn file stays the thumbnail (True): the row names
-        no new blob, so readers take the file, and the byte copy puts it later."""
-        if not await asyncio.to_thread(self.write_drawn_thumbnail, output_id, png):
-            return False
+        """``png`` as the thumbnail only while the output has none (#4775): an upload that
+        landed first stays, file and blob. The blob is put first, under its own key
+        (`staged_thumbnail_key`); then one step under the output's thumbnail lock
+        (`OutputRows.draw_thumbnail`) points the thumbnail key at it, writes the file
+        (`write_drawn_thumbnail`) and names the key in the row, only when neither the key
+        nor the file is there. A failed put is logged, and the file alone is written
+        under the lock (True when it was this draw's): the row names no new blob, so
+        readers take the file, and the byte copy puts it later. With no blob store or no
+        row, the file alone, under the lock when there are rows."""
         slug = await asyncio.to_thread(self._blob_slug, output_id)
-        if slug is None:
-            return True
-        assert self.bytes is not None and self.rows is not None
-        key = output_blob_key(output_id, "thumbnail")
-        try:
-            if await self.bytes.put_if_absent(key, png, slug=slug):
-                await asyncio.to_thread(self.rows.set_blob, output_id, "thumbnail", key)
-        except Exception:
-            logger.warning(
-                "could not put a drawn thumbnail's blob; its file stays",
-                extra={"output_id": output_id},
-                exc_info=True,
-            )
-        return True
+        if slug is not None:
+            assert self.bytes is not None and self.rows is not None
+            rows = self.rows
+            sha256 = hashlib.sha256(png).hexdigest()
+            try:
+                staged = await self.bytes.put(
+                    staged_thumbnail_key(output_id, sha256), png, slug=slug
+                )
+            except Exception:
+                logger.warning(
+                    "could not put a drawn thumbnail's blob; its file stays",
+                    extra={"output_id": output_id},
+                    exc_info=True,
+                )
+            else:
+                return await asyncio.to_thread(
+                    rows.draw_thumbnail,
+                    output_id,
+                    output_blob_key(output_id, "thumbnail"),
+                    staged,
+                    slug=slug,
+                    write=lambda: self.write_drawn_thumbnail(output_id, png),
+                )
+        if self.rows is None:
+            return await asyncio.to_thread(self.write_drawn_thumbnail, output_id, png)
+        file_rows = self.rows
+        return await asyncio.to_thread(
+            file_rows.write_thumbnail_file,
+            output_id,
+            lambda: self.write_drawn_thumbnail(output_id, png),
+        )
 
     def _write_meta(self, directory: Path, meta: OutputMeta) -> None:
         (directory / META_NAME).write_text(

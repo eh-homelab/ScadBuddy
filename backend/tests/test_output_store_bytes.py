@@ -16,14 +16,17 @@ from typing import Any, BinaryIO
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
+from psycopg.errors import DeadlockDetected
 
 import scadbuddy.library.outputs as outputs_module
+from scadbuddy.api.outputs import _listed
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes
 from scadbuddy.library.output_rows import (
     OUTPUT_HOLDER,
     ByteWrite,
     OutputRows,
+    lock_thumbnail,
     output_blob_key,
     output_file_key,
 )
@@ -42,7 +45,7 @@ from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import StoreFullError
-from scadbuddy.store.index import Pool
+from scadbuddy.store.index import BlobIndex, Pool
 from tests.support.arrange import finished_job
 from tests.support.store import flip_first_byte, local_content, store_pool
 
@@ -915,7 +918,7 @@ async def test_put_drawn_thumbnail_failed_put_keeps_the_drawn_file(
     async def refused(*args: Any, **kwargs: Any) -> Any:
         raise StoreFullError("no room")
 
-    monkeypatch.setattr(content, "replace", refused)
+    monkeypatch.setattr(content, "put", refused)
     with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
         assert await store.put_drawn_thumbnail(meta.id, b"drawn") is True
     assert "thumbnail" in caplog.text
@@ -927,6 +930,58 @@ async def test_put_drawn_thumbnail_failed_put_keeps_the_drawn_file(
     assert row is not None and row.blobs.thumbnail is None
     assert await _read(store, meta.id, "thumbnail") == b"drawn"
     assert output_blob_key(meta.id, "thumbnail") not in _holds(pool, meta.id)
+
+
+async def test_put_drawn_thumbnail_waits_for_the_thumbnail_lock(
+    copied: tuple[OutputStore, OutputMeta], pool: Pool
+) -> None:
+    """#7256 review A-M1: a drawn thumbnail's step takes the output's thumbnail lock, as
+    every writer of the key and the file does, so the byte copy can rely on it."""
+    store, meta = copied
+    assert store.rows is not None
+    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
+    thumbnail.unlink()
+    with pool.connection() as conn:
+        conn.execute(
+            "DELETE FROM store_blobs WHERE key = %s", (output_blob_key(meta.id, "thumbnail"),)
+        )
+        conn.execute("UPDATE outputs SET thumbnail_blob = NULL WHERE output_id = %s", (meta.id,))
+    with pool.connection() as held, held.transaction():
+        lock_thumbnail(held, meta.id)
+        draw = asyncio.create_task(store.put_drawn_thumbnail(meta.id, b"drawn"))
+        await asyncio.sleep(0.5)
+        # The step waits for the lock: no file and no key yet.
+        assert not draw.done()
+        assert not thumbnail.exists()
+    assert await draw is True
+    assert thumbnail.read_bytes() == b"drawn"
+    assert await _read(store, meta.id, "thumbnail") == b"drawn"
+
+
+async def test_put_thumbnail_retries_a_deadlock(
+    copied: tuple[OutputStore, OutputMeta], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7256 review A-M2: a step Postgres picks as a deadlock's victim runs again, as
+    `BlobIndex.retrying` runs an index write again, so the upload does not answer 500."""
+    store, meta = copied
+    real_put_in = BlobIndex.put_in
+    key = output_blob_key(meta.id, "thumbnail")
+    calls: list[str] = []
+
+    def deadlocks_once(self: BlobIndex, conn: Any, put: str, *args: Any, **kwargs: Any) -> Any:
+        # Only the step's put of the thumbnail key; the staged put has its own retry.
+        if put == key:
+            calls.append(put)
+            if len(calls) == 1:
+                raise DeadlockDetected("deadlock detected")
+        return real_put_in(self, conn, put, *args, **kwargs)
+
+    monkeypatch.setattr(BlobIndex, "put_in", deadlocks_once)
+    await store.put_thumbnail(meta.id, b"new png")
+    monkeypatch.undo()
+    assert len(calls) == 2
+    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
+    assert await _read(store, meta.id, "thumbnail") == thumbnail.read_bytes() == b"new png"
 
 
 async def test_save_commit_failure_after_puts_discards_folder_and_row(
@@ -962,3 +1017,42 @@ async def test_save_commit_failure_after_puts_discards_folder_and_row(
     with pool.connection() as conn:
         held = conn.execute("SELECT key FROM blob_refs WHERE key = ANY(%s)", (keys,)).fetchall()
     assert held == []
+
+
+async def test_a_listing_reads_its_versions_in_one_query(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7256 review B-M6: a listing's thumbnail and preview versions come from one query
+    of the rows and the index, not one index read per output."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    metas = [await store.save(job, name=f"n{n}", files_dir=files) for n in range(3)]
+    for meta in metas:
+        await store.put_thumbnail(meta.id, f"png {meta.id}".encode())
+    expected = {
+        meta.id: (store.role_version(meta.id, "thumbnail"), store.role_version(meta.id, "preview"))
+        for meta in metas
+    }
+    assert store.bytes is not None and store.rows is not None
+    refs: list[str] = []
+    real_ref = store.bytes.ref
+    batched: list[int] = []
+    real_shas = store.rows.blob_shas
+
+    def ref(key: str) -> Any:
+        refs.append(key)
+        return real_ref(key)
+
+    def blob_shas(output_ids: Any) -> Any:
+        batched.append(len(output_ids))
+        return real_shas(output_ids)
+
+    monkeypatch.setattr(store.bytes, "ref", ref)
+    monkeypatch.setattr(store.rows, "blob_shas", blob_shas)
+    listed = _listed(store, metas, {meta.id: [] for meta in metas}, set())
+    assert batched == [3]
+    assert refs == []
+    assert {item.id: (item.thumbnail_version, item.preview_version) for item in listed} == expected

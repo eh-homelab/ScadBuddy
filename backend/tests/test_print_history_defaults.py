@@ -11,8 +11,8 @@ import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
-import scadbuddy.api.print_history as print_history
-from scadbuddy.api.print_history import _Defaults, _output_files, _output_plate_names
+import scadbuddy.library.outputs as outputs_module
+from scadbuddy.api.print_history import _Defaults, _output_files
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.history import ModelHistory
@@ -53,12 +53,15 @@ async def test_print_history_plate_names_from_model_blob(
         assert path.is_file()
         return [PlateEntry(1, None, "Tags"), PlateEntry(2, None, None)]
 
-    monkeypatch.setattr(print_history, "plates_of", plates_of)
+    monkeypatch.setattr(outputs_module, "plates_of", plates_of)
     async with blob_output(tmp_path, pg_conninfo) as output:
         (output.directory / MODEL_NAME).unlink()
-        assert await _output_plate_names(output.store, output.meta.id) == {1: "Tags"}
-        assert read and read[0].parent != output.directory
-        assert await _output_plate_names(output.store, "0" * 32) == {}
+        assert await output.store.plate_names(output.meta.id) == {1: "Tags"}
+        assert len(read) == 1 and read[0].parent != output.directory
+        # #7256 review B-M1: the names are kept; a second print detail reads no 3MF.
+        assert await output.store.plate_names(output.meta.id) == {1: "Tags"}
+        assert len(read) == 1
+        assert await output.store.plate_names("0" * 32) == {}
 
 
 async def test_a_template_whose_schema_fails_has_no_defaults_and_no_error_span(

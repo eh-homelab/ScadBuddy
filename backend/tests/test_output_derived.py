@@ -5,16 +5,24 @@ of a model with no picture of its own is read out of the output's model blob."""
 
 from __future__ import annotations
 
+import logging
+import shutil
 import zipfile
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 
 import scadbuddy.library.outputs as outputs_module
 from scadbuddy.library.output_bytes import OutputBytes
-from scadbuddy.library.output_rows import ByteWrite, OutputRows
+from scadbuddy.library.output_rows import (
+    OUTPUT_HOLDER,
+    ByteWrite,
+    OutputRows,
+    plate_cover_key,
+)
 from scadbuddy.library.outputs import (
     GEOMETRY_NAME,
     MODEL_NAME,
@@ -110,6 +118,19 @@ async def test_geometry_cached_in_output_derived(
     (directory / GEOMETRY_NAME).unlink()
     assert await store.geometry(meta.id) == analysis
     assert len(calls) == 1
+
+
+async def test_geometry_answers_when_its_file_cache_cannot_be_written(
+    tmp_path: Path, projection: JobProjection, content: ContentStore
+) -> None:
+    """#7256 review B-M7: an output whose bytes are only blobs has no folder for the file
+    cache; the analysis is still the answer, and its row is kept."""
+    store, meta = await _copied(tmp_path, projection, content)
+    shutil.rmtree(store.directory(meta.id))
+    analysis = await store.geometry(meta.id)
+    assert store.rows is not None
+    found = store.rows.derived(meta.id, "geometry", 1)
+    assert found is not None and GeometryAnalysis.model_validate(found[1]) == analysis
 
 
 async def test_geometry_version_mismatch_recomputes(
@@ -211,3 +232,152 @@ async def test_plate_cover_from_file_before_the_copy(
     store.forget_plate_cover(meta.slug)
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
     assert await store.read_plate_cover("other") is None
+
+
+def _without_cover(model: Path) -> None:
+    """``model`` rewritten with no plate cover image."""
+    with zipfile.ZipFile(model) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    members.pop(PLATE_THUMBNAIL, None)
+    with zipfile.ZipFile(model, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+
+async def _covered(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, *, cover: bool = True
+) -> tuple[OutputStore, OutputMeta]:
+    """A copied output whose 3MF holds a plate cover (or none), its NFS 3MF removed."""
+    paths, job, _ = await finished_job(tmp_path / "data")
+    store = OutputStore(paths)
+    rows = OutputRows(projection.pool)
+    store.rows = rows
+    store.bytes = OutputBytes(content)
+    meta = store.create(job, name="first")
+    directory = store.directory(meta.id)
+    if cover:
+        _with_cover(directory / MODEL_NAME)
+    else:
+        _without_cover(directory / MODEL_NAME)
+    with projection.pool.connection() as conn:
+        conn.execute("UPDATE outputs SET has_plate_cover = true WHERE output_id = %s", (meta.id,))
+    run = rows.start_run()
+    rows.finish_run(run, copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    blobs = await store.bytes.put_folder(directory, meta.id, meta.slug)
+    rows.write_bytes([ByteWrite(meta.id, blobs, "stamp", None)])
+    (directory / MODEL_NAME).unlink()
+    return store, meta
+
+
+def _model_reads(store: OutputStore, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every role `local_role` is asked for."""
+    asked: list[str] = []
+    real = store.local_role
+
+    def counting(output_id: str, role: Any) -> Any:
+        asked.append(role)
+        return real(output_id, role)
+
+    monkeypatch.setattr(store, "local_role", counting)
+    return asked
+
+
+async def test_plate_cover_is_kept_as_a_blob(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7256 review B-I2: the first read keeps the cover as its own blob, held by the
+    output; a second read reads that blob and no 3MF."""
+    store, meta = await _covered(tmp_path, projection, content)
+    asked = _model_reads(store, monkeypatch)
+    assert await store.read_plate_cover(meta.slug) == COVER_PNG
+    assert asked == ["model"]
+    key = plate_cover_key(meta.id)
+    assert store.rows is not None
+    assert store.rows.derived(meta.id, "plate_cover", 0) == ("1", {"key": key})
+    with pool.connection() as conn:
+        held = conn.execute(
+            "SELECT holder_kind, holder_id FROM blob_refs WHERE key = %s", (key,)
+        ).fetchall()
+    assert [(row["holder_kind"], row["holder_id"]) for row in held] == [(OUTPUT_HOLDER, meta.id)]
+    assert await store.read_plate_cover(meta.slug) == COVER_PNG
+    assert asked == ["model"]  # the second read read no 3MF
+
+
+async def test_no_plate_cover_is_kept_as_a_row(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, meta = await _covered(tmp_path, projection, content, cover=False)
+    asked = _model_reads(store, monkeypatch)
+    assert await store.read_plate_cover(meta.slug) is None
+    assert store.rows is not None
+    assert store.rows.derived(meta.id, "plate_cover", 0) == ("1", {"key": None})
+    assert await store.read_plate_cover(meta.slug) is None
+    assert asked == ["model"]
+
+
+async def test_lost_plate_cover_blob_is_derived_again(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
+) -> None:
+    store, meta = await _covered(tmp_path, projection, content)
+    assert await store.read_plate_cover(meta.slug) == COVER_PNG
+    with pool.connection() as conn:
+        conn.execute("DELETE FROM store_blobs WHERE key = %s", (plate_cover_key(meta.id),))
+    assert await store.read_plate_cover(meta.slug) == COVER_PNG
+
+
+def _client_error(status: int) -> ClientError:
+    response: Any = {"Error": {"Code": str(status)}, "ResponseMetadata": {"HTTPStatusCode": status}}
+    return ClientError(response, "GetObject")
+
+
+async def test_plate_cover_4xx_is_no_cover_once(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#7256 review B-M2: a 4xx answer of the model blob is no cover (not a 500), logged
+    once at warning and kept, so the next ask does not read again."""
+    store, meta = await _covered(tmp_path, projection, content)
+    gets: list[Any] = []
+
+    def refused(ref: Any, *args: Any, **kwargs: Any) -> Any:
+        gets.append(ref)
+        raise _client_error(403)
+
+    monkeypatch.setattr(content, "get", refused)
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+        assert await store.read_plate_cover(meta.slug) is None
+    warned = [r for r in caplog.records if "plate cover" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelno == logging.WARNING
+    assert await store.read_plate_cover(meta.slug) is None
+    assert len(gets) == 1
+
+
+async def test_plate_cover_5xx_is_asked_again(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, meta = await _covered(tmp_path, projection, content)
+    real = content.get
+
+    def failing(ref: Any, *args: Any, **kwargs: Any) -> Any:
+        raise _client_error(503)
+
+    monkeypatch.setattr(content, "get", failing)
+    # A 5xx is a lost blob: the file is read, and it is gone, so no cover for now.
+    assert await store.read_plate_cover(meta.slug) is None
+    assert store.rows is not None
+    assert store.rows.derived(meta.id, "plate_cover", 0) is None
+    monkeypatch.setattr(content, "get", real)
+    assert await store.read_plate_cover(meta.slug) == COVER_PNG

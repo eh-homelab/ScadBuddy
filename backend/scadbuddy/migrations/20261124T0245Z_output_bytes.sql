@@ -29,10 +29,14 @@ CREATE TABLE output_files (
 );
 
 -- What a reader derives from an output's model, per plate (the geometry analysis, the
--- attributed preview), and the version of the code that derived it.
+-- attributed preview), and the version of the code that derived it. Plate 0 is the whole
+-- output: the asset ids its 3MF names (`asset_ids`), its plate names (`plate_names`), and
+-- its plate cover (`plate_cover`: the key of the cover's blob, or none when the 3MF has no
+-- cover; the image itself is a blob, never a row).
 CREATE TABLE output_derived (
     output_id text NOT NULL REFERENCES outputs ON DELETE CASCADE,
-    kind text NOT NULL CHECK (kind IN ('geometry', 'attributed')),
+    kind text NOT NULL
+        CHECK (kind IN ('geometry', 'attributed', 'asset_ids', 'plate_names', 'plate_cover')),
     plate int NOT NULL,
     version text NOT NULL,
     data jsonb NOT NULL,

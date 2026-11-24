@@ -23,8 +23,6 @@ import json
 import logging
 import re
 import time
-import xml.etree.ElementTree as ET
-import zipfile
 from collections.abc import Awaitable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import PurePosixPath
@@ -105,7 +103,6 @@ from scadbuddy.operations.store import OperationAccepted
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
-from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import ParamValue
 
@@ -1362,26 +1359,13 @@ def _media(link: LinkedPrint, archive: ArchiveDetail, added: list[Attachment]) -
     )
 
 
-async def _output_plate_names(outputs: OutputStore, output_id: str) -> dict[int, str]:
-    """Each plate's name in the output's 3MF, read from its blob through a temporary
-    file, else from its file, in a thread (#7256)."""
-    try:
-        async with outputs.local_role(output_id, "model") as path:
-            if path is None:
-                return {}
-            plates = await asyncio.to_thread(plates_of, path)
-    except (OSError, KeyError, ValueError, zipfile.BadZipFile, ET.ParseError):
-        return {}
-    return {plate.index: plate.name for plate in plates if plate.name}
-
-
 async def _plate_names(
     link: LinkedPrint, outputs: OutputStore, client: BambuddyClient, native: NativeLibrary | None
 ) -> dict[int, str]:
     """#2055 — each plate's name, from what this print was of. Advisory: an unreadable
     source names nothing, and the caption keeps the plate's number."""
     if link.output_id is not None:
-        return await _output_plate_names(outputs, link.output_id)
+        return await outputs.plate_names(link.output_id)
     if link.library_file_id is None:
         return {}
     reads = native if native is not None and is_native_id(link.library_file_id) else client

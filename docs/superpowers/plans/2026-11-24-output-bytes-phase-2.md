@@ -221,8 +221,9 @@
 **Interfaces:**
 - Consumes: Task 2's releasing deletes; `sweep_content`.
 - Behaviour: `delete` keeps its order (index row, then the row with its byte holds in one transaction, then the folder). `delete_run`'s `release_parts` stays. `_reap_orphan_holds` treats an output that has a row as live (one `rows.existing(candidates)` query, when `rows` is set), so it never releases a live output's holds because of its folder.
+- The derived blobs go too (Task 7 fix round): the plate cover `output-<id>-plate_cover` (`output_rows.plate_cover_key`, put on the first read of a model's fallback cover and held by the output) and the staged thumbnail keys `output-<id>-thumbnail-<sha256>` (held by nothing). The row's delete releases the cover's hold with its other byte holds (`_RELEASE_BYTES`, every key `output-<id>-`), and its `output_derived` rows go by the foreign key.
 
-- [ ] **Step 1:** Write tests: `test_deleted_output_blobs_go_after_grace` (save, delete, `sweep_content` with grace 0 removes every `output-<id>-*` key and object), `test_live_output_blobs_survive_sweep`, `test_model_delete_releases_byte_holds_keeps_part_holds`, `test_failed_save_blobs_are_swept`, `test_reaper_keeps_holds_of_output_with_row_and_no_meta`.
+- [ ] **Step 1:** Write tests: `test_deleted_output_blobs_go_after_grace` (save, read the plate cover so its blob is kept, delete, `sweep_content` with grace 0 removes every `output-<id>-*` key and object, the `plate_cover` one included), `test_live_output_blobs_survive_sweep`, `test_model_delete_releases_byte_holds_keeps_part_holds`, `test_failed_save_blobs_are_swept`, `test_reaper_keeps_holds_of_output_with_row_and_no_meta`.
 - [ ] **Step 2:** Run them; expect FAIL.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run them and `tests/test_output_holds*.py`, `tests/test_catalogue*.py`; expect PASS.

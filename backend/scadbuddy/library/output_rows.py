@@ -15,6 +15,7 @@ It is synchronous, like `OutputIndex`: callers on the loop use a thread. It impo
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 
 import psycopg
 from psycopg import Connection
+from psycopg.errors import DeadlockDetected, SerializationFailure
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -32,6 +34,8 @@ from scadbuddy.store.index import BlobIndex
 
 if TYPE_CHECKING:
     from scadbuddy.library.outputs import OutputMeta
+
+logger = logging.getLogger(__name__)
 
 #: `blob_refs.holder_kind` for a saved output: its Parts and its byte blobs live as long
 #: as it does.
@@ -54,11 +58,22 @@ def staged_thumbnail_key(output_id: str, sha256: str) -> str:
     return f"output-{output_id}-thumbnail-{sha256}"
 
 
+def plate_cover_key(output_id: str) -> str:
+    """The blob key of the output's plate cover: the 3MF's ``plate_1.png``, put once on
+    its first read (`OutputRows.keep_plate_cover`) and held by the output like its other
+    blobs, so a model delete releases it with them."""
+    return f"output-{output_id}-plate_cover"
+
+
 def thumbnail_lock_key(output_id: str) -> str:
     """The text whose ``hashtextextended(…, 0)`` keys the output's thumbnail lock: a
     Postgres advisory transaction lock, so it holds across the API's replicas. Every
-    writer of the thumbnail key and file takes it (`lock_thumbnail`): a thumbnail
-    upload's step and the byte copy (Task 9)."""
+    writer of the thumbnail key or file in a process with a database takes it
+    (`lock_thumbnail`): a thumbnail upload's step (`OutputRows.keep_thumbnail`), a drawn
+    thumbnail's step (`OutputRows.draw_thumbnail`), a write of the file alone
+    (`OutputRows.write_thumbnail_file`) and the byte copy (Task 9). With no database
+    (tests and tools) there is no blob and no other replica, and the file is written with
+    no lock."""
     return f"output-thumbnail:{output_id}"
 
 
@@ -282,6 +297,39 @@ def _set_blob(conn: Connection[DictRow], output_id: str, role: Role, key: str) -
     return True
 
 
+#: What a thumbnail step runs again after, as `BlobIndex.retrying` runs an index write
+#: again: Postgres broke a deadlock with it (`BlobIndex.put_in` can still take a hold out
+#: of key order), or a serialization failure.
+_RETRIED: tuple[type[Exception], ...] = (DeadlockDetected, SerializationFailure)
+_ATTEMPTS = 3
+
+
+def _retrying[T](
+    pool: ConnectionPool[Connection[DictRow]],
+    output_id: str,
+    step: Callable[[Connection[DictRow]], T],
+) -> T:
+    """Run ``step`` (one transaction of its own) on one pooled connection, again when
+    Postgres picks it as a deadlock's victim or fails it to serialize. The last
+    attempt's error propagates."""
+    with pool.connection() as conn:
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                return step(conn)
+            except _RETRIED:
+                if attempt == _ATTEMPTS:
+                    raise
+                logger.warning(
+                    "retrying a thumbnail step Postgres picked as a deadlock's victim",
+                    extra={"output_id": output_id, "attempt": attempt},
+                )
+    raise AssertionError("unreachable")
+
+
+class _FileThereError(Exception):
+    """A drawn thumbnail's file write found a file there: its step rolls back."""
+
+
 def _insert(conn: Connection[DictRow], row: OutputRow) -> None:
     blobs = row.blobs
     _drop_copied(conn, row.output_id, row.slug)
@@ -399,25 +447,86 @@ class OutputRows:
         `staged_thumbnail_key`), then ``write`` writes the file, then the row names
         ``key`` and holds it. The key moves only when the transaction commits, so a
         ``write`` that raises leaves the key, the row and the old file as they were; the
-        staged blob is then held by nothing, and the sweep removes it.
+        staged blob is then held by nothing, and the sweep removes it. A commit that
+        fails after ``write`` (a lost connection) leaves the new file with the old key:
+        that is the accepted cost of a file beside a row, until #7257 drops the file.
+        A deadlock or a serialization failure runs the step again (`_retrying`); ``write``
+        then writes the same bytes again.
 
         Returns whether the row was there (False: nothing written) and the object ``key``
         named before, which the caller releases when it is not ``staged``'s
         (`OutputBytes.release_replaced`). `ReuseLostError` when the staged object was
         freed first. Blocking."""
-        with self._pool.connection() as conn, conn.transaction():
-            lock_thumbnail(conn, output_id)
-            found = conn.execute(
-                "SELECT 1 FROM outputs WHERE output_id = %s FOR UPDATE", (output_id,)
-            ).fetchone()
-            if found is None:
-                return False, None
-            previous = BlobIndex(self._pool).put_in(
-                conn, key, staged, slug=slug, meta={}, reuse=True
-            )
-            write()
-            _set_blob(conn, output_id, "thumbnail", key)
-        return True, previous
+
+        def step(conn: Connection[DictRow]) -> tuple[bool, BlobRef | None]:
+            with conn.transaction():
+                lock_thumbnail(conn, output_id)
+                found = conn.execute(
+                    "SELECT 1 FROM outputs WHERE output_id = %s FOR UPDATE", (output_id,)
+                ).fetchone()
+                if found is None:
+                    return False, None
+                previous = BlobIndex(self._pool).put_in(
+                    conn, key, staged, slug=slug, meta={}, reuse=True
+                )
+                write()
+                _set_blob(conn, output_id, "thumbnail", key)
+            return True, previous
+
+        return _retrying(self._pool, output_id, step)
+
+    def draw_thumbnail(
+        self,
+        output_id: str,
+        key: str,
+        staged: BlobRef,
+        *,
+        slug: str,
+        write: Callable[[], bool],
+    ) -> bool:
+        """A drawn thumbnail's step (#4775), in one transaction under the output's
+        thumbnail lock, only while the output has no thumbnail: no index row of ``key``
+        and no file. ``key`` takes the object of ``staged``, then ``write`` writes the
+        file only when there is none (False: an upload's file is there, and the key goes
+        back), then the row names ``key`` and holds it. Whether this draw is the
+        thumbnail now. Blocking."""
+
+        def step(conn: Connection[DictRow]) -> bool:
+            try:
+                with conn.transaction():
+                    lock_thumbnail(conn, output_id)
+                    found = conn.execute(
+                        "SELECT 1 FROM outputs WHERE output_id = %s FOR UPDATE", (output_id,)
+                    ).fetchone()
+                    if found is None:
+                        return False
+                    there = conn.execute(
+                        "SELECT 1 FROM store_blobs WHERE key = %s", (key,)
+                    ).fetchone()
+                    if there is not None:
+                        return False
+                    BlobIndex(self._pool).put_in(conn, key, staged, slug=slug, meta={}, reuse=True)
+                    if not write():
+                        raise _FileThereError
+                    _set_blob(conn, output_id, "thumbnail", key)
+                    return True
+            except _FileThereError:
+                return False
+
+        return _retrying(self._pool, output_id, step)
+
+    def write_thumbnail_file[T](self, output_id: str, write: Callable[[], T]) -> T:
+        """``write`` of the thumbnail file alone (no blob store, no row yet, or a drawn
+        thumbnail whose put failed), under the output's thumbnail lock, so the byte copy
+        puts the key from the file under the same lock (Task 9), never puts a file this
+        write replaces. Blocking."""
+
+        def step(conn: Connection[DictRow]) -> T:
+            with conn.transaction():
+                lock_thumbnail(conn, output_id)
+                return write()
+
+        return _retrying(self._pool, output_id, step)
 
     def files(self, output_id: str) -> list[OutputFileBlob]:
         """The output's ``files/`` blobs, by name."""
@@ -462,6 +571,71 @@ class OutputRows:
         except psycopg.errors.ForeignKeyViolation:
             # The row went between the check and the insert.
             return
+
+    def write_derived_many(
+        self, kind: str, plate: int, version: str, items: Sequence[tuple[str, Any]]
+    ) -> None:
+        """`write_derived` of ``(output_id, data)`` for many outputs, in one statement and
+        one transaction (prod commits take 1-2 s each). A row gone meanwhile is left out."""
+        if not items:
+            return
+        ids = [output_id for output_id, _ in items]
+        data = [Jsonb(value) for _, value in items]
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                with self._pool.connection() as conn:
+                    conn.execute(
+                        "INSERT INTO output_derived (output_id, kind, plate, version, data)"
+                        " SELECT item.output_id, %s, %s, %s, item.data"
+                        " FROM unnest(%s::text[], %s::jsonb[]) AS item (output_id, data)"
+                        " JOIN outputs USING (output_id)"
+                        " ON CONFLICT (output_id, kind, plate)"
+                        " DO UPDATE SET version = EXCLUDED.version, data = EXCLUDED.data",
+                        (kind, plate, version, ids, data),
+                    )
+                return
+            except psycopg.errors.ForeignKeyViolation:
+                # A row went between the join and the insert: the next try leaves it out.
+                if attempt == _ATTEMPTS:
+                    raise
+
+    def keep_plate_cover(self, output_id: str, version: str, key: str | None) -> None:
+        """Keep the output's plate cover (`output_derived` kind ``plate_cover``, plate 0):
+        ``key``, a blob already put under `plate_cover_key`, held by the output in the
+        same transaction; ``None`` when the 3MF has no cover. Nothing is written when the
+        row is gone, and the blob is then held by nothing, so the sweep removes it."""
+        with self._pool.connection() as conn, conn.transaction():
+            found = conn.execute(
+                "SELECT 1 FROM outputs WHERE output_id = %s FOR SHARE", (output_id,)
+            ).fetchone()
+            if found is None:
+                return
+            conn.execute(
+                "INSERT INTO output_derived (output_id, kind, plate, version, data)"
+                " VALUES (%s, 'plate_cover', 0, %s, %s) ON CONFLICT (output_id, kind, plate)"
+                " DO UPDATE SET version = EXCLUDED.version, data = EXCLUDED.data",
+                (output_id, version, Jsonb({"key": key})),
+            )
+            if key is not None:
+                _hold_keys(conn, output_id, [key])
+
+    def blob_shas(self, output_ids: Sequence[str]) -> dict[tuple[str, Role], str]:
+        """The sha256 of each ``(output_id, role)`` blob the rows name, for rows already
+        in blobs (``bytes_at`` set), from the index: one query for a whole listing
+        (`OutputStore.role_versions`). A role with no such blob is left out."""
+        if not output_ids:
+            return {}
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                "SELECT o.output_id, role.name, b.sha256 FROM outputs o"
+                " CROSS JOIN LATERAL (VALUES ('model', o.model_blob),"
+                " ('preview', o.preview_blob), ('thumbnail', o.thumbnail_blob))"
+                " AS role (name, key)"
+                " JOIN store_blobs b ON b.key = role.key"
+                " WHERE o.output_id = ANY(%s) AND o.bytes_at IS NOT NULL",
+                (list(output_ids),),
+            ).fetchall()
+        return {(str(item["output_id"]), item["name"]): str(item["sha256"]) for item in found}
 
     def byte_states(self) -> dict[str, tuple[str, str | None, datetime | None]]:
         """Each row's slug, ``bytes_stamp`` and ``bytes_at``, by output id: what the byte
@@ -643,17 +817,31 @@ class OutputRows:
             _release_bytes(conn, deleted)
         return len(deleted)
 
-    def documents(self) -> list[tuple[str, bool, str]]:
-        """Each row's id, whether its ``params`` is ``{}``, and the text of every JSON
-        column it holds (its meta and records): what the asset sweep scans for the ids
-        an output names, as it scanned the folder's JSON files (#7256)."""
+    def documents(self, asset_ids_version: str) -> list[tuple[str, bool, str, list[str] | None]]:
+        """Each row's id, whether its ``params`` is ``{}``, the text of every JSON column
+        it holds (its meta and records), and for such a row the asset ids its 3MF names,
+        as kept (`output_derived` kind ``asset_ids`` of ``asset_ids_version``; ``None``
+        when not kept yet): what the asset sweep scans for the ids an output names, as it
+        scanned the folder's JSON files (#7256)."""
         with self._pool.connection() as conn:
             found = conn.execute(
-                "SELECT output_id, params = '{}'::jsonb AS bare,"
-                " jsonb_build_array(meta, params, inputs, record, manifest, bom,"
-                " arranged_from, backfill)::text AS text FROM outputs"
+                "SELECT o.output_id, o.params = '{}'::jsonb AS bare,"
+                " jsonb_build_array(o.meta, o.params, o.inputs, o.record, o.manifest, o.bom,"
+                " o.arranged_from, o.backfill)::text AS text, d.data AS kept FROM outputs o"
+                " LEFT JOIN output_derived d ON d.output_id = o.output_id"
+                " AND d.kind = 'asset_ids' AND d.plate = 0 AND d.version = %s"
+                " AND o.params = '{}'::jsonb",
+                (asset_ids_version,),
             ).fetchall()
-        return [(str(item["output_id"]), bool(item["bare"]), str(item["text"])) for item in found]
+        return [
+            (
+                str(item["output_id"]),
+                bool(item["bare"]),
+                str(item["text"]),
+                None if item["kept"] is None else [str(each) for each in item["kept"]],
+            )
+            for item in found
+        ]
 
     def stamps(self) -> dict[str, str | None]:
         """Each row's ``files_stamp``, by output id: what the copy compares the files with."""

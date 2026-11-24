@@ -116,6 +116,10 @@ LAST_USED_MAX = 500
 #: harmless, one that misses a reference destroys an output's provenance. Matching
 #: raw text rather than parsed JSON also reads a file too damaged to parse.
 _ID_IN_TEXT = re.compile(rb"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
+#: The version of the asset ids kept per output (`output_derived` kind ``asset_ids``,
+#: #7256). Change it with `_ID_IN_TEXT` or `_ids_in_archive`: every output's 3MF is then
+#: read once again.
+ASSET_IDS_VERSION = "1"
 
 #: The largest upload read. An SVG this size is already far past a logo or a mask.
 MAX_ASSET_BYTES = 8 * 1024 * 1024
@@ -1210,8 +1214,10 @@ async def referenced_asset_ids(
     - every output's records, and for an output whose ``params`` is empty or gone, the
       root model of its 3MF, where the provenance "Edit in ScadBuddy" falls back to is
       stamped. Once ``outputs`` has finished a copy into its rows (#7255), its rows'
-      JSON is scanned, and such a 3MF is read from its model blob through a temporary
-      file, else its file (#7256). Before that, the folders' JSON files and 3MFs;
+      JSON is scanned. The ids such a 3MF names are kept in ``output_derived`` (kind
+      ``asset_ids``, `ASSET_IDS_VERSION`), so a 3MF, which is never rewritten, is read
+      once: from its model blob through a temporary file, else its file (#7256). Before
+      that copy, the folders' JSON files and 3MFs;
     - ``records``: JSON records from Postgres, each scanned whole: every saved
       preset's and every job's inputs (the ``render_jobs`` projection, finished or
       not), and every order item's (#4249, orders spec §3.3) -- their ``params`` and
@@ -1229,11 +1235,16 @@ async def referenced_asset_ids(
     # One span for the scan, with what it read (#7245), as the folder walk has.
     with span("assets.referenced") as current:
         found, read, bare = await asyncio.to_thread(_referenced_in_rows, paths, records, rows)
+        kept: list[tuple[str, list[str]]] = []
         for output_id in bare:
             async with outputs.local_role(output_id, "model") as archive:
                 if archive is not None:
                     read["archives"] += 1
-                    found.update(await asyncio.to_thread(_ids_in_archive, archive))
+                    ids = await asyncio.to_thread(_ids_in_archive, archive)
+                    found.update(ids)
+                    kept.append((output_id, sorted(ids)))
+        # One write for the whole scan; a 3MF read here is not read again.
+        await asyncio.to_thread(rows.write_derived_many, "asset_ids", 0, ASSET_IDS_VERSION, kept)
         for name, count in read.items():
             current.set_attribute(f"scadbuddy.{name}", count)
         current.set_attribute("scadbuddy.assets", len(found))
@@ -1244,14 +1255,17 @@ def _referenced_in_rows(
     paths: DataPaths, records: Iterable[Mapping[str, Any]], rows: OutputRows
 ) -> tuple[set[str], dict[str, int], list[str]]:
     """The ids in every output row's JSON, the templates' files and ``records``, what was
-    read, and the outputs whose 3MF is still to scan (``params`` empty). Blocking."""
+    read, and the outputs whose 3MF is still to scan (``params`` empty, and its ids not
+    kept yet). Blocking."""
     found: set[str] = set()
     read = {"files": 0, "archives": 0, "outputs": 0}
     bare: list[str] = []
-    for output_id, empty, text in rows.documents():
+    for output_id, empty, text, kept in rows.documents(ASSET_IDS_VERSION):
         read["outputs"] += 1
         found.update(_ids_in(text.encode()))
-        if empty:
+        if kept is not None:
+            found.update(kept)
+        elif empty:
             bare.append(output_id)
     found.update(_template_ids(paths, read))
     for document in records:

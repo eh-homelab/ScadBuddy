@@ -422,6 +422,42 @@ async def test_referenced_asset_ids_from_rows_and_blob_3mf(
         assert in_files not in found
 
 
+@pytest.mark.requires_postgres
+async def test_referenced_asset_ids_read_each_3mf_once(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7256 review B-I1: the ids a 3MF names are kept in ``output_derived`` on its first
+    read, so the daily sweep reads no blob for an output it read before."""
+    in_archive = "b" * 64
+    async with blob_output(tmp_path / "o", pg_conninfo) as output:
+        store, rows = output.store, output.store.rows
+        assert rows is not None and store.bytes is not None
+        model = output.directory / "model.3mf"
+        with zipfile.ZipFile(model, "w") as written:
+            written.writestr(ROOT_MODEL, f"<model>{in_archive}</model>")
+        blobs = await store.bytes.put_folder(output.directory, output.meta.id, output.meta.slug)
+        rows.write_bytes([ByteWrite(output.meta.id, blobs, "stamp", None)])
+        with output.pool.connection() as conn:
+            conn.execute("UPDATE outputs SET params = '{}' WHERE output_id = %s", (output.meta.id,))
+        run = rows.start_run()
+        rows.finish_run(run, copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
+        model.unlink()
+        gets: list[Any] = []
+        real_get = output.content.get
+
+        def counting_get(ref: Any, *args: Any, **kwargs: Any) -> Any:
+            gets.append(ref)
+            return real_get(ref, *args, **kwargs)
+
+        monkeypatch.setattr(output.content, "get", counting_get)
+        assert in_archive in await referenced_asset_ids(store.paths, [], store)
+        assert len(gets) == 1
+        found = rows.derived(output.meta.id, "asset_ids", 0)
+        assert found == (assets_module.ASSET_IDS_VERSION, [in_archive])
+        assert in_archive in await referenced_asset_ids(store.paths, [], store)
+        assert len(gets) == 1  # the second sweep read no blob
+
+
 # -- the sweep --------------------------------------------------------------------
 
 

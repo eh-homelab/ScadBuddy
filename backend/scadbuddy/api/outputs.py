@@ -103,6 +103,7 @@ from scadbuddy.core.tracing import span, traced_thread
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.output_index import DEFAULT_LIMIT, AfterNotListedError, OutputQuery
+from scadbuddy.library.output_rows import Role
 from scadbuddy.library.outputs import (
     BACK_OFFICE,
     OUTPUT_ID_PATTERN,
@@ -228,10 +229,13 @@ def detail(
     library_files: list[LibraryCopy],
     *,
     failed_before_queueing: bool = False,
+    versions: Mapping[tuple[str, Role], str] | None = None,
 ) -> OutputDetail:
+    """``versions``: the listing's blob versions, read for all its outputs at once
+    (`OutputStore.blob_versions`); a role left out reads its own."""
     # One read of the output's row for every part below (#7255).
     with store.reading(meta.id):
-        return _detail(store, meta, library_files, failed_before_queueing)
+        return _detail(store, meta, library_files, failed_before_queueing, versions or {})
 
 
 def _detail(
@@ -239,14 +243,19 @@ def _detail(
     meta: OutputMeta,
     library_files: list[LibraryCopy],
     failed_before_queueing: bool,
+    versions: Mapping[tuple[str, Role], str],
 ) -> OutputDetail:
+    def version(role: Role) -> str | None:
+        known = versions.get((meta.id, role))
+        return known if known is not None else store.role_version(meta.id, role)
+
     params = store.params(meta.id)
-    thumbnail_version = store.thumbnail_version(meta.id)
+    thumbnail_version = version("thumbnail")
     return OutputDetail(
         **meta.model_dump(),
         has_thumbnail=thumbnail_version is not None or store.drawable_thumbnail(meta.id),
         thumbnail_version=thumbnail_version,
-        preview_version=store.role_version(meta.id, "preview"),
+        preview_version=version("preview"),
         params=params,
         inputs=store.inputs(meta.id, params),
         bom=store.bom(meta.id),
@@ -281,12 +290,27 @@ async def _details(
     # The thumbnail check and params read are file IO: off the event loop. A span of
     # their own (#2755): on the NAS share they were most of a listing's time.
     with span("output.details", attributes={"scadbuddy.outputs": len(metas)}):
-        return await asyncio.to_thread(
-            lambda: [
-                detail(store, meta, copies[meta.id], failed_before_queueing=meta.id in failed)
-                for meta in metas
-            ]
+        return await asyncio.to_thread(_listed, store, metas, copies, failed)
+
+
+def _listed(
+    store: OutputStore,
+    metas: list[OutputMeta],
+    copies: Mapping[str, list[LibraryCopy]],
+    failed: set[str],
+) -> list[OutputDetail]:
+    """Each output's detail; the blob versions of all of them in one query. Blocking."""
+    versions = store.blob_versions([meta.id for meta in metas])
+    return [
+        detail(
+            store,
+            meta,
+            copies[meta.id],
+            failed_before_queueing=meta.id in failed,
+            versions=versions,
         )
+        for meta in metas
+    ]
 
 
 @router.post(
