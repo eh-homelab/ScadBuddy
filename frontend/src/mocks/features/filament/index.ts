@@ -1420,7 +1420,7 @@ function fetchTargets(): S['ExportTarget'][] {
 
 /**
  * The mock has no worker: a running fetch ends `imported` on the next read of it, with
- * one preset per target key (a Bambuddy local preset id and a 3DFP-style name), as the
+ * one preset per target key (a ScadBuddy preset ref, `sb-<id>`, and a 3DFP-style name), as the
  * API's import writes them.
  */
 function finishFetch(run: S['ProfileFetch']): S['ProfileFetch'] {
@@ -1431,7 +1431,7 @@ function finishFetch(run: S['ProfileFetch']): S['ProfileFetch'] {
       type_id: run.type_id,
       printer_model: target.printer_model,
       nozzle_diameter: nozzle,
-      slicer_filament: String(9000 + t * 10 + n),
+      slicer_filament: `sb-${9000 + t * 10 + n}`,
       slicer_filament_name: `${type?.code ?? 'Filament'} @BBL ${target.printer_model} ${nozzle} nozzle`,
     })),
   )
@@ -2111,6 +2111,7 @@ export const handlers = [
       const refused = spoolRefusal({ ...row, ...fields })
       if (refused) return problem(422, `spool #${row.number}: ${((await refused.clone().json()) as { detail: string }).detail}`)
     }
+    const changed: string[] = []
     for (const row of found) {
       const at = state.spools.indexOf(row)
       const changes = Object.fromEntries(
@@ -2119,11 +2120,12 @@ export const handlers = [
           .map((field) => [field, [row[field as keyof SpoolRow], fields[field as keyof SpoolRow]]]),
       )
       if (!Object.keys(changes).length) continue
+      changed.push(row.id)
       state.spools[at] = { ...row, ...fields, updated_at: now() }
       if (!row.type_id && fields.type_id) state.spoolPresets = state.spoolPresets.filter((one) => !(one.spool_id === row.id && one.migrated))
       addEvent(row.id, 'edited', { data: { changes } })
     }
-    return HttpResponse.json({ updated: found.map((row) => row.id), not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
+    return HttpResponse.json({ changed, unchanged: found.map((row) => row.id).filter((id) => !changed.includes(id)), not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
   }),
   // #7151 — `POST /filament/spools/bulk-archive` and `bulk-restore`: each spool's outcome, reported once.
   ...([true, false] as const).map((archived) =>

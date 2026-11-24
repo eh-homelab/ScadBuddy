@@ -9,39 +9,27 @@ Where a preset comes from:
 - ``standard`` and ``cloud`` presets are Bambu Studio's own, read from the image's BBL
   tree (:class:`~scadbuddy.slicing.profiles.Profiles`) by id, then by the name
   Bambuddy's catalogue gives the id.
-- A process preset that is not in the tree (``local``, a cloud user preset, or a
-  ``standard`` one this image's Bambu Studio does not ship) takes Bambuddy's flattened
-  values (``GET /slicer/preset-values``). Bambuddy's slicer may carry other profiles
-  than the image's (02.08.00.06 against 02.08.00.05 on 2026-10-18), so such a slice's
-  key carries a digest of the process file it wrote (:attr:`PresetFiles.from_bambuddy`,
-  :func:`native_preset_key`), never only the image's version.
-- A ``local`` printer or filament preset (a user's own, imported into Bambuddy from an
-  OrcaSlicer or Bambu Studio profile, as the spool intake does from 3dfilamentprofiles)
-  is read from Bambuddy's ``GET /local-presets/{id}`` (#4233): its ``setting`` is the
-  preset's own document, already merged over the OrcaSlicer BBL base its ``inherits``
-  names, which Bambuddy's own slicer slices with verbatim
-  (:class:`~scadbuddy.bambuddy.models.LocalPresetDetail`). Here it is flattened over the
-  image's tree by that same ``inherits`` (:meth:`Profiles.flatten_over`), so a parent
-  this Bambu Studio lacks refuses it, naming the parent, rather than slicing a document
-  that the CLI would fill from its defaults. The slice's key carries the sha256 of each
-  such file (:attr:`PresetFiles.from_bambuddy`): ``PUT /local-presets/{id}`` rewrites a
-  preset under the same id. Bambuddy's values route serves no other slot: it answers
-  ``GET /slicer/preset-values?slot=filament`` with ``400 "Only the 'process' slot is
-  supported"`` (measured 2026-09-27, and again 2026-10-18 against the live
-  ``ghcr.io/maziggy/bambuddy:daily@sha256:99684c2f…`` with ``source=cloud&id=GFSB00_22``),
-  so a cloud user preset in the printer or filament slot is still refused.
-- A ``local`` preset of any slot that the kept copy of Bambuddy's local presets holds
-  (:attr:`Profiles.held`, `slicing/held_presets.py`, #4645) is built from that copy's
-  document, flattened over the tree as above, and never read from Bambuddy, with a
-  client or without: so a native run, which has none, slices it, and a slice's start and
-  its prepare build it alike. A process preset is then the tree's flattening of the
-  user's document, not Bambuddy's values. Its key carries the built file's digest as a
-  read from Bambuddy does (the same ``from_bambuddy`` slot), so an edit, once kept,
-  slices again. A ``local`` ref the copy lacks is read from Bambuddy as above.
+- A process preset that is not in the tree (a cloud user preset, or a ``standard`` one
+  this image's Bambu Studio does not ship) takes Bambuddy's flattened values (``GET
+  /slicer/preset-values``). Bambuddy's slicer may carry other profiles than the image's
+  (02.08.00.06 against 02.08.00.05 on 2026-10-18), so such a slice's key carries a digest
+  of the process file it wrote (:attr:`PresetFiles.from_bambuddy`,
+  :func:`native_preset_key`), never only the image's version. Bambuddy's values route
+  serves no other slot: it answers ``GET /slicer/preset-values?slot=filament`` with
+  ``400 "Only the 'process' slot is supported"`` (measured 2026-09-27, and again
+  2026-10-18 against the live ``ghcr.io/maziggy/bambuddy:daily@sha256:99684c2f…`` with
+  ``source=cloud&id=GFSB00_22``), so a cloud user preset in the printer or filament slot
+  is refused.
 - A ``local`` filament ref ``sb-<id>`` is ScadBuddy's own preset (#7176,
   :attr:`Profiles.own`, `slicing/own_presets.py`): its current document, flattened over
-  the tree as a kept one is, never read from Bambuddy. Its key carries the built file's
-  digest in the same ``from_bambuddy`` slot, so a new version slices again.
+  the tree by its ``inherits`` (:meth:`Profiles.flatten_over`), so a parent this Bambu
+  Studio lacks refuses it, naming the parent, rather than slicing a document that the CLI
+  would fill from its defaults. It is never read from Bambuddy. Its key carries the built
+  file's digest in the same ``from_bambuddy`` slot, so a new version slices again.
+- Any other ``local`` ref is a Bambuddy local preset, of any slot, and is refused (#7244,
+  the owner's decision of 2026-11-23: ScadBuddy owns its presets, and the native slicer
+  reads no Bambuddy local preset, from a copy or from Bambuddy). A filament one is
+  imported into ScadBuddy's own first (``POST /filament/presets/bambuddy-import``).
 - ``orca_cloud`` presets are OrcaSlicer's, not Bambu Studio's, and are refused.
 
 The plate type goes in the process file's ``curr_bed_type``: the v02.08.02.61 CLI has
@@ -79,16 +67,14 @@ import json
 from collections.abc import Mapping
 from typing import Literal
 
-from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import read_preset_names
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
-from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef, ProcessValue
+from scadbuddy.bambuddy.models import PresetRef, ProcessValue
 from scadbuddy.bambuddy.process_overrides import without_host_side
 from scadbuddy.core.credentials import strip_credentials
-from scadbuddy.core.problems import ApiError
 from scadbuddy.slicing.own_presets import sb_id
 from scadbuddy.slicing.profiles import (
     Flat,
@@ -194,9 +180,7 @@ async def _resolve(
         own_id = sb_id(ref.id)
         if own_id is not None:
             return await _own(slot, ref, own_id, profiles), True
-        held = await _held(profiles, ref)
-        if held is not None or slot != "process":
-            return await _local(slot, ref, profiles, client, held), True
+        raise ProfileError(bambuddy_local_refusal(slot, ref.id))
     name = await names.of(ref) or ref.id
     if slot != "process":
         version = await asyncio.to_thread(lambda: profiles.version)
@@ -227,30 +211,21 @@ async def _resolve(
     return flatten(name, {name: own}.get), True
 
 
-def _local_id(ref: PresetRef) -> int | None:
-    """A Bambuddy local preset's id: a number (ASCII digits only)."""
-    return int(ref.id) if ref.id.isascii() and ref.id.isdigit() else None
-
-
-async def _held(profiles: Profiles, ref: PresetRef) -> LocalPresetDetail | None:
-    """``local`` ``ref`` from the kept copy of Bambuddy's local presets (#4645), or
-    ``None`` when it holds none (or there is no copy)."""
-    preset_id = _local_id(ref)
-    if profiles.held is None or ref.source != "local" or preset_id is None:
-        return None
-    return (await profiles.held.documents([preset_id])).get(preset_id)
-
-
-async def held_flat(profiles: Profiles, slot: Slot, ref: PresetRef) -> Flat | None:
-    """``local`` ``ref``'s ``slot`` preset flattened from the kept copy, as a slice builds
-    it; ``None`` when the copy holds none. A :class:`ProfileError` when it cannot be read."""
-    held = await _held(profiles, ref)
-    return None if held is None else await _local(slot, ref, profiles, None, held)
+def bambuddy_local_refusal(slot: str, preset_id: str) -> str:
+    """Why the native slicer refuses Bambuddy local preset ``preset_id`` (#7244)."""
+    what = f"the native slicer cannot read Bambuddy local {slot} preset {preset_id}"
+    if slot == "filament":
+        return (
+            f"{what}: ScadBuddy reads only its own filament presets. Import Bambuddy's"
+            " presets (Settings, Printing, Filament: Import presets from Bambuddy now),"
+            " then choose the imported one"
+        )
+    return f"{what}: ScadBuddy reads no Bambuddy local preset. Choose one of Bambu Studio's"
 
 
 async def _own(slot: Slot, ref: PresetRef, preset_id: int, profiles: Profiles) -> Flat:
     """A ScadBuddy preset's file (#7176, `slicing/own_presets.py`): its current document,
-    flattened over the image's tree by its ``inherits`` as a kept local preset's is. Never
+    flattened over the image's tree by its ``inherits`` (the module's docstring). Never
     read from Bambuddy, with a client or without."""
     what = f"the native slicer cannot read ScadBuddy {slot} preset {ref.id}"
     if slot != "filament":
@@ -278,58 +253,6 @@ async def _own(slot: Slot, ref: PresetRef, preset_id: int, profiles: Profiles) -
         ) from None
 
 
-async def _local(
-    slot: Slot,
-    ref: PresetRef,
-    profiles: Profiles,
-    client: BambuddyClient | None,
-    held: LocalPresetDetail | None = None,
-) -> Flat:
-    """A ``local`` preset's file (#4233): Bambuddy's document for it, flattened over the
-    image's tree by its ``inherits`` (the module's docstring). The document is the kept
-    copy's (``held``, #4645) when it has one, else read from Bambuddy (``GET
-    /local-presets/{id}``). The row names the preset, so the catalogue is not read."""
-    what = f"the native slicer cannot read local {slot} preset"
-    row = held
-    if row is None:
-        if client is None:
-            version = await asyncio.to_thread(lambda: profiles.version)
-            raise ProfileError(
-                f"{what} {ref.id}: it is not one of Bambu Studio {version}'s, nor in"
-                " ScadBuddy's copy of Bambuddy's local presets (kept with the spools), and"
-                " reading it from Bambuddy needs Bambuddy, and none is configured"
-            )
-        preset_id = _local_id(ref)
-        if preset_id is None:
-            raise ProfileError(f"{what} {ref.id}: a Bambuddy local preset's id is a number")
-        try:
-            row = await client.local_preset(preset_id)
-        except ApiError as error:
-            if error.status != status.HTTP_404_NOT_FOUND:
-                raise
-            raise ProfileError(
-                f"{what} {ref.id}: Bambuddy has no local preset {preset_id} any more"
-            ) from None
-    preset_id = row.id
-    if row.preset_type != slot:
-        raise ProfileError(
-            f"{what} {row.name}: Bambuddy's local preset {preset_id} is a {row.preset_type} preset"
-        )
-    if not row.setting:
-        raise ProfileError(f"{what} {row.name}: Bambuddy holds no settings for it")
-    try:
-        return await asyncio.to_thread(
-            profiles.flatten_over, _KINDS[slot], row.name, strip_credentials(row.setting)
-        )
-    except ProfileImageError:
-        raise
-    except ProfileError as error:
-        version = await asyncio.to_thread(lambda: profiles.version)
-        raise ProfileError(
-            f"{what} {row.name} from Bambuddy over Bambu Studio {version}'s presets: {error}"
-        ) from None
-
-
 def _document(flat: Flat) -> bytes:
     return json.dumps(flat, indent=4, ensure_ascii=False).encode()
 
@@ -340,9 +263,9 @@ def _digest(document: bytes) -> str:
 
 async def needs_bambuddy(plan: SlicePlan, profiles: Profiles) -> bool:
     """Whether building ``plan``'s presets reads Bambuddy: a ref the image's tree does
-    not hold by its id that Bambuddy could resolve (by name, a process preset's values,
-    or a local preset's document the kept copy lacks, #4645). A ref refused either way
-    (``orca_cloud``) does not count."""
+    not hold by its id that Bambuddy could resolve (by name, or a process preset's
+    values). A ref refused either way (``orca_cloud``, any ``local`` one but ScadBuddy's
+    own, #7244) does not count."""
     refs: list[tuple[Slot, PresetRef]] = [
         ("printer", plan.printer_preset),
         ("process", plan.process_preset),
@@ -351,14 +274,12 @@ async def needs_bambuddy(plan: SlicePlan, profiles: Profiles) -> bool:
     for slot, ref in refs:
         if ref.source == "orca_cloud":
             continue
-        if ref.source in ("standard", "cloud"):
-            if await asyncio.to_thread(profiles.find, _KINDS[slot], ref.id) is None:
-                return True
-        elif sb_id(ref.id) is not None:
-            # ScadBuddy's own: read from its store, never from Bambuddy (#7176).
-            continue
-        elif await _held(profiles, ref) is None:
+        if ref.source in ("standard", "cloud") and (
+            await asyncio.to_thread(profiles.find, _KINDS[slot], ref.id) is None
+        ):
             return True
+        # A `local` ref is ScadBuddy's own, read from its store (#7176), or a Bambuddy
+        # local preset, refused (#7244): neither reads Bambuddy.
     return False
 
 
@@ -392,8 +313,8 @@ async def build_presets(
         process["curr_bed_type"] = plan.bed_type
     # No print-host credential reaches a slicer file, whichever tree or document it came
     # from, nor any setting that acts on the machine that slices: `post_process` would run
-    # a command in the slicer's pod (#2998, `process_overrides.HOST_SIDE_KEYS`). A local
-    # preset Bambuddy holds may carry one too.
+    # a command in the slicer's pod (#2998, `process_overrides.HOST_SIDE_KEYS`). A user's
+    # own preset may carry one too.
     machine_document = _document(_host_safe(machine, "printer preset"))
     process_document = _document(_host_safe(process, "process preset"))
     filament_documents = [

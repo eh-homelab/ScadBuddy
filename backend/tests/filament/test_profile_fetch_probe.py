@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 from temporalio.api.enums.v1 import TaskQueueType
-from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.api.taskqueue.v1 import PollerInfo
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest, DescribeTaskQueueResponse
 
 from scadbuddy.filament.profile_fetch import (
     POLLERS_CACHE_SECONDS,
@@ -26,11 +27,14 @@ class FakeService:
         self.fail = False
         self.reads: list[tuple[str, int]] = []
 
-    async def describe_task_queue(self, request: DescribeTaskQueueRequest) -> Any:
-        self.reads.append((request.task_queue.name, request.task_queue_type))
+    async def describe_task_queue(self, request: DescribeTaskQueueRequest, **_: object) -> Any:
+        # One read per queue and type: its root partition. The others
+        # (`pollers.partition_name`) answer alike, unrecorded.
+        if not request.task_queue.name.startswith("/_sys/"):
+            self.reads.append((request.task_queue.name, request.task_queue_type))
         if self.fail:
             raise RuntimeError("Temporal is down")
-        return type("Described", (), {"pollers": [object()] if self.pollers else []})()
+        return DescribeTaskQueueResponse(pollers=[PollerInfo(identity="w")] if self.pollers else [])
 
 
 class FakeHandle:

@@ -53,6 +53,7 @@ from scadbuddy.workflows.pipelines import (
     RenderPreview,
     TemplatePipeline,
 )
+from scadbuddy.workflows.pollers import queue_pollers
 from scadbuddy.workflows.printer_watch import PrinterWatch
 from scadbuddy.workflows.printing import LanSequenceWorkflow, PrintRunWorkflow
 from scadbuddy.workflows.problems import operation_lost
@@ -493,19 +494,14 @@ async def pollers_elsewhere(
     prod, 2026-10-27). A stopping worker leaves its pinned runs only to one of them that
     `any_serving` finds unmarked (#4869): in a rollout the build is still current while
     the new pods, of the next build, start, and none of them serves a run pinned to this
-    one."""
-    described = await client.workflow_service.describe_task_queue(
-        DescribeTaskQueueRequest(
-            namespace=client.namespace,
-            task_queue=TaskQueue(name=task_queue),
-            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-        ),
-        timeout=RPC_TIMEOUT,
+    one. Every partition's pollers (`pollers.queue_pollers`, #7350)."""
+    pollers = await queue_pollers(
+        client, task_queue, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW, timeout=RPC_TIMEOUT
     )
     since = datetime.now(UTC) - timedelta(seconds=within)
     return {
         poller.identity
-        for poller in described.pollers
+        for poller in pollers
         if poller.deployment_options.deployment_name == deployment_name
         and poller.deployment_options.build_id == build_id
         and poller.identity not in identities
