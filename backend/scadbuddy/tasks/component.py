@@ -35,10 +35,12 @@ class TasksComponent:
         return self._store
 
     async def mark_answered(
-        self, task_id: str, answer: dict[str, Any] | None, by: str | None
+        self, task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str
     ) -> Task:
         """`TaskStore.mark_answered`, as `RemoteTasks` has it, for the in-process worker."""
-        return await asyncio.to_thread(self.store.mark_answered, task_id, answer, by)
+        return await asyncio.to_thread(
+            self.store.mark_answered, task_id, answer, by, workflow_run_id
+        )
 
 
 TASKS: Key[TasksComponent] = Key("tasks")

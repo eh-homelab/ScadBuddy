@@ -4,7 +4,7 @@ Every mounted route falls in exactly one class, by its endpoint: the public ones
 person-only ones, the service-token exchange, the flow host routes and the internal
 modules are named here, and every other ``/api/v1`` route is ``api``.
 ``tests/auth/test_routes.py`` fails for a name here that matches no route, and for an
-endpoint that refuses agents (``_browser_only``) that is not ``person``.
+endpoint that refuses agents (``browser_only``) that is not ``person``.
 
 :func:`would_refuse` says why ``enforce`` refuses a request, or ``None``.
 ``auth/check.py`` refuses it in ``enforce`` and counts it in ``observe``.
@@ -79,7 +79,7 @@ EXCHANGE_ENDPOINTS = frozenset({"scadbuddy.api.service_token.exchange_service_to
 #: A person's own session only (§8.1): what an agent must never do for them.
 PERSON_ENDPOINTS = frozenset(
     {
-        # `_browser_only` today (`api/flows.py`): a flow's answers, approvals and grants.
+        # `browser_only` today (`api/flows.py`): a flow's answers, approvals and grants.
         "scadbuddy.api.flows.answer_flow_run",
         "scadbuddy.api.flows.decide_flow_run",
         "scadbuddy.api.flows.get_flow_run_proposal",

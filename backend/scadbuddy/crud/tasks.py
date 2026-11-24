@@ -65,13 +65,16 @@ class RemoteTasks:
         return Task.model_validate(response.json())
 
     async def mark_answered(
-        self, task_id: str, answer: dict[str, Any] | None, by: str | None
+        self, task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str
     ) -> Task:
         """`TaskStore.mark_answered`, with its rules; the same answer again answers the
-        row. Raises `TaskNotOpenError` and, for a missing task, `KeyError`."""
+        row, and so does one of another execution. Raises `TaskNotOpenError` and, for a
+        missing task, `KeyError`."""
         try:
             response = await self._client.request(
-                "POST", f"{BASE}/{_part(task_id)}/answered", json={"answer": answer, "by": by}
+                "POST",
+                f"{BASE}/{_part(task_id)}/answered",
+                json={"answer": answer, "by": by, "workflow_run_id": workflow_run_id},
             )
         except CrudRefusedError as error:
             reason = error.problem.get("reason")

@@ -14,7 +14,8 @@ The row lives as long as the Update may have landed (#2247):
   failed send never blocks the answer that would resolve the call. When Temporal
   cannot say, the row stays and the error is raised; the next attempt resends.
 - Cancelled (the activity's deadline, a worker stopping): the row stays and the
-  cancellation is raised. Nothing is asked while cancelling; the next attempt resends.
+  cancellation is raised. Nothing is asked while cancelling; the next attempt resends,
+  an answer only if it did not land.
 
 A retry, or a new request with the same decision, is let through by `check` on a
 matching row before `waiting_on` is looked at: a call the landed Update resolved is no
@@ -38,10 +39,15 @@ seals it under the run's own payload key (`seal_answer`), so the operation's inp
 its `operations` row carry `answer_sealed`, and forgetting the run (`forget.py`) makes
 them unreadable with the rest of the run's payloads.
 
+A Reset undoes the answers after its point, so an answer never crosses one (#7364). An
+attempt that finds its row on record asks first whether its Update landed on the execution
+it checked, and then sends nothing. Any other attempt sends only while that execution is
+the run's current one.
+
 `task_answer` (#7364) is `flow_answer` for a prompt, whose call id is its task's id and
-whose answer is an object the route checked against the task's schema. Its task is marked
-only once the Update landed; a mark that fails fails the attempt, and the next one resends
-the same Update and marks again. Neither kind's result holds the answer.
+whose answer is an object the route checked against the task's schema. Once the Update
+landed, its task is marked once, best effort: the run has the answer whether or not the
+mark works. Neither kind's result holds the answer.
 """
 
 from __future__ import annotations
@@ -65,7 +71,11 @@ from temporalio import activity
 from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.enums.v1 import ResetReapplyExcludeType
 from temporalio.api.workflowservice.v1 import ResetWorkflowExecutionRequest
-from temporalio.client import Client, WorkflowUpdateFailedError
+from temporalio.client import (
+    Client,
+    WorkflowUpdateFailedError,
+    WorkflowUpdateRPCTimeoutOrCancelledError,
+)
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
@@ -92,7 +102,6 @@ from scadbuddy.flows.store import (
 )
 from scadbuddy.operations.kinds import KindsBuild, OperationKind
 from scadbuddy.tasks.models import Task, TaskState
-from scadbuddy.tasks.store import TaskNotOpenError
 from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
 from scadbuddy.workflows.flow_models import Hop, HopAction, HopRecord
 from scadbuddy.workflows.payload_codec import PayloadKeys, dedup_iv
@@ -219,19 +228,21 @@ def task_not_open(state: TaskState) -> ApiError:
     )
 
 
-class _TakenError(Exception):
-    """Another answer holds the call: on record, or (`by_run`) the run already has one."""
-
-    def __init__(self, *, by_run: bool) -> None:
-        super().__init__("another answer holds the call")
-        self.by_run = by_run
+def _task_taken() -> ApiError:
+    """Another answer holds the task's call. The route adds the row's own `state`, which is
+    `open` until the mark of the answer that won."""
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "That was answered already. Read the task again.",
+        type_=TASK_NOT_OPEN,
+    )
 
 
 class AnswerMarks(Protocol):
     """Where a task is marked answered: `RemoteTasks`, or the API's own `TasksComponent`."""
 
     async def mark_answered(
-        self, task_id: str, answer: dict[str, Any] | None, by: str | None
+        self, task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str
     ) -> Task: ...
 
 
@@ -381,6 +392,17 @@ def flow_kinds(
         text = await open_answer(keys, str(request["run_id"]), str(request["answer_sealed"]))
         return json.loads(text) if "task_id" in request else text
 
+    async def at_execution(workflow_id: str, run_id: str) -> None:
+        """Refuse unless `run_id` is the workflow's current execution: a Reset replaces it."""
+        try:
+            described = await activity.client().get_workflow_handle(workflow_id).describe()
+        except RPCError as err:
+            if err.status == RPCStatusCode.NOT_FOUND:
+                raise _stale() from None
+            raise
+        if described.run_id != run_id:
+            raise _stale()
+
     async def check(kind: str, request: dict[str, Any]) -> dict[str, Any]:
         run = await store.get_run(str(request["run_id"]))
         if run is None:
@@ -388,14 +410,7 @@ def flow_kinds(
         if run.status in TERMINAL:
             raise ApiError(status.HTTP_409_CONFLICT, "The run has ended.", type_=RUN_CLOSED)
         call_id = _call_id(request)
-        try:
-            described = await activity.client().get_workflow_handle(run.workflow_id).describe()
-        except RPCError as err:
-            if err.status == RPCStatusCode.NOT_FOUND:
-                raise _stale() from None
-            raise
-        if described.run_id != run.workflow_run_id:
-            raise _stale()
+        await at_execution(run.workflow_id, run.workflow_run_id)
         rid = request_id(run, call_id)
         # Before `waiting_on`: a call whose Update landed is no longer waiting, and its
         # resend must reach Temporal's answer, not a 409 (#2247).
@@ -444,6 +459,11 @@ def flow_kinds(
                 return False
             activity.logger.warning("could not tell whether flow decision %s landed: %s", rid, err)
             return None
+        except WorkflowUpdateRPCTimeoutOrCancelledError as err:
+            # The SDK raises a deadline and a cancel of this activity as this one class.
+            if isinstance(err.__cause__, asyncio.CancelledError):
+                raise err.__cause__ from None
+            return None
         except WorkflowUpdateFailedError:
             return None
         return True
@@ -472,14 +492,25 @@ def flow_kinds(
     async def check_answer(request: dict[str, Any]) -> dict[str, Any]:
         return await check("answer", request)
 
-    async def give(request: dict[str, Any], checked: dict[str, Any]) -> Decision:
+    async def give(
+        request: dict[str, Any], checked: dict[str, Any], taken: Callable[[], ApiError]
+    ) -> Decision:
         """Record the answer and tell the harness; the decision, once its Update landed.
-        `_TakenError` when another answer holds the call."""
+        Raises `taken()` when another answer holds the call."""
         outcome, response = _wanted("answer", request, await answer_of(request))
         decision = _decision(request, checked, kind="answer", outcome=outcome, response=response)
+        sent = await store.get_decision(decision.request_id) is not None and await landed(
+            checked, decision.request_id
+        )
+        if not sent:
+            await at_execution(str(checked["workflow_id"]), decision.workflow_run_id)
         if not await store.record_decision(decision):
-            raise _TakenError(by_run=False)
+            raise taken()
+        if sent:
+            return decision
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
+        # The Update id is the call's, not the answer's. After a row was deleted (#2221), an
+        # earlier answer's Update may still land, and this one is then told that it landed.
         try:
             await client.provide_callback_result(
                 decision.call_id, result=response, update_id=decision.request_id
@@ -491,7 +522,7 @@ def flow_kinds(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, "The run cannot take that answer."
                 ) from None
             if err.error_type == "CallbackAlreadyResolved":
-                raise _TakenError(by_run=True) from None
+                raise taken() from None
             raise _stale() from None
         except BaseException as err:
             if not await settle(checked, decision.request_id, err):
@@ -499,34 +530,25 @@ def flow_kinds(
         return decision
 
     async def run_answer(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        try:
-            decision = await give(request, checked)
-        except _TakenError:
-            raise _resolved() from None
+        decision = await give(request, checked, _resolved)
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": "answered"}
 
     async def run_task_answer(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """The result is in the operation's record and its history, so it holds no answer:
-        the route reads the task."""
+        the route reads the task. An answer that lost (`_task_taken`) marks nothing."""
         assert tasks is not None
-        task_id = str(request["task_id"])
+        decision = await give(request, checked, _task_taken)
+        task_id = decision.call_id
         try:
-            decision = await give(request, checked)
-        except _TakenError as err:
-            if err.by_run or await landed(checked, str(checked["request_id"])):
-                # The run has another answer. The winner's own mark fills it in.
-                try:
-                    await tasks.mark_answered(task_id, None, None)
-                except TaskNotOpenError as held:
-                    raise task_not_open(held.state) from None
-                except KeyError:
-                    raise _stale() from None
-            raise task_not_open("answered") from None
-        try:
-            await tasks.mark_answered(task_id, decision.response["answer"], request.get("by"))
-        except (TaskNotOpenError, KeyError):
-            # The run took the answer, and its end closed the task (or it was forgotten).
-            activity.logger.info("the task %s ended before it was marked answered", task_id)
+            await tasks.mark_answered(
+                task_id,
+                decision.response["answer"],
+                request.get("by"),
+                decision.workflow_run_id,
+            )
+        except Exception as err:
+            # By its type alone: its text may quote the answer.
+            activity.logger.warning("could not mark the task %s: %s", task_id, type(err).__name__)
         return {"run_id": decision.run_id, "task_id": task_id, "outcome": "answered"}
 
     async def parked_hash(checked: dict[str, Any], call_id: str, shown: Any) -> str | None:

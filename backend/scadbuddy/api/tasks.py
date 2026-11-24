@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from scadbuddy.api.crud_agent_events import UUID_PATTERN
-from scadbuddy.api.flows import _browser_only, _unavailable
+from scadbuddy.api.flows import browser_only, unavailable
 from scadbuddy.api.limits import RouteLimit
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -121,8 +121,9 @@ def _fits(answer: dict[str, Any]) -> bool:
         status.HTTP_404_NOT_FOUND: {"description": "No such task"},
         status.HTTP_409_CONFLICT: {
             "content": {PROBLEM_MEDIA_TYPE: {}},
-            "description": f"`{TASK_NOT_OPEN}`, with the task's `state`; or the run ended or"
-            " no longer waits for this answer",
+            "description": f"`{TASK_NOT_OPEN}`, with the task's `state`, which may still be"
+            " `open` for a moment; or the run ended or no longer waits for this answer. Read"
+            " the task again",
         },
         status.HTTP_413_CONTENT_TOO_LARGE: {
             "description": f"The answer is more than {MAX_JSON_BYTES} bytes of JSON"
@@ -145,9 +146,11 @@ async def answer_task(
     idempotency_key: IdempotencyKey = None,
 ) -> Task | JSONResponse:
     """Check the answer against the task's schema and give it to the run. The same request
-    again answers the task. A 202's operation says only that it was answered: read the
-    task itself at ``GET /tasks/{id}``."""
-    _browser_only("Only a person answers a task.")
+    again answers the task as it stands. A 202's operation says only that it was answered:
+    read the task itself at ``GET /tasks/{id}``. Read it again after a 409 too. A 409
+    ``not-open`` has the task's own ``state``, which is ``open`` for a moment when the run
+    has another answer that is not marked yet."""
+    browser_only("Only a person answers a task.")
     answer = body.answer
     # First: nothing below walks an answer that is too large.
     if not _fits(answer):
@@ -157,7 +160,7 @@ async def answer_task(
         )
     task = await _found(tasks, task_id)
     if flows.keys is None:
-        raise _unavailable()
+        raise unavailable()
     # The same text for the same answer, so a resend seals to the same bytes. ASCII, so
     # that any text can be sealed: what cannot be stored is refused below.
     text = json.dumps(answer, sort_keys=True, separators=(",", ":"))
@@ -166,7 +169,7 @@ async def answer_task(
     except SubjectForgottenError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such task.") from None
     except psycopg.errors.UndefinedTable:
-        raise _unavailable() from None
+        raise unavailable() from None
 
     async def refuse() -> None:
         # Not for a repeat, which is its first answer however the task stands now.
@@ -181,20 +184,26 @@ async def answer_task(
                 problems=[problem.model_dump() for problem in problems],
             )
 
-    result = await run_operation(
-        ops,
-        response,
-        kind=ops.kinds[TASK_ANSWER],
-        subject=f"flow:{task.run_id}",
-        request={
-            "run_id": task.run_id,
-            "task_id": task.id,
-            "answer_sealed": sealed,
-            "by": browser_principal()[:MAX_BY_CHARS],
-        },
-        idempotency_key=idempotency_key,
-        before_start=refuse,
-    )
+    try:
+        result = await run_operation(
+            ops,
+            response,
+            kind=ops.kinds[TASK_ANSWER],
+            subject=f"flow:{task.run_id}",
+            request={
+                "run_id": task.run_id,
+                "task_id": task.id,
+                "answer_sealed": sealed,
+                "by": browser_principal()[:MAX_BY_CHARS],
+            },
+            idempotency_key=idempotency_key,
+            before_start=refuse,
+        )
+    except ApiError as error:
+        if error.type != TASK_NOT_OPEN:
+            raise
+        error.extensions["state"] = (await _found(tasks, task_id)).state
+        raise
     answered = operation_answer(result, TaskAnswered)
     if isinstance(answered, JSONResponse):
         return answered

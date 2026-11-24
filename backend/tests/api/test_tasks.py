@@ -232,22 +232,28 @@ def test_two_answers_at_once_one_wins_the_other_is_409(
     assert sorted(r.status_code for r in got) == [200, 409], [r.text for r in got]
     won = next(n for n, r in enumerate(got) if r.status_code == 200)
     lost = got[1 - won].json()
-    assert (lost["type"], lost["state"]) == (NOT_OPEN, "answered")
+    # The winner's mark may still be on the way.
+    assert lost["type"] == NOT_OPEN and lost["state"] in ("open", "answered")
     assert len(harness.sends) == 1
     assert rows.task(task)[:2] == ("answered", answers[won])
     assert rows.decisions(task) == [{"answer": answers[won]}]
 
 
-def test_an_already_resolved_callback_ends_the_task_answered_and_answers_409(
+def test_an_already_resolved_callback_is_409_with_the_tasks_own_state(
     client: TestClient, task: str, rows: Rows, harness: Harness
 ) -> None:
     harness.fails = [refused("CallbackAlreadyResolved")]
     response = post(client, task, GOOD)
     assert response.status_code == 409, response.text
-    assert (response.json()["type"], response.json()["state"]) == (NOT_OPEN, "answered")
-    # The answer that lost is stored nowhere; the winner's own mark fills it.
-    assert rows.task(task) == ("answered", None, None)
+    # The run has an answer and its mark is still on the way.
+    assert (response.json()["type"], response.json()["state"]) == (NOT_OPEN, "open")
+    assert rows.task(task) == ("open", None, None)
     assert rows.decisions(task) == []
+    rows.conn.execute("UPDATE tasks SET state = 'expired'")
+    again = post(client, task, GOOD)
+    assert (again.status_code, again.json()["type"]) == (409, NOT_OPEN)
+    assert again.json()["state"] == "expired"
+    assert len(harness.sends) == 1
 
 
 def test_an_answer_the_run_cannot_take_is_422_and_the_task_stays_open(
@@ -322,28 +328,27 @@ def test_the_same_request_again_answers_the_task_and_another_key_is_409(
     assert len(harness.sends) == 1
 
 
-def test_a_failed_mark_is_retried_and_the_callback_is_resolved_once(
+def test_a_failed_mark_answers_the_task_as_it_stands_and_is_not_made_again(
     client: TestClient,
     task: str,
     rows: Rows,
     harness: Harness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original = TaskStore.mark_answered
     marks: list[int] = []
 
-    def flaky(self: TaskStore, *args: Any) -> Any:
+    def fails(self: TaskStore, *args: Any) -> Any:
         marks.append(1)
-        if len(marks) == 1:
-            raise RuntimeError("the database is away")
-        return original(self, *args)
+        raise RuntimeError("the database is away")
 
-    monkeypatch.setattr(TaskStore, "mark_answered", flaky)
+    monkeypatch.setattr(TaskStore, "mark_answered", fails)
     response = post(client, task, GOOD)
     assert response.status_code == 200, response.text
-    assert len(marks) == 2
-    assert {update for _, _, update in harness.sends} == {harness.resolved[task][0]}
-    assert rows.task(task)[:2] == ("answered", GOOD)
+    assert (response.json()["state"], response.json()["answer"]) == ("open", None)
+    assert len(marks) == 1
+    assert len(harness.sends) == 1
+    assert rows.task(task) == ("open", None, None)
+    assert rows.decisions(task) == [{"answer": GOOD}]
 
 
 def test_a_send_that_failed_is_retried_and_marked_once_it_landed(

@@ -170,7 +170,7 @@ def _routes() -> list[tuple[str, dict[str, Any]]]:
     return [
         (BASE, _wire(T1)),
         (f"{BASE}/{T1}/close", {"state": "expired"}),
-        (f"{BASE}/{T1}/answered", {"answer": None, "by": None}),
+        (f"{BASE}/{T1}/answered", {"answer": {}, "by": None, "workflow_run_id": "x"}),
     ]
 
 
@@ -250,7 +250,7 @@ async def test_close_of_an_answered_task_is_409_with_its_state(
     remote: RemoteTasks, http: httpx.AsyncClient, store: TaskStore
 ) -> None:
     await remote.open(_task(T1))
-    await remote.mark_answered(T1, {"ok": True}, "alice")
+    await remote.mark_answered(T1, {"ok": True}, "alice", "x")
     raw = await http.post(f"{BASE}/{T1}/close", json={"state": "cancelled"})
     assert raw.status_code == 409
     assert raw.json()["reason"] == "task-not-open" and raw.json()["state"] == "answered"
@@ -277,8 +277,8 @@ async def test_the_same_answer_twice_answers_the_same_row(
     remote: RemoteTasks, events: _Events
 ) -> None:
     await remote.open(_task(T1))
-    first = await remote.mark_answered(T1, {"ok": True}, "alice")
-    again = await remote.mark_answered(T1, {"ok": True}, "alice")
+    first = await remote.mark_answered(T1, {"ok": True}, "alice", "x")
+    again = await remote.mark_answered(T1, {"ok": True}, "alice", "x")
     assert first == again and first.state == "answered" and first.answer == {"ok": True}
     assert events.changes() == [(T1, "open"), (T1, "answered")]
 
@@ -288,22 +288,45 @@ async def test_another_answer_or_a_closed_task_raises_with_its_state(
 ) -> None:
     await remote.open(_task(T1))
     await remote.open(_task(T2))
-    await remote.mark_answered(T1, {"ok": True}, None)
+    await remote.mark_answered(T1, {"ok": True}, None, "x")
     with pytest.raises(TaskNotOpenError) as another:
-        await remote.mark_answered(T1, {"ok": False}, None)
+        await remote.mark_answered(T1, {"ok": False}, None, "x")
     assert another.value.state == "answered"
-    await remote.close(T2, "cancelled")
+    await remote.close(T2, "expired")
     with pytest.raises(TaskNotOpenError) as closed:
-        await remote.mark_answered(T2, {"ok": True}, None)
-    assert closed.value.state == "cancelled"
+        await remote.mark_answered(T2, {"ok": True}, None, "x")
+    assert closed.value.state == "expired"
+
+
+async def test_the_answer_of_another_execution_answers_the_row_as_it_is(
+    remote: RemoteTasks, store: TaskStore, events: _Events
+) -> None:
+    opened = await remote.open(_task(T1))
+    assert await remote.mark_answered(T1, {"ok": True}, "alice", "replaced") == opened
+    assert store.get(T1) == opened
+    assert events.changes() == [(T1, "open")]
+
+
+@pytest.mark.parametrize("missing", ["answer", "workflow_run_id"])
+async def test_a_mark_without_its_answer_or_its_execution_is_422(
+    remote: RemoteTasks, http: httpx.AsyncClient, store: TaskStore, missing: str
+) -> None:
+    await remote.open(_task(T1))
+    whole: dict[str, Any] = {"answer": {"ok": True}, "by": None, "workflow_run_id": "x"}
+    left_out = {name: value for name, value in whole.items() if name != missing}
+    for body in (left_out, {**whole, missing: None}):
+        assert (await http.post(f"{BASE}/{T1}/answered", json=body)).status_code == 422
+    assert (task := store.get(T1)) is not None and task.state == "open"
 
 
 async def test_answering_a_missing_task_raises_a_key_error(
     remote: RemoteTasks, http: httpx.AsyncClient
 ) -> None:
     with pytest.raises(KeyError):
-        await remote.mark_answered(T1, {"ok": True}, None)
-    raw = await http.post(f"{BASE}/{T1}/answered", json={"answer": None, "by": None})
+        await remote.mark_answered(T1, {"ok": True}, None, "x")
+    raw = await http.post(
+        f"{BASE}/{T1}/answered", json={"answer": {}, "by": None, "workflow_run_id": "x"}
+    )
     assert raw.status_code == 404 and raw.json()["reason"] == "task-not-found"
 
 
@@ -318,7 +341,9 @@ async def test_an_id_that_is_not_a_uuid_is_422(
     assert (await http.post(BASE, json=_wire(bad))).status_code == 422
     assert (await http.post(BASE, json=_wire(T1, bad))).status_code == 422
     shut = await http.post(f"{BASE}/{quote(bad)}/close", json={"state": "expired"})
-    answered = await http.post(f"{BASE}/{quote(bad)}/answered", json={"answer": None, "by": None})
+    answered = await http.post(
+        f"{BASE}/{quote(bad)}/answered", json={"answer": {}, "by": None, "workflow_run_id": "x"}
+    )
     assert shut.status_code == answered.status_code == 422
     assert store.list(state=None) == []
 
@@ -328,9 +353,10 @@ async def test_a_nul_never_reaches_postgres(http: httpx.AsyncClient, store: Task
     for body in (
         {"answer": {"x": "a\u0000b"}, "by": None},
         {"answer": {"a\u0000b": 1}, "by": None},
-        {"answer": None, "by": "al\u0000ice"},
+        {"answer": {}, "by": "al\u0000ice"},
     ):
-        raw = await http.post(f"{BASE}/{T1}/answered", content=json.dumps(body))
+        content = json.dumps({**body, "workflow_run_id": "x"})
+        raw = await http.post(f"{BASE}/{T1}/answered", content=content)
         assert raw.status_code == 422, body
     for field, value in (("title", "a\u0000"), ("place", "a\u0000"), ("ui", "\u0000")):
         raw = await http.post(BASE, json={**_wire(T2), field: value})
@@ -350,7 +376,8 @@ async def test_a_refusal_never_quotes_an_answer_or_a_context_and_the_log_holds_n
         ),
         await http.post(BASE, json={**_wire(T1), "schema": {"type": "object", "x-note": schema}}),
         await http.post(
-            f"{BASE}/{T1}/answered", json={"answer": {"a": answer}, "by": f"{answer}\u0000"}
+            f"{BASE}/{T1}/answered",
+            json={"answer": {"a": answer}, "by": f"{answer}\u0000", "workflow_run_id": "x"},
         ),
     ]
     assert {r.status_code for r in sent} == {422}
@@ -364,8 +391,14 @@ async def test_a_refusal_never_quotes_an_answer_or_a_context_and_the_log_holds_n
     )
     assert ok.status_code == 200
     sent += [
-        await http.post(f"{BASE}/{T2}/answered", json={"answer": {"a": answer}, "by": None}),
-        await http.post(f"{BASE}/{T2}/answered", json={"answer": {"a": "other"}, "by": None}),
+        await http.post(
+            f"{BASE}/{T2}/answered",
+            json={"answer": {"a": answer}, "by": None, "workflow_run_id": "x"},
+        ),
+        await http.post(
+            f"{BASE}/{T2}/answered",
+            json={"answer": {"a": "other"}, "by": None, "workflow_run_id": "x"},
+        ),
     ]
     assert sent[-1].status_code == 409
     for response in sent[:3] + sent[-1:]:
@@ -382,11 +415,11 @@ async def test_a_big_context_or_answer_or_name_is_422(
     assert (await http.post(BASE, json={**_wire(T1), "ui": "x" * 201})).status_code == 422
     assert store.get(T1) is None
     await http.post(BASE, json=_wire(T1))
-    huge = {"answer": {"a": "x" * 17_000}, "by": None}
+    huge = {"answer": {"a": "x" * 17_000}, "by": None, "workflow_run_id": "x"}
     assert (await http.post(f"{BASE}/{T1}/answered", json=huge)).status_code == 422
-    long_by = {"answer": None, "by": "x" * 201}
+    long_by = {"answer": {}, "by": "x" * 201, "workflow_run_id": "x"}
     assert (await http.post(f"{BASE}/{T1}/answered", json=long_by)).status_code == 422
-    fine = {"answer": {"a": "x" * 200}, "by": "x" * 200, "newer": 1}
+    fine = {"answer": {"a": "x" * 200}, "by": "x" * 200, "newer": 1, "workflow_run_id": "x"}
     assert (await http.post(f"{BASE}/{T1}/answered", json=fine)).status_code == 200
     assert (await http.post(BASE, json={**_wire(T2), "newer": 1})).status_code == 200
 

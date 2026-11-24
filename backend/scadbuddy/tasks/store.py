@@ -113,41 +113,44 @@ class TaskStore:
             ).fetchall()
         return [Task.model_validate(row) for row in rows]
 
-    def mark_answered(self, task_id: str, answer: dict[str, Any] | None, by: str | None) -> Task:
-        """Answer an open task. A task that is answered already stays as it is when
-        ``answer`` is the same, or ``None`` (the caller lost a race and does not know the
-        winner's answer); a row answered with no answer takes ``answer``. Anything else
-        raises `TaskNotOpenError`. A missing task raises `KeyError`."""
+    def mark_answered(
+        self, task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str
+    ) -> Task:
+        """Record the answer the run's execution ``workflow_run_id`` took. An open task, and
+        one its run's end cancelled before this mark, is answered. The same answer again
+        changes nothing but a missing ``by``, which it fills in. A task with another answer
+        and an expired one raise `TaskNotOpenError`. A missing task raises `KeyError`.
+
+        A Reset undoes an answer, so when the run is at another execution the task is
+        answered as it stands. The run's row is locked before the task's, as `open` and
+        `FlowStore._reset_run` do: a Reset under way commits first, and a later one waits."""
         with self._pool.connection() as conn, conn.transaction():
-            row = conn.execute(
-                f"SELECT {_COLUMNS} FROM tasks WHERE id = %s FOR UPDATE", (task_id,)
+            run = conn.execute(
+                "SELECT workflow_run_id FROM workflow_runs"
+                " WHERE id = (SELECT run_id FROM tasks WHERE id = %s) FOR SHARE",
+                (task_id,),
             ).fetchone()
-            if row is None:
+            row = conn.execute(
+                f"SELECT {_COLUMNS}, answer = %s::jsonb AS same FROM tasks"
+                " WHERE id = %s FOR UPDATE",
+                (Jsonb(answer), task_id),
+            ).fetchone()
+            if run is None or row is None:
                 raise KeyError(task_id)
-            if row["state"] == "open":
+            if run["workflow_run_id"] != workflow_run_id:
+                return Task.model_validate(row)
+            state = row["state"]
+            if state == "expired" or (state == "answered" and not row["same"]):
+                raise TaskNotOpenError(state)
+            if state != "answered" or (row["answered_by"] is None and by is not None):
                 row = conn.execute(
                     "UPDATE tasks SET state = 'answered', answer = %s, answered_by = %s,"
                     f" updated_at = now() WHERE id = %s RETURNING {_COLUMNS}",
-                    (Jsonb(answer) if answer is not None else None, by, task_id),
-                ).fetchone()
-                assert row is not None
-                self._announce(conn, row)
-            elif row["state"] != "answered":
-                raise TaskNotOpenError(row["state"])
-            elif answer is not None and row["answer"] is None:
-                row = conn.execute(
-                    "UPDATE tasks SET answer = %s, answered_by = %s, updated_at = now()"
-                    f" WHERE id = %s RETURNING {_COLUMNS}",
                     (Jsonb(answer), by, task_id),
                 ).fetchone()
                 assert row is not None
-            elif answer is not None:
-                same = conn.execute(
-                    "SELECT answer = %s::jsonb AS same FROM tasks WHERE id = %s",
-                    (Jsonb(answer), task_id),
-                ).fetchone()
-                if same is None or not same["same"]:
-                    raise TaskNotOpenError("answered")
+                if state != "answered":
+                    self._announce(conn, row)
         return Task.model_validate(row)
 
     def close(self, task_id: str, state: Literal["expired", "cancelled"]) -> Task | None:

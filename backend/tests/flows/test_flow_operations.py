@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from temporal_agent_harness.harness.agent_client import AgentClient, CallbackResultError
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
+from temporalio.client import WorkflowUpdateHandle, WorkflowUpdateRPCTimeoutOrCancelledError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
@@ -30,10 +31,11 @@ from scadbuddy.flows.operations import (
     seal_answer,
 )
 from scadbuddy.operations.kinds import OperationKind
-from scadbuddy.tasks.models import TaskState
-from scadbuddy.tasks.store import TaskNotOpenError
+from scadbuddy.tasks.models import TaskOpen
+from scadbuddy.tasks.store import TaskNotOpenError, TaskStore
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, ProjectionWrite
 from scadbuddy.workflows.flows_client import harness_plugins
+from tests.flows.fake_api import Outward
 from tests.flows.flows_support import HASH_KEY, Flows, Keys, define, script
 from tests.flows.harness_probe import (
     PROBE_TOOLS,
@@ -42,6 +44,7 @@ from tests.flows.harness_probe import (
     ProbeWorkflow,
     probe_close,
 )
+from tests.flows.test_flow_reset import point_after, reset
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
@@ -323,7 +326,7 @@ async def _moved_on(flows: Flows, run: Run, call_id: str) -> Run:
     return await flows.row(run.id, lambda r: all(w.call_id != call_id for w in r.waiting_on))
 
 
-async def test_an_answer_that_landed_but_whose_reply_was_lost_stands_and_resends(
+async def test_an_answer_that_landed_but_whose_reply_was_lost_stands_and_is_not_resent(
     flows: Flows, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run, call_id = await two_questions(flows)
@@ -335,10 +338,10 @@ async def test_an_answer_that_landed_but_whose_reply_was_lost_stands_and_resends
     assert (await operate(flows, answer, request))["outcome"] == "answered"
     assert await flows.store.get_decision(request_id(run, call_id)) is not None
     await _moved_on(flows, run, call_id)
-    # A retry of the same answer, once the call is no longer waiting, gets Temporal's
-    # answer for the same Update id, not a 409.
+    # A retry of the same answer, once the call is no longer waiting, is told that it
+    # landed, not a 409. It is not sent again.
     assert (await operate(flows, answer, request))["outcome"] == "answered"
-    assert len(calls) == 2
+    assert len(calls) == 1
     decision = await flows.store.get_decision(request_id(run, call_id))
     assert decision is not None and decision.response == {"answer": "ok"}
 
@@ -384,14 +387,30 @@ async def test_an_approval_that_landed_but_whose_reply_was_lost_stands(
 class Marks:
     """`RemoteTasks.mark_answered` as the task operation calls it (#7364)."""
 
-    def __init__(self, *fails: Exception) -> None:
-        self.fails = list(fails)
-        self.made: list[tuple[str, Any, str | None]] = []
+    def __init__(self, fails: Exception | None = None) -> None:
+        self.fails = fails
+        self.made: list[tuple[str, Any, str | None, str]] = []
 
-    async def mark_answered(self, task_id: str, answer: Any, by: str | None) -> Any:
-        if self.fails:
-            raise self.fails.pop(0)
-        self.made.append((task_id, answer, by))
+    async def mark_answered(
+        self, task_id: str, answer: Any, by: str | None, workflow_run_id: str
+    ) -> Any:
+        self.made.append((task_id, answer, by, workflow_run_id))
+        if self.fails is not None:
+            raise self.fails
+
+
+class StoreMarks:
+    """The real store's marks, as `TasksComponent` makes them."""
+
+    def __init__(self, store: TaskStore) -> None:
+        self.store = store
+
+    async def mark_answered(
+        self, task_id: str, answer: Any, by: str | None, workflow_run_id: str
+    ) -> Any:
+        return await asyncio.to_thread(
+            self.store.mark_answered, task_id, answer, by, workflow_run_id
+        )
 
 
 async def task_request(run: Run, call_id: str, answer: Any) -> dict[str, Any]:
@@ -399,19 +418,23 @@ async def task_request(run: Run, call_id: str, answer: Any) -> dict[str, Any]:
     return {"run_id": run.id, "task_id": call_id, "answer_sealed": sealed, "by": "jane"}
 
 
-def _as_text(monkeypatch: pytest.MonkeyPatch, error: BaseException | None = None) -> None:
+def _as_text(monkeypatch: pytest.MonkeyPatch, error: BaseException | None = None) -> list[str]:
     """The parked `wait_for_human` takes a text, so a typed answer reaches it as one; then
-    `error`, as if the reply were lost."""
+    `error`, as if the reply were lost. Returns the calls sent to."""
     original = AgentClient.provide_callback_result
+    sent: list[str] = []
 
     async def typed(self: AgentClient, tool_id: str, *, result: Any, update_id: Any) -> Any:
-        text = {"answer": json.dumps(result["answer"])}
+        sent.append(tool_id)
+        answer = result["answer"]
+        text = {"answer": answer if isinstance(answer, str) else json.dumps(answer)}
         ack = await original(self, tool_id, result=text, update_id=update_id)
         if error is not None:
             raise error
         return ack
 
     monkeypatch.setattr(AgentClient, "provide_callback_result", typed)
+    return sent
 
 
 def _resolved_before(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -443,63 +466,186 @@ async def test_a_task_answer_that_landed_with_its_reply_lost_is_marked(
     result = await operate(flows, kinds(flows, marks)[TASK_ANSWER], request)
     # Never the answer: the result is in the operation's history and its record.
     assert result == {"run_id": run.id, "task_id": call_id, "outcome": "answered"}
-    assert marks.made == [(call_id, {"a": 1}, "jane")]
+    assert marks.made == [(call_id, {"a": 1}, "jane", run.workflow_run_id)]
 
 
-async def test_a_task_answer_whose_mark_failed_is_marked_by_the_retry(
-    flows: Flows, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("ended", [False, True])
+async def test_a_task_answer_that_landed_is_marked_by_the_retry_and_not_sent_again(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, ended: bool
 ) -> None:
-    run, call_id = await two_questions(flows)
-    _as_text(monkeypatch)
-    marks = Marks(RuntimeError("the API is away"))
+    run, call_id = await (parked(flows) if ended else two_questions(flows))
+    sent = _as_text(monkeypatch, asyncio.CancelledError())
+    marks = Marks()
     task_answer = kinds(flows, marks)[TASK_ANSWER]
     # A number jsonb writes another way is still the same answer.
     request = await task_request(run, call_id, {"a": 1e23})
     env = ActivityEnvironment(client=flows.client)
     checked = await env.run(task_answer.check, request)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(asyncio.CancelledError):
         await env.run(task_answer.run, request, checked)
-    await _moved_on(flows, run, call_id)
-    # The retry of the run, and a new request with the same answer.
+    assert marks.made == []
+    await (flows.finished(run.id) if ended else _moved_on(flows, run, call_id))
     assert (await env.run(task_answer.run, request, checked))["outcome"] == "answered"
-    assert (await operate(flows, task_answer, request))["outcome"] == "answered"
-    assert marks.made == [(call_id, {"a": 1e23}, "jane")] * 2
+    assert sent == [call_id]
+    assert marks.made == [(call_id, {"a": 1e23}, "jane", run.workflow_run_id)]
 
 
-async def test_a_task_answer_whose_mark_failed_is_marked_after_the_run_ended(
-    flows: Flows, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("the answer is s3cret"),
+        KeyError("gone"),
+        TaskNotOpenError("expired"),
+        TaskNotOpenError("answered"),
+    ],
+    ids=["away", "missing", "expired", "answered"],
+)
+async def test_a_task_answer_that_landed_stands_when_its_mark_fails(
+    flows: Flows,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+) -> None:
+    run, call_id = await two_questions(flows)
+    _as_text(monkeypatch)
+    marks = Marks(error)
+    caplog.set_level("DEBUG")
+    request = await task_request(run, call_id, {"a": "s3cret"})
+    result = await operate(flows, kinds(flows, marks)[TASK_ANSWER], request)
+    assert result == {"run_id": run.id, "task_id": call_id, "outcome": "answered"}
+    assert len(marks.made) == 1
+    assert f"could not mark the task {call_id}" in caplog.text
+    assert "s3cret" not in caplog.text
+
+
+async def _task_of(flows: Outward, run_id: str, call_id: str) -> TaskStore:
+    tasks = TaskStore(flows.store._pool)
+    await asyncio.to_thread(
+        tasks.open, TaskOpen(id=call_id, run_id=run_id, title="q", schema={"type": "object"})
+    )
+    return tasks
+
+
+def _answer_request(kind: str, run: Run, call_id: str) -> dict[str, Any]:
+    if kind == FLOW_ANSWER:
+        return {"run_id": run.id, "call_id": call_id, "answer": "ok"}
+    return {"run_id": run.id, "task_id": call_id, "by": "jane"}
+
+
+@pytest.mark.parametrize("name", [TASK_ANSWER, FLOW_ANSWER])
+async def test_an_answer_that_a_reset_undid_is_neither_sent_nor_marked_again(
+    outward: Outward, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    run_id = await outward.run(
+        script("await wait_for_human('First?', 600)", "await wait_for_human('Second?', 600)")
+    )
+    first = await outward.row(run_id, lambda r: r.status == "waiting")
+    call_id = first.waiting_on[0].call_id
+    waited = await point_after(outward, first, first.steps[0].history_length)
+    tasks = await _task_of(outward, run_id, call_id)
+    operation = kinds(outward, StoreMarks(tasks))[name]
+    request = _answer_request(name, first, call_id)
+    if name == TASK_ANSWER:
+        request["answer_sealed"] = await seal_answer(Keys(), run_id, '{"a": 1}')
+    env = ActivityEnvironment(client=outward.client)
+    checked = await env.run(operation.check, request)
+    sent = _as_text(monkeypatch, asyncio.CancelledError())
+    # The attempt fails once its answer landed.
+    with pytest.raises(asyncio.CancelledError):
+        await env.run(operation.run, request, checked)
+    second = await outward.row(run_id, lambda r: [w.prompt for w in r.waiting_on] == ["Second?"])
+    await reset(outward, second, await point_after(outward, second, waited))
+    after = await outward.row(run_id, lambda r: r.workflow_run_id != second.workflow_run_id)
+    assert [w.call_id for w in after.waiting_on] == [call_id]
+    await env.run(operation.run, request, checked)
+    assert sent == [call_id]
+    held = await asyncio.to_thread(tasks.get, call_id)
+    assert held is not None and (held.state, held.answer) == ("open", None)
+    status = await AgentClient(outward.client, after.workflow_id).get_status()
+    assert [p.tool_id for p in status.pending_callbacks] == [call_id]
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+async def test_an_answer_that_never_landed_is_not_sent_past_a_reset(
+    outward: Outward, monkeypatch: pytest.MonkeyPatch, recorded: bool
+) -> None:
+    """An attempt that stopped before it sent, on record already or not."""
+    run_id = await outward.run(
+        script("await wait_for_human('First?', 600)", "await wait_for_human('Second?', 600)")
+    )
+    run = await outward.row(run_id, lambda r: r.status == "waiting")
+    call_id = run.waiting_on[0].call_id
+    marks = Marks()
+    operation = kinds(outward, marks)[TASK_ANSWER]
+    request = await task_request(run, call_id, {"a": 1})
+    env = ActivityEnvironment(client=outward.client)
+    checked = await env.run(operation.check, request)
+    left = Decision(
+        request_id=request_id(run, call_id),
+        run_id=run_id,
+        workflow_run_id=run.workflow_run_id,
+        call_id=call_id,
+        kind="answer",
+        outcome="answered",
+        response={"answer": {"a": 1}},
+        responder="browser",
+    )
+    if recorded:
+        assert await outward.store.record_decision(left)
+    sent = _as_text(monkeypatch)
+    # Answered another way, and that undone: the call waits in the new execution too.
+    waited = await point_after(outward, run, run.steps[0].history_length)
+    client = AgentClient(outward.client, run.workflow_id)
+    await client.provide_callback_result(call_id, result={"answer": "y"}, update_id="other")
+    await outward.row(run_id, lambda r: [w.prompt for w in r.waiting_on] == ["Second?"])
+    sent.clear()
+    await reset(outward, run, await point_after(outward, run, waited))
+    after = await outward.row(run_id, lambda r: r.workflow_run_id != run.workflow_run_id)
+    assert [w.call_id for w in after.waiting_on] == [call_id]
+    with pytest.raises(ApiError) as err:
+        await env.run(operation.run, request, checked)
+    assert (err.value.status, err.value.type) == (409, STALE_ENTRY)
+    assert sent == []
+    assert marks.made == []
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_a_probe_that_times_out_says_nothing_about_the_answer(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, cancelled: bool
 ) -> None:
     run, call_id = await parked(flows)
-    _as_text(monkeypatch)
-    marks = Marks(RuntimeError("the API is away"))
-    task_answer = kinds(flows, marks)[TASK_ANSWER]
-    request = await task_request(run, call_id, {"a": 1})
-    env = ActivityEnvironment(client=flows.client)
-    checked = await env.run(task_answer.check, request)
-    with pytest.raises(RuntimeError):
-        await env.run(task_answer.run, request, checked)
-    done = await flows.finished(run.id)
-    assert done.status == "succeeded"
-    assert (await env.run(task_answer.run, request, checked))["outcome"] == "answered"
-    assert marks.made == [(call_id, {"a": 1}, "jane")]
+    lost = RPCError("update deadline exceeded", RPCStatusCode.DEADLINE_EXCEEDED, b"")
+
+    async def lose(self: AgentClient, *args: Any, **kwargs: Any) -> Any:
+        raise lost
+
+    async def slow(self: WorkflowUpdateHandle[Any], **kwargs: Any) -> Any:
+        # As the SDK raises both a deadline and a cancel (`_poll_until_outcome`).
+        cause = asyncio.CancelledError() if cancelled else lost
+        raise WorkflowUpdateRPCTimeoutOrCancelledError() from cause
+
+    monkeypatch.setattr(AgentClient, "provide_callback_result", lose)
+    monkeypatch.setattr(WorkflowUpdateHandle, "result", slow)
+    request = {"run_id": run.id, "call_id": call_id, "answer": "ok"}
+    with pytest.raises(asyncio.CancelledError if cancelled else RPCError):
+        await operate(flows, kinds(flows)[FLOW_ANSWER], request)
+    # Its fate is unknown: the row stays for the next attempt.
+    assert await flows.store.get_decision(request_id(run, call_id)) is not None
 
 
-async def test_a_task_answer_that_lost_to_one_that_landed_marks_no_answer(
+async def test_a_task_answer_that_lost_to_one_that_landed_marks_nothing(
     flows: Flows, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The winner's mark failed for good: the task must not stay open."""
     run, call_id = await two_questions(flows)
     _as_text(monkeypatch)
     failing = kinds(flows, Marks(RuntimeError("the API is away")))[TASK_ANSWER]
-    with pytest.raises(RuntimeError):
-        await operate(flows, failing, await task_request(run, call_id, {"a": 1}))
+    await operate(flows, failing, await task_request(run, call_id, {"a": 1}))
     marks = Marks()
     other = await task_request(run, call_id, {"a": 2})
     with pytest.raises(ApiError) as err:
         await operate(flows, kinds(flows, marks)[TASK_ANSWER], other)
     assert (err.value.status, err.value.type) == (409, TASK_NOT_OPEN)
-    assert err.value.extensions == {"state": "answered"}
-    assert marks.made == [(call_id, None, None)]
+    assert marks.made == []
     decision = await flows.store.get_decision(request_id(run, call_id))
     assert decision is not None and decision.response == {"answer": {"a": 1}}
 
@@ -525,46 +671,15 @@ async def test_a_task_answer_that_lost_to_one_still_unsent_marks_nothing(flows: 
     assert marks.made == []
 
 
-async def test_a_task_answer_the_call_was_resolved_before_marks_no_answer(
+async def test_a_task_answer_the_call_was_resolved_before_marks_nothing(
     flows: Flows, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run, call_id = await parked(flows)
     _resolved_before(monkeypatch)
+    marks = Marks()
     request = await task_request(run, call_id, {"a": 1})
-    marks = Marks(RuntimeError("the API is away"))
-    task_answer = kinds(flows, marks)[TASK_ANSWER]
-    env = ActivityEnvironment(client=flows.client)
-    checked = await env.run(task_answer.check, request)
-    # A mark that fails is retried here too.
-    with pytest.raises(RuntimeError):
-        await env.run(task_answer.run, request, checked)
     with pytest.raises(ApiError) as err:
-        await env.run(task_answer.run, request, checked)
+        await operate(flows, kinds(flows, marks)[TASK_ANSWER], request)
     assert (err.value.status, err.value.type) == (409, TASK_NOT_OPEN)
-    assert marks.made == [(call_id, None, None)]
+    assert marks.made == []
     assert await flows.store.get_decision(request_id(run, call_id)) is None
-
-
-@pytest.mark.parametrize("state", ["cancelled", "expired", None])
-async def test_a_task_that_ended_while_its_answer_landed_is_left_as_it_is(
-    flows: Flows, monkeypatch: pytest.MonkeyPatch, state: TaskState | None
-) -> None:
-    """The run has the answer: its end closed the task first, or the run was forgotten."""
-    run, call_id = await two_questions(flows)
-    _as_text(monkeypatch)
-    marks = Marks(KeyError(call_id) if state is None else TaskNotOpenError(state))
-    request = await task_request(run, call_id, {"a": 1})
-    result = await operate(flows, kinds(flows, marks)[TASK_ANSWER], request)
-    assert result["outcome"] == "answered"
-
-
-@pytest.mark.parametrize("state", ["cancelled", "expired"])
-async def test_a_task_answer_resolved_before_on_a_task_that_ended_says_its_state(
-    flows: Flows, monkeypatch: pytest.MonkeyPatch, state: TaskState
-) -> None:
-    run, call_id = await parked(flows)
-    _resolved_before(monkeypatch)
-    task_answer = kinds(flows, Marks(TaskNotOpenError(state)))[TASK_ANSWER]
-    with pytest.raises(ApiError) as err:
-        await operate(flows, task_answer, await task_request(run, call_id, {"a": 1}))
-    assert (err.value.status, err.value.extensions) == (409, {"state": state})

@@ -411,7 +411,7 @@ def _started_by() -> dict[str, Any]:
     return requester_record()
 
 
-def _unavailable() -> ApiError:
+def unavailable() -> ApiError:
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
         "Flows need ScadBuddy's secret key file (SCADBUDDY_SECRET_KEY_FILE) and the"
@@ -422,7 +422,7 @@ def _unavailable() -> ApiError:
 
 def _client(flows: Flows) -> Client:
     if flows.client is None:
-        raise _unavailable()
+        raise unavailable()
     return flows.client
 
 
@@ -845,7 +845,7 @@ async def start_flow_run(
         raise ApiError(status.HTTP_409_CONFLICT, "This run could not be started.") from err
     except (psycopg.errors.UndefinedTable, SubjectForgottenError) as err:
         logger.warning("flows are unavailable: %s", type(err).__name__)
-        raise _unavailable() from None
+        raise unavailable() from None
     except RPCError as err:
         logger.warning("could not reach Temporal to start a flow run", exc_info=True)
         raise ApiError(
@@ -1124,7 +1124,7 @@ async def delete_flow_run(run_id: str, flows: FlowsDep) -> Response:
     except ValueError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.") from None
     if flows.client is None or flows.connect is None:
-        raise _unavailable()
+        raise unavailable()
     if (
         await flows.store.get_run(run_id) is None
         and await execution_status(flows.client, run_id) is None
@@ -1220,7 +1220,7 @@ class Decided(BaseModel):
     outcome: Literal["approved", "denied", "answered"]
 
 
-def _browser_only(
+def browser_only(
     detail: str = "Only a person answers a flow's questions and approvals.",
     type_: str = ENTRY_BROWSER_ONLY,
 ) -> None:
@@ -1233,7 +1233,7 @@ def _browser_only(
 
 def _grant_browser_only() -> None:
     # Spec 2026-10-11 §3.2: an agent proposes a grant; only a person approves or declines it.
-    _browser_only("Only a person approves or declines a run's grant.", GRANT_BROWSER_ONLY)
+    browser_only("Only a person approves or declines a run's grant.", GRANT_BROWSER_ONLY)
 
 
 async def _asks_a_task(tasks: TasksComponent, call_id: str) -> bool:
@@ -1260,7 +1260,7 @@ async def answer_flow_run(
     tasks: TasksDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Decided | JSONResponse:
-    _browser_only()
+    browser_only()
     if await _asks_a_task(tasks, body.call_id):
         # Its answer is checked against the task's schema there, and never reaches the run
         # from here.
@@ -1271,7 +1271,7 @@ async def answer_flow_run(
             task_id=body.call_id,
         )
     if flows.keys is None:
-        raise _unavailable()
+        raise unavailable()
     try:
         # Sealed under the run's key: the text never reaches the operation's history or
         # its record in the clear (#2221).
@@ -1279,7 +1279,7 @@ async def answer_flow_run(
     except SubjectForgottenError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.") from None
     except psycopg.errors.UndefinedTable:
-        raise _unavailable() from None
+        raise unavailable() from None
     result = await run_operation(
         ops,
         response,
@@ -1304,7 +1304,7 @@ async def decide_flow_run(
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Decided | JSONResponse:
-    _browser_only()
+    browser_only()
     result = await run_operation(
         ops,
         response,
@@ -1327,9 +1327,9 @@ async def get_flow_run_proposal(
     """Browser only: the proposal is the person's to judge, so no agent reads it. The
     original is read from the run's parked call, never from anything stored with the
     proposal."""
-    _browser_only("Only a person reads a proposal it may approve.")
+    browser_only("Only a person reads a proposal it may approve.")
     if flows.client is None:
-        raise _unavailable()
+        raise unavailable()
     run = await flows.store.get_run(run_id)
     if run is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such proposal.")
@@ -1618,7 +1618,7 @@ async def preview_flow_reset(
     if run is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
     if flows.client is None:
-        raise _unavailable()
+        raise unavailable()
     return await outward_since(flows.client, run, event_id)
 
 
@@ -1635,7 +1635,7 @@ async def flow_reset_points(run_id: str, flows: FlowsDep) -> ResetPoints:
     if run is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
     if flows.client is None:
-        raise _unavailable()
+        raise unavailable()
     return await reset_points(flows.client, run, floor=await flows.store.reset_floor(run.id))
 
 

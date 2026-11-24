@@ -10,8 +10,10 @@ import psycopg
 import pytest
 from psycopg import Connection
 from psycopg.pq import TransactionStatus
+from psycopg.rows import dict_row
 
 from scadbuddy.core.events import Event, TaskChanged
+from scadbuddy.flows.store import FlowStore
 from scadbuddy.tasks.models import TaskOpen
 from scadbuddy.tasks.store import RunEndedError, RunNotFoundError, TaskNotOpenError, TaskStore
 from tests.conftest import PgPool
@@ -92,10 +94,10 @@ def test_a_task_round_trips_its_fields(store: TaskStore) -> None:
 
 def test_mark_answered_only_while_open(store: TaskStore, recorder: Recorder) -> None:
     store.open(_task("t1"))
-    done = store.mark_answered("t1", {"ok": True}, "u1")
+    done = store.mark_answered("t1", {"ok": True}, "u1", "x")
     assert done.state == "answered" and done.answer == {"ok": True} and done.answered_by == "u1"
     with pytest.raises(TaskNotOpenError) as err:
-        store.mark_answered("t1", {"ok": False}, "u2")
+        store.mark_answered("t1", {"ok": False}, "u2", "x")
     assert err.value.state == "answered"
     assert store.get("t1") == done
     assert recorder.changes() == [("t1", "open"), ("t1", "answered")]
@@ -105,44 +107,66 @@ def test_the_same_answer_again_changes_nothing_and_publishes_nothing(
     store: TaskStore, recorder: Recorder
 ) -> None:
     store.open(_task("t1"))
-    done = store.mark_answered("t1", {"ok": True}, "u1")
+    done = store.mark_answered("t1", {"ok": True}, "u1", "x")
     recorder.events.clear()
-    assert store.mark_answered("t1", {"ok": True}, "u2") == done
-    assert store.mark_answered("t1", None, None) == done
+    assert store.mark_answered("t1", {"ok": True}, "u2", "x") == done
+    assert store.mark_answered("t1", {"ok": True}, None, "x") == done
     assert recorder.events == []
 
 
-def test_an_answered_row_with_no_answer_is_filled(store: TaskStore, recorder: Recorder) -> None:
+def test_the_same_answer_again_fills_in_who_gave_it(store: TaskStore, recorder: Recorder) -> None:
+    """A mark that does not know who answered may come first."""
     store.open(_task("t1"))
-    first = store.mark_answered("t1", None, None)
-    assert first.state == "answered" and first.answer is None
+    assert store.mark_answered("t1", {"ok": True}, None, "x").answered_by is None
     recorder.events.clear()
-    got = store.mark_answered("t1", {"ok": True}, "u1")
-    assert got.state == "answered" and got.answer == {"ok": True} and got.answered_by == "u1"
-    assert recorder.events == []
     with pytest.raises(TaskNotOpenError):
-        store.mark_answered("t1", {"ok": False}, "u1")
+        store.mark_answered("t1", {"ok": False}, "u1", "x")
+    got = store.mark_answered("t1", {"ok": True}, "u1", "x")
+    assert (got.state, got.answer, got.answered_by) == ("answered", {"ok": True}, "u1")
+    assert store.get("t1") == got
+    assert recorder.events == []
 
 
-def test_mark_answered_of_a_cancelled_task_raises_with_its_state(store: TaskStore) -> None:
+def test_a_task_cancelled_before_its_mark_is_answered(store: TaskStore, recorder: Recorder) -> None:
+    """The run took the answer and ended before the mark."""
     store.open(_task("t1"))
     store.close("t1", "cancelled")
+    recorder.events.clear()
+    got = store.mark_answered("t1", {"ok": True}, "u1", "x")
+    assert (got.state, got.answer, got.answered_by) == ("answered", {"ok": True}, "u1")
+    assert recorder.changes() == [("t1", "answered")]
+
+
+def test_mark_answered_of_an_expired_task_raises_with_its_state(store: TaskStore) -> None:
+    store.open(_task("t1"))
+    store.close("t1", "expired")
     with pytest.raises(TaskNotOpenError) as err:
-        store.mark_answered("t1", {"ok": True}, "u1")
-    assert err.value.state == "cancelled"
-    with pytest.raises(TaskNotOpenError) as err:
-        store.mark_answered("t1", None, None)
-    assert err.value.state == "cancelled"
+        store.mark_answered("t1", {"ok": True}, "u1", "x")
+    assert err.value.state == "expired"
+
+
+@pytest.mark.parametrize("state", ["open", "answered", "cancelled", "expired"])
+def test_the_answer_of_another_execution_leaves_the_task_as_it_is(
+    store: TaskStore, pg_pool: PgPool, recorder: Recorder, state: str
+) -> None:
+    store.open(_task("t1"))
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE tasks SET state = %s", (state,))
+    held = store.get("t1")
+    recorder.events.clear()
+    assert store.mark_answered("t1", {"ok": True}, "u1", "replaced") == held
+    assert store.get("t1") == held
+    assert recorder.events == []
 
 
 def test_mark_answered_of_a_missing_task_raises_a_key_error(store: TaskStore) -> None:
     with pytest.raises(KeyError):
-        store.mark_answered("nope", {}, "u1")
+        store.mark_answered("nope", {}, "u1", "x")
 
 
 def test_close_of_an_answered_task_returns_none(store: TaskStore, recorder: Recorder) -> None:
     store.open(_task("t1"))
-    store.mark_answered("t1", {"ok": True}, "u1")
+    store.mark_answered("t1", {"ok": True}, "u1", "x")
     recorder.events.clear()
     assert store.close("t1", "expired") is None
     assert recorder.events == []
@@ -165,7 +189,7 @@ def test_cancel_for_run_cancels_only_open_tasks_of_that_run(
     for name in ("a", "b", "c"):
         store.open(_task(name))
     store.open(_task("d", run_id="run-2"))
-    store.mark_answered("c", {"ok": True}, "u1")
+    store.mark_answered("c", {"ok": True}, "u1", "x")
     recorder.events.clear()
     assert store.cancel_for_run("run-1") == 2
     assert _states(store, "run-1") == {"a": "cancelled", "b": "cancelled", "c": "answered"}
@@ -195,7 +219,7 @@ def test_each_write_publishes_inside_its_transaction(
     for name in ("a", "b", "c", "d"):
         store.open(_task(name))
         assert published() == inside
-    store.mark_answered("a", {"ok": True}, "u1")
+    store.mark_answered("a", {"ok": True}, "u1", "x")
     assert published() == inside
     store.close("b", "expired")
     assert published() == inside
@@ -216,7 +240,7 @@ def test_list_filters_by_place(store: TaskStore) -> None:
     store.open(_task("a", place="room/a"))
     store.open(_task("b", place="room/b"))
     store.open(_task("c"))
-    store.mark_answered("c", {"ok": True}, "u1")
+    store.mark_answered("c", {"ok": True}, "u1", "x")
     assert [t.id for t in store.list(place="room/a")] == ["a"]
     assert sorted(t.id for t in store.list()) == ["a", "b"]
     assert [t.id for t in store.list(state="answered")] == ["c"]
@@ -231,9 +255,9 @@ def test_match_waiting_in_reconciles_a_reset_run(
     for name in names:
         store.open(_task(name))
     store.open(_task("other", run_id="run-2"))
-    store.mark_answered("wait_answered", {"ok": True}, "u1")
+    store.mark_answered("wait_answered", {"ok": True}, "u1", "x")
     store.close("wait_cancelled", "cancelled")
-    store.mark_answered("done", {"ok": True}, "u1")
+    store.mark_answered("done", {"ok": True}, "u1", "x")
     store.close("gone", "expired")
     recorder.events.clear()
     with pg_pool.connection() as conn, conn.transaction():
@@ -307,8 +331,9 @@ def test_open_on_an_ended_run_raises_and_the_same_id_again_answers_its_row(
     assert [t.id for t in store.list(state=None)] == ["t1"]
 
 
-def _wait_for_block(pg_pool: PgPool, blocker: Connection[Any]) -> None:
-    """Wait until a backend of this database waits for a lock that ``blocker`` holds."""
+def _wait_for_block(pg_pool: PgPool, blocker: int, count: int = 1) -> None:
+    """Wait until ``count`` backends of this database wait for a lock that the backend
+    ``blocker`` holds."""
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         with pg_pool.connection() as conn:
@@ -316,12 +341,12 @@ def _wait_for_block(pg_pool: PgPool, blocker: Connection[Any]) -> None:
                 "SELECT count(*) AS n FROM pg_stat_activity"
                 " WHERE datname = current_database() AND wait_event_type = 'Lock'"
                 " AND %s = ANY(pg_blocking_pids(pid))",
-                (blocker.info.backend_pid,),
+                (blocker,),
             ).fetchone()
-        if waiting is not None and waiting["n"]:
+        if waiting is not None and waiting["n"] >= count:
             return
         time.sleep(0.05)
-    pytest.fail("open did not wait for the run's row")
+    pytest.fail("nothing waits for the row")
 
 
 def test_a_run_that_ends_while_open_waits_for_its_row_leaves_no_open_task(
@@ -330,7 +355,7 @@ def test_a_run_that_ends_while_open_waits_for_its_row_leaves_no_open_task(
     with psycopg.connect(pg_pool.conninfo) as ender, ThreadPoolExecutor(1) as pool:
         ender.execute("UPDATE workflow_runs SET status = 'failed' WHERE id = 'run-2'")
         opening = pool.submit(store.open, _task("t1", "run-2"))
-        _wait_for_block(pg_pool, ender)
+        _wait_for_block(pg_pool, ender.info.backend_pid)
         ender.commit()
         with pytest.raises(RunEndedError):
             opening.result(timeout=30)
@@ -343,7 +368,7 @@ def test_a_retried_open_answers_the_row_the_first_attempt_committed(
     with psycopg.connect(pg_pool.conninfo) as ender, ThreadPoolExecutor(1) as pool:
         ender.execute("UPDATE workflow_runs SET status = 'failed' WHERE id = 'run-2'")
         retry = pool.submit(store.open, _task("t1", "run-2"))
-        _wait_for_block(pg_pool, ender)
+        _wait_for_block(pg_pool, ender.info.backend_pid)
         # The first attempt's insert commits while the retry waits, then the run ends.
         with pg_pool.connection() as conn:
             conn.execute(
@@ -355,12 +380,97 @@ def test_a_retried_open_answers_the_row_the_first_attempt_committed(
     assert answered.id == "t1" and answered.state == "open"
 
 
+def _hold_run(conn: Connection[Any]) -> None:
+    """As `_reset_run` does: the run's row first, then its new execution."""
+    conn.execute("SELECT 1 FROM workflow_runs WHERE id = 'run-1' FOR UPDATE")
+    conn.execute("UPDATE workflow_runs SET workflow_run_id = 'y' WHERE id = 'run-1'")
+
+
+def test_a_mark_in_flight_while_a_reset_commits_marks_nothing(
+    store: TaskStore, pg_pool: PgPool, recorder: Recorder
+) -> None:
+    store.open(_task("t1"))
+    marks: list[Any] = []
+    with ThreadPoolExecutor(1) as pool:
+
+        def reset() -> str:
+            # `_reset_run` holds the run's row here.
+            with pg_pool.connection() as conn:
+                [held] = conn.execute(
+                    "SELECT pid FROM pg_locks WHERE relation = 'workflow_runs'::regclass"
+                    " AND database = (SELECT oid FROM pg_database"
+                    " WHERE datname = current_database())"
+                    " AND mode = 'RowShareLock' AND pid <> pg_backend_pid()"
+                ).fetchall()
+            marks.append(pool.submit(store.mark_answered, "t1", {"ok": True}, "u1", "x"))
+            _wait_for_block(pg_pool, held["pid"])
+            return "y"
+
+        run = FlowStore(pg_pool)._reset_run("run-1", "x", 10, "req-1", reset)
+        assert run is not None and run.workflow_run_id == "y"
+        left = marks[0].result(timeout=30)
+    assert (left.state, left.answer) == ("open", None)
+    assert store.get("t1") == left
+    assert recorder.changes() == [("t1", "open")]
+
+
+def test_a_mark_and_an_open_that_wait_for_a_reset_do_not_deadlock_with_it(
+    store: TaskStore, pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    """Each takes the run's row first, then the tasks'."""
+    store.open(_task("t1"))
+    with (
+        ThreadPoolExecutor(2) as pool,
+        psycopg.connect(pg_conninfo, row_factory=dict_row) as resetter,
+    ):
+        _hold_run(resetter)
+        marking = pool.submit(store.mark_answered, "t1", {"ok": True}, "u1", "x")
+        opening = pool.submit(store.open, _task("t2"))
+        _wait_for_block(pg_pool, resetter.info.backend_pid, count=2)
+        # A mark that held its task's row would block this, and wait for the run's.
+        assert store.match_waiting_in(resetter, "run-1", set(), set()) == 1
+        resetter.commit()
+        assert marking.result(timeout=30).state == "cancelled"
+        assert opening.result(timeout=30).state == "open"
+    assert _states(store, "run-1") == {"t1": "cancelled", "t2": "open"}
+
+
+def test_a_reset_waits_for_a_mark_in_flight(
+    store: TaskStore, pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    """The mark holds the run's row, so the Reset sees it done and opens the task again."""
+    store.open(_task("t1"))
+    with (
+        ThreadPoolExecutor(2) as pool,
+        psycopg.connect(pg_conninfo) as holder,
+        psycopg.connect(pg_conninfo, row_factory=dict_row) as resetter,
+    ):
+        # The mark waits here, with the run's row locked.
+        holder.execute("SELECT 1 FROM tasks WHERE id = 't1' FOR UPDATE")
+        marking = pool.submit(store.mark_answered, "t1", {"ok": True}, "u1", "x")
+        _wait_for_block(pg_pool, holder.info.backend_pid)
+
+        def reset() -> int:
+            _hold_run(resetter)
+            changed = store.match_waiting_in(resetter, "run-1", {"t1"}, set())
+            resetter.commit()
+            return changed
+
+        resetting = pool.submit(reset)
+        time.sleep(0.5)
+        assert not resetting.done()
+        holder.commit()
+        assert marking.result(timeout=30).state == "answered"
+        assert resetting.result(timeout=30) == 1
+    assert _states(store, "run-1") == {"t1": "open"}
+
+
 def test_close_or_current_closes_an_open_task_and_answers_the_row_as_it_is(
     store: TaskStore, recorder: Recorder
 ) -> None:
     store.open(_task("t1"))
     store.open(_task("t2"))
-    store.mark_answered("t2", {"ok": True}, None)
+    store.mark_answered("t2", {"ok": True}, None, "x")
     closed = store.close_or_current("t1", "expired")
     assert closed is not None and closed.state == "expired"
     held = store.close_or_current("t2", "cancelled")
@@ -376,10 +486,10 @@ def test_close_or_current_closes_an_open_task_and_answers_the_row_as_it_is(
 
 def test_the_same_answer_with_a_big_number_is_the_same_answer(store: TaskStore) -> None:
     store.open(_task("t1"))
-    first = store.mark_answered("t1", {"n": 1e23}, "alice")
-    assert store.mark_answered("t1", {"n": 1e23}, "alice") == first
+    first = store.mark_answered("t1", {"n": 1e23}, "alice", "x")
+    assert store.mark_answered("t1", {"n": 1e23}, "alice", "x") == first
     with pytest.raises(TaskNotOpenError):
-        store.mark_answered("t1", {"n": 2e23}, "alice")
+        store.mark_answered("t1", {"n": 2e23}, "alice", "x")
 
 
 def test_the_model_refuses_a_big_context_or_ui() -> None:

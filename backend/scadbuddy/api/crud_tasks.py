@@ -41,8 +41,10 @@ class CloseWrite(BaseModel):
 
 
 class AnswerWrite(BaseModel):
-    answer: dict[str, Any] | None
+    answer: dict[str, Any]
     by: str | None
+    #: The run's execution that took the answer.
+    workflow_run_id: str
 
     @field_validator("answer", "by")
     @classmethod
@@ -53,7 +55,7 @@ class AnswerWrite(BaseModel):
 
     @field_validator("answer")
     @classmethod
-    def _answer_is_small(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _answer_is_small(cls, value: dict[str, Any]) -> dict[str, Any]:
         if not json_fits(value):
             raise ValueError(f"the answer is more than {MAX_JSON_BYTES} bytes of JSON")
         return value
@@ -116,10 +118,11 @@ def close_task(task_id: str, body: CloseWrite, tasks: TasksDep) -> Task:
 
 @router.post("/tasks/{task_id}/answered", name="crud_projects_answer_task")
 def answer_task(task_id: str, body: AnswerWrite, tasks: TasksDep) -> Task:
-    """`TaskStore.mark_answered`, with its rules: the same answer again answers the row."""
+    """`TaskStore.mark_answered`, with its rules: the same answer again answers the row,
+    and so does one of another execution."""
     _uuid("task id", task_id)
     try:
-        return tasks.store.mark_answered(task_id, body.answer, body.by)
+        return tasks.store.mark_answered(task_id, body.answer, body.by, body.workflow_run_id)
     except KeyError:
         raise _missing() from None
     except TaskNotOpenError as error:
