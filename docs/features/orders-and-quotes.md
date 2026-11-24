@@ -38,8 +38,8 @@ print, wait and notify the customer (`backend/scadbuddy/orders/builtin_flow.py:4
 Attempt media: with Bambuddy linked, an attempt that names an archive gets the archive's
 latest finish photo and its timelapse as attachments with no click. The `AttemptMedia`
 workflow imports them (`backend/scadbuddy/workflows/attempt_media.py`, `orders/archives.py`
-`mirror_attempt`); a hand attempt, a heard print outcome, a read of the attempt's archives
-and a housekeeping sweep start it. A medium larger than the upload limit is recorded in
+`mirror_attempt`). Four starters start it: a hand attempt, a heard print outcome, a read
+of the attempt's archives and the housekeeping sweep `housekeeping_import_attempt_media`. A medium larger than the upload limit is recorded in
 `order_attempt_media_refusals`, and no import tries it again until the limit is higher.
 A medium an archive does not offer an hour after it completed (a printer with timelapse
 off) is recorded in `order_attempt_media_not_offered`, and the sweep leaves it out (#7453).
