@@ -12,6 +12,9 @@
 - ``POST …/printers/{printer_id}/feed``: the recorder's feed state; 204. A change of
   state emits ``camera.feed``.
 
+The lease and feed routes answer 404 ``printer_not_found`` for a printer that was deleted, so
+the callers stop: the lease's and the feed's rows need the printer's row.
+
 The lease and the index use the API process clock, never a time from the request.
 """
 
@@ -35,6 +38,7 @@ from scadbuddy.core.events import PG_CHANNEL, CameraFeedEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.store import PrinterNotFoundError
 
 MAX_SEGMENTS = 500
 #: The ``scadbuddy_events`` kinds the camera callers' streams carry. ``camera.reconnect`` is
@@ -124,9 +128,12 @@ async def post_segments(printer_id: str, body: SegmentsAsk, state: StateDep) -> 
 
 @router.post("/printers/{printer_id}/lease", name="crud_camera_lease")
 async def post_lease(printer_id: str, body: LeaseAsk, state: StateDep) -> LeaseAnswer:
-    return await asyncio.to_thread(
-        camera_store(state).lease, printer_id, body.recorder, body.action, datetime.now(UTC)
-    )
+    try:
+        return await asyncio.to_thread(
+            camera_store(state).lease, printer_id, body.recorder, body.action, datetime.now(UTC)
+        )
+    except PrinterNotFoundError:
+        raise _printer_gone() from None
 
 
 @router.post(
@@ -139,5 +146,15 @@ async def post_feed(printer_id: str, body: FeedReport, state: StateDep) -> None:
 
 
 async def report_feed(state: StateDep, printer_id: str, report: FeedReport) -> None:
-    if await asyncio.to_thread(camera_store(state).report_feed, printer_id, report):
+    try:
+        changed = await asyncio.to_thread(camera_store(state).report_feed, printer_id, report)
+    except PrinterNotFoundError:
+        raise _printer_gone() from None
+    if changed:
         emit(state.events, CameraFeedEvent(printer_id=printer_id))
+
+
+def _printer_gone() -> ApiError:
+    return ApiError(
+        status.HTTP_404_NOT_FOUND, "There is no such printer.", reason="printer_not_found"
+    )

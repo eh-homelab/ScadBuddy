@@ -52,6 +52,7 @@ def test_a_segment_needs_positive_sizes_and_an_aware_start() -> None:
         {"init_bytes": 0},
         {"init_sha256": "xyz"},
         {"started_at": "2026-11-24T00:00:00"},
+        {"object_key": ""},
     ):
         with pytest.raises(ValidationError):
             SegmentIn.model_validate({**good, **bad})

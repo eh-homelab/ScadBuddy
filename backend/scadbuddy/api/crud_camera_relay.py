@@ -7,7 +7,8 @@ nothing else. The code is never logged.
 - ``GET …/changes``: the same filtered change stream as the ``camera`` caller's;
 - ``GET …/printers`` and ``…/printers/{printer_id}``: the qualifying printers with their
   codes; 404 ``not_recorded`` for one that does not qualify;
-- ``POST …/printers/{printer_id}/feed``: the relay's feed state; 204.
+- ``POST …/printers/{printer_id}/feed``: the relay's feed state; 204, or 404
+  ``printer_not_found`` for a printer that was deleted.
 """
 
 from __future__ import annotations

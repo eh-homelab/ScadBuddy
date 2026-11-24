@@ -202,6 +202,52 @@ def test_indexed_until_is_last_end(
     assert camera.lease(pid, "b", "acquire", now).indexed_until == NOW + timedelta(seconds=7.5)
 
 
+def test_indexed_until_reads_only_the_newest_rows(
+    camera: CameraStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """Each lease call answers the index's end without reading the printer's whole index:
+    the same end as the full scan, from the rows of the last minutes only."""
+    from scadbuddy.camera.store import INDEXED_UNTIL
+
+    pid = make_printer(printers, pg_pool)
+    rows = [(pid, NOW + timedelta(seconds=4 * i), 4000, f"camera/{i}.mp4") for i in range(3000)]
+    last = NOW + timedelta(seconds=4 * 2999)
+    # A longer segment just before the newest one ends after it.
+    rows.append((pid, last - timedelta(seconds=30), 40_000, "camera/long.mp4"))
+    with pg_pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO camera_segments (printer_id, started_at, duration_ms, object_key,"
+                " bytes, init_bytes, init_sha256, recorder) VALUES (%s, %s, %s, %s, 1, 1, '', 'a')",
+                rows,
+            )
+        conn.execute("ANALYZE camera_segments")
+        full = conn.execute(
+            "SELECT max(started_at + duration_ms * interval '1 millisecond') AS t"
+            " FROM camera_segments WHERE printer_id = %s",
+            (pid,),
+        ).fetchone()
+        with conn.transaction():
+            conn.execute("SET LOCAL enable_seqscan = off")
+            [[plan]] = (
+                conn.execute("EXPLAIN (ANALYZE, FORMAT JSON) SELECT " + INDEXED_UNTIL, {"pid": pid})
+                .fetchall()[0]
+                .values()
+            )
+    assert full is not None and full["t"] == last + timedelta(seconds=10)
+    assert camera.lease(pid, "a", "acquire", datetime.now(UTC)).indexed_until == full["t"]
+
+    def read(node: dict[str, Any]) -> int:
+        here = 0
+        if node.get("Relation Name") == "camera_segments" or "camera_segments" in str(
+            node.get("Index Name", "")
+        ):
+            here = int(node["Actual Rows"]) + int(node.get("Rows Removed by Filter", 0))
+        return here + sum(read(child) for child in node.get("Plans", []))
+
+    assert read(plan["Plan"]) < 200
+
+
 def test_report_feed_says_changed(
     camera: CameraStore, printers: PrinterStore, pg_pool: PgPool
 ) -> None:

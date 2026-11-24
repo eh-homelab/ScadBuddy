@@ -11,8 +11,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
-from psycopg import Connection
+from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -26,13 +27,20 @@ from scadbuddy.camera.models import (
     SegmentIn,
     rtsp_url,
 )
-from scadbuddy.printers.store import PrinterStore, printer_uuid
+from scadbuddy.printers.store import PrinterNotFoundError, PrinterStore, printer_uuid
 
 LEASE_SECONDS = 20
 
-_INDEXED_UNTIL = (
+#: The end of a printer's index. It reads only the rows that start in the 5 minutes before
+#: the newest start (found through ``camera_segments_printer_started``), not the printer's
+#: whole index, on every lease call. The result is the full scan's: MediaMTX cuts a segment
+#: every 4 s at a key frame (``recordSegmentDuration``), so an older segment that ends after
+#: the newest one would have to be more than 5 minutes long.
+INDEXED_UNTIL = (
     "(SELECT max(started_at + duration_ms * interval '1 millisecond')"
-    " FROM camera_segments WHERE printer_id = %(pid)s)"
+    " FROM camera_segments WHERE printer_id = %(pid)s AND started_at >="
+    " (SELECT max(started_at) FROM camera_segments WHERE printer_id = %(pid)s)"
+    " - interval '5 minutes')"
 )
 
 
@@ -155,6 +163,14 @@ class CameraStore:
             "now": now,
             "until": now + timedelta(seconds=LEASE_SECONDS),
         }
+        try:
+            return self._lease(args, action)
+        except errors.ForeignKeyViolation:
+            raise PrinterNotFoundError(printer_id) from None
+
+    def _lease(
+        self, args: dict[str, Any], action: Literal["acquire", "renew", "release"]
+    ) -> LeaseAnswer:
         with self._pool.connection() as conn, conn.transaction():
             if action == "release":
                 conn.execute(
@@ -176,7 +192,7 @@ class CameraStore:
                     is not None
                 )
             current = conn.execute(
-                "SELECT holder, expires_at, " + _INDEXED_UNTIL + " AS indexed_until"
+                "SELECT holder, expires_at, " + INDEXED_UNTIL + " AS indexed_until"
                 " FROM (SELECT 1) x LEFT JOIN camera_leases ON printer_id = %(pid)s",
                 args,
             ).fetchone()
@@ -189,9 +205,17 @@ class CameraStore:
         )
 
     def report_feed(self, printer_id: str, report: FeedReport) -> bool:
+        """Store the part's feed state; true when its state changed. Raises
+        `PrinterNotFoundError` when the printer is gone."""
         key = printer_uuid(printer_id)
         if key is None:
             return False
+        try:
+            return self._report_feed(key, report)
+        except errors.ForeignKeyViolation:
+            raise PrinterNotFoundError(printer_id) from None
+
+    def _report_feed(self, key: UUID, report: FeedReport) -> bool:
         with self._pool.connection() as conn, conn.transaction():
             old = conn.execute(
                 "SELECT report->>'state' AS state FROM camera_feeds"

@@ -40,7 +40,7 @@ class CameraSourceWithCode(CameraSource):
 class SegmentIn(BaseModel):
     started_at: AwareDatetime
     duration_ms: int = Field(gt=0)
-    object_key: str
+    object_key: str = Field(min_length=1)
     bytes: int = Field(gt=0)
     init_bytes: int = Field(gt=0)
     init_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]

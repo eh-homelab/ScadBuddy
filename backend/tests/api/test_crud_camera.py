@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -151,6 +152,35 @@ def test_relay_feed_is_the_relay_part(
         rows = conn.execute("SELECT part FROM camera_feeds").fetchall()
     assert [r["part"] for r in rows] == ["relay"]
     assert len(events) == 1
+
+
+def test_feed_and_lease_404_for_a_deleted_printer(
+    client: TestClient, printer: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A printer deleted while its feed runs: 404, not a 500 the callers retry forever."""
+    _state(client).components.get(PRINTERS).store.delete(printer)
+    camera = bearer_of(client, "camera")
+    relay = bearer_of(client, "camera-relay")
+    feed = {"part": "recorder", "state": "stopped"}
+    caplog.clear()
+    answers = [
+        client.post(f"{CAMERA}/printers/{printer}/feed", json=feed, headers=camera),
+        client.post(f"{RELAY}/printers/{printer}/feed", json=feed, headers=relay),
+        client.post(
+            f"{CAMERA}/printers/{printer}/lease",
+            json={"recorder": "r1", "action": "acquire"},
+            headers=camera,
+        ),
+        client.post(
+            f"{CAMERA}/printers/{printer}/lease",
+            json={"recorder": "r1", "action": "renew"},
+            headers=camera,
+        ),
+    ]
+    assert [(a.status_code, a.json()["reason"]) for a in answers] == [
+        (404, "printer_not_found")
+    ] * 4
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR or r.exc_info]
 
 
 def test_areas_list_printers_and_changes(client: TestClient) -> None:
