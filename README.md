@@ -467,8 +467,10 @@ on shutdown.
     `orders/storefront/listings.py`, in the gauges as `scadbuddy-storefront-publish`), a library copy's target locks (`print_library/copy_store.py`),
     the Bambuddy catalogue refresh and upload claims, the store's folder lock, the
     output backfill's claim, the service credential rotation and the flow keys. The copy
-    of the saved outputs to rows (#7255) takes its connections from the main pool: one
-    that holds its advisory lock for the whole run, and one more for each statement. So
+    of the saved outputs to rows (#7255) and the copy of their bytes to the blob store
+    (#7256, after it) each take their connections from the main pool: one that holds its
+    advisory lock for the whole run (the byte copy's up to its 30-minute timeout), and
+    one more for each statement. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main
     pool one more) and closes a connection left idle for a minute, one a minute
     (psycopg_pool's `max_idle`). The `LISTEN` connection and `scadbuddy-preview-follows`

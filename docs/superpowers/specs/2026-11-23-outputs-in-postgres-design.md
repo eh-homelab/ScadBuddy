@@ -113,6 +113,15 @@ Anti-goals (a failure even if it works)
   `output_files` and `output_derived` come with #7256, the phase whose code writes them.
   Its indexes are `(slug, created_at)` and one on the rows with a `backfill`. Each run
   of the copy is a row of `output_copy_runs`.
+- As built in phase 2 (#7256, `migrations/20261124T0245Z_output_bytes.sql`): `outputs`
+  gains `model_blob`, `preview_blob`, `thumbnail_blob` (NULL when the role has no blob),
+  `bytes_stamp` (the byte copy's stamp of the byte files), `bytes_at` (set when the
+  blobs hold the bytes; NULL while only the files do) and `damaged` (jsonb, `[]` when
+  none), with an index on the rows whose `bytes_at` is NULL. `output_files` is as above.
+  `output_derived` holds, per `(output_id, kind, plate)`, the kinds `geometry`,
+  `attributed`, `asset_ids`, `plate_names` and `plate_cover` (plate 0 is the whole
+  output; a plate cover row names the key of a small blob, or none). Each run of the
+  byte copy is a row of `output_byte_runs`.
 
 ### 4.3 Blobs
 
@@ -160,6 +169,38 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    `print_library/filing.py`, `library/backfill.py`, the asset sweep's 3MF scan) to
    bytes or the temporary-file helper. The copy also uploads existing
    outputs' bytes and checks each 3MF's sha256 against the file.
+
+   As built (#7256): a save writes the folder, puts its bytes, then inserts the row,
+   its `output_files` rows and its `blob_refs` holds in one transaction; a put into a
+   full store is a 507 and leaves no folder, row or hold. The keys are
+   `output-<id>-<role>` and `output-<id>-file-<n>` (`n` the index of the name in the
+   sorted `files/`), held by `(output, <id>)`. A thumbnail upload puts its blob first,
+   under `output-<id>-thumbnail-<sha256>`, then names it under a Postgres advisory lock
+   per output. Readers read the blob first and the file when the row names none or the
+   blob is lost (`library/outputs.py` `read_role`); a reader that needs a path gets a
+   temporary file and runs in a thread. What readers derive of the model is kept once in
+   `output_derived`; the plate cover is a blob under `output-<id>-plate_cover-<sha256>`.
+   The byte copy (`library/output_byte_copy.py` `copy_output_bytes`) runs after the row
+   copy at each API start and in the housekeeping sweep `housekeeping_copy_output_bytes`
+   (`OUTPUT_BYTES_SWEEP`), under a session advisory lock that holds one autocommit
+   connection for up to the run's timeout (30 min, `OUTPUT_BYTES_TIMEOUT`). It compares
+   each byte file with its blob by sha256, puts a changed one with a compare-and-swap,
+   reads back what it put (and every blob of a row not copied before), and names the
+   keys in batches. Before any put it checks the store's caps against the bytes and
+   count of the rows still in files; past one it is `refused` and names the shortfall.
+   That count is at most what it adds: blobs a failed run already put are counted again
+   until the sweep removes them. It is refused on `local` (no content store, plan
+   Ruling R1) and on `bambuddy` (§6.4); a store migration to `bambuddy` is refused while
+   any `output` blob exists. `GET /outputs/copy-status` answers its last run as `bytes`,
+   with `pending`, the rows whose bytes the files still hold.
+
+   Derived rows are written only while the model sha256 the reader read is still the
+   row's (or the files hold the bytes). When the copy moves a copied row's model key, it
+   deletes that output's derived rows (`OutputRows.drop_derived`). A copied row whose
+   model blob is lost keeps no derived rows: readers fall back to the file and derive
+   again until the blob is back. One window is accepted: an attributed analysis made
+   from a cached geometry row read between the model swap and `drop_derived` can stay
+   stale. It needs a hand-edited `model.3mf` and two reads within about one commit.
 3. **Cut over** (#7257). When the copy reports every output copied and verified,
    remove the file fallback, the NFS writes, `meta.json` handling, the orphan and hold
    reapers' directory scans (they read rows), `OutputIndex.sync`'s glob, and
