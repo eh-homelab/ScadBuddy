@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, BinaryIO, Final, get_args
 
 from aiobotocore.config import AioConfig
-from aiobotocore.session import get_session
+from aiobotocore.session import AioSession, get_session
 from botocore.exceptions import ClientError
 from opentelemetry.trace import Span, SpanKind
 
@@ -38,6 +38,25 @@ if TYPE_CHECKING:
     from types_aiobotocore_s3.type_defs import CompletedPartTypeDef, ObjectTypeDef
 
 logger = logging.getLogger(__name__)
+
+#: What a new S3 client reads from botocore's data files: its loader lists every
+#: service it knows (a directory listing and a file check each) and reads these.
+_S3_MODELS: Final = ("service-2", "endpoint-rule-set-1")
+_SHARED_DATA: Final = ("endpoints", "partitions", "_retry", "sdk-default-configuration")
+
+
+def _load_s3_data(session: AioSession) -> None:
+    """Read what ``session.create_client("s3")`` reads into the session's loader, which
+    keeps it (botocore's ``instance_cache``). Blocking file reads: run it off the loop.
+    On an API pod that had just started, the client's own read held the loop 1.3 s
+    (#7359)."""
+    loader = session.get_component("data_loader")
+    for model in _S3_MODELS:
+        # As botocore calls it: its cache keys on the keyword too.
+        loader.load_service_model("s3", model, api_version=None)
+    for name in _SHARED_DATA:
+        loader.load_data(name)
+
 
 _CHUNK = 1 << 20
 _MISSING = frozenset({"404", "NoSuchKey", "NotFound"})
@@ -154,7 +173,17 @@ class S3ContentBackend:
         self._exits = AsyncExitStack()
         self._client: S3Client | None = None
         self._signer: S3Client | None = None
+        self._session: AioSession | None = None
         self._opening = asyncio.Lock()
+
+    async def _loaded_session(self) -> AioSession:
+        """One session for both clients, its data files read in a thread (#7359).
+        Called under `_opening`."""
+        if self._session is None:
+            session = get_session()
+            await asyncio.to_thread(_load_s3_data, session)
+            self._session = session
+        return self._session
 
     def _key(self, backend_id: str) -> str:
         prefix = f"{self.settings.prefix}/"
@@ -169,8 +198,9 @@ class S3ContentBackend:
         async with self._opening:
             client = self._client
             if client is None:
+                session = await self._loaded_session()
                 client = self._client = await self._exits.enter_async_context(
-                    get_session().create_client(
+                    session.create_client(
                         "s3",
                         endpoint_url=self.settings.endpoint,
                         region_name=self.settings.region,
@@ -188,8 +218,9 @@ class S3ContentBackend:
         async with self._opening:
             signer = self._signer
             if signer is None:
+                session = await self._loaded_session()
                 signer = self._signer = await self._exits.enter_async_context(
-                    get_session().create_client(
+                    session.create_client(
                         "s3",
                         endpoint_url=self.settings.endpoint,
                         region_name=self.settings.region,
