@@ -150,7 +150,12 @@ scope addition of 2026-11-23 on #7067 adds `saleable`.
    - `SELECT currency, count(*) FROM parts GROUP BY 1` and `SELECT value FROM settings WHERE name = 'orders_currency'`, and whether the API pod sets the currency from its environment;
    - `SELECT count(*) FROM order_cost_entries WHERE source LIKE 'part:%'`; counts of `parts`, `part_stock_moves`, `model_part_rules`, `order_item_parts` (used > 0), `entities WHERE kind = 'part'`;
    - `SELECT DISTINCT supplier FROM parts`;
-   - `SELECT count(*) FROM part_stock_moves WHERE delta = 0` (adjusts that moved nothing; Task 6 drops them).
+   - `SELECT count(*) FROM part_stock_moves WHERE delta = 0` (adjusts that moved nothing; Task 6 drops them);
+   - `SELECT max(pack_price_minor) FROM parts`, against `numeric(12,4)` of `offer_price_points.price` (the price is `pack_price_minor / 10^exponent`, so it must fit);
+   - the count of `entities` of kind `part` whose `ref` names no part (expect 0; R-P2-24);
+   - the count of costed `use` moves (`amount_minor IS NOT NULL`) whose `part:<order item>:<part>` cost entry is gone (R-P2-21; Task 6 converts them at cost 0);
+   - whether a `hardware` item already has a part's name (`items` has a unique `(kind_id, lower(name))`; after Task 6 the parts are `hardware` items);
+   - a blocking question for the owner: is the orders currency set only by the environment? (`shop` in Task 6 reads `settings.orders_currency`; if the API sets it from an env var and the table has no row, the migration would read `'USD'`.)
    If any part's currency differs from the shop's, stop and ask the owner before merge.
 7. **Coverage.** Each new route is a tool or a `coverage.ts` entry, or
    `agent/test/coverage.test.ts` fails (`agent/CLAUDE.md` l.393-396). Layer 2 adds
@@ -223,13 +228,14 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 - `stock_lots (id uuid PK, item_id uuid NOT NULL REFERENCES items (id), location_id uuid
   REFERENCES filament_locations (id), received_qty numeric(20,6) NOT NULL, on_hand
   numeric(20,6) NOT NULL, unit_cost_minor numeric(20,6) NOT NULL CHECK (>= 0),
-  cost_unknown boolean NOT NULL DEFAULT false, cost_currency text, origin text NOT NULL
+  cost_unknown boolean NOT NULL DEFAULT false, cost_currency text,
+  foreign_unit_cost_minor numeric(20,6) CHECK (>= 0), origin text NOT NULL
   CHECK IN ('invoice_line','production_run','opening','adjustment','manual'),
   invoice_line_id uuid REFERENCES filament_invoice_lines (id), production_run_id uuid,
   note text NOT NULL DEFAULT '', received_at timestamptz NOT NULL DEFAULT
   clock_timestamp(), created_by jsonb NOT NULL)`; index `(item_id, received_at, id)`.
   `origin = 'manual'` is a receive with no invoice yet (today's "Add stock"); spec §6.4
-  lists the other four. `cost_currency` is set only on opening lots from parts.
+  lists the other four. `cost_currency` is the currency the lot was bought in; NULL means the shop's currency (R-P2-12). `foreign_unit_cost_minor` keeps the unit cost of a lot bought in a foreign currency, in that currency's minor units, while `unit_cost_minor` is 0 and `cost_unknown` is set (R-P2-11).
 - `stock_units (id uuid PK, item_id uuid NOT NULL REFERENCES items (id), serial text,
   name text NOT NULL DEFAULT '', location_id uuid REFERENCES filament_locations (id),
   status text NOT NULL DEFAULT 'in_stock' CHECK IN
@@ -308,7 +314,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   - `Tracking = Literal["lot", "unit", "filament", "none"]`, `LifeBasis = Literal["none", "hours", "months"]`.
   - `ItemKind(BaseModel)`: `id, name, parent_id: str | None, tracking, uom, attribute_schema: dict, life_basis, saleable: bool, builtin: bool, archived_at, item_count: int`.
   - `KindInput` (`id`, `name`, `parent_id`, `tracking`, `uom`, `attribute_schema`, `life_basis`, `saleable`), `KindPatch` (all optional but `id`), `extra="forbid"`.
-  - `Item(BaseModel)`: `id: UUID, kind_id, kind_path: list[str]` (root first), `tracking, uom, name, manufacturer, compatible_with: list[str], low_stock: Decimal, life_hours, life_months, saleable: bool | None, effective_saleable: bool, source, source_ref, edited_fields, note, archived_at, on_hand: Decimal` (lots' sum, or units `in_stock` count), `stock_value_minor: Decimal` (on-hand lots × cost, plus in-stock units' cost), `cost_unknown: bool`, `low: bool` (`low_stock > 0 and on_hand <= low_stock`).
+  - `Item(BaseModel)`: `id: UUID, kind_id, kind_path: list[str]` (root first), `tracking, uom, name, manufacturer, compatible_with: list[str], low_stock: Decimal, life_hours, life_months, saleable: bool | None, effective_saleable: bool, source, source_ref, edited_fields, note, archived_at, on_hand: Decimal` (lots' sum, or units `in_stock` count), `stock_value_minor: Decimal` (on-hand lots × cost, plus in-stock units' cost); `low_stock`, `on_hand` and `stock_value_minor` serialize normalized (`"4"`, not `"4.000000"`), like a lot's (R-P2-13), `cost_unknown: bool`, `low: bool` (`low_stock > 0 and on_hand <= low_stock`).
   - `ItemInput`, `ItemPatch` (`extra="forbid"`).
 - Produces (`inventory/kinds.py`): `class KindStore(pool)`: `list(include_archived=False) -> list[ItemKind]`, `get(id)`, `create(body, by)`, `update(id, patch, by)`, `archive(id)`, `restore(id)`; `merged_schema(conn, kind_id) -> dict` (ancestors' `properties` then the kind's, a child's key wins); `item_schema(conn, item_id: str) -> dict` (the item's kind's merged schema; the empty object schema for a bad id). Errors: `KindNotFound`, `KindExists`, `KindCycle`, `KindInUse` (tracking change on a kind with items, or on a builtin), `BadPropertySchema` (re-raised from `check_schema`).
 - Produces (`inventory/items.py`): `class ItemStore(pool, entities)`: `list(*, kind: str | None, descendants: bool = True, q: str | None, low: bool = False, include_archived: bool = False, compatible: str | None) -> list[Item]`; `get(id) -> Item | None`; `create(body, by) -> Item`; `update(id, patch, by) -> Item` (adds each changed field to `edited_fields` when `source != 'manual'`); `archive(id)`, `restore(id)`. Errors: `ItemNotFound`, `ItemExists`, `FilamentItemRefused` (a kind with `tracking = filament`, Ruling 9), `KindArchived`. `q` matches name, manufacturer and any property value of the item (`EXISTS` over `entity_properties` joined to `entities` with `kind = 'item'`, `value::text ILIKE`).
@@ -317,7 +323,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 
 - [ ] **Step 1: Write the failing tests**
   - `test_kinds.py`: create `fastener` under `part`; `merged_schema("fastener")` has `part`'s keys plus its own; a child key overrides the parent's subschema; `update(parent_id=<own descendant>)` raises `KindCycle`; a restricting schema (`additionalProperties: false`) raises `BadPropertySchema` and the stored schema is unchanged; changing `tracking` of `nozzle` raises `KindInUse`; `archive` of a kind with unarchived items raises `KindInUse`.
-  - `test_items.py`: an item of `service` (`tracking = none`) has `on_hand == 0`, `stock_value_minor == 0` and `low is False` whatever its `low_stock`; create in `hardware`, `get` gives `kind_path == ["part", "hardware"]`, `effective_saleable is False`; with `saleable=True` it is True; `list(kind="part")` includes it, `list(kind="part", descendants=False)` does not; a second item named the same in any case in the kind raises `ItemExists`; create in `filament` raises `FilamentItemRefused`; with `source="bambu_store"`, `update(name=…)` gives `edited_fields == ["name"]`; `list(q="0451")` finds an item whose property `mpn` is `"X-0451"`.
+  - `test_items.py`: an item of `service` (`tracking = none`) has `on_hand == 0`, `stock_value_minor == 0` and `low is False` whatever its `low_stock`; create in `hardware`, `get` gives `kind_path == ["part", "hardware"]`, `effective_saleable is False`; with `saleable=True` it is True; `list(kind="part")` includes it, `list(kind="part", descendants=False)` does not; a second item named the same in any case in the kind raises `ItemExists`; create in `filament` raises `FilamentItemRefused`; with `source="bambu_store"`, `update(name=…)` gives `edited_fields == ["name"]`; `list(q="0451")` finds an item whose property `mpn` is `"X-0451"`; an item with `low_stock` 4 and `on_hand` 4 serializes both as `"4"` (R-P2-13); a NUL in a name or `q` raises 422, and `low_stock` above `numeric(20,6)` raises 422, never a 500 (R-P2-16).
   - `test_properties.py`: `test_an_items_schema_is_its_kinds`: set `part`'s schema to type `mpn` as string; `apply(item:<id>, {"mpn": 5})` raises `BadPropertyValue("mpn", …)`; `{"colour": "red"}` is stored; `set_schema("item", …)` raises `SchemaOwnedByKind`.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory tests/entities/test_properties.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement** the models, stores, component and the registry rows. `apply` reads `schema_for` before its transaction, as it reads `_schema_in` today.
@@ -347,22 +353,25 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 - Test: `backend/tests/inventory/test_stock.py`
 
 **Interfaces:**
-- Produces (`inventory/models.py`): `Lot`, `Unit`, `Move` (every column of Task 1, decimals serialized as strings as `InventoryPart._decimal` does, `orders/parts.py:119`); `ReceiveLot (qty, total_cost_minor | unit_cost_minor, currency (default the shop's `orders_currency`), location_id, note, received_at?)`: a cost in another currency opens the lot with `unit_cost_minor = 0`, `cost_unknown`, and `cost_currency` = that currency, as today's parts in another currency are left uncosted (R-7067-11, D11); `ReceiveUnits (count 1..100, cost_minor each, serials: list[str] | None, location_id, name)`; `UseInput (qty > 0, lot_id?, entity: str | None ("kind:ref"), reason)`; `AdjustInput (on_hand, note required)`; `UnitStatusInput (status, entity?, note)`; `RecostResult (moves: int, orders: list[RecostedItem{order_id, order_item_id, before_minor, after_minor}])`.
+- Produces (`inventory/models.py`): `Lot`, `Unit`, `Move` (every column of Task 1, decimals serialized as strings as `InventoryPart._decimal` does, `orders/parts.py:119`); `ReceiveLot (qty, total_cost_minor | unit_cost_minor, currency (default the shop's `orders_currency`), location_id, note, received_at?)`: a cost in another currency opens the lot with `unit_cost_minor = 0`, `cost_unknown`, `cost_currency` = that currency and `foreign_unit_cost_minor` = the entered unit cost, as today's parts in another currency are left uncosted (R-7067-11, D11, R-P2-11, R-P2-12); a cost in the shop's currency leaves `cost_currency` NULL; `ReceiveUnits (count 1..100, cost_minor each, serials: list[str] | None, location_id, name)`; `UseInput (qty > 0, lot_id?, entity: str | None ("kind:ref"), reason)`; `AdjustInput (on_hand, note required)`; `UnitStatusInput (status, entity?, note)`; `RecostResult (moves: int, orders: list[RecostedItem{order_id, order_item_id, before_minor, after_minor}])`.
 - Produces `class StockStore(pool, entities)`:
   - `receive_lot(item_id, body, by) -> Lot` (one `receive` move); `receive_units(item_id, body, by) -> list[Unit]` (one `receive` move each).
-  - `take(conn, item_id, qty: Decimal, by, *, lot_id=None, order_id=None, order_item_id=None, entity_id=None, reason="", kind="use") -> list[Move]` — FIFO; Review Focus 1 rules; locks the item's lots `FOR UPDATE` in `(received_at, id)` order.
+  - `take(conn, item_id, qty: Decimal, by, *, lot_id=None, order_id=None, order_item_id=None, entity_id=None, reason="", kind="use") -> list[Move]` — FIFO; Review Focus 1 rules; locks the item's lots `FOR UPDATE` in `(received_at, id)` order. A named `lot_id` is taken first (R-P2-14): if it holds less than `qty`, the rest spills FIFO into the other lots; if it holds nothing (`on_hand <= 0`), the take raises `LotEmpty` (409 `lot_empty`). A take from a lot with `cost_currency` set (a foreign lot) writes `cost_unknown` moves (R-P2-19). Input is checked before SQL: `qty × unit cost` that overflows `numeric(20,6)` raises `BadQuantity` (R-P2-16).
   - `give_back(conn, *, order_item_id: str, item_id: UUID, by) -> list[Move]` — one `return` move per unreversed `use` move of that order item and item, same lot, same `unit_cost_minor`, `reverses_move_id` set.
   - `use(item_id, body, by) -> list[Move]` (`take` in its own transaction; `entity` resolved with `EntityStore.ensure`).
-  - `adjust_lot(lot_id, body, by) -> Lot`; `count_item(item_id, on_hand, note, by) -> list[Move]` (a lower count takes FIFO as `adjust`; a higher one adds to the newest lot at its cost).
+  - `adjust_lot(lot_id, body, by) -> Lot`; `count_item(item_id, on_hand, note, by) -> list[Move]` (R-P2-15: first it zeroes each negative lot with an `adjust` move, then it takes the difference FIFO as `adjust` when the count is lower, or adds it to the newest lot at its cost when higher; no lot keeps an offsetting negative balance).
   - `set_unit_status(unit_id, body, by) -> Unit` — moves: `in_service` → `use` (−1), `sold` → `sell`, `retired` → `retire`, `scrapped` → `scrap`, back to `in_stock` → `return` (+1); sets `in_service_at` / `retired_at`. A unit with `installed_in_unit_id` set is refused (`UnitInstalled`; #7278 owns install and remove).
-  - `set_lot_cost(lot_id, unit_cost_minor, by) -> Lot` (clears `cost_unknown`; no move changes, D14).
+  - `set_lot_cost(lot_id, unit_cost_minor, by) -> Lot` (clears `cost_unknown`; keeps `cost_currency` and `foreign_unit_cost_minor` for provenance, R-P2-12; no move changes, D14).
   - `recost_lot(conn, lot_id) -> RecostResult` — every `use`/`return`/`adjust` move of the lot re-snapshotted at the lot's cost now; per order item, the parts sum before and after.
-  - `lots(item_id)`, `units(item_id, status?)`, `moves(*, item_id=None, lot_id=None, unit_id=None, order_item_id=None, limit=200)`, `estimate_unit_cost(conn, item_id, qty) -> tuple[Decimal, bool]` (what `take` would charge per unit now, and whether any part is cost-unknown; reads, writes nothing).
-  - Errors: `LotNotFound`, `UnitNotFound`, `WrongTracking` (a lot call on a unit item and the reverse), `ItemNotCounted` (any lot, unit or move call on an item of a `none` kind, Ruling 1; `take` raises it too, so an order part of such an item is refused at `set_item_parts`), `BadQuantity`, `UnitInstalled`.
+  - `lots(item_id)`, `units(item_id, status?)`, `moves(*, item_id=None, lot_id=None, unit_id=None, order_item_id=None, limit=200)`, `estimate_unit_cost(conn, item_id, qty) -> tuple[Decimal, bool]` (what `take` would charge per unit now, and whether any part is cost-unknown; reads, writes nothing; a `qty` that overflows `numeric(20,6)` raises `BadQuantity`, R-P2-16).
+  - Errors: `LotNotFound`, `UnitNotFound`, `WrongTracking` (a lot call on a unit item and the reverse), `ItemNotCounted` (any lot, unit or move call on an item of a `none` kind, Ruling 1; `take` raises it too, so an order part of such an item is refused at `set_item_parts`), `BadQuantity`, `UnitInstalled`, `LotEmpty` (R-P2-14).
 
 - [ ] **Step 1: Write the failing tests** (`test_stock.py`):
   - `test_fifo_takes_the_oldest_lot_first`: lots 10 @ 5.00 (day 1) and 10 @ 7.00 (day 2); take 15 → moves `-10 @ 500`, `-5 @ 700`; on hand 0 and 5.
-  - `test_a_named_lot_is_taken_first`.
+  - `test_a_named_lot_is_taken_first_then_fifo`: take 12 with `lot_id` = lot 2 (10 @ 7.00) → `-10 @ 700` from lot 2, then `-2 @ 500` FIFO from lot 1; an empty named lot (`on_hand <= 0`) raises `LotEmpty` and writes nothing (R-P2-14).
+  - `test_a_foreign_receive_keeps_what_was_entered`: `receive_lot` with cost 4.50 EUR (shop USD) → `unit_cost_minor == 0`, `cost_unknown`, `cost_currency == 'EUR'`, `foreign_unit_cost_minor == 450`; a take from it writes `cost_unknown` moves (R-P2-11, R-P2-19); `set_lot_cost` to 480 clears `cost_unknown` and keeps `cost_currency` and `foreign_unit_cost_minor` (R-P2-12); a shop-currency receive has `cost_currency IS NULL`.
+  - `test_a_count_settles_a_negative_lot_first`: lots 10 and (after a shortfall) −5 on the newest; `count_item(…, 12)` writes an `adjust` that zeroes the −5 lot, then adds the difference to the newest lot or takes it FIFO; no lot ends below 0 (R-P2-15).
+  - `test_bad_input_is_refused_not_a_500`: a NUL in a note, and a `qty × cost` overflow, raise `BadQuantity` or the 422 error (R-P2-16).
   - `test_a_shortfall_goes_negative_on_the_newest_lot`: take 25 of the above → third move `-5 @ 700`, `needs_review`, newest lot `-5`.
   - `test_an_item_with_no_lot_opens_a_cost_unknown_lot`: one `adjustment` lot, cost 0, `cost_unknown`; the move has `cost_unknown`.
   - `test_give_back_reverses_each_use_at_its_own_cost`: take 15, `set_lot_cost` of lot 2 to 9.00, `give_back` → `+10 @ 500`, `+5 @ 700`; a second `give_back` writes nothing.
@@ -396,14 +405,14 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 - Produces (all under `/api/v1`, tag `inventory`, store calls in `asyncio.to_thread`, a
   `summary` and `description` on each route; no `from __future__ import annotations`):
   - Kinds: `GET /inventory/kinds` → `{kinds: ItemKind[]}` (`?archived=true`); `POST /inventory/kinds`; `PATCH /inventory/kinds/{kind_id}`; `POST /inventory/kinds/{kind_id}/archive|restore`; `GET /inventory/kinds/{kind_id}/schema` → `{kind_id, schema (merged), own_schema, keys_in_use}`.
-  - Items: `GET /inventory/items?kind=&descendants=&q=&low=&archived=&compatible=` → `{items: Item[]}`; `POST /inventory/items`; `GET|PATCH /inventory/items/{item_id}`; `POST /inventory/items/{item_id}/archive|restore`.
+  - Items: `GET /inventory/items?kind=&descendants=&q=&low=&archived=&compatible=&limit=` → `{items: Item[]}` (`limit` 1-5000, default 1000; R-P2-17); `POST /inventory/items`; `GET|PATCH /inventory/items/{item_id}`; `POST /inventory/items/{item_id}/archive|restore`.
   - Offers: `GET /inventory/items/{item_id}/offers`; `GET /inventory/suppliers/{supplier_id}/offers`; `POST /inventory/offers`; `PATCH /inventory/offers/{offer_id}`; `POST /inventory/offers/{offer_id}/archive`; `GET|POST /inventory/offers/{offer_id}/prices`.
   - Stock: `GET|POST /inventory/items/{item_id}/lots`; `GET|POST /inventory/items/{item_id}/units`; `GET|PATCH /inventory/lots/{lot_id}` (PATCH: `unit_cost_minor`, `location_id`, `note`); `POST /inventory/lots/{lot_id}/adjust`; `POST /inventory/items/{item_id}/use`; `POST /inventory/items/{item_id}/count`; `GET|PATCH /inventory/units/{unit_id}` (name, serial, location); `POST /inventory/units/{unit_id}/status`; `GET /inventory/moves?item_id=&lot_id=&unit_id=&order_item_id=&limit=`.
   - `POST /inventory/lots/{lot_id}/recost` is added in Task 7 (it writes order events).
   - `GET /entities/{ref}/property-schema` → `KindPropertySchema` of the entity's effective schema (`schema_for`), for every kind.
-  - Problems (`inventory/problems.py`): 404 `kind_not_found`, `item_not_found`, `offer_not_found`, `lot_not_found`, `unit_not_found`, `supplier_not_found`; 409 `kind_exists`, `kind_in_use`, `item_exists`, `offer_exists`, `wrong_tracking`, `item_not_counted`, `unit_installed`, `filament_item_refused`, `schema_owned_by_item_kind`; 422 `kind_cycle`, `bad_quantity`, `bad_property_schema`.
+  - Problems (`inventory/problems.py`): 404 `kind_not_found`, `item_not_found`, `offer_not_found`, `lot_not_found`, `unit_not_found`, `supplier_not_found`; 409 `kind_exists`, `kind_in_use`, `item_exists`, `offer_exists`, `wrong_tracking`, `item_not_counted`, `unit_installed`, `filament_item_refused`, `schema_owned_by_item_kind`; 422 `kind_cycle`, `bad_quantity`, `bad_property_schema`; 409 `lot_empty` (R-P2-14). No input reaches SQL unchecked: a NUL is 422, an integer is bounded to its column, and a 500 is never an answer to input (R-P2-16).
 
-- [ ] **Step 1: Write the failing tests** with the app `client` fixture of `tests/api/test_entity_links.py`: one round trip per family (kinds, items, offers, lots, units, moves); each problem code above at least once; `GET /entities/item:<id>/property-schema` returns the merged kind schema; `PATCH /entities/item:<id>/properties` with a value the kind types wrong → 422 `bad_property_value`; `POST /inventory/kinds` with `"attribute_schema": {"type":"object","required":["mpn"]}` → 422 `bad_property_schema` and `GET` shows no kind.
+- [ ] **Step 1: Write the failing tests** with the app `client` fixture of `tests/api/test_entity_links.py`: one round trip per family (kinds, items, offers, lots, units, moves); each problem code above at least once; `GET /entities/item:<id>/property-schema` returns the merged kind schema; `GET /inventory/items?limit=0` and `limit=5001` → 422, and a NUL in `q` → 422 (R-P2-16, R-P2-17); a take of a named empty lot → 409 `lot_empty`; `PATCH /entities/item:<id>/properties` with a value the kind types wrong → 422 `bad_property_value`; `POST /inventory/kinds` with `"attribute_schema": {"type":"object","required":["mpn"]}` → 422 `bad_property_schema` and `GET` shows no kind.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/api/test_inventory.py tests/api/test_inventory_stock.py tests/api/test_entity_properties.py -q` — Expected: FAIL (404).
 - [ ] **Step 3: Implement** the routes and problems; add the coverage entries (reason: "Inventory phase 2 (#7067, spec §6.4–6.6); its `inventory_*` tools follow in layer 5 of the same stack, which drops these entries").
 - [ ] **Step 4: Run** the tests, `uv run --frozen pytest tests/auth -q` (route coverage), and `cd agent && pnpm exec vitest run test/coverage.test.ts` — Expected: PASS.
@@ -415,16 +424,18 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 
 **Files:**
 - Create: `backend/scadbuddy/migrations/<UTC>_parts_to_items.sql`
+- Modify: `backend/scadbuddy/entities/registry.py` (`part` leaves `KINDS`: the orphan sweep reads every kind's table, and `parts` is renamed; R-P2-18)
 - Test: `backend/tests/test_pg_migrations.py` (`test_the_parts_migration_*`, the pattern of
   `test_the_projection_migration_backfills_inputs_of_existing_rows`, l.168-183)
 
 The migration, in one file, in this order:
+0. `LOCK TABLE parts, part_stock_moves, order_item_parts, model_part_rules IN EXCLUSIVE MODE` first (R-P2-20). The layer-3 PR body names the deploy window: old pods fail on fulfil after the rename.
 1. `part_item_map`: `item_id = parts.id::uuid` when it is a uuid's text, else
    `gen_random_uuid()`.
 2. `items` from `parts`: kind `hardware` (Ruling 2), name, `low_stock`, `source = 'manual'`,
    `created_at`/`updated_at` kept.
 3. Suppliers (Ruling 5): for each distinct non-empty `parts.supplier`, the unarchived
-   `filament_suppliers` row with that `upper(name)`, else a new row (name only). One
+   `filament_suppliers` row with that `upper(btrim(name))` (`btrim` on both sides of the match), else a new row (name only); an archived same-name supplier does not match, so a new row is made. A part with no supplier keeps no offer (owner Ruling 5, R-P2-25): its pack data stays in `parts_retired`. One
    `supplier_offers` row per part with a supplier: `sku` = `'PART-' || left(item_id::text, 8)`
    (parts have no SKU; a person edits it), `url` = `parts.link`, and an empty `''` link becomes NULL (the column has a CHECK `^https?://`), `pack_size` =
    `parts.pack_size`. One `offer_price_points` row per offer: `price` =
@@ -438,18 +449,19 @@ The migration, in one file, in this order:
    `on_hand = parts.on_hand`. `received_qty` is the lot's whole known intake: a part's
    first count is an `adjust`, not an `add` (`PartStore._create`, `orders/parts.py:457-460`),
    so a sum of `add` deltas would miss it, and the history before the lot is kept as its
-   moves (step 6), not as intake. The lot's `unit_cost_minor = parts.unit_cost_minor`,
-   `cost_currency = parts.currency`, `cost_unknown = (parts.currency <> shop)` where `shop`
+   moves (step 6), not as intake. The lot's cost is as R-P2-22 below;
+   `cost_unknown = (parts.currency <> shop)` where `shop`
    is `coalesce((SELECT value #>> '{}' FROM settings WHERE name = 'orders_currency'), 'USD')`
    (D11; Pre-flight 6 checks prod has no other case), `received_at = parts.created_at`,
    `created_by` = the system actor `{"kind":"provider","principal":"parts_migration"}`.
+   R-P2-22: a foreign part's lot (currency <> shop) has `unit_cost_minor = 0`, `foreign_unit_cost_minor = parts.unit_cost_minor`, `cost_unknown` and `cost_currency = parts.currency`. A shop-currency part's lot has `cost_currency` NULL and `unit_cost_minor = parts.unit_cost_minor`.
 6. Every `part_stock_moves` row with `delta <> 0` becomes a `stock_moves` row on that lot.
    A row with `delta = 0` is dropped: `PartStore.adjust` writes one when a count equals the
    shelf (`body.on_hand - part.on_hand`, `orders/parts.py:519`), it moved nothing,
    `stock_moves` refuses `qty = 0`, and its note has no other place (the retired table
    keeps it until the follow-up drop, Ruling 6). Kinds: `add` → `receive`, `adjust` →
    `adjust`, `use` → `use`, `return` → `return`; `qty = delta`; `reason = note`, order ids,
-   `actor = created_by`, `at = created_at`. `unit_cost_minor` by kind:
+   `actor = created_by`, `at = created_at`. The migration builds these moves in a temp table with indexes on its join keys (order item, part, `created_at`). `unit_cost_minor` by kind:
    - `use` and `adjust`: `unit_cost_after_minor` (a use's cost, as `used_at` reads it,
      `orders/parts.py:397`);
    - `add`: `amount_minor / delta` when `amount_minor` is set (what the packs cost), else
@@ -460,19 +472,19 @@ The migration, in one file, in this order:
      matched before the costs are set.
    Then `amount_minor = round(qty × unit_cost_minor, 6)` (R-P2-1), and `cost_unknown =
    (parts.currency <> shop) OR (kind in (use, return) and the old amount_minor IS NULL and
-   unit cost > 0)`. The first term matches step 5's lot: a part in another currency keeps
+   round(abs(qty) × unit_cost_minor) > 0)` (R-P2-23: a use that rounds to 0 stays a known 0). A move on a foreign part's lot has `unit_cost_minor = 0` (R-P2-22). The first term matches step 5's lot: a part in another currency keeps
    that currency's minor units, which job cost must not add as the shop's. The second term
    carries today's rule: `PartStore` writes a use or return with no `amount_minor` when it
    took the units with no known cost (`orders/parts.py` `move`), so the converted move is
    uncosted too.
 7. Delete every `order_cost_entries` row whose `source` is `part:<order item>:<part>` and
-   whose order item has a converted `use` move (Pre-flight 5).
+   whose order item has a converted `use` move (Pre-flight 5). A row whose source is not `part:…` is kept. A costed `use` whose `part:<order item>:<part>` entry a person removed converts with `unit_cost_minor` 0, and so does its paired `return`; the move's `reason` notes why (R-P2-21: job cost never rises silently; Pre-flight 6 counts these).
 8. `order_item_parts`: add `item_id uuid REFERENCES items (id)`, fill from the map, `SET NOT
    NULL`, drop `part_id`, new PK `(order_item_id, item_id)`, index `(item_id)`.
 9. `model_part_rules.lines`: rewrite every `part_id` (line and `when`) to its item id with
    `jsonb_set` over the array; the key becomes `item_id`.
 10. `entities` of kind `part`: `kind = 'item'`, `ref` = the item id; their
-    `entity_attachments.subject` likewise.
+    `entity_attachments.subject` likewise. If a part entity's `ref` names no part, the migration RAISEs (R-P2-24; Pre-flight 6 counts these, expect 0).
 11. Rename `parts` → `parts_retired`, `part_stock_moves` → `part_stock_moves_retired` (Ruling 6; a follow-up issue drops them after a prod check).
 
 - [ ] **Step 1: Write the failing tests** (apply files before this one, seed, apply it):
@@ -480,10 +492,16 @@ The migration, in one file, in this order:
     an add of 10 @ 599, a use of 3 for `oi1` (entry `part:oi1:<p>` 1797) → one item with the
     part's id; one opening lot `on_hand = 7`, `unit_cost_minor = 599`; two moves; no
     `part:` cost entry; `order_item_parts.item_id` set.
-  - `test_a_part_in_another_currency_opens_a_cost_unknown_lot`: EUR part, shop USD → the
-    opening lot has `cost_unknown`, `cost_currency = 'EUR'`, and its offer's price point is
-    in EUR (R-7067-11).
+  - `test_a_part_in_another_currency_opens_a_cost_unknown_lot`: EUR part with unit cost 450, shop USD → the
+    opening lot has `cost_unknown`, `cost_currency = 'EUR'`, `foreign_unit_cost_minor = 450` and `unit_cost_minor = 0`, and its offer's price point is
+    in EUR (R-7067-11, R-P2-22). A shop-currency part's lot has `cost_currency IS NULL`.
   - `test_a_returned_use_is_linked_to_its_use`.
+  - `test_a_non_uuid_part_id_gets_a_new_item_id`: a part id that is not a uuid maps to a generated uuid, and its rows follow the map.
+  - `test_step_7_keeps_a_non_part_cost_entry`: an `order_cost_entries` row with another `source` stays.
+  - `test_a_return_pairs_per_part_and_an_unpaired_return_converts`: two parts used and returned on one order item pair each with its own use; a `return` with no `use` converts with its own cost and no `reverses_move_id`.
+  - `test_a_removed_part_cost_entry_converts_at_zero`: a costed use whose `part:` entry is gone, and its return, convert with `unit_cost_minor` 0 and a reason that says why (R-P2-21).
+  - `test_a_null_amount_foreign_use_and_a_rounds_to_zero_use`: a use with NULL `amount_minor` in a foreign currency is `cost_unknown`; a use with `round(abs(qty) × unit_cost_minor) = 0` is a known 0 (R-P2-23).
+  - `test_an_orphan_part_entity_raises`: an `entities` row of kind `part` with no part makes the migration RAISE (R-P2-24).
   - `test_a_return_after_a_dearer_add_nets_to_zero`: add 10 @ 500, use 4 for `oi1`
     (unit cost after 500), add 10 for 7000 (unit cost after 600), return 4 for `oi1`, all
     before the migration → the return's `unit_cost_minor` is 500 (its use's), the add's is
@@ -494,7 +512,7 @@ The migration, in one file, in this order:
     `lines[0].item_id`, `lines[0].when[0].item_id`; the link lists under `item:<p>`.
   - `test_suppliers_are_matched_by_name_or_made`: `"bambu lab"` matches an existing
     "Bambu Lab" row; `"Amazon"` makes one; `""` makes none and the link becomes a
-    `purchase` entity link.
+    `purchase` entity link; `" Bambu Lab "` matches after `btrim`; an archived same-name supplier makes a new row; a part with no supplier has no offer.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/test_pg_migrations.py -k parts_migration -q` — Expected: FAIL.
 - [ ] **Step 3: Write the migration.**
 - [ ] **Step 4: Run** the same — Expected: PASS.
@@ -523,7 +541,7 @@ Lock order: callers lock items in `item_id` order, and lock orders before lots, 
   `backend/tests/api/test_inventory_stock.py` (recost)
 
 **Interfaces:**
-- Consumes: `StockStore.take`, `give_back`, `recost_lot`, `estimate_unit_cost` (Task 4).
+- Consumes: `StockStore.take`, `give_back`, `recost_lot`, `estimate_unit_cost` (Task 4). `estimate_unit_cost` applies R-P2-16: a `per_unit × quantity` that overflows is 422 `bad_quantity`, not a 500.
 - Produces: `OrderLifecycle.recost_lot(lot_id: UUID, by: Actor) -> RecostResult`;
   `ItemPartRow(item_id, per_unit, used)`; `PartNeed` and `OrderParts` keep their fields with
   `item_id` beside `part_id` (same value) for one release.
@@ -557,7 +575,7 @@ Lock order: callers lock items in `item_id` order, and lock orders before lots, 
 
 **Interfaces:**
 - Produces: `Margin.parts_minor`; `"parts"` in `ItemCost.unknown` when a move is
-  `cost_unknown` or the order's currency is not the shop's (the existing rule for today's
+  `cost_unknown` (R-P2-19; a take from a foreign lot writes `cost_unknown` moves) or the order's currency is not the shop's (the existing rule for today's
   settings, docstring l.38-39).
 
 - [ ] **Step 1: Write the failing tests**: an item with a use of 6 @ 599.5 → `parts_minor
@@ -577,7 +595,7 @@ Lock order: callers lock items in `item_id` order, and lock orders before lots, 
   offer + its latest price point; `unit_cost_minor` = on-hand lots' weighted average for
   display; `POST /parts` creates an item of kind `hardware` + offer + price + a `manual`
   lot when `on_hand > 0`; `POST /parts/{id}/stock` receives `packs × pack_size` at
-  `packs × pack price` (the offer's latest price point, or the body's `pack_price_minor`,
+  `packs × pack price` (the offer's latest price point, or the body's `pack_price_minor`; a part with no offer has no price point, so Add stock uses the body's pack price there, R-P2-25;
   which also writes a new `manual` price point: Add stock keeps prefilling the cost, Ruling 4).
   Every price point an alias writes is in the part's own currency: the currency of the
   offer's latest price point, else the shop's for `POST /parts` (parts are made in
@@ -586,14 +604,14 @@ Lock order: callers lock items in `item_id` order, and lock orders before lots, 
   (R-7067-11); `POST /parts/{id}/adjust` → `count_item`; `GET /parts/{id}/moves`
   maps `Move` to `StockMove`; each route's description says "Alias of /inventory/…; goes
   after one release", spec §6.11)
-- Modify: `frontend/src/pages/PartsPage.tsx` (the panels' entity `part:<id>` → `item:<id>`)
+- Modify: `frontend/src/pages/PartsPage.tsx` (the panels' entity `part:<id>` → `item:<id>`; `grep -rn "part:" frontend/src agent/src` finds the rest, and each `part:` ref moves to `item:`, R-P2-18)
 - Test: `backend/tests/api/test_parts.py` (existing; it must pass unchanged but for
   `part_id` values that are now uuids), `frontend/src/pages/PartsPage.test.tsx`
 
 - [ ] **Step 1: Add one test and run.** `test_a_part_in_another_currency_round_trips`
   in `tests/api/test_parts.py`: a part migrated in EUR (shop USD) answers `currency ==
   "EUR"` on `GET /parts`; `POST /parts/{id}/stock` with `packs: 1` writes an EUR price
-  point and a lot with `cost_unknown`; `GET /inventory/items/{id}` has `cost_unknown`.
+  point and a lot with `cost_unknown`, `cost_currency = 'EUR'`, `unit_cost_minor = 0` and `foreign_unit_cost_minor` = the entered cost (R-P2-11); `GET /inventory/items/{id}` has `cost_unknown`.
   Run `cd backend && uv run --frozen pytest tests/api/test_parts.py -q` — Expected: FAIL (tables gone).
 - [ ] **Step 2: Implement** the aliases; change the two entity strings.
 - [ ] **Step 3: Run** the same and `cd frontend && pnpm exec vitest run src/pages/PartsPage.test.tsx` (after `pnpm gen:api`) — Expected: PASS.
@@ -675,7 +693,7 @@ Load `frontend-design` first.
 - Modify: `agent/src/tools/index.ts` (register), `agent/src/tools/coverage.ts` (drop the
   layer-2 entries and the `/parts` entries l.89-111; keep reasons only for routes with no
   tool), `agent/src/sessions/touched.ts` (every new write tool, as l.334-357),
-  `agent/src/tools/entities.ts` (`uiPath` for `item`, `unit`, `lot`),
+  `agent/src/tools/entities.ts` (`uiPath` for `item`, `unit`, `lot`; every `part:` ref the agent builds moves to `item:`, R-P2-18),
   `agent/src/tools/orders.ts` (`part_list`, `part_stock_add`: descriptions say "Alias of
   inventory_item_list / inventory_lot_receive; goes after one release"; they call the
   inventory routes; `order_item_parts_set` takes `item_id`, and `part_id` as an alias)
@@ -799,7 +817,33 @@ task above follows them.
   provenance.
 - **R-P2-13.** The API serializes an item's decimal figures normalized, like a lot's
   (`"4"`, not `"4.000000"`).
-- **R-P2-14.** A move that names a lot uses that lot or is refused (an empty lot gives an
-  error). FIFO never silently replaces the lot.
+- **R-P2-14.** A move that names a lot takes that lot first. If it holds less than the
+  quantity, the rest spills FIFO into the other lots. If it holds nothing (`on_hand <= 0`),
+  the take is refused with `LotEmpty` (409 `lot_empty`). FIFO never silently replaces the
+  lot.
 - **R-P2-15.** A count first zeroes the negative lots, then takes the difference FIFO, or
   adds it to the newest lot. No lot keeps an offsetting negative balance.
+- **R-P2-16** (Tasks 2, 4, 5, 7). No input reaches SQL unchecked. NUL is refused (422).
+  Integers are bounded to their columns. A qty × unit cost overflow answers 422
+  `bad_quantity`. A 500 is never an answer to input.
+- **R-P2-17** (Task 5). `GET /inventory/items` takes `limit` (1-5000, default 1000).
+- **R-P2-18** (Task 6). `part` leaves the entities `KINDS`, because the sweep reads every
+  kind's table. Tasks 9 and 12 move `part:` refs to `item:`.
+- **R-P2-19** (Task 8). A move with `cost_unknown` makes "parts" unknown. A foreign lot's
+  takes are `cost_unknown`.
+- **R-P2-20** (Task 6). The migration first takes `LOCK TABLE parts, part_stock_moves,
+  order_item_parts, model_part_rules IN EXCLUSIVE MODE`. The layer-3 PR body names the
+  deploy window: old pods fail on fulfil after the rename.
+- **R-P2-21** (Task 6). A costed use whose `part:<oi>:<part>` cost entry a person removed
+  converts with `unit_cost_minor` 0, and so does its paired return. The reason notes why.
+  Job cost never rises silently. Pre-flight 6 counts these.
+- **R-P2-22** (Task 6 step 5). A foreign part's lot has `unit_cost_minor` 0,
+  `foreign_unit_cost_minor` = the part's cost, `cost_unknown` and `cost_currency` = the
+  part's currency. A shop-currency part's lot has `cost_currency` NULL.
+- **R-P2-23** (Task 6 step 6). The second `cost_unknown` term tests
+  `round(abs(qty) × unit_cost_minor) > 0`, so a use that rounds to 0 stays a known 0.
+- **R-P2-24** (Task 6). If an entity of kind `part` has a ref that names no part, the
+  migration RAISEs. Pre-flight 6 counts these (expect 0).
+- **R-P2-25** (Tasks 6 and 9). A part with no supplier keeps no offer (owner Ruling 5). Its
+  pack data stays in `parts_retired`; the drop follow-up and the layer-3 PR body name it.
+  In Task 9, Add stock uses the body's pack price there.
