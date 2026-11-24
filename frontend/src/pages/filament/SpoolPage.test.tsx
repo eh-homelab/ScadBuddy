@@ -337,9 +337,11 @@ describe('the spool page', () => {
     expect(screen.getByText(/Saving the type drops H2C 0\.4,/)).toBeInTheDocument()
     expect(within(table).queryByLabelText('Slicer filament')).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Save spool' }))
-    const presets = screen.getByRole('table', { name: 'Slicer presets' })
-    expect(await within(presets).findByRole('row', { name: /H2C 0\.4 from type/i })).toBeInTheDocument()
-    expect(within(presets).queryByLabelText('Slicer filament')).toBeNull()
+    // The save renders the table twice: first with the dropped row beside the type's, then
+    // remounted without it. Wait for the second, and look the table up again.
+    await waitFor(() => expect(screen.queryByRole('row', { name: /Dropped when the type is saved/ })).toBeNull())
+    expect(await screen.findByRole('row', { name: /H2C 0\.4 from type/i })).toBeInTheDocument()
+    expect(within(screen.getByRole('table', { name: 'Slicer presets' })).queryByLabelText('Slicer filament')).toBeNull()
     expect(puts).toEqual([])
     expect((await getSpool(spoolId(6))).type_id).toBe(T.JADE)
     expect((await getSpool(spoolId(6))).presets.every((row) => !row.overridden)).toBe(true)
@@ -513,6 +515,26 @@ describe('the spool page', () => {
     expect(sent.copy_of).toBe(spoolId(6))
     expect(sent.presets.length).toBeGreaterThan(0)
     expect(sent.presets.every((row) => !('migrated' in row))).toBe(true)
+  })
+
+  it('says the copied spool was deleted, and the next save makes a new spool with no copy link (#7150 review, R-7150-13)', async () => {
+    server.use(http.post('*/api/v1/filament/spools/bulk', () => HttpResponse.json({ type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'copy_of names no spool' }, { status: 422, headers: { 'Content-Type': 'application/problem+json' } }), { once: true }))
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(6)}`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    expect(await screen.findByLabelText('Colour name')).toHaveValue('Teal')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('The spool this form copied was deleted')
+    expect(alert).toHaveTextContent('Save again to make this one a new spool')
+    expect(alert).not.toHaveTextContent('copy_of')
+    expect(screen.queryByText(/stay with it/)).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Colour name')).toHaveValue('Teal')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    expect(await heading(20)).toBeInTheDocument()
+    expect(posts).toHaveLength(2)
+    expect((posts[0] as { copy_of: string | null }).copy_of).toBe(spoolId(6))
+    expect((posts[1] as { copy_of: string | null }).copy_of).toBeNull()
   })
 
   it("an unchanged copied migrated row stays migrated, so the copy's first type drops it (R-7150-11, R-7150-13)", async () => {

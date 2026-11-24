@@ -2,7 +2,10 @@ import type { Client } from '@temporalio/client'
 
 /**
  * The read partitions of a normal task queue: Temporal's default
- * `matching.numTaskqueueReadPartitions`. Prod's dynamic config does not set it
+ * `matching.numTaskqueueReadPartitions`, `GlobalDefaultNumTaskQueuePartitions`
+ * (https://github.com/temporalio/temporal/blob/v1.32.1/common/dynamicconfig/shared_constants.go).
+ * A change to that setting changes this in the same PR (agent/CLAUDE.md "Poller reads").
+ * Prod's dynamic config does not set it
  * (`scadbuddy-temporal-v2-dynamicconfig`, read 2026-11-24), and the dev server the tests run
  * has these four too (#7306).
  */

@@ -59,12 +59,18 @@ _MIGRATED_ROWS = (
 )
 
 
-def _migrated_rows(conn: Conn, spool_id: UUID) -> set[_PresetValues]:
-    """The key and values of each of the spool's ``migrated`` preset rows."""
+def _preset_values(rows: list[DictRow]) -> set[_PresetValues]:
+    """The key and values of each preset row; a row of NULLs (a LEFT JOIN's miss) is none."""
     return {
         (r["printer_model"], r["nozzle_diameter"], r["slicer_filament"], r["slicer_filament_name"])
-        for r in conn.execute(_MIGRATED_ROWS, (spool_id,)).fetchall()
+        for r in rows
+        if r["printer_model"] is not None
     }
+
+
+def _migrated_rows(conn: Conn, spool_id: UUID) -> set[_PresetValues]:
+    """The key and values of each of the spool's ``migrated`` preset rows."""
+    return _preset_values(conn.execute(_MIGRATED_ROWS, (spool_id,)).fetchall())
 
 
 #: The columns of a spool row: every field of `Spool` but the four it is given here.
@@ -746,16 +752,7 @@ class FilamentSpoolStore:
             ).fetchall()
             if not rows:
                 raise SpoolCopySourceError()
-            carried = {
-                (
-                    r["printer_model"],
-                    r["nozzle_diameter"],
-                    r["slicer_filament"],
-                    r["slicer_filament_name"],
-                )
-                for r in rows
-                if r["printer_model"] is not None
-            }
+            carried = _preset_values(rows)
         if body.location_id is not None:
             place = conn.execute(
                 "SELECT tray_id FROM filament_locations WHERE id = %s", (body.location_id,)
