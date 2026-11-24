@@ -56,7 +56,7 @@ async def task_of(flows: Flows, call_id: str) -> Task:
 
 async def run_tasks(flows: Flows, run_id: str) -> list[Task]:
     listed = await asyncio.to_thread(tasks_of(flows).list, state=None)
-    return [t for t in listed if t.run_id == run_id]
+    return [await task_of(flows, t.id) for t in listed if t.run_id == run_id]
 
 
 async def parked(flows: Flows, run_id: str, count: int = 1) -> Run:
@@ -208,12 +208,10 @@ async def test_an_answer_the_run_never_took_leaves_its_task_expired(
 
     @activity.defn(name=FLOW_ENTRY_TIMEOUT)
     async def answered_then_refused(entry: EntryTimeout) -> bool:
+        execution = activity.info().workflow_run_id
+        assert execution is not None
         await asyncio.to_thread(
-            TaskStore(jobs.pool).mark_answered,
-            entry.call_id,
-            JANE,
-            "jane",
-            activity.info().workflow_run_id,
+            TaskStore(jobs.pool).mark_answered, entry.call_id, JANE, "jane", execution
         )
         raise ApplicationError("refused", type="EntryRefused", non_retryable=True)
 

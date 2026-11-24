@@ -267,6 +267,69 @@ def test_any_other_date_time_is_refused(value: str) -> None:
     assert not FORMAT_CHECKER.conforms(value, "date-time")
 
 
+LONG_LABEL = "b" * 63
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "jane@example.com",
+        "jane.doe+tag@mail.example.co.uk",
+        "o'brien!#$%&*/=?^`{|}~@example.com",
+        "j\u00fcrgen@m\u00fcnchen.example",
+        "\u30e6\u30fc\u30b6\u30fc@\u4f8b\u3048.\u30c6\u30b9\u30c8",
+        "a@b.c",
+        # 254 characters.
+        f"{'a' * 60}@{LONG_LABEL}.{LONG_LABEL}.{LONG_LABEL}.c",
+        7,
+        None,
+    ],
+)
+def test_an_email_with_a_local_part_and_a_domain_fits(value: Any) -> None:
+    from scadbuddy.core.input_schema import FORMAT_CHECKER
+
+    assert FORMAT_CHECKER.conforms(value, "email")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "@",
+        "jane",
+        "a@b",
+        "@example.com",
+        "jane@",
+        "jane@example",
+        "jane@@example.com",
+        "jane@doe@example.com",
+        "jane@.example.com",
+        "jane@example.com.",
+        "jane@example..com",
+        "jane@.",
+        " jane@example.com",
+        "jane doe@example.com",
+        "jane@exam ple.com",
+        "jane@example.com ",
+        "jane@example.com\n",
+        "jane\n@example.com",
+        "jane@example.com\r\nBcc: eve@example.com",
+        "jane\t@example.com",
+        "jane\x00@example.com",
+        "jane@example\x7f.com",
+        "jane@example\x85.com",
+        "jane\u00a0doe@example.com",
+        "jane@example\u2028.com",
+        # 255 characters.
+        f"{'a' * 61}@{LONG_LABEL}.{LONG_LABEL}.{LONG_LABEL}.c",
+    ],
+)
+def test_any_other_email_is_refused(value: str) -> None:
+    from scadbuddy.core.input_schema import FORMAT_CHECKER
+
+    assert not FORMAT_CHECKER.conforms(value, "email")
+
+
 SLOW_DEFAULT = {
     "type": "string",
     "pattern": "^(a|aa)+$",

@@ -33,7 +33,14 @@ from scadbuddy.flows.component import FlowsDep
 from scadbuddy.flows.operations import TASK_ANSWER, TASK_NOT_OPEN, seal_answer, task_not_open
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.tasks.component import TasksComponent, TasksDep
-from scadbuddy.tasks.models import MAX_BY_CHARS, MAX_JSON_BYTES, Task, TaskState, json_fits
+from scadbuddy.tasks.models import (
+    MAX_BY_CHARS,
+    MAX_JSON_BYTES,
+    Task,
+    TaskQuestion,
+    TaskState,
+    json_fits,
+)
 from scadbuddy.tasks.validate import validate_answer
 from scadbuddy.workflows.payload_codec import SubjectForgottenError
 
@@ -58,7 +65,7 @@ TaskIdPath = Annotated[str, Path(pattern=UUID_PATTERN)]
 
 
 class TaskList(BaseModel):
-    tasks: list[Task]
+    tasks: list[TaskQuestion]
 
 
 class TaskAnswerBody(BaseModel):
@@ -93,7 +100,8 @@ def list_tasks(
     ] = None,
     limit: Annotated[int, Query(ge=1, le=MAX_TASKS)] = 100,
 ) -> TaskList:
-    """The tasks in ``state``, at ``place`` when it is given, oldest first."""
+    """The tasks in ``state``, at ``place`` when it is given, oldest first. Without their
+    answers: ``GET /tasks/{id}`` has one task's own."""
     return TaskList(tasks=tasks.store.list(state=state, place=place, limit=limit))
 
 
@@ -146,7 +154,7 @@ async def answer_task(
     idempotency_key: IdempotencyKey = None,
 ) -> Task | JSONResponse:
     """Check the answer against the task's schema and give it to the run. The same request
-    again answers the task as it stands. A 202's operation says only that it was answered:
+    again returns the task as it stands. A 202's operation says only that it was answered:
     read the task itself at ``GET /tasks/{id}``. Read it again after a 409 too. A 409
     ``not-open`` has the task's own ``state``, which is ``open`` for a moment when the run
     has another answer that is not marked yet."""

@@ -4,7 +4,7 @@ store's writes, with its answers and errors, and holds no database secret. The r
 
 Every write it sends is natural: the client may send it again after a lost answer, and
 the route answers as it did the first time. So `close` on a task already in the asked
-state answers its row, and `None` only for a task in another state (or none).
+state returns its row, and `None` only for a task in another state (or none).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ RUN_NOT_FOUND = "run-not-found"
 RUN_ENDED = "run-ended"
 RUN_BEHIND = "run-behind"
 TASK_NOT_FOUND = "task-not-found"
-TASK_NOT_OPEN = "task-not-open"
+NOT_OPEN = "task-not-open"
 
 
 def _part(value: str) -> str:
@@ -46,7 +46,7 @@ class RemoteTasks:
         self._client = crud
 
     async def open(self, task: TaskOpen, *, workflow_run_id: str | None = None) -> Task:
-        """`TaskStore.open`: the same id again answers the stored row. Raises
+        """`TaskStore.open`: the same id again returns the stored row. Raises
         `RunNotFoundError` for an unknown run and `RunEndedError` for one that ended, or
         whose execution ``workflow_run_id`` a Reset replaced."""
         body = task.model_dump(mode="json", by_alias=True) | {"workflow_run_id": workflow_run_id}
@@ -83,7 +83,7 @@ class RemoteTasks:
             raise
         except CrudRefusedError as error:
             reason = error.problem.get("reason")
-            if (error.status, reason) in ((409, TASK_NOT_OPEN), (404, TASK_NOT_FOUND)):
+            if (error.status, reason) in ((409, NOT_OPEN), (404, TASK_NOT_FOUND)):
                 return None
             raise
         return Task.model_validate(response.json())
@@ -97,7 +97,7 @@ class RemoteTasks:
         *,
         final: bool = False,
     ) -> Task:
-        """`TaskStore.mark_answered`, with its rules; the same answer again answers the
+        """`TaskStore.mark_answered`, with its rules; the same answer again returns the
         row, and so does one of another execution. Raises `TaskNotOpenError`, with ``final``
         `RunBehindError` and, for a missing task, `KeyError`."""
         try:
@@ -116,7 +116,7 @@ class RemoteTasks:
             raise
         except CrudRefusedError as error:
             reason = error.problem.get("reason")
-            if error.status == 409 and reason == TASK_NOT_OPEN:
+            if error.status == 409 and reason == NOT_OPEN:
                 raise TaskNotOpenError(error.problem["state"]) from error
             if error.status == 404 and reason == TASK_NOT_FOUND:
                 raise KeyError(task_id) from error

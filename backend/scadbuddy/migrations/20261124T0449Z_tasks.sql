@@ -4,7 +4,6 @@
 CREATE TABLE tasks (
     id          text PRIMARY KEY,
     run_id      text NOT NULL REFERENCES workflow_runs (id) ON DELETE CASCADE,
-    project_id  text,
     title       text NOT NULL CONSTRAINT tasks_title CHECK (length(title) BETWEEN 1 AND 500),
     schema      jsonb NOT NULL,
     context     jsonb NOT NULL DEFAULT '[]',
@@ -12,7 +11,7 @@ CREATE TABLE tasks (
                   (length(place) BETWEEN 1 AND 100 AND place !~ '[[:cntrl:]]'),
     ui          text,
     expires_at  timestamptz,
-    state       text NOT NULL DEFAULT 'open'
+    state       text NOT NULL DEFAULT 'open' CONSTRAINT tasks_state
                   CHECK (state IN ('open', 'answered', 'cancelled', 'expired')),
     answer      jsonb,
     answered_by text,

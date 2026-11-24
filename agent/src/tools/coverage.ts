@@ -352,8 +352,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   ...(['GET /api/v1/tasks', 'GET /api/v1/tasks/{task_id}'] as const).map((operation) => ({
     operation,
     reason:
-      "The questions flows ask a person (#7364), for the screens that show and answer them. The assistant reads " +
-      "what a run waits on with get_flow_run, and only a person answers.",
+      "The questions flows ask a person (#7364), for the screens that show and answer them; the list has no answers, " +
+      'and one task has its own. The assistant reads what a run waits on with get_flow_run, and only a person answers.',
   })),
   {
     operation: 'POST /api/v1/workflow-runs/{run_id}/decide',

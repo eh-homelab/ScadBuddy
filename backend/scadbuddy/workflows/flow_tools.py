@@ -153,8 +153,9 @@ async def task_answer(  # type: ignore[empty-body]
 def _prompt_task(call_id: str, run_id: str, **fields: Any) -> dict[str, Any]:
     """The prompt's task as the open activity takes it. ValueError names what is wrong.
 
-    A refusal here schedules nothing, so a rule that a later build adds refuses a call
-    that an older build let through, and that run does not replay: put it behind a patch."""
+    A refusal here schedules nothing, so a run replays only if its calls are refused and
+    taken as they were. A change of what this takes needs a patch, in either direction: a
+    rule added, a rule loosened, or a dependency bump that moves one."""
     try:
         task = TaskOpen.model_validate(
             {"id": call_id, "run_id": run_id, **fields}, context=UNCHECKED_DEFAULTS

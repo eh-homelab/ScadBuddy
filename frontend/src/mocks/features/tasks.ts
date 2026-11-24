@@ -7,7 +7,7 @@ import type { AnswerProblem, Task, TaskQuestion } from '../../api/types'
  * a name the schema does not have, a value's type, an `enum`, and an `email` or
  * `date-time` that is not one. A task that is not open is the backend's 409 `not-open`.
  * Every answer is kept with its `Idempotency-Key` for tests (`taskAnswers`), and the same
- * key again is answered with the task as it stands.
+ * key again returns the task as it stands.
  */
 
 /** The task `run-prompt` (`flows.ts`) waits on. */
@@ -22,7 +22,6 @@ function defaults(): Task[] {
     {
       id: PROMPT_TASK_ID,
       run_id: 'run-prompt',
-      project_id: null,
       title: 'Where do we send the pickup note?',
       schema: {
         type: 'object',
@@ -119,7 +118,7 @@ const FITS: Record<string, (value: unknown) => boolean> = {
   array: Array.isArray,
 }
 const FORMATS: Record<string, RegExp> = {
-  email: /^.+@.+$/,
+  email: /^(?=.{1,254}$)[^\s@\p{Cc}]+@[^\s@.\p{Cc}]+(\.[^\s@.\p{Cc}]+)+$/u,
   date: /^\d{4}-\d{2}-\d{2}$/,
   'date-time': /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/,
 }

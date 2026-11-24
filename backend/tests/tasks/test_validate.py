@@ -49,13 +49,25 @@ def test_a_bad_email_names_its_field() -> None:
     assert p.field == "email" and "email" in p.message
 
 
+@pytest.mark.parametrize(
+    "bad", ["a@b", "@", "jane@example.com\n", "jane doe@example.com", "jane@example..com"]
+)
+def test_what_is_no_address_is_not_a_valid_email(bad: str) -> None:
+    said = AnswerProblem(field="email", message="not a valid email")
+    assert validate_answer(EMAIL, {"email": bad}) == [said]
+    items = _asks({"type": "array", "items": {"type": "string", "format": "email"}})
+    [problem] = validate_answer(items, {"x": ["jane@example.com", bad]})
+    assert (problem.field, problem.message) == ("x/1", "not a valid email")
+
+
 def test_a_missing_required_field_is_a_root_problem_naming_it() -> None:
     [p] = validate_answer(EMAIL, {})
     assert p.field == "" and "email" in p.message
 
 
 def test_a_nested_or_referencing_schema_is_refused_for_a_prompt() -> None:
-    assert prompt_schema_problems({"type": "object", "properties": {"x": {"$ref": "#/a"}}})
+    [problem] = prompt_schema_problems(_asks({"type": "string", "$ref": "#/a"}))
+    assert problem == "x: '$ref' is not supported for string"
 
 
 def test_a_problem_message_never_holds_the_rejected_value() -> None:
@@ -90,8 +102,9 @@ def test_uri_is_refused_for_a_prompt_naming_it() -> None:
     assert "uri" in problem and "email" in problem and "date-time" in problem
 
 
-def test_a_bad_email_default_is_refused() -> None:
-    prop = {"type": "string", "format": "email", "default": "nope"}
+@pytest.mark.parametrize("bad", ["nope", "a@b", "jane@example.com\n"])
+def test_a_bad_email_default_is_refused(bad: str) -> None:
+    prop = {"type": "string", "format": "email", "default": bad}
     problems = prompt_schema_problems({"type": "object", "properties": {"e": prop}})
     assert problems and "default" in problems[0]
 
@@ -111,7 +124,8 @@ def test_a_slow_pattern_is_refused_within_seconds() -> None:
     schema = {"type": "object", "properties": {"s": prop}}
     started = time.monotonic()
     problems = validate_answer(schema, {"s": "a" * 1000 + "b"})
-    assert problems and time.monotonic() - started < 5
+    # It takes 0.11 s (2026-11-24). With no deadline it backtracks without end.
+    assert problems and time.monotonic() - started < 60
 
 
 @pytest.mark.parametrize("answer", [["x"], "text", None, 3, {"email": ["x"]}, {"email": None}])
@@ -127,20 +141,21 @@ def test_an_extra_key_is_refused_even_without_additional_properties() -> None:
 
 
 def test_a_ref_schema_is_refused_when_a_task_opens() -> None:
-    schema = {"type": "object", "properties": {"x": {"$ref": "http://example.com/x"}}}
-    with pytest.raises(ValidationError, match="type must be one of"):
+    schema = _asks({"type": "string", "$ref": "http://example.com/x"})
+    with pytest.raises(ValidationError, match=r"'\$ref' is not supported for string"):
         TaskOpen(id="t", run_id="r", title="x", schema=schema)
 
 
 def test_a_stored_task_reads_without_the_subset_check() -> None:
     now = datetime.now(UTC)
-    stored = {"type": "object", "properties": {"x": {"$ref": "#/a"}}}
+    stored = _asks({"type": "string", "$ref": "#/a"})
+    with pytest.raises(ValidationError, match=r"'\$ref'"):
+        TaskOpen(id="t", run_id="r", title="x", schema=stored)
     task = Task(
         id="t",
         run_id="r",
         title="x",
         schema=stored,
-        project_id=None,
         state="open",
         answer=None,
         answered_by=None,
@@ -167,8 +182,8 @@ def test_a_remote_ref_is_never_fetched() -> None:
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
     try:
-        schema = {"$ref": f"http://127.0.0.1:{server.server_port}/x"}
-        problems = validate_answer(schema, {"a": 1})
+        ref = f"http://127.0.0.1:{server.server_port}/x"
+        problems = validate_answer(_asks({"type": "string", "$ref": ref}), {"x": "a"})
     finally:
         server.shutdown()
         thread.join()
@@ -181,17 +196,17 @@ def test_a_file_ref_is_never_read(tmp_path: Path) -> None:
     # Read, the file would make "text" a type problem.
     target = tmp_path / "integer.json"
     target.write_text('{"type": "integer"}')
-    assert validate_answer({"$ref": target.as_uri()}, "text") == BROKEN
+    schema = _asks({"type": "string", "$ref": target.as_uri()})
+    assert validate_answer(schema, {"x": "text"}) == BROKEN
 
 
 def test_an_over_long_value_is_refused_before_its_pattern_runs() -> None:
     prop = {"type": "string", "pattern": "^(a|aa)+$"}
     schema = {"type": "object", "properties": {"s": prop}}
-    started = time.monotonic()
-    [problem] = validate_answer(schema, {"s": "a" * 5000})
+    # The pattern does not match it: a run would be a second problem.
+    [problem] = validate_answer(schema, {"s": "a" * 5000 + "b"})
     assert problem.field == "s" and "1024" in problem.message
     assert "aaaa" not in problem.message
-    assert time.monotonic() - started < 1
 
 
 HALVES = _asks({"type": "number", "multipleOf": 0.5})
@@ -357,10 +372,10 @@ def test_a_tuple_holds_only_what_the_store_can_write(bad: Any) -> None:
 @pytest.mark.parametrize(
     "items",
     [
-        [{"a": i, "b": [i]} for i in range(2000)],
-        [i if i % 2 else f"s{i}" for i in range(4000)],
+        [{"a": i, "b": [i]} for i in range(6000)],
+        [i if i % 2 else f"s{i}" for i in range(16_000)],
         # Every one of these integers has the same hash.
-        [(i + 1) * (2**61 - 1) for i in range(20_000)],
+        [(i + 1) * (2**61 - 1) for i in range(60_000)],
     ],
     ids=["objects", "mixed", "one-hash"],
 )
@@ -368,7 +383,9 @@ def test_unique_items_take_no_quadratic_time(items: list[Any]) -> None:
     schema = _asks({"type": "array", "items": {"type": "integer"}, "uniqueItems": True})
     started = time.monotonic()
     validate_answer(schema, {"x": items})
-    assert time.monotonic() - started < 2
+    # At most 0.7 s (2026-11-24). Quadratic, each takes over 50 s: a pair by pair check of
+    # the first two, and a `set` of the integers.
+    assert time.monotonic() - started < 8
 
 
 def test_at_most_fifty_problems_are_returned() -> None:

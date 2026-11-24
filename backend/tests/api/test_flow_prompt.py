@@ -97,14 +97,14 @@ def test_a_prompt_answer_reaches_the_script_as_a_dict(
     run_id, entry = parked(client, ASK, "return a['email']")
     assert (entry["kind"], entry["fn"], entry["prompt"]) == ("answer", "prompt", "Where to?")
     call_id = entry["call_id"]
-    # The run's page has the task as its own route and the list do, without the answer.
+    # The run's page has the task as its own route does, without the answer.
     held = task(client, call_id)
     unanswered = {k: v for k, v in held.items() if k not in ("answer", "answered_by")}
     assert entry["task"] == unanswered and len(unanswered) == len(held) - 2
     assert (held["state"], held["title"], held["schema"]) == ("open", "Where to?", EMAIL)
     assert (held["run_id"], held["place"], held["context"]) == (run_id, "bench", [{"text": "hi"}])
     listed = client.get("/api/v1/tasks", params={"place": "bench"}).json()["tasks"]
-    assert [t["id"] for t in listed] == [call_id]
+    assert listed == [entry["task"]]
     # A text answer is not an answer to it, nor one that does not fit.
     text = client.post(
         f"/api/v1/workflow-runs/{run_id}/answer",

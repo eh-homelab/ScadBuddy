@@ -77,7 +77,12 @@ _OWN: dict[str, set[str]] = {
 FORMATS: Final = ("email", "date", "date-time")
 #: Checks exactly `FORMATS`, with no optional dependency. jsonschema's shared checker has a
 #: format only where its package is installed, and the image has no rfc3339-validator.
-FORMAT_CHECKER: Final = jsonschema.FormatChecker(formats=("email", "date"))
+FORMAT_CHECKER: Final = jsonschema.FormatChecker(formats=("date",))
+MAX_EMAIL: Final = 254
+#: One `@`, a local part, and a domain of two labels or more, with no whitespace and no
+#: control character. Linear: no part can hold the separator that ends it.
+_EMAIL_PART = r"[^\s@\x00-\x1f\x7f-\x9f"
+_EMAIL = re.compile(rf"{_EMAIL_PART}]+@{_EMAIL_PART}.]+(?:\.{_EMAIL_PART}.]+)+")
 _DATE_TIME = re.compile(
     r"(\d{4}-\d{2}-\d{2})[Tt](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?"
     r"(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)",
@@ -87,6 +92,14 @@ _OBJECT_OWN = {"properties", "required", "additionalProperties"}
 _DESCRIBED = {"type", "title", "description"}
 #: Names a pydantic model cannot hold as fields (flows' `inputs_model`).
 _PYDANTIC = frozenset(name for name in dir(BaseModel) if not name.startswith("__"))
+
+
+@FORMAT_CHECKER.checks("email")
+def _is_email(instance: object) -> bool:
+    """One address. jsonschema's own check takes any text with an `@`."""
+    if not isinstance(instance, str):
+        return True
+    return len(instance) <= MAX_EMAIL and _EMAIL.fullmatch(instance) is not None
 
 
 @FORMAT_CHECKER.checks("date-time", raises=ValueError)
@@ -112,7 +125,8 @@ def schema_problems(
     ``stored``: a schema registered already, checked again as it is used. The two rules
     #2661 added are a registration's only: a stored `pattern` with no `maxLength` is
     capped as it runs, and a stored required boolean is harmless (it is false when left
-    out), so neither stops it.
+    out), so neither stops it. A new rule must be lenient here too: an open task whose
+    schema is refused cannot be answered (`tasks/validate.py`).
     ``objects``: a top-level input may be an object of scalar inputs (#5701).
     ``formats``: a string may have a ``format`` of `FORMATS` (a prompt's, #7364).
     ``defaults``: false skips the check of each ``default``, which runs its pattern within

@@ -54,9 +54,11 @@ The text route refuses a prompt's call with 409 `flow-answer-is-a-task`
 **No default limit.** Both wait with no limit unless `timeout_s` sets one (`_wait_s`). The
 floor is 10 seconds (`MIN_WAIT_S`): less raises `ValueError`, and a literal that is too
 short is refused when the script is checked (`backend/scadbuddy/flows/typecheck.py`
-`_literal_ranges`). The ceiling is ten years (`OPEN_WAIT`): a longer `timeout_s` is ten
-years. The callbacks declare the same ten years to the harness, so a call with no
-`timeout_s` ends then at the latest. When the time is up the script gets `TimeoutError`.
+`_literal_ranges`). When a `timeout_s` is up the script gets `TimeoutError`. The ceiling is ten
+years (`OPEN_WAIT`): a longer `timeout_s` is ten years. The callbacks declare the same ten
+years to the harness, which ends a call with no `timeout_s` then. The script does not get
+`TimeoutError` for that. It gets the harness's `CallbackToolError`, which a script sees as a
+plain `Exception`, and the prompt's task is `cancelled`.
 
 **Old runs keep their timer.** A `wait_for_human` that a run called before this change
 replays with the old callback, its default of an hour and its range of 10 to 86400 seconds
@@ -67,8 +69,11 @@ limit.
 (`backend/scadbuddy/core/input_schema.py` `schema_problems`,
 `backend/scadbuddy/tasks/schema.py` `prompt_schema_problems`). A string, or an array's string
 items, may also have a `format`: `email`, `date` or `date-time` (`FORMATS`). A `date-time`
-is RFC 3339 with an offset, and a leap second is refused. A `default` must fit its field,
-its `format` included. The inputs of a flow and of a pipeline refuse `format`.
+is RFC 3339 with an offset, and a leap second is refused. An `email` has one `@`, a local
+part before it and a domain with a dot after it, no empty part between dots in the domain,
+no whitespace, no control character and at most 254 characters. A letter need not be
+ASCII. A `default` must fit its field, its `format` included. The inputs of a flow and of a
+pipeline refuse `format`.
 
 **Sizes.** `backend/scadbuddy/tasks/models.py` `TaskOpen` checks them. The title has 1 to
 500 characters. The context has at most 16 KiB of JSON (`MAX_JSON_BYTES`), `ui` at most 200
@@ -126,14 +131,16 @@ another answer on the row and leaves an expired task as it is.
   (`backend/scadbuddy/workflows/flow_activities.py` `FlowTaskActivities`). An execution that
   a Reset replaced opens, marks and closes nothing. The run's own mark or close from an
   execution that the row of an open run does not know yet is refused (503 `run-behind`) and
-  tried again. The row of an ended run answers with the task as it stands, with no retry.
+  tried again. From one that the row of an ended run does not know, the write changes
+  nothing and returns the task as it stands, so it is not tried again.
 - **Retries.** The task activities (`flow_task_open`,
   `flow_task_answered`, `flow_task_close`) are tried without limit. Only `flow_task_open` has final
   refusals: a task that is refused (422), a run that has ended and a run that is gone.
 - **Forget.** Forgetting a run deletes its tasks (`ON DELETE CASCADE`).
 
-**Reads.** `GET /api/v1/tasks` lists tasks by `state` and `place`, and
-`GET /api/v1/tasks/{task_id}` reads one (`backend/scadbuddy/api/tasks.py`). A run's page gets
+**Reads.** `GET /api/v1/tasks` lists tasks by `state` and `place`, without their answers or
+who gave them (`TaskQuestion`). `GET /api/v1/tasks/{task_id}` reads one with both
+(`backend/scadbuddy/api/tasks.py`). A run's page gets
 the question, without its answer, in its pending entry (`PendingEntry.task`). A task that
 opens or moves to another state publishes `task.changed` on the realtime topics `tasks`,
 `task:<id>` and, with a place, `tasks:<place>` (`backend/scadbuddy/api/realtime.py`

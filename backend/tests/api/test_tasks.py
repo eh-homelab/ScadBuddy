@@ -193,6 +193,18 @@ def test_an_invalid_email_is_422_naming_the_field_and_the_task_stays_open(
     assert post(client, task, GOOD).status_code == 200
 
 
+def test_what_is_no_address_is_422_and_the_task_stays_open(
+    client: TestClient, task: str, rows: Rows, harness: Harness
+) -> None:
+    for bad in ("a@b", "@", "jane@example.com\n", "jane@example..com"):
+        response = post(client, task, {"email": bad})
+        assert response.status_code == 422, bad
+        assert response.json()["type"] == INVALID
+        assert response.json()["problems"] == [{"field": "email", "message": "not a valid email"}]
+    assert rows.task(task) == ("open", None, None)
+    assert harness.sends == []
+
+
 def test_the_answer_is_checked_off_the_event_loop(
     client: TestClient, task: str, harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -496,6 +508,18 @@ def test_the_flow_answer_route_takes_no_answer_for_a_prompt(
     assert rows.decisions(call_id) == []
     assert rows.task(call_id) == ("open", None, None)
     assert rows.conn.execute("SELECT 1 FROM operations WHERE kind = 'flow_answer'").fetchall() == []
+
+
+def test_the_list_has_no_answer_and_not_who_gave_it(
+    client: TestClient, task: str, harness: Harness
+) -> None:
+    held = post(client, task, GOOD).json()
+    assert (held["answer"], held["answered_by"]) == (GOOD, "browser")
+    assert client.get(f"/api/v1/tasks/{task}").json() == held
+    response = client.get("/api/v1/tasks", params={"state": "answered"})
+    del held["answer"], held["answered_by"]
+    assert response.json() == {"tasks": [held]}
+    assert GOOD["email"] not in response.text
 
 
 def test_the_list_is_the_open_tasks_by_place_and_is_bounded(client: TestClient, rows: Rows) -> None:

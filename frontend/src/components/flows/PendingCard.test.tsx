@@ -247,6 +247,13 @@ describe('PendingCard, a prompt (#7364)', () => {
     expect(second!.key).not.toBe(first!.key)
   })
 
+  it.each(['a@b', 'jo@', 'jo@example..com', 'jo@doe@example.com'])('is told that %s is not a valid email', async (address) => {
+    const { user } = draw()
+    await answer(user, address)
+    await waitFor(() => expect(email()).toHaveAccessibleDescription("The customer's address not a valid email"))
+    expect(email()).toHaveValue(address)
+  })
+
   it('closes on a 409 `not-open`, and an open task on the page does not draw the form again', async () => {
     const realtime = fakeRealtime()
     refuse(409, { type: NOT_OPEN, state: 'open' })

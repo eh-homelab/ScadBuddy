@@ -101,7 +101,6 @@ def open_problems(error: ValidationError) -> str:
 class TaskQuestion(_TaskFields):
     """A task without its answer, and without who gave it."""
 
-    project_id: str | None
     state: TaskState
     created_at: datetime
     updated_at: datetime

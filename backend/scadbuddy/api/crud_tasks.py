@@ -18,6 +18,7 @@ from typing import Any, Literal
 from fastapi import status
 from pydantic import BaseModel, field_validator
 
+from scadbuddy.api.crud_agent_events import UUID_PATTERN
 from scadbuddy.core.json_values import unstorable
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
@@ -35,9 +36,9 @@ RUN_NOT_FOUND = "run-not-found"
 RUN_ENDED = "run-ended"
 RUN_BEHIND = "run-behind"
 TASK_NOT_FOUND = "task-not-found"
-TASK_NOT_OPEN = "task-not-open"
+NOT_OPEN = "task-not-open"
 #: Matched whole (`fullmatch`: a trailing newline fails).
-_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_UUID = re.compile(UUID_PATTERN)
 
 router = crud_router("projects")
 
@@ -94,9 +95,7 @@ def _uuid(what: str, value: str) -> str:
 
 
 def _not_open(state: str) -> ApiError:
-    return ApiError(
-        status.HTTP_409_CONFLICT, f"The task is {state}.", reason=TASK_NOT_OPEN, state=state
-    )
+    return ApiError(status.HTTP_409_CONFLICT, f"The task is {state}.", reason=NOT_OPEN, state=state)
 
 
 def _behind() -> ApiError:
@@ -114,7 +113,7 @@ def _missing() -> ApiError:
 
 @router.post("/tasks", name="crud_projects_open_task")
 def open_task(body: OpenWrite, tasks: TasksDep) -> Task:
-    """`TaskStore.open`: the same id again answers the stored row, whatever its run's
+    """`TaskStore.open`: the same id again returns the stored row, whatever its run's
     state."""
     _uuid("task id", body.id)
     _uuid("run id", body.run_id)
@@ -128,7 +127,7 @@ def open_task(body: OpenWrite, tasks: TasksDep) -> Task:
 
 @router.post("/tasks/{task_id}/close", name="crud_projects_close_task")
 def close_task(task_id: str, body: CloseWrite, tasks: TasksDep) -> Task:
-    """`TaskStore.close_or_current`. A task already in the asked state answers its row, so
+    """`TaskStore.close_or_current`. A task already in the asked state returns its row, so
     a retry after a lost answer is the same request; another state is 409
     ``task-not-open``."""
     _uuid("task id", task_id)
@@ -147,7 +146,7 @@ def close_task(task_id: str, body: CloseWrite, tasks: TasksDep) -> Task:
 
 @router.post("/tasks/{task_id}/answered", name="crud_projects_answer_task")
 def answer_task(task_id: str, body: AnswerWrite, tasks: TasksDep) -> Task:
-    """`TaskStore.mark_answered`, with its rules: the same answer again answers the row,
+    """`TaskStore.mark_answered`, with its rules: the same answer again returns the row,
     and so does one of another execution. With ``final`` so do another answer, which it
     replaces, and an expired task; the row of an open run that lags Temporal is 503
     ``run-behind``."""

@@ -17,8 +17,7 @@ from scadbuddy.flows.models import TERMINAL
 from scadbuddy.tasks.models import Task, TaskOpen, TaskQuestion, TaskState
 
 _QUESTION = (
-    "id, run_id, project_id, title, schema, context, place, ui, expires_at, state,"
-    " created_at, updated_at"
+    "id, run_id, title, schema, context, place, ui, expires_at, state, created_at, updated_at"
 )
 _COLUMNS = f"{_QUESTION}, answer, answered_by"
 _MOVED = "id, run_id, state, place"
@@ -42,8 +41,8 @@ class RunEndedError(Exception):
 
 class RunBehindError(Exception):
     """The row of an open run does not know the caller's execution yet: a Reset made in
-    Temporal, which the sweep has not followed. The same write again is taken once it has,
-    and answered with the row as it stands if the run ends first."""
+    Temporal, which the sweep has not followed. The same write again is taken once it has.
+    If the run ends first, it changes nothing and returns the row as it stands."""
 
 
 class TaskStore:
@@ -123,16 +122,17 @@ class TaskStore:
 
     def list(
         self, *, state: TaskState | None = "open", place: str | None = None, limit: int = 100
-    ) -> list[Task]:
+    ) -> list[TaskQuestion]:
+        """Tasks without their answers, oldest first."""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM tasks"
+                f"SELECT {_QUESTION} FROM tasks"
                 " WHERE (%(state)s::text IS NULL OR state = %(state)s)"
                 " AND (%(place)s::text IS NULL OR place = %(place)s)"
                 " ORDER BY created_at, id LIMIT %(limit)s",
                 {"state": state, "place": place, "limit": limit},
             ).fetchall()
-        return [Task.model_validate(row) for row in rows]
+        return [TaskQuestion.model_validate(row) for row in rows]
 
     def mark_answered(
         self,
@@ -148,17 +148,18 @@ class TaskStore:
         changes nothing but a missing ``by``, which it fills in. A task with another answer
         and an expired one raise `TaskNotOpenError`. A missing task raises `KeyError`.
 
-        A Reset undoes an answer, so when the run is at another execution the task is
-        answered as it stands. The run's row is locked before the task's, as `open` and
-        `FlowStore._reset_run` do: a Reset under way commits first, and a later one waits.
+        A Reset undoes an answer, so when the run is at another execution nothing changes
+        and the row is returned as it stands. The run's row is locked before the task's, as
+        `open` and `FlowStore._reset_run` do: a Reset under way commits first, and a later
+        one waits.
 
         ``final`` is the run's own mark, of the answer its script gets. It replaces another
         answer and who gave it, and leaves an expired task as it stands. From an execution
         that the row of an open run does not know yet, it raises `RunBehindError`. From one
-        that the row of an ended run does not know, it is answered with the task as it
-        stands: the sweep follows no run that ended, so a refusal might never end. (A Reset
-        through ScadBuddy whose commit was lost is the exception: its retry moves such a
-        row, #7413.)"""
+        that the row of an ended run does not know, it changes nothing and the row is
+        returned as it stands: the sweep follows no run that ended, so a refusal might never
+        end. (A Reset through ScadBuddy whose commit was lost is the exception: its retry
+        moves such a row, #7413.)"""
         with self._pool.connection() as conn, conn.transaction():
             run = self._run_of(conn, task_id, workflow_run_id)
             row = conn.execute(
@@ -188,18 +189,6 @@ class TaskStore:
                     self._announce(conn, row)
         return Task.model_validate(row)
 
-    def close(self, task_id: str, state: Literal["expired", "cancelled"]) -> Task | None:
-        """End an open task; ``None`` when it was not open."""
-        with self._pool.connection() as conn, conn.transaction():
-            row = conn.execute(
-                "UPDATE tasks SET state = %s, updated_at = now()"
-                f" WHERE id = %s AND state = 'open' RETURNING {_COLUMNS}",
-                (state, task_id),
-            ).fetchone()
-            if row is not None:
-                self._announce(conn, row)
-        return Task.model_validate(row) if row else None
-
     def close_or_current(
         self,
         task_id: str,
@@ -207,8 +196,8 @@ class TaskStore:
         *,
         workflow_run_id: str | None = None,
     ) -> Task | None:
-        """`close`, and the row as it stands when it was not open, in one transaction;
-        ``None`` for a missing task.
+        """End an open task. One that was not open is returned as it stands; ``None`` for a
+        missing task.
 
         With ``workflow_run_id`` it is that execution's own close of a question it took no
         answer to, so it replaces an answer too. The executions are as `mark_answered`'s
@@ -247,10 +236,6 @@ class TaskStore:
             ).fetchone()
             if row is not None:
                 self._announce(conn, row)
-
-    def cancel_for_run(self, run_id: str) -> int:
-        with self._pool.connection() as conn:
-            return self.cancel_for_run_in(conn, run_id)
 
     def cancel_for_run_in(self, conn: Connection[DictRow], run_id: str) -> int:
         """Cancel every open task of the run, in the caller's transaction. Call this

@@ -321,8 +321,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   so a run moves to each new build and a change must replay
   `tests/fixtures/project_workflow_histories/`. `wait_for_human` and `prompt` (#7364, "Tasks"
   below) wait with no default limit (`_wait_s`, `OPEN_WAIT`); `WAIT_OPEN_PATCH` keeps the old
-  timer of a recorded `wait_for_human`, one patch id per call. A rule that a later build adds
-  to what `prompt` takes goes behind a patch (`_prompt_task`). A run whose start names a host function
+  timer of a recorded `wait_for_human`, one patch id per call. A later change of what
+  `prompt` takes, stricter or looser, goes behind a patch (`_prompt_task`). A run whose start names a host function
   (`FlowStart.host_functions`) its worker lacks waits after `flow_record` for a build
   that has it (`project.offers_host_functions`). A flow's payloads are sealed per run
   (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
@@ -349,7 +349,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   answer), `schema.py` (`prompt_schema_problems`: `core/input_schema.py` with `formats`),
   `validate.py` (`validate_answer`: its problems never quote a value), `store.py`
   (`TaskStore`, the table `tasks`), `component.py` (`TASKS`, `TasksDep`). Routes
-  `api/tasks.py`: `GET /tasks`, `GET /tasks/{id}` and `POST /tasks/{id}/answer`
+  `api/tasks.py`: `GET /tasks` (`TaskQuestion`s), `GET /tasks/{id}` and `POST /tasks/{id}/answer`
   (`browser_only`, `PERSON_ENDPOINTS`; the answer sealed into the operation). The projects
   worker's area `tasks` is `api/crud_tasks.py` (`…/projects/tasks`, its `/{id}/close` and
   `/{id}/answered`), client `crud/tasks.py` `RemoteTasks`; the area is in the worker's
