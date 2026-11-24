@@ -103,7 +103,7 @@
         { "query": "9999", "match": true },
         { "query": "06975337041234", "match": true },
         { "query": "1.8", "match": true },
-        { "query": "true", "match": true },
+        { "query": "true", "match": false },
         { "query": "a00-k0 black", "match": true },
         { "query": "gtin", "match": false },
         { "query": "food_safe", "match": false }
