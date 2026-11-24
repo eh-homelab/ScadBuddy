@@ -329,6 +329,11 @@ class PrinterReportStore:
             ).fetchone()
         return None if data is None else (dict(data["report"]), data["seen_at"])
 
+    def watch_get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
+        """`get`, for the printer watch: the print worker's store bounds it as the watch's
+        writes (`crud/print.py` `RemoteReports`)."""
+        return self.get(printer_id)
+
     def all(self) -> dict[str, tuple[dict[str, Any], datetime]]:
         with self.pool.connection() as conn:
             rows = conn.execute(

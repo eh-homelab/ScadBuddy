@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -615,3 +616,36 @@ async def test_a_dropped_url_is_announced(
 ) -> None:
     kinds = await _kinds(linked, [_camera(None, 1)], stored=_camera(URL_A, 0))
     assert kinds.count("printer.changed") == 1
+
+
+async def test_a_cancel_during_the_camera_seed_leaks_no_task() -> None:
+    """The stored camera URL is read before the reader starts: a cancel while that read
+    waits leaves no task behind."""
+    asked, release = threading.Event(), threading.Event()
+
+    class SlowReports(PrinterReportStore):
+        def __init__(self) -> None:
+            pass
+
+        def get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
+            asked.set()
+            release.wait(5)
+            return None
+
+        def watch_get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
+            return self.get(printer_id)
+
+    lan = Lan(subscribes=True)
+    watches = WatchActivities(None, SlowReports(), None)  # type: ignore[arg-type]
+    before = asyncio.all_tasks()
+    follow = asyncio.create_task(watches._follow("p1", cast(LanPrinter, lan)))
+    try:
+        assert await asyncio.to_thread(asked.wait, 5)
+        follow.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await follow
+    finally:
+        release.set()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert asyncio.all_tasks() - before == set()

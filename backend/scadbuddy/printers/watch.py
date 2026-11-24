@@ -15,7 +15,8 @@ attempt fails, and `FOLLOW_RETRY` starts the next; ``seen_at`` then ages until
 ``/printers/now`` shows the printer offline (`status.STALE_AFTER`). A worker shutting
 down ends the attempt at once, as `FollowActivities` does, so a stop never waits out
 its graceful timeout per printer. A report the store could not write, or a touch it could
-not make, is logged and counted (`WATCH_WRITE_FAILED`) and the watch goes on; the report
+not make, is logged and counted (`WATCH_WRITE_FAILED`), as is the stored report it could not
+read at the start of an attempt (`WATCH_READ_FAILED`), and the watch goes on; the report
 is written at the next quiet tick or report, and announced only once written. A report
 whose answer was lost (it may have landed) is sent again under its Idempotency-Key before
 any newer one, so the API answers the print end that write showed, at most
@@ -76,6 +77,9 @@ HEARD_EVERY = 10.0
 #: Logged, with the write (``put`` or ``touch``) and the error's type, when the watch
 #: could not write a report or touch its row; counted on `Metrics.printer_watch_write_failed`.
 WATCH_WRITE_FAILED = "a printer watch could not write its report"
+#: Logged, with ``get`` and the error's type, when the watch could not read the stored
+#: report (its camera URL) at the start of an attempt; counted on the same counter.
+WATCH_READ_FAILED = "a printer watch could not read its stored report"
 
 #: How a report's write ended (`WatchActivities._write`): written; sent and an answer
 #: lost (on any try of the call), so it may have landed and is sent again under its key;
@@ -160,7 +164,8 @@ class WatchActivities:
         self.settle_failed = settle_failed
         #: Each job start, to the print watcher's LAN nudge (#4699 phase 3).
         self.nudge = nudge
-        #: The count of reports not written and touches not made (`WATCH_WRITE_FAILED`).
+        #: The count of reports not written, touches not made (`WATCH_WRITE_FAILED`) and
+        #: stored reports not read (`WATCH_READ_FAILED`).
         self.write_failed = write_failed
 
     @activity.defn(name=PRINTER_WATCH_ACTIVITY)
@@ -200,6 +205,12 @@ class WatchActivities:
         raise ConnectionError("the printer closed its MQTT connection")
 
     async def _follow(self, printer_id: str, lan: LanPrinter) -> None:
+        #: The camera URL the row holds before this attempt's first write (none when it
+        #: has no report), then the last one written: ``printer.changed`` follows a write
+        #: that moves it. Seeded from the store, so a change across a restart, or the first
+        #: URL a printer reports, is announced too. Read before any task starts, so a
+        #: cancel while it waits leaves none behind.
+        camera = await self._stored_camera(printer_id)
         queue: asyncio.Queue[LanReport | BaseException | None] = asyncio.Queue()
         connected = asyncio.Event()
 
@@ -225,11 +236,6 @@ class WatchActivities:
         last_shown: tuple[Any, ...] | None = None
         #: What the last report written showed, announced once its write lands.
         announced: tuple[Any, ...] | None = None
-        #: The camera URL the row holds before this attempt's first write (none when it
-        #: has no report), then the last one written: ``printer.changed`` follows a write
-        #: that moves it. Seeded from the store, so a change across a restart, or the first
-        #: URL a printer reports, is announced too.
-        camera = await self._stored_camera(printer_id)
         last_write = float("-inf")
         #: The newest report not written yet: held back by `write_every`, or one whose
         #: write never ran. A newer report replaces it.
@@ -331,9 +337,9 @@ class WatchActivities:
         """The camera URL of the row's stored report; none when it has none or cannot be
         read (the first URL then announces, which a controller reads and finds the same)."""
         try:
-            got = await asyncio.to_thread(self.reports.get, printer_id)
+            got = await asyncio.to_thread(self.reports.watch_get, printer_id)
         except Exception as error:
-            self._failed("get", printer_id, error)
+            self._failed("get", printer_id, error, WATCH_READ_FAILED)
             return None
         return None if got is None else rtsp_url(got[0])
 
@@ -365,7 +371,9 @@ class WatchActivities:
             extra={"printer_id": printer_id, "write": "put", "given_up": True},
         )
 
-    def _failed(self, what: str, printer_id: str, error: Exception) -> None:
+    def _failed(
+        self, what: str, printer_id: str, error: Exception, message: str = WATCH_WRITE_FAILED
+    ) -> None:
         """Counted, and logged with what can be searched for, never the report nor an
         error's text, traceback or message (spec §7: a database error's DETAIL can quote
         the report, hotend serials in it): a refusal's status and problem type, a CRUD
@@ -387,7 +395,7 @@ class WatchActivities:
             extra["failure"] = error.failure
         else:
             extra["raised_at"] = raised_at(error)
-        logger.warning(WATCH_WRITE_FAILED, extra=extra)
+        logger.warning(message, extra=extra)
 
     async def _touch(self, printer_id: str, proven: datetime) -> None:
         """The row's ``seen_at``; a failure is logged and counted, and the row ages."""
