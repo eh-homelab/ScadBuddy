@@ -307,6 +307,8 @@ const created = (body: SpoolPatch, grams: string): SpoolCreate => {
   return out as SpoolCreate
 }
 
+/** `SpoolCopySourceError`'s detail: the bulk create's `copy_of` names no spool (#7150, R-7150-13). */
+const COPY_SOURCE_GONE = 'copy_of names no spool'
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : cause instanceof Error ? cause.message : 'The server could not be reached. Try again.')
 
 const NONE = '__none__'
@@ -409,7 +411,10 @@ export function SpoolPage() {
   const location = useLocation()
   const [search] = useSearchParams()
   /** #7150 — the spool a new one is copied from (`?copy=<id>`). */
-  const copyOf = id === 'new' ? search.get('copy') : null
+  const asked = id === 'new' ? search.get('copy') : null
+  /** The source was deleted after the form loaded its copy: the next save sends no `copy_of`. */
+  const [sourceGone, setSourceGone] = useState(false)
+  const copyOf = sourceGone ? null : asked
   /** How many identical spools a save makes (#7150). */
   const [quantity, setQuantity] = useState('1')
   /** One `Idempotency-Key` per opened form: a retry or a second click makes no more spools. */
@@ -450,9 +455,10 @@ export function SpoolPage() {
     setHistoryError(null)
     setQuantity('1')
     setCreateKey(crypto.randomUUID())
+    setSourceGone(false)
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getSpool(id),
-      copyOf ? copySpool(copyOf) : Promise.resolve(null),
+      asked ? copySpool(asked) : Promise.resolve(null),
       listCatalog('materials'),
       listCatalog('subtypes'),
       listCatalog('brands'),
@@ -479,7 +485,7 @@ export function SpoolPage() {
     return () => {
       live = false
     }
-  }, [id, copyOf])
+  }, [id, asked])
 
   const base = useMemo(() => (saved ? draftOf(saved) : BLANK), [saved])
   /** The catalogs and places by id and name: the names the timeline shows for an event's ids. */
@@ -604,6 +610,12 @@ export function SpoolPage() {
       setSaved(fresh)
       setDraft(draftOf(fresh))
     } catch (cause) {
+      if (creating && copyOf && cause instanceof ApiError && cause.status === 422 && cause.detail === COPY_SOURCE_GONE) {
+        // R-7150-13 keeps this a 422: the form drops the link, so the next save makes a plain new spool.
+        setSourceGone(true)
+        setError('The spool this form copied was deleted after the form opened. Save again to make this one a new spool without a link to it.')
+        return
+      }
       setError(message(cause))
       // A write that did land is shown as it now is, unsaved edits kept.
       if (spoolId !== 'new') await Promise.all([getSpool(spoolId).then(setSaved, () => {}), readHistory(spoolId)])
