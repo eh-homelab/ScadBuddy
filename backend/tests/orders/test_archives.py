@@ -16,10 +16,12 @@ from typing import Any, cast
 
 import pytest
 
+from scadbuddy import main
 from scadbuddy.api.orders import record_fulfilment, update_fulfilment
 from scadbuddy.bambuddy.models import SpoolAssignment
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.core.events import OrderItemChanged, PrintOutcome
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders import archives as archives_module
@@ -1413,6 +1415,30 @@ class TimelapseFails(Archives):
         if what == "timelapse":
             raise RuntimeError("Bambuddy did not answer")
         return await super().download_archive_media(archive_id, what, name, target, limit)
+
+
+async def test_the_housekeeping_sweep_counts_the_starts_it_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7491: each pass adds the starts `sweep_media` asked for to
+    ``scadbuddy_attempt_media_sweep_starts_total``, so its steady-state cost shows."""
+
+    async def three(*args: object, **kwargs: object) -> int:
+        return 3
+
+    monkeypatch.setattr(main, "sweep_media", three)
+    metrics = Metrics()
+    orders = SimpleNamespace(lifecycle=None, integrations=None, media_starter=None)
+    state = SimpleNamespace(
+        components=SimpleNamespace(get=lambda _: orders),
+        settings=SimpleNamespace(media_upload_max_bytes=LIMIT),
+        metrics=metrics,
+    )
+
+    await main._import_attempt_media_logged(state)  # type: ignore[arg-type]
+    await main._import_attempt_media_logged(state)  # type: ignore[arg-type]
+
+    assert metrics.registry.get_sample_value("scadbuddy_attempt_media_sweep_starts_total") == 6
 
 
 async def test_without_bambuddy_the_sweep_starts_nothing(shop: Shop) -> None:

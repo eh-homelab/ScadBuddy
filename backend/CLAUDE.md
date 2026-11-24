@@ -1705,7 +1705,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `order_item_fulfilments_media_sweep` serves its read, whose WHERE repeats the index's
   predicate. Each step rewrites the attempt's rows of `order_attempt_media_not_offered`
   (`record_media_not_offered`, from `_not_offered`): the media an archive past `FRESH` does
-  not offer, which the sweep leaves out and nothing else reads (#7453). A step's
+  not offer, which the sweep leaves out and nothing else reads (#7453). Each pass adds the
+  starts it asked for to the counter `scadbuddy_attempt_media_sweep_starts` (#7491;
+  `main._import_attempt_media_logged`). A step's
   `missing` (`_missing`) is true when no archive was read, or an archive lacks a medium
   that is neither present nor refused, and the archive offers it or may still offer it (its
   `completed_at` is null or under an hour old, `FRESH`). Refusals: a medium the import refused as larger than the
