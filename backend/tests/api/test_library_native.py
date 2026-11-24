@@ -181,6 +181,29 @@ def test_listing_names_native_folders(native_client: TestClient, in_folder: Nati
     ]
 
 
+def test_the_listing_reads_no_full_file_row(
+    native_client: TestClient, in_folder: NativeFile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7346: the listing counts folders with one GROUP BY and lists light rows, so no
+    file's plates are read or validated. The answer is unchanged."""
+    before = native_client.get("/api/v1/print/library", params={"all": True}).json()
+    inside = native_client.get(
+        "/api/v1/print/library", params={"folder_id": in_folder.folder_id}
+    ).json()
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the listing loaded a full file row")
+
+    monkeypatch.setattr(NativeFile, "model_validate", forbidden)
+    assert native_client.get("/api/v1/print/library", params={"all": True}).json() == before
+    assert (
+        native_client.get("/api/v1/print/library", params={"folder_id": in_folder.folder_id}).json()
+        == inside
+    )
+    assert [f["id"] for f in inside["files"]] == [in_folder.id]
+    assert before["folders"][0]["file_count"] == 1
+
+
 def test_file_id_lists_its_folder(native_client: TestClient, in_folder: NativeFile) -> None:
     assert (
         native_client.get("/api/v1/print/library", params={"file_id": in_folder.id}).json()[
