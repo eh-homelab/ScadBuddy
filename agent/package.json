@@ -44,7 +44,7 @@
     "openapi-fetch": "^0.17.0",
     "quickjs-emscripten": "0.32.0",
     "turndown": "7.2.5",
-    "undici": "8.12.4",
+    "undici": "8.13.0",
     "ws": "^8.23.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
