@@ -123,7 +123,7 @@ from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.core.tracing import span
+from scadbuddy.core.tracing import span, traced_thread
 from scadbuddy.dialog_reads.component import DialogReadsDep
 from scadbuddy.dialog_reads.reads import dialog_client, maybe_dialog_client
 from scadbuddy.filament.component import FilamentDep
@@ -292,7 +292,9 @@ async def _name_native_outputs(
     native: NativeLibrary, outputs: OutputStore, entries: Sequence[LibraryEntry]
 ) -> None:
     """Each entry's ``output_id`` from its row (`LibraryEntry` carries none of its own)."""
-    rows = await asyncio.to_thread(native.rows.files_by_ids, [entry.id for entry in entries])
+    rows = await traced_thread(
+        "native_library.files_by_ids", native.rows.files_by_ids, [entry.id for entry in entries]
+    )
     made = await native_outputs_for_files(outputs, rows)
     for entry in entries:
         entry.output_id = made.get(entry.id)
@@ -707,7 +709,10 @@ async def post_library_file(
     """Streams the ``file`` part to disk and uploads it through Bambuddy, to the folder
     in ``folder_id`` or the top level; its filename is the library name. The body may be
     as large as the library download cap (#2686)."""
-    received = await receive_upload(request, paths.cache, fields={"folder_id": 32})
+    # The body streamed to the data volume (#7245): the client's upload and the writes.
+    with span("library.receive_upload") as current:
+        received = await receive_upload(request, paths.cache, fields={"folder_id": 32})
+        current.set_attribute("scadbuddy.bytes", sum(received.sizes.values()))
     try:
         path = received.files.get("file")
         if path is None or received.sizes["file"] == 0:
@@ -746,7 +751,7 @@ async def post_library_file(
             )
             is None
         ):
-            held.append(await asyncio.to_thread(claims.hold_file, path, digest))
+            held.append(await traced_thread("claims.hold_file", claims.hold_file, path, digest))
         result = await run_operation(
             ops,
             response,

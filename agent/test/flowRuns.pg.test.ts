@@ -3,7 +3,6 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { ApplicationFailure } from '@temporalio/common'
-import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { inputHash } from '../src/approvals/service.js'
@@ -13,6 +12,7 @@ import { connectInProcess, turnToolActivity } from '../src/temporal/turnTools.js
 import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 import { PgSessionRows } from './support/sql/sessionRows.js'
+import { turnToolEnv } from './support/turnToolEnv.js'
 
 // A flow run's starter and decisions, read from the backend's own tables (#1057, plan
 // 2026-10-09 Task D1). The tables come from the backend's migration files, copied into
@@ -231,7 +231,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`CrudFlowRuns${TEST_DATABASE_URL ? '' : ` (s
       VALUES (${flowRequestId(id, 'wr1', 'c1')}, ${id}, 'wr1', 'c1', 'approval', 'approved', 'browser',
         ${hash('notes__post', { body: 'x' })})`
     const env = () =>
-      new MockActivityEnvironment({
+      turnToolEnv({
         activityId: 'tool-c1',
         activityType: 'turn:notes__post',
         workflowExecution: { workflowId: `flow-${id}`, runId: 'wr1' },
@@ -256,7 +256,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`CrudFlowRuns${TEST_DATABASE_URL ? '' : ` (s
       INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id, call_id, kind, outcome, responder, input_hash)
       VALUES (${flowRequestId(id, 'wr1', 'c2')}, ${id}, 'wr1', 'c2', 'approval', 'approved', 'grant:g1',
         ${hash('notes__post', { body: 'z' })})`
-    const lapsed = await new MockActivityEnvironment({
+    const lapsed = await turnToolEnv({
       activityId: 'tool-c2',
       activityType: 'turn:notes__post',
       workflowExecution: { workflowId: `flow-${id}`, runId: 'wr1' },

@@ -153,7 +153,7 @@ describe('ProfileFetchPanel (#6625)', () => {
     show()
     await screen.findByRole('status', { name: 'Last fetch' })
     expect(fetchButton()).toHaveAccessibleDescription(
-      "Imports a preset for each printer model and nozzle into Bambuddy and sets it here. It replaces this type's presets for the nozzles chosen in Settings → Printing.",
+      "Keeps a preset for each printer model and nozzle in ScadBuddy, with a copy in Bambuddy when Settings → Printing asks for one, and sets it here. It replaces this type's presets for the nozzles chosen in Settings → Printing.",
     )
   })
 

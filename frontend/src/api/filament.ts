@@ -15,6 +15,8 @@ export type SpoolCreate = Schemas['SpoolCreate-Input']
 export type SpoolPatch = Schemas['SpoolPatch']
 export type SpoolDraft = Schemas['SpoolDraft']
 export type SpoolBulkCreate = Schemas['SpoolBulkCreate']
+export type SpoolBulkUpdated = Schemas['SpoolBulkUpdated']
+export type SpoolsArchived = Schemas['SpoolsArchived']
 export type TagBind = Schemas['TagBind']
 export type TagBinding = Schemas['TagBinding']
 export type PresetInput = Schemas['SpoolPresetCreate']
@@ -172,7 +174,7 @@ export const createSpool = (body: SpoolCreate) => request<Spool>(`${BASE}/spools
 export const bulkCreateSpools = (body: SpoolBulkCreate, key: string) =>
   request<Spool[]>(`${BASE}/spools/bulk`, { ...json('POST', body), headers: { 'Idempotency-Key': key } })
 
-/** #7150 — a new spool's draft from an existing one: not its number, tags, tray, ledger or weight lock. */
+/** #7150 — a new spool's draft from an existing one: not its number, tags, tray, ledger, weight lock or `added_full`. */
 export const copySpool = (id: string) => request<SpoolDraft>(`${BASE}/spools/${seg(id)}/copy`)
 
 /** Only the fields sent change; `null` clears an override. */
@@ -181,6 +183,17 @@ export const patchSpool = (id: string, body: SpoolPatch) => request<Spool>(`${BA
 /** `archived: false` restores it. */
 export const archiveSpool = (id: string, archived = true) =>
   request<Spool>(`${BASE}/spools/${seg(id)}/archive`, json('POST', { archived }))
+
+/**
+ * #7151 — the same patch on several spools, all or none: a spool that refuses it refuses
+ * the edit (a 422 naming its number). `not_found` lists the ids that name no spool.
+ */
+export const bulkUpdateSpools = (spoolIds: string[], patch: SpoolPatch) =>
+  request<SpoolBulkUpdated>(`${BASE}/spools/bulk-update`, json('POST', { spool_ids: spoolIds, patch }))
+
+/** #7151 — archive (`true`) or restore several spools in one request; each spool's outcome is in the answer. */
+export const bulkArchiveSpools = (spoolIds: string[], archived: boolean) =>
+  request<SpoolsArchived>(`${BASE}/spools/${archived ? 'bulk-archive' : 'bulk-restore'}`, json('POST', { spool_ids: spoolIds }))
 
 /** Only a spool that never printed (409 otherwise: archive it). */
 export const deleteSpool = (id: string) => request<void>(`${BASE}/spools/${seg(id)}`, { method: 'DELETE' })
@@ -219,6 +232,11 @@ export const getSyncStatus = () => request<SyncStatus>(`${BASE}/sync/status`)
  * 409 (`code` `no_bambuddy` or `nothing_pushes`) when no pass can run, 503 when it could not be asked for.
  */
 export const runSync = () => request<Schemas['SyncRun']>(`${BASE}/sync/run`, { method: 'POST' })
+
+export type PresetImport = Schemas['PresetImport']
+
+/** #7244 — bring Bambuddy's filament presets into ScadBuddy's own once, whatever the presets direction says. */
+export const importBambuddyPresets = () => request<PresetImport>(`${BASE}/presets/bambuddy-import`, { method: 'POST' })
 
 export type SyncPass = Schemas['SyncPass']
 export type SyncPassPage = Schemas['SyncPassPage']

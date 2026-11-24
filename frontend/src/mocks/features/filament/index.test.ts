@@ -3,7 +3,9 @@ import { ApiError, api, request } from '../../../api/client'
 import {
   archiveSpool,
   bindTag,
+  bulkArchiveSpools,
   bulkCreateSpools,
+  bulkUpdateSpools,
   copySpool,
   createSpool,
   deleteSpool,
@@ -419,6 +421,23 @@ describe('the spools CSV import (Task 15)', () => {
     expect(await refusal(bulkCreateSpools({ ...body, quantity: 3 }, 'b-1'))).toMatchObject({ status: 422 })
     expect(await refusal(bulkCreateSpools({ ...body, location_id: L.AMS_A1 }, 'b-2'))).toMatchObject({ status: 422 })
     expect(await listSpools()).toHaveLength(13)
+  })
+
+  it('edits spools all or none, and archives and restores them in one request (#7151)', async () => {
+    expect(await bulkUpdateSpools([spoolId(1), spoolId(3), NOBODY], { note: 'June' })).toEqual({ changed: [spoolId(1), spoolId(3)].sort(), unchanged: [], not_found: [NOBODY] })
+    expect((await getSpool(spoolId(3))).note).toBe('June')
+    expect(await refusal(bulkUpdateSpools([spoolId(1)], { archived: true }))).toMatchObject({ status: 422 })
+    expect(await refusal(bulkUpdateSpools([spoolId(1)], {}))).toMatchObject({ status: 422 })
+    const archived = await bulkArchiveSpools([spoolId(1), NOBODY], true)
+    expect(archived).toEqual({ changed: [spoolId(1)], unchanged: [], not_found: [NOBODY] })
+    expect((await getSpool(spoolId(1))).archived_at).not.toBeNull()
+    expect(await bulkArchiveSpools([spoolId(1)], true)).toEqual({ changed: [], unchanged: [spoolId(1)], not_found: [] })
+    expect(await bulkArchiveSpools([spoolId(1)], false)).toEqual({ changed: [spoolId(1)], unchanged: [], not_found: [] })
+  })
+
+  it('takes the spool out of a tray (#7151)', async () => {
+    await api.unlinkTraySpool(H2C.printer_id, 0, 0)
+    expect((await getSpool(spoolId(4))).location_id).toBeNull()
   })
 
   it("copies a spool's own fields and not its tray, weight or lock (#7150)", async () => {

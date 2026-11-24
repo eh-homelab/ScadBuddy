@@ -39,9 +39,9 @@ from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.crud import listener
 from scadbuddy.crud.print import (
     RemoteBbPull,
+    RemoteFilamentPresets,
     RemoteFilamentSync,
     RemoteFilamentTrays,
-    RemoteHeldPresets,
     RemoteNativeSlices,
     RemotePrinterStore,
     RemotePrintUses,
@@ -141,7 +141,7 @@ async def test_it_builds_with_no_database_and_holds_no_pool(
         # A native run's SB spools through the API (#6262 Task 6).
         assert isinstance(print_deps.sb_spools, RemoteFilamentTrays)
         assert print_deps.native is not None
-        assert isinstance(print_deps.native.profiles.held, RemoteHeldPresets)
+        assert isinstance(print_deps.native.profiles.own, RemoteFilamentPresets)
         [lan] = [
             fn
             for fn in deps.activities

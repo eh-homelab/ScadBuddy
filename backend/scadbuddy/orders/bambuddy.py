@@ -2,7 +2,7 @@
 that reaches ``bambuddy.client`` (``tests/test_orders_bambuddy_seam.py`` checks it).
 
 :class:`BambuddyIntegrations` is the ``OrderIntegrations`` seam with ``bambuddy_url`` set
-(``orders/integrations.py``): the spool import's local presets (#6136; its spools are
+(``orders/integrations.py``): the spool import's tray assignments (its spools are
 ScadBuddy's own since #6262), the order's nested projects (§8.1) and an attempt's
 archives (§8.2). The functions below it are
 the quote's slice through Bambuddy's slicer (#4250 Ruling 2), the print dialog's own
@@ -20,8 +20,6 @@ from contextlib import aclosing, asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from pydantic import ValidationError
-
 from scadbuddy.bambuddy.client import BambuddyClient, Operation, client_for, maybe_client
 from scadbuddy.bambuddy.costs import archive_cost
 from scadbuddy.bambuddy.models import (
@@ -29,7 +27,6 @@ from scadbuddy.bambuddy.models import (
     ArchiveDetail,
     FolderCreate,
     LibraryFile,
-    LocalPreset,
     PrinterMaintenanceOverview,
     SliceJob,
     SpoolAssignment,
@@ -43,14 +40,12 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.bambuddy_pull import read_assignments
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
-from scadbuddy.orders.density import density_text
 from scadbuddy.orders.held_print import STOREFRONT_FOLDER, NativeShelf, Shelf, Shelved
 from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
     ArchiveSlot,
     CopiedMedia,
-    LocalDensity,
     MaintenanceDone,
     MaintenanceTask,
     MediaTooLargeError,
@@ -66,16 +61,6 @@ logger = logging.getLogger(__name__)
 
 #: How a held copy is sent to Bambuddy, as the library page's upload sends a file.
 UPLOAD_MEDIA_TYPE = "application/octet-stream"
-
-
-def _local_densities(presets: list[LocalPreset]) -> dict[str, LocalDensity]:
-    """Each local filament preset with a density, by its id as a spool names it."""
-    return {
-        str(preset.id): LocalDensity(name=preset.name, density_g_cm3=density)
-        for preset in presets
-        if preset.preset_type == "filament"
-        and (density := density_text(preset.filament_density)) is not None
-    }
 
 
 def archive_facts(archive: ArchiveDetail) -> ArchiveFacts:
@@ -142,25 +127,6 @@ class BambuddyIntegrations:
     @property
     def linked(self) -> bool:
         return True
-
-    async def local_densities(self) -> dict[str, LocalDensity]:
-        """``GET /local-presets/``: each local filament preset with a density (#6136). A
-        read Bambuddy refuses, or answers in another shape, gives none, logged, so the
-        import goes on without them."""
-        stored = await asyncio.to_thread(self.settings.load)
-        try:
-            async with client_for(stored) as client:
-                presets = await client.local_presets()
-        except ApiError as error:
-            logger.warning("no densities from Bambuddy's local presets: %s", error.detail)
-            return {}
-        except ValidationError as error:
-            logger.warning(
-                "no densities from Bambuddy's local presets: an answer of another shape: %s",
-                error,
-            )
-            return {}
-        return _local_densities(presets.filament)
 
     async def spool_assignments(self) -> list[SpoolAssignment]:
         """``GET /inventory/assignments``, as `filament/bambuddy_pull.py`
@@ -440,6 +406,16 @@ class BambuddyShelf:
             if (found.file_hash or "").lower() == sha256:
                 return Shelved(found.id, found.filename)
         return None
+
+    async def stands(self, file_id: int, sha256: str) -> bool:
+        try:
+            found = await self.client.library_file(file_id)
+        except ApiError as error:
+            if error.status == 404:
+                return False
+            raise
+        # A row that states no hash stands while it is there (`Shelf.stands`).
+        return found.file_hash is None or found.file_hash.lower() == sha256
 
     async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
         # Streamed from the content store into the one spool `upload_raw` keeps.
