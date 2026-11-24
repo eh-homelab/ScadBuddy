@@ -1623,12 +1623,18 @@ jobs:
               if [ -z "$cg" ] && [ -s "$cid" ]; then
                 cg=$(find /sys/fs/cgroup -maxdepth 3 -type d -name "*$(cat "$cid")*" -print -quit)
               fi
-              [ -n "$cg" ] && cat "$cg/memory.peak" > "$peak" 2>/dev/null
+              # Read first, then write: `cat … > "$peak"` truncates it before `cat` runs, and
+              # the cgroup goes away before `docker run --rm` returns.
+              if [ -n "$cg" ] && v=$(cat "$cg/memory.peak" 2>/dev/null) && [ -n "$v" ]; then
+                echo "$v" > "$peak"
+              fi
               n=$((n + 1))
               [ $((n % 15)) -eq 0 ] || continue
               line="memory: $(free -m | awk '/^Mem:/ {printf "vm used %d avail %d MiB", $3, $7} /^Swap:/ {printf ", swap used %d MiB", $3}')"
               if [ -n "$cg" ] && [ -r "$cg/memory.current" ]; then
-                line+=" | container $(($(cat "$cg/memory.current") >> 20)) peak $(($(cat "$peak") >> 20)) shmem $(($(awk '$1 == "shmem" {print $2}' "$cg/memory.stat") >> 20)) MiB"
+                cur=$(cat "$cg/memory.current" 2>/dev/null) p=$(cat "$peak" 2>/dev/null)
+                shm=$(awk '$1 == "shmem" {print $2}' "$cg/memory.stat" 2>/dev/null)
+                line+=" | container $(( ${cur:-0} >> 20 )) peak $(( ${p:-0} >> 20 )) shmem $(( ${shm:-0} >> 20 )) MiB"
               fi
               echo "$line"
               ps -eo rss=,pid=,args= --sort=-rss | head -n 5 | awk '{printf "  %6d MiB %7d %s\n", $1 / 1024, $2, substr($0, index($0, $3), 100)}'
@@ -1646,8 +1652,9 @@ jobs:
             --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration \
             --store-durations --clean-durations --durations-path=/results/durations.json \
             --junitxml=/results/junit.xml --durations=20 || rc=$?
-          kill "$sampler"
-          echo "container memory peak: $(($(cat "$peak" 2>/dev/null || echo 0) >> 20)) MiB of 13312"
+          kill "$sampler" 2>/dev/null || true
+          p=$(cat "$peak" 2>/dev/null || true)
+          echo "container memory peak: $(( ${p:-0} >> 20 )) MiB of 13312"
           sudo dmesg | grep -iE 'out of memory|oom-kill|killed process' || echo "no OOM kill in the kernel log"
           exit "$rc"
 

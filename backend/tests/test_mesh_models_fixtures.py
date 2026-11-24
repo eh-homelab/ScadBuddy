@@ -86,6 +86,19 @@ def welded_part(path: Path) -> trimesh.Trimesh:
     return mesh
 
 
+def test_the_streaming_read_of_a_part_file_agrees_with_trimesh(tmp_path: Path) -> None:
+    """`welded_part` reads a part file with the reader that wrote the scene; trimesh reads
+    one small fixture's part files independently, so the two readers are checked against
+    each other (#6978 review)."""
+    _, scene = opened("411-broccoli.3mf", tmp_path)
+    load = mesh_of(tmp_path)
+    for obj in scene.objects:
+        for part in obj.parts:
+            ours, theirs = welded_part(tmp_path / part.mesh), load(part.mesh)
+            assert np.array_equal(ours.faces, theirs.faces), part.mesh
+            assert np.allclose(ours.vertices, theirs.vertices), part.mesh
+
+
 def carrot_neck(directory: Path, scene: Scene) -> tuple[SceneObject, Any, float, Section]:
     """The small carrot, its mesh, and its neck: the narrowest section where the painted
     leaves meet the body, searched from a little below the lowest painted face to a little
