@@ -1404,6 +1404,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `flows/history.py` is the Reset preview, not git). Both repositories are shared by
   every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
   (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).
+  A models repository made from #7314 on keeps its meshes (`*/meshes/*.3mf`) in Git LFS:
+  `ModelHistory` passes the filter on every call (required, so a mesh it cannot read is an
+  error and never its pointer), writes `.gitattributes` only in a repository with no commit,
+  and its push sends the LFS objects first, to the remote's own endpoint whatever a
+  `.lfsconfig` says (`tests/test_history_lfs.py`).
   The off-box copy (#4974) is `git_remote/` (`push.py` `RemotePush`, `store.py`
   `git_remote_pushes`): `GitRepo.after_commit` asks for a push on a thread once the write
   lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
