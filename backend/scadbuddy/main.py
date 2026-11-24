@@ -651,7 +651,7 @@ async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> Non
         return
     try:
         result = await copy_output_bytes(
-            state.outputs, rows, state.store.content, state.projection.pool, stop
+            state.outputs, rows, state.store.content, state.projection.conninfo, stop
         )
     except Exception:
         logger.exception(

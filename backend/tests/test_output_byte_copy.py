@@ -15,6 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 
 from scadbuddy.library import output_byte_copy
@@ -149,7 +150,7 @@ async def _run(
     projection: JobProjection,
     stop: threading.Event | None = None,
 ) -> ByteCopyResult | None:
-    return await copy_output_bytes(tree.store, tree.rows, content, projection.pool, stop)
+    return await copy_output_bytes(tree.store, tree.rows, content, projection.conninfo, stop)
 
 
 async def _ref(content: ContentStore, key: str) -> BlobRef:
@@ -694,6 +695,41 @@ async def test_byte_copy_runs_once_under_lock(
             conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (BYTES_LOCK,))
     assert tree.rows.last_byte_run() is None
     assert await _run(tree, content, projection) is not None
+
+
+async def test_the_lock_is_on_a_connection_of_its_own_and_ends_with_the_run(
+    tree: Tree,
+    content: ContentStore,
+    projection: JobProjection,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run holds its lock for up to 30 minutes in the sweep, and with no bound at a
+    start: never on a connection of the API's pool, so the pool keeps all of its
+    connections (#7256, as the row copy's, #7360). The run's end releases it."""
+    seen: list[tuple[str, int]] = []
+
+    async def run(self: Any) -> ByteCopyResult:
+        with psycopg.connect(pg_conninfo, autocommit=True) as other:
+            found = other.execute(
+                "SELECT a.application_name FROM pg_locks l"
+                " JOIN pg_stat_activity a ON a.pid = l.pid"
+                " WHERE l.locktype = 'advisory' AND l.granted"
+                " AND a.datname = current_database()"
+            ).fetchall()
+        seen.extend((str(name), 0) for (name,) in found)
+        stats = projection.pool.get_stats()
+        seen.append(("pool in use", stats["pool_size"] - stats["pool_available"]))
+        return ByteCopyResult()
+
+    monkeypatch.setattr(output_byte_copy._Copy, "run", run)
+    assert await _run(tree, content, projection) is not None
+    assert seen == [(output_byte_copy.LOCK_APPLICATION, 0), ("pool in use", 0)]
+    with psycopg.connect(pg_conninfo, autocommit=True) as other:
+        got = other.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (BYTES_LOCK,)
+        ).fetchone()
+        assert got is not None and got[0] is True
 
 
 async def test_byte_copy_stops_unfinished_on_stop(

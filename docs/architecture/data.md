@@ -223,8 +223,10 @@ after the row copy, and the housekeeping sweep `housekeeping_copy_output_bytes`
 (`workflows/housekeeping.py` `OUTPUT_BYTES_SWEEP`, after `OUTPUT_COPY_SWEEP`, on the
 sweeps' Schedule) runs it again, with a timeout of 30 minutes (`OUTPUT_BYTES_TIMEOUT`). One
 replica copies at a time, under a session advisory lock. That lock holds one autocommit
-connection of the pool (no transaction) for the whole run: in the sweep up to that timeout,
-and at a start with no bound (the first start after the roll-out copies every output). Each run is
+connection of its own (`scadbuddy-output-byte-copy`, no transaction), not a pool's, for the
+whole run: in the sweep up to that timeout, and at a start with no bound (the first start
+after the roll-out copies every output). Each of the run's statements takes a connection of
+the main pool. Each run is
 a row of `output_byte_runs`. It reconciles:
 
 - A row whose `bytes_at` is set and whose `bytes_stamp` (the name, size and `mtime_ns` of

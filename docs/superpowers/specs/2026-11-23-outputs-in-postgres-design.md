@@ -188,7 +188,7 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    The byte copy (`library/output_byte_copy.py` `copy_output_bytes`) runs after the row
    copy at each API start and in the housekeeping sweep `housekeeping_copy_output_bytes`
    (`OUTPUT_BYTES_SWEEP`), under a session advisory lock that holds one autocommit
-   connection for the whole run (in the sweep up to its timeout, 30 min,
+   connection of its own (not a pool's) for the whole run (in the sweep up to its timeout, 30 min,
    `OUTPUT_BYTES_TIMEOUT`; at a start with no bound). It compares
    each byte file with its blob by sha256, puts a changed one with a compare-and-swap,
    reads back what it put (and every blob of a row not copied before), and names the

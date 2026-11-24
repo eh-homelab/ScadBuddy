@@ -294,7 +294,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   min) runs `library/output_byte_copy.py` `copy_output_bytes` the same way, after the
   row copy at start: it puts the files' bytes as `output` blobs, refuses on `local`,
   `bambuddy` or a store past its caps, and its session advisory lock holds one autocommit
-  connection for the run (docs/architecture/data.md "The byte copy"). Sweeps off (`asset_sweep_interval` 0) deletes the
+  connection of its own for the run (docs/architecture/data.md "The byte copy"). Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`

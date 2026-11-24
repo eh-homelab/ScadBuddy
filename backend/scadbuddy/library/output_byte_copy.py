@@ -44,14 +44,14 @@ is ``refused`` and uploads nothing. On the `local` store (no content store, Ruli
 and on `bambuddy` (spec §6.4) every run is refused.
 
 A run has ``finished_at`` only when nothing was refused, failed or incomplete and it was
-not stopped. One replica copies at a time, under a session advisory lock. Every blocking
+not stopped. One replica copies at a time, under a session advisory lock on a
+connection of its own. Every blocking
 call (a stat, a hash, a read, an SQL statement) runs in a thread.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import logging
@@ -63,10 +63,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from psycopg import Connection
-from psycopg.rows import DictRow
-from psycopg_pool import ConnectionPool
+import psycopg
+from psycopg.conninfo import make_conninfo
 
+from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.library.output_bytes import (
     FILES_DIR,
     MODEL_NAME,
@@ -94,6 +94,11 @@ logger = logging.getLogger(__name__)
 
 #: The advisory lock's name: ``pg_try_advisory_lock(hashtextextended(BYTES_LOCK, 0))``.
 BYTES_LOCK = "scadbuddy:outputs:bytes"
+
+#: The lock connection's ``application_name``, as a pool's name is its connections'.
+LOCK_APPLICATION = "scadbuddy-output-byte-copy"
+#: Seconds to connect for the lock: a database that cannot be reached fails the run.
+LOCK_CONNECT_TIMEOUT = 10
 
 #: Outputs per transaction: prod commits take 1-2 s, so one commit per output is too slow.
 BATCH_BYTES = 50
@@ -294,41 +299,33 @@ async def copy_output_bytes(
     store: OutputStore,
     rows: OutputRows,
     content: ContentStore | None,
-    pool: ConnectionPool[Connection[DictRow]],
+    conninfo: str,
     stop: threading.Event | None = None,
 ) -> ByteCopyResult | None:
     """One run of the byte copy; ``None`` when another replica runs one. ``stop`` ends
     it between outputs: it writes the batch so far and leaves its run unfinished.
 
-    The lock holds one connection of ``pool`` for the whole run. It is autocommit, so it
-    is never idle in a transaction and holds no row lock."""
-    lock = await asyncio.to_thread(pool.getconn)
-    try:
-        got = await asyncio.to_thread(
-            lambda: lock.execute(
-                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", (BYTES_LOCK,)
-            ).fetchone()
+    The lock is a session lock on a connection of its own (``conninfo``), held for the
+    whole run (up to `workflows.housekeeping.OUTPUT_BYTES_TIMEOUT`, 30 minutes, in the
+    sweep; with no bound at a start). It is not taken from the API's pool, so the pool's
+    other users keep every connection during a run. It is autocommit, so it is never
+    idle in a transaction and holds no row lock. Closing the connection ends its
+    session, which releases the lock, also when the run fails."""
+    own = make_conninfo(
+        conninfo,
+        application_name=LOCK_APPLICATION,
+        connect_timeout=LOCK_CONNECT_TIMEOUT,
+        **TCP_KEEPALIVE,
+    )
+    async with await psycopg.AsyncConnection.connect(own, autocommit=True) as lock:
+        cursor = await lock.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (BYTES_LOCK,)
         )
-        if got is None or not got["got"]:
+        got = await cursor.fetchone()
+        if got is None or not got[0]:
             logger.info("another replica copies the outputs' bytes; this one does not")
             return None
-        try:
-            return await _Copy(store, rows, content, stop).run()
-        finally:
-            try:
-                await asyncio.to_thread(
-                    lock.execute,
-                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
-                    (BYTES_LOCK,),
-                )
-            except Exception:
-                # Closing the connection ends its session, which frees the lock; the pool
-                # drops a closed connection.
-                logger.warning("could not release the byte copy's lock; closed its connection")
-                with contextlib.suppress(Exception):
-                    lock.close()
-    finally:
-        await asyncio.to_thread(pool.putconn, lock)
+        return await _Copy(store, rows, content, stop).run()
 
 
 class _FailedError(Exception):
