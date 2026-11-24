@@ -186,11 +186,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `GET`/`PUT /entity-kinds/{kind}/property-schema`
   (`backend/scadbuddy/api/entity_properties.py`).
 - UI: the section "Files, links and properties" of the spool and type pages
-  (`frontend/src/components/entities/PropertiesPanel.tsx`; the anchor `#files-and-links`
-  stays). A list value has one field per item. A rename or an add onto a key the entity
+  (`frontend/src/components/entities/PropertiesPanel.tsx`; the spool page's anchor
+  `#files-and-links` stays). A list value has one field per item. A rename or an add onto a key the entity
   already has asks first, since it replaces that key's value.
-- Search: the Spools and Types tabs' search also matches property values, as text fields
-  beside a spool's tag UID and tray UUID (#7151)
+- Search: the Spools and Types tabs' search also matches property values, beside the hex
+  match on a spool's tag UID and tray UUID (#7151)
   (`frontend/src/lib/filamentSearch.ts` `propertyTexts`, loaded by
   `frontend/src/components/entities/api.ts`). The agent's search matches them too
   (`agent/src/tools/filament.ts` loads them, `agent/src/tools/filamentSearch.ts` matches); both use the shared vectors
