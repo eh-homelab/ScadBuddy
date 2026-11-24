@@ -769,6 +769,27 @@ def test_a_supplier_with_an_open_create_intent_is_still_adopted(pg_pool: PgPool)
     ]
 
 
+def test_a_supplier_whose_link_a_404_dropped_is_not_made_again(pg_pool: PgPool) -> None:
+    """D16 (#7067): once a probe's 404 drops a supplier's link, one with no filament
+    product, invoice or open intent is not created again. With a product it is."""
+    f = _filament(pg_pool)
+    sb_id = _linked(pg_pool, f, "supplier")
+    with pg_pool.connection() as conn:  # what the 404 leaves (`test_a_row_probe_404_...`)
+        conn.execute(
+            "UPDATE filament_suppliers SET bb_supplier_id = NULL, bb_seen = NULL,"
+            " bb_seen_at = NULL WHERE id = %s",
+            (sb_id,),
+        )
+
+    writes = _plan(f, _snap([], suppliers=[]), _ROWS_PUSH).writes
+    assert [w for w in writes if w.kind == "supplier"] == []
+    assert _intents(pg_pool) == []
+
+    assert f.suppliers.add_product(sb_id, ProductCreate(type_id=_type(f), sku="A-1"))
+    writes = _plan(f, _snap([], suppliers=[]), _ROWS_PUSH).writes
+    assert [(w.op, w.sb_id) for w in writes if w.kind == "supplier"] == [("create", sb_id)]
+
+
 def test_a_linked_supplier_with_no_product_is_still_updated(pg_pool: PgPool) -> None:
     """R-P2-8: a supplier Bambuddy already knows stays in the sync, product or not: a
     missing row still gets its probe."""

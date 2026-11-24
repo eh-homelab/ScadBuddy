@@ -1669,7 +1669,9 @@ def _suppliers(conn: Conn) -> list[_Item]:
     answer may be lost, so its row is still adopted or its intent closed, R-P2-9). Only
     filament reaches Bambuddy, so a supplier whose offers are all for other items
     (`supplier_offers`, #7067) is never created there (spec
-    2026-11-21-inventory-and-purchasing-design.md §6.5, D16)."""
+    2026-11-21-inventory-and-purchasing-design.md §6.5, D16). So once a probe's 404 drops
+    a supplier's link, one with no filament product, invoice or open intent is not created
+    again; that is intended (D16)."""
     rows = conn.execute(
         "SELECT id, name, website, customer_number, note, archived_at,"
         " bb_supplier_id, bb_pushed, bb_seen, bb_seen_at FROM filament_suppliers s"
