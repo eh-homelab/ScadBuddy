@@ -2779,11 +2779,13 @@ def test_a_library_file_bambuddy_sends_encoded_is_never_kept(
 
 
 @respx.mock
+@pytest.mark.parametrize("private", [False, True], ids=["shared", "private"])
 def test_a_kept_file_too_large_to_copy_first_is_streamed_from_bambuddy(
-    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch, private: bool
 ) -> None:
-    """A hit is copied whole before its first byte (#2821 review): past
-    CACHED_COPY_MAX_BYTES the file streams from Bambuddy instead, and is not kept again."""
+    """A hit is checked whole before its first byte (#2821 review): copied, or with a
+    private cache (#7316) hashed in place. Past CACHED_COPY_MAX_BYTES the file streams
+    from Bambuddy instead, is never checked, and is not kept again."""
     configure(client)
     content = library_3mf()
     sha = hashlib.sha256(content).hexdigest()
@@ -2791,6 +2793,7 @@ def test_a_kept_file_too_large_to_copy_first_is_streamed_from_bambuddy(
     state: AppState = getattr(app.state, STATE_ATTR)
     downloads = state.store.downloads
     assert downloads is not None
+    downloads.private = private
     downloads.put(sha, content)
     assert downloads.has(sha)
     monkeypatch.setattr(library_print, "CACHED_COPY_MAX_BYTES", len(content) - 1)
@@ -2802,12 +2805,21 @@ def test_a_kept_file_too_large_to_copy_first_is_streamed_from_bambuddy(
         return real_fill(sha256)
 
     monkeypatch.setattr(downloads, "fill", fill)
+    checked: list[str | None] = []
+    real_read_checked = downloads.read_checked
+
+    def read_checked(sha256: str | None, directory: Path, *, what: str) -> Any:
+        checked.append(sha256)
+        return real_read_checked(sha256, directory, what=what)
+
+    monkeypatch.setattr(downloads, "read_checked", read_checked)
 
     served = client.get("/api/v1/print/library/89/file")
 
     assert served.content == content
     assert download.call_count == 1
     assert fills == []
+    assert checked == []
 
 
 @respx.mock
