@@ -521,6 +521,26 @@ describe('useAgentChat', () => {
     act(() => result.current.send('hello', { route: '/' }))
     expect(t.chat()).toContainEqual({ v: 1, type: 'user.message', text: 'hello', context: { route: '/' } })
   })
+
+  it("sends a new chat's browser options with its first message only (#7027)", () => {
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => t.h().onOpen?.())
+    const browser = { user_agent: 'UA', viewport: { width: 390, height: 844 }, locale: 'en-GB' }
+    act(() => result.current.send('hello', { route: '/' }, undefined, browser))
+    expect(t.chat()).toContainEqual({ v: 1, type: 'user.message', text: 'hello', context: { route: '/' }, browser })
+    act(() => t.h().onFrame(frame({ type: 'session.started', sessionId: 's1', origin: 'chat', owner, title: 't' })))
+    act(() => result.current.send('again', { route: '/' }, undefined, browser))
+    expect(t.chat()).toContainEqual({ v: 1, type: 'user.message', sessionId: 's1', text: 'again', context: { route: '/' } })
+  })
+
+  it('sends no browser key when the options are empty (#7027)', () => {
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => t.h().onOpen?.())
+    act(() => result.current.send('hello', { route: '/' }, undefined, {}))
+    expect(t.chat()).toContainEqual({ v: 1, type: 'user.message', text: 'hello', context: { route: '/' } })
+  })
 })
 
 describe('requestIdOf', () => {

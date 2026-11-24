@@ -34,7 +34,7 @@ from scadbuddy.filament.models import (
     SpoolPatch,
     SpoolTypePatch,
 )
-from scadbuddy.filament.purchasing_models import SupplierCreate, SupplierPatch
+from scadbuddy.filament.purchasing_models import ProductCreate, SupplierCreate, SupplierPatch
 from scadbuddy.filament.rfid_push import error_label
 from scadbuddy.filament.spools import SpoolBambuddyCreatingError, SpoolBambuddyLinkedError
 from tests.conftest import PgPool
@@ -966,7 +966,9 @@ def test_a_pull_between_creates_and_results_leaves_the_rows_to_the_push(
     shelf = _kind(f, "Shelf")
     root = f.locations.create(LocationCreate(name="Shelf A", kind_id=shelf)).id
     f.locations.create(LocationCreate(name="Bin 1", kind_id=shelf, parent_id=root))
-    f.suppliers.create(SupplierCreate(name="Micro Center"))
+    shop = f.suppliers.create(SupplierCreate(name="Micro Center"))
+    # Under D16 only a supplier that sells filament is synced (#7067).
+    assert f.suppliers.add_product(shop.id, ProductCreate(type_id=_type(f), sku="MC-1"))
     writes = _plan(f, _snap([], locations=[], suppliers=[]), TWO_WAY_ROWS).writes
     creates = [w for w in writes if w.op == "create"]
     names = sorted(_body(w)["name"] for w in creates)

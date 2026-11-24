@@ -45,6 +45,7 @@ from scadbuddy.render.inputs import nul_at
 from scadbuddy.workflows.commands import (
     FAST_ACCEPT,
     RETRY_AFTER_SECONDS,
+    SHORT_TASK_TIMEOUT,
     AlreadyClosedError,
     CommandClosedError,
     CommandStillAcceptingError,
@@ -471,6 +472,7 @@ async def _run_operation(
             update=ACCEPTED_UPDATE,
             result_type=OperationAnswer,
             reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+            task_timeout=SHORT_TASK_TIMEOUT,
             **fast,
         )
     except AlreadyClosedError:

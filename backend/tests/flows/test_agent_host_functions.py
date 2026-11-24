@@ -327,3 +327,28 @@ async def test_an_image_that_is_no_pointer_is_a_script_error_and_starts_nothing(
     run = await outward.finished(run_id)
     assert run.result == "result: 'refused'"
     assert served.calls == []
+
+
+async def test_agent_hands_its_browser_options_to_sessions_start(
+    outward: Outward, sessions: tuple[Sessions, str]
+) -> None:
+    """#7027: `browser` goes into the start body as given; the API checks its bounds."""
+    served, queue = sessions
+    run_id = await outward.run(
+        script("return await agent('x', [], None, browser={'user_agent': 'UA'})"),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert run.result == "result: 'plain words'"
+    sent = {name: args for name, _, args in served.calls if name == "sessions_start"}
+    assert sent["sessions_start"]["browser"] == {"user_agent": "UA"}
+
+
+async def test_agent_without_browser_sends_the_old_start_body(
+    outward: Outward, sessions: tuple[Sessions, str]
+) -> None:
+    served, queue = sessions
+    run_id = await outward.run(script("return await agent('x', [], None)"), tools_queue=queue)
+    await outward.finished(run_id)
+    sent = {name: args for name, _, args in served.calls if name == "sessions_start"}
+    assert "browser" not in sent["sessions_start"]

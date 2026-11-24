@@ -30,6 +30,16 @@ async function refusal(set: Record<string, unknown>): Promise<string | null> {
 describe('entity properties mock (#7026)', () => {
   beforeEach(() => resetMockState())
 
+  it("refuses an item's schema: it is its item kind's (#7067)", async () => {
+    const url = '/api/v1/entity-kinds/item/property-schema'
+    const read = await fetch(url)
+    const write = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ schema: { type: 'object' } }) })
+    for (const response of [read, write]) {
+      expect(response.status).toBe(409)
+      expect(((await response.json()) as { code: string }).code).toBe('schema_owned_by_item_kind')
+    }
+  })
+
   it('takes only the Draft 2020-12 $schema', async () => {
     expect(await putSchema({ type: 'object', $schema: 'https://json-schema.org/draft/2020-12/schema' })).toBeNull()
     expect(await putSchema({ type: 'object', $schema: 'http://json-schema.org/draft-07/schema#' })).toMatch(/\$schema/)

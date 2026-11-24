@@ -22,6 +22,7 @@ from scadbuddy.slicing.models import SliceProgress
 from scadbuddy.slicing.presets import build_presets, native_preset_key
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.store import NativeSlice, NativeSliceStore, native_workflow_id
+from scadbuddy.workflows.commands import SHORT_TASK_TIMEOUT
 from scadbuddy.workflows.slicing import SliceWorkflow
 from scadbuddy.workflows.slicing_models import SLICE_PLATE, SliceWorkflowInput
 
@@ -124,6 +125,7 @@ async def start_native_slice(
             task_queue=starter.library_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+            task_timeout=SHORT_TASK_TIMEOUT,
         )
     return row
 

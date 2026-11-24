@@ -202,6 +202,46 @@ describe("a session's row through the CRUD routes", () => {
     await expect(store.insert(row)).rejects.toThrow('no CRUD route answered')
   })
 
+  it("sends a session's browser options only when given, and reads them back (#7027)", async () => {
+    const BROWSER = { user_agent: 'Mozilla/5.0 Test', viewport: { width: 1280, height: 800 }, locale: 'en-GB' }
+    const api = new FakeApi()
+      .answer('POST /sessions', { session: { ...WIRE_TURN_ROW, browser: BROWSER } })
+      .answer(`GET /sessions/${SESSION}`, { session: { ...WIRE_TURN_ROW, browser: BROWSER } })
+      .answer('POST /sessions/list', { sessions: [{ ...WIRE_ROW, browser: null }] })
+    const store = rows(api)
+    const row = { id: SESSION, origin: 'chat' as const, owner: TOKEN, title: 't', tags: [], scope: {}, parentId: null, runtime: 'unified' as const, maxTurns: 20, budgetUsd: 5 }
+    await store.insert({ ...row, browser: BROWSER })
+    await store.insert(row)
+    const [given, absent] = api.seen.map((s) => s.body as Record<string, unknown>)
+    expect(given?.browser).toEqual(BROWSER)
+    expect(absent).not.toHaveProperty('browser')
+    expect((await store.get(SESSION))?.browser).toEqual(BROWSER)
+    expect((await store.list(TOKEN, {}))[0]?.browser).toBeNull()
+  })
+
+  it("keeps each refused field's message from the API's 422 (#7027)", async () => {
+    // The shape backend crud/guard.py answers a RequestValidationError with.
+    const api = new FakeApi().answer(
+      'POST /sessions',
+      {
+        detail: 'the request did not match the expected shape',
+        errors: [
+          { loc: ['body', 'browser', 'viewport', 'width'], msg: 'Input should be greater than or equal to 320' },
+          { loc: ['body', 'browser', 'locale'], msg: "String should match pattern '^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$'" },
+        ],
+      },
+      422,
+    )
+    const row = { id: SESSION, origin: 'chat' as const, owner: TOKEN, title: 't', tags: [], scope: {}, parentId: null, runtime: 'unified' as const, maxTurns: 20, budgetUsd: 5 }
+    const error = (await rows(api).insert({ ...row, browser: { viewport: { width: 1, height: 800 }, locale: '1' } }).catch((e: unknown) => e)) as CrudReadError
+    expect(error).toBeInstanceOf(CrudReadError)
+    expect(error.fields).toEqual(['body.browser.viewport.width', 'body.browser.locale'])
+    expect(error.errors).toEqual([
+      { field: 'body.browser.viewport.width', msg: 'Input should be greater than or equal to 320' },
+      { field: 'body.browser.locale', msg: "String should match pattern '^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$'" },
+    ])
+  })
+
   it('sends every string well-formed: a lone surrogate goes as U+FFFD, as postgres.js wrote it', async () => {
     const api = new FakeApi().answer('POST /sessions', { session: WIRE_TURN_ROW }).answer('POST /sessions/list', { sessions: [] })
     const store = rows(api)
