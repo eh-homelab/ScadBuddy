@@ -1484,10 +1484,11 @@ def reap_orphan_holds(
     """Release every `output` hold (the Parts and byte blobs) older than ``grace`` whose
     output has no meta.json (#1007): a save that failed between holding its Parts and
     byte blobs and writing meta.json, or a hold taken after a delete's release, leaves
-    holds that nothing else ever drops. Returns how many outputs' holds it released. Each released output's directory, if
-    one is left with no meta.json, goes too (`_remove_orphan_directory`, #1815), as
-    does an output directory with no meta.json and no hold at all, past the same grace
-    (#5448: a save that claimed its id and stopped before it held its Parts).
+    holds that nothing else ever drops. Returns how many outputs' holds it released.
+    Each released output's directory, if one is left with no meta.json, goes too
+    (`_remove_orphan_directory`, #1815), as does an output directory with no meta.json
+    and no hold at all, past the same grace (#5448: a save that claimed its id and
+    stopped before it held its Parts).
 
     It never mistakes a missing directory for deleted outputs. An output's hold is
     released only when the reaper knows the output's slug (``output_hold_slugs``) and
