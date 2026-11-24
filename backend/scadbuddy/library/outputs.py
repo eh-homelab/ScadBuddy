@@ -46,6 +46,7 @@ from scadbuddy.library.output_bytes import (
     OutputBytes,
     OutputStream,
     in_thread_closing,
+    server_error,
 )
 from scadbuddy.library.output_rows import OUTPUT_HOLDER as OUTPUT_HOLDER
 from scadbuddy.library.output_rows import OutputBlobs, Role, output_blob_key
@@ -101,8 +102,16 @@ ROLE_FILES: dict[Role, str] = {
 #: A blob the row names that the store cannot give whole: the reader takes the file. A
 #: stream raises it before its first chunk only for a missing blob, a corrupt blob of at
 #: most `output_bytes._PREFETCH` bytes, or a transport error during that prefetch; a larger
-#: corrupt blob, or a transport error past the prefetch, raises it mid-stream.
+#: corrupt blob, or a transport error past the prefetch, raises it mid-stream. An S3 5xx
+#: answer counts as a transport error (`output_bytes.server_error`); a 4xx does not.
 _LOST: tuple[type[Exception], ...] = (BlobMissingError, BlobCorruptError, *TRANSPORT_ERRORS)
+
+
+def _lost(error: Exception) -> bool:
+    """Whether a reader takes the file in place of the blob after ``error``."""
+    return isinstance(error, _LOST) or server_error(error)
+
+
 #: How much of a file a stream reads at a time.
 _FILE_CHUNK = 1024 * 1024
 
@@ -716,7 +725,9 @@ class OutputStore:
             assert self.bytes is not None
             try:
                 return await self.bytes.read(key)
-            except _LOST as error:
+            except Exception as error:
+                if not _lost(error):
+                    raise
                 _warn_lost(output_id, "model", key, error)
         return await asyncio.to_thread(self._model_3mf, output_id)
 
@@ -1281,7 +1292,9 @@ class OutputStore:
             assert self.bytes is not None
             try:
                 return await self.bytes.stream(key)
-            except _LOST as error:
+            except Exception as error:
+                if not _lost(error):
+                    raise
                 _warn_lost(output_id, "files", key, error)
         path = await asyncio.to_thread(self.file_path, output_id, name)
         stream = await _file_stream(path)
@@ -1338,7 +1351,9 @@ class OutputStore:
             assert self.bytes is not None
             try:
                 return await self.bytes.stream(key)
-            except _LOST as error:
+            except Exception as error:
+                if not _lost(error):
+                    raise
                 _warn_lost(output_id, role, key, error)
         path = await asyncio.to_thread(self._role_file, output_id, role)
         return None if path is None else await _file_stream(path)
@@ -1363,7 +1378,9 @@ class OutputStore:
                 suffix = Path(ROLE_FILES[role]).suffix
                 try:
                     path = await stack.enter_async_context(self.bytes.local_file(key, suffix))
-                except _LOST as error:
+                except Exception as error:
+                    if not _lost(error):
+                        raise
                     _warn_lost(output_id, role, key, error)
             if path is None:
                 path = await asyncio.to_thread(self._role_file, output_id, role)

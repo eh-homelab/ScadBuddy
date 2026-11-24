@@ -28,8 +28,8 @@ from types import TracebackType
 from typing import BinaryIO, Self
 
 import aiohttp
+from botocore.exceptions import ClientError, HTTPClientError
 from botocore.exceptions import ConnectionError as BotoConnectionError
-from botocore.exceptions import HTTPClientError
 
 from scadbuddy.library.output_rows import (
     OutputBlobs,
@@ -118,6 +118,16 @@ TRANSPORT_ERRORS: tuple[type[Exception], ...] = (
     aiohttp.ClientError,
     TimeoutError,
 )
+
+
+def server_error(error: BaseException) -> bool:
+    """An S3 answer of 5xx (``InternalError``, ``SlowDown`` and the like), after
+    botocore's own retries: the store failed, not the request. A 4xx is the request's
+    fault (a rotated key's 403) and is not one."""
+    if not isinstance(error, ClientError):
+        return False
+    status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return isinstance(status, int) and status >= 500
 
 
 async def in_thread_closing[T](call: Callable[[], T], close: Callable[[T], None]) -> T:

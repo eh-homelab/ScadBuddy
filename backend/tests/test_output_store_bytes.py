@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 import pytest
-from botocore.exceptions import EndpointConnectionError
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 import scadbuddy.library.outputs as outputs_module
 from scadbuddy.core.paths import DataPaths
@@ -298,14 +298,15 @@ async def test_open_role_falls_back_when_blob_of_exactly_prefetch_corrupt(
     assert await _read(store, meta.id) == b"file bytes"
 
 
-def _unreachable(after: list[bytes]) -> Any:
-    """A `ContentStore.get` that gives ``after`` and then loses the connection."""
+def _unreachable(after: list[bytes], error: Exception | None = None) -> Any:
+    """A `ContentStore.get` that gives ``after`` and then loses the connection, or
+    raises ``error``."""
 
     def get(ref: Any) -> AsyncGenerator[bytes]:
         async def chunks() -> AsyncGenerator[bytes]:
             for chunk in after:
                 yield chunk
-            raise EndpointConnectionError(endpoint_url="http://s3.invalid")
+            raise error or EndpointConnectionError(endpoint_url="http://s3.invalid")
 
         return chunks()
 
@@ -330,6 +331,47 @@ async def test_transport_error_in_prefetch_falls_back_to_file(
         async with await store.open_file(meta.id, "a.stl") as stream:
             assert b"".join([chunk async for chunk in stream.chunks]) == b"a stl"
     assert "blob" in caplog.text
+
+
+def _s3_error(status: int, code: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}}, "GetObject"
+    )
+
+
+@pytest.mark.parametrize(("status", "code"), [(503, "SlowDown"), (500, "InternalError")])
+async def test_s3_server_error_in_prefetch_falls_back_to_file(
+    copied: tuple[OutputStore, OutputMeta],
+    content: ContentStore,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    code: str,
+) -> None:
+    store, meta = copied
+    model = store.directory(meta.id) / MODEL_NAME
+    model.write_bytes(b"file bytes")
+    monkeypatch.setattr(content, "get", _unreachable([], _s3_error(status, code)))
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+        assert await _read(store, meta.id) == b"file bytes"
+        assert await store.model_3mf(meta.id) == b"file bytes"
+        async with store.local_role(meta.id, "model") as path:
+            assert path == model
+        async with await store.open_file(meta.id, "a.stl") as stream:
+            assert b"".join([chunk async for chunk in stream.chunks]) == b"a stl"
+    assert "blob" in caplog.text
+
+
+async def test_s3_client_error_is_not_a_lost_blob(
+    copied: tuple[OutputStore, OutputMeta],
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 4xx (a rotated key's 403) is a fault to see, not a blob to read around.
+    store, meta = copied
+    monkeypatch.setattr(content, "get", _unreachable([], _s3_error(403, "AccessDenied")))
+    with pytest.raises(ClientError):
+        await store.open_role(meta.id, "model")
 
 
 async def test_transport_error_past_prefetch_ends_stream_short(
