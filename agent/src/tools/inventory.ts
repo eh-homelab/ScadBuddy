@@ -23,11 +23,22 @@ const locationId = id("A place's id, as filament_location_list gives it")
 const kindId = z.string().regex(/^[a-z][a-z0-9_]{0,39}$/).describe('A kind id, `^[a-z][a-z0-9_]{0,39}$`: `part`, `hardware`, `tool`, `spool_part`, ...')
 const noNul = (s: string) => !s.includes('\u0000')
 const text = (max: number) => z.string().max(max).refine(noNul, 'no U+0000')
-/** A decimal the backend reads exactly: a number, or a string such as `"2.5"`. */
-const decimal = z
-  .union([z.number().finite().min(0), z.string().regex(/^[0-9]{1,14}(\.[0-9]{1,6})?$/, 'a decimal such as "2.5"')])
-  .describe('A decimal: a number, or a string such as "2.5"')
-const positive = decimal.refine((v) => Number(v) > 0, 'above 0')
+/**
+ * A decimal the backend reads exactly: a number, or a string such as `"2.5"`, with at most
+ * `whole` digits before the point and `places` after it (the column's `max_digits` and
+ * `decimal_places`). A number is read as JavaScript writes it, so one with more places (or in
+ * exponent form) is refused, never rounded.
+ */
+const decimalOf = (whole: number, places: number) => {
+  const form = new RegExp(`^[0-9]{1,${whole}}(\\.[0-9]{1,${places}})?$`)
+  const message = `a decimal of up to ${whole} digits and ${places} decimal places, such as "2.5"`
+  return z
+    .union([z.number().finite().min(0).refine((v) => form.test(String(v)), message), z.string().regex(form, message)])
+    .describe(`A decimal with up to ${places} decimal places: a number, or a string such as "2.5"`)
+}
+const decimal = decimalOf(14, 6)
+const above0 = (v: number | string) => Number(v) > 0
+const positive = decimal.refine(above0, 'above 0')
 const entityRef = z.string().min(3).max(200).refine(noNul, 'no U+0000').describe('What it was for, `kind:ref`: `printer:<id>`, `unit:<id>`, `order:<id>`, ...')
 const note = text(4000)
 
@@ -45,7 +56,8 @@ function oneOf<T extends Record<string, unknown>>(given: T): keyof T {
 
 const STOCK_RULES =
   'Quantities and costs are decimal strings; costs are in minor units of the shop currency (`orders_currency`). ' +
-  "A move's cost is a snapshot of its lot's cost when it was written (spec D14): a later lot cost change moves no past move."
+  "A move's cost is a snapshot of its lot's cost when it was written (spec D14): a later lot cost change moves no past move " +
+  'until inventory_lot_recost re-costs it.'
 
 const kindFields = z.object({
   name: z.string().min(1).max(100).refine(noNul, 'no U+0000').optional(),
@@ -63,7 +75,7 @@ const itemFields = z.object({
   manufacturer: text(200).optional(),
   compatible_with: z.array(z.string().min(1).max(100).refine(noNul, 'no U+0000')).max(100).optional().describe('The printer model codes it fits'),
   low_stock: decimal.optional().describe('Warn at or below this on hand; 0 never warns'),
-  life_hours: positive.nullable().optional().describe('Service life in print hours; null clears it'),
+  life_hours: decimalOf(10, 2).refine(above0, 'above 0').nullable().optional().describe('Service life in print hours; null clears it'),
   life_months: z.number().int().min(1).max(1200).nullable().optional().describe('Service life in months; null clears it'),
   saleable: z.boolean().nullable().optional().describe("Its own choice; null takes its kind's"),
   note: note.optional(),
@@ -134,6 +146,7 @@ export const inventoryTools = [
       if (create) {
         const { name, tracking } = fields
         if (name === undefined || tracking === undefined) throw new ToolError('a new kind needs `name` and `tracking`')
+        if (archived === false) throw new ToolError('a new kind is not archived: leave out `archived: false`')
         row = await ok(backend.POST('/api/v1/inventory/kinds', { body: { ...changes(fields), name, tracking, id: kind_id } }), `add kind ${kind_id}`)
       } else if (!empty(fields)) {
         row = await ok(backend.PATCH('/api/v1/inventory/kinds/{kind_id}', { ...path, body: changes(fields) }), `edit kind ${kind_id}`)
@@ -175,7 +188,7 @@ export const inventoryTools = [
     label: 'Read an inventory item',
     description:
       'One inventory item whole: the item, its supplier offers (each with its newest pack price), its lots in FIFO ' +
-      'order or its units (by its kind\'s tracking; neither for a kind that is not counted) and its last `moves` stock ' +
+      'order or its units (by its kind\'s tracking; neither for a kind that is not counted or a filament kind) and its last `moves` stock ' +
       'moves, newest first. Give `item_id`, or a `lot_id` or `unit_id` to read that lot or unit and its item. ' +
       `${STOCK_RULES} A lot's \`on_hand\` is below 0 after a use past the stock (\`needs_review\` on that move).` +
       INVENTORY_UI_PATH_NOTE,
@@ -389,7 +402,7 @@ export const inventoryTools = [
       INVENTORY_UI_PATH_NOTE,
     input: z.object({
       offer_id: offerId,
-      price: z.union([z.number().finite().min(0), z.string().regex(/^[0-9]{1,8}(\.[0-9]{1,4})?$/, 'a price such as "4.99"')]),
+      price: decimalOf(8, 4),
       currency: z.string().regex(/^[A-Z]{3}$/).optional().describe('An ISO 4217 code: `USD`, `EUR`, ...'),
       on_date: z.iso.date().optional(),
     }),

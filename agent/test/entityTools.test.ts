@@ -160,7 +160,7 @@ describe('entity property tools', () => {
       keys_in_use: [],
       entity_ui_path: '/inventory/items/ab700000-0000-4000-8000-000000000001',
     })
-    await expect(tool('entity_property_schema_get').execute({}, ctx())).rejects.toThrow('`kind` or `entity`')
+    await expect(tool('entity_property_schema_get').execute({}, ctx())).rejects.toThrow('give one of `kind` or `entity`')
     await expect(tool('entity_property_schema_get').execute({ kind: 'spool', entity: ITEM }, ctx())).rejects.toThrow('`kind` or `entity`')
   })
 

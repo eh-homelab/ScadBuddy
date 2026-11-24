@@ -398,6 +398,10 @@ describe('order tools (#4249)', () => {
     expect(firstText(await tool('part_list').execute({}, ctx()))).toEqual([
       { id: 'p1', name: 'Hook', pack_size: 100, on_hand: 2, low: true, ui_path: '/inventory/items/p1' },
     ])
+    const orderParts = { order_id: ORDER, items: [{ item_id: ITEM, parts: [{ item_id: 'p1', per_unit: 2 }] }], needs: [], short: [] }
+    server.use(http.get(`${BACKEND}/api/v1/orders/${ORDER}/parts`, () => HttpResponse.json(orderParts)))
+    expect(firstText(await tool('part_list').execute({ order_id: ORDER }, ctx()))).toEqual(orderParts)
+    expect(tool('part_list').description).toContain('Without `order_id`, each part has `ui_path`')
     expect(tool('part_list').description).toContain('Alias of inventory_item_list; goes after one release')
     expect(tool('part_stock_add').description).toContain('Alias of inventory_lot_receive; goes after one release')
     expect(tool('order_item_parts_set').description).toContain('inventory_item_list')

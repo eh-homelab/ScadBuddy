@@ -307,7 +307,8 @@ export const entityTools = [
     risk: 'read',
     routes: ['GET /api/v1/entity-kinds/{kind}/property-schema', 'GET /api/v1/entities/{ref}/property-schema'],
     handler: async ({ kind, entity: ref }, { backend }) => {
-      if ((kind === undefined) === (ref === undefined)) throw new ToolError('give `kind` or `entity`, not both')
+      if (kind === undefined && ref === undefined) throw new ToolError('give one of `kind` or `entity`')
+      if (kind !== undefined && ref !== undefined) throw new ToolError('give `kind` or `entity`, not both')
       if (ref !== undefined) {
         return withPage(
           ref,

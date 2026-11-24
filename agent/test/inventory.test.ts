@@ -110,6 +110,7 @@ describe('inventory tools', () => {
     expect(tool('inventory_move_use').description).toMatch(/snapshot/)
     expect(tool('inventory_move_use').description).toContain('`kind:ref`')
     expect(tool('inventory_lot_update').description).toMatch(/snapshot/)
+    expect(tool('inventory_item_list').description).toContain('until inventory_lot_recost')
     expect(tool('inventory_lot_recost').description).toMatch(/past order/)
     expect(tool('inventory_unit_status').description).toContain('`kind:ref`')
     for (const t of ALL_TOOLS.filter((x) => x.name.startsWith('inventory_'))) expect(t.description, t.name).toContain('ui_path')
@@ -156,6 +157,31 @@ describe('inventory tools', () => {
     expect((err as ToolError).message).toContain(`inventory item ${ITEM} was saved; its properties were not`)
     expect((err as ToolError).message).toContain('entity_property_set')
     expect((err as ToolError).status).toBe(422)
+    expect((err as ToolError).problem).toBe('bad_property_value')
+    expect((err as ToolError).untrusted).toBe('Bad value: thread: not a number')
+
+    const run = await runTool(tool('inventory_item_upsert'), { fields: { kind_id: 'hardware', name: 'M3 nut' }, properties: { thread: 'M3' } }, ctx())
+    expect(run.isError).toBe(true)
+    const shown = (run.content[0] as { text: string }).text
+    const envelope = shown.indexOf('"untrusted_data"')
+    expect(shown.slice(0, envelope)).toContain(`inventory item ${ITEM} was saved`)
+    expect(envelope).toBeGreaterThan(0)
+    expect(shown.slice(envelope)).toContain('thread: not a number')
+    expect(shown.slice(0, envelope)).not.toContain('thread: not a number')
+  })
+
+  it('says nothing was saved when a properties-only edit is refused', async () => {
+    server.use(
+      http.patch(props, () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/entities/bad_property_value', title: 'Bad value', status: 422, detail: 'thread: not a number' },
+          { status: 422 },
+        ),
+      ),
+    )
+    const err = await tool('inventory_item_upsert').execute({ item_id: ITEM, properties: { thread: 'M3' } }, ctx()).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ToolError)
+    expect((err as ToolError).message).not.toContain('was saved')
     expect((err as ToolError).problem).toBe('bad_property_value')
   })
 
@@ -231,6 +257,21 @@ describe('inventory tools', () => {
     await expect(tool('inventory_item_get').execute({ item_id: ITEM, lot_id: LOT }, ctx())).rejects.toThrow('one of')
   })
 
+  it('reads a filament item with its offers and no stock', async () => {
+    const asked: string[] = []
+    server.use(
+      http.get(`${INV}/items/${ITEM}`, () => HttpResponse.json(item({ tracking: 'filament', kind_id: 'filament' }))),
+      http.get(`${INV}/items/${ITEM}/offers`, () => (asked.push('offers'), HttpResponse.json({ offers: [] }))),
+      http.get(`${INV}/items/${ITEM}/lots`, () => (asked.push('lots'), HttpResponse.json({ lots: [] }))),
+      http.get(`${INV}/items/${ITEM}/units`, () => (asked.push('units'), HttpResponse.json({ units: [] }))),
+      http.get(`${INV}/moves`, () => (asked.push('moves'), HttpResponse.json({ moves: [] }))),
+    )
+    const answer = firstText(await runTool(tool('inventory_item_get'), { item_id: ITEM }, ctx()))
+    expect(asked).toEqual(['offers'])
+    expect(Object.keys(answer as object).sort()).toEqual(['item', 'offers'])
+    expect(tool('inventory_item_get').description).toContain('or a filament kind')
+  })
+
   it('lists items with the filters given and a page for each', async () => {
     let search = ''
     server.use(
@@ -281,6 +322,9 @@ describe('inventory tools', () => {
     ])
     await expect(tool('inventory_kind_upsert').execute({ kind_id: 'bearing', create: true, fields: { name: 'B' } }, ctx())).rejects.toThrow('tracking')
     await expect(tool('inventory_kind_upsert').execute({ kind_id: 'bearing' }, ctx())).rejects.toThrow('nothing to change')
+    await expect(
+      tool('inventory_kind_upsert').execute({ kind_id: 'bearing', create: true, fields: { name: 'B', tracking: 'lot' }, archived: false }, ctx()),
+    ).rejects.toThrow('archived')
   })
 
   it('archives and restores an item', async () => {
@@ -330,6 +374,12 @@ describe('inventory tools', () => {
       'price {"price":"4.99","currency":"EUR"}',
     ])
     await expect(tool('inventory_offer_upsert').execute({ fields: { sku: 'N3' } }, ctx())).rejects.toThrow('supplier_id')
+    await expect(tool('inventory_offer_upsert').execute({ offer_id: OFFER, fields: { item_id: ITEM } }, ctx())).rejects.toThrow('do not change')
+    await expect(tool('inventory_offer_upsert').execute({ offer_id: OFFER, fields: { supplier_id: SUPPLIER } }, ctx())).rejects.toThrow('do not change')
+    await expect(
+      tool('inventory_offer_upsert').execute({ fields: { item_id: ITEM, supplier_id: SUPPLIER, sku: 'N3' }, archived: true }, ctx()),
+    ).rejects.toThrow('archived needs an offer_id')
+    expect(calls).toHaveLength(4)
   })
 
   it('receives, edits, re-costs, uses and counts lots through their routes', async () => {
@@ -359,6 +409,15 @@ describe('inventory tools', () => {
     ])
     expect(() => tool('inventory_lot_receive').parse({ item_id: ITEM, qty: 1, unit_cost_minor: 1, total_cost_minor: 1 })).toThrow()
     expect(() => tool('inventory_move_use').parse({ item_id: ITEM, qty: '-1' })).toThrow()
+    expect(() => tool('inventory_move_use').parse({ item_id: ITEM, qty: 0.1234567 })).toThrow()
+    expect(() => tool('inventory_move_use').parse({ item_id: ITEM, qty: 0.123456 })).not.toThrow()
+    expect(() => tool('inventory_move_use').parse({ item_id: ITEM, qty: 1e-7 })).toThrow()
+    expect(() => tool('inventory_offer_price_add').parse({ offer_id: OFFER, price: 4.99999 })).toThrow()
+    expect(() => tool('inventory_offer_price_add').parse({ offer_id: OFFER, price: 4.9999 })).not.toThrow()
+    expect(() => tool('inventory_item_upsert').parse({ item_id: ITEM, fields: { life_hours: '1.255' } })).toThrow()
+    expect(() => tool('inventory_item_upsert').parse({ item_id: ITEM, fields: { life_hours: '12345678901' } })).toThrow()
+    expect(() => tool('inventory_item_upsert').parse({ item_id: ITEM, fields: { life_hours: 1234567890.25 } })).not.toThrow()
+    expect(() => tool('inventory_item_upsert').parse({ item_id: ITEM, fields: { life_hours: 0 } })).toThrow()
     await expect(tool('inventory_move_count').execute({ item_id: ITEM, lot_id: LOT, on_hand: 1, note: 'x' }, ctx())).rejects.toThrow('one of')
     await expect(tool('inventory_lot_update').execute({ lot_id: LOT }, ctx())).rejects.toThrow('nothing to change')
   })

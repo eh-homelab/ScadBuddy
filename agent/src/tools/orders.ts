@@ -1583,8 +1583,8 @@ export const orderTools: Tool[] = [
       'nothing says what a unit costs), what is `on_hand` (below zero when more was used ' +
       'than recorded) and `low` at or below its low-stock level. With `low`, only the low ones. With `order_id`, ' +
       "that order's items' parts per unit and `short`: the parts its open items need beyond what is on hand " +
-      "(there `on_hand` and `short` are decimal strings, the lots summed). Each part has `ui_path`, its item's page " +
-      'in ScadBuddy\'s UI; link its name with it.',
+      "(there `on_hand` and `short` are decimal strings, the lots summed). Without `order_id`, each part has `ui_path`, " +
+      "its item's page in ScadBuddy's UI; link its name with it.",
     input: z.object({
       low: z.boolean().default(false),
       order_id: orderId.optional(),
