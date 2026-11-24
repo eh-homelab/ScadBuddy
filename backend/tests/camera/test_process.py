@@ -26,8 +26,12 @@ def mtx(status: int | None, running: tuple[str, ...] = ()) -> MediaMtx:
     return MediaMtx("http://mtx", transport=httpx.MockTransport(handle))
 
 
-async def get(path: str, alive: Callable[[], Awaitable[bool]]) -> httpx.Response:
-    server = await serve_health(0, alive)
+async def get(
+    path: str,
+    alive: Callable[[], Awaitable[bool]],
+    ready: Callable[[], Awaitable[bool]] | None = None,
+) -> httpx.Response:
+    server = await serve_health(0, alive, ready)
     port = server.sockets[0].getsockname()[1]
     try:
         async with httpx.AsyncClient() as http:
@@ -164,3 +168,26 @@ async def test_a_path_that_is_not_ready_counts_as_present() -> None:
 
     not_ready = MediaMtx("http://mtx", transport=httpx.MockTransport(handle))
     assert await healthy(not_ready, None, {"p1"})
+
+
+async def test_readyz_answers_the_ready_check_and_healthz_the_alive_one() -> None:
+    async def yes() -> bool:
+        return True
+
+    async def no() -> bool:
+        return False
+
+    assert (await get("/readyz", yes, no)).status_code == 503
+    assert (await get("/healthz", yes, no)).status_code == 200
+    assert (await get("/readyz", no, yes)).status_code == 200
+    assert (await get("/healthz", no, yes)).status_code == 503
+
+
+async def test_readyz_503_when_the_ready_check_fails() -> None:
+    async def yes() -> bool:
+        return True
+
+    async def boom() -> bool:
+        raise RuntimeError("boom")
+
+    assert (await get("/readyz", yes, boom)).status_code == 503

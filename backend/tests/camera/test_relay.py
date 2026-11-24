@@ -471,3 +471,14 @@ async def test_wanted_names_the_paths_put() -> None:
     await subject.reconcile_all()
     assert subject.wanted() == {"p2"}
     await subject.aclose()
+
+
+async def test_ready_once_a_full_reconcile_put_the_paths() -> None:
+    """``/readyz``: the relay's paths are in MediaMTX, whether their pulls run or not (a
+    printer that is off must not hold back the relay's Service)."""
+    api = FakeApi([source("p1")])
+    subject = relay(api, FakeMtx())
+    assert not subject.ready()
+    await subject.reconcile_all()
+    assert subject.ready()
+    await subject.aclose()

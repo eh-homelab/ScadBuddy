@@ -1024,3 +1024,32 @@ async def test_a_former_leader_drops_its_feed_state(tmp_path: Path, api: FakeCam
     await asyncio.sleep(0.05)
     assert api.feeds == []
     await rig.recorder.aclose()
+
+
+async def test_ready_once_every_path_delivered_a_segment(tmp_path: Path, api: FakeCamera) -> None:
+    """``/readyz``: a new recorder pod is ready only when it holds video of every printer,
+    so a rolling update stops the old pod only then."""
+    api.printers = [P1, "p2"]
+    rig = Rig(tmp_path, api)
+    assert not rig.recorder.ready()  # no full reconcile yet
+    await rig.recorder.reconcile_all()
+    assert not rig.recorder.ready()
+    await rig.segment(0)
+    assert not rig.recorder.ready()
+    await rig.segment(0, printer="p2")
+    assert rig.recorder.ready()
+    await rig.recorder.aclose()
+
+
+async def test_ready_after_the_stall_time_without_a_segment(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """A printer that is off sends no video to any recorder: past `STALL_SECONDS` it does
+    not hold back the rollout."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    rig.clock.now += STALL_SECONDS - 1
+    assert not rig.recorder.ready()
+    rig.clock.now += 1
+    assert rig.recorder.ready()
+    await rig.recorder.aclose()

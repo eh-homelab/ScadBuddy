@@ -235,6 +235,8 @@ class Recorder:
         )
         self._not_before = -math.inf
         self._lock = asyncio.Lock()
+        #: A full reconcile has put the API's paths in MediaMTX (`ready`).
+        self._synced = False
 
     def __repr__(self) -> str:
         return f"Recorder(name={self._name!r}, printers={sorted(self._feeds)!r})"
@@ -243,6 +245,17 @@ class Recorder:
         """The paths this recorder has put in MediaMTX and not removed: each one must be in
         MediaMTX's runtime list (`process.healthy`)."""
         return set(self._confs)
+
+    def ready(self) -> bool:
+        """``/readyz``: a full reconcile has put the API's paths, and each recorded printer
+        has delivered a segment since this process started, or has delivered none for
+        `STALL_SECONDS` (a printer that is off sends no video to any recorder). A rolling
+        update stops the other recorder only when this one is ready, so this one holds
+        video of every printer that sends any when it takes the leases."""
+        now = self._clock()
+        return self._synced and all(
+            feed.seen or now - feed.arrived >= STALL_SECONDS for feed in self._feeds.values()
+        )
 
     # Clock (spec §6.9)
 
@@ -381,6 +394,7 @@ class Recorder:
                 await self._stop(name, name in existing)
             for name in sorted(wanted):
                 await self._start(name, name in existing)
+            self._synced = True
 
     async def reconcile(self, printer_id: str) -> None:
         """Start one printer's recording, or stop it when the API answers 404."""
@@ -973,7 +987,10 @@ async def run(settings: RecorderSettings, stop: asyncio.Event | None = None) -> 
     async def alive() -> bool:
         return await healthy(mtx, follower, recorder.wanted()) and recorder.clock_ok()
 
-    health = await serve_health(HEALTH_PORT, alive)
+    async def ready() -> bool:
+        return follower is not None and recorder.ready() and await alive()
+
+    health = await serve_health(HEALTH_PORT, alive, ready)
     try:
         if not await wait_for_areas(crud, "camera", AREAS, stop):
             logger.info("stopped before the CRUD service served the camera areas")

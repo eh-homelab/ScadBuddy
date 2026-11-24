@@ -15,8 +15,8 @@ raises `SourceError`, which names the fields only, never their values; a MediaMT
 raises `MediaMtxError`, which names the path and the status only. `ChangeFollower` logs these.
 
 The relay has no database secret and refuses to start with one
-(`settings.RelaySettings.check_environment`). ``/healthz`` and ``/metrics`` on
-`process.HEALTH_PORT`.
+(`settings.RelaySettings.check_environment`). ``/healthz``, ``/readyz`` (`Relay.ready`) and
+``/metrics`` on `process.HEALTH_PORT`.
 """
 
 from __future__ import annotations
@@ -126,11 +126,18 @@ class Relay:
         #: metrics.
         self._pull: dict[str, FeedState] = {}
         self._was_ready: set[str] = set()
+        #: A full reconcile has put the API's paths in MediaMTX (`ready`).
+        self._synced = False
 
     def wanted(self) -> set[str]:
         """The paths the relay has put in MediaMTX and not removed: each one must be in
         MediaMTX's runtime list (`process.healthy`)."""
         return set(self._confs)
+
+    def ready(self) -> bool:
+        """``/readyz``: a full reconcile has put the API's paths in MediaMTX. A pull need
+        not run: a printer that is off must not take the relay out of its Service."""
+        return self._synced
 
     def _conf(self, source: CameraSourceWithCode) -> dict[str, Any]:
         return {
@@ -239,6 +246,7 @@ class Relay:
                 await self._remove(name, name in existing)
             for printer_id, parsed in sources.items():
                 await self._put(printer_id, self._conf(parsed), printer_id in existing)
+            self._synced = True
             await self._runtime()
             if unreadable:
                 raise SourceError("; ".join(str(error) for error in unreadable))
@@ -304,7 +312,10 @@ async def run(settings: RelaySettings, stop: asyncio.Event | None = None) -> Non
     async def alive() -> bool:
         return await healthy(mtx, follower, relay.wanted())
 
-    health = await serve_health(HEALTH_PORT, alive)
+    async def ready() -> bool:
+        return follower is not None and relay.ready() and await alive()
+
+    health = await serve_health(HEALTH_PORT, alive, ready)
     try:
         if not await wait_for_areas(crud, "camera-relay", AREAS, stop):
             logger.info("stopped before the CRUD service served the camera-relay areas")

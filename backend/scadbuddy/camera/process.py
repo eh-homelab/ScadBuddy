@@ -1,5 +1,6 @@
 """The parts the camera relay and the camera recorder share as processes: the local hook
-server that MediaMTX's commands call, ``/healthz`` and ``/metrics``, and ``main``."""
+server that MediaMTX's commands call, ``/healthz``, ``/readyz`` and ``/metrics``, and
+``main``."""
 
 from __future__ import annotations
 
@@ -94,18 +95,20 @@ async def _alive(check: Check) -> bool:
         return False
 
 
-async def serve_health(port: int, alive: Check) -> asyncio.Server:
-    """``GET /metrics``: the process's metrics. Any other request: 200 when ``alive``
-    answers true within `CHECK_BUDGET`, else 503, so a liveness probe restarts a stuck
-    pod. On every address."""
+async def serve_health(port: int, alive: Check, ready: Check | None = None) -> asyncio.Server:
+    """``GET /metrics``: the process's metrics. ``GET /readyz``: 200 when ``ready`` (else
+    ``alive``) answers true within `CHECK_BUDGET`, else 503, for a readiness probe. Any other
+    request: the same for ``alive``, so a liveness probe restarts a stuck pod. On every
+    address."""
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         with suppress(Exception):
             line = await asyncio.wait_for(reader.readline(), 5)
             status = b"200 OK"
-            if line.split(b" ")[1:2] == [b"/metrics"]:
+            target = line.split(b" ")[1:2]
+            if target == [b"/metrics"]:
                 body, kind = generate_latest(), CONTENT_TYPE_LATEST.encode()
-            elif await _alive(alive):
+            elif await _alive(ready if target == [b"/readyz"] and ready is not None else alive):
                 body, kind = b"ok", b"text/plain"
             else:
                 status, body, kind = b"503 Service Unavailable", b"unhealthy", b"text/plain"

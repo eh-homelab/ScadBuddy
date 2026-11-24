@@ -1059,13 +1059,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   than 2 s off refuses the start with exit 2 (three samples at start), and later fails
   `/healthz` and puts an `error` on its feed reports). Both register `scadbuddy_camera_*`
   metrics on prometheus_client's own registry, which `lint-dashboard.sh` reads.
-  `process.py` holds the hook server MediaMTX's `curl` hooks call (127.0.0.1:9091), `/healthz`
-  and `/metrics` on 9090, and `main_with` (a `CameraRefusal` from `run` exits 2). `/healthz`
+  `process.py` holds the hook server MediaMTX's `curl` hooks call (127.0.0.1:9091), `/healthz`,
+  `/readyz` and `/metrics` on 9090, and `main_with` (a `CameraRefusal` from `run` exits 2). `/healthz`
   (`healthy`) answers 503 when MediaMTX's control API does not answer within 3 s, when its
   runtime list lacks a path the controller put (`wanted()`: a MediaMTX-only restart), when the
   change follower has stopped, or (recorder) when the clock is off. Before the follower
   starts it answers 200 when MediaMTX answers and holds the paths and, in the recorder, the
-  clock is within 2 s: the follower does not count yet. `follow.py` follows the filtered change stream,
+  clock is within 2 s: the follower does not count yet. `/readyz` answers 503 until the
+  follower runs, a full reconcile has put the paths and `/healthz` would pass; the recorder
+  also waits until every recorded printer has delivered a segment since start, or none for
+  `STALL_SECONDS` (120 s), so a rolling update (with `minReadySeconds: 30`) stops the other
+  recorder only once this one holds video. `follow.py` follows the filtered change stream,
   `feed.py` sends feed states, `mediamtx.py` is the control API client, `uploads.py` the bucket
   (`Uploader`, the object key), `mp4.py` the init section parse (`moov/udta` left out of the
   digest). The API side is `store.py` (`CameraStore`: sources, leases, the index, feeds),
