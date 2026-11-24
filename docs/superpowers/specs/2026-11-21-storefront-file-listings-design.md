@@ -579,9 +579,9 @@ price key only (the listing's version and the colours), so a change that keeps t
 nothing again. It keeps the last price on screen marked as updating until the new colours
 are priced; a `last` answer (§7.5) shows at once, marked as updating, and the page reads
 again after its `retry_after`. With no price known, "Working out the price…" shows from
-the change on, through the debounce. It stops at a `render_limited` or `rate_limited`
-refusal with its text, and keeps the last price on screen, not marked as updating, since
-no update will come. So does a read past the time limit, or one that fails after a `last`
+the change on, through the debounce. A `render_limited` or `rate_limited` refusal shows
+its text and keeps the last price on screen, not marked as updating, until a read answers
+(§7.5: one read on its own, then "Try again"). So does a read past the time limit, or one that fails after a `last`
 answer. That price is never shown as firm: the page says "This was our last price. We
 confirm the price before you pay." until the colours change or a new read is due. With no
 price on screen, the time limit shows "We price this design by hand". A plate chooser ("Plate 1", …)

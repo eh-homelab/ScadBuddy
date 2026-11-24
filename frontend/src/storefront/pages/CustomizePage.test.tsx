@@ -1225,6 +1225,18 @@ describe('CustomizePage of a file listing (#6710)', () => {
       expect(screen.queryByText(HELD_NOTE)).toBeNull()
     })
 
+    it('says nothing of a next read once the shop changed the design', async () => {
+      answers(limited(42))
+      server.use(http.post('/api/store/v1/draft/items', () => HttpResponse.json(CHANGED, { status: 409 })))
+      const { user } = held()
+      await screen.findByText(/We will check this price again/)
+      await user.click(screen.getByRole('button', { name: 'Add to order' }))
+      await screen.findByRole('button', { name: 'Load the latest version' })
+      expect(screen.queryByText(/We will check this price again/)).toBeNull()
+      expect(screen.queryByText(STILL)).toBeNull()
+      expect(tryAgain()).toBeNull()
+    })
+
     it('lets the visitor try again a read that failed or ran out of time, not one refused', async () => {
       const gone = () => HttpResponse.json({ type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'The shop does not answer.' }, { status: 502 })
       const pendingPrice = () => HttpResponse.json({ ...PENDING_PRICE, retry_after: 0 })

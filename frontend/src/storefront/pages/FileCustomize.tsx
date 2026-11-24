@@ -93,8 +93,8 @@ export function FileCustomize({
   const [priced, setPriced] = useState<{ key: string; estimate: StoreEstimate; heldFor?: string }>()
   /** The colours whose price the shop is working out (it answered `pending`). */
   const [pendingFor, setPendingFor] = useState<string>()
-  /** Why there is no price of the colours on screen. `limited`: the visitor's limit is why, and an order is still taken. */
-  const [priceError, setPriceError] = useState<{ text: string; limited?: boolean } | null>(null)
+  /** Why there is no price of the colours on screen; `limit` is the slug of a limit that is why. */
+  const [priceError, setPriceError] = useState<{ text: string; limit?: string | null } | null>(null)
   /** "Try again", once the page reads no more on its own: `seconds` to wait first, and whether the refusal says them. */
   const [again, setAgain] = useState<{ seconds: number; told?: boolean }>()
   /** How often the visitor pressed "Try again". */
@@ -182,7 +182,7 @@ export function FileCustomize({
         await wait(seconds * 1000)
         if (!live) return
         setAgain({ seconds: 0 })
-        if (limit) setPriceError({ text: priceLimitText(limit, null), limited: limit.slug === 'render_limited' })
+        if (limit) setPriceError({ text: priceLimitText(limit, null), limit: limit.slug })
       }
       const pause = async (seconds: number | null | undefined) => {
         const left = began + timing.limitMs - now()
@@ -239,7 +239,7 @@ export function FileCustomize({
           if (limited) {
             const seconds = caught.retryAfter ?? LIMIT_SECONDS
             const waits = waitsFor(seconds)
-            setPriceError({ text: priceLimitText(caught, waits ? 'page' : 'visitor'), limited: caught.slug === 'render_limited' })
+            setPriceError({ text: priceLimitText(caught, waits ? 'page' : 'visitor'), limit: caught.slug })
             if (!waits) return await offer(seconds, caught)
             if (await late(seconds)) continue
             return
@@ -365,12 +365,13 @@ export function FileCustomize({
             </button>
           </div>
         )}
-        {priceError && (
+        {/* What a limit's refusal says of the next read holds only while a read can follow. */}
+        {priceError && !(blocked && priceError.limit) && (
           <p className="sf-error" role="alert">
             {priceError.text}
           </p>
         )}
-        {priceError?.limited && !blocked && !(priced && hasNumber(priced.estimate)) && (
+        {priceError?.limit === 'render_limited' && !blocked && !(priced && hasNumber(priced.estimate)) && (
           <p className="sf-hint">You can still add it to your order, and we will send you the price before you pay.</p>
         )}
         {priced && hasNumber(priced.estimate) ? (
