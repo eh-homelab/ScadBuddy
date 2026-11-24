@@ -90,6 +90,8 @@ type tree struct {
 	pendings map[*pending]bool
 	// down is set while listings are served stale because ScadBuddy is not answering.
 	down bool
+	// failedAt is when a listing last failed because ScadBuddy was not answering.
+	failedAt time.Time
 
 	// released, if set, is called when a write handle's release has finished (tests).
 	released func()
@@ -105,6 +107,10 @@ type listing struct {
 // listTimeout bounds one listing request, which no single caller can cancel: others
 // may share it.
 const listTimeout = time.Minute
+
+// downBackoff is how long after a failed listing, while ScadBuddy is down, an expired
+// folder starts no new background refresh.
+const downBackoff = 5 * time.Second
 
 // fetch is one folder's listing request in flight. Every caller that needs the folder
 // meanwhile shares it and its answer.
@@ -146,7 +152,7 @@ func (t *tree) list(ctx context.Context, folderID int, a staleness) (listing, sy
 	t.mu.Lock()
 	l, ok := t.listings[folderID]
 	if ok && (t.fresh(l) || a == anyAge && t.servable(l)) {
-		if !t.fresh(l) && t.fetches[folderID] == nil {
+		if !t.fresh(l) && t.fetches[folderID] == nil && !(t.down && time.Since(t.failedAt) < downBackoff) {
 			t.startFetch(ctx, folderID, true)
 		}
 		t.mu.Unlock()
@@ -211,6 +217,7 @@ func (t *tree) fetch(ctx context.Context, folderID int, f *fetch, r *telemetry.R
 			f.serveLast = true
 			first = !t.down
 			t.down = true
+			t.failedAt = time.Now()
 		} else if had && isCurrent && r != nil {
 			// A refresh refused (the folder is gone, say): the next use lists it again
 			// and answers the error.
@@ -510,8 +517,12 @@ func (d *dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (_ *f
 	if child := d.find(ctx, l, name, out); child != nil {
 		return child, 0
 	}
-	if d.tree.fresh(l.listing) || d.tree.isDown() {
+	// With a TTL of 0 the first view was listed just now, so it is current.
+	if d.tree.fresh(l.listing) || d.tree.opts.TTL == 0 || d.tree.isDown() {
 		return nil, syscall.ENOENT
+	}
+	if op == nil {
+		ctx, op = telemetry.StartOp(ctx, "lookup", telemetry.FolderID(d.id))
 	}
 	// A miss in an expired listing waits for a current one: the kernel keeps an
 	// ENOENT as a negative entry, which would hide a file added since. While
