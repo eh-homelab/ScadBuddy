@@ -245,6 +245,30 @@ class _Batch:
         self.inserted = {}
 
 
+def restore_slug(store: OutputStore, rows: OutputRows, slug: str) -> int:
+    """Write the rows of ``slug``'s output folders again from their files, as the copy
+    writes them (one transaction, guarded by a mark). A model delete that dropped them
+    and then could not move the model calls it, so its outputs keep their rows. How
+    many rows it wrote."""
+    mark = rows.clock()
+    read: list[OutputRow] = []
+    walk = _Walk(store.paths.outputs)
+    for directory in walk._list(store.paths.outputs / slug):
+        if not (re.fullmatch(OUTPUT_ID_PATTERN, directory.name) and walk._is_dir(directory)):
+            continue
+        stamp = files_stamp(directory)
+        row, _ = store.row_from_files(directory, slug)
+        if row is not None:
+            read.append(dataclasses.replace(row, files_stamp=stamp))
+    known = rows.existing(row.output_id for row in read)
+    added, refreshed = rows.write_copy(
+        [row for row in read if row.output_id not in known],
+        [row for row in read if row.output_id in known],
+        mark,
+    )
+    return len(added) + len(refreshed)
+
+
 def _copy(store: OutputStore, rows: OutputRows, stop: threading.Event | None) -> CopyResult:
     run_id = rows.start_run()
     started = rows.run_started_at(run_id)

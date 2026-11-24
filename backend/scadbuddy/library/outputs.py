@@ -1149,6 +1149,16 @@ class OutputStore:
             self._covers.pop(slug, None)
             self._cover_epoch += 1
 
+    def restore_rows(self, slug: str) -> None:
+        """Write the rows of ``slug``'s outputs again from their files, as the copy does
+        (#7255): a model delete that dropped them and then failed keeps its outputs, so
+        they get their rows back. The index rows (#4777) come back at the next start."""
+        if self.rows is None:
+            return
+        from scadbuddy.library.output_copy import restore_slug
+
+        restore_slug(self, self.rows, slug)
+
     def forget_indexed(self, slug: str) -> None:
         """Drop the rows of ``slug``'s outputs with their model, before their directory
         goes (spec §6.2). Their output rows are the record (#7255), so a failure to drop

@@ -2704,7 +2704,7 @@ class Catalogue:
         # Its output rows first (spec §6.2): they are the outputs' record (#7255), so a
         # failure fails the delete and leaves the model and its outputs whole for a retry.
         # The rows go before the rename on purpose: a failed rename leaves the files, and
-        # a retried delete removes them.
+        # a retried delete removes them, and the rows come back from the files.
         self._forget_outputs(slug)
         # Renamed out of `models/` first, so the model leaves the catalogue in one
         # step: an `rmtree` that dies halfway could otherwise leave `model.scad`
@@ -2712,12 +2712,22 @@ class Catalogue:
         # `cache/` (same volume, so the rename is atomic) rather than beside the
         # model, where it would be picked up by the listing and by `git add -A`.
         tombstones = self.paths.tombstones
-        tombstones.mkdir(parents=True, exist_ok=True)
         try:
+            tombstones.mkdir(parents=True, exist_ok=True)
             self.paths.model_dir(slug).rename(tombstones / f"{slug}.{uuid.uuid4().hex}")
         except FileNotFoundError:
             # A concurrent delete of the same slug won the rename.
             raise ModelNotFoundError(slug) from None
+        except OSError:
+            # The model and its outputs stay: their rows come back from the files. A
+            # failure there must not hide the move's own error; the next copy run
+            # writes them too.
+            if self.outputs is not None:
+                try:
+                    self.outputs.restore_rows(slug)
+                except Exception:
+                    logger.exception("could not restore a model's output rows", extra={"slug": slug})
+            raise
         # The history is the shared `models/` repository, not the model's own:
         # a delete is one more commit, so the model's revisions stay restorable.
         self._commit(f"Delete {slug}", slug)

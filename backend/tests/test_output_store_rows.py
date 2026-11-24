@@ -5,6 +5,7 @@ row is a missing output, found with no glob."""
 
 from __future__ import annotations
 
+import errno
 import json
 import shutil
 import zipfile
@@ -315,6 +316,38 @@ async def test_model_delete_fails_whole_when_its_output_rows_stay(
     catalogue.delete(job.slug)
     assert rows_of(store).get(meta.id) is None
     assert not (store.paths.outputs / job.slug).exists()
+
+
+async def test_a_model_delete_whose_move_fails_puts_its_output_rows_back(
+    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rows go before the model's folder moves. When the move fails (EIO, not a
+    concurrent delete), the model and its outputs stay, so their rows come back from
+    the files, as the copy writes them."""
+    store, meta, job = saved
+    second = store.create(job, name="second")
+    finish_copy(store)
+    catalogue = _catalogue(store)
+    model_dir = store.paths.model_dir(job.slug)
+    rename = Path.rename
+
+    def failing(self: Path, target: Path) -> Path:
+        if self == model_dir:
+            raise OSError(errno.EIO, "Input/output error")
+        return rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", failing)
+    with pytest.raises(OSError, match="Input/output error"):
+        catalogue.delete(job.slug)
+    monkeypatch.undo()
+    assert store.paths.model_source(job.slug).is_file()
+    for kept in (meta, second):
+        row = rows_of(store).get(kept.id)
+        assert row is not None and row.slug == job.slug
+        assert row.files_stamp is not None
+        assert store.get(kept.id).name == kept.name
+    catalogue.delete(job.slug)
+    assert rows_of(store).get(meta.id) is None
 
 
 async def test_orphan_sweep_keeps_outputs_whose_rows_stay(
