@@ -166,6 +166,11 @@ class Settings(BaseSettings):
     # start when its name never had a version, or this build's script when the newest
     # version is an unedited older built-in (orders spec §7.2, #4252, #4673).
     orders_builtin_flow: bool = True
+    # SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS (#7255): the API copies the saved outputs'
+    # files to rows at start, and then once each this many seconds, so the saves and
+    # deletes of pods on an older build (during a roll-out, or after a rollback) reach
+    # the rows within one interval. 0 is the start's copy only.
+    output_copy_interval_seconds: float = Field(default=600, ge=0)
     # SCADBUDDY_STOREFRONT_WARM_PRICES: publish renders a listing's default variant and
     # starts its storefront slice price, and Prepare colours starts each prepared
     # variant's, before a visitor asks (#6922).
@@ -986,6 +991,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Whether the API registers the built-in order-fulfilment flow at its start"
             " (#4252); the deployment's choice, read once, and nothing a running server"
             " can undo."
+        ),
+        "output_copy_interval_seconds": (
+            "How often the API copies the saved outputs' files to rows (#7255); read once"
+            " at start, as the loop it sets runs from there."
         ),
         "storefront_warm_prices": (
             "Whether publish and Prepare colours start the storefront's slices before a"
