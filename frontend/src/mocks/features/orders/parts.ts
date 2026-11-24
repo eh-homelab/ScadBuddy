@@ -255,7 +255,10 @@ export const handlers = [
         const amount = packs * each
         p.unit_cost = p.cost_unknown ? round6(amount / count) : average(p, count, amount)
         p.cost_unknown = false
-        move(p, 'add', count, { amount_minor: amount, note: body.note ?? '' })
+        // R-P2-36: a part in another currency receives in it: the lot's cost is unknown in
+        // the shop's currency (its move has no amount) and its own cost is kept.
+        const foreign = p.currency !== mockSettings().orders_currency
+        move(p, 'add', count, { amount_minor: foreign ? null : amount, note: body.note ?? '' })
       }
       return HttpResponse.json(answer(p))
     } catch (error) {

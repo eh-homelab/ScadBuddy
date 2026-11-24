@@ -13,10 +13,11 @@ size, and with no price point either it is unknown (`cost_unknown`, read as 0).
 A part with no supplier has no offer (owner Ruling 5, R-P2-25): it reads as a pack of 1 at
 0, its link is its newest `purchase` entity link, and "Add stock" takes the body's pack
 price (none: the lot's cost is unknown) and writes no price point. A pack, on a create or an
-edit, needs an offer (`PartHasNoOffer`, R-P2-34). Every price point an alias writes is in
-the part's own currency (its offer's latest price point's, else the shop's), so `currency`
+edit, needs an offer (`PartHasNoOffer`, R-P2-34). A part's currency is its offer's latest
+price point's, else its newest lot's `cost_currency`, else the shop's (R-P2-36). Every price
+point an alias writes and every lot "Add stock" receives is in that currency, so `currency`
 reads back the same; a receive in another currency than the shop's opens a lot of unknown
-cost (R-7067-11).
+cost that keeps the cost entered (R-7067-11, R-P2-11).
 
 Each write runs in one transaction. Input reaches SQL only checked (R-P2-16): a pack price
 past what `offer_price_points.price` holds is `BadQuantity`.
@@ -79,6 +80,8 @@ SELECT i.id, i.kind_id, i.name, i.low_stock, i.created_at, i.updated_at,
     (SELECT l.url FROM entities e JOIN entity_links l ON l.entity_id = e.id
      WHERE e.kind = 'item' AND e.ref = i.id::text AND l.kind = 'purchase'
      ORDER BY l.created_at DESC, l.id DESC LIMIT 1) AS purchase_url,
+    (SELECT cost_currency FROM stock_lots WHERE item_id = i.id
+     ORDER BY received_at DESC, id DESC LIMIT 1) AS lot_currency,
     st.on_hand, st.held, st.value
 FROM items i
 LEFT JOIN LATERAL (
@@ -122,7 +125,9 @@ def _price(minor: int, currency: str) -> Decimal:
 
 
 def _view(row: dict[str, Any], shop: str) -> InventoryPart:
-    currency = row["currency"] or shop
+    # The offer's latest price point's, else the newest lot's (a foreign lot keeps its
+    # currency, R-P2-11), else the shop's (R-P2-36).
+    currency = row["currency"] or row["lot_currency"] or shop
     pack_size = int(row["pack_size"]) if row["pack_size"] is not None else 1
     pack_price = (
         int(Decimal(row["price"]).scaleb(minor_exponent(currency)))

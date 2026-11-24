@@ -271,6 +271,32 @@ def test_a_part_in_another_currency_round_trips(client: TestClient) -> None:
     assert lot["foreign_unit_cost_minor"] == "450"
     assert client.get(f"/api/v1/inventory/items/{part['id']}").json()["cost_unknown"] is True
 
+    # R-P2-36: a part with no supplier has no price point. As the parts migration leaves an
+    # EUR part (step 5: an `opening` lot, its cost unknown in the shop's currency and kept
+    # in EUR), its currency is its newest lot's, and Add stock receives in EUR.
+    ring = _no_supplier(client)
+    with _state(client).refs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO stock_lots (item_id, received_qty, on_hand, unit_cost_minor,"
+            " cost_unknown, cost_currency, foreign_unit_cost_minor, origin, note, created_by)"
+            " VALUES (%s, 0, 0, 0, true, 'EUR', 50, 'opening', 'migrated', %s)",
+            (ring["id"], '{"kind": "browser"}'),
+        )
+    [listed] = [p for p in client.get("/api/v1/parts").json() if p["id"] == ring["id"]]
+    assert (listed["currency"], listed["supplier"]) == ("EUR", "")
+    stocked = client.post(
+        f"/api/v1/parts/{ring['id']}/stock", json={"packs": 2, "pack_price_minor": 60}
+    )
+    assert stocked.status_code == 200, stocked.text
+    assert stocked.json()["currency"] == "EUR"
+    lots = client.get(f"/api/v1/inventory/items/{ring['id']}/lots").json()["lots"]
+    added = [lot for lot in lots if lot["origin"] == "manual"]
+    assert [
+        (lot["cost_unknown"], lot["cost_currency"], lot["unit_cost_minor"], lot["on_hand"])
+        for lot in added
+    ] == [(True, "EUR", "0", "2")]
+    assert added[0]["foreign_unit_cost_minor"] == "60"
+
 
 @pytest.mark.parametrize(
     ("method", "path", "body"),
