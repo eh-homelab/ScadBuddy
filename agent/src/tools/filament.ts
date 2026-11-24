@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
 import { command } from './command.js'
-import { PROPERTY_RULES, propertyChanges, propertySet, setPropertiesAfter } from './entities.js'
+import { PROPERTY_RULES, propertiesNotSet, propertyChanges, propertySet, setPropertiesAfter } from './entities.js'
 import { linkingTools, type LinkKind } from './filamentLinks.js'
 import {
   catalogNames,
@@ -963,8 +963,24 @@ const tools: Tool[] = [
           }),
           'add the spools',
         )
+        if (properties === undefined) return json(rows)
+        // One at a time, stopping at the first failure (a refused value is refused for the rest
+        // too); the error names every spool made, so none is left without its properties unseen.
         const out = []
-        for (const row of rows) out.push(await withProperties(row))
+        for (const row of rows) {
+          try {
+            out.push({ ...row, properties: await setPropertiesAfter(backend, `spool:${row.id}`, properties) })
+          } catch (e) {
+            const done = out.map((r) => r.id)
+            const left = rows.slice(done.length).map((r) => `spool:${r.id}`)
+            throw propertiesNotSet(
+              `${rows.length} spools were saved (${rows.map((r) => r.id).join(', ')}); ` +
+                (done.length > 0 ? `the properties were set on ${done.join(', ')} but not on ` : 'the properties were not set on ') +
+                `${left.join(', ')} (set them with entity_property_set on each, not this tool again)`,
+              e,
+            )
+          }
+        }
         return json(out)
       }
       return json(

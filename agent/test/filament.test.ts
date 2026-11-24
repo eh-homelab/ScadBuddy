@@ -1735,6 +1735,32 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     expect(set).toEqual([`spool:${ROW} {"set":{"mpn":"M1"}}`, `spool:${SOURCE_ID} {"set":{"mpn":"M1"}}`])
   })
 
+  it('names every spool a bulk add made when a property write fails part way (#7026)', async () => {
+    const THIRD = '00000000-0000-4000-8000-000000000003'
+    const set: string[] = []
+    server.use(
+      http.post(BULK, () =>
+        HttpResponse.json([{ id: ROW, number: 1 }, { id: SOURCE_ID, number: 2 }, { id: THIRD, number: 3 }], { status: 201 }),
+      ),
+      http.patch(`${BACKEND}/api/v1/entities/:ref/properties`, ({ params }) => {
+        set.push(String(params.ref))
+        return set.length === 1
+          ? HttpResponse.json({ properties: [{ key: 'td', value: 1.5, source: 'manual' }] })
+          : HttpResponse.json({ detail: { problem: 'bad_property_value', message: 'td must be a number' } }, { status: 422 })
+      }),
+    )
+    const result = await runTool(tool('filament_spool_upsert'), { quantity: 3, fields: { type_id: ROW }, properties: { td: 'abc' } }, ctx())
+    expect(result.isError).toBe(true)
+    const text = JSON.stringify(result.content)
+    expect(text).toContain(`3 spools were saved (${ROW}, ${SOURCE_ID}, ${THIRD})`)
+    expect(text).toContain(`the properties were set on ${ROW}`)
+    expect(text).toContain(`not on spool:${SOURCE_ID}, spool:${THIRD}`)
+    expect(text).toContain('entity_property_set')
+    expect(text).toContain('not this tool again')
+    // It stops at the first failure: a refused value would be refused for the rest too.
+    expect(set).toEqual([`spool:${ROW}`, `spool:${SOURCE_ID}`])
+  })
+
   it('refuses quantity or copy_of on an edit before calling the backend', async () => {
     const result = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, quantity: 2 }, ctx())
     expect(result.isError).toBe(true)

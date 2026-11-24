@@ -78,10 +78,14 @@ export async function setPropertiesAfter(backend: BackendClient, ref: string, se
     return properties
   } catch (e) {
     if (saved === undefined) throw e
-    const lead = `${saved} was saved; its properties were not (set them with entity_property_set on ${ref}, not this tool again)`
-    if (e instanceof ToolError) throw new ToolError(`${lead}: ${e.summary}`, e.status, e.untrusted, e.problem)
-    throw new ToolError(`${lead}: ${e instanceof Error ? e.message : String(e)}`)
+    throw propertiesNotSet(`${saved} was saved; its properties were not (set them with entity_property_set on ${ref}, not this tool again)`, e)
   }
+}
+
+/** A failed property write after its row was saved, led by what was saved and what is left to set. */
+export function propertiesNotSet(lead: string, e: unknown): ToolError {
+  if (e instanceof ToolError) return new ToolError(`${lead}: ${e.summary}`, e.status, e.untrusted, e.problem)
+  return new ToolError(`${lead}: ${e instanceof Error ? e.message : String(e)}`)
 }
 
 /** For an upsert's `summarize`: the properties it sets and removes, if any. */
