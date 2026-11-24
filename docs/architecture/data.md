@@ -31,7 +31,7 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 | Domain | Tables (creating migration) | Written by |
 |---|---|---|
 | Render and blobs | `render_jobs` (`20260927T2243Z_render_jobs`), `blob_refs` (`20260928T0900Z_render_jobs_projection`), `store_blobs`, `store_folders` (`20260928T1800Z_blob_store`), `assets` (`20260928T1631Z_assets`), `piece_geometry` (`20261013T0719Z_piece_geometry`), `model_previews`, `template_media`, `saved_presets`, `analyzer_decisions`, `library_leases`, `library_pin_holds`, `library_install_slots`, `transfer_puts` | the API; the render worker through `crud.render` routes (`scadbuddy/api/crud_render.py:89`) |
-| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `flows_repo_head`, `git_remote_pushes`, `output_index` | the API |
+| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261123T0900Z_outputs_records`, #7255; see [Saved outputs](#saved-outputs)) | the API |
 | Auth | `auth_sessions`, `auth_login_config`, `auth_break_glass_codes`, `service_credentials`, `personal_access_tokens`, `auth_delegation_codes`, `service_caller_suspensions` (2026-11-02 to 2026-11-06 files) | the API |
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
 | Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `held_local_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`) | the API; the print worker through CRUD |
@@ -125,6 +125,42 @@ Templates are git repositories on the API's data volume (`SCADBUDDY_DATA_DIR`,
 start (`scadbuddy/library/catalogue.py:2940-2956`, called from `scadbuddy/main.py:1561-1565`).
 Every model edit is a commit, which is what versions and history read
 ([features/versions-and-history.md](../features/versions-and-history.md)).
+
+### Saved outputs
+
+A saved output's record is a row of `outputs` (#7255, phase 1 of the
+[outputs-in-Postgres spec](../superpowers/specs/2026-11-23-outputs-in-postgres-design.md)):
+what its `meta.json`, `params.json`, `inputs.json`, `record.json`, `manifest.json`,
+`bom.json`, `arranged_from.json` and `backfill.json` hold (`scadbuddy/library/output_rows.py`
+`OutputRows`). Its bytes (`model.3mf`, `preview.glb`, `thumbnail.png`, `files/`) stay in
+`data/outputs/<slug>/<id>/` until #7256 moves them to the blob store. A save writes the
+files, then the row in one transaction; when the row fails, the save fails and its folder
+is removed (`OutputStore._insert_row`). Its last print stays in `output_last_prints`.
+
+Each API start copies the folders to rows (`scadbuddy/library/output_copy.py`
+`copy_outputs`, one replica at a time under an advisory lock), and each run is a row of
+`output_copy_runs`. `GET /api/v1/outputs/copy-status` answers the last run. Until a run
+finishes, a lookup that finds no row falls back to the files; after one, a missing row
+is a missing output. The copy reconciles:
+
+- A folder with no row gets one. A row is read again when the folder's `files_stamp`
+  differs from the row's: a sha256 of the sorted name, size and `mtime_ns` of the record
+  files, so no NFS clock is compared with the database's. A save writes no stamp, so the
+  next run reads its folder once.
+- Live writers (a save, a rename, a backfill change) set `copied_at` to the database's
+  clock. The copy takes a mark from that clock before it reads a batch. A refresh is
+  `UPDATE … WHERE copied_at < mark`, and a new row is `INSERT … ON CONFLICT DO NOTHING`
+  (`OutputRows.write_copy`), so a live write wins.
+- After each batch, `undo_copy` deletes each row the batch wrote whose `meta.json` is
+  gone, only while its `copied_at` is still the mark. The run's end checks the rows it
+  inserted once more.
+- A row whose folder the walk did not see is dropped, only when its `copied_at` is before
+  the run's start. When a listing or a stat fails (ESTALE, EIO), or the outputs folder
+  lists nothing, the run drops no row.
+- A folder with no readable `meta.json` gets no row and goes on the run's `not_copied`
+  list; a side file that cannot be read is left out of its row and named on `damaged`.
+
+`output_index` stays as it is in this phase; #7257 drops it.
 
 ## Generated API files
 

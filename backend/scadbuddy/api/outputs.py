@@ -1103,6 +1103,38 @@ def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
     return metas
 
 
+class OutputCopyStatus(BaseModel):
+    """The last run of the start's copy of the saved outputs' files to rows (#7255)."""
+
+    started_at: datetime
+    #: ``None`` while the run goes on, or when it stopped before its end.
+    finished_at: datetime | None
+    copied: int
+    refreshed: int
+    dropped: int
+    #: ``<slug>/<id>`` of each folder with no readable ``meta.json``: it has no row.
+    not_copied: list[str]
+    #: ``{output_id, slug, file, error}`` for each side file left out of its row.
+    damaged: list[dict[str, Any]]
+
+
+# Before `/outputs/{output_id}`, which would take `copy-status` for an id.
+@router.get(
+    "/outputs/copy-status",
+    response_model=OutputCopyStatus,
+    summary="The last copy of the outputs' files to rows",
+)
+async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
+    """The last run of the copy that each API start runs (#7255): when it started and
+    finished, what it copied, refreshed and dropped, the folders it could not copy and
+    the side files it left out. 404 before any run."""
+    rows = outputs.rows
+    last = None if rows is None else await asyncio.to_thread(rows.last_run)
+    if last is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "no copy of the outputs to rows has run")
+    return OutputCopyStatus.model_validate(last)
+
+
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")
 async def get_output(
     output_id: OutputIdPath, outputs: OutputsDep, uploads: UploadsDep, state: StateDep
