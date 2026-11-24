@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { normalizeHex } from './format'
-import { designOpacityOf } from './glbColor'
+import { designColorOf, designOpacityOf } from './glbColor'
 import { previewOpacity } from './rgba'
 
 const EXPLICIT_ALPHA = /^#?[0-9A-Fa-f]{8}$/
@@ -63,6 +63,58 @@ export function recolourParts(scene: THREE.Object3D, colors: ReadonlyMap<string,
     for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
       const own = material as THREE.MeshStandardMaterial
       const printed = colors.get(own.userData.designColor as string)
+      own.color.set(normalizeHex(printed ?? (own.userData.designColor as string)))
+      applyPartOpacity(mesh, own, slotOpacity(printed, own.userData.designOpacity as number))
+    }
+  })
+}
+
+/** A mesh's filament slot, from 0: the GLB's `scadbuddy_slot` extra (`render/glb.py` `SLOT_EXTRA`), or null. */
+function slotOf(mesh: THREE.Object3D): number | null {
+  const slot: unknown = mesh.userData.scadbuddy_slot
+  return typeof slot === 'number' && Number.isInteger(slot) && slot >= 0 ? slot : null
+}
+
+/**
+ * #6710 §8.2 — gives each mesh that names a slot materials of its own to recolour, each
+ * holding its design colour and opacity, as `recolourParts` reads them. `scene` is a
+ * `clone(true)` of the loader's scene, whose materials are shared: no shared material
+ * changes. A mesh with no slot keeps its materials. Returns the clones, for the caller to
+ * dispose.
+ */
+export function ownSlotMaterials(scene: THREE.Object3D): THREE.Material[] {
+  const owned: THREE.Material[] = []
+  scene.traverse((node) => {
+    const mesh = node as THREE.Mesh
+    if (!mesh.isMesh || slotOf(mesh) === null) return
+    const opacity = designOpacityOf(mesh)
+    const own = (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).map((material) => {
+      const copy = material.clone()
+      copy.userData.designColor = designColorOf(mesh, copy)
+      copy.userData.designOpacity = opacity
+      owned.push(copy)
+      return copy
+    })
+    mesh.material = Array.isArray(mesh.material) ? own : own[0]!
+  })
+  return owned
+}
+
+/**
+ * #6710 §8.2 — a file listing's recolour: each mesh that names a slot takes the colour of
+ * the filament picked for that slot (`colours`, by slot from 0, `#RRGGBBAA`) and its
+ * opacity (`slotOpacity`); a slot with no colour shows the file's own. A mesh with no slot
+ * is left as it is. Call `ownSlotMaterials` on the scene first.
+ */
+export function recolourSlots(scene: THREE.Object3D, colours: Readonly<Record<number, string>>): void {
+  scene.traverse((node) => {
+    const mesh = node as THREE.Mesh
+    const slot = mesh.isMesh ? slotOf(mesh) : null
+    if (slot === null) return
+    const printed = colours[slot]
+    for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+      const own = material as THREE.MeshStandardMaterial
+      if (typeof own.userData.designColor !== 'string') continue
       own.color.set(normalizeHex(printed ?? (own.userData.designColor as string)))
       applyPartOpacity(mesh, own, slotOpacity(printed, own.userData.designOpacity as number))
     }

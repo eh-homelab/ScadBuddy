@@ -2274,11 +2274,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   slicer as slot ids from 1, each in its filament's colour (`SliceVariant.slot_colours`).
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
-  the listing's pin. Its price read and cart line are `file_prices.py` (#6710 §7.5, §7.6):
+  the listing's pin. It is on the public site (#6710 PR 6): `public_card` and `public_listing`
+  show it with `source`, `slots` (`PublicSlot`, the offered slots, "Part 1"…, each starting at
+  the listing filament closest to the file's colour in the first material the listing offers a
+  colour of, `listings.py` `_offered_file`) and `previews` (edge paths
+  `/api/store/v1/listings/{id}/preview/{plate}.glb`); `GET …/listings/{id}/preview/{plate}.glb`
+  (`file_listings.py` `held_preview`) streams the plate's held GLB, and the edge relays it. A
+  render, a variant and the prepare run still take a template listing only
+  (`published_listing`'s `source`). Its price read and cart line are `file_prices.py` (#6710 §7.5, §7.6):
   `POST …/listings/{id}/price` (area `file-prices`; edge `/api/store/v1/listings/{id}/price`,
   counted as a read) takes `ListingPriceBody` (a listing colour per offered slot, one
   material, `file_choice`; a support slot takes the snapshot's lock) and answers
-  `slice_estimate` of `held_file.py` `priced_file(snapshot)`; a read that would claim a new
+  `slice_estimate` of `held_file.py` `priced_file(snapshot)`, or, while that is `pending`, the
+  file's last firm price as `last` (`SlicePrices.listing_last`); a read that would claim a new
   slice first takes one render of the visitor's rates (`RenderLimits.admit_slice`, a
   `storefront_renders` row of `kind` `slice` with no job, which render concurrency never
   counts), refunded when it claims none or its start gives the claim back. The cart add
