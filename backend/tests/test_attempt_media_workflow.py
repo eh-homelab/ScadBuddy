@@ -14,6 +14,7 @@ from datetime import timedelta
 import pytest
 from temporalio import activity
 from temporalio.client import Client, WorkflowHandle
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from scadbuddy.orders.attempt_media import TemporalMediaStarter
@@ -48,9 +49,10 @@ def _seconds(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class Steps:
-    """A fake step that answers ``missing`` in turn (the last one for ever)."""
+    """A fake step that answers ``missing`` in turn (the last one for ever). ``None``
+    fails the step for good (no retry), as a step out of tries does."""
 
-    def __init__(self, *missing: bool) -> None:
+    def __init__(self, *missing: bool | None) -> None:
         self.missing = list(missing)
         self.calls: list[str] = []
         self.release = asyncio.Event()
@@ -62,6 +64,8 @@ class Steps:
             self.calls.append(fulfilment_id)
             await self.release.wait()
             answer = self.missing[min(len(self.calls), len(self.missing)) - 1]
+            if answer is None:
+                raise ApplicationError("the step failed", non_retryable=True)
             return AttemptMediaStep(missing=answer)
 
         return attempt_media_step
@@ -150,5 +154,41 @@ async def test_a_second_start_joins_the_run_and_one_after_its_end_runs_again(
             assert await asyncio.wait_for(again.result(), 30) == "done"
             assert (await again.describe()).run_id != first
         assert len(steps.calls) == 2
+    finally:
+        await terminate_open_workflows(client, queue)
+
+
+async def test_a_step_out_of_tries_moves_on_to_the_next_step(client: Client, queue: str) -> None:
+    """A failed step does not fail the run: the next step tries again."""
+    attempt = uuid.uuid4().hex
+    steps = Steps(None, False)
+    try:
+        async with serving(client, queue, steps):
+            handle = await start(client, queue, attempt, retries=True)
+            assert await asyncio.wait_for(handle.result(), 30) == "done"
+        assert len(steps.calls) == 2
+    finally:
+        await terminate_open_workflows(client, queue)
+
+
+async def test_a_start_with_retries_turns_on_the_retries_of_a_run_it_joins(
+    client: Client, queue: str
+) -> None:
+    """A read starts one step; an outcome heard during that step asks for retries. The
+    run it joins steps three times, as a run started with retries does (#7281 review)."""
+    attempt = uuid.uuid4().hex
+    steps = Steps(True)
+    steps.release.clear()
+    try:
+        async with serving(client, queue, steps):
+            handle = await start(client, queue, attempt, retries=False)
+            first = (await handle.describe()).run_id
+            while not steps.calls:
+                await asyncio.sleep(0.05)
+            await start(client, queue, attempt, retries=True)
+            assert (await handle.describe()).run_id == first
+            steps.release.set()
+            assert await asyncio.wait_for(handle.result(), 30) == "missing"
+        assert len(steps.calls) == 3
     finally:
         await terminate_open_workflows(client, queue)

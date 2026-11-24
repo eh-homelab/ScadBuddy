@@ -22,7 +22,9 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.core.events import OrderItemChanged, PrintOutcome
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.orders import archives as archives_module
 from scadbuddy.orders.archives import (
+    FRESH,
     attempt_archives,
     copy_check,
     copy_in,
@@ -66,6 +68,8 @@ pytestmark = pytest.mark.requires_postgres
 
 JPEG = b"\xff\xd8\xff\xe0" + b"j" * 2048
 MP4 = b"\0\0\0\x18ftypisom" + b"v" * 4096
+#: The upload limit a test's import runs with: both media fit.
+LIMIT = 1 << 20
 
 
 class Archives:
@@ -191,7 +195,9 @@ async def test_a_settled_attempt_copies_what_its_archives_say(shop: Shop, pool: 
         ),
     )
     shop.events.clear()
-    read = await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, Starts())
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
     # #5263: written under the order's lock and told, as every item write is.
     assert [e.item_id for e in shop.events if isinstance(e, OrderItemChanged)] == [item.id]
     assert read.linked and [a.archive_id for a in read.archives] == [81, 82]
@@ -206,7 +212,9 @@ async def test_a_settled_attempt_copies_what_its_archives_say(shop: Shop, pool: 
     corrected = datetime(2026, 11, 1, 14, tzinfo=UTC)
     with shop.rows.transaction() as conn:
         shop.rows.update_fulfilment(conn, attempt.id, finished_at=corrected)
-    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, Starts())
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
     assert shop.rows.fulfilments(item.id)[0].finished_at == corrected
 
 
@@ -249,7 +257,7 @@ async def test_an_attempt_by_hand_copies_the_archive_it_names(shop: Shop) -> Non
     assert attempt.archive_ids == [81] and attempt.print_run_id is None
 
     read = await attempt_archives(
-        shop.lifecycle, Archives(facts(81)), order.id, item.id, attempt.id, Starts()
+        shop.lifecycle, Archives(facts(81)), order.id, item.id, attempt.id, Starts(), limit=LIMIT
     )
 
     assert [a.archive_id for a in read.archives] == [81]
@@ -439,13 +447,17 @@ async def test_a_hand_attempts_archive_without_facts_keeps_corrected_times(shop:
         BY,
     )
     seam = Archives(facts(81, actual_seconds=None, grams=None))
-    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, Starts())
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
     kept = shop.rows.fulfilments(item.id)[0]
     assert kept.finished_at == datetime(2026, 11, 1, 12, tzinfo=UTC)
     corrected = datetime(2026, 11, 1, 14, tzinfo=UTC)
     with shop.rows.transaction() as conn:
         shop.rows.update_fulfilment(conn, attempt.id, finished_at=corrected)
-    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, Starts())
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
     assert shop.rows.fulfilments(item.id)[0].finished_at == corrected
 
 
@@ -470,7 +482,7 @@ async def test_an_archive_named_by_hand_is_not_a_later_runs(shop: Shop, pool: Pg
 
     seam = Archives(facts(81), facts(82, actual_seconds=600, grams=2.5))
     read = await attempt_archives(
-        shop.lifecycle, seam, other.id, other_item.id, attempt.id, Starts()
+        shop.lifecycle, seam, other.id, other_item.id, attempt.id, Starts(), limit=LIMIT
     )
 
     assert [a.archive_id for a in read.archives] == [82]
@@ -512,7 +524,7 @@ def test_a_hand_attempt_cannot_name_another_attempts_archive(shop: Shop, pool: P
 async def test_without_bambuddy_nothing_is_asked(shop: Shop, pool: PgPool) -> None:
     order, item, attempt, _ = printed(shop, pool)
     read = await attempt_archives(
-        shop.lifecycle, NOT_LINKED, order.id, item.id, attempt.id, Starts()
+        shop.lifecycle, NOT_LINKED, order.id, item.id, attempt.id, Starts(), limit=LIMIT
     )
     assert (read.linked, read.archives) == (False, [])
 
@@ -747,7 +759,9 @@ async def test_a_copy_is_refused_for_what_the_archive_lacks(
     # Another order's attempt is no attempt of this item.
     other = str(uuid.uuid4())
     with pytest.raises(ApiError) as missing:
-        await attempt_archives(shop.lifecycle, seam, order.id, item.id, other, Starts())
+        await attempt_archives(
+            shop.lifecycle, seam, order.id, item.id, other, Starts(), limit=LIMIT
+        )
     assert missing.value.status == 404
 
 
@@ -813,7 +827,7 @@ Step = Callable[..., Awaitable[AttemptMediaStep]]
 def step(shop: Shop, tmp_path: Path, blobs: CachedBlobStore) -> Step:
     """One step of the attempt's import, as the workflow's activity runs it."""
 
-    async def run(seam: Any, fulfilment_id: str, limit: int = 1 << 20) -> AttemptMediaStep:
+    async def run(seam: Any, fulfilment_id: str, limit: int = LIMIT) -> AttemptMediaStep:
         return await mirror_attempt(
             shop.lifecycle,
             seam,
@@ -920,26 +934,62 @@ async def test_a_copy_on_the_item_from_before_5268_counts_as_present(
 
 
 async def test_a_timelapse_too_large_does_not_stop_the_photo(
-    shop: Shop, step: Step, caplog: pytest.LogCaptureFixture
+    shop: Shop, step: Step, tmp_path: Path, blobs: CachedBlobStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    order, _, attempt = by_hand(shop)
+    """The refusal is remembered (#7281 review): a later step and a later read do not
+    download it again while the limit is unchanged, so the run ends. The button still
+    tries, and a higher limit imports it."""
+    order, item, attempt = by_hand(shop)
     seam = Archives(facts(81))
+    small = len(JPEG) + 1
 
-    found = await step(seam, attempt.id, limit=len(JPEG) + 1)
+    found = await step(seam, attempt.id, limit=small)
 
-    assert found.missing
+    assert not found.missing
     assert media(shop, order.id) == [(attempt.id, 81, "finished_photo", "finish_2_bb.jpg")]
     assert any(
-        "too large" in r.getMessage() and str(len(JPEG) + 1) in r.getMessage()
-        for r in caplog.records
+        "too large" in r.getMessage() and str(small) in r.getMessage() for r in caplog.records
     )
+
+    seam.downloads.clear()
+    assert not (await step(seam, attempt.id, limit=small)).missing
+    assert not (await step(seam, attempt.id, limit=small - 1)).missing
+    starts = Starts()
+    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, starts, limit=small)
+    assert (seam.downloads, starts.started) == ([], [])
+
+    # The button still tries, and is refused again.
+    with pytest.raises(ApiError) as refused:
+        await copy_in(
+            store=shop.rows,
+            lifecycle=shop.lifecycle,
+            integrations=seam,
+            blobs=blobs,
+            claims=ClaimStore(tmp_path / "claims"),
+            order_id=order.id,
+            item_id=item.id,
+            fulfilment_id=attempt.id,
+            archive_id=81,
+            what="timelapse",
+            name=None,
+            by=BY,
+            limit=small,
+        )
+    assert refused.value.status == 413
+    assert seam.downloads == [(81, "timelapse", "timelapse-81.avi")]
+
+    # A higher limit: the read starts a step, which imports it.
+    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, starts, limit=LIMIT)
+    assert starts.started == [(attempt.id, False)]
+    assert not (await step(seam, attempt.id)).missing
+    assert (attempt.id, 81, "timelapse", "timelapse-81.avi") in media(shop, order.id)
 
 
 async def test_a_timelapse_bambuddy_has_later_is_imported_by_a_later_step(
     shop: Shop, step: Step
 ) -> None:
     order, _, attempt = by_hand(shop)
-    seam = Archives(facts(81, timelapse=False, timelapse_name=None))
+    seam = Archives(facts(81, timelapse=False, timelapse_name=None, completed_at=datetime.now(UTC)))
 
     assert (await step(seam, attempt.id)).missing
     assert media(shop, order.id) == [(attempt.id, 81, "finished_photo", "finish_2_bb.jpg")]
@@ -948,6 +998,22 @@ async def test_a_timelapse_bambuddy_has_later_is_imported_by_a_later_step(
     seam.downloads.clear()
     assert not (await step(seam, attempt.id)).missing
     assert seam.downloads == [(81, "timelapse", "timelapse-81.avi")]
+
+
+async def test_an_archive_an_hour_old_with_no_timelapse_misses_nothing(
+    shop: Shop, step: Step
+) -> None:
+    """Spec §4.4's rule: an archive that completed an hour ago or more and has no
+    timelapse has none to wait for, so a run with retries ends (#7281 review). One with
+    no completion time yet still waits."""
+    _, _, attempt = by_hand(shop)
+    old = datetime.now(UTC) - FRESH
+    seam = Archives(facts(81, timelapse=False, timelapse_name=None, completed_at=old))
+
+    assert not (await step(seam, attempt.id)).missing
+
+    seam.facts[81] = facts(81, timelapse=False, timelapse_name=None, completed_at=None)
+    assert (await step(seam, attempt.id)).missing
 
 
 async def test_a_step_with_bambuddy_down_is_missing_and_raises_nothing(
@@ -996,6 +1062,11 @@ async def test_a_hand_attempt_starts_its_import_and_never_downloads_in_the_reque
     await record_fulfilment(order.id, item.id, plain, orders_of(shop, seam, starts))
     assert len(starts.started) == 2
 
+    # Without a Bambuddy there is nothing to import: no Temporal call (#7281 review).
+    unlinked = FulfilmentInput(quantity=1, outcome="succeeded", archive_id=83)
+    await record_fulfilment(order.id, item.id, unlinked, orders_of(shop, NOT_LINKED, starts))
+    assert len(starts.started) == 2
+
 
 async def test_a_heard_outcome_starts_the_import_with_retries(shop: Shop, pool: PgPool) -> None:
     _, _, attempt, run_id = printed(shop, pool)
@@ -1008,6 +1079,24 @@ async def test_a_heard_outcome_starts_the_import_with_retries(shop: Shop, pool: 
     await mirror_run(shop.lifecycle, Archives(facts(81)), run_id, Starts(fail=True))
 
 
+async def test_a_heard_outcome_starts_the_import_when_the_archive_read_fails(
+    shop: Shop, pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The step reads the archives again, so a failed read here still starts the
+    import with retries (#7281 review)."""
+    _, _, attempt, run_id = printed(shop, pool)
+
+    async def failing(*_: object, **__: object) -> None:
+        raise RuntimeError("Bambuddy did not answer")
+
+    monkeypatch.setattr(archives_module, "mirror_archives", failing)
+    starts = Starts()
+
+    await mirror_run(shop.lifecycle, Archives(facts(81)), run_id, starts)
+
+    assert starts.started == [(attempt.id, True)]
+
+
 async def test_a_read_starts_one_step_only_for_an_offered_medium_not_attached(
     shop: Shop, step: Step
 ) -> None:
@@ -1015,19 +1104,19 @@ async def test_a_read_starts_one_step_only_for_an_offered_medium_not_attached(
     seam = Archives(facts(81, timelapse=False, timelapse_name=None))
     starts = Starts()
 
-    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, starts)
+    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, starts, limit=LIMIT)
     assert starts.started == [(attempt.id, False)]
     assert seam.downloads == []
 
     await step(seam, attempt.id)
-    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, starts)
+    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, starts, limit=LIMIT)
     # The photo is attached and Bambuddy has no timelapse: nothing to start.
     assert len(starts.started) == 1
 
     # Temporal down: the read still answers.
     seam.facts[81] = facts(81)
     read = await attempt_archives(
-        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(fail=True)
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(fail=True), limit=LIMIT
     )
     assert [a.archive_id for a in read.archives] == [81]
 
@@ -1038,12 +1127,16 @@ async def test_the_read_answers_the_ids_of_what_is_attached(shop: Shop, step: St
     order, item, attempt = by_hand(shop)
     seam = Archives(facts(81))
 
-    read = await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, Starts())
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
     [offer] = read.archives
     assert (offer.finished_attachment_id, offer.timelapse_attachment_id) == (None, None)
 
     await step(seam, attempt.id)
-    read = await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id, Starts())
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
     ids = {a.archive_media: a.id for a in shop.rows.attachments(order.id)}
     [offer] = read.archives
     assert offer.finished_attachment_id == ids["finished_photo"]
@@ -1071,9 +1164,31 @@ async def test_a_copy_on_the_item_from_before_5268_is_answered_as_attached(shop:
     )
 
     read = await attempt_archives(
-        shop.lifecycle, Archives(facts(81)), order.id, item.id, attempt.id, Starts()
+        shop.lifecycle, Archives(facts(81)), order.id, item.id, attempt.id, Starts(), limit=LIMIT
     )
 
     [offer] = read.archives
     assert offer.finished_attachment_id == kept.id
     assert offer.timelapse_attachment_id is None
+
+
+async def test_the_read_answers_a_medium_refused_as_too_large(shop: Shop, step: Step) -> None:
+    """#7281 review: a medium the import refused at this limit, or a higher one, is
+    answered as too large, so the page stops waiting for it; a higher limit clears it."""
+    order, item, attempt = by_hand(shop)
+    seam = Archives(facts(81))
+    small = len(JPEG) + 1
+    await step(seam, attempt.id, limit=small)
+
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=small
+    )
+    [offer] = read.archives
+    assert offer.finished_attachment_id is not None and not offer.finished_too_large
+    assert (offer.timelapse_attachment_id, offer.timelapse_too_large) == (None, True)
+
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    [offer] = read.archives
+    assert (offer.timelapse_attachment_id, offer.timelapse_too_large) == (None, False)

@@ -47,6 +47,9 @@ function offersOf(attempt: Fulfilment): ArchiveOffer[] {
     completed_at: completed,
     actual_seconds: 3600,
     grams: 9.5,
+    // The mock's import is never refused as too large (#7281 review).
+    finished_too_large: false,
+    timelapse_too_large: false,
   }))
 }
 
