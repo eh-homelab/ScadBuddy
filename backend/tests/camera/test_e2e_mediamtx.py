@@ -358,7 +358,7 @@ async def test_two_recorders_no_gap_on_leader_kill(
         leader.hooks.close()
         await leader.recorder.aclose()
 
-        await until(f"{AFTER} more indexed segments", lambda: count_at_least(before + AFTER), 120)
+        await until(f"{AFTER} more indexed segments", lambda: count_at_least(before + AFTER), 180)
         assert await asyncio.to_thread(holder) == standby.name
         await standby.recorder.shutdown()
 

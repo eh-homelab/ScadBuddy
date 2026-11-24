@@ -61,7 +61,7 @@ def _fetch_mediamtx() -> Path | str:
     except OSError as error:
         return f"MediaMTX is not on PATH and {url} did not download ({type(error).__name__})"
     if hashlib.sha256(body).hexdigest() != MEDIAMTX_SHA256[arch]:
-        return f"{url} does not match its pinned sha256"
+        pytest.fail(f"{url} does not match its pinned sha256: the pin or the release is wrong")
     folder.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=folder) as scratch:
         tarball = Path(scratch) / name
