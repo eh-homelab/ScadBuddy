@@ -244,7 +244,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   cost_minor numeric(20,6) NOT NULL CHECK (>= 0), cost_unknown boolean NOT NULL DEFAULT
   false, origin text NOT NULL (as lots), invoice_line_id, production_run_id,
   in_service_at, retired_at, life_hours, life_months, printer_id uuid REFERENCES printers
-  (id), location_ref_id uuid REFERENCES filament_locations (id), received_at, created_by
+  (id) ON DELETE SET NULL (R-P2-3), location_ref_id uuid REFERENCES filament_locations (id), received_at, created_by
   jsonb NOT NULL)`; unique `(item_id, serial) WHERE serial IS NOT NULL`.
 - `stock_moves (id uuid PK, at timestamptz NOT NULL DEFAULT clock_timestamp(), item_id
   uuid NOT NULL REFERENCES items (id), lot_id uuid REFERENCES stock_lots (id), unit_id
@@ -257,9 +257,9 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   production_run_id uuid, print_run_id text, entity_id uuid REFERENCES entities (id),
   actor jsonb NOT NULL, CHECK ((lot_id IS NULL) <> (unit_id IS NULL)), CHECK
   (amount_minor = round(qty * unit_cost_minor, 6)))` (R-P2-1); indexes `(item_id, at)`, `(order_item_id)
-  WHERE order_item_id IS NOT NULL`, `(lot_id)`. No FK on `order_id`/`order_item_id`
+  WHERE order_item_id IS NOT NULL`, `(lot_id)`, and the partial index `stock_moves_entity (entity_id) WHERE entity_id IS NOT NULL` (R-P2-4). No FK on `order_id`/`order_item_id`
   (a move outlives a deleted draft, as `part_stock_moves` l.39-42).
-- Seed rows of `item_kinds` (`builtin = true`), per Ruling 1: see Task 1 test.
+- Seed rows of `item_kinds` (`builtin = true`), per Ruling 1: see Task 1 test. Names are plain English (Build plate, AMS part, Dry bin, Spool part; R-P2-2).
   `spool_part` gets `attribute_schema` `{"type":"object","properties":{"empty_weight_g":
   {"type":"integer","exclusiveMinimum":0,"description":"Weight of the empty part in
   grams"},"role":{"type":"string","enum":["shell","addon"],"description":"A reusable
@@ -350,13 +350,14 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
 
 **Files:**
 - Create: `backend/scadbuddy/inventory/stock.py`
-- Test: `backend/tests/inventory/test_stock.py`
+- Modify: `backend/scadbuddy/entities/sweep.py` (the orphan sweep skips an entity that a `stock_moves.entity_id` names; R-P2-4)
+- Test: `backend/tests/inventory/test_stock.py`, `backend/tests/entities/test_sweep.py` (one case: an entity a move names survives the sweep)
 
 **Interfaces:**
 - Produces (`inventory/models.py`): `Lot`, `Unit`, `Move` (every column of Task 1, decimals serialized as strings as `InventoryPart._decimal` does, `orders/parts.py:119`); `ReceiveLot (qty, total_cost_minor | unit_cost_minor, currency (default the shop's `orders_currency`), location_id, note, received_at?)`: a cost in another currency opens the lot with `unit_cost_minor = 0`, `cost_unknown`, `cost_currency` = that currency and `foreign_unit_cost_minor` = the entered unit cost, as today's parts in another currency are left uncosted (R-7067-11, D11, R-P2-11, R-P2-12); a cost in the shop's currency leaves `cost_currency` NULL; `ReceiveUnits (count 1..100, cost_minor each, serials: list[str] | None, location_id, name)`; `UseInput (qty > 0, lot_id?, entity: str | None ("kind:ref"), reason)`; `AdjustInput (on_hand, note required)`; `UnitStatusInput (status, entity?, note)`; `RecostResult (moves: int, orders: list[RecostedItem{order_id, order_item_id, before_minor, after_minor}])`.
 - Produces `class StockStore(pool, entities)`:
   - `receive_lot(item_id, body, by) -> Lot` (one `receive` move); `receive_units(item_id, body, by) -> list[Unit]` (one `receive` move each).
-  - `take(conn, item_id, qty: Decimal, by, *, lot_id=None, order_id=None, order_item_id=None, entity_id=None, reason="", kind="use") -> list[Move]` — FIFO; Review Focus 1 rules; locks the item's lots `FOR UPDATE` in `(received_at, id)` order. A named `lot_id` is taken first (R-P2-14): if it holds less than `qty`, the rest spills FIFO into the other lots; if it holds nothing (`on_hand <= 0`), the take raises `LotEmpty` (409 `lot_empty`). A take from a lot with `cost_currency` set (a foreign lot) writes `cost_unknown` moves (R-P2-19). Input is checked before SQL: `qty × unit cost` that overflows `numeric(20,6)` raises `BadQuantity` (R-P2-16).
+  - `take(conn, item_id, qty: Decimal, by, *, lot_id=None, order_id=None, order_item_id=None, entity_id=None, reason="", kind="use") -> list[Move]` — FIFO; Review Focus 1 rules; locks the item's lots `FOR UPDATE` in `(received_at, id)` order. Every lot insert takes `_open_lock`, and `lock_items` takes `_open_lock` first and the lots after it (R-P2-32). A named `lot_id` is taken first (R-P2-14): if it holds less than `qty`, the rest spills FIFO into the other lots; if it holds nothing (`on_hand <= 0`), the take raises `LotEmpty` (409 `lot_empty`). A take from a lot with `cost_currency` set (a foreign lot) writes `cost_unknown` moves (R-P2-19). Input is checked before SQL: `qty × unit cost` that overflows `numeric(20,6)` raises `BadQuantity` (R-P2-16).
   - `give_back(conn, *, order_item_id: str, item_id: UUID, by) -> list[Move]` — one `return` move per unreversed `use` move of that order item and item, same lot, same `unit_cost_minor`, `reverses_move_id` set.
   - `use(item_id, body, by) -> list[Move]` (`take` in its own transaction; `entity` resolved with `EntityStore.ensure`).
   - `adjust_lot(lot_id, body, by) -> Lot`; `count_item(item_id, on_hand, note, by) -> list[Move]` (R-P2-15: first it zeroes each negative lot with an `adjust` move, then it takes the difference FIFO as `adjust` when the count is lower, or adds it to the newest lot at its cost when higher; no lot keeps an offsetting negative balance).
@@ -370,7 +371,7 @@ Tables (one file; a top comment cites #7067 and spec §6.4–6.6):
   - `test_fifo_takes_the_oldest_lot_first`: lots 10 @ 5.00 (day 1) and 10 @ 7.00 (day 2); take 15 → moves `-10 @ 500`, `-5 @ 700`; on hand 0 and 5.
   - `test_a_named_lot_is_taken_first_then_fifo`: take 12 with `lot_id` = lot 2 (10 @ 7.00) → `-10 @ 700` from lot 2, then `-2 @ 500` FIFO from lot 1; an empty named lot (`on_hand <= 0`) raises `LotEmpty` and writes nothing (R-P2-14).
   - `test_a_foreign_receive_keeps_what_was_entered`: `receive_lot` with cost 4.50 EUR (shop USD) → `unit_cost_minor == 0`, `cost_unknown`, `cost_currency == 'EUR'`, `foreign_unit_cost_minor == 450`; a take from it writes `cost_unknown` moves (R-P2-11, R-P2-19); `set_lot_cost` to 480 clears `cost_unknown` and keeps `cost_currency` and `foreign_unit_cost_minor` (R-P2-12); a shop-currency receive has `cost_currency IS NULL`.
-  - `test_a_count_settles_a_negative_lot_first`: lots 10 and (after a shortfall) −5 on the newest; `count_item(…, 12)` writes an `adjust` that zeroes the −5 lot, then adds the difference to the newest lot or takes it FIFO; no lot ends below 0 (R-P2-15).
+  - `test_a_count_settles_a_negative_lot_first`: build the state with `adjust_lot` (a lot with 10, and a newer lot set to −5; a shortfall through `take` cannot leave this, because FIFO empties the older lot first). `count_item(…, 12)` writes an `adjust` of +5 that zeroes the −5 lot, then an `adjust` of +2 on the newest lot (the lots held 10 and 0, the count is 12); no lot ends below 0 (R-P2-15).
   - `test_bad_input_is_refused_not_a_500`: a NUL in a note, and a `qty × cost` overflow, raise `BadQuantity` or the 422 error (R-P2-16).
   - `test_a_shortfall_goes_negative_on_the_newest_lot`: take 25 of the above → third move `-5 @ 700`, `needs_review`, newest lot `-5`.
   - `test_an_item_with_no_lot_opens_a_cost_unknown_lot`: one `adjustment` lot, cost 0, `cost_unknown`; the move has `cost_unknown`.
@@ -541,7 +542,7 @@ Lock order: callers lock items in `item_id` order, and lock orders before lots, 
   `backend/tests/api/test_inventory_stock.py` (recost)
 
 **Interfaces:**
-- Consumes: `StockStore.take`, `give_back`, `recost_lot`, `estimate_unit_cost` (Task 4). `estimate_unit_cost` applies R-P2-16: a `per_unit × quantity` that overflows is 422 `bad_quantity`, not a 500.
+- Consumes: `StockStore.take`, `give_back`, `recost_lot`, `estimate_unit_cost` (Task 4). `estimate_unit_cost` applies R-P2-16 and R-P2-30: a `per_unit × quantity` that overflows is 422 `bad_quantity` on the estimate route and 409 on fulfil, never a 500. An estimate for an order outside the shop's currency is 0 and unknown (R-P2-33). The estimate route returns the cost of the known share and `parts_unknown: bool` (R-P2-29). A bulk fulfil locks the union of the items of all its order items, in `item_id` order (R-P2-28). Part history (the `used_at` and moves reads) reads `stock_moves` (R-P2-27).
 - Produces: `OrderLifecycle.recost_lot(lot_id: UUID, by: Actor) -> RecostResult`;
   `ItemPartRow(item_id, per_unit, used)`; `PartNeed` and `OrderParts` keep their fields with
   `item_id` beside `part_id` (same value) for one release.
@@ -554,7 +555,7 @@ Lock order: callers lock items in `item_id` order, and lock orders before lots, 
   a slug whose rule has a `when` colour gets the colour's item; `PUT
   /orders/{id}/items/{item}/parts` with `part_id` keys still works; `POST
   /inventory/lots/{id}/recost` writes `item.parts_recosted` on the affected order with
-  before and after; the unit-cost route's `parts_unit_minor` equals the FIFO estimate.
+  before and after; the unit-cost route's `parts_unit_minor` equals the FIFO estimate; with a cost-unknown lot it returns the known share and `parts_unknown: true` (R-P2-29); an order outside the shop's currency estimates 0 and unknown (R-P2-33); a fulfil whose `per_unit × quantity` overflows answers 409 and the estimate answers 422 `bad_quantity` (R-P2-30); a bulk fulfil of two order items that share items takes the item locks in `item_id` order (R-P2-28); an item's history lists its `stock_moves` (R-P2-27).
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/orders/test_parts_lifecycle.py tests/orders/test_parts.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `cd backend && uv run --frozen pytest tests/orders tests/inventory -n auto -q` — Expected: PASS.
@@ -566,7 +567,7 @@ Lock order: callers lock items in `item_id` order, and lock orders before lots, 
 - Modify: `backend/scadbuddy/orders/costs.py` (`CostPart` adds `"parts"`; `Margin.parts_minor:
   Money = 0`; `_item_cost` adds it to `cost_minor`; `_order_costs` sums it; the module
   docstring gains a **Parts** paragraph citing spec §6.6 and #7067), the cost reader
-  (`_Rows` or `_read`, l.300 / l.670: one query per order, `SELECT order_item_id,
+  (`_Rows` or `_read`, l.300 / l.670: one shared reader for job cost and the profit report (R-P2-31), one query per order, `SELECT order_item_id,
   sum(-amount_minor), bool_or(cost_unknown) FROM stock_moves WHERE order_id = %s AND kind IN
   ('use','return') GROUP BY 1`)
 - Modify: `backend/scadbuddy/orders/report.py` (or whatever builds `orders_profit_report`;
@@ -597,24 +598,28 @@ Lock order: callers lock items in `item_id` order, and lock orders before lots, 
   lot when `on_hand > 0`; `POST /parts/{id}/stock` receives `packs × pack_size` at
   `packs × pack price` (the offer's latest price point, or the body's `pack_price_minor`; a part with no offer has no price point, so Add stock uses the body's pack price there, R-P2-25;
   which also writes a new `manual` price point: Add stock keeps prefilling the cost, Ruling 4).
-  Every price point an alias writes is in the part's own currency: the currency of the
-  offer's latest price point, else the shop's for `POST /parts` (parts are made in
-  `orders_currency`, `orders/parts.py` `create`), so `InventoryPart.currency` reads back
-  the same; a receive in a currency other than the shop's opens a cost-unknown lot
-  (R-7067-11); `POST /parts/{id}/adjust` → `count_item`; `GET /parts/{id}/moves`
+  Every price point an alias writes is in the part's own currency (R-P2-36): the currency
+  of the offer's latest price point, else the newest lot's `cost_currency`, else the shop's
+  (`POST /parts` makes parts in `orders_currency`, `orders/parts.py` `create`), so
+  `InventoryPart.currency` reads back the same, also for a part with no supplier. Add stock
+  with a body pack price receives in that currency, so a foreign one opens a cost-unknown
+  lot (R-7067-11, R-P2-11). A pack needs a supplier: a pack without one is 422 with loc
+  `supplier` (R-P2-34). `unit_cost_minor` averages the known lots only, and
+  `InventoryPart.cost_unknown` is true when any on-hand lot is unknown (R-P2-35);
+  `PartsPage` shows "unknown" for it; `POST /parts/{id}/adjust` → `count_item`; `GET /parts/{id}/moves`
   maps `Move` to `StockMove`; each route's description says "Alias of /inventory/…; goes
   after one release", spec §6.11)
 - Modify: `frontend/src/pages/PartsPage.tsx` (the panels' entity `part:<id>` → `item:<id>`; `grep -rn "part:" frontend/src agent/src` finds the rest, and each `part:` ref moves to `item:`, R-P2-18)
 - Test: `backend/tests/api/test_parts.py` (existing; it must pass unchanged but for
-  `part_id` values that are now uuids), `frontend/src/pages/PartsPage.test.tsx`
+  `part_id` values that are now uuids; layer 3 alone must pass `cd frontend && pnpm typecheck`, R-P2-26), `frontend/src/pages/PartsPage.test.tsx`
 
 - [ ] **Step 1: Add one test and run.** `test_a_part_in_another_currency_round_trips`
   in `tests/api/test_parts.py`: a part migrated in EUR (shop USD) answers `currency ==
   "EUR"` on `GET /parts`; `POST /parts/{id}/stock` with `packs: 1` writes an EUR price
-  point and a lot with `cost_unknown`, `cost_currency = 'EUR'`, `unit_cost_minor = 0` and `foreign_unit_cost_minor` = the entered cost (R-P2-11); `GET /inventory/items/{id}` has `cost_unknown`.
+  point and a lot with `cost_unknown`, `cost_currency = 'EUR'`, `unit_cost_minor = 0` and `foreign_unit_cost_minor` = the entered cost (R-P2-11); `GET /inventory/items/{id}` has `cost_unknown`. A supplier-less EUR part (no offer, an opening lot with `cost_currency = 'EUR'`) reads back `currency == "EUR"`, and `POST /parts/{id}/stock` with a body `pack_price_minor` opens a `cost_unknown` lot, never a costed USD one (R-P2-36). A pack with no supplier is 422 loc `supplier` (R-P2-34). `unit_cost_minor` averages known lots only and `cost_unknown` is true with an unknown lot (R-P2-35).
   Run `cd backend && uv run --frozen pytest tests/api/test_parts.py -q` — Expected: FAIL (tables gone).
 - [ ] **Step 2: Implement** the aliases; change the two entity strings.
-- [ ] **Step 3: Run** the same and `cd frontend && pnpm exec vitest run src/pages/PartsPage.test.tsx` (after `pnpm gen:api`) — Expected: PASS.
+- [ ] **Step 3: Run** the same and `cd frontend && pnpm exec vitest run src/pages/PartsPage.test.tsx` (after `pnpm gen:api`) and `pnpm typecheck` — Expected: PASS.
 - [ ] **Step 4: Run** the whole backend suite `cd backend && uv run --frozen pytest -n auto` — Expected: PASS.
 - [ ] **Step 5: Commit** `refactor(orders): the parts routes are aliases of inventory (#7067, 3/6)`
 
@@ -847,3 +852,20 @@ task above follows them.
 - **R-P2-25** (Tasks 6 and 9). A part with no supplier keeps no offer (owner Ruling 5). Its
   pack data stays in `parts_retired`; the drop follow-up and the layer-3 PR body name it.
   In Task 9, Add stock uses the body's pack price there.
+- **R-P2-26** (Task 9). Layer 3 passes the frontend typecheck on its own.
+- **R-P2-27** (Task 7). Part history reads `stock_moves`.
+- **R-P2-28** (Task 7). A bulk fulfil locks the union of its items, in `item_id` order.
+- **R-P2-29** (Task 7). The estimate returns the cost of the known share and
+  `parts_unknown`.
+- **R-P2-30** (Task 7). A fulfil whose quantity overflows answers 409. The estimate
+  answers 422.
+- **R-P2-31** (Task 8). Job cost and the profit report share one parts-cost reader.
+- **R-P2-32** (Task 4). Lot inserts take `_open_lock`. `lock_items` takes `_open_lock`, then
+  the lots.
+- **R-P2-33** (Task 7). An estimate outside the shop currency is 0 and unknown.
+- **R-P2-34** (Task 9). A pack needs a supplier: 422 with loc `supplier`.
+- **R-P2-35** (Task 9). The `/parts` unit cost averages known lots only.
+  `InventoryPart.cost_unknown` is set when a lot is unknown. The UI shows "unknown".
+- **R-P2-36** (Task 9). The alias currency is the currency of the offer's latest price point,
+  else the newest lot's `cost_currency`, else the shop's. Add stock with a body pack price
+  receives in that currency, so a foreign one opens a `cost_unknown` lot (R-P2-11).
