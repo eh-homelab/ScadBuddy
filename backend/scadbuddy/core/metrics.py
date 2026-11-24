@@ -566,6 +566,15 @@ class Metrics:
         if role == "api":
             r.register(self.filament)
         # A customer's staged files (#6133): the backstop's repairs, each a bug signal.
+        self.template_refresh_failures = Counter(
+            "scadbuddy_template_refresh_failures_total",
+            "Refreshes of templates' rows that failed (#7317, model records spec §5.2), by"
+            " path: commit (in the HEAD transaction, or a commit with no coordinator),"
+            " no_commit (a change that committed nothing) or no_git. The write stands; the"
+            " next copy run repairs the rows.",
+            ["path"],
+            registry=r,
+        )
         self.staged_files_repaired = Counter(
             "scadbuddy_staged_files_repaired",
             "Staged customer files the backstop repaired, by kind: a staging object no row"

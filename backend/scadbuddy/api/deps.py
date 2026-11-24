@@ -70,6 +70,8 @@ from scadbuddy.library.repo_lock import PgRepoCoordinator
 from scadbuddy.library.repo_signal import ModelsHeadFollower
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.library.template_refresh import TemplateRefresh
+from scadbuddy.library.template_rows import TemplateRows
 from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
 from scadbuddy.printers.progress import LanProgress, lan_last_print
 from scadbuddy.printers.reports import PrinterReportStore
@@ -387,6 +389,12 @@ def _build_core(settings: Settings) -> AppState:
         media_store=PostgresMediaStore(pool),
     )
     history.on_commit = announce_commits(events, catalogue)
+    # The history gets it only after the migrations (`main._start_render`, #7317).
+    catalogue.refresh = TemplateRefresh(
+        catalogue,
+        TemplateRows(pool),
+        on_failure=lambda path: metrics.template_refresh_failures.labels(path).inc(),
+    )
     follower.catalogue = catalogue
     # Lazy, so the API boots while Temporal is down: a render is then refused with
     # `temporal-unavailable` (#1053) until it is back.

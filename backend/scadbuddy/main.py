@@ -1737,6 +1737,9 @@ async def _start_render(state: AppState) -> None:
     failed start opened, each once."""
     projection, service, settings = state.projection, state.render, state.settings
     await asyncio.to_thread(projection.open)
+    # Only now is the `templates` table there (#7317, plan decision 2): the boot
+    # commit `ensure_repo` made before it writes no rows; the start copy fills them.
+    state.history.template_rows = state.catalogue.refresh
     await _prepare_catalogue(state)
     # What a pre-Temporal release was running, nothing
     # will finish (#546).

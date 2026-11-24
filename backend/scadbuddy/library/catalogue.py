@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
     # `render.provenance`, so a runtime import here would be circular.
     from scadbuddy.library.outputs import OutputStore
+    from scadbuddy.library.template_refresh import TemplateRefresh
 
 logger = logging.getLogger(__name__)
 
@@ -714,6 +715,10 @@ class Catalogue:
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
         self.on_change: Callable[[str], None] | None = None
+        #: Writes each template's ``templates`` row after a change that the history
+        #: does not refresh (#7317): with no git, and a built-in's added media. Set
+        #: once the migrations have run; None writes no rows.
+        self.refresh: TemplateRefresh | None = None
         #: Each template's `ui_version` and the HEAD it was read at: the walk it takes
         #: is made once per commit, not on every record of the template (#1469).
         self._ui_versions: dict[str, tuple[str, str | None]] = {}
@@ -734,7 +739,14 @@ class Catalogue:
 
     def notify_change(self, *slugs: str) -> None:
         """Tell :attr:`on_change` about a change made other than through this class
-        -- a revision restored straight through the history."""
+        -- a revision restored straight through the history.
+
+        Without git it also refreshes the templates' rows (#7317, spec §5.2): there
+        is no history to do it, and no other replica."""
+        if self.refresh is not None and not self._has_history:
+            ids = [slug for slug in slugs if slug != BUILTIN_DIR]
+            if ids:
+                self.refresh.refresh_locked(ids, path="no_git")
         if self.on_change is None:
             return
         for slug in slugs:
@@ -2173,7 +2185,13 @@ class Catalogue:
         commit: nothing it touches is in the models repository, so the built-in's
         revision never moves."""
         with self._overlay_write_lock():
-            change()
+            try:
+                change()
+            finally:
+                # Under the lock (#7317): no commit lands, so the history refreshes
+                # nothing. Without git, `notify_change` refreshes it.
+                if self.refresh is not None and self._has_history:
+                    self.refresh.refresh_locked([slug], path="no_commit")
         self.notify_change(slug)
         return self.record(slug)
 
