@@ -462,6 +462,42 @@ describe('filament spool tools', () => {
     expect(tool('filament_spool_add_event').parse({ spool_id: ROW, kind: 'consumed_reset' }).kind).toBe('consumed_reset')
   })
 
+  it('edits several spools with one POST, all or none (#7151, R-7151-1)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOLS}/bulk-update`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ updated: [ROW], not_found: [] })
+      }),
+    )
+    const input = { spool_ids: [ROW], patch: { note: 'June order', cost_per_kg: null } }
+    const result = await runTool(tool('filament_spools_bulk_update'), input, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([input])
+    expect(firstText(result)).toEqual({ updated: [ROW], not_found: [] })
+    expect(() => tool('filament_spools_bulk_update').parse({ spool_ids: [], patch: { note: 'x' } })).toThrow()
+    expect(tool('filament_spools_bulk_update').risk).toBe('write')
+  })
+
+  it.each([
+    [true, 'bulk-archive'],
+    [false, 'bulk-restore'],
+  ])('archived %s sends one POST to %s (#7151, R-7151-2)', async (archived, route) => {
+    const bodies: unknown[] = []
+    const answer = { changed: [ROW], unchanged: [], not_found: [] }
+    server.use(
+      http.post(`${SPOOLS}/${route}`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(answer)
+      }),
+    )
+    const result = await runTool(tool('filament_spools_bulk_archive'), { spool_ids: [ROW], archived }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([{ spool_ids: [ROW] }])
+    expect(firstText(result)).toEqual(answer)
+    expect(tool('filament_spools_bulk_archive').risk).toBe('write')
+  })
+
   it('lists the spools that need a type, reads one and its ledger', async () => {
     server.use(
       http.get(SPOOLS, ({ request }) => {
@@ -602,6 +638,7 @@ describe('filament location tools', () => {
     ['filament_code_resolve', 'read'],
     ['filament_location_get', 'read'],
     ['filament_printer_labels', 'read'],
+    ['filament_label_templates', 'read'],
     ['filament_location_upsert', 'write'],
     ['filament_spool_move', 'write'],
   ])('%s is %s tier, never gated', (name, risk) => {
@@ -650,6 +687,12 @@ describe('filament location tools', () => {
     await runTool(tool('filament_printer_labels'), {}, ctx())
     await runTool(tool('filament_printer_labels'), { printer_ids: [ROW] }, ctx())
     expect(bodies).toEqual([{ printer_ids: null }, { printer_ids: [ROW] }])
+  })
+
+  it('lists the label templates', async () => {
+    const answer = { templates: [{ id: 'roll_50x25', name: 'Roll label 50 x 25 mm', width_mm: 50, height_mm: 25, sheet: null }], custom: { min_width_mm: 40 } }
+    server.use(http.get(`${BACKEND}/api/v1/filament/label-templates`, () => HttpResponse.json(answer)))
+    expect(firstText(await runTool(tool('filament_label_templates'), {}, ctx()))).toEqual(answer)
   })
 
   it('moves a spool, and takes one out of its place', async () => {

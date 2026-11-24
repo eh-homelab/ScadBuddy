@@ -23,6 +23,7 @@ from scadbuddy.bambuddy.models import ProcessValue
 from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import InvalidSlugError, slugify
@@ -431,9 +432,21 @@ class OutputStore:
         known = self._dirs.get(output_id)
         if known is not None and (known / META_NAME).is_file():
             return known
-        for meta_path in self.paths.outputs.glob(f"*/{output_id}/{META_NAME}"):
-            self._dirs[output_id] = meta_path.parent
-            return meta_path.parent
+        # The glob reads every model's directory (0.2 to 0.4 s on prod's NFS share, and a
+        # miss is never remembered): a span of its own (#7245). A hit above is one stat
+        # and gets none, as a listing asks about each output many times.
+        with span(
+            "outputs.find_dir",
+            attributes={
+                "scadbuddy.output_id": output_id,
+                "scadbuddy.remembered": known is not None,
+            },
+        ) as current:
+            for meta_path in self.paths.outputs.glob(f"*/{output_id}/{META_NAME}"):
+                self._dirs[output_id] = meta_path.parent
+                current.set_attribute("scadbuddy.found", True)
+                return meta_path.parent
+            current.set_attribute("scadbuddy.found", False)
         self._dirs.pop(output_id, None)
         raise OutputNotFoundError(output_id)
 
@@ -553,24 +566,29 @@ class OutputStore:
         return await asyncio.to_thread(self._model_3mf, output_id)
 
     def _model_3mf(self, output_id: str) -> bytes | None:
-        try:
-            return (self._find_dir(output_id) / MODEL_NAME).read_bytes()
-        except (OutputNotFoundError, FileNotFoundError):
-            return None
+        with span("outputs.read_3mf", attributes={"scadbuddy.output_id": output_id}) as current:
+            try:
+                data = (self._find_dir(output_id) / MODEL_NAME).read_bytes()
+            except (OutputNotFoundError, FileNotFoundError):
+                current.set_attribute("scadbuddy.found", False)
+                return None
+            current.set_attribute("scadbuddy.bytes", len(data))
+            return data
 
     def provenance(self, output_id: str) -> Provenance | None:
         """What the 3MF itself says produced it — the fallback when the record is gone.
         With rows, an output that has a row is read at its own folder, and the tree is
         searched only before a copy run finished (#7255)."""
-        if self.rows is not None:
-            slug = self.rows.slug_of(output_id)
-            if slug is not None:
-                return read_provenance(self.paths.output_dir(slug, output_id) / MODEL_NAME)
-            if self.rows.copied():
-                return None
-        for path in self.paths.outputs.glob(f"*/{output_id}/{MODEL_NAME}"):
-            return read_provenance(path)
-        return None
+        with span("outputs.provenance", attributes={"scadbuddy.output_id": output_id}):
+            if self.rows is not None:
+                slug = self.rows.slug_of(output_id)
+                if slug is not None:
+                    return read_provenance(self.paths.output_dir(slug, output_id) / MODEL_NAME)
+                if self.rows.copied():
+                    return None
+            for path in self.paths.outputs.glob(f"*/{output_id}/{MODEL_NAME}"):
+                return read_provenance(path)
+            return None
 
     def params(self, output_id: str) -> dict[str, ParamValue]:
         row = self._row_of(output_id)
@@ -612,20 +630,25 @@ class OutputStore:
         return checked
 
     def list_for(self, slug: str) -> list[OutputMeta]:
-        if self._copied():
-            assert self.rows is not None
-            # Newest first already; one query, no glob (#7255).
-            return self._with_last_prints([row.meta for row in self.rows.for_slug(slug)])
-        directory = self.paths.outputs / slug
-        if not directory.is_dir():
-            return []
-        metas = []
-        for path in directory.glob(f"*/{META_NAME}"):
-            meta = OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
-            # Found by the listing's own glob: the details read next need no search.
-            if meta.id == path.parent.name:
-                self._dirs[meta.id] = path.parent
-            metas.append(meta)
+        with span("outputs.list_for", attributes={"scadbuddy.slug": slug}) as current:
+            if self._copied():
+                assert self.rows is not None
+                # Newest first already; one query, no glob (#7255).
+                rows = [row.meta for row in self.rows.for_slug(slug)]
+                current.set_attribute("scadbuddy.outputs", len(rows))
+                return self._with_last_prints(rows)
+            directory = self.paths.outputs / slug
+            if not directory.is_dir():
+                current.set_attribute("scadbuddy.outputs", 0)
+                return []
+            metas = []
+            for path in directory.glob(f"*/{META_NAME}"):
+                meta = OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
+                # Found by the listing's own glob: the details read next need no search.
+                if meta.id == path.parent.name:
+                    self._dirs[meta.id] = path.parent
+                metas.append(meta)
+            current.set_attribute("scadbuddy.outputs", len(metas))
         return sorted(self._with_last_prints(metas), key=lambda meta: meta.created_at, reverse=True)
 
     def ids_for(self, slug: str) -> list[str]:
@@ -910,24 +933,26 @@ class OutputStore:
     def pending_backfills(self) -> list[tuple[str, BackfillState]]:
         """Every output waiting on a re-render that has not failed."""
         pending: list[tuple[str, BackfillState]] = []
-        if self._copied():
-            assert self.rows is not None
-            # One query, no glob (#7255).
-            for output_id, data in self.rows.pending_backfills():
-                try:
-                    state = BackfillState.model_validate(data)
-                except ValidationError:
-                    continue
-                if state.error is None:
-                    pending.append((output_id, state))
-            return pending
-        for path in self.paths.outputs.glob(f"*/*/{BACKFILL_NAME}"):
-            try:
-                state = BackfillState.model_validate_json(path.read_text(encoding="utf-8"))
-            except (OSError, ValidationError):
-                continue  # deleted under us, or half written: the next pass reads it
-            if state.error is None:
-                pending.append((path.parent.name, state))
+        with span("outputs.pending_backfills") as current:
+            if self._copied():
+                assert self.rows is not None
+                # One query, no glob (#7255).
+                for output_id, data in self.rows.pending_backfills():
+                    try:
+                        state = BackfillState.model_validate(data)
+                    except ValidationError:
+                        continue
+                    if state.error is None:
+                        pending.append((output_id, state))
+            else:
+                for path in self.paths.outputs.glob(f"*/*/{BACKFILL_NAME}"):
+                    try:
+                        state = BackfillState.model_validate_json(path.read_text(encoding="utf-8"))
+                    except (OSError, ValidationError):
+                        continue  # deleted under us, or half written: the next pass reads it
+                    if state.error is None:
+                        pending.append((path.parent.name, state))
+            current.set_attribute("scadbuddy.outputs", len(pending))
         return pending
 
     def attach_backfill(self, output_id: str, chosen: PipelineOutput) -> None:
@@ -1052,11 +1077,23 @@ class OutputStore:
         `render.jobs.plate_thumbnails`), so the next one is tried rather than
         giving up on the model.
         """
-        for meta in self._oldest_first(slug):
-            archive_path = self.paths.output_dir(slug, meta.id) / MODEL_NAME
-            if _holds_plate_cover(archive_path):
-                return archive_path
-        return None
+        # Reads every output's record and opens 3MFs on the NFS share: one span for
+        # the scan (#7245), with how many records and archives it read.
+        with span("outputs.scan_plate_cover", attributes={"scadbuddy.slug": slug}) as current:
+            metas = self._oldest_first(slug)
+            current.set_attribute("scadbuddy.outputs", len(metas))
+            opened = 0
+            try:
+                for meta in metas:
+                    archive_path = self.paths.output_dir(slug, meta.id) / MODEL_NAME
+                    opened += 1
+                    if _holds_plate_cover(archive_path):
+                        current.set_attribute("scadbuddy.found", True)
+                        return archive_path
+                current.set_attribute("scadbuddy.found", False)
+                return None
+            finally:
+                current.set_attribute("scadbuddy.archives", opened)
 
     def plate_cover_archive(self, slug: str) -> Path | None:
         """:meth:`_scan_plate_cover`, resolved once per state of the model's outputs.
@@ -1332,19 +1369,23 @@ def _live_outputs(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
     look deleted."""
     live: dict[str, set[str]] = {}
     bare: list[Path] = []
-    with os.scandir(root) as slugs:
-        for slug in slugs:
-            if not slug.is_dir(follow_symlinks=True):
-                continue
-            ids = live.setdefault(slug.name, set())
-            with os.scandir(slug.path) as entries:
-                for entry in entries:
-                    if not entry.is_dir(follow_symlinks=True):
-                        continue
-                    if os.path.isfile(os.path.join(entry.path, META_NAME)):
-                        ids.add(entry.name)
-                    else:
-                        bare.append(Path(entry.path))
+    with span("outputs.scan_all") as current:
+        with os.scandir(root) as slugs:
+            for slug in slugs:
+                if not slug.is_dir(follow_symlinks=True):
+                    continue
+                ids = live.setdefault(slug.name, set())
+                with os.scandir(slug.path) as entries:
+                    for entry in entries:
+                        if not entry.is_dir(follow_symlinks=True):
+                            continue
+                        if os.path.isfile(os.path.join(entry.path, META_NAME)):
+                            ids.add(entry.name)
+                        else:
+                            bare.append(Path(entry.path))
+        current.set_attribute("scadbuddy.models", len(live))
+        current.set_attribute("scadbuddy.outputs", sum(len(ids) for ids in live.values()))
+        current.set_attribute("scadbuddy.bare", len(bare))
     return live, bare
 
 
@@ -1408,6 +1449,13 @@ def reap_orphan_holds(
     releases nothing. A hold whose slug is unknown (taken before slugs were recorded,
     and with no live output to learn it from) is never released here. The cost of all
     this: holds orphaned by a model's whole deletion stay until a person drops them."""
+    with span("outputs.reap_orphan_holds") as current:
+        released = _reap_orphan_holds(refs, store, grace)
+        current.set_attribute("scadbuddy.outputs", released)
+        return released
+
+
+def _reap_orphan_holds(refs: BlobRefs, store: OutputStore, grace: timedelta) -> int:
     root = store.paths.outputs
     with refs.pool.connection() as conn:
         rows = conn.execute(

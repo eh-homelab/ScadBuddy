@@ -1062,8 +1062,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   holder; not "beside" places; it first makes each unit, slot and external holder the printer's
   latest `printer_reports` row lists, and answers `no_report` for a printer with none). Routes in `api/filament.py`: `GET /filament/locations/{id}`
   (`LocationDetail`) and `POST /filament/printer-labels` (a POST because it may make places; 422
-  for an unknown printer; in `NOT_NUDGED`). Agent tools: `filament_code_resolve`, `filament_location_get`,
-  `filament_printer_labels` (all `read`).
+  for an unknown printer; in `NOT_NUDGED`). The labels PDF (#7157, plan
+  `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): `filament/label_templates.py`
+  (`TEMPLATES`, SB's 50 x 25 mm roll and Bambuddy's six; `LabelTemplateChoice`, the stored-only
+  setting `filament_label_template` and the PDF body's `template`), `labels.py` `pdf_labels`
+  (the labels from SB's rows; a place label needs `label_base_url`, else 409 `no_label_base`,
+  never the request's host) and `label_pdf.py` (ReportLab: the browser label's lines and a vector
+  QR code, Helvetica, Latin-1 only). Routes `GET /filament/label-templates` and `POST
+  /filament/labels` (the PDF as the body, at most 100 labels; in `NOT_NUDGED`). Agent tools: `filament_code_resolve`, `filament_location_get`,
+  `filament_printer_labels` and `filament_label_templates` (all `read`); the PDF route has none
+  (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
   (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
   (`L` is `filament_locations`, `S` is `filament_spools`) and `resolve` (`{kind, id, code, name,
@@ -1429,7 +1437,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the
   standard `OTEL_*` variables, the sampler (parentless `CLIENT` spans dropped), and the
   helpers every traced file uses (`span`, `detached_span` for a span exited in another
-  task such as a stream, `current_traceparent`, `link_to`, `use_traceparent`).
+  task such as a stream, `traced_thread` for an `asyncio.to_thread` call whose span says how
+  long it waited for a free thread (`scadbuddy.thread_wait_ms`, #7245), `current_traceparent`,
+  `link_to`, `use_traceparent`). The S3 backend makes its own CLIENT span per request
+  (`S3.<Operation>`, `store/s3.py` `_request`, whose docstring says why not the
+  `AiobotocoreInstrumentor`).
   `core/trace_scrub.py` strips exception messages and status
   descriptions before anything is exported; never record a parameter value, a log
   line or anything Bambuddy returns. Tests share one provider (`tests/conftest.py`,

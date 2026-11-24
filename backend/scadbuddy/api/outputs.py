@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal, get_args
 
 from fastapi import APIRouter, File, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
+from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
@@ -96,7 +97,7 @@ from scadbuddy.core.events import EventBus, OutputEvent, emit
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
-from scadbuddy.core.tracing import span
+from scadbuddy.core.tracing import span, traced_thread
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.output_index import DEFAULT_LIMIT, AfterNotListedError, OutputQuery
 from scadbuddy.library.outputs import (
@@ -453,7 +454,7 @@ async def live_outputs_for_files(
     whose output is gone is any other library file (#2138). The library listing and
     Arrange both ask this, so they cannot disagree about a file."""
     made = await uploads.outputs_for_files(library_file_ids)
-    live = await asyncio.to_thread(outputs.existing, set(made.values()))
+    live = await _live(outputs, set(made.values()))
     return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
 
 
@@ -464,8 +465,29 @@ async def native_outputs_for_files(
     2026-10-17-native-print-library, Task 4): the output each file's row names, while
     that output still exists."""
     made = {f.id: f.output_id for f in files if f.output_id is not None}
-    live = await asyncio.to_thread(outputs.existing, set(made.values()))
+    live = await _live(outputs, set(made.values()))
     return {file_id: output_id for file_id, output_id in made.items() if output_id in live}
+
+
+async def _live(outputs: OutputStore, output_ids: set[str]) -> set[str]:
+    """`_existing` on a thread, in a span (#7245): before a copy run finished (#7255),
+    each output it does not remember is a glob of the NFS share
+    (`OutputStore._files_dir`, a child span), and a miss is never remembered."""
+    return await traced_thread(
+        "outputs.existing",
+        _existing,
+        outputs,
+        output_ids,
+        attributes={"scadbuddy.outputs": len(output_ids)},
+    )
+
+
+def _existing(outputs: OutputStore, output_ids: set[str]) -> set[str]:
+    """Those of ``output_ids`` the output store still has."""
+    found = outputs.existing(output_ids)
+    # The span `_live` opened, current on this thread.
+    trace.get_current_span().set_attribute("scadbuddy.found", len(found))
+    return found
 
 
 async def resolve_library_files(

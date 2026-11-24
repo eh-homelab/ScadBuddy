@@ -146,6 +146,32 @@ const LOW_STOCK_PCT = 20
 
 const now = () => new Date().toISOString()
 
+/** #7157 — `GET /filament/label-templates`, as `filament/label_templates.py` lists them. */
+export const LABEL_TEMPLATES: S['LabelTemplates'] = {
+  templates: [
+    { id: 'roll_50x25', name: 'Roll label 50 x 25 mm', width_mm: 50, height_mm: 25, sheet: null },
+    { id: 'box_40x30', name: 'Box label 40 x 30 mm', width_mm: 40, height_mm: 30, sheet: null },
+    { id: 'box_62x29', name: 'Box label 62 x 29 mm', width_mm: 62, height_mm: 29, sheet: null },
+    { id: 'ams_holder_74x33', name: 'AMS holder 74 x 33 mm', width_mm: 74, height_mm: 33, sheet: null },
+    { id: 'ams_holder_75x55', name: 'AMS holder 75 x 55 mm', width_mm: 75, height_mm: 55, sheet: null },
+    {
+      id: 'avery_5160',
+      name: 'Avery 5160 (Letter, 30 a sheet)',
+      width_mm: 66.675,
+      height_mm: 25.4,
+      sheet: { page: 'letter', cols: 3, rows: 10, top_mm: 12.7, left_mm: 4.76, col_gap_mm: 3.175, row_gap_mm: 0 },
+    },
+    {
+      id: 'avery_l7160',
+      name: 'Avery L7160 (A4, 21 a sheet)',
+      width_mm: 63.5,
+      height_mm: 38.1,
+      sheet: { page: 'a4', cols: 3, rows: 7, top_mm: 15.15, left_mm: 7, col_gap_mm: 2.5, row_gap_mm: 0 },
+    },
+  ],
+  custom: { min_width_mm: 40, min_height_mm: 25, max_width_mm: 190, max_height_mm: 190 },
+}
+
 const TITLES = { 404: 'Not Found', 409: 'Conflict', 422: 'Unprocessable Content', 428: 'Precondition Required' } as const
 
 /** A refusal as `core/problems.py` `problem_response` writes it: every error here. */
@@ -1943,6 +1969,16 @@ export const handlers = [
     return HttpResponse.json(draft)
   }),
   // #7150 — create from slot: the mock's report is the tray's place; a new PLA spool, placed there.
+  // #7151 — unassign: the tray's spool moves to no place; a tray with none answers 204 too.
+  http.delete('/api/v1/printers/:printer/trays/:ams/:tray/spool', ({ params }) => {
+    const place = state.locations.find((one) => one.printer_id === params.printer && one.ams_id === Number(params.ams) && one.tray_id === Number(params.tray))
+    for (const [at, row] of state.spools.entries()) {
+      if (!place || row.location_id !== place.id) continue
+      state.spools[at] = { ...row, location_id: null, updated_at: now() }
+      addEvent(row.id, 'moved', { data: { from: place.id, to: null } })
+    }
+    return new HttpResponse(null, { status: 204 })
+  }),
   http.post('/api/v1/printers/:printer/trays/:ams/:tray/new-spool', ({ params, request }) => {
     const ams = Number(params.ams)
     const tray = Number(params.tray)
@@ -1966,6 +2002,59 @@ export const handlers = [
     const row = findSpool(String(params.id))
     return row ? HttpResponse.json(detail(row)) : problem(404, `no spool ${String(params.id)}`)
   }),
+  // #7151 — `POST /filament/spools/bulk-update`: one patch on every spool named, all or none.
+  http.post(`${BASE}/spools/bulk-update`, async ({ request }) => {
+    const raw = (await request.json()) as { spool_ids?: string[]; patch?: Record<string, unknown> }
+    const extra = extraKeys(raw, ['spool_ids', 'patch']) ?? extraKeys(raw.patch, PATCH_FIELDS.spool.filter((field) => field !== 'archived'))
+    if (extra) return extra
+    const ids = raw.spool_ids ?? []
+    const patch = raw.patch ?? {}
+    if (ids.length < 1 || ids.length > 500) return problem(422, 'spool_ids: List should have 1 to 500 items')
+    if (!Object.keys(patch).length) return problem(422, 'the patch sets no field')
+    const clear = cleared(patch, ['weight_locked'])
+    if (clear) return problem(422, clear)
+    const fields = normalised(patch) as Partial<SpoolRow>
+    const found = state.spools.filter((row) => ids.includes(row.id)).sort((a, b) => a.id.localeCompare(b.id))
+    for (const row of found) {
+      const refused = spoolRefusal({ ...row, ...fields })
+      if (refused) return problem(422, `spool #${row.number}: ${((await refused.clone().json()) as { detail: string }).detail}`)
+    }
+    for (const row of found) {
+      const at = state.spools.indexOf(row)
+      const changes = Object.fromEntries(
+        Object.keys(fields)
+          .filter((field) => row[field as keyof SpoolRow] !== fields[field as keyof SpoolRow])
+          .map((field) => [field, [row[field as keyof SpoolRow], fields[field as keyof SpoolRow]]]),
+      )
+      if (!Object.keys(changes).length) continue
+      state.spools[at] = { ...row, ...fields, updated_at: now() }
+      if (!row.type_id && fields.type_id) state.spoolPresets = state.spoolPresets.filter((one) => !(one.spool_id === row.id && one.migrated))
+      addEvent(row.id, 'edited', { data: { changes } })
+    }
+    return HttpResponse.json({ updated: found.map((row) => row.id), not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
+  }),
+  // #7151 — `POST /filament/spools/bulk-archive` and `bulk-restore`: each spool's outcome, reported once.
+  ...([true, false] as const).map((archived) =>
+    http.post(`${BASE}/spools/${archived ? 'bulk-archive' : 'bulk-restore'}`, async ({ request }) => {
+      const raw = (await request.json()) as { spool_ids?: string[] }
+      const extra = extraKeys(raw, ['spool_ids'])
+      if (extra) return extra
+      const ids = raw.spool_ids ?? []
+      if (ids.length < 1 || ids.length > 500) return problem(422, 'spool_ids: List should have 1 to 500 items')
+      const found = state.spools.filter((row) => ids.includes(row.id)).sort((a, b) => a.id.localeCompare(b.id))
+      const changed: string[] = []
+      const unchanged: string[] = []
+      for (const row of found) {
+        if ((row.archived_at != null) === archived) {
+          unchanged.push(row.id)
+          continue
+        }
+        setArchived(state.spools.indexOf(row), archived)
+        changed.push(row.id)
+      }
+      return HttpResponse.json({ changed, unchanged, not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
+    }),
+  ),
   http.patch(`${BASE}/spools/:id`, async ({ params, request }) => {
     const at = state.spools.findIndex((row) => row.id === params.id)
     if (at < 0) return problem(404, `no spool ${String(params.id)}`)
@@ -2245,6 +2334,26 @@ export const handlers = [
     if (unknown) return problem(422, `no printer ${unknown}`)
     const wanted = ids.map((id) => roots.find((one) => one.printer_id === id)!).sort((a, b) => a.name.localeCompare(b.name))
     return HttpResponse.json({ base_url: null, labels: wanted.flatMap(printerLabelRows), no_report: [] } satisfies S['PrinterLabels'])
+  }),
+  // #7157 — `filament/label_templates.py` `TEMPLATES` and its custom bounds.
+  http.get(`${BASE}/label-templates`, () => HttpResponse.json(LABEL_TEMPLATES)),
+  // #7157 — `POST /filament/labels`: the route's refusals, and a stand-in PDF (the real one is ReportLab's).
+  http.post(`${BASE}/labels`, async ({ request }) => {
+    const body = (await request.json()) as S['LabelsPdfRequest']
+    const spools = body.spool_ids ?? []
+    const places = body.location_ids ?? []
+    const count = spools.length + places.length
+    if (count < 1 || count > 100) return problem(422, 'name 1 to 100 spools and places')
+    const noSpool = spools.find((id) => !findSpool(id))
+    if (noSpool) return problem(404, `no spool ${noSpool}`)
+    const noPlace = places.find((id) => !state.locations.some((one) => one.id === id))
+    if (noPlace) return problem(404, `no location ${noPlace}`)
+    const settings = mockSettings()
+    if (places.length > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
+      return problem(409, 'A place label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
+    return new HttpResponse(new Blob([`%PDF-1.4\n% ${count} labels\n%%EOF\n`], { type: 'application/pdf' }), {
+      headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="labels.pdf"' },
+    })
   }),
   http.get(`${BASE}/locations`, ({ request }) => HttpResponse.json(tree(flag(request, 'include_archived')))),
   http.post(`${BASE}/locations`, async ({ request }) => {

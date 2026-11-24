@@ -28,6 +28,7 @@ from pydantic import (
 
 from scadbuddy.bambuddy.models import SpoolBuddyDevice
 from scadbuddy.filament.colour import Rgba
+from scadbuddy.filament.label_templates import LabelTemplate, LabelTemplateChoice
 from scadbuddy.slicing.own_presets import sb_id
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
@@ -473,6 +474,43 @@ class PrinterLabels(BaseModel):
     #: The names of the printers with no report that lists an AMS unit or an external
     #: holder: their slots get labels only once a spool has been loaded in them.
     no_report: list[str] = []
+
+
+#: The most labels one PDF draws, as the Labels page (`labelSheet.ts` `MAX_LABELS`).
+MAX_LABELS = 100
+
+
+class LabelsPdfRequest(_In):
+    """#7157: the labels of these spools, then these places, in the order sent."""
+
+    spool_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    location_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    #: ``None``: the stored setting `filament_label_template`.
+    template: LabelTemplateChoice | None = None
+    #: A one-label template: one label a page (``roll``) or packed on Letter paper
+    #: (``sheet``). A sheet template prints on its own grid either way.
+    layout: Literal["roll", "sheet"] = "roll"
+
+    @model_validator(mode="after")
+    def _one_to_max(self) -> LabelsPdfRequest:
+        count = len(self.spool_ids) + len(self.location_ids)
+        if not 1 <= count <= MAX_LABELS:
+            raise ValueError(f"name 1 to {MAX_LABELS} spools and places")
+        return self
+
+
+class CustomLabelBounds(BaseModel):
+    min_width_mm: float
+    min_height_mm: float
+    max_width_mm: float
+    max_height_mm: float
+
+
+class LabelTemplates(BaseModel):
+    """#7157: the label templates, and a custom label's bounds."""
+
+    templates: list[LabelTemplate]
+    custom: CustomLabelBounds
 
 
 Reading = Annotated[float, Field(allow_inf_nan=False)]
@@ -1608,6 +1646,48 @@ class ConsumedResetDone(BaseModel):
     """How many spools took a ``consumed_reset`` event, and the ids that name no spool."""
 
     reset: int
+    not_found: list[UUID]
+
+
+#: The most spools one bulk edit, archive or restore names (#7151), as `ConsumedReset`.
+BULK_IDS_MAX: Final = 500
+
+
+class SpoolIds(_In):
+    """The spools a bulk archive or restore acts on (#7151, R-7151-2): an explicit list."""
+
+    spool_ids: list[UUID] = Field(min_length=1, max_length=BULK_IDS_MAX)
+
+
+class SpoolBulkUpdate(SpoolIds):
+    """A bulk edit (#7151, R-7151-1): ``patch`` on each spool named, all or none. The
+    patch is a PATCH's, less ``archived`` (the archive routes do that), and sets at least
+    one field."""
+
+    patch: SpoolPatch
+
+    @model_validator(mode="after")
+    def _fields(self) -> SpoolBulkUpdate:
+        if "archived" in self.patch.model_fields_set:
+            raise ValueError("a bulk edit does not archive; use bulk-archive or bulk-restore")
+        if not self.patch.model_fields_set:
+            raise ValueError("the patch sets no field")
+        return self
+
+
+class SpoolBulkUpdated(BaseModel):
+    """The spools a bulk edit changed (or found already so), and the ids that name none."""
+
+    updated: list[UUID]
+    not_found: list[UUID]
+
+
+class SpoolsArchived(BaseModel):
+    """A bulk archive's or restore's answer (#7151, R-7151-2), each list in id order:
+    the spools it archived or restored, those already so, and the ids that name none."""
+
+    changed: list[UUID]
+    unchanged: list[UUID]
     not_found: list[UUID]
 
 

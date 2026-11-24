@@ -11,6 +11,7 @@ import {
   parseSearch,
   SEARCH_ROUTES,
   spoolSearchDoc,
+  spoolTags,
   spoolTrays,
   typeSearchDoc,
   typeSkus,
@@ -30,6 +31,7 @@ const SOURCE = "ScadBuddy's own filament inventory"
 type SpoolCreate = components['schemas']['SpoolCreate-Input']
 type SpoolDraft = components['schemas']['SpoolDraft']
 type SpoolBulkCreate = components['schemas']['SpoolBulkCreate']
+type SpoolBulkUpdate = components['schemas']['SpoolBulkUpdate']
 
 /** A SpoolBuddy device id, as the backend's `DeviceId` accepts it (`filament/models.py`). */
 const DEVICE_ID = z.string().regex(/^[A-Za-z0-9._:-]{1,50}$/)
@@ -773,7 +775,8 @@ const tools: Tool[] = [
       '`grams_left` from its ledger. ' +
       '`needs_type: true` lists only spools with no type yet, `false` only typed ones. Archived spools only ' +
       'with `include_archived`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
-      "place, tray, type code or type's supplier SKU match it.",
+      "place, tray, type code, type's supplier SKU or open tag's UID or tray UUID (from 4 hex digits; `:` and `-` " +
+      'are left out, so `04:A1:B2` finds tag `04A1B2…`) match it.',
     input: z.object({
       include_archived: z.boolean().default(false),
       needs_type: z.boolean().optional(),
@@ -781,7 +784,13 @@ const tools: Tool[] = [
     }),
     risk: 'read',
     source: SOURCE,
-    routes: ['GET /api/v1/filament/spools', 'GET /api/v1/filament/types', 'GET /api/v1/filament/inventory', ...SEARCH_ROUTES],
+    routes: [
+      'GET /api/v1/filament/spools',
+      'GET /api/v1/filament/types',
+      'GET /api/v1/filament/inventory',
+      'GET /api/v1/filament/tags',
+      ...SEARCH_ROUTES,
+    ],
     handler: async ({ include_archived, needs_type, q }, { backend }) => {
       const spools = await ok(
         backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type } } }),
@@ -789,14 +798,15 @@ const tools: Tool[] = [
       )
       const tokens = parseSearch(q)
       if (!tokens.length) return json(spools)
-      // The type codes, SKUs and trays only add to the search: one that cannot be read leaves its field out.
-      const [types, skus, trays] = await Promise.all([
+      // The type codes, SKUs, trays and tags only add to the search: one that cannot be read leaves its field out.
+      const [types, skus, trays, tags] = await Promise.all([
         orElse(
           ok(backend.GET('/api/v1/filament/types', { params: { query: { include_archived: true } } }), 'list the spool types'),
           [],
         ),
         orElse(typeSkus(backend), new Map<string, string[]>()),
         orElse(spoolTrays(backend), new Map<string, string>()),
+        orElse(spoolTags(backend), new Map<string, string[]>()),
       ])
       const codes = new Map(types.map((type) => [type.id, type.code]))
       return json(
@@ -806,6 +816,7 @@ const tools: Tool[] = [
               typeCode: spool.type_id ? codes.get(spool.type_id) : null,
               skus: spool.type_id ? skus.get(spool.type_id) : undefined,
               tray: trays.get(spool.id),
+              tags: tags.get(spool.id),
             }),
             tokens,
           ),
@@ -1690,6 +1701,61 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_spools_bulk_update',
+    label: 'Edit several spools at once',
+    description:
+      'Set the same `patch` on 1 to 500 spools in one request (#7151): any field filament_spool_upsert edits but ' +
+      '`archived` (use filament_spools_bulk_archive). `null` on an override clears it. All or none: when one spool ' +
+      'refuses the patch, nothing changes and the error names that spool by its number. Each changed spool gets its ' +
+      'own `edited` ledger event; a resend changes nothing more. Answers `updated` and `not_found` (ids with no spool). ' +
+      'Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      spool_ids: z.array(z.string().uuid()).min(1).max(500),
+      patch: z.record(z.string(), z.unknown()).describe('The spool fields to set on each spool'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/bulk-update'],
+    summarize: ({ spool_ids, patch }) =>
+      `Set ${Object.keys(patch).join(', ') || 'nothing'} on ${spool_ids.length} ${spool_ids.length === 1 ? 'spool' : 'spools'}`,
+    handler: async ({ spool_ids, patch }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/spools/bulk-update', { body: { spool_ids, patch } as SpoolBulkUpdate }),
+          'edit the spools',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spools_bulk_archive',
+    label: 'Archive or restore several spools',
+    description:
+      '`archived: true` takes 1 to 500 spools off the lists in one request; `false` puts them back (#7151). Each spool ' +
+      'changed gets its own ledger event, and an archived one loses its open tag binding, as filament_spool_archive does. ' +
+      'Answers `changed`, `unchanged` (already so) and `not_found` (ids with no spool). Only what the user says. Writes ' +
+      "ScadBuddy; with tag sync on (filament_sync.tags), an archived spool's tag is then cleared in Bambuddy.",
+    input: z.object({
+      spool_ids: z.array(z.string().uuid()).min(1).max(500),
+      archived: z.boolean().default(true),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/bulk-archive', 'POST /api/v1/filament/spools/bulk-restore'],
+    summarize: ({ spool_ids, archived }) =>
+      `${archived ? 'Archive' : 'Restore'} ${spool_ids.length} ${spool_ids.length === 1 ? 'spool' : 'spools'}`,
+    handler: async ({ spool_ids, archived }, { backend }) =>
+      json(
+        await ok(
+          archived
+            ? backend.POST('/api/v1/filament/spools/bulk-archive', { body: { spool_ids } })
+            : backend.POST('/api/v1/filament/spools/bulk-restore', { body: { spool_ids } }),
+          `${archived ? 'archive' : 'restore'} the spools`,
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_location_list',
     label: 'List filament locations',
     description:
@@ -1766,6 +1832,22 @@ const tools: Tool[] = [
           'list the printer labels',
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'filament_label_templates',
+    label: 'List label templates',
+    description:
+      'The label sizes the Labels page offers (#7157): each template\'s `id`, `name`, `width_mm`, `height_mm` and, ' +
+      'for a sheet of labels, its `sheet` (page, columns, rows, margins and gaps); `custom`, the bounds of a custom ' +
+      'size. With none chosen the labels are `roll_50x25`. The chosen one is the setting ' +
+      '`filament_label_template` (get_settings).',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/label-templates'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/label-templates'), 'list the label templates')),
   }),
 
   defineTool({
