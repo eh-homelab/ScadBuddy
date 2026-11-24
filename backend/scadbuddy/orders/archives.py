@@ -352,19 +352,21 @@ async def mirror_attempt(
 
 
 async def sweep_media(
-    lifecycle: Lifecycle, integrations: OrderIntegrations, starter: MediaStarter
+    lifecycle: Lifecycle, integrations: OrderIntegrations, starter: MediaStarter, *, limit: int
 ) -> int:
     """The housekeeping sweep ``housekeeping_import_attempt_media`` (spec 2026-11-05 §4.6):
     one step of ``AttemptMedia`` for each attempt of the last `SWEEP_DAYS` that still
     lacks a medium and was not read for media in the last `SWEEP_CHECK_EVERY`. It catches
     what the triggers missed (Temporal down, an outcome not heard, a timelapse Bambuddy
-    got later). It asks Bambuddy nothing itself, and nothing without a Bambuddy. A failed
-    start is logged, and the next attempt is started. The number of starts asked for."""
+    got later). A medium the import refused as too large at ``limit`` (the upload limit)
+    or a higher one is not missing (#7281 review). It asks Bambuddy nothing itself, and
+    nothing without a Bambuddy. A failed start is logged, and the next attempt is
+    started. The number of starts asked for."""
     if not integrations.linked:
         return 0
     now = datetime.now(UTC)
     attempts = await asyncio.to_thread(
-        lifecycle.store.attempts_missing_media, now - SWEEP_DAYS, now - SWEEP_CHECK_EVERY
+        lifecycle.store.attempts_missing_media, now - SWEEP_DAYS, now - SWEEP_CHECK_EVERY, limit
     )
     for fulfilment_id in attempts:
         await start_media(starter, fulfilment_id, retries=False)

@@ -1576,7 +1576,12 @@ async def _import_attempt_media_logged(state: AppState) -> None:
     (`orders.archives.sweep_media`, spec 2026-11-05 §4.6)."""
     orders = state.components.get(ORDERS)
     try:
-        started = await sweep_media(orders.lifecycle, orders.integrations, orders.media_starter)
+        started = await sweep_media(
+            orders.lifecycle,
+            orders.integrations,
+            orders.media_starter,
+            limit=state.settings.media_upload_max_bytes,
+        )
     except Exception:
         logger.exception("could not sweep the order attempts' media")
         raise

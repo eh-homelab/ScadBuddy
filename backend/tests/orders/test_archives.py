@@ -1209,7 +1209,7 @@ async def test_the_sweep_starts_one_step_for_an_attempt_missing_a_medium(
     starts = Starts()
     sweeping = Archives()
 
-    await sweep_media(shop.lifecycle, sweeping, starts)
+    await sweep_media(shop.lifecycle, sweeping, starts, limit=LIMIT)
 
     assert sorted(starts.started) == sorted([(missing_photo.id, False), (never_checked.id, False)])
     assert sweeping.downloads == []
@@ -1225,8 +1225,27 @@ async def test_the_sweep_starts_a_finished_run_whose_outcome_was_missed(
     started(shop, order, item, run_row(pool))
     starts = Starts()
 
-    await sweep_media(shop.lifecycle, Archives(), starts)
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=LIMIT)
 
+    assert starts.started == [(attempt.id, False)]
+
+
+async def test_the_sweep_skips_a_medium_refused_at_the_current_limit(
+    shop: Shop, pool: PgPool, step: Step
+) -> None:
+    """#7281 review: an attempt whose only missing medium the import refused as too large
+    at this limit, or a higher one, gets no step; a limit above the refusal's gets one."""
+    _, _, attempt = by_hand(shop, 81)
+    small = len(JPEG) + 1
+    await step(Archives(facts(81)), attempt.id, limit=small)  # the photo; the timelapse refused
+    aged(pool, attempt.id, timedelta(days=3), timedelta(hours=2))
+
+    starts = Starts()
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=small)
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=small - 1)
+    assert starts.started == []
+
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=small + 1)
     assert starts.started == [(attempt.id, False)]
 
 
@@ -1234,7 +1253,7 @@ async def test_without_bambuddy_the_sweep_starts_nothing(shop: Shop) -> None:
     by_hand(shop)
     starts = Starts()
 
-    await sweep_media(shop.lifecycle, NOT_LINKED, starts)
+    await sweep_media(shop.lifecycle, NOT_LINKED, starts, limit=LIMIT)
 
     assert starts.started == []
 
@@ -1258,11 +1277,11 @@ async def test_the_sweep_goes_on_after_a_failed_start(shop: Shop) -> None:
     _, _, second = by_hand(shop, 82)
     starts = FirstFails()
 
-    await sweep_media(shop.lifecycle, Archives(), starts)
+    await sweep_media(shop.lifecycle, Archives(), starts, limit=LIMIT)
     assert len(starts.started) == 1
 
     again = Starts()
-    await sweep_media(shop.lifecycle, Archives(), again)
+    await sweep_media(shop.lifecycle, Archives(), again, limit=LIMIT)
     assert sorted(again.started) == sorted([(first.id, False), (second.id, False)])
 
 
