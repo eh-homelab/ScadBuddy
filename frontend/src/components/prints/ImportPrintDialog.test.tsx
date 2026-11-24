@@ -362,21 +362,86 @@ describe('ImportPrintDialog', () => {
       await waitFor(() => expect(read).toHaveBeenCalledWith(9104))
     })
 
-    it('finds a chosen file gone when the window gets focus back', async () => {
+    const goneProblem = (replacement: { id: number; filename: string; folder_id: number | null } | null) =>
+      new ApiError({ type: GONE, title: 'Not Found', status: 404, detail: 'library file 1000000501 was deleted or replaced', replacement })
+
+    it('finds a chosen file gone when the window gets focus back, and offers its replacement', async () => {
       nativeLibrary()
-      const { dialog } = await chooseLibraryFile()
-      vi.spyOn(api, 'getLibraryFile').mockRejectedValue(new ApiError(404, 'library file 1000000501 not found'))
+      const { dialog, user } = await chooseLibraryFile()
+      vi.spyOn(api, 'checkImportTarget').mockRejectedValue(goneProblem({ id: 1_000_000_502, filename: 'benchy_hull.3mf', folder_id: null }))
       act(() => {
         window.dispatchEvent(new Event('focus'))
       })
-      expect(await within(dialog).findByRole('alert')).toHaveTextContent('benchy_hull.3mf was deleted or replaced')
+      const alert = await within(dialog).findByRole('alert')
+      expect(alert).toHaveTextContent('benchy_hull.3mf was deleted or replaced')
       expect(within(dialog).getByRole('button', { name: 'Import' })).toBeDisabled()
+      await user.click(within(alert).getByRole('button', { name: 'Use the new copy' }))
+      expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+      expect(within(dialog).getByRole('button', { name: 'Import' })).toBeEnabled()
+    })
+
+    it('finds a chosen file gone on focus with no replacement to offer', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      vi.spyOn(api, 'checkImportTarget').mockRejectedValue(goneProblem(null))
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+      })
+      const alert = await within(dialog).findByRole('alert')
+      expect(within(alert).queryByRole('button', { name: 'Use the new copy' })).not.toBeInTheDocument()
+    })
+
+    it('does not count a 404 of another kind as a gone file', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      const check = vi.spyOn(api, 'checkImportTarget').mockRejectedValue(new ApiError(404, 'Not Found'))
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+      })
+      await waitFor(() => expect(check).toHaveBeenCalledWith(1_000_000_501))
+      expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('drops the reply of an older read of the suggestions when a newer one was asked for', async () => {
+      nativeLibrary()
+      const { dialog, user } = await chooseLibraryFile()
+      const replies: ((files: { id: number; filename: string; folder_id: number | null }[]) => void)[] = []
+      const real = api.getPrintSources.bind(api)
+      vi.spyOn(api, 'getPrintSources').mockImplementation((...args) => {
+        const at = replies.length
+        replies.push(() => undefined)
+        return new Promise((resolve) => {
+          void real(...args).then((sources) => {
+            replies[at] = (files) => resolve({ ...sources, suggested_library_files: files })
+          })
+        })
+      })
+      const check = vi.spyOn(api, 'checkImportTarget')
+      check.mockRejectedValue(goneProblem({ id: 1_000_000_502, filename: 'benchy_hull.3mf', folder_id: null }))
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+      })
+      const alert = await within(dialog).findByRole('alert')
+      await user.click(within(alert).getByRole('button', { name: 'Use the new copy' }))
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+      })
+      await waitFor(() => expect(replies).toHaveLength(2))
+      await new Promise((r) => setTimeout(r, 50))
+      // The newer read lands first, the older one last.
+      await act(async () => {
+        replies[1]?.([{ id: 1_000_000_503, filename: 'newer.3mf', folder_id: null }])
+        replies[0]?.([{ id: 1_000_000_504, filename: 'older.3mf', folder_id: null }])
+      })
+      const group = await within(dialog).findByRole('group', { name: 'Suggested library files' })
+      expect(within(group).getByText('newer.3mf')).toBeInTheDocument()
+      expect(within(group).queryByText('older.3mf')).not.toBeInTheDocument()
     })
 
     it('keeps the chosen file when the check on focus fails for another reason', async () => {
       nativeLibrary()
       const { dialog } = await chooseLibraryFile()
-      const check = vi.spyOn(api, 'getLibraryFile').mockRejectedValue(new ApiError(503, 'the library did not answer'))
+      const check = vi.spyOn(api, 'checkImportTarget').mockRejectedValue(new ApiError(503, 'the library did not answer'))
       act(() => {
         window.dispatchEvent(new Event('focus'))
       })

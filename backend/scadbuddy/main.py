@@ -139,7 +139,7 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
-from scadbuddy.orders.archives import mirror_attempt
+from scadbuddy.orders.archives import mirror_attempt, sweep_media
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.orders.storefront.prepare import prepare_activities
@@ -218,6 +218,7 @@ from scadbuddy.workflows.flow_triggers import VersionedFlowTriggerFire
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
+    ATTEMPT_MEDIA_SWEEP,
     AUTH_SESSIONS_SWEEP,
     AUTO_IMPORT_SWEEP,
     BACKFILL_SWEEP,
@@ -960,6 +961,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def reap_print_run_holds() -> None:
         await _heartbeating(_reap_run_holds_logged(state))
 
+    @activity.defn(name=ATTEMPT_MEDIA_SWEEP)
+    async def import_attempt_media() -> None:
+        await _heartbeating(_import_attempt_media_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -995,6 +1000,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         send_storefront_mail,
         auto_import_prints,
         reap_print_run_holds,
+        import_attempt_media,
     ]
 
 
@@ -1708,6 +1714,24 @@ async def _import_maintenance_logged(state: AppState) -> None:
             "imported the printers' maintenance logs",
             extra={"read": read, "failed": failed},
         )
+
+
+async def _import_attempt_media_logged(state: AppState) -> None:
+    """#7234: one ``AttemptMedia`` step for each order attempt still missing a medium
+    (`orders.archives.sweep_media`, spec 2026-11-05 §4.6)."""
+    orders = state.components.get(ORDERS)
+    try:
+        started = await sweep_media(
+            orders.lifecycle,
+            orders.integrations,
+            orders.media_starter,
+            limit=state.settings.media_upload_max_bytes,
+        )
+    except Exception:
+        logger.exception("could not sweep the order attempts' media")
+        raise
+    if started:
+        logger.info("started attempt media imports", extra={"count": started})
 
 
 async def _reap_run_holds_logged(state: AppState) -> None:

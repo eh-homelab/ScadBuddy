@@ -27,6 +27,8 @@ from scadbuddy.workflows.housekeeping import (
     ACTIVITY_TIMEOUT,
     ATTACHMENTS_SWEEP,
     ATTACHMENTS_TIMEOUT,
+    ATTEMPT_MEDIA_SWEEP,
+    ATTEMPT_MEDIA_TIMEOUT,
     AUTH_SESSIONS_SWEEP,
     AUTH_SESSIONS_TIMEOUT,
     AUTO_IMPORT_SWEEP,
@@ -179,6 +181,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         AUTO_IMPORT_SWEEP: AUTO_IMPORT_TIMEOUT,
         RUN_HOLDS_SWEEP: RUN_HOLDS_TIMEOUT,
         OUTPUT_COPY_SWEEP: OUTPUT_COPY_TIMEOUT,
+        ATTEMPT_MEDIA_SWEEP: ATTEMPT_MEDIA_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -186,21 +189,21 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
 
 def test_the_storefront_drafts_sweep_is_on_both_schedules() -> None:
     """#5282: idle carts go even with the sweeps off, behind their own patch."""
-    assert SWEEPS[-4] == PRUNE_SWEEPS[-4] == STOREFRONT_DRAFTS_SWEEP
+    assert SWEEPS[-5] == PRUNE_SWEEPS[-5] == STOREFRONT_DRAFTS_SWEEP
     assert sweep_timeout(STOREFRONT_DRAFTS_SWEEP) == STOREFRONT_DRAFTS_TIMEOUT
 
 
 def test_the_storefront_mail_sweep_is_on_both_schedules() -> None:
     """#5283: the storefront mail a send after its commit left is tried again within the
     prune interval, even with the sweeps off, behind its own patch."""
-    assert SWEEPS[-3] == PRUNE_SWEEPS[-3] == STOREFRONT_MAIL_SWEEP
+    assert SWEEPS[-4] == PRUNE_SWEEPS[-4] == STOREFRONT_MAIL_SWEEP
     assert sweep_timeout(STOREFRONT_MAIL_SWEEP) == STOREFRONT_MAIL_TIMEOUT
 
 
 def test_the_print_watcher_is_on_both_schedules() -> None:
     """#4699: a print ScadBuddy did not start shows within the prune interval, even with
     the sweeps off, behind its own patch."""
-    assert SWEEPS[-2] == PRUNE_SWEEPS[-2] == AUTO_IMPORT_SWEEP
+    assert SWEEPS[-3] == PRUNE_SWEEPS[-3] == AUTO_IMPORT_SWEEP
     assert sweep_timeout(AUTO_IMPORT_SWEEP) == AUTO_IMPORT_TIMEOUT
 
 
@@ -220,10 +223,10 @@ def test_the_maintenance_import_follows_the_deposit_sync_on_the_sweeps_schedule(
     assert sweep_timeout(MAINTENANCE_IMPORT_SWEEP) == MAINTENANCE_IMPORT_TIMEOUT
 
 
-def test_the_run_holds_reaper_is_last_on_both_schedules() -> None:
+def test_the_run_holds_reaper_is_on_both_schedules() -> None:
     """#6122: a LAN run's hold that its end left goes within the prune interval, even
     with the sweeps off, behind its own patch."""
-    assert SWEEPS[-1] == PRUNE_SWEEPS[-1] == RUN_HOLDS_SWEEP
+    assert SWEEPS[-2] == PRUNE_SWEEPS[-2] == RUN_HOLDS_SWEEP
     assert sweep_timeout(RUN_HOLDS_SWEEP) == RUN_HOLDS_TIMEOUT
 
 
@@ -234,6 +237,13 @@ def test_the_output_copy_follows_the_output_holds_reaper_on_the_sweeps_schedule(
     assert SWEEPS[SWEEPS.index(REAP_SWEEP) + 1] == OUTPUT_COPY_SWEEP
     assert OUTPUT_COPY_SWEEP not in PRUNE_SWEEPS
     assert sweep_timeout(OUTPUT_COPY_SWEEP) == OUTPUT_COPY_TIMEOUT
+
+
+def test_the_attempt_media_sweep_is_last_on_both_schedules() -> None:
+    """#7234 (spec 2026-11-05 §4.6): an attempt's media the triggers missed is imported
+    within the hour, even with the sweeps off, behind its own patch."""
+    assert SWEEPS[-1] == PRUNE_SWEEPS[-1] == ATTEMPT_MEDIA_SWEEP
+    assert sweep_timeout(ATTEMPT_MEDIA_SWEEP) == ATTEMPT_MEDIA_TIMEOUT
 
 
 def test_the_git_sweeps_timeout_covers_its_gc_and_no_more() -> None:
@@ -400,6 +410,8 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         "housekeeping_auto_import_prints",
         # #6122: a LAN run's hold that its end left goes within the interval.
         "housekeeping_reap_print_run_holds",
+        # #7234: an attempt's media the triggers missed is imported within the hour.
+        "housekeeping_import_attempt_media",
     ]
     # #4439, #4747: the Bambuddy printer sync calls Bambuddy, so it obeys the switch.
     assert PRINTER_SYNC_SWEEP not in sweeps
@@ -540,8 +552,9 @@ async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
     # 95 minutes since #5700's payment closes (10 minutes), #4959's pending captures
     # (15 minutes), #5282's idle storefront carts (5 minutes) and #5283's storefront mail
     # (10 minutes) joined the prune Schedule; 110 since #4699's print watcher (15 minutes);
-    # 112 since #6122's run holds reaper (2 minutes).
-    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=112)
+    # 112 since #6122's run holds reaper (2 minutes); 117 since #7234's attempt media
+    # sweep (5 minutes).
+    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=117)
     assert sweeps_action.execution_timeout == housekeeping_timeout(SWEEPS)
     assert sweeps_action.execution_timeout > 3 * SWEEP_TIMEOUT + PRUNE_TIMEOUT
 

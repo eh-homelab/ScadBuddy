@@ -278,6 +278,18 @@ class StorefrontCrud:
             content=body,
         )
 
+    async def listing_preview(
+        self, listing_id: str, plate: int, *, visitor_id: str, client: str
+    ) -> CrudStream:
+        """``GET …/storefront/listings/{id}/preview/{plate}.glb`` (#6710): a file listing's
+        held preview, its body unread: the caller reads it as a stream, then closes it.
+        ``listing_id`` must be a listing id (`storefront/routes.py` checks it)."""
+        return await self._crud.stream(
+            "GET",
+            f"{BASE}/listings/{listing_id}/preview/{plate}.glb",
+            headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
+        )
+
     async def variant_preview(
         self, key: str, *, visitor_id: str, client: str, if_none_match: str | None = None
     ) -> CrudStream:

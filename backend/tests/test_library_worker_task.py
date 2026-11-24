@@ -286,13 +286,17 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "sweep_orphan_entities", _broken(OSError("the database is gone")))
     # #7255: the copy of the saved outputs' files to rows.
     monkeypatch.setattr(main, "copy_outputs", _broken(OSError("the volume is gone")))
+    # #7256: the copy of the saved outputs' bytes to the blob store.
+    monkeypatch.setattr(main, "copy_output_bytes", _broken_async)
+    # #7234: the order attempts' missed media, one read and a start per attempt.
+    monkeypatch.setattr(main, "sweep_media", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
     state = SimpleNamespace(
         render=SimpleNamespace(prune=_broken_async, store=SimpleNamespace(read=None)),
         outputs=SimpleNamespace(rows=object()),
-        projection=SimpleNamespace(pool=object()),
+        projection=SimpleNamespace(pool=object(), conninfo=""),
         store=SimpleNamespace(content=None),
         blobs=object(),
         refs=object(),
@@ -322,9 +326,15 @@ async def test_a_failing_sweep_fails_its_activity(
                 # #5774: the printers' maintenance logs, read from Bambuddy.
                 machine_rates=SimpleNamespace(read_logs=_broken_async),
                 attachments=None,  # #6950: read by the stubbed entity sweep
+                # #7234: read by the stubbed attempt media sweep.
+                lifecycle=None,
+                integrations=None,
+                media_starter=None,
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
+        # #7234: the attempt media sweep's upload limit.
+        settings=SimpleNamespace(media_upload_max_bytes=1 << 20),
         uploads=None,
         history=SimpleNamespace(maintain=_broken(OSError("the volume is gone"))),
         print_runs=SimpleNamespace(client=object(), task_queue="bambuddy"),
@@ -446,6 +456,14 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
 
     monkeypatch.setattr(main, "reap_run_holds", slow_run_holds)
     state.refs = None
+
+    # #7234: the order attempts' missed media, one read and a Temporal start per attempt.
+    async def slow_media(*args: object, **kwargs: object) -> int:
+        await asyncio.sleep(0.1)
+        return 0
+
+    monkeypatch.setattr(main, "sweep_media", slow_media)
+    state.settings = SimpleNamespace(media_upload_max_bytes=1 << 20)
     # #5298: the CRUD routes' idempotency replies past their 24 h, one delete.
     monkeypatch.setattr(main, "_prune_crud_requests", lambda state: time.sleep(0.1))
 
@@ -526,6 +544,10 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             temporal=object,
             store=None,
             refs=None,
+            # #7234: read by the stubbed attempt media sweep.
+            lifecycle=None,
+            integrations=None,
+            media_starter=None,
         )
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]

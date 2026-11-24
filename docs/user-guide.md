@@ -443,12 +443,16 @@ project, the same as an output's.
 - **Off-box history** (Settings → Library) pushes that repository, and the flow
   scripts' own, to a git remote you name: models to its `models` branch, flows to
   `flows`. Each commit is pushed once it lands, without holding up the save, and a
-  housekeeping pass retries every five minutes what did not land. Give an http(s)
+  housekeeping pass retries every five minutes what did not land. When the remote
+  refuses a commit for a reason a retry cannot fix (a file over its size limit, a
+  hook, another history, a refused login), that commit is tried again only after six
+  hours, or at once when a new commit lands. Give an http(s)
   URL without credentials in it, a username if the host wants one, and a token with
   write access; the token is stored sealed under `SCADBUDDY_SECRET_KEY_FILE` (saving
   one without it is refused) and is never shown again. A push is never forced, so a
   remote on another history refuses it; the section shows each repository's
-  commits not yet pushed, since when, and the last push's error.
+  commits not yet pushed, since when, and the last push's error, which names the
+  refusing file first when the remote refused one for its size.
 - **Edit source** opens the model's source in the editor. Saving it creates a
   new revision. The row above the editor lists the model's `.scad` files:
   `model.scad`, which every render opens, and any files beside it that it can
