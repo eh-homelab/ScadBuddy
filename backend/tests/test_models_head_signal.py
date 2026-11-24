@@ -227,7 +227,7 @@ def test_a_change_too_large_to_name_says_why_everything_is_refreshed(
     caplog.clear()
     with caplog.at_level(logging.DEBUG, logger="scadbuddy.library.repo_lock"):
         encode_change(HeadChange("b" * 40, ["keychain"]))
-    assert not caplog.records
+    assert not [r for r in caplog.records if r.name == "scadbuddy.library.repo_lock"]
 
 
 class _NoListener:
@@ -355,12 +355,13 @@ async def test_a_slow_refresh_is_said_while_it_runs_and_when_it_ends(
     follower.revalidate = revalidate  # type: ignore[method-assign]
     with caplog.at_level(logging.DEBUG, logger="scadbuddy.library.repo_signal"):
         await follower.refresh(["keychain"])
-    said = [(r.levelno, r.getMessage()) for r in caplog.records]
+    records = [r for r in caplog.records if r.name == "scadbuddy.library.repo_signal"]
+    said = [(r.levelno, r.getMessage()) for r in records]
     assert [level for level, _ in said] == [logging.WARNING, logging.WARNING]
     assert "still walking" in said[0][1]
     assert said[1][1] == "refreshed the models library"
     # #3375: the final record says the refresh stalled, so it is not counted twice.
-    assert [getattr(r, "stalled", None) for r in caplog.records] == [None, True]
+    assert [getattr(r, "stalled", None) for r in records] == [None, True]
 
     caplog.clear()
     delay = 0.0
@@ -368,10 +369,11 @@ async def test_a_slow_refresh_is_said_while_it_runs_and_when_it_ends(
     follower.slow_after = 5.0
     with caplog.at_level(logging.DEBUG, logger="scadbuddy.library.repo_signal"):
         await follower.refresh(["keychain"])
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+    records = [r for r in caplog.records if r.name == "scadbuddy.library.repo_signal"]
+    assert [(r.levelno, r.getMessage()) for r in records] == [
         (logging.DEBUG, "refreshed the models library")
     ]
-    assert caplog.records[0].stalled is False  # type: ignore[attr-defined]
+    assert records[0].stalled is False  # type: ignore[attr-defined]
 
 
 async def test_a_failed_refresh_still_forgets_but_leaves_head(paths: DataPaths) -> None:

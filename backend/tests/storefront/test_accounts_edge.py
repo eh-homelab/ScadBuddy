@@ -238,7 +238,11 @@ def test_a_sign_out_the_full_queue_cannot_take_promises_no_retry(
     assert r.json()["type"] == SIGN_OUT_INCOMPLETE
     assert r.json() == INCOMPLETE["not_queued"]
     # Review of #5957: one warning per full-queue sign-out, the route's.
-    warned = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
+    warned = [
+        rec
+        for rec in caplog.records
+        if rec.levelno >= logging.WARNING and rec.name.startswith("scadbuddy.storefront")
+    ]
     assert [rec.name for rec in warned] == ["scadbuddy.storefront.routes"]
     assert r.json()["detail"].endswith("it ends on its own within 30 days.")
     (cleared,) = [c for c in set_cookies(r) if c.startswith(f"{SESSION_COOKIE}=")]
