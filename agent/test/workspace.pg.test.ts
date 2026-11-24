@@ -22,6 +22,7 @@ import { BACKEND, connect, firstText, services, testApp } from './helpers/mcp.js
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { pgHttpBodies } from './support/sql/httpBodies.js'
+import { turnToolEnv } from './support/turnToolEnv.js'
 
 // #2329: the assistant's workspace in ai_session_files: the store's caps,
 // conflicts, scoping, fork copy, cascade and sweep; the workspace_* tools over
@@ -675,7 +676,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
           httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files },
         }),
       }
-      const out = await new MockActivityEnvironment({
+      const out = await turnToolEnv({
         activityId: 'tool-toolu_http',
         workflowExecution: { workflowId: `session-${sessionId}`, runId: 'run-1' },
         activityType: `turn:${HTTP_SERVER}__${HTTP_TOOL}`,
@@ -706,7 +707,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
         }),
       }
       const out = String(
-        await new MockActivityEnvironment({
+        await turnToolEnv({
           activityId: 'tool-toolu_bin',
           workflowExecution: { workflowId: `session-${sessionId}`, runId: 'run-1' },
           activityType: `turn:${HTTP_SERVER}__${HTTP_TOOL}`,
@@ -741,7 +742,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
         }),
       }
       const out = String(
-        await new MockActivityEnvironment({
+        await turnToolEnv({
           activityId: 'tool-flow_bin',
           workflowExecution: { workflowId: `flow-${flow}`, runId: 'run-1' },
           activityType: `turn:${HTTP_SERVER}__${HTTP_TOOL}`,

@@ -42,7 +42,8 @@ key goes through the one generic `process_overrides`, never a per-key field (roo
 ## Data
 
 - Tables: `print_runs`, `print_preview_slices`, `print_slice_starts`, `native_slices`,
-  `model_print_choices`, `held_local_presets`, `analyzer_decisions`.
+  `model_print_choices`, `analyzer_decisions`; `held_local_presets` is read by nothing
+  since #7244 and is to be dropped.
 - Blob keys: `slice-<file>-<digest>` and kind `slice` blobs.
 - Settings: `slicer_backend`, `printer_print_options`, `printer_bed_types`,
   `printer_plates`.

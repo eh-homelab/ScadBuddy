@@ -50,10 +50,10 @@ def test_the_spools_preset_id_comes_first(table: DensityTable) -> None:
     )
 
 
-def test_a_local_preset_gives_its_own_density(table: DensityTable) -> None:
+def test_a_scadbuddy_preset_gives_its_own_density(table: DensityTable) -> None:
     local = LocalDensity(name="Cookiecad PETG Magic @H2C", density_g_cm3="1.275")
-    assert resolve(group(slicer_filament="2", local_preset=local), table) == ProfileDensity(
-        "1.275", "Bambuddy local preset Cookiecad PETG Magic @H2C (spool preset 2)"
+    assert resolve(group(slicer_filament="sb-2", local_preset=local), table) == ProfileDensity(
+        "1.275", "ScadBuddy preset Cookiecad PETG Magic @H2C (spool preset sb-2)"
     )
 
 
@@ -77,8 +77,8 @@ def test_the_trays_preset_comes_after_the_spools(table: DensityTable) -> None:
         ProfileDensity("1.32", "Bambu PLA Silk @base (tray preset GFA05)")
     )
     local = LocalDensity(name="Cookiecad PETG Magic @H2C", density_g_cm3="1.275")
-    assert resolve(group(tray_filament="2", tray_local_preset=local), table) == ProfileDensity(
-        "1.275", "Bambuddy local preset Cookiecad PETG Magic @H2C (tray preset 2)"
+    assert resolve(group(tray_filament="sb-2", tray_local_preset=local), table) == (
+        ProfileDensity("1.275", "ScadBuddy preset Cookiecad PETG Magic @H2C (tray preset sb-2)")
     )
 
 
