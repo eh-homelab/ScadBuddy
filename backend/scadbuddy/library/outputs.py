@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -49,7 +50,12 @@ from scadbuddy.library.output_bytes import (
     server_error,
 )
 from scadbuddy.library.output_rows import OUTPUT_HOLDER as OUTPUT_HOLDER
-from scadbuddy.library.output_rows import OutputBlobs, Role, output_blob_key
+from scadbuddy.library.output_rows import (
+    OutputBlobs,
+    Role,
+    output_blob_key,
+    staged_thumbnail_key,
+)
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
@@ -513,10 +519,6 @@ class OutputStore:
         self._undrawable_lock = threading.Lock()
         #: The row `reading` read for this thread, as ``(output_id, row)``.
         self._held = threading.local()
-        #: Each output's thumbnail lock and how many calls hold or wait for it
-        #: (`_thumbnail_lock`).
-        self._thumbnail_locks: dict[str, tuple[threading.Lock, int]] = {}
-        self._thumbnail_locks_lock = threading.Lock()
 
     def _changed(self, slug: str) -> None:
         if self.on_change is None:
@@ -1707,49 +1709,33 @@ class OutputStore:
         _replace_bytes(self.thumbnail_path(output_id), png)
 
     async def put_thumbnail(self, output_id: str, png: bytes) -> None:
-        """``png`` as the thumbnail: its blob first, then the file and the row's key in
-        one step (`_keep_thumbnail`, #7256). A failed put changes nothing and raises
-        (`StoreFullError` among them). With no blob store or no row yet, the file only;
-        the byte copy takes it later."""
+        """``png`` as the thumbnail (#7256). Its blob is put first, under its own key
+        (`staged_thumbnail_key`); then one step, under the output's thumbnail lock across
+        replicas, points the thumbnail key at it, writes the file and names the key in
+        the row (`OutputRows.keep_thumbnail`). The last step to run wins the file and
+        the blob both. A failed put changes nothing and raises (`StoreFullError` among
+        them). A failed file write raises too and leaves the old key and the old file,
+        which still agree; the new blob is held by nothing, and the sweep removes it.
+        With no blob store or no row yet, the file only; the byte copy takes it later."""
         slug = await asyncio.to_thread(self._blob_slug, output_id)
         if slug is None:
             await asyncio.to_thread(self.write_thumbnail, output_id, png)
             return
-        assert self.bytes is not None
-        key = output_blob_key(output_id, "thumbnail")
-        ref = await self.bytes.put(key, png, slug=slug)
-        await asyncio.to_thread(self._keep_thumbnail, output_id, png, key, ref.sha256)
-
-    def _keep_thumbnail(self, output_id: str, png: bytes, key: str, sha256: str) -> None:
-        """Write the file and name ``key`` in the row, under the output's thumbnail lock,
-        only while ``key`` still holds this put's bytes (``sha256``). When a later put
-        moved the key on, that put's own step writes its file, so the file and the blob
-        are one image whatever order the puts and steps run in. Blocking."""
         assert self.bytes is not None and self.rows is not None
-        with self._thumbnail_lock(output_id):
-            current = self.bytes.ref(key)
-            if current is None or current.sha256 != sha256:
-                return
-            self.write_thumbnail(output_id, png)
-            self.rows.set_blob(output_id, "thumbnail", key)
-
-    @contextlib.contextmanager
-    def _thumbnail_lock(self, output_id: str) -> Iterator[None]:
-        """The output's own thumbnail lock, dropped from the store when no call holds or
-        waits for it."""
-        with self._thumbnail_locks_lock:
-            lock, users = self._thumbnail_locks.get(output_id, (threading.Lock(), 0))
-            self._thumbnail_locks[output_id] = (lock, users + 1)
-        try:
-            with lock:
-                yield
-        finally:
-            with self._thumbnail_locks_lock:
-                lock, users = self._thumbnail_locks[output_id]
-                if users == 1:
-                    del self._thumbnail_locks[output_id]
-                else:
-                    self._thumbnail_locks[output_id] = (lock, users - 1)
+        rows = self.rows
+        key = output_blob_key(output_id, "thumbnail")
+        sha256 = hashlib.sha256(png).hexdigest()
+        staged = await self.bytes.put(staged_thumbnail_key(output_id, sha256), png, slug=slug)
+        _, previous = await asyncio.to_thread(
+            rows.keep_thumbnail,
+            output_id,
+            key,
+            staged,
+            slug=slug,
+            write=lambda: self.write_thumbnail(output_id, png),
+        )
+        if previous is not None and previous.backend_id != staged.backend_id:
+            await self.bytes.release_replaced(key, previous)
 
     def _blob_slug(self, output_id: str) -> str | None:
         """The output's slug when its bytes go to the blob store too; ``None`` with no

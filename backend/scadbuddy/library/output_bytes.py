@@ -281,6 +281,11 @@ class OutputBytes:
             files.append(OutputFileBlob(name=name, blob_key=key, size=ref.size))
         return OutputBlobs(model=model, preview=preview, thumbnail=thumbnail, files=tuple(files))
 
+    async def release_replaced(self, key: str, previous: BlobRef) -> None:
+        """Release the object ``key`` named before it took another one, as a put that
+        replaces a key does."""
+        await self.content.release_replaced(key, previous)
+
     def ref(self, key: str) -> BlobRef | None:
         """The blob ``key`` names: one index read, no backend call. Blocking."""
         stat = self.content.index.get(key)

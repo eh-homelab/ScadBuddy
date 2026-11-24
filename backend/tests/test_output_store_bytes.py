@@ -334,9 +334,8 @@ async def test_transport_error_in_prefetch_falls_back_to_file(
 
 
 def _s3_error(status: int, code: str) -> ClientError:
-    return ClientError(
-        {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}}, "GetObject"
-    )
+    response: Any = {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}}
+    return ClientError(response, "GetObject")
 
 
 @pytest.mark.parametrize(("status", "code"), [(503, "SlowDown"), (500, "InternalError")])
@@ -758,11 +757,13 @@ async def test_put_thumbnail_calls_at_once_leave_file_and_blob_alike(
     assert thumbnail.read_bytes() == b"first"
 
 
-async def test_put_thumbnail_step_of_an_older_put_keeps_the_newer_file(
+async def test_put_thumbnail_steps_out_of_order_leave_file_and_blob_alike(
     copied: tuple[OutputStore, OutputMeta],
     content: ContentStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The first put lands first and its step runs last: that step's image is the one in
+    # the file and the blob both.
     store, meta = copied
     put = content.put
     first_landed = asyncio.Event()
@@ -772,7 +773,6 @@ async def test_put_thumbnail_step_of_an_older_put_keeps_the_newer_file(
         ref = await put(kind, data, **kwargs)
         if data == b"first":
             first_landed.set()
-            # The first call's put landed first; its file step runs after the second's.
             await second_done.wait()
         return ref
 
@@ -783,8 +783,91 @@ async def test_put_thumbnail_step_of_an_older_put_keeps_the_newer_file(
     second_done.set()
     await first
     thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
-    assert await _read(store, meta.id, "thumbnail") == b"second"
-    assert thumbnail.read_bytes() == b"second"
+    assert await _read(store, meta.id, "thumbnail") == b"first"
+    assert thumbnail.read_bytes() == b"first"
+
+
+async def test_put_thumbnail_lock_holds_across_replicas(
+    copied: tuple[OutputStore, OutputMeta],
+    pg_conninfo: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two API replicas: each its own store, pools and content store over one database
+    # and one backend. Replica A's put lands first; its step stops before its file write.
+    # Replica B's put lands later, and its step must wait for A's, so the file and the
+    # row name one image.
+    store, meta = copied
+    with store_pool(pg_conninfo) as rows_pool, store_pool(pg_conninfo) as index_pool:
+        other_content = local_content(tmp_path / "remote", index_pool)
+        other_content.spool = tmp_path / "spool-b"
+        other = OutputStore(store.paths)
+        other.rows = OutputRows(rows_pool)
+        other.bytes = OutputBytes(other_content)
+        loop = asyncio.get_running_loop()
+        a_in_step = asyncio.Event()
+        b_done = threading.Event()
+        write = store.write_thumbnail
+
+        def a_waits(output_id: str, png: bytes) -> None:
+            loop.call_soon_threadsafe(a_in_step.set)
+            # Without a lock across replicas, B's whole step runs here.
+            b_done.wait(timeout=1.5)
+            write(output_id, png)
+
+        monkeypatch.setattr(store, "write_thumbnail", a_waits)
+        try:
+            first = asyncio.create_task(store.put_thumbnail(meta.id, b"from a"))
+            await a_in_step.wait()
+            await other.put_thumbnail(meta.id, b"from b")
+            b_done.set()
+            await first
+        finally:
+            b_done.set()
+            await other_content.aclose()
+        thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
+        assert await _read(store, meta.id, "thumbnail") == thumbnail.read_bytes() == b"from b"
+
+
+async def test_put_thumbnail_failed_file_write_keeps_the_old_key(
+    copied: tuple[OutputStore, OutputMeta],
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, meta = copied
+    assert store.rows is not None
+    before = store.rows.get(meta.id)
+    version = store.thumbnail_version(meta.id)
+    holds = _holds(pool, meta.id)
+
+    def full(output_id: str, png: bytes) -> None:
+        raise OSError("the share is full")
+
+    monkeypatch.setattr(store, "write_thumbnail", full)
+    with pytest.raises(OSError, match="the share is full"):
+        await store.put_thumbnail(meta.id, b"new png")
+    monkeypatch.undo()
+    # The old blob and the old file still agree.
+    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
+    assert thumbnail.read_bytes() == b"thumbnail png"
+    assert await _read(store, meta.id, "thumbnail") == b"thumbnail png"
+    after = store.rows.get(meta.id)
+    assert after is not None and before is not None
+    assert (after.blobs, after.bytes_at) == (before.blobs, before.bytes_at)
+    assert store.thumbnail_version(meta.id) == version
+    # The new blob is stored and held by nothing: the sweep takes it after its grace.
+    sha = hashlib.sha256(b"new png").hexdigest()
+    with pool.connection() as conn:
+        staged = conn.execute(
+            "SELECT key FROM store_blobs WHERE sha256 = %s AND kind = 'output'", (sha,)
+        ).fetchall()
+    assert staged
+    assert _holds(pool, meta.id) == holds
+    with pool.connection() as conn:
+        held = conn.execute(
+            "SELECT 1 FROM blob_refs WHERE key = ANY(%s)", ([str(row["key"]) for row in staged],)
+        ).fetchall()
+    assert not held
 
 
 async def test_put_thumbnail_without_blob_store_writes_file(

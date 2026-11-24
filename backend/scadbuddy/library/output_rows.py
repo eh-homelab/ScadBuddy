@@ -16,7 +16,7 @@ It is synchronous, like `OutputIndex`: callers on the loop use a thread. It impo
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, get_args
@@ -26,6 +26,9 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+
+from scadbuddy.store.content_models import BlobRef
+from scadbuddy.store.index import BlobIndex
 
 if TYPE_CHECKING:
     from scadbuddy.library.outputs import OutputMeta
@@ -42,6 +45,28 @@ ROLES: tuple[Role, ...] = get_args(Role)
 def output_blob_key(output_id: str, role: Role) -> str:
     """The blob key of the output's ``role`` (spec §4.3)."""
     return f"output-{output_id}-{role}"
+
+
+def staged_thumbnail_key(output_id: str, sha256: str) -> str:
+    """The key a thumbnail upload's blob is put under before its step names it as
+    `output_blob_key` ``thumbnail`` (`OutputRows.keep_thumbnail`). Nothing holds it, so
+    the sweep removes its row after the grace."""
+    return f"output-{output_id}-thumbnail-{sha256}"
+
+
+def thumbnail_lock_key(output_id: str) -> str:
+    """The text whose ``hashtextextended(…, 0)`` keys the output's thumbnail lock: a
+    Postgres advisory transaction lock, so it holds across the API's replicas. Every
+    writer of the thumbnail key and file takes it (`lock_thumbnail`): a thumbnail
+    upload's step and the byte copy (Task 9)."""
+    return f"output-thumbnail:{output_id}"
+
+
+def lock_thumbnail(conn: Connection[DictRow], output_id: str) -> None:
+    """Take the output's thumbnail lock until ``conn``'s transaction ends."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (thumbnail_lock_key(output_id),)
+    )
 
 
 def output_file_key(output_id: str, n: int) -> str:
@@ -245,6 +270,18 @@ def _hold_keys(conn: Connection[DictRow], output_id: str, keys: Sequence[str]) -
             cursor.executemany(_HOLD, [(key, OUTPUT_HOLDER, output_id, output_id) for key in keys])
 
 
+def _set_blob(conn: Connection[DictRow], output_id: str, role: Role, key: str) -> bool:
+    cursor = conn.execute(
+        f"UPDATE outputs SET {role}_blob = %s, bytes_at = CASE WHEN bytes_at IS NOT"
+        " NULL THEN clock_timestamp() END WHERE output_id = %s",
+        (key, output_id),
+    )
+    if not cursor.rowcount:
+        return False
+    _hold_keys(conn, output_id, [key])
+    return True
+
+
 def _insert(conn: Connection[DictRow], row: OutputRow) -> None:
     blobs = row.blobs
     _drop_copied(conn, row.output_id, row.slug)
@@ -346,15 +383,41 @@ class OutputRows:
         if role not in ROLES:
             raise ValueError(f"not a byte role: {role!r}")
         with self._pool.connection() as conn, conn.transaction():
-            cursor = conn.execute(
-                f"UPDATE outputs SET {role}_blob = %s, bytes_at = CASE WHEN bytes_at IS NOT"
-                " NULL THEN clock_timestamp() END WHERE output_id = %s",
-                (key, output_id),
+            return _set_blob(conn, output_id, role, key)
+
+    def keep_thumbnail(
+        self,
+        output_id: str,
+        key: str,
+        staged: BlobRef,
+        *,
+        slug: str,
+        write: Callable[[], None],
+    ) -> tuple[bool, BlobRef | None]:
+        """A thumbnail upload's step, in one transaction under the output's thumbnail
+        lock (`lock_thumbnail`): ``key`` takes the object of ``staged`` (a put under
+        `staged_thumbnail_key`), then ``write`` writes the file, then the row names
+        ``key`` and holds it. The key moves only when the transaction commits, so a
+        ``write`` that raises leaves the key, the row and the old file as they were; the
+        staged blob is then held by nothing, and the sweep removes it.
+
+        Returns whether the row was there (False: nothing written) and the object ``key``
+        named before, which the caller releases when it is not ``staged``'s
+        (`OutputBytes.release_replaced`). `ReuseLostError` when the staged object was
+        freed first. Blocking."""
+        with self._pool.connection() as conn, conn.transaction():
+            lock_thumbnail(conn, output_id)
+            found = conn.execute(
+                "SELECT 1 FROM outputs WHERE output_id = %s FOR UPDATE", (output_id,)
+            ).fetchone()
+            if found is None:
+                return False, None
+            previous = BlobIndex(self._pool).put_in(
+                conn, key, staged, slug=slug, meta={}, reuse=True
             )
-            if not cursor.rowcount:
-                return False
-            _hold_keys(conn, output_id, [key])
-        return True
+            write()
+            _set_blob(conn, output_id, "thumbnail", key)
+        return True, previous
 
     def files(self, output_id: str) -> list[OutputFileBlob]:
         """The output's ``files/`` blobs, by name."""
