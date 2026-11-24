@@ -36,7 +36,7 @@ function managerOver(rows: PendingInputEntry[], grant = false) {
         grantReads.push(grant)
         return grant
       },
-      listVisiblePending: async () => [],
+      list: async () => [],
     },
     questions: { listPending: async () => ({ questions: [], summariesTruncated: false }) },
     queue: { ownEntries: async () => [] },

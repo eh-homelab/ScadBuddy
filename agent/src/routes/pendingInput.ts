@@ -130,8 +130,11 @@ export async function pendingInput(
   // browser user's aggregate read, the badge's, and in no other principal's.
   const withRuns = browser && filter.runs === true && filter.sessionId === undefined
   const [approvals, { questions: answers, summariesTruncated }, durable, own] = await Promise.all([
-    sessions.approvals.listVisiblePending(principal),
-    sessions.questions.listPending(principal),
+    // Each list is capped, so one session's read asks for that session's rows only.
+    filter.sessionId === undefined
+      ? sessions.approvals.listVisiblePending(principal)
+      : sessions.approvals.list(principal, { sessionId: filter.sessionId, pending: true }),
+    sessions.questions.listPending(principal, filter.sessionId),
     sessions.projection.entries({
       ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }),
       ...(browser ? { ownAnswers: true } : { ownedBy: principal, allApprovals: grant }),

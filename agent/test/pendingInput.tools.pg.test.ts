@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from './support/database.js'
 import type { Owner } from '../src/sessions/protocol.js'
+import { BROWSER_USER } from '../src/routes/approvals.js'
+import { sessionPendingInput } from '../src/routes/pendingInput.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool } from '../src/tools/registry.js'
 import { firstText, services } from './helpers/mcp.js'
@@ -88,6 +90,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`the pending-input read tools${TEST_DATABASE
     const owned = await call(agentB, 'sessions_pending_input', { session_id: durable })
     expect(owned.isError ?? false, JSON.stringify(owned.content)).toBe(false)
     expect((firstText(owned) as Page).entries.map((e) => e.id).sort()).toEqual([ids.approval, ids.answer].sort())
+    // The browser user sees its approval and not its answer, which is not the user's to give.
+    const mine = await sessionPendingInput(m, BROWSER_USER, durable)
+    expect(mine?.entries.map((e) => e.id)).toEqual([ids.approval])
     // A grant holder that does not own it sees its approval only, as in the aggregate.
     const granted = firstText(await call(agentA, 'sessions_pending_input', { session_id: durable })) as Page
     expect(granted.entries.map((e) => e.id)).toEqual([ids.approval])
