@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from decimal import Decimal
 from typing import Any
@@ -163,6 +164,32 @@ def test_openspool_reads_a_whole_number_written_with_a_point() -> None:
     half = decode([_json_record(OPENSPOOL_SAMPLE | {"min_temp": "220.5", "max_temp": [1]})])
     assert half is not None and (half.nozzle_temp_min, half.nozzle_temp_max) == (None, None)
     assert half.warnings == ["min_temp", "max_temp"]
+
+
+def test_openspool_refuses_a_huge_number_quickly() -> None:
+    # A tag is untrusted: an exponent this big must never reach int().
+    started = time.monotonic()
+    got = decode(
+        [_json_record(OPENSPOOL_SAMPLE | {"min_temp": "1e999999999", "max_temp": 10_000_000})]
+    )
+    assert time.monotonic() - started < 1
+    assert got is not None and (got.nozzle_temp_min, got.nozzle_temp_max) == (None, None)
+    assert got.warnings == ["min_temp", "max_temp"]
+    long = decode([_json_record(OPENSPOOL_SAMPLE | {"min_temp": "0" * 16 + "1"})])
+    assert long is not None and long.warnings == ["min_temp"]  # over 16 characters
+
+
+def test_openspool_names_a_json_integer_literal_too_long_for_python() -> None:
+    # 5000 digits is over Python's int max-str-digits (4300), where int() raises. The
+    # record is built unvalidated: it is over NTAG216's 888 bytes, but the decoder must
+    # still answer a warning, not raise.
+    text = '{"protocol":"openspool","version":"1.0","type":"PLA","min_temp":' + "9" * 5000 + "}"
+    record = NdefRecord.model_construct(
+        record_type="mime", media_type="application/json", data_hex=text.encode().hex()
+    )
+    got = decode([record])
+    assert got is not None and got.material == "PLA" and got.nozzle_temp_min is None
+    assert got.warnings == ["min_temp"]
 
 
 def test_openspool_encodes_back_to_the_sample_keys_and_strings() -> None:
@@ -333,6 +360,13 @@ def test_opentag3d_takes_the_target_for_a_missing_min_or_max_print_temp() -> Non
     payload[0x92] = 0
     got = decode([_ot3d_record(bytes(payload))])
     assert got is not None and (got.nozzle_temp_min, got.nozzle_temp_max) == (210, 210)
+
+
+def test_an_opentag3d_payload_without_a_whole_version_is_too_short() -> None:
+    for payload in (b"", b"\x07"):
+        got = decode([_ot3d_record(payload)])
+        assert got is not None and (got.version, got.warnings) == ("", ["payload too short"])
+        assert got.model_dump(exclude={"format", "version", "warnings"}, exclude_none=True) == {}
 
 
 def test_a_short_opentag3d_payload_reads_its_missing_bytes_as_zero() -> None:

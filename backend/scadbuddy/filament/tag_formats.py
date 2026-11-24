@@ -139,9 +139,17 @@ def _media(record: m.NdefRecord) -> str | None:
 
 
 def _openspool_object(record: m.NdefRecord) -> dict[str, Any] | None:
+    """The record's JSON object when it is an OpenSpool one. A tag is untrusted, so every
+    number is kept as its text (no ``int()`` of a huge literal, which Python refuses past
+    4300 digits); `_whole` bounds it before it is converted."""
     try:
-        obj = json.loads(bytes.fromhex(record.data_hex).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        obj = json.loads(
+            bytes.fromhex(record.data_hex).decode("utf-8"),
+            parse_int=str,
+            parse_float=str,
+            parse_constant=str,
+        )
+    except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError among them
         return None
     if isinstance(obj, dict) and obj.get("protocol") == "openspool":
         return obj
@@ -198,16 +206,30 @@ def _text(value: object) -> str | None:
     return str(value).strip() or None
 
 
-def _whole(value: object) -> int | None:
-    """A whole number given as a number or a string, ``220``, ``"220"`` or ``"220.0"``;
-    `ValueError` when it is not one."""
+#: The longest number text `_whole` reads, and its largest magnitude: under 10,000,000
+#: (a ``Decimal``'s ``adjusted()`` exponent of at most 6).
+_WHOLE_MAX_CHARS: Final = 16
+_WHOLE_MAX_EXPONENT: Final = 6
+
+
+def _whole(value: object) -> int:
+    """A whole number given as a number or a string, ``220``, ``"220"`` or ``"220.0"``.
+    `ValueError` when it is not one, or when it is longer than 16 characters or at least
+    10,000,000: a tag is untrusted, so the bound comes before any ``int()``."""
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ValueError(value)
+    if isinstance(value, int) and abs(value) >= 10 ** (_WHOLE_MAX_EXPONENT + 1):
+        raise ValueError("too big")
+    text = str(value).strip()
+    if len(text) > _WHOLE_MAX_CHARS:
+        raise ValueError("too long")
     try:
-        number = Decimal(str(value).strip())
+        number = Decimal(text)
     except InvalidOperation:
         raise ValueError(value) from None
-    if not number.is_finite() or number != number.to_integral_value():
+    if not number.is_finite() or (number and number.adjusted() > _WHOLE_MAX_EXPONENT):
+        raise ValueError(value)
+    if number != number.to_integral_value():
         raise ValueError(value)
     return int(number)
 
@@ -225,7 +247,7 @@ def _openspool_decode(obj: dict[str, Any]) -> m.DecodedSpool:
         except ValueError:
             warnings.append(key)
             continue
-        temps[key] = number if number is not None and number > 0 else None
+        temps[key] = number if number > 0 else None
     return m.DecodedSpool(
         format="openspool",
         version=_text(obj.get("version")) or "",
@@ -382,6 +404,9 @@ def _opentag3d_encode(facts: SpoolFacts) -> EncodedTag:
 
 
 def _opentag3d_decode(payload: bytes) -> m.DecodedSpool:
+    if len(payload) < 2:
+        # Not even a whole tag_version: no version to name, and nothing to read.
+        return m.DecodedSpool(format="opentag3d", version="", warnings=["payload too short"])
     data = payload.ljust(OPENTAG3D_SIZE, b"\0")
     raw: dict[str, bytes] = {f[0]: data[f[1] : f[1] + f[2]] for f in _LAYOUT}
 
