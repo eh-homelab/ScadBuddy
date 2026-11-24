@@ -908,8 +908,10 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "spool_dir": SettingDoc(
             "Download spool folder",
-            "Where the API keeps its temporary copies of cached downloads and of the"
-            " library files it reads. Unset, they go under the data volume's cache folder.",
+            "Where the API, and a render worker where it is set, keeps its temporary"
+            " files: copies of cached downloads and of the library files it reads, the"
+            " slicer's and print worker's uploads, slice files, thumbnail copies and"
+            " order archive copies. Unset, they go under the data volume's cache folder.",
         ),
         "storefront_public_url": SettingDoc(
             "Storefront URL",

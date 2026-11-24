@@ -79,8 +79,9 @@ def build_store(
     ``downloads_private`` says that directory is this process's alone (#7316), so a hit
     is read in place; only the API passes it, never a worker, which runs template code.
     The spool root (``config.spool_dir``, default the data volume's ``cache/``) is
-    resolved here once, onto the download cache: a hit's private copy and every library
-    read spool under it, and no caller passes it.
+    resolved here once, onto the download cache and the content store: a hit's private
+    copy, every library read and every body spooled to `ContentStore.spool` (internal
+    PUTs, slice bodies, thumbnail and archive copies) go under it, and no caller passes it.
     ``index`` is the blob index: the API's `BlobIndex` on ``pool``, the render worker's
     `crud/render.py` `RemoteBlobIndex` (#5298). ``folders`` keeps a Bambuddy store's
     folders: SQL on ``pool`` unless given (the render worker's `RemoteStoreFolders`).
