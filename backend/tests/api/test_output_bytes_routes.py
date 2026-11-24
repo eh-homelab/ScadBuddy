@@ -21,6 +21,7 @@ from starlette.requests import ClientDisconnect
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE
+from scadbuddy.api.media import IMMUTABLE_CACHE_CONTROL
 from scadbuddy.api.output_streams import stream_response
 from scadbuddy.api.template_ui import UI_FILE_HEADERS
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes, OutputStream
@@ -176,8 +177,9 @@ def test_download_falls_back_to_file_when_blob_missing(
     assert response.status_code == 200, response.text
     assert response.content == b"file bytes"
     assert response.headers["content-length"] == str(len(b"file bytes"))
-    # A file has no recorded sha256, so no strong validator.
-    assert "etag" not in response.headers
+    # A file has no recorded sha256: a weak validator from its size and mtime.
+    info = (outputs.directory(output_id) / MODEL_NAME).stat()
+    assert response.headers["etag"] == f'W/"{info.st_size:x}-{info.st_mtime_ns:x}"'
     if blob == "lost":
         assert "blob is lost" in caplog.text
 
@@ -460,3 +462,134 @@ async def test_stream_response_closes_its_stream_when_never_sent() -> None:
     with pytest.raises(ClientDisconnect):
         await response(scope, receive, send)
     assert closed == [True]
+
+
+#: Each byte route, as its URL under the output and the blob key's role or file index.
+_BYTE_ROUTES = [
+    ("model.3mf", "model"),
+    ("preview.glb", "preview"),
+    ("thumbnail", "thumbnail"),
+    ("files/a.stl", "file-0"),
+]
+
+
+def _count_gets(content: ContentStore, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every read of a blob's bytes from the backend."""
+    gets: list[str] = []
+    get = content.get
+
+    def counted(ref: Any) -> Any:
+        gets.append(ref.sha256)
+        return get(ref)
+
+    monkeypatch.setattr(content, "get", counted)
+    return gets
+
+
+@pytest.mark.parametrize(("url", "role"), _BYTE_ROUTES)
+def test_conditional_get_of_a_blob_is_304_with_no_blob_read(
+    client: TestClient,
+    model: str,
+    outputs: OutputStore,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    role: str,
+) -> None:
+    output_id = _copied(client, model, outputs)
+    first = client.get(f"/api/v1/outputs/{output_id}/{url}")
+    assert first.status_code == 200, first.text
+    etag = first.headers["etag"]
+    gets = _count_gets(content, monkeypatch)
+    again = client.get(f"/api/v1/outputs/{output_id}/{url}", headers={"if-none-match": etag})
+    assert again.status_code == 304, again.text
+    assert again.content == b""
+    assert again.headers["etag"].removeprefix("W/") == etag.removeprefix("W/")
+    assert gets == []
+    # Another tag gets the bytes.
+    other = client.get(f"/api/v1/outputs/{output_id}/{url}", headers={"if-none-match": '"x"'})
+    assert other.status_code == 200
+    assert other.content == first.content
+
+
+def test_conditional_get_of_the_gzipped_preview_is_304(
+    client: TestClient, model: str, outputs: OutputStore
+) -> None:
+    # `Compression` weakens the tag of a gzipped answer; the weak tag still matches.
+    output_id = _copied(client, model, outputs)
+    url = f"/api/v1/outputs/{output_id}/preview.glb"
+    first = client.get(url, headers={"accept-encoding": "gzip"})
+    assert first.status_code == 200, first.text
+    assert first.headers["content-encoding"] == "gzip"
+    etag = first.headers["etag"]
+    assert etag.startswith('W/"')
+    again = client.get(url, headers={"accept-encoding": "gzip", "if-none-match": etag})
+    assert again.status_code == 304, again.text
+
+
+@pytest.mark.parametrize(("url", "role"), _BYTE_ROUTES)
+def test_conditional_get_of_a_file_is_304_by_its_weak_tag(
+    client: TestClient,
+    model: str,
+    outputs: OutputStore,
+    content: ContentStore,
+    url: str,
+    role: str,
+) -> None:
+    # Saved with no blob store: the files hold the bytes.
+    outputs.bytes = None
+    output_id = _saved(client, model)
+    directory = outputs.directory(output_id)
+    (directory / THUMBNAIL_NAME).write_bytes(PNG_BYTES)
+    (directory / FILES_DIR).mkdir(exist_ok=True)
+    (directory / FILES_DIR / "a.stl").write_bytes(b"a stl")
+    outputs.bytes = OutputBytes(content)
+    first = client.get(
+        f"/api/v1/outputs/{output_id}/{url}", headers={"accept-encoding": "identity"}
+    )
+    assert first.status_code == 200, first.text
+    etag = first.headers["etag"]
+    assert etag.startswith('W/"')
+    again = client.get(
+        f"/api/v1/outputs/{output_id}/{url}",
+        headers={"accept-encoding": "identity", "if-none-match": etag},
+    )
+    assert again.status_code == 304, again.text
+    assert again.headers["etag"] == etag
+
+
+@pytest.mark.parametrize("blob", [True, False])
+@pytest.mark.parametrize("role", ["thumbnail", "preview"])
+def test_versioned_thumbnail_and_preview_are_immutable(
+    client: TestClient,
+    model: str,
+    outputs: OutputStore,
+    content: ContentStore,
+    role: str,
+    blob: bool,
+) -> None:
+    if blob:
+        output_id = _copied(client, model, outputs)
+    else:
+        outputs.bytes = None
+        output_id = _saved(client, model)
+        (outputs.directory(output_id) / THUMBNAIL_NAME).write_bytes(PNG_BYTES)
+        outputs.bytes = OutputBytes(content)
+    url = f"/api/v1/outputs/{output_id}/{'thumbnail' if role == 'thumbnail' else 'preview.glb'}"
+    version = outputs.role_version(output_id, role)  # type: ignore[arg-type]
+    assert version is not None
+    if role == "thumbnail":
+        assert version == outputs.thumbnail_version(output_id)
+    current = client.get(url, params={"v": version})
+    assert current.status_code == 200, current.text
+    assert current.headers["cache-control"] == IMMUTABLE_CACHE_CONTROL
+    # The 304 of a versioned read is immutable too.
+    again = client.get(
+        url, params={"v": version}, headers={"if-none-match": current.headers["etag"]}
+    )
+    assert again.status_code == 304
+    assert again.headers["cache-control"] == IMMUTABLE_CACHE_CONTROL
+    for params in ({}, {"v": "old"}):
+        plain = client.get(url, params=params)
+        assert plain.status_code == 200
+        assert "cache-control" not in plain.headers

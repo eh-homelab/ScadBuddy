@@ -3,6 +3,12 @@ an `OutputStream`, which is the blob or the NFS file, and this sends it.
 
 It lives apart from `api/outputs.py` because `bambuddy/download.py` uses it too, and
 `api/outputs.py` imports that module; `api/outputs.py` re-exports it.
+
+A conditional GET gets its ``304`` (#7256): a blob's strong ``ETag`` is its sha256,
+which `blob_not_modified` compares from the index before any byte of the blob is read; a
+file's weak ``ETag`` is from its size and mtime, read on the descriptor that serves it
+(`stream_response`). A request whose ``v`` names the bytes' current version
+(`OutputStream.version`) is cached for good (`IMMUTABLE_CACHE_CONTROL`).
 """
 
 from __future__ import annotations
@@ -12,10 +18,13 @@ from collections.abc import AsyncIterator, Mapping
 from urllib.parse import quote
 
 import anyio
+from fastapi import Response, status
 from fastapi.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 
-from scadbuddy.library.output_bytes import OutputStream
+from scadbuddy.api.media import IMMUTABLE_CACHE_CONTROL
+from scadbuddy.api.models import etag_matches
+from scadbuddy.library.output_bytes import OutputStream, blob_version
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +41,54 @@ async def _body(stream: OutputStream) -> AsyncIterator[bytes]:
         raise
 
 
+async def _nothing() -> AsyncIterator[bytes]:
+    return
+    yield b""
+
+
+def _matches(if_none_match: str | None, etag: str) -> bool:
+    """`api/models.py` `etag_matches`, weakly: the tag may be weak itself."""
+    return etag_matches(if_none_match, etag.removeprefix("W/"))
+
+
+def _cache(current: str | None, asked: str | None) -> dict[str, str]:
+    """``Cache-Control`` for good when the request's ``v`` names the current version."""
+    if asked is not None and asked == current:
+        return {"cache-control": IMMUTABLE_CACHE_CONTROL}
+    return {}
+
+
+def blob_not_modified(
+    sha256: str | None, *, if_none_match: str | None, v: str | None = None
+) -> Response | None:
+    """The ``304`` for a blob whose sha256 (from the index) the request's
+    ``If-None-Match`` names, before the blob is read; ``None`` otherwise."""
+    if sha256 is None:
+        return None
+    etag = f'"{sha256}"'
+    if not _matches(if_none_match, etag):
+        return None
+    return Response(
+        status_code=status.HTTP_304_NOT_MODIFIED,
+        headers={"etag": etag, **_cache(blob_version(sha256), v)},
+    )
+
+
 class _OutputStreamResponse(StreamingResponse):
     """A response that closes its stream however it ends: sent, failed, cancelled by a
     client that went away, or never sent at all. The close is shielded, so a cancel
     does not stop the backend's read from closing."""
 
     def __init__(
-        self, stream: OutputStream, *, media_type: str, headers: Mapping[str, str]
+        self,
+        stream: OutputStream,
+        *,
+        media_type: str | None,
+        headers: Mapping[str, str],
+        status_code: int = status.HTTP_200_OK,
     ) -> None:
-        super().__init__(_body(stream), media_type=media_type, headers=headers)
+        body = _body(stream) if status_code == status.HTTP_200_OK else _nothing()
+        super().__init__(body, status_code=status_code, media_type=media_type, headers=headers)
         self._stream = stream
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -61,17 +109,34 @@ def attachment(filename: str) -> str:
 
 
 def stream_response(
-    stream: OutputStream, *, media_type: str, headers: Mapping[str, str]
+    stream: OutputStream,
+    *,
+    media_type: str,
+    headers: Mapping[str, str],
+    if_none_match: str | None = None,
+    v: str | None = None,
 ) -> StreamingResponse:
-    """``stream`` as the body, with ``Content-Length`` its size, a strong ``ETag`` when
-    its sha256 is known (a blob; a file has none), and no ranges. ``headers`` are added.
-    The response closes the stream. A route that does more work between the open and
-    this call closes the stream itself when that work raises."""
+    """``stream`` as the body, with ``Content-Length`` its size, its ``ETag``
+    (`OutputStream.etag`: strong for a blob, weak for a file), and no ranges. ``headers``
+    are added. A ``v`` that names the stream's version adds `IMMUTABLE_CACHE_CONTROL`. An
+    ``If-None-Match`` that names the tag gets a ``304`` with no body. The response closes
+    the stream. A route that does more work between the open and this call closes the
+    stream itself when that work raises."""
+    etag = stream.etag
+    cache = _cache(stream.version, v)
+    if etag is not None and _matches(if_none_match, etag):
+        return _OutputStreamResponse(
+            stream,
+            media_type=None,
+            headers={"etag": etag, **cache},
+            status_code=status.HTTP_304_NOT_MODIFIED,
+        )
     sent = {
         **headers,
+        **cache,
         "content-length": str(stream.size),
         "accept-ranges": "none",
     }
-    if stream.sha256 is not None:
-        sent["etag"] = f'"{stream.sha256}"'
+    if etag is not None:
+        sent["etag"] = etag
     return _OutputStreamResponse(stream, media_type=media_type, headers=sent)

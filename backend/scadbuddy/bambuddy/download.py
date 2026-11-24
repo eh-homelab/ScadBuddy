@@ -10,8 +10,9 @@ is **saved**: a file laid out for a printer names that printer and each slot's m
 (#2639), and the template's ``print_settings`` (#770) go into its
 ``project_settings.config`` (``OutputStore.create``, ``render.provenance.stamp``). The
 download streams the saved bytes, the blob first, else the file (#7256,
-`api/output_streams.py`): it has a ``Content-Length`` and, for a blob, a strong ``ETag``,
-and it serves no ranges.
+`api/output_streams.py`): it has a ``Content-Length`` and an ``ETag`` (strong for a blob,
+weak for a file), answers a matching ``If-None-Match`` with ``304``, and serves no
+ranges.
 """
 
 from __future__ import annotations
@@ -25,10 +26,13 @@ from scadbuddy.library.outputs import OutputMeta, download_filename
 THREE_MF_MEDIA_TYPE = "model/3mf"
 
 
-def download_3mf(stream: OutputStream, meta: OutputMeta) -> StreamingResponse:
+def download_3mf(
+    stream: OutputStream, meta: OutputMeta, *, if_none_match: str | None = None
+) -> StreamingResponse:
     """``stream``'s 3MF as an attachment, as it was saved."""
     return stream_response(
         stream,
         media_type=THREE_MF_MEDIA_TYPE,
         headers={"content-disposition": attachment(download_filename(meta))},
+        if_none_match=if_none_match,
     )

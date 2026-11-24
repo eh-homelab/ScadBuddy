@@ -46,6 +46,8 @@ from scadbuddy.library.output_bytes import (
     TRANSPORT_ERRORS,
     OutputBytes,
     OutputStream,
+    blob_version,
+    file_version,
     in_thread_closing,
     server_error,
 )
@@ -337,7 +339,7 @@ def thumbnail_file_version(path: Path) -> str | None:
         info = path.stat()
     except OSError:  # as `is_file()` before it: no readable file is no thumbnail
         return None
-    return f"{info.st_ino:x}-{info.st_mtime_ns:x}-{info.st_size:x}"
+    return file_version(info.st_ino, info.st_mtime_ns, info.st_size)
 
 
 async def _file_chunks(file: BinaryIO) -> AsyncGenerator[bytes]:
@@ -346,9 +348,10 @@ async def _file_chunks(file: BinaryIO) -> AsyncGenerator[bytes]:
         yield chunk
 
 
-def _open_regular(path: Path) -> tuple[BinaryIO, int] | None:
-    """The file open for reading and its size from its own descriptor, so the size is
-    the size of the file that is read. ``None`` when there is no regular file. Blocking."""
+def _open_regular(path: Path) -> tuple[BinaryIO, os.stat_result] | None:
+    """The file open for reading and its stat from its own descriptor, so the size and
+    the validator are those of the file that is read. ``None`` when there is no regular
+    file. Blocking."""
     try:
         file = path.open("rb")
     except OSError:
@@ -361,7 +364,7 @@ def _open_regular(path: Path) -> tuple[BinaryIO, int] | None:
     if not stat.S_ISREG(info.st_mode):
         file.close()
         return None
-    return file, info.st_size
+    return file, info
 
 
 async def _file_stream(path: Path) -> OutputStream | None:
@@ -372,16 +375,17 @@ async def _file_stream(path: Path) -> OutputStream | None:
     opened = await in_thread_closing(lambda: _open_regular(path), _close_regular)
     if opened is None:
         return None
-    file, size = opened
+    file, info = opened
     return OutputStream(
-        size=size,
+        size=info.st_size,
         sha256=None,
         chunks=_file_chunks(file),
         _on_close=lambda: asyncio.to_thread(file.close),
+        identity=(info.st_ino, info.st_mtime_ns, info.st_size),
     )
 
 
-def _close_regular(opened: tuple[BinaryIO, int] | None) -> None:
+def _close_regular(opened: tuple[BinaryIO, os.stat_result] | None) -> None:
     if opened is not None:
         opened[0].close()
 
@@ -1425,15 +1429,43 @@ class OutputStore:
         return indexed is not None or self._role_file(output_id, role) is not None
 
     def thumbnail_version(self, output_id: str) -> str | None:
-        """What changes when the thumbnail changes: the blob's sha256 prefix, else the
-        file's identity (`thumbnail_file_version`). ``None``: no thumbnail. Blocking."""
+        """What changes when the thumbnail changes (`role_version`). Blocking."""
+        return self.role_version(output_id, "thumbnail")
+
+    def role_version(self, output_id: str, role: Role) -> str | None:
+        """What changes when the role's bytes change: the blob's sha256 prefix, else the
+        file's identity (`thumbnail_file_version`); the ``v`` a client may cache the
+        role's URL under for good. ``None``: no such bytes. Blocking."""
         try:
-            indexed = self._indexed(output_id, "thumbnail")
+            indexed = self._indexed(output_id, role)
             if indexed is not None:
-                return indexed[1][:16]
-            return thumbnail_file_version(self.thumbnail_path(output_id))
+                return blob_version(indexed[1])
+            return thumbnail_file_version(self._find_dir(output_id) / ROLE_FILES[role])
         except OutputNotFoundError:
             return None
+
+    def blob_sha(self, output_id: str, role: Role) -> str | None:
+        """The sha256 of the blob the row names for ``role``, from the index alone, with no
+        backend read: a conditional GET's tag. ``None``: no such blob. Blocking."""
+        try:
+            indexed = self._indexed(output_id, role)
+        except OutputNotFoundError:
+            return None
+        return None if indexed is None else indexed[1]
+
+    def file_blob_sha(self, output_id: str, name: str) -> str | None:
+        """`blob_sha` of the ``files/`` entry ``name``. Blocking."""
+        if not re.fullmatch(FILE_NAME_PATTERN, name):
+            return None
+        try:
+            key = self._file_key(output_id, name)
+        except OutputNotFoundError:
+            return None
+        if key is None:
+            return None
+        assert self.bytes is not None
+        ref = self.bytes.ref(key)
+        return None if ref is None else ref.sha256
 
     def rename(self, output_id: str, name: str | None) -> OutputMeta:
         """Give the output ``name``, or none (#2288). Only its meta changes, in

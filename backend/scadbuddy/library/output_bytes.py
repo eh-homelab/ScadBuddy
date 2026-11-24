@@ -64,6 +64,17 @@ def usable(content: ContentStore | None) -> bool:
     return content is not None and content.name != "bambuddy"
 
 
+def blob_version(sha256: str) -> str:
+    """A blob's version: its sha256's first 16 hex digits (`thumbnail_version`)."""
+    return sha256[:16]
+
+
+def file_version(ino: int, mtime_ns: int, size: int) -> str:
+    """A file's identity: every write puts a new file in place (a new inode, by a rename
+    or a link), and its time and size tell apart an inode used again."""
+    return f"{ino:x}-{mtime_ns:x}-{size:x}"
+
+
 @dataclass
 class OutputStream:
     """A blob's bytes. Whoever takes one closes it (`aclose`, or ``async with``), read
@@ -77,6 +88,28 @@ class OutputStream:
     _source: AsyncGenerator[bytes] | None = field(default=None, repr=False)
     #: Called last by `aclose`: a file stream closes its file here.
     _on_close: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
+    #: A file stream's ``(st_ino, st_mtime_ns, st_size)``, from the descriptor it reads.
+    identity: tuple[int, int, int] | None = None
+
+    @property
+    def etag(self) -> str | None:
+        """A blob's strong tag (its sha256); a file's weak one, from its size and mtime."""
+        if self.sha256 is not None:
+            return f'"{self.sha256}"'
+        if self.identity is not None:
+            _, mtime_ns, size = self.identity
+            return f'W/"{size:x}-{mtime_ns:x}"'
+        return None
+
+    @property
+    def version(self) -> str | None:
+        """What a client's ``v`` names: a blob's sha256 prefix (`blob_version`), a file's
+        identity (`file_version`)."""
+        if self.sha256 is not None:
+            return blob_version(self.sha256)
+        if self.identity is not None:
+            return file_version(*self.identity)
+        return None
 
     async def aclose(self) -> None:
         try:

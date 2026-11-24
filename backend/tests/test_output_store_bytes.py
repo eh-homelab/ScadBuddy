@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import threading
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
@@ -236,7 +237,7 @@ async def test_file_stream_closes_its_file_unread(
     store, meta = await _saved(tmp_path, projection, content)
     files: list[BinaryIO] = []
 
-    def recorded(path: Path) -> tuple[BinaryIO, int] | None:
+    def recorded(path: Path) -> tuple[BinaryIO, os.stat_result] | None:
         opened = open_regular(path)
         if opened is not None:
             files.append(opened[0])
@@ -262,7 +263,7 @@ async def test_file_stream_cancelled_during_open_closes_its_file(
     release = threading.Event()
     files: list[BinaryIO] = []
 
-    def slow(path: Path) -> tuple[BinaryIO, int] | None:
+    def slow(path: Path) -> tuple[BinaryIO, os.stat_result] | None:
         opened = open_regular(path)
         assert opened is not None
         files.append(opened[0])

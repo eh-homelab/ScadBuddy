@@ -73,7 +73,7 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
-from scadbuddy.api.output_streams import attachment, stream_response
+from scadbuddy.api.output_streams import attachment, blob_not_modified, stream_response
 from scadbuddy.api.template_ui import UI_FILE_HEADERS
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.download import download_3mf
@@ -1246,20 +1246,33 @@ def _no_content(result: dict[str, Any] | Operation) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+#: The ``v`` of a byte route that may be cached for good.
+VERSION_QUERY = (
+    "The version of the bytes asked for: the output's `thumbnail_version` for its "
+    "thumbnail. When it is the current one, the answer is cached as `immutable`."
+)
+
+
 @router.get(
     "/outputs/{output_id}/model.3mf",
     response_class=Response,
     responses={200: {"content": {THREE_MF_MEDIA_TYPE: {}}}},
     summary="Download the 3MF",
 )
-async def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> Response:
+async def download_output(
+    output_id: OutputIdPath, outputs: OutputsDep, request: Request
+) -> Response:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
+    if_none_match = request.headers.get("if-none-match")
+    sha256 = await asyncio.to_thread(outputs.blob_sha, output_id, "model")
+    if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match)) is not None:
+        return unchanged
     stream = await outputs.open_role(output_id, "model")
     if stream is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
     # The saved bytes as they are (#2652): its presets and print settings were written
     # when it was saved.
-    return download_3mf(stream, meta)
+    return download_3mf(stream, meta, if_none_match=if_none_match)
 
 
 @router.get(
@@ -1272,7 +1285,9 @@ async def get_output_preview(
     output_id: OutputIdPath,
     outputs: OutputsDep,
     budget: ReadBudgetDep,
+    request: Request,
     plate: Annotated[int | None, Query(ge=1)] = None,
+    v: Annotated[str | None, Query(description=VERSION_QUERY)] = None,
 ) -> Response:
     """The output's preview mesh, or with ``plate`` that one plate of its 3MF, where the
     file places it: what the print dialog's pane shows for a plate clicked (#2169)."""
@@ -1291,10 +1306,16 @@ async def get_output_preview(
             # #2767: the refusal a library file's plate gives for the same read (library_view.py).
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         return Response(data, media_type=GLB_MEDIA_TYPE)
+    if_none_match = request.headers.get("if-none-match")
+    sha256 = await asyncio.to_thread(outputs.blob_sha, output_id, "preview")
+    if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match, v=v)) is not None:
+        return unchanged
     stream = await outputs.open_role(output_id, "preview")
     if stream is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")
-    return stream_response(stream, media_type=GLB_MEDIA_TYPE, headers={})
+    return stream_response(
+        stream, media_type=GLB_MEDIA_TYPE, headers={}, if_none_match=if_none_match, v=v
+    )
 
 
 @router.get(
@@ -1302,8 +1323,14 @@ async def get_output_preview(
     response_class=FileResponse,
     summary="Download one of a pipeline output's extra files",
 )
-async def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> Response:
+async def output_file(
+    output_id: OutputIdPath, name: str, outputs: OutputsDep, request: Request
+) -> Response:
     """An extra file a pipeline wrote (§10): served as a download, never as a page."""
+    if_none_match = request.headers.get("if-none-match")
+    sha256 = await asyncio.to_thread(outputs.file_blob_sha, output_id, name)
+    if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match)) is not None:
+        return unchanged
     try:
         stream = await outputs.open_file(output_id, name)
     except OutputNotFoundError:
@@ -1314,6 +1341,7 @@ async def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -
         stream,
         headers={**UI_FILE_HEADERS, "content-disposition": attachment(name)},
         media_type="image/svg+xml" if name.endswith(".svg") else "application/octet-stream",
+        if_none_match=if_none_match,
     )
 
 
@@ -1329,16 +1357,27 @@ async def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -
     ),
 )
 async def get_output_thumbnail(
-    output_id: OutputIdPath, outputs: OutputsDep, config: ConfigDep, events: EventsDep
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    config: ConfigDep,
+    events: EventsDep,
+    request: Request,
+    v: Annotated[str | None, Query(description=VERSION_QUERY)] = None,
 ) -> Response:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
+    if_none_match = request.headers.get("if-none-match")
+    sha256 = await asyncio.to_thread(outputs.blob_sha, output_id, "thumbnail")
+    if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match, v=v)) is not None:
+        return unchanged
     stream = await outputs.open_role(output_id, "thumbnail")
     if stream is None:
         await _draw_thumbnail(outputs, meta, config, events)
         stream = await outputs.open_role(output_id, "thumbnail")
     if stream is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
-    return stream_response(stream, media_type="image/png", headers={})
+    return stream_response(
+        stream, media_type="image/png", headers={}, if_none_match=if_none_match, v=v
+    )
 
 
 async def _draw_thumbnail(
