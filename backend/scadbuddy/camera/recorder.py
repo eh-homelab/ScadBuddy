@@ -181,10 +181,12 @@ class Recorder:
         put_timeout: float = PUT_TIMEOUT,
         retry_min: float = RETRY_MIN,
         retry_max: float = RETRY_MAX,
+        hook_url: str = HOOK_URL,
     ) -> None:
         self._crud = crud
         self._mtx = mtx
         self._uploader = uploader
+        self._hook_url = hook_url
         self._name = settings.camera_recorder_name
         self._relay_url = settings.camera_relay_rtsp_url
         self._read_user = settings.camera_relay_read_user
@@ -236,7 +238,7 @@ class Recorder:
             # MediaMTX expands the MTX_* variables itself, with no shell; the duration is in
             # seconds, such as "4.8" (measured 2026-11-24 UTC on v1.21.4).
             "runOnRecordSegmentComplete": (
-                f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH"
+                f"curl -fsS -X POST {self._hook_url}/$MTX_PATH"
                 "?duration=$MTX_SEGMENT_DURATION&file=$MTX_SEGMENT_PATH"
             ),
         }

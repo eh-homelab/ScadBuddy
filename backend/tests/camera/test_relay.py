@@ -165,6 +165,19 @@ async def test_reconcile_all_adds_and_removes() -> None:
     assert api.states("old") == ["stopped"]
 
 
+async def test_hooks_call_the_given_url() -> None:
+    """A test runs two camera processes on one host: each one's hooks name its own port."""
+    api, mtx = FakeApi([source("p1")]), FakeMtx()
+    subject = Relay(api.client(), mtx.client(), hook_url="http://127.0.0.1:40001/hook")
+    await subject.reconcile_all()
+    conf = mtx.paths["p1"]
+    assert conf["runOnAvailable"] == "curl -fsS -X POST http://127.0.0.1:40001/hook/$MTX_PATH/ready"
+    assert conf["runOnUnavailable"] == (
+        "curl -fsS -X POST http://127.0.0.1:40001/hook/$MTX_PATH/not_ready"
+    )
+    await subject.aclose()
+
+
 async def test_reconcile_all_is_idempotent() -> None:
     api = FakeApi([source("p1")])
     mtx = FakeMtx()

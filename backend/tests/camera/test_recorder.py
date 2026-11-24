@@ -492,6 +492,27 @@ async def test_standby_reports_no_feed_state(tmp_path: Path, api: FakeCamera) ->
     assert api.feeds == []
 
 
+async def test_segment_hook_calls_the_given_url(tmp_path: Path, api: FakeCamera) -> None:
+    """A test runs two recorders on one host: each one's hook names its own port."""
+    rig = Rig(tmp_path, api)
+    recorder = Recorder(
+        api.client(),
+        rig.mtx.client(),
+        FakeUploader(api.bucket),
+        settings(),
+        segments=rig.root,
+        tick_seconds=None,
+        hook_url="http://127.0.0.1:40002/segment",
+    )
+    assert recorder._conf(P1)["runOnRecordSegmentComplete"] == (
+        "curl -fsS -X POST http://127.0.0.1:40002/segment/$MTX_PATH"
+        "?duration=$MTX_SEGMENT_DURATION&file=$MTX_SEGMENT_PATH"
+    )
+    assert rig.recorder._conf(P1)["runOnRecordSegmentComplete"].startswith(
+        "curl -fsS -X POST http://127.0.0.1:9091/segment/$MTX_PATH?"
+    )
+
+
 async def test_resync_keeps_unchanged_paths(tmp_path: Path, api: FakeCamera) -> None:
     rig = Rig(tmp_path, api)
     await rig.recorder.reconcile_all()

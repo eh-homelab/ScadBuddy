@@ -85,10 +85,12 @@ class Relay:
         source_for: Callable[[CameraSourceWithCode], str] = rtsps_source,
         retry_min: float = RETRY_MIN,
         retry_max: float = RETRY_MAX,
+        hook_url: str = HOOK_URL,
     ) -> None:
         self._crud = crud
         self._mtx = mtx
         self._source_for = source_for
+        self._hook_url = hook_url
         #: The paths the relay holds in MediaMTX; `None` until it first lists them.
         self._held: set[str] | None = None
         #: The conf the relay last put for each path. MediaMTX lists a source with its
@@ -107,8 +109,8 @@ class Relay:
             "sourceOnDemand": False,
             # MediaMTX expands $MTX_PATH itself, with no shell (measured 2026-11-24 UTC on
             # v1.21.4). The older runOnReady/runOnNotReady are deprecated in favour of these.
-            "runOnAvailable": f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/ready",
-            "runOnUnavailable": f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/not_ready",
+            "runOnAvailable": f"curl -fsS -X POST {self._hook_url}/$MTX_PATH/ready",
+            "runOnUnavailable": f"curl -fsS -X POST {self._hook_url}/$MTX_PATH/not_ready",
         }
 
     async def _existing(self) -> dict[str, dict[str, Any]]:
