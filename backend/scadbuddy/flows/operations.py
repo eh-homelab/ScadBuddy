@@ -27,7 +27,9 @@ operation was cancelled) says `approved`, `denied` or `answered` before the harn
 it. If no attempt ever resends it and the call is later resolved another way (the
 approval timer, a Reset), the row disagrees with the run. The window is the time until
 the next attempt; it stays open only once every attempt has been exhausted without
-Temporal ever answering.
+Temporal ever answering. A recorded row whose Update is known not to have landed, and whose
+execution was replaced, stays `answered` on the replaced execution: the attempt is refused
+as stale.
 
 The reverse is accepted, not reconciled (#2221): an Update still on its way to the
 history when Temporal answers the probe with no such Update lands after its row was
@@ -39,10 +41,11 @@ seals it under the run's own payload key (`seal_answer`), so the operation's inp
 its `operations` row carry `answer_sealed`, and forgetting the run (`forget.py`) makes
 them unreadable with the rest of the run's payloads.
 
-A Reset undoes the answers after its point, so an answer never crosses one (#7364). An
-attempt that finds its row on record asks first whether its Update landed on the execution
-it checked, and then sends nothing. Any other attempt sends only while that execution is
-the run's current one.
+A Reset undoes the answers after its point (#7364). An attempt that finds its row on
+record asks first whether its Update landed on the execution it checked, and sends nothing
+if it did. Any other attempt sends only after it checked that this execution is the run's
+current one. A Reset between that check and the send is still crossed (milliseconds: the
+harness client cannot pin the Update to an execution).
 
 `task_answer` (#7364) is `flow_answer` for a prompt, whose call id is its task's id and
 whose answer is an object the route checked against the task's schema. Once the Update
