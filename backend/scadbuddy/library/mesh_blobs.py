@@ -9,8 +9,8 @@ out of git (`GITIGNORE_LINES`), and git tracks a small pointer beside each one,
 ``<name>.3mf.blob`` (`MeshPointer`: the sha256 and size). The bytes are a blob of
 ScadBuddy's own store, ``attachment-<sha256>`` (`orders/attachments.py` `keep_file`, on
 the local store and a remote one alike), held in ``blob_refs`` by `HOLDER` with the
-sha256 as holder id. Nothing ever drops that hold: an old revision's pointer may name
-the blob for as long as the history stands.
+sha256 as holder id (`library/mesh_store.py` `LoopMeshStore`). Nothing ever drops that
+hold: an old revision's pointer may name the blob for as long as the history stands.
 
 `library/history.py` `ModelHistory` writes the pointers when it stages a commit and
 fills the meshes back in wherever it writes a revision into a directory (export,
@@ -20,23 +20,18 @@ revision has one or the other, and both are read.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import hashlib
 import json
 import os
 import re
 import uuid
-from collections.abc import Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from scadbuddy.core.gitrepo import GitError
 from scadbuddy.core.paths import BUILTIN_DIR
-from scadbuddy.orders.attachments import blob_key, blob_path, keep_file
-from scadbuddy.store import BlobStore
-from scadbuddy.store.refs import HoldsBlobs
 
 #: The directory of a model's meshes, and a mesh's and its pointer's suffixes.
 MESHES_DIR = "meshes"
@@ -144,47 +139,3 @@ class MeshStore(Protocol):
         """Write the mesh ``sha256`` at ``dest``, its bytes checked;
         `MeshBlobMissingError` when the store has no such mesh."""
         ...
-
-
-class LoopMeshStore:
-    """`MeshStore` over the API's `BlobStore` and `blob_refs`, called from the threads
-    the history runs on: the store's coroutines run on ``loop``, the API's own.
-
-    Only the API commits to the models repository, and only it holds the database
-    (root CLAUDE.md "Database access"): the hold is a row it writes itself."""
-
-    def __init__(
-        self,
-        blobs: BlobStore,
-        refs: HoldsBlobs,
-        loop: asyncio.AbstractEventLoop,
-        *,
-        timeout: float = MESH_TIMEOUT,
-    ) -> None:
-        self.blobs = blobs
-        self.refs = refs
-        self.loop = loop
-        self.timeout = timeout
-
-    def put(self, path: Path, sha256: str) -> None:
-        # Kept first, then held: `keep_file` touches the blob, which keeps it from the
-        # sweeps until the hold is written (`BlobStore.claim`).
-        with path.open("rb") as source:
-            key = self._run(keep_file(self.blobs, source, sha256))
-        self.refs.add(key, HOLDER, sha256)
-
-    def get(self, sha256: str, dest: Path) -> None:
-        found = self._run(blob_path(self.blobs, blob_key(sha256)))
-        if found is None:
-            raise MeshBlobMissingError(f"the blob store holds no mesh {sha256}")
-        copy_verified(found, dest, sha256)
-
-    def _run[T](self, coro: Coroutine[Any, Any, T]) -> T:
-        try:
-            running: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
-        except RuntimeError:
-            running = None
-        if running is self.loop:
-            coro.close()
-            raise RuntimeError("the mesh store is called from a thread, never its own loop")
-        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(self.timeout)

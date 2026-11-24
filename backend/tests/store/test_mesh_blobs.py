@@ -1,4 +1,4 @@
-"""`library/mesh_blobs.py` `LoopMeshStore` (#7313): a mesh's bytes kept as a blob of
+"""`library/mesh_store.py` `LoopMeshStore` (#7313): a mesh's bytes kept as a blob of
 ScadBuddy's own store, held by `model_mesh` so no sweep ever takes them."""
 
 from __future__ import annotations
@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from scadbuddy.library.mesh_blobs import HOLDER, LoopMeshStore, MeshBlobMissingError
+from scadbuddy.library.mesh_blobs import HOLDER, MeshBlobMissingError
+from scadbuddy.library.mesh_store import LoopMeshStore
 from scadbuddy.orders.attachments import BLOB_FILE, blob_key
 from scadbuddy.store import BlobRefs, sweep_blobs
 from scadbuddy.store.local import LocalBlobStore

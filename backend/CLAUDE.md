@@ -235,9 +235,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `ModelHistory._stage` writes a pointer `meshes/<name>.3mf.blob` (sha256 and size) for
   each mesh a commit's paths hold, storing the bytes as the blob `attachment-<sha256>`
   (`orders/attachments.py` `keep_file`) held in `blob_refs` by `model_mesh` (holder id the
-  sha256), a hold nothing drops. `LoopMeshStore` (set in the API's lifespan, before
-  `ensure_repo`) runs the store's coroutines on the API's loop, so a history call must
-  stay on a thread. Export, restore (`_restore_locked` fetches first, then
+  sha256), a hold nothing drops. `library/mesh_store.py` `LoopMeshStore` (set in the
+  API's lifespan, before `ensure_repo`; apart from `mesh_blobs.py`, since
+  `orders/attachments.py` reaches the history through `library/libraries.py`) runs the
+  store's coroutines on the API's loop, so a history call must stay on a thread. Export, restore (`_restore_locked` fetches first, then
   `_after_checkout`) and `library/upstream.py` `plan_merge` (meshes compared by sha256)
   fill meshes back in; a revision from before then still holds the bytes and is read as
   it is. The start's `ensure_repo` turns meshes still tracked as bytes into pointers in
