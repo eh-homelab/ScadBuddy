@@ -482,3 +482,56 @@ async def test_ready_once_a_full_reconcile_put_the_paths() -> None:
     await subject.reconcile_all()
     assert subject.ready()
     await subject.aclose()
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "169.254.169.254", "203.0.113.9"])
+async def test_reconcile_all_refuses_a_host_off_the_lan(host: str) -> None:
+    """The relay runs `lan_address` at every connect, as the LAN client does: a host off
+    the local network is never put in MediaMTX, and a held path for it is removed."""
+    api = FakeApi([source("p1"), source("p2", host="10.0.0.6")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    api.sources = [source("p1", host=host), source("p2", host="10.0.0.6")]
+    with pytest.raises(SourceError, match="p1") as raised:
+        await subject.reconcile_all()
+    assert host not in str(raised.value)
+    assert set(mtx.paths) == {"p2"}
+    await subject.flushed()
+    assert api.states("p1")[-1] == "stopped"
+    await subject.aclose()
+
+
+async def test_reconcile_refuses_a_host_off_the_lan() -> None:
+    api = FakeApi([source("p1", host="127.0.0.1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    with pytest.raises(SourceError, match="p1"):
+        await subject.reconcile("p1")
+    assert mtx.paths == {}
+    await subject.aclose()
+
+
+async def test_a_host_name_is_dialled_by_its_checked_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MediaMTX gets the address `lan_address` checked, never the name, so a second
+    resolution cannot answer differently (DNS rebinding)."""
+    from scadbuddy.printers import address
+
+    answers = {"printer.lan": "10.0.0.8", "rebound.lan": "169.254.169.254"}
+
+    async def resolve(host: str, port: Any, **kwargs: Any) -> list[Any]:
+        return [(0, 0, 0, "", (answers[host], 0))]
+
+    monkeypatch.setattr(address, "_getaddrinfo", resolve)
+    api = FakeApi([source("p1", host="printer.lan")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    assert mtx.paths["p1"]["source"] == "rtsps://bblp:12345678@10.0.0.8:322/streaming/live/1"
+    api.sources = [source("p1", host="rebound.lan")]
+    with pytest.raises(SourceError):
+        await subject.reconcile("p1")
+    assert mtx.paths == {}
+    await subject.aclose()

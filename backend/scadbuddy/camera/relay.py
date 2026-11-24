@@ -50,6 +50,7 @@ from scadbuddy.camera.process import (
 )
 from scadbuddy.camera.settings import RelaySettings
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, wait_for_areas
+from scadbuddy.printers.address import UnsafeAddressError, lan_address
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,23 @@ def _parse(item: object) -> CameraSourceWithCode:
         raise SourceError(
             f"the API sent a camera source for {name} the relay cannot read: {', '.join(fields)}"
         ) from None
+
+
+async def _dialable(source: CameraSourceWithCode) -> CameraSourceWithCode:
+    """``source`` with its host replaced by the address `lan_address` checked, the same
+    check the LAN client runs at every connect: MediaMTX dials that address, never a name
+    that could resolve differently later. The error names the printer, never the host."""
+    try:
+        address = await lan_address(source.host)
+    except UnsafeAddressError:
+        raise SourceError(
+            f"the camera source for {source.printer_id} is not on the local network"
+        ) from None
+    except OSError:
+        raise SourceError(
+            f"the camera source host for {source.printer_id} did not resolve"
+        ) from None
+    return source.model_copy(update={"host": address})
 
 
 class Relay:
@@ -232,16 +250,21 @@ class Relay:
                 ) from None
             sources: dict[str, CameraSourceWithCode] = {}
             unreadable: list[SourceError] = []
+            refused: set[str] = set()
             for item in items:
                 try:
                     parsed = _parse(item)
                 except SourceError as error:
                     unreadable.append(error)
                     continue
-                sources[parsed.printer_id] = parsed
+                try:
+                    sources[parsed.printer_id] = await _dialable(parsed)
+                except SourceError as error:
+                    unreadable.append(error)
+                    refused.add(parsed.printer_id)
             existing = await self._existing()
             self._held = set(existing)
-            kept = {str(item.get("printer_id")) for item in items}
+            kept = {str(item.get("printer_id")) for item in items} - refused
             for name in sorted((set(existing) | self._feed.printers()) - kept):
                 await self._remove(name, name in existing)
             for printer_id, parsed in sources.items():
@@ -273,6 +296,11 @@ class Relay:
             parsed = _parse(item)
             existing = await self._existing()
             self._held = set(existing)
+            try:
+                parsed = await _dialable(parsed)
+            except SourceError:
+                await self._remove(printer_id, printer_id in existing)
+                raise
             await self._put(printer_id, self._conf(parsed), printer_id in existing)
 
     async def on_hook(self, printer_id: str, event: HookEvent) -> None:
