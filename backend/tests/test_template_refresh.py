@@ -190,6 +190,19 @@ def _two_images(world: World) -> None:
     _image(world.catalogue, "demo")
 
 
+def _two_builtin_images(world: World) -> None:
+    _image(world.catalogue, "builtin:keychain")
+    _image(world.catalogue, "builtin:keychain")
+
+
+def _merge_resolve(world: World) -> None:
+    """The saved resolution of a conflicted upstream merge (`write_source` with
+    ``merge_base``): the upstream's revision becomes the copy's base."""
+    base = world.catalogue.version("demo")
+    assert base is not None
+    world.catalogue.write_source("copy", "cube(6);\n", merge_base=base)
+
+
 def _ids(world: World, slug: str) -> list[str]:
     return [item.id for item in world.catalogue.media_store.items(slug)]
 
@@ -259,6 +272,26 @@ WRITERS: dict[str, Writer] = {
         lambda w: w.catalogue.set_cover("builtin:keychain", _ids(w, "builtin:keychain")[0]),
         lambda w: _image(w.catalogue, "builtin:keychain"),
     ),
+    "builtin_set_caption": Writer(
+        "builtin:keychain",
+        lambda w: w.catalogue.set_caption(
+            "builtin:keychain", _ids(w, "builtin:keychain")[0], "A caption"
+        ),
+        lambda w: _image(w.catalogue, "builtin:keychain"),
+    ),
+    "builtin_reorder": Writer(
+        "builtin:keychain",
+        lambda w: w.catalogue.reorder(
+            "builtin:keychain", list(reversed(_ids(w, "builtin:keychain")))
+        ),
+        _two_builtin_images,
+    ),
+    "builtin_remove_media": Writer(
+        "builtin:keychain",
+        lambda w: w.catalogue.remove_media("builtin:keychain", _ids(w, "builtin:keychain")[0]),
+        lambda w: _image(w.catalogue, "builtin:keychain"),
+    ),
+    "merge_resolve": Writer("copy", _merge_resolve, _upstream_update),
     "merge_upstream": Writer(
         "copy", lambda w: w.catalogue.merge_upstream("copy"), _upstream_update
     ),
