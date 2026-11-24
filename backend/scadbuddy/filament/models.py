@@ -1654,7 +1654,8 @@ BULK_IDS_MAX: Final = 500
 
 
 class SpoolIds(_In):
-    """The spools a bulk archive or restore acts on (#7151, R-7151-2): an explicit list."""
+    """The spools a bulk edit, archive or restore acts on (#7151, R-7151-1, R-7151-2): an
+    explicit list."""
 
     spool_ids: list[UUID] = Field(min_length=1, max_length=BULK_IDS_MAX)
 
@@ -1676,9 +1677,11 @@ class SpoolBulkUpdate(SpoolIds):
 
 
 class SpoolBulkUpdated(BaseModel):
-    """The spools a bulk edit changed (or found already so), and the ids that name none."""
+    """A bulk edit's answer, each list in id order: the spools it changed, those already
+    so, and the ids that name none."""
 
-    updated: list[UUID]
+    changed: list[UUID]
+    unchanged: list[UUID]
     not_found: list[UUID]
 
 

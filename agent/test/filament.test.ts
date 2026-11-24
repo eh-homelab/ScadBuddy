@@ -467,14 +467,14 @@ describe('filament spool tools', () => {
     server.use(
       http.post(`${SPOOLS}/bulk-update`, async ({ request }) => {
         bodies.push(await request.json())
-        return HttpResponse.json({ updated: [ROW], not_found: [] })
+        return HttpResponse.json({ changed: [ROW], unchanged: [], not_found: [] })
       }),
     )
     const input = { spool_ids: [ROW], patch: { note: 'June order', cost_per_kg: null } }
     const result = await runTool(tool('filament_spools_bulk_update'), input, ctx())
     expect(result.isError).toBeFalsy()
     expect(bodies).toEqual([input])
-    expect(firstText(result)).toEqual({ updated: [ROW], not_found: [] })
+    expect(firstText(result)).toEqual({ changed: [ROW], unchanged: [], not_found: [] })
     expect(() => tool('filament_spools_bulk_update').parse({ spool_ids: [], patch: { note: 'x' } })).toThrow()
     expect(tool('filament_spools_bulk_update').risk).toBe('write')
   })

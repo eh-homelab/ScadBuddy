@@ -57,7 +57,7 @@ describe('the bulk bar', () => {
     server.use(
       http.post('/api/v1/filament/spools/bulk-update', async ({ request }) => {
         bodies.push(await request.json())
-        return HttpResponse.json({ updated: ['s1', 's2'], not_found: [] })
+        return HttpResponse.json({ changed: ['s1'], unchanged: ['s2'], not_found: [] })
       }),
     )
     const onDone = vi.fn()
@@ -71,8 +71,31 @@ describe('the bulk bar', () => {
     await user.type(within(dialog).getByRole('textbox', { name: 'Low stock (%)' }), '15')
     await user.click(within(dialog).getByRole('checkbox', { name: 'Change Cost per kg' }))
     await user.click(within(dialog).getByRole('button', { name: 'Change 2 spools' }))
-    await waitFor(() => expect(onDone).toHaveBeenCalledWith('Changed 2 spools.'))
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith('Changed 1 spool. 1 spool already had these values.'))
     expect(bodies).toEqual([{ spool_ids: ['s1', 's2'], patch: { note: 'June order', low_stock_pct: 15, cost_per_kg: null } }])
+  })
+
+  it('words the Type pick\'s clear choice as "No type" and shows each subtype\'s material (#7322)', async () => {
+    server.use(
+      http.get('/api/v1/filament/catalog/materials', () => HttpResponse.json([{ id: 'm1', name: 'PLA' }, { id: 'm2', name: 'PETG' }])),
+      http.get('/api/v1/filament/catalog/subtypes', () =>
+        HttpResponse.json([
+          { id: 'u1', name: 'Silk', material_id: 'm1' },
+          { id: 'u2', name: 'Silk', material_id: 'm2' },
+        ]),
+      ),
+    )
+    const { user } = renderPage(<BulkBar selected={two} places={[]} types={[]} onDone={() => {}} onClear={() => {}} />)
+    await user.click(screen.getByRole('button', { name: 'Edit fields' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Edit 2 spools' })
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Change Type' }))
+    await user.click(within(dialog).getByRole('combobox', { name: 'Type' }))
+    expect(await screen.findByRole('option', { name: 'No type' })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Change Subtype' }))
+    await user.click(within(dialog).getByRole('combobox', { name: 'Subtype' }))
+    expect(await screen.findByRole('option', { name: 'Silk (PLA)' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Silk (PETG)' })).toBeInTheDocument()
   })
 
   it('keeps the edit open with the reason when one spool refuses it (#7151)', async () => {
