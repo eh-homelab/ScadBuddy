@@ -381,3 +381,9 @@ async def test_two_recorders_no_gap_on_leader_kill(
     # The first segment, and the handover's: no other.
     flags = [row["discontinuity"] for row in rows]
     assert flags == [i in (0, len(rows) - len(after)) for i in range(len(rows))], table
+    # Spec §6.8: no MediaMTX process writes the relay read password to its output. The relay
+    # gets it from MTX_AUTHINTERNALUSERS_0_PASS, each recorder inside its paths' source URL.
+    for name in ("printer", "relay", "rec-a", "rec-b"):
+        output = (tmp_path / f"{name}.log").read_text(errors="replace")
+        assert output, f"{name} wrote nothing: the check would prove nothing"
+        assert READ_PASS not in output, f"{name}.log holds the relay read password"
