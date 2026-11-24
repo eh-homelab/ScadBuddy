@@ -179,6 +179,20 @@ def test_row_of_meta_that_is_not_json(catalogue: Catalogue, paths: DataPaths) ->
     assert row.name == "demo"
 
 
+def test_row_of_meta_with_an_integer_too_long_to_read(
+    catalogue: Catalogue, paths: DataPaths
+) -> None:
+    # Review A-M1 (#7317): Python's int parser refuses more than 4300 digits (ValueError).
+    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
+    text = '{"name": "Demo", "x": ' + "1" * 5000 + "}"
+    paths.model_meta("demo").write_text(text, encoding="utf-8")
+    row = _row(catalogue, "demo")
+    assert row.meta is None
+    assert row.meta_error is not None
+    assert row.meta_error.startswith("not JSON")
+    assert row.meta_text == text
+
+
 def test_row_of_meta_that_does_not_parse_keeps_meta(catalogue: Catalogue, paths: DataPaths) -> None:
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
     paths.model_meta("demo").write_text('{"name": "Demo", "tags": 5}', encoding="utf-8")

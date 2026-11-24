@@ -3343,7 +3343,9 @@ def _raw_meta_of(slug: str, data: bytes) -> dict[str, Any]:
     """The ``model.json`` bytes ``data`` as `Catalogue.read_raw_meta` answers them."""
     try:
         loaded: Any = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+    # `ValueError` covers `UnicodeDecodeError`, `JSONDecodeError` and an integer too long
+    # for Python's int parser (review A-M1, #7317).
+    except (ValueError, RecursionError) as error:
         raise InvalidModelMetaError(slug, f"not JSON ({error})") from None
     return loaded if isinstance(loaded, dict) else {}
 
