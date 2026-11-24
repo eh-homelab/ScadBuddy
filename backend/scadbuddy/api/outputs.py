@@ -1137,8 +1137,8 @@ class OutputBytesStatus(BaseModel):
     API start, or in a housekeeping sweep."""
 
     started_at: datetime
-    #: ``None`` while the run goes on, when it stopped before its end, when it is
-    #: ``incomplete``, or when it was ``refused``.
+    #: ``None`` while the run goes on, when it stopped before its end, when an output
+    #: ``failed``, when it is ``incomplete``, or when it was ``refused``.
     finished_at: datetime | None
     #: A folder could not be read (a failed stat). The next run tries again.
     incomplete: bool
@@ -1149,8 +1149,8 @@ class OutputBytesStatus(BaseModel):
     verified: int
     #: Outputs whose files did not change since the copy put their bytes.
     skipped: int
-    #: At most what the outputs still in files need of the quota: blobs that a failed run
-    #: already put are counted again until the sweep removes them.
+    #: What the outputs still in files need of the quota, or more, never less: blobs that a
+    #: failed run already put are counted again until the sweep removes them.
     needed_bytes: int
     needed_count: int
     #: ``{output_id, role, error}`` for each output whose bytes could not be read, put or

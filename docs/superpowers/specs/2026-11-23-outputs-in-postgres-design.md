@@ -183,13 +183,14 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    The byte copy (`library/output_byte_copy.py` `copy_output_bytes`) runs after the row
    copy at each API start and in the housekeeping sweep `housekeeping_copy_output_bytes`
    (`OUTPUT_BYTES_SWEEP`), under a session advisory lock that holds one autocommit
-   connection for up to the run's timeout (30 min, `OUTPUT_BYTES_TIMEOUT`). It compares
+   connection for the whole run (in the sweep up to its timeout, 30 min,
+   `OUTPUT_BYTES_TIMEOUT`; at a start with no bound). It compares
    each byte file with its blob by sha256, puts a changed one with a compare-and-swap,
    reads back what it put (and every blob of a row not copied before), and names the
    keys in batches. Before any put it checks the store's caps against the bytes and
    count of the rows still in files; past one it is `refused` and names the shortfall.
-   That count is at most what it adds: blobs a failed run already put are counted again
-   until the sweep removes them. It is refused on `local` (no content store, plan
+   That count can be more than it adds, never less: blobs a failed run already put are
+   counted again until the sweep removes them. It is refused on `local` (no content store, plan
    Ruling R1) and on `bambuddy` (§6.4); a store migration to `bambuddy` is refused while
    any `output` blob exists. `GET /outputs/copy-status` answers its last run as `bytes`,
    with `pending`, the rows whose bytes the files still hold.

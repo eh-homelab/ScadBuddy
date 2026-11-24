@@ -469,7 +469,7 @@ on shutdown.
     output backfill's claim, the service credential rotation and the flow keys. The copy
     of the saved outputs to rows (#7255) and the copy of their bytes to the blob store
     (#7256, after it) each take their connections from the main pool: one that holds its
-    advisory lock for the whole run (the byte copy's up to its 30-minute timeout), and
+    advisory lock for the whole run (the byte copy's up to its 30-minute timeout in the sweep, with no bound at a start), and
     one more for each statement. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main
     pool one more) and closes a connection left idle for a minute, one a minute

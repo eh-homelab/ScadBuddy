@@ -210,7 +210,8 @@ after the row copy, and the housekeeping sweep `housekeeping_copy_output_bytes`
 (`workflows/housekeeping.py` `OUTPUT_BYTES_SWEEP`, after `OUTPUT_COPY_SWEEP`, on the
 sweeps' Schedule) runs it again, with a timeout of 30 minutes (`OUTPUT_BYTES_TIMEOUT`). One
 replica copies at a time, under a session advisory lock. That lock holds one autocommit
-connection of the pool (no transaction) for the whole run, up to that timeout. Each run is
+connection of the pool (no transaction) for the whole run: in the sweep up to that timeout,
+and at a start with no bound (the first start after the roll-out copies every output). Each run is
 a row of `output_byte_runs`. It reconciles:
 
 - A row whose `bytes_at` is set and whose `bytes_stamp` (the name, size and `mtime_ns` of
@@ -233,10 +234,10 @@ a row of `output_byte_runs`. It reconciles:
   a missing file makes the run `incomplete`.
 
 Refusals: before any put, the copy adds up the bytes and the count of the rows with
-`bytes_at` NULL and checks them against `store_max_total_bytes` and `store_max_count`.
+`bytes_at` NULL (an output with a bad `files/` name adds nothing, as it is not copied) and checks them against `store_max_total_bytes` and `store_max_count`.
 Past a cap, the run is `refused`, names the shortfall and puts nothing. The needed bytes
-and count are at most what the copy will add: blobs that a failed run already put are
-counted again until the sweep removes them. On the `local` and the `bambuddy` backends
+and count can be more than the copy will add, never less: blobs that a failed run already
+put are counted again until the sweep removes them. On the `local` and the `bambuddy` backends
 every run is refused.
 
 A run has a `finished_at` only when nothing was refused, failed or incomplete and it was
