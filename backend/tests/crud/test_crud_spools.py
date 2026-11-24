@@ -125,13 +125,6 @@ _HOSTED = {
 _CREDENTIALS = {"printhost_apikey", "printhost_password", "printhost_user", "upload_token"}
 
 
-async def test_the_retired_held_presets_reads_answer_empty() -> None:
-    """No copy of Bambuddy's local presets is kept (#7244): a print worker of an older
-    build, during a roll, reads none and so slices none."""
-    assert await crud_print.held_presets() == []
-    assert await crud_print.held_preset_documents([7]) == {}
-
-
 def test_the_own_presets_area_is_served_and_awaited() -> None:
     """ScadBuddy's own filament presets (#7176), an area of their own, appended."""
     assert "own-presets" in PRINT_CRUD_AREAS
@@ -269,10 +262,11 @@ def _rows(store: SettingsStore, table: str) -> list[dict[str, Any]]:
 
 
 @pytest.mark.requires_postgres
-async def test_the_held_presets_routes_answer_empty(crud: CrudClient) -> None:
-    assert (await crud.request("GET", f"{BASE}/held-presets")).json() == []
-    answer = await crud.request("GET", f"{BASE}/held-presets/documents?id=7")
-    assert answer.json() == {}
+@pytest.mark.parametrize("path", ["/held-presets", "/held-presets/documents?id=7"])
+async def test_the_held_presets_routes_are_gone(crud: CrudClient, path: str) -> None:
+    """#7275: the kept copy and its table are gone, and no print worker from before #7244
+    is left to call them."""
+    assert (await crud._http.get(f"{BASE}{path}")).status_code == 404
 
 
 @pytest.mark.requires_postgres
@@ -312,8 +306,6 @@ async def test_a_native_slice_sent_twice_starts_once(
 def test_another_callers_credential_is_refused(store: SettingsStore) -> None:
     with threaded_print_crud(store, caller="projects") as client:
         for method, path in (
-            ("GET", f"{BASE}/held-presets"),
-            ("GET", f"{BASE}/held-presets/documents?id=1"),
             ("GET", f"{BASE}/own-presets"),
             ("GET", f"{BASE}/own-presets/documents?id=1"),
             ("POST", f"{BASE}/native-slices/start"),

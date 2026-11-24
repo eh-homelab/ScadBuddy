@@ -18,8 +18,9 @@ from typing import Any
 
 from google.protobuf.any_pb2 import Any as Any_
 from temporalio.api.common.v1 import GrpcStatus
+from temporalio.api.enums.v1 import EventType
 from temporalio.api.errordetails.v1 import NamespaceNotFoundFailure
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowHandle
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
@@ -152,6 +153,17 @@ def _dev_server(db_file: Path) -> Iterator[str]:
     finally:
         loop.run_until_complete(env.shutdown())
         loop.close()
+
+
+async def cancel_recorded(handle: WorkflowHandle[Any, Any]) -> None:
+    """Cancel ``handle``'s workflow and return once its history holds the cancel request,
+    so a recorder (#7433) opens its gate only after the server recorded the cancel."""
+    await handle.cancel()
+    while not any(
+        event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+        for event in (await handle.fetch_history()).events
+    ):
+        await asyncio.sleep(0.05)
 
 
 async def terminate_open_workflows(client: Client, task_queue: str) -> None:

@@ -82,5 +82,24 @@ test.describe('sell on storefront', () => {
     await expect(page).toHaveURL(/\/storefront\/listings\/[0-9a-f-]{36}$/)
     await expect(page.getByTestId('listing-source')).toContainText('Library file')
     await expect(page.getByTestId('listing-picture').getByText('Live', { exact: true })).toBeVisible()
+
+    // #6710 §6.3 — the public page of the published file: a picker per part, the held
+    // preview drawn in the colours picked, and a price, with no render.
+    const id = /\/storefront\/listings\/([0-9a-f-]{36})$/.exec(page.url())![1]!
+    const renders: string[] = []
+    page.on('request', (request) => {
+      if (/\/api\/store\/v1\/(renders|listings\/[^/]+\/variant)/.test(new URL(request.url()).pathname)) renders.push(request.url())
+    })
+    await page.goto(`/store/l/${id}`)
+    await expect(page.getByRole('heading', { name: 'Bag clip', level: 1 })).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Part 1/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Part 2/ })).toBeVisible()
+    await expect(page.locator('canvas')).toBeVisible()
+    await expect(page.getByText(/^\$7\.00 for one$/)).toBeVisible()
+    // The page shows no file name and no material.
+    await expect(page.getByText(/bag-clip|\.3mf|PLA|PETG/)).toHaveCount(0)
+    await page.getByRole('button', { name: 'Add to order' }).click()
+    await expect(page.getByText('Added to your order.')).toBeVisible()
+    expect(renders).toEqual([])
   })
 })

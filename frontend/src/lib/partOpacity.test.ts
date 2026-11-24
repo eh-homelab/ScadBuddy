@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { describe, expect, it } from 'vitest'
 import { designOpacityOf } from './glbColor'
-import { applyPartOpacity, recolourParts, slotOpacity, withPartOpacity } from './partOpacity'
+import { applyPartOpacity, ownSlotMaterials, recolourParts, recolourSlots, slotOpacity, withPartOpacity } from './partOpacity'
 
 /** Two meshes sharing one material, as the loader's cache gives them. */
 function scene(alpha?: number) {
@@ -150,5 +150,46 @@ describe('slotOpacity (#6349)', () => {
     expect(slotOpacity('#FFFFFF', 0.5)).toBe(0.5)
     expect(slotOpacity(undefined, 0.5)).toBe(0.5)
     expect(slotOpacity('#FFFFFFFF', 0.5)).toBe(1)
+  })
+})
+
+describe('recolourSlots (#6710 §8.2)', () => {
+  function slotted() {
+    const shared = new THREE.MeshStandardMaterial({ color: '#808080' })
+    const body = new THREE.Mesh(new THREE.BoxGeometry(), shared)
+    body.userData.scadbuddy_colour = '#FF6AC1'
+    body.userData.scadbuddy_slot = 0
+    const top = new THREE.Mesh(new THREE.BoxGeometry(), shared)
+    top.userData.scadbuddy_colour = '#1F6FEB'
+    top.userData.scadbuddy_slot = 1
+    const loose = new THREE.Mesh(new THREE.BoxGeometry(), shared)
+    loose.userData.scadbuddy_colour = '#00FF00'
+    const root = new THREE.Group()
+    root.add(body, top, loose)
+    return { root, shared, body, top, loose }
+  }
+
+  it("colours each mesh by its slot's colour, on materials of its own", () => {
+    const { root, shared, body, top, loose } = slotted()
+    const owned = ownSlotMaterials(root)
+    expect(owned).toHaveLength(2)
+    recolourSlots(root, { 0: '#E8532FFF', 1: '#1B6CA880' })
+    const bodyMaterial = body.material as THREE.MeshStandardMaterial
+    const topMaterial = top.material as THREE.MeshStandardMaterial
+    expect(bodyMaterial).not.toBe(shared)
+    expect(bodyMaterial.color.getHexString(THREE.SRGBColorSpace)).toBe('e8532f')
+    expect(bodyMaterial.transparent).toBe(false)
+    expect(topMaterial.color.getHexString(THREE.SRGBColorSpace)).toBe('1b6ca8')
+    expect(topMaterial.transparent).toBe(true)
+    // A mesh with no slot is left as it is, and the loader's shared material is untouched.
+    expect(loose.material).toBe(shared)
+    expect(shared.color.getHexString(THREE.SRGBColorSpace)).toBe('808080')
+  })
+
+  it("keeps a slot with no colour given in the file's own colour", () => {
+    const { root, body } = slotted()
+    ownSlotMaterials(root)
+    recolourSlots(root, { 1: '#000000FF' })
+    expect((body.material as THREE.MeshStandardMaterial).color.getHexString(THREE.SRGBColorSpace)).toBe('ff6ac1')
   })
 })

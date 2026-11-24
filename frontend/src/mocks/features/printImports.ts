@@ -86,7 +86,22 @@ function importedPrint(archive: PastPrint, slug: string | null, record: Imported
   }
 }
 
+/** #7335 — the 404 of a library file that is gone (backend `api/print_imports.py`). */
+const LIBRARY_FILE_GONE = 'https://scadbuddy.dev/problems/print-imports/library-file-gone'
+
 export const handlers = [
+  http.get('/api/v1/print-imports/library-files/:fileId', ({ params }) => {
+    const id = Number(params['fileId'])
+    if (!NATIVE_FILES.has(id)) {
+      return HttpResponse.json(
+        { type: LIBRARY_FILE_GONE, title: 'Not Found', status: 404, detail: `library file ${id} was deleted or replaced in ScadBuddy's library: choose the file again`, file_id: id, replacement: null },
+        { status: 404 },
+      )
+    }
+    const known = Object.values(SUGGESTED_FILES).flat().find((f) => f.id === id)
+    return HttpResponse.json({ id, filename: known?.filename ?? `file-${id}.3mf`, folder_id: known?.folder_id ?? null })
+  }),
+
   http.get('/api/v1/print-imports/:archiveId/sources', ({ params, request }) => {
     const archive = pastPrint(Number(params['archiveId']))
     if (!archive) return problem(404, 'Not Found', `Bambuddy has no archive ${String(params['archiveId'])}`)

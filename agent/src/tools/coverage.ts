@@ -17,6 +17,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "A multipart upload and a binary download. The assistant gets an invoice's file in the import session's first message, as an image or a PDF document block (#6267), not through a tool.",
   })),
   {
+    operation: 'GET /api/v1/print-imports/library-files/{file_id}',
+    reason:
+      "The Import print dialog's check, on focus, that its chosen library file still stands (#7335). The assistant imports with import_print, which gets the same refusals and the replacement from the import itself.",
+  },
+  {
     operation: 'POST /api/v1/filament/labels',
     reason:
       "The labels PDF (#7157, R-7157-10): the answer is a binary file that the assistant cannot read as text. The download tools' pattern (outputs.ts `binary`) embeds base64, which images and files never travel as (#2479), or links a GET, and this is a POST. The Labels page downloads it; the assistant reads the codes with filament_printer_labels and the sizes with filament_label_templates.",

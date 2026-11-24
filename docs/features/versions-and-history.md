@@ -22,7 +22,7 @@ one commit.
   schema, diff, restore `:158-298`), `backend/scadbuddy/api/outputs.py:141`.
 - Git: `backend/scadbuddy/library/history.py` (`restore` `:208`, `diff` `:462`),
   `backend/scadbuddy/core/gitrepo.py`.
-- Off-box history: an optional push to a git remote, `backend/scadbuddy/git_remote/push.py:181`.
+- Off-box history: an optional push to a git remote, `backend/scadbuddy/git_remote/push.py:254`.
 
 ## Data
 
