@@ -4,6 +4,7 @@ lists what it cannot read, runs on one replica at a time and stops when told."""
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import errno
 import os
@@ -14,6 +15,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 
 from scadbuddy.core.paths import DataPaths
@@ -597,3 +599,49 @@ def test_a_complete_run_is_not_incomplete(
     assert result is not None and result.incomplete is False
     last = rows.last_run()
     assert last is not None and last["incomplete"] is False
+
+
+class _FailingUnlock:
+    """A connection whose advisory unlock fails, as one whose server went away would."""
+
+    def __init__(self, conn: Any) -> None:
+        self.conn = conn
+
+    def execute(self, query: str, params: Any = None) -> Any:
+        if "pg_advisory_unlock" in query:
+            raise OSError("the connection broke")
+        return self.conn.execute(query, params)
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+class _FailingUnlockPool:
+    def __init__(self, pool: Any) -> None:
+        self.pool = pool
+        self.used: list[Any] = []
+
+    @contextlib.contextmanager
+    def connection(self) -> Iterator[_FailingUnlock]:
+        with self.pool.connection() as conn:
+            self.used.append(conn)
+            yield _FailingUnlock(conn)
+
+
+def test_a_failed_unlock_closes_the_lock_connection(
+    files: tuple[DataPaths, Job, list[OutputMeta]], projection: JobProjection, pg_conninfo: str
+) -> None:
+    """A connection whose unlock failed would go back to the pool with the lock held,
+    and no other replica could copy. Closing it ends its session, and the lock."""
+    paths, _, _ = files
+    store, rows = _stores(paths, projection)
+    pool = _FailingUnlockPool(projection.pool)
+    result = copy_outputs(store, rows, pool)  # type: ignore[arg-type]
+    assert result is not None
+    [conn] = pool.used
+    assert conn.closed
+    with psycopg.connect(pg_conninfo, autocommit=True) as other:
+        got = other.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (COPY_LOCK,)
+        ).fetchone()
+        assert got is not None and got[0] is True

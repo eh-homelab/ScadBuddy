@@ -173,10 +173,15 @@ def copy_outputs(
         try:
             return _copy(store, rows, stop)
         finally:
-            # A failed unlock must not hide the copy's own error. The lock ends with the
-            # session in any case.
-            with contextlib.suppress(Exception):
+            try:
                 lock.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (COPY_LOCK,))
+            except Exception:
+                # A failed unlock must not hide the copy's own error. The connection
+                # must not go back to the pool with the lock held: closing it ends its
+                # session, which releases the lock, and the pool drops a closed one.
+                logger.warning("could not release the output copy's lock; closed its connection")
+                with contextlib.suppress(Exception):
+                    lock.close()
 
 
 def _has_meta(directory: Path) -> bool:
