@@ -1,16 +1,18 @@
 """`GET /outputs/copy-status` (#7255): the last run of the copy of the saved outputs' files
-to rows, at an API start or in a housekeeping sweep. The tests' apps skip the start's
-copy (`app_output_copy_off`), so each test writes the runs it reads."""
+to rows, at an API start or in a housekeeping sweep, and the last run of the copy of
+their bytes to the blob store (#7256). The tests' apps skip the start's copies
+(`app_output_copy_off`), so each test writes the runs it reads."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.library.output_rows import OutputRows
-from scadbuddy.library.outputs import OutputStore
+from scadbuddy.library.output_rows import ByteWrite, OutputBlobs, OutputRow, OutputRows
+from scadbuddy.library.outputs import OutputMeta, OutputStore
+from scadbuddy.render.glb import BoundingBox
 
 
 def _rows(client: TestClient) -> OutputRows:
@@ -62,3 +64,98 @@ def test_copy_status_404_before_any_run(client: TestClient) -> None:
     response = client.get("/api/v1/outputs/copy-status")
     assert response.status_code == 404
     assert "copy" in response.json()["detail"]
+
+
+def _row(output_id: str) -> OutputRow:
+    now = datetime.now(UTC)
+    meta = OutputMeta(
+        id=output_id,
+        slug="box",
+        job_id="j",
+        created_at=now,
+        bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+    )
+    return OutputRow(
+        output_id=output_id,
+        slug="box",
+        meta=meta,
+        params={},
+        inputs=None,
+        record=None,
+        manifest=None,
+        bom=None,
+        arranged_from=None,
+        backfill=None,
+        has_plate_cover=False,
+        copied_at=now,
+    )
+
+
+def test_copy_status_reports_byte_run_and_pending(client: TestClient) -> None:
+    """#7256: the last byte copy run, and how many rows the files still hold the bytes
+    of now."""
+    rows = _rows(client)
+    rows.finish_run(
+        rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[]
+    )
+    for output_id in ("a" * 32, "b" * 32):
+        rows.insert(_row(output_id))
+    rows.write_bytes([ByteWrite("a" * 32, OutputBlobs(), "stamp", [])])
+    failed = [{"output_id": "b" * 32, "role": "model", "error": "OSError"}]
+    damaged = [{"output_id": "c" * 32, "role": "preview", "error": "missing"}]
+    run = rows.start_byte_run()
+    rows.end_byte_run(
+        run,
+        finished=True,
+        incomplete=False,
+        refused=None,
+        copied=5,
+        verified=4,
+        skipped=3,
+        needed_bytes=1024,
+        needed_count=2,
+        failed=failed,
+        damaged=damaged,
+    )
+
+    body = client.get("/api/v1/outputs/copy-status").json()
+    byte_run = body["bytes"]
+    assert byte_run is not None
+    started = datetime.fromisoformat(byte_run["started_at"])
+    assert started <= datetime.fromisoformat(byte_run["finished_at"])
+    assert byte_run["incomplete"] is False and byte_run["refused"] is None
+    counts = ("copied", "verified", "skipped", "needed_bytes", "needed_count")
+    assert tuple(byte_run[name] for name in counts) == (5, 4, 3, 1024, 2)
+    assert byte_run["failed"] == failed and byte_run["damaged"] == damaged
+    assert byte_run["pending"] == 1
+    assert "id" not in byte_run
+
+    # A refused run is the last run: no end, the reason, and nothing copied.
+    refused = rows.start_byte_run()
+    rows.end_byte_run(
+        refused,
+        finished=False,
+        incomplete=False,
+        refused="the store is full",
+        copied=0,
+        verified=0,
+        skipped=0,
+        needed_bytes=2048,
+        needed_count=1,
+        failed=[],
+        damaged=[],
+    )
+    later = client.get("/api/v1/outputs/copy-status").json()["bytes"]
+    assert later["finished_at"] is None
+    assert later["refused"] == "the store is full"
+    assert later["pending"] == 1
+
+
+def test_copy_status_bytes_null_before_any_byte_run(client: TestClient) -> None:
+    rows = _rows(client)
+    rows.finish_run(
+        rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[]
+    )
+    rows.insert(_row("a" * 32))
+    body = client.get("/api/v1/outputs/copy-status").json()
+    assert body["bytes"] is None

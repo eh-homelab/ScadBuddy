@@ -1132,6 +1132,37 @@ def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
     return metas
 
 
+class OutputBytesStatus(BaseModel):
+    """The last run of the copy of the saved outputs' bytes to the blob store (#7256): at an
+    API start, or in a housekeeping sweep."""
+
+    started_at: datetime
+    #: ``None`` while the run goes on, when it stopped before its end, when it is
+    #: ``incomplete``, or when it was ``refused``.
+    finished_at: datetime | None
+    #: A folder could not be read (a failed stat). The next run tries again.
+    incomplete: bool
+    #: Why the run copied nothing: no blob store (``local``), the ``bambuddy`` store, or
+    #: a quota the bytes do not fit in (with the shortfall). ``None`` when it ran.
+    refused: str | None
+    copied: int
+    verified: int
+    #: Outputs whose files did not change since the copy put their bytes.
+    skipped: int
+    #: At most what the outputs still in files need of the quota: blobs that a failed run
+    #: already put are counted again until the sweep removes them.
+    needed_bytes: int
+    needed_count: int
+    #: ``{output_id, role, error}`` for each output whose bytes could not be read, put or
+    #: verified. The output gets no write; the next run tries again.
+    failed: list[dict[str, Any]]
+    #: ``{output_id, role, error}`` for each missing byte file, and ``names`` too for a
+    #: ``files/`` folder with a name an output may not hold.
+    damaged: list[dict[str, Any]]
+    #: How many rows the files still hold the bytes of now.
+    pending: int
+
+
 class OutputCopyStatus(BaseModel):
     """The last run of the copy of the saved outputs' files to rows (#7255): at an API start,
     or in a housekeeping sweep."""
@@ -1151,6 +1182,8 @@ class OutputCopyStatus(BaseModel):
     not_copied: list[str]
     #: ``{output_id, slug, file, error}`` for each side file left out of its row.
     damaged: list[dict[str, Any]]
+    #: The last run of the byte copy (#7256); ``None`` before any.
+    bytes: OutputBytesStatus | None = None
 
 
 # Before `/outputs/{output_id}`, which would take `copy-status` for an id.
@@ -1163,12 +1196,16 @@ async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
     """The last run of the copy of the outputs' files to rows (#7255), at an API start or in
     a housekeeping sweep: when it started and finished, what it copied, refreshed and
     dropped, the folders it could not copy and the side files it left out. 404 before any
-    run."""
+    run. ``bytes``: the last run of the copy of their bytes to the blob store (#7256), and
+    how many rows the files still hold the bytes of."""
     rows = outputs.rows
     last = None if rows is None else await asyncio.to_thread(rows.last_run)
-    if last is None:
+    if rows is None or last is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "no copy of the outputs to rows has run")
-    return OutputCopyStatus.model_validate(last)
+    byte_run = await asyncio.to_thread(rows.last_byte_run)
+    if byte_run is not None:
+        byte_run["pending"] = await asyncio.to_thread(rows.pending_bytes)
+    return OutputCopyStatus.model_validate({**last, "bytes": byte_run})
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")
