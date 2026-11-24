@@ -433,12 +433,6 @@ def test_no_printer_model_is_logged_once_per_confirm(
     assert "no printer has a model" in warning.getMessage()
 
 
-def _fetch_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
-    """The profile fetch's own records: ``caplog`` also holds every other logger's
-    warnings, such as ``core/loop_watch.py``'s stall warning on a loaded runner."""
-    return [r for r in caplog.records if r.name == profile_fetch.__name__]
-
-
 # -- a run no worker serves (build Decision 62) ------------------------------------------
 
 
