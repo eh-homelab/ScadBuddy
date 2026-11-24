@@ -596,3 +596,69 @@ def test_capture_takes_the_printer_lock_before_it_makes_a_place(pg_pool: PgPool)
     )
     assert result.loaded == 1
     assert _row(pg_pool, spool)["location_id"] == _tray_place(pg_pool, pid)
+
+
+def _tag_row(pool: PgPool, tray_uuid: str) -> dict[str, Any]:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id, last_seen_source, last_seen_at FROM filament_tags WHERE tray_uuid = %s",
+            (tray_uuid,),
+        ).fetchone()
+    assert row is not None
+    return dict(row)
+
+
+def _count_tags(pool: PgPool) -> int:
+    with pool.connection() as conn:
+        row = conn.execute("SELECT count(*) AS n FROM filament_tags").fetchone()
+    assert row is not None
+    return int(row["n"])
+
+
+def test_a_tagged_tray_marks_its_tag_seen_by_the_ams(pg_pool: PgPool) -> None:
+    """#7273 G3: an AMS reading goes through `tags.seen_on`, as a phone's does."""
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    result = _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    assert result.loaded == 1
+    assert [e.data["by"] for e in _events(pg_pool, spool, "loaded")] == ["tag"]
+    row = _tag_row(pg_pool, U1)
+    assert row["last_seen_source"] == "ams" and row["last_seen_at"] is not None
+
+
+def test_an_unknown_ams_tag_makes_no_tag_row(pg_pool: PgPool) -> None:
+    pid, _ = _printer(pg_pool)
+    _reconcile(pg_pool, pid, _report(_tray(1, U2, tag_uid="04A1B2C3D4E5F6")))
+    assert _count_tags(pg_pool) == 0
+
+
+def test_a_resent_report_does_not_touch_the_tag_again(pg_pool: PgPool) -> None:
+    """The second write shows the same trays, so `trays_changed` runs no reconcile."""
+    _spool(pg_pool, tray_uuid=U1)
+    pid, reports = _printer(pg_pool)
+    report = _report(_tray(1, U1, remain=80))
+    seen = []
+    for _ in range(2):
+        with pg_pool.connection() as conn, conn.transaction():
+            reports.advance_in(conn, pid, report, T0)
+        seen.append(_tag_row(pg_pool, U1)["last_seen_at"])
+    assert seen[0] is not None and seen[1] == seen[0]
+
+
+def test_a_tag_locked_by_a_bind_is_skipped_not_waited_on(pg_pool: PgPool) -> None:
+    """A bind locks the tag before its spools; the capture holds spools, so its mark skips
+    a locked tag row (`SKIP LOCKED`) rather than wait on it. The lock timeout turns a wait
+    into a failure, not a hang."""
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    before = _tag_row(pg_pool, U1)
+    with pg_pool.connection() as holder, holder.transaction():
+        holder.execute("SELECT 1 FROM filament_tags WHERE id = %s FOR UPDATE", (before["id"],))
+        with pg_pool.connection() as conn, conn.transaction():
+            conn.execute("SET LOCAL lock_timeout = '2s'")
+            result = capture.reconcile(
+                conn, pid, _report(_tray(1, U1)), T0, actor=capture.WATCH_ACTOR
+            )
+    assert result.loaded == 1
+    assert [e.kind for e in _events(pg_pool, spool, "loaded")] == ["loaded"]
+    assert _tag_row(pg_pool, U1)["last_seen_at"] == before["last_seen_at"]
