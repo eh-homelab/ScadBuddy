@@ -433,6 +433,18 @@ class ContentStore:
         async with aclosing(self.get(ref)) as chunks:
             return b"".join([chunk async for chunk in chunks])
 
+    async def verify(self, ref: BlobRef) -> bool:
+        """Whether the backend holds ``ref``'s bytes whole: a download from the backend,
+        never from `downloads`, checked against its sha256. False when the object is
+        missing or its bytes are not its sha256."""
+        try:
+            async with aclosing(self._download(ref)) as chunks:
+                async for _ in chunks:
+                    pass
+        except (BlobCorruptError, BlobMissingError):
+            return False
+        return True
+
     async def stat(self, key: str) -> BlobStat | None:
         stat = await asyncio.to_thread(self.index.get, key)
         if stat is None or stat.ref.backend != self.name:
