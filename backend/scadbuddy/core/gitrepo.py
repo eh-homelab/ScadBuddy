@@ -976,6 +976,11 @@ class GitRepo:
             return None
         return completed.stdout.strip() or None
 
+    def last_commit_checked(self, path: str) -> str | None:
+        """As `last_commit`, but a git failure raises `GitError` in place of answering
+        None, so a caller can tell "no commit touched it" from "git did not answer"."""
+        return self._out("log", "-1", "--format=%H", "--", path).strip() or None
+
     def log(
         self, path: str | None = None, *, limit: int = DEFAULT_LOG_LIMIT, rev: str | None = None
     ) -> list[Revision]:

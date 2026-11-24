@@ -370,3 +370,35 @@ def test_a_write_lock_timeout_in_a_batch_is_incomplete_and_the_run_goes_on(
     last = world.rows.last_run()
     assert last is not None
     assert last["incomplete"] is True and last["finished_at"] is None
+
+
+def test_a_git_failure_reading_a_version_keeps_the_stored_version(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Task 5 review B-M2: the walk had no versions (`versions()` failed and answered
+    # `{}`), and each template's own `git log -1` fails too. The rows keep their stored
+    # versions, never None, and the run is incomplete.
+    _copy(world)
+    before = world.rows.get("demo")
+    assert before is not None and before.version is not None
+    (world.catalogue.paths.models / "demo" / "model.json").write_text(
+        json.dumps({"name": "Edited by hand"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(Catalogue, "versions", lambda self: {})
+    run = ModelHistory._run
+
+    def failing_log(self: ModelHistory, *args: str, **kwargs: Any) -> Any:
+        if args[:2] == ("log", "-1"):
+            if kwargs.get("check", True):
+                raise GitError("git log failed", "fatal: unable to read tree")
+            return subprocess.CompletedProcess(args, 128, "", "fatal: unable to read tree")
+        return run(self, *args, **kwargs)
+
+    monkeypatch.setattr(ModelHistory, "_run", failing_log)
+    result = _copy(world)
+
+    after = world.rows.get("demo")
+    assert after is not None
+    assert after.name == "Edited by hand"
+    assert after.version == before.version
+    assert result.incomplete is True

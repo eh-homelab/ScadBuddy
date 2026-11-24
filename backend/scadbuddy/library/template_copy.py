@@ -10,7 +10,8 @@ It refreshes those templates `BATCH` at a time, each batch under the write lock,
 waits for at most one small batch. Under the lock it reads the files again, so no stale
 read writes over a newer row (spec §7.2). When HEAD moved since the walk, it corrects the
 batch's versions with `ModelHistory.last_commits_since`, or, when this replica cannot see
-the walk's HEAD, with each template's own last commit. Then, under the lock, it drops each
+the walk's HEAD, with each template's own last commit; when git cannot answer that read,
+the row keeps its stored version and the run is ``incomplete``. Then, under the lock, it drops each
 row whose template the walk did not see and that is not there now.
 
 A listing or stat error other than a missing entry (an NFS ``ESTALE``, ``EIO``), a
@@ -257,12 +258,15 @@ class _Copy:
     ) -> bool:
         """Read and write ``batch``'s rows under the write lock. False when a read or a
         git call failed: the batch's rows are left as they were."""
+        failed: list[str] = []
         try:
             with self._locked():
                 head = None if self.history is None else self.history.head()
                 read_versions = {template_id: versions.get(template_id) for template_id in batch}
-                if self.history is not None:
-                    read_versions = self._current(batch, read_versions, walk_head, head)
+                if self.history is not None and head is not None:
+                    read_versions = self._current(
+                        batch, read_versions, walk_head, head, known, failed
+                    )
                 written, gone = self.refresh.read(batch, read_versions, head)
                 self.rows.put(written, gone)
         except (OSError, GitError):
@@ -276,6 +280,12 @@ class _Copy:
             else:
                 self.result.added += 1
         self.result.dropped += sum(1 for template_id in gone if template_id in known)
+        if failed:
+            logger.warning(
+                "git could not name the templates' versions; kept the stored ones",
+                extra={"templates": failed},
+            )
+            return False
         return True
 
     def _current(
@@ -283,30 +293,46 @@ class _Copy:
         batch: list[str],
         versions: dict[str, str | None],
         walk_head: str | None,
-        head: str | None,
+        head: str,
+        known: dict[str, tuple[str, str | None]],
+        failed: list[str],
     ) -> dict[str, str | None]:
         """``versions`` as of ``head``, under the lock: a commit that landed after the walk
         names its templates' new versions, so the copy never writes an older one back
-        (plan decision 5). A template the walk had no version for reads its own."""
-        history = self.history
-        assert history is not None
+        (plan decision 5). A template the walk had no version for reads its own. When git
+        cannot answer that read, the template keeps its row's stored version and its id
+        goes on ``failed`` (Task 5 review B-M2): a transient failure never writes None."""
         current = dict(versions)
         if head != walk_head:
             try:
                 if walk_head is None:
                     raise GitError("the walk saw no HEAD")
-                current.update(history.last_commits_since(walk_head, batch))
+                current.update(self._history().last_commits_since(walk_head, batch))
             except GitError:
                 # This replica cannot see the walk's HEAD (Task 5 amendment 1): read
                 # each template's last commit in full.
                 return {
-                    template_id: history.last_commit(model_path(template_id))
+                    template_id: self._own_version(template_id, known, failed)
                     for template_id in batch
                 }
         for template_id in batch:
             if current.get(template_id) is None:
-                current[template_id] = history.last_commit(model_path(template_id))
+                current[template_id] = self._own_version(template_id, known, failed)
         return current
+
+    def _history(self) -> ModelHistory:
+        assert self.history is not None
+        return self.history
+
+    def _own_version(
+        self, template_id: str, known: dict[str, tuple[str, str | None]], failed: list[str]
+    ) -> str | None:
+        try:
+            return self._history().last_commit_checked(model_path(template_id))
+        except GitError:
+            failed.append(template_id)
+            stored = known.get(template_id)
+            return None if stored is None else stored[1]
 
     def _drop(self, seen: set[str]) -> bool:
         """Under the write lock, drop each row whose template the walk did not see and
