@@ -236,7 +236,10 @@ class ChangeHub:
         else:
             if sum(1 for s in self._streams if s.group is None) >= self._total:
                 raise StreamsFullError(f"{self._total} change streams are open")
-            if sum(1 for s in self._streams if s.key == key) >= self._per_credential:
+            if (
+                sum(1 for s in self._streams if s.group is None and s.key == key)
+                >= self._per_credential
+            ):
                 raise StreamsFullError(f"this credential has {self._per_credential} streams open")
         stream = ChangeStream(key, self._queue_max, keep)
         stream.group = group[0] if group else None

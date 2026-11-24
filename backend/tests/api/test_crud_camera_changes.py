@@ -93,8 +93,7 @@ async def test_camera_stream_replays_after_last_event_id(
         await ctx.__aexit__(None, None, None)
         for event in (skipped, second, other):
             served.bus.publish(event)
-        while await served.bus.newest() != other.id:
-            await asyncio.sleep(0.05)
+        await _logged(served, other.id)
         ctx, sse = await _open(client, served, caller, base, first.id)
         replayed = await sse.next()
         ready = await sse.next()
@@ -131,27 +130,62 @@ async def test_the_camera_callers_have_the_changes_area(served: Served) -> None:
         assert refused.status_code == 403
 
 
+async def _logged(served: Served, event_id: str) -> None:
+    async def wait() -> None:
+        while await served.bus.newest() != event_id:
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(wait(), PROMPTLY)
+
+
+async def _status(
+    client: httpx.AsyncClient, served: Served, caller: ServiceCaller, base: str
+) -> int:
+    """The status of one request to a stream route, read and closed at once, so an answer that
+    streams on never holds the test."""
+
+    async def ask() -> int:
+        async with client.stream(
+            "GET", f"{served.url}{base}/changes", headers=served.token(caller)
+        ) as response:
+            return response.status_code
+
+    return await asyncio.wait_for(ask(), PROMPTLY)
+
+
 async def test_camera_streams_have_a_budget_of_their_own(served: Served) -> None:
     """Each token is a new credential, so the cap counts the caller group, and the agent's
     streams stay free while it is full."""
+    agent_base = "/api/v1/internal/crud/agent"
     async with httpx.AsyncClient(timeout=None) as client:
         opened = []
-        for i in range(crud_camera.CAMERA_STREAMS_MAX):
-            caller, base = ROUTES[i % 2]
-            opened.append(await _open(client, served, caller, base))
-        for caller, base in ROUTES:
-            refused = await client.get(f"{served.url}{base}/changes", headers=served.token(caller))
-            assert refused.status_code == 429
-        agent_ctx = client.stream(
-            "GET",
-            f"{served.url}/api/v1/internal/crud/agent/changes",
-            headers=served.token("agent"),
-        )
-        agent = await agent_ctx.__aenter__()
-        assert agent.status_code == 200
-        await agent_ctx.__aexit__(None, None, None)
-        for ctx, _ in opened:
+        try:
+            for i in range(crud_camera.CAMERA_STREAMS_MAX):
+                caller, base = ROUTES[i % 2]
+                opened.append(await _open(client, served, caller, base))
+            for caller, base in ROUTES:
+                assert await _status(client, served, caller, base) == 429
+            assert await _status(client, served, "agent", agent_base) == 200
+        finally:
+            for ctx, _ in opened:
+                await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.parametrize(("caller", "base"), ROUTES)
+async def test_a_closed_camera_stream_frees_its_place(
+    served: Served, caller: ServiceCaller, base: str
+) -> None:
+    async with httpx.AsyncClient(timeout=None) as client:
+        for _ in range(crud_camera.CAMERA_STREAMS_MAX + 1):
+            ctx, sse = await _open(client, served, caller, base)
+            assert (await sse.next())["event"] == "ready"
             await ctx.__aexit__(None, None, None)
+            await asyncio.wait_for(_closed(served), PROMPTLY)
+
+
+async def _closed(served: Served) -> None:
+    while served.hub.streams:
+        await asyncio.sleep(0.02)
 
 
 async def test_a_long_run_of_filtered_events_is_a_resync(
@@ -168,8 +202,7 @@ async def test_a_long_run_of_filtered_events_is_a_resync(
         await ctx.__aexit__(None, None, None)
         for event in others:
             served.bus.publish(event)
-        while await served.bus.newest() != others[-1].id:
-            await asyncio.sleep(0.05)
+        await _logged(served, others[-1].id)
         ctx, sse = await _open(client, served, "camera", ROUTES[0][1], first.id)
         ready = await sse.next()
         assert ready["data"] == {"resync": True, "reconnect": True}
