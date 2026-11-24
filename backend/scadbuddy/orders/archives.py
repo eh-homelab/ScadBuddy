@@ -328,24 +328,31 @@ async def mirror_attempt(
     archive lacks its finish photo or its timelapse and either offers it or completed
     less than ``FRESH`` ago (or has no completion time yet), so the workflow steps again.
     A medium refused as too large at this limit is not missing (#7281 review).
-    ``missing`` is false without a Bambuddy or once the attempt is gone."""
+    ``missing`` is false without a Bambuddy or once the attempt is gone. A failure, a
+    failed database read included, answers ``missing``; a failed stamp is logged and
+    keeps the answer."""
     if not integrations.linked:
         return AttemptMediaStep(missing=False)
-    attempt = await asyncio.to_thread(lifecycle.store.fulfilment, fulfilment_id)
-    if attempt is None:
-        return AttemptMediaStep(missing=False)
     try:
+        attempt = await asyncio.to_thread(lifecycle.store.fulfilment, fulfilment_id)
+        if attempt is None:
+            return AttemptMediaStep(missing=False)
         attempt, facts = await mirror_archives(lifecycle, integrations, attempt)
         await mirror_media(lifecycle, integrations, blobs, claims, attempt, facts, limit=limit)
         skipped = await _skipped(lifecycle, attempt, limit)
+        missing = _missing(facts, skipped, datetime.now(UTC))
     except Exception:
         logger.warning("could not import the media of attempt %s", fulfilment_id, exc_info=True)
-        return AttemptMediaStep(missing=True)
-    finally:
+        missing = True
+    try:
         await asyncio.to_thread(
             lifecycle.store.stamp_media_checked, fulfilment_id, datetime.now(UTC)
         )
-    return AttemptMediaStep(missing=_missing(facts, skipped, datetime.now(UTC)))
+    except Exception:
+        logger.warning(
+            "could not stamp the media check of attempt %s", fulfilment_id, exc_info=True
+        )
+    return AttemptMediaStep(missing=missing)
 
 
 def attempt_of(store: OrderStore, order_id: str, item_id: str, fulfilment_id: str) -> Fulfilment:

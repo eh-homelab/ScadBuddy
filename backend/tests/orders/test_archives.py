@@ -23,6 +23,7 @@ from scadbuddy.core.events import OrderItemChanged, PrintOutcome
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders import archives as archives_module
+from scadbuddy.orders import attempt_media as attempt_media_module
 from scadbuddy.orders.archives import (
     FRESH,
     attempt_archives,
@@ -32,6 +33,7 @@ from scadbuddy.orders.archives import (
     mirror_attempt,
     mirror_run,
 )
+from scadbuddy.orders.attempt_media import start_media
 from scadbuddy.orders.component import OrdersComponent
 from scadbuddy.orders.integrations import (
     NOT_LINKED,
@@ -1025,6 +1027,37 @@ async def test_a_step_with_bambuddy_down_is_missing_and_raises_nothing(
     assert shop.rows.attachments(order.id) == []
 
 
+async def test_a_step_whose_attempt_read_fails_is_missing_and_raises_nothing(
+    shop: Shop, step: Step, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7281 review: the database read of the attempt is inside the step's guard."""
+    _, _, attempt = by_hand(shop)
+
+    def down(_: str) -> None:
+        raise RuntimeError("Postgres is down")
+
+    monkeypatch.setattr(shop.lifecycle.store, "fulfilment", down)
+
+    assert (await step(Archives(facts(81)), attempt.id)).missing
+
+
+async def test_a_step_whose_stamp_fails_keeps_its_answer(
+    shop: Shop, step: Step, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7281 review: a failed ``media_checked_at`` stamp is logged and never replaces the
+    step's answer, a failed step's ``missing`` included."""
+    order, _, attempt = by_hand(shop)
+
+    def down(*_: object) -> None:
+        raise RuntimeError("Postgres is down")
+
+    monkeypatch.setattr(shop.lifecycle.store, "stamp_media_checked", down)
+
+    assert not (await step(Archives(facts(81)), attempt.id)).missing
+    assert len(media(shop, order.id)) == 2
+    assert (await step(FailingArchives(), attempt.id)).missing
+
+
 async def test_without_bambuddy_a_step_asks_nothing(shop: Shop, step: Step) -> None:
     order, _, attempt = by_hand(shop)
 
@@ -1077,6 +1110,47 @@ async def test_a_heard_outcome_starts_the_import_with_retries(shop: Shop, pool: 
     assert starts.started == [(attempt.id, True)]
     # Temporal down: logged, never raised.
     await mirror_run(shop.lifecycle, Archives(facts(81)), run_id, Starts(fail=True))
+
+
+async def test_an_edit_of_a_hand_attempt_naming_an_archive_starts_the_import_with_retries(
+    shop: Shop,
+) -> None:
+    """#7281 review: ``update_fulfilment`` goes through ``_with_archive_facts``, so each
+    edit of a hand attempt that names an archive starts its import with retries; an edit
+    of one that names none starts nothing."""
+    order, item = shop.accepted()
+    seam = Archives(facts(81))
+    named = await record_fulfilment(
+        order.id,
+        item.id,
+        FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81),
+        orders_of(shop, seam),
+    )
+    plain = await record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="failed"), orders_of(shop, seam)
+    )
+    starts = Starts()
+    edit = FulfilmentInput(quantity=1, outcome="succeeded")
+
+    await update_fulfilment(order.id, item.id, named.id, edit, orders_of(shop, seam, starts))
+    await update_fulfilment(order.id, item.id, plain.id, edit, orders_of(shop, seam, starts))
+
+    assert starts.started == [(named.id, True)]
+
+
+async def test_a_start_temporal_never_answers_is_given_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7281 review: a start is bounded by ``START_TIMEOUT``; one that never answers is
+    logged like any failed start, and the route answers."""
+
+    class Hangs:
+        async def start(self, fulfilment_id: str, *, retries: bool) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(attempt_media_module, "START_TIMEOUT", 0.05)
+
+    await asyncio.wait_for(start_media(Hangs(), "f-1", retries=True), 5)
 
 
 async def test_a_heard_outcome_starts_the_import_when_the_archive_read_fails(

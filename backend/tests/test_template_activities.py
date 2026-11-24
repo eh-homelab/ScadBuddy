@@ -29,6 +29,7 @@ from scadbuddy.workflows.models import Failure, TemplateCall
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.template_process import OUTPUT_LOG_MAX_BYTES
 from tests.support.temporal import temporal_client
+from tests.support.waits import until
 
 ACTIVITIES = """\
 import os, subprocess, time
@@ -223,10 +224,9 @@ async def test_cancelling_kills_the_template_process_group(tmp_path: Path) -> No
 
 
 async def _until_dead(pids: list[int], within: float = 5) -> None:
-    deadline = time.monotonic() + within
-    while not all(_dead(pid) for pid in pids):
-        assert time.monotonic() < deadline, f"still alive: {pids}"
-        await asyncio.sleep(0.05)
+    await until(
+        lambda: all(_dead(pid) for pid in pids), within, interval=0.05, what=f"still alive: {pids}"
+    )
 
 
 async def test_a_timed_out_function_is_killed_and_refused(tmp_path: Path) -> None:

@@ -282,12 +282,16 @@ async def traced_thread[T, *Ts](
     with span(name, attributes=attributes) as current:
         handed = time.monotonic()
 
-        def run() -> T:
+        def run() -> tuple[float, T]:
             waited = time.monotonic() - handed
-            current.set_attribute(THREAD_WAIT_ATTRIBUTE, round(waited * 1000, 3))
-            return func(*args)
+            return waited, func(*args)
 
-        return await asyncio.to_thread(run)
+        # The wait is recorded here, on the awaiting task, not in the thread: a cancelled
+        # await ends the span while the thread still runs, and a write then would hit an
+        # ended span.
+        waited, result = await asyncio.to_thread(run)
+        current.set_attribute(THREAD_WAIT_ATTRIBUTE, round(waited * 1000, 3))
+        return result
 
 
 def current_traceparent() -> str | None:
