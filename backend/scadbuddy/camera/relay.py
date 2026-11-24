@@ -124,8 +124,10 @@ class Relay:
             "source": self._source_for(source),
             "sourceFingerprint": source.cert_sha256.lower(),
             "sourceOnDemand": False,
-            "runOnReady": f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/ready",
-            "runOnNotReady": f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/not_ready",
+            # MediaMTX expands $MTX_PATH itself, with no shell (measured 2026-11-24 UTC on
+            # v1.21.4). The older runOnReady/runOnNotReady are deprecated in favour of these.
+            "runOnAvailable": f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/ready",
+            "runOnUnavailable": f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/not_ready",
         }
 
     async def _existing(self) -> dict[str, dict[str, Any]]:
@@ -145,7 +147,7 @@ class Relay:
         self._confs[name] = conf
         assert self._held is not None
         self._held.add(name)
-        # Until MediaMTX calls the ready hook, the pull is being tried.
+        # Until MediaMTX calls the ready hook (``runOnAvailable``), the pull is being tried.
         self._want(name, "retrying")
 
     async def _remove(self, name: str, present: bool) -> None:
@@ -284,8 +286,8 @@ def _why(error: httpx.HTTPError) -> str:
 
 
 async def serve_hooks(relay: Relay, host: str, port: int) -> asyncio.Server:
-    """``POST /hook/<printer_id>/ready`` (or ``not_ready``), from MediaMTX's ``runOnReady``
-    and ``runOnNotReady`` commands: 204, or 404 for any other request."""
+    """``POST /hook/<printer_id>/ready`` (or ``not_ready``), from MediaMTX's ``runOnAvailable``
+    and ``runOnUnavailable`` commands: 204, or 404 for any other request."""
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         status = b"404 Not Found"

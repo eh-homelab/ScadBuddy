@@ -147,8 +147,8 @@ async def test_reconcile_all_adds_and_removes() -> None:
     assert conf["source"] == "rtsps://bblp:12345678@10.0.0.5:322/streaming/live/1"
     assert conf["sourceFingerprint"] == FINGERPRINT
     assert conf["sourceOnDemand"] is False
-    assert conf["runOnReady"] == f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/ready"
-    assert conf["runOnNotReady"] == f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/not_ready"
+    assert conf["runOnAvailable"] == f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/ready"
+    assert conf["runOnUnavailable"] == f"curl -fsS -X POST {HOOK_URL}/$MTX_PATH/not_ready"
     await subject.flushed()
     assert api.states("old") == ["stopped"]
 
