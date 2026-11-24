@@ -1606,7 +1606,7 @@ jobs:
       # The whole-fixture reads take a lock, one at a time per shard
       # (`tests/conftest.py` `one_whole_read_at_a_time`), and read each part file with
       # ScadBuddy's streaming reader: `trimesh.load` of the olive bottle's 228 MB part
-      # took 2.9 GB, and that test peaked at 6.7 GB alone (2.2 GB now); on run
+      # took 2.9 GB, and that test peaked at 5.0 to 6.7 GB alone (2.2 to 2.5 GB now); on run
       # 45318737267 it filled the 13 GiB cap on shards 1 to 3. No `GOMEMLIMIT` for the
       # Temporal dev servers: at 768 MiB (run 45303037684) they stayed at about
       # 950 MiB, their Go GC ran without end, and shards 4 and 6 took 2567 and 2751 s
@@ -1618,8 +1618,13 @@ jobs:
           peak="$RUNNER_TEMP/pytest.peak"
           (
             set +e  # the container's cgroup goes away under it at the end
+            # The sleep runs in the background, so a TERM ends the wait at once and the
+            # trap ends the sleep with the sampler: nothing outlives the kill below.
+            trap 'kill "$nap" 2>/dev/null; exit 0' TERM
             cg="" n=0
-            while sleep 2; do
+            while :; do
+              sleep 2 & nap=$!
+              wait "$nap"
               if [ -z "$cg" ] && [ -s "$cid" ]; then
                 cg=$(find /sys/fs/cgroup -maxdepth 3 -type d -name "*$(cat "$cid")*" -print -quit)
               fi
@@ -1653,9 +1658,14 @@ jobs:
             --store-durations --clean-durations --durations-path=/results/durations.json \
             --junitxml=/results/junit.xml --durations=20 || rc=$?
           kill "$sampler" 2>/dev/null || true
+          wait "$sampler" 2>/dev/null || true
           p=$(cat "$peak" 2>/dev/null || true)
           echo "container memory peak: $(( ${p:-0} >> 20 )) MiB of 13312"
-          sudo dmesg | grep -iE 'out of memory|oom-kill|killed process' || echo "no OOM kill in the kernel log"
+          if kernel=$(sudo dmesg 2>&1); then
+            grep -iE 'out of memory|oom-kill|killed process' <<<"$kernel" || echo "no OOM kill in the kernel log"
+          else
+            echo "the kernel log could not be read: $kernel"
+          fi
           exit "$rc"
 
       # The intake sandbox's confinement (#6133, spec 2026-11-13 §7), proved on every

@@ -61,10 +61,11 @@ def test_every_readable_fixture_opens_with_its_objects_parts_and_paint(
     # faces), so a part's file is held to what was read, not to watertight: the same
     # faces, and closed exactly when the source part is once welded the way a load welds
     # it (a pinched vertex stays two in the source's index space and one after the weld).
+    load = mesh_loader(tmp_path)
     first = 0
     for obj in read:
         for source, part in zip(obj.parts, scene.objects[first].parts, strict=True):
-            mesh = welded_part(tmp_path / part.mesh)
+            mesh = load(part.mesh)
             welded = source.mesh.copy()
             welded.merge_vertices()
             assert len(mesh.faces) == len(welded.faces), f"{obj.name} {part.id}"
@@ -73,37 +74,21 @@ def test_every_readable_fixture_opens_with_its_objects_parts_and_paint(
     assert "module o1()" in compile_scene(scene)
 
 
-def welded_part(path: Path) -> trimesh.Trimesh:
-    """A part file's mesh welded as a load welds it (`trimesh.load`'s ``process=True``
-    merges vertices and drops no face). Read with ScadBuddy's streaming reader, not
-    `trimesh.load`: trimesh parses the whole XML tree, 2.9 GB for the olive bottle's 228 MB
-    part file against about 0.1 GB here, and that spike, beside a shard's other xdist
-    workers and Temporal dev servers, filled the CI runner's memory (#6978)."""
-    [obj] = read_objects(path.read_bytes(), ReadBudget())
-    [part] = obj.parts
-    mesh = part.mesh.copy()
-    mesh.merge_vertices()
-    return mesh
+# `trimesh.load` parses a part file's whole XML tree: 2.9 GB for the olive bottle's 228 MB
+# part, which beside a shard's other xdist workers and Temporal dev servers filled the CI
+# runner's memory (#6978). So it reads only the small fixtures' part files.
+TRIMESH_MAX_BYTES = 12_000_000
+SMALL = [e for e in READ if e["bytes"] <= TRIMESH_MAX_BYTES]
 
 
-def test_the_streaming_read_of_a_part_file_agrees_with_trimesh(tmp_path: Path) -> None:
-    """`welded_part` reads a part file with the reader that wrote the scene; trimesh reads
-    one small fixture's part files independently, so the two readers are checked against
-    each other (#6978 review)."""
-    _, scene = opened("411-broccoli.3mf", tmp_path)
-    load = mesh_of(tmp_path)
-    for obj in scene.objects:
-        for part in obj.parts:
-            ours, theirs = welded_part(tmp_path / part.mesh), load(part.mesh)
-            assert np.array_equal(ours.faces, theirs.faces), part.mesh
-            assert np.allclose(ours.vertices, theirs.vertices), part.mesh
-@pytest.mark.parametrize("entry", READ, ids=lambda e: e["file"].removesuffix(".3mf"))
+@pytest.mark.parametrize("entry", SMALL, ids=lambda e: e["file"].removesuffix(".3mf"))
 def test_every_part_file_loads_as_trimesh_load_welds_it(
     entry: dict[str, Any], tmp_path: Path
 ) -> None:
     """`mesh_loader` reads a part file with the streaming reader, not `trimesh.load`
     (#7397), and welds it as that load's process=True did: the same faces in the same
-    order (the paint codes follow it), the same vertices, closed exactly when it was."""
+    order (the paint codes follow it), the same vertices, closed exactly when it was.
+    Only the fixtures of `TRIMESH_MAX_BYTES` or less (#6978)."""
     _, scene = opened(entry["file"], tmp_path)
     load = mesh_loader(tmp_path)
     for path in sorted({part.mesh for obj in scene.objects for part in obj.parts}):
