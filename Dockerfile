@@ -1068,6 +1068,38 @@ RUN apt-get update \
 ENV SCADBUDDY_TEST_MQTT=/usr/sbin/mosquitto \
     SCADBUDDY_TEST_FAKES_REQUIRED=1
 
+# The camera e2e (tests/camera/test_e2e_mediamtx.py): ffmpeg publishes a test stream, and
+# MediaMTX stands in for the printer, the relay and both recorders. ffmpeg is unpinned
+# like the packages above. MediaMTX is pinned by version and per-arch digest, the same
+# pins as tests/camera/conftest.py `MEDIAMTX_SHA256`: the release's checksums.sha256
+# (https://github.com/bluenviron/mediamtx/releases/tag/v1.21.4), equal to `sha256sum` of
+# each tarball on 2026-11-23. Move the three together. With both here, the test fails
+# instead of skipping (SCADBUDDY_TEST_MEDIA_REQUIRED).
+ARG MEDIAMTX_VERSION=v1.21.4
+ARG MEDIAMTX_SHA256_AMD64=be0c05d9c8af8338116977e7f1c3fcb409fbf882075e5ab075cf8baad76a59d2
+ARG MEDIAMTX_SHA256_ARM64=47784081da54c0608ea4dc359f5cfb19880209434769c532b3ed3a67ea99c29d
+# hadolint ignore=DL3008
+RUN case "$TARGETARCH" in \
+      amd64) sha="$MEDIAMTX_SHA256_AMD64" ;; \
+      arm64) sha="$MEDIAMTX_SHA256_ARM64" ;; \
+      *) echo "ERROR: no pinned MediaMTX for '${TARGETARCH}'." >&2; exit 1 ;; \
+    esac \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+         --output /tmp/mediamtx.tar.gz \
+         "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_${TARGETARCH}.tar.gz" \
+    && printf '%s  /tmp/mediamtx.tar.gz\n' "$sha" > /tmp/mediamtx.sha256 \
+    && sha256sum --check --strict /tmp/mediamtx.sha256 \
+    && tar -xzf /tmp/mediamtx.tar.gz -C /usr/local/bin mediamtx \
+    && rm -f /tmp/mediamtx.tar.gz /tmp/mediamtx.sha256 \
+    && mediamtx --version \
+    && ffmpeg -hide_banner -version
+ENV SCADBUDDY_TEST_MEDIA_REQUIRED=1
+# The MediaMTX configs the camera e2e runs (tests/camera/test_e2e_mediamtx.py `DEPLOY`).
+COPY deploy/camera /app/deploy/camera
+
 # The slice_plate vectors the Rust workers test against too (workers/rust/vectors,
 # #3821): tests/slicing reads them from the repo layout, so they sit beside the backend.
 COPY workers/rust/vectors /app/workers/rust/vectors
