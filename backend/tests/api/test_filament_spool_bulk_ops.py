@@ -38,7 +38,11 @@ def test_a_bulk_edit_sets_every_field_sent_on_each_spool(client: TestClient) -> 
     patch = {"colour_name": "Teal", "cost_per_kg": None, "low_stock_pct": 15, "added_full": True}
     done = client.post(UPDATE, json={"spool_ids": [b["id"], a["id"], MISSING], "patch": patch})
     assert done.status_code == 200, done.text
-    assert done.json() == {"updated": sorted([str(a["id"]), str(b["id"])]), "not_found": [MISSING]}
+    assert done.json() == {
+        "changed": sorted([str(a["id"]), str(b["id"])]),
+        "unchanged": [],
+        "not_found": [MISSING],
+    }
     for spool in (a, b):
         row = _one(client, spool["id"])
         assert row["colour_name"] == "Teal"
@@ -53,8 +57,10 @@ def test_a_bulk_edit_sent_again_books_nothing(client: TestClient) -> None:
     """R-7151-1: the write sets values, so a resend changes nothing and books no event."""
     a = _spool(client)
     body = {"spool_ids": [a["id"]], "patch": {"note": "same"}}
-    assert client.post(UPDATE, json=body).status_code == 200
-    assert client.post(UPDATE, json=body).status_code == 200
+    first = client.post(UPDATE, json=body)
+    again = client.post(UPDATE, json=body)
+    assert first.json()["changed"] == [str(a["id"])]
+    assert again.json() == {"changed": [], "unchanged": [str(a["id"])], "not_found": []}
     assert _kinds(client, a["id"]).count("edited") == 1
 
 

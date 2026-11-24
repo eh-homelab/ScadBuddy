@@ -10,10 +10,13 @@ and grams summed (:func:`mirror_archives`). That runs when the print's outcome i
 attempt by hand that names its archives copies them when it is recorded or edited too
 (``api/orders.py`` ``record_fulfilment``, ``update_fulfilment``, #6132).
 
-An archive's ``finish_`` photo and its timelapse are offered as one-click copies into the
-attempt's attachments (§6.2, #4251): the bytes are pulled once through the seam into the claim
-store, kept as ScadBuddy's own blob and recorded as the attachment, with the role
-``finished`` or ``timelapse`` (:func:`copy_in`). Nothing goes the other way.
+An archive's ``finish_`` photo and its timelapse are copied into the attempt's
+attachments (§6.2, #4251): the bytes are pulled once through the seam into the claim store,
+kept as ScadBuddy's own blob and recorded as the attachment, with the role ``finished`` or
+``timelapse`` (:func:`copy_in`). Nothing goes the other way. The copy is imported with no
+click (#7233, spec 2026-11-05 §4.1): a hand attempt with an archive, a heard outcome and a
+read of the archives start the attempt's ``AttemptMedia`` workflow, whose step is
+:func:`mirror_attempt`. The copy route stays, for a chosen photo and as the fallback.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -29,6 +32,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders import attachments
+from scadbuddy.orders.attempt_media import MediaStarter, start_media
 from scadbuddy.orders.integrations import (
     ArchiveFacts,
     MediaTooLargeError,
@@ -52,8 +56,13 @@ from scadbuddy.orders.store import (
     item_subject,
 )
 from scadbuddy.store import BlobStore
+from scadbuddy.workflows.attempt_media import AttemptMediaStep
 
 logger = logging.getLogger(__name__)
+
+#: How long after its print completed an archive can still gain a timelapse (spec
+#: 2026-11-05 §4.4): Bambuddy writes it minutes after, and the UI says "waiting" till then.
+FRESH = timedelta(hours=1)
 
 ROLES: dict[ArchiveCopyMedia, AttachmentRole] = {
     "finished_photo": "finished",
@@ -152,15 +161,186 @@ async def mirror_archives(
     return written, facts
 
 
-async def mirror_run(lifecycle: Lifecycle, integrations: OrderIntegrations, run_id: str) -> None:
-    """:func:`mirror_archives` for the attempt a run started, if any; logged, never
-    raised: the attempt's archives are read again when they are shown."""
+async def mirror_run(
+    lifecycle: Lifecycle, integrations: OrderIntegrations, run_id: str, starter: MediaStarter
+) -> None:
+    """:func:`mirror_archives` for the attempt a run started, if any, then the start of
+    its media import, with retries (spec 2026-11-05 §4.1), also when the archive read
+    failed; logged, never raised: the attempt's archives are read again when they are
+    shown, and by each step of the import."""
     try:
         attempt = await asyncio.to_thread(lifecycle.store.print_attempt, run_id)
-        if attempt is not None:
-            await mirror_archives(lifecycle, integrations, attempt)
+    except Exception:
+        logger.warning("could not find the attempt of print run %s", run_id, exc_info=True)
+        return
+    if attempt is None:
+        return
+    try:
+        await mirror_archives(lifecycle, integrations, attempt)
     except Exception:
         logger.warning("could not copy an order item's print archives", exc_info=True)
+    # Each step reads the archives again, so a failed read here still starts the import.
+    await start_media(starter, attempt.id, retries=True)
+
+
+def _wanted(facts: ArchiveFacts) -> list[tuple[ArchiveCopyMedia, str | None]]:
+    """What the archive offers: its latest ``finish_`` photo (the last by name, as the
+    names carry a timestamp; Bambuddy's list order is not trusted, spec §4.2) and its
+    timelapse, when it has one."""
+    wanted: list[tuple[ArchiveCopyMedia, str | None]] = []
+    if facts.finish_photos:
+        wanted.append(("finished_photo", sorted(facts.finish_photos)[-1]))
+    if facts.timelapse:
+        wanted.append(("timelapse", None))
+    return wanted
+
+
+async def _skipped(
+    lifecycle: Lifecycle, attempt: Fulfilment, limit: int
+) -> set[tuple[int, ArchiveCopyMedia]]:
+    """Each ``(archive_id, medium)`` the import does not download: the attempt or its
+    item has a copy (spec §4.2), or the import refused it at this limit (#7281 review)."""
+    present = await asyncio.to_thread(
+        lifecycle.store.archive_media_present, attempt.id, attempt.order_item_id
+    )
+    refused = await asyncio.to_thread(lifecycle.store.media_refused, attempt.id, limit)
+    return present | refused
+
+
+def _missing(
+    facts: list[ArchiveFacts], skipped: set[tuple[int, ArchiveCopyMedia]], now: datetime
+) -> bool:
+    """Whether a later step can still import something: no archive was read, or an
+    archive lacks a medium that it offers or, while it is fresh (``FRESH``), may offer
+    soon. A medium in ``skipped`` (copied, or refused as too large) is not missing."""
+    if not facts:
+        return True
+    for archive in facts:
+        fresh = archive.completed_at is None or now - archive.completed_at < FRESH
+        offered = {what for what, _ in _wanted(archive)}
+        for what in ROLES:
+            if (archive.archive_id, what) not in skipped and (what in offered or fresh):
+                return True
+    return False
+
+
+async def mirror_media(
+    lifecycle: Lifecycle,
+    integrations: OrderIntegrations,
+    blobs: BlobStore,
+    claims: ClaimStore,
+    attempt: Fulfilment,
+    facts: list[ArchiveFacts],
+    *,
+    limit: int,
+) -> list[Attachment]:
+    """For each archive in ``facts``, the media the attempt is still missing, imported
+    (spec 2026-11-05 §4.2). A medium the attempt, or its item, already has a copy of is
+    skipped with no download, and so is one refused before at this limit or a lower
+    one; a refusal as too large is recorded (#7281 review). Each medium is its own try:
+    one that fails (too large, Bambuddy down) is logged and does not stop the others.
+    Each copy is written by the attempt's creator (Ruling 12, spec §4.5)."""
+    item = await asyncio.to_thread(lifecycle.store.item, attempt.order_item_id)
+    if item is None:
+        return []
+    skipped = await _skipped(lifecycle, attempt, limit)
+    imported: list[Attachment] = []
+    for archive in facts:
+        for what, name in _wanted(archive):
+            if (archive.archive_id, what) in skipped:
+                continue
+            try:
+                imported.append(
+                    await copy_in(
+                        store=lifecycle.store,
+                        lifecycle=lifecycle,
+                        integrations=integrations,
+                        blobs=blobs,
+                        claims=claims,
+                        order_id=item.order_id,
+                        item_id=item.id,
+                        fulfilment_id=attempt.id,
+                        archive_id=archive.archive_id,
+                        what=what,
+                        name=name,
+                        by=attempt.created_by,
+                        limit=limit,
+                    )
+                )
+            except ApiError as error:
+                if error.status != status.HTTP_413_CONTENT_TOO_LARGE:
+                    logger.warning(
+                        "could not import the %s of archive %s: %s",
+                        what,
+                        archive.archive_id,
+                        error.detail,
+                    )
+                    continue
+                logger.warning(
+                    "the %s of archive %s is too large to import (%s; the limit is %s bytes)",
+                    what,
+                    archive.archive_id,
+                    error.detail,
+                    limit,
+                )
+                await asyncio.to_thread(
+                    lifecycle.store.record_media_refusal,
+                    attempt.id,
+                    archive.archive_id,
+                    what,
+                    limit,
+                    datetime.now(UTC),
+                )
+            except Exception:
+                logger.warning(
+                    "could not import the %s of archive %s",
+                    what,
+                    archive.archive_id,
+                    exc_info=True,
+                )
+    return imported
+
+
+async def mirror_attempt(
+    lifecycle: Lifecycle,
+    integrations: OrderIntegrations,
+    blobs: BlobStore,
+    claims: ClaimStore,
+    fulfilment_id: str,
+    *,
+    limit: int,
+) -> AttemptMediaStep:
+    """One step of the attempt's ``AttemptMedia`` workflow: :func:`mirror_archives`, then
+    :func:`mirror_media`, then ``media_checked_at`` stamped (spec 2026-11-05 §4.6).
+    Logged, never raised. ``missing`` is true while no archive could be read yet, or an
+    archive lacks its finish photo or its timelapse and either offers it or completed
+    less than ``FRESH`` ago (or has no completion time yet), so the workflow steps again.
+    A medium refused as too large at this limit is not missing (#7281 review).
+    ``missing`` is false without a Bambuddy or once the attempt is gone. A failure, a
+    failed database read included, answers ``missing``; a failed stamp is logged and
+    keeps the answer."""
+    if not integrations.linked:
+        return AttemptMediaStep(missing=False)
+    try:
+        attempt = await asyncio.to_thread(lifecycle.store.fulfilment, fulfilment_id)
+        if attempt is None:
+            return AttemptMediaStep(missing=False)
+        attempt, facts = await mirror_archives(lifecycle, integrations, attempt)
+        await mirror_media(lifecycle, integrations, blobs, claims, attempt, facts, limit=limit)
+        skipped = await _skipped(lifecycle, attempt, limit)
+        missing = _missing(facts, skipped, datetime.now(UTC))
+    except Exception:
+        logger.warning("could not import the media of attempt %s", fulfilment_id, exc_info=True)
+        missing = True
+    try:
+        await asyncio.to_thread(
+            lifecycle.store.stamp_media_checked, fulfilment_id, datetime.now(UTC)
+        )
+    except Exception:
+        logger.warning(
+            "could not stamp the media check of attempt %s", fulfilment_id, exc_info=True
+        )
+    return AttemptMediaStep(missing=missing)
 
 
 def attempt_of(store: OrderStore, order_id: str, item_id: str, fulfilment_id: str) -> Fulfilment:
@@ -180,9 +360,20 @@ async def attempt_archives(
     order_id: str,
     item_id: str,
     fulfilment_id: str,
+    starter: MediaStarter,
+    *,
+    limit: int,
 ) -> AttemptArchives:
+    """The attempt's archives, their facts copied. When an archive offers a medium the
+    attempt does not have yet, and the import did not refuse it at ``limit`` (the upload
+    limit) or a lower one, one step of its media import is started; the read answers at
+    once and never waits on a download (spec 2026-11-05 §4.1)."""
     attempt = await asyncio.to_thread(attempt_of, lifecycle.store, order_id, item_id, fulfilment_id)
     attempt, facts = await mirror_archives(lifecycle, integrations, attempt)
+    if facts:
+        skipped = await _skipped(lifecycle, attempt, limit)
+        if any((f.archive_id, what) not in skipped for f in facts for what, _ in _wanted(f)):
+            await start_media(starter, attempt.id, retries=False)
     return AttemptArchives(
         linked=integrations.linked,
         attempt=attempt,
