@@ -56,7 +56,18 @@ function answer(attempt: Fulfilment, offer: Partial<ArchiveOffer>): string[] {
       return HttpResponse.json<AttemptArchives>({
         linked: true,
         attempt,
-        archives: [{ archive_id: 8001, status: 'completed', finish_photos: ['finish_8001.jpg'], timelapse: false, completed_at: '2026-11-01T12:00:00Z', ...offer }],
+        archives: [
+          {
+            archive_id: 8001,
+            status: 'completed',
+            finish_photos: ['finish_8001.jpg'],
+            timelapse: false,
+            completed_at: '2026-11-01T12:00:00Z',
+            finished_too_large: false,
+            timelapse_too_large: false,
+            ...offer,
+          },
+        ],
       })
     }),
   )
@@ -143,6 +154,18 @@ describe('ArchiveCopies', () => {
     expect(archives).not.toHaveTextContent(/print's page/)
     expect(within(archives).queryByRole('button')).toBeNull()
     // Nothing is offered and missing, so the row reads no more.
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS * 2)
+    expect(reads).toHaveLength(1)
+  })
+
+  it('says a medium the import refused as too large is attached by hand, offers no copy, and reads no more', async () => {
+    const attempt = printedAttempt()
+    const reads = answer(attempt, { finished_attachment_id: 'att-photo', timelapse: true, timelapse_too_large: true })
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Timelapse is over the upload limit; attach it by hand'))
+    expect(archives).toHaveTextContent('Finish photo attached')
+    expect(within(archives).queryByRole('button')).toBeNull()
     await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS * 2)
     expect(reads).toHaveLength(1)
   })

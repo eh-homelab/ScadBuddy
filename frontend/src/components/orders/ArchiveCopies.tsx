@@ -12,9 +12,12 @@ export const ARCHIVE_READS = 6
 /** Bambuddy writes the timelapse minutes after the print ends; after this long, it has none. */
 const TIMELAPSE_WAIT_MS = 60 * 60_000
 
-/** Whether the archive offers a medium the attempt has not attached yet. */
+/** Whether the archive offers a medium the attempt has not attached yet, and the import did not refuse as too large. */
 function due(archive: ArchiveOffer): boolean {
-  return ((archive.finish_photos ?? []).length > 0 && !archive.finished_attachment_id) || (Boolean(archive.timelapse) && !archive.timelapse_attachment_id)
+  return (
+    ((archive.finish_photos ?? []).length > 0 && !archive.finished_attachment_id && !archive.finished_too_large) ||
+    (Boolean(archive.timelapse) && !archive.timelapse_attachment_id && !archive.timelapse_too_large)
+  )
 }
 
 /** The attempt facts a read copies from the archives (`mirror_archives`). */
@@ -125,14 +128,22 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
           </span>
           <Medium
             attached={Boolean(archive.finished_attachment_id)}
+            tooLarge={Boolean(archive.finished_too_large)}
             offered={(archive.finish_photos ?? []).length > 0}
             waiting={waiting}
             busy={busy}
-            names={{ attached: 'Finish photo attached', importing: 'Importing finish photo…', copy: 'Copy finish photo', none: 'no finish photo' }}
+            names={{
+              attached: 'Finish photo attached',
+              importing: 'Importing finish photo…',
+              copy: 'Copy finish photo',
+              tooLarge: 'Finish photo is over the upload limit; attach it by hand',
+              none: 'no finish photo',
+            }}
             onCopy={() => void copy(archive.archive_id, { what: 'finished_photo' })}
           />
           <Medium
             attached={Boolean(archive.timelapse_attachment_id)}
+            tooLarge={Boolean(archive.timelapse_too_large)}
             offered={Boolean(archive.timelapse)}
             waiting={waiting}
             busy={busy}
@@ -140,6 +151,7 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
               attached: 'Timelapse attached',
               importing: 'Importing timelapse…',
               copy: 'Copy timelapse',
+              tooLarge: 'Timelapse is over the upload limit; attach it by hand',
               // Spec §4.3: after an hour, "not in Bambuddy" covers both a video left on the
               // printer and one never recorded; the sweep still imports a late one.
               none: completedLongAgo(archive) ? 'no timelapse in Bambuddy for this print' : 'waiting for Bambuddy to process the timelapse',
@@ -157,9 +169,13 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
   )
 }
 
-/** One medium of an archive: attached, being imported, offered as a copy, or not there. */
+/**
+ * One medium of an archive: attached, refused as too large (#7281 review: the copy button
+ * would be refused too, so none is offered), being imported, offered as a copy, or not there.
+ */
 function Medium({
   attached,
+  tooLarge,
   offered,
   waiting,
   busy,
@@ -167,10 +183,11 @@ function Medium({
   onCopy,
 }: {
   attached: boolean
+  tooLarge: boolean
   offered: boolean
   waiting: boolean
   busy: boolean
-  names: { attached: string; importing: string; copy: string; none: string }
+  names: { attached: string; importing: string; copy: string; tooLarge: string; none: string }
   onCopy: () => void
 }) {
   if (attached) {
@@ -181,6 +198,7 @@ function Medium({
       </span>
     )
   }
+  if (tooLarge) return <span className="text-warn">{names.tooLarge}</span>
   if (!offered) return <span className="text-muted-foreground">{names.none}</span>
   if (waiting) return <span className="text-muted-foreground">{names.importing}</span>
   return (

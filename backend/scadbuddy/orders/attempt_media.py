@@ -3,6 +3,7 @@
 `TemporalMediaStarter` starts one ``AttemptMedia`` workflow per attempt
 (`workflows/attempt_media.py`), as `storefront/staged_files.py` `TemporalWatcher` starts
 its watchers: a run still going is joined, and a run that ended is started again. A
+start with ``retries`` is a signal-with-start, so a run it joins steps again too. A
 start is one Temporal call and never waits on Bambuddy. `start_media` logs a failed start
 and never raises it, so a route that starts the import still answers with Temporal down.
 """
@@ -17,6 +18,7 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
 from scadbuddy.workflows.attempt_media import (
     ATTEMPT_MEDIA_WORKFLOW,
+    RETRIES_SIGNAL,
     AttemptMediaInput,
     workflow_id,
 )
@@ -43,6 +45,8 @@ class TemporalMediaStarter:
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+            # A run already going keeps its input: the signal asks it for retries.
+            start_signal=RETRIES_SIGNAL if retries else None,
         )
 
 
