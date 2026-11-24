@@ -89,7 +89,7 @@ export function TagBackups({
             session={session}
             label="Restore a backup"
             restoring
-            run={({ onStep, signal }) => restoreBackup({ session, tagId, backupId: restoring.id, onStep, signal })}
+            run={({ onStep, onClaimed, signal }) => restoreBackup({ session, tagId, backupId: restoring.id, onStep, onClaimed, signal })}
             onSettled={(outcome) => {
               setRestored((count) => count + 1)
               onAnnounce?.(headlineOf(outcome, true))

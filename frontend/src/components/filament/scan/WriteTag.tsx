@@ -9,10 +9,12 @@ import { cn } from '@/lib/utils'
 const FORMAT_NAMES = { openspool: 'OpenSpool', opentag3d: 'OpenTag3D' } as const
 const STEPS = ['Read and back up', 'Write', 'Read back'] as const
 
-/** The hooks a run reports through: the step it is on, and the records it is about to write. */
+/** The hooks a run reports through: the step it is on, the records it is about to write, and when it holds the session. */
 export interface RunHooks {
   onStep: (step: WriteStep) => void
   onRecords: (records: TagRecords) => void
+  /** Pass to `writeWithBackup`: the flow says it runs only once its run holds the session's claim. */
+  onClaimed: () => void
   signal: AbortSignal
 }
 
@@ -70,7 +72,14 @@ export function WriteFlow({
     setRecords(null)
     setOutcome(null)
     setReady(false)
-    latest.current.onRunning?.(true)
+    // The parent hears of a run only while it holds the session's claim: a run another one
+    // refused must not tell the parent that runs ended while the other still goes on.
+    let held = false
+    const release = () => {
+      if (!held) return
+      held = false
+      latest.current.onRunning?.(false)
+    }
     const detail = (cause: unknown) => (cause instanceof Error && cause.message ? cause.message : String(cause))
     void (async () => {
       let done: WriteOutcome
@@ -82,6 +91,11 @@ export function WriteFlow({
             signal: controller.signal,
             onStep: (next) => live() && setStep(next),
             onRecords: (next) => live() && setRecords(next),
+            onClaimed: () => {
+              if (!live()) return
+              held = true
+              latest.current.onRunning?.(true)
+            },
           })
         } catch (cause) {
           // The run may have stopped after its write: only the tag can say what it holds.
@@ -92,12 +106,12 @@ export function WriteFlow({
       }
       if (!live()) return
       setOutcome(done)
-      latest.current.onRunning?.(false)
+      release()
       latest.current.onSettled?.(done)
     })()
     return () => {
       controller.abort()
-      latest.current.onRunning?.(false)
+      release()
     }
   }, [session, attempt])
 
@@ -272,7 +286,7 @@ export function WriteTag({
         session={session}
         label="Restore the tag"
         restoring
-        run={({ onStep, signal }) => restoreBackup({ session, tagId: restoring.tagId, backupId: restoring.backupId, onStep, signal })}
+        run={({ onStep, onClaimed, signal }) => restoreBackup({ session, tagId: restoring.tagId, backupId: restoring.backupId, onStep, onClaimed, signal })}
         onSettled={(outcome) => settled(outcome, true)}
         onRunning={onRunning}
         onClose={onClose}
@@ -285,11 +299,12 @@ export function WriteTag({
         key="write"
         session={session}
         label="Write tag"
-        run={({ onStep, onRecords, signal }) =>
+        run={({ onStep, onRecords, onClaimed, signal }) =>
           writeWithBackup({
             session,
             reason: 'spool_write',
             onStep,
+            onClaimed,
             signal,
             prepare: async (now, backupId) => {
               written.current = { uid: now.uid, records: now.records }

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { installNdefStub, type NdefStub } from '../test/ndefStub'
-import { NfcSession, nfcSupport, recordsSha256, sameRecords, toInit, toWire, type NDEFRecord, type Reading } from './webNfc'
+import { NfcSession, nfcSupport, posterRecords, recordsSha256, RecordNotWritableError, sameRecords, toInit, toWire, type NDEFRecord, type NDEFRecordInit, type Reading } from './webNfc'
 
 const bytes = (text: string) => new TextEncoder().encode(text)
+const hex = (text: string) => Array.from(bytes(text), (b) => b.toString(16).padStart(2, '0')).join('')
 
 describe('nfcSupport', () => {
   it('reports no_api without NDEFReader', () => {
@@ -37,6 +38,43 @@ describe('records', () => {
     expect(init.mediaType).toBe('application/json')
     expect([...(init.data as Uint8Array)]).toEqual([...data])
     expect(toWire({ recordType: 'empty', data: null }).data_hex).toBe('')
+  })
+
+  it('gives a URL record its URL as a string, as Web NFC requires', () => {
+    // https://w3c-cg.github.io/web-nfc/ "Mapping URL to NDEF": data that is not a string is a TypeError.
+    expect(toInit({ record_type: 'url', data_hex: hex('https://example.com/x') })).toEqual({ recordType: 'url', data: 'https://example.com/x' })
+    expect(toInit({ record_type: 'absolute-url', data_hex: hex('https://example.com/a') })).toEqual({ recordType: 'absolute-url', data: 'https://example.com/a' })
+    expect(() => toInit({ record_type: 'url', data_hex: 'ff' })).toThrow(RecordNotWritableError)
+  })
+
+  it('gives a smart poster its records as a message, as Web NFC requires', () => {
+    // A "U" record (0x04 "https://", "example.org"), a "T" record ("en", "Hi") and an "act" record (0x00).
+    const poster = '91010c5504' + hex('example.org') + '1101055402' + hex('en') + hex('Hi') + '510301' + hex('act') + '00'
+    const init = toInit({ record_type: 'smart-poster', id: 'p1', data_hex: poster })
+    expect(init.recordType).toBe('smart-poster')
+    expect(init.id).toBe('p1')
+    const [url, text, act] = (init.data as { records: NDEFRecordInit[] }).records
+    expect(url).toEqual({ recordType: 'url', data: 'https://example.org' })
+    expect(text).toMatchObject({ recordType: 'text', encoding: 'utf-8', lang: 'en' })
+    expect(new TextDecoder().decode(text!.data as Uint8Array)).toBe('Hi')
+    expect(act!.recordType).toBe(':act')
+    expect([...(act!.data as Uint8Array)]).toEqual([0])
+  })
+
+  it('names the smart posters it cannot write', () => {
+    // Chunked (CF set), cut short, or an absolute URL, which Web NFC refuses inside a poster.
+    expect(() => toInit({ record_type: 'smart-poster', data_hex: 'b1010155' })).toThrow(RecordNotWritableError)
+    expect(() => toInit({ record_type: 'smart-poster', data_hex: '91010c5504' })).toThrow(RecordNotWritableError)
+    expect(() => toInit({ record_type: 'smart-poster', data_hex: 'd3010078' })).toThrow(RecordNotWritableError)
+  })
+
+  it('reads the records a smart poster holds', () => {
+    const poster = '91010c5504' + hex('example.org') + '5101055402' + hex('en') + hex('Hi')
+    expect(posterRecords(poster)).toEqual([
+      { recordType: 'url', text: 'https://example.org', hex: '04' + hex('example.org') },
+      { recordType: 'text', text: 'Hi', hex: '02' + hex('en') + hex('Hi') },
+    ])
+    expect(posterRecords('91')).toBeNull()
   })
 
   it('compares records by type, media type and data', () => {
@@ -86,6 +124,20 @@ describe('NfcSession', () => {
     off()
     stub.tapError()
     expect(errors).toBe(1)
+    session.stop()
+  })
+
+  it('tells its listeners when the scan starts and stops', async () => {
+    const session = new NfcSession()
+    const seen: boolean[] = []
+    const off = session.onActiveChange(() => seen.push(session.active))
+    await session.start()
+    await session.start()
+    session.stop()
+    session.stop()
+    off()
+    await session.start()
+    expect(seen).toEqual([true, false])
     session.stop()
   })
 

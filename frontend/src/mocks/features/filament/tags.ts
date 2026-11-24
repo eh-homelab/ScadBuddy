@@ -3,7 +3,7 @@ import type { components } from '../../../api/schema'
 import { parseRgba } from '../../../lib/rgba'
 import { recordsSha256 } from '../../../lib/webNfc'
 import { newId } from '../../newId'
-import { bindOn, cleanTagUid, findByKey, holderOf, seenTag, spoolViewOf, tagOf, tagRowOf } from './index'
+import { bindOn, cleanTagUid, findByKey, holderOf, seenTag, setOrigin, spoolViewOf, tagOf, tagRowOf } from './index'
 
 type S = components['schemas']
 
@@ -15,11 +15,15 @@ type S = components['schemas']
  * `none` with no UID. Only OpenSpool's JSON is decoded here; an OpenTag3D record reads as no format.
  *
  * The write routes (`back_up`, `records_for_spool`, `written`, `restore_records`) keep each
- * tag's backups in memory, append-only. `tag-records` answers one OpenSpool record built from
- * the spool; `tag-written` checks the backup, the read-back and the records, then binds.
+ * tag's backups in memory, append-only; a backup covers a write for 10 minutes. `tag-records`
+ * answers one OpenSpool record built from the spool; `tag-written` checks the backup, the
+ * read-back and the records, then binds and gives the spool the `openspool` origin and the
+ * write's time. Both check the backup before they look the spool up, as the routes do.
  *
  * The agents' NFC jobs (`tags.py` `claim_job`, `finish_job`, `cancel_job`) live in memory too;
- * `seedNfcJob` queues one. A job past its `expires_at` is `expired` at the next request.
+ * `seedNfcJob` queues one. A job past its `expires_at` is `expired` at the next request. A read
+ * job's result is the reading's answer, as `/tags/reads` gives it, with the tag marked seen by
+ * the agent.
  */
 
 const BASE = '/api/v1/filament'
@@ -160,13 +164,37 @@ function openSpoolRecords(spool: NonNullable<ReturnType<typeof spoolViewOf>>): S
 const conflict = (code: string, detail: string) =>
   HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail, code }, { status: 409, headers: { 'Content-Type': 'application/problem+json' } })
 
-/** `_covering_backup`: the backup of this write, of the tag as just read, with this reason. */
+/** `BACKUP_TTL`: a backup covers a write for 10 minutes. */
+const BACKUP_TTL_MS = 10 * 60 * 1000
+
+/** `valid_backup`: the backup of this write, of the tag as just read, with this reason, at most 10 minutes old. */
 function covering(body: { uid: string; backup_id: string; records?: S['NdefRecord'][] }, reason: Backup['reason']): Backup | Response {
   const backup = backups.find((one) => one.id === body.backup_id)
-  if (!backup || backup.reason !== reason || cleanTagUid(backup.uid) !== cleanTagUid(body.uid) || (body.records && !sameRecords(backup.records, body.records))) {
+  if (
+    !backup ||
+    backup.reason !== reason ||
+    cleanTagUid(backup.uid) !== cleanTagUid(body.uid) ||
+    Date.now() - Date.parse(backup.at) > BACKUP_TTL_MS ||
+    (body.records && !sameRecords(backup.records, body.records))
+  ) {
     return conflict('backup_mismatch', 'the backup does not cover this write')
   }
   return backup
+}
+
+/** `read_on`: a reading's answer. A read with a UID finds or makes its tag, marked seen by `source`; with `bindSpoolId` it binds it there. */
+function readOn(uid: string | null, records: readonly S['NdefRecord'][], source: 'phone' | 'agent', bindSpoolId?: string | null): S['TagReadResult'] | Response {
+  const decoded = decodeOpenSpool(records)
+  if (bindSpoolId && uid === null) return problem(422, 'a tag with no UID cannot be bound', 'no_uid')
+  if (uid === null) return { tag: null, spool: null, decoded, draft: decoded ? draftOf(decoded) : null, next: 'none' }
+  const kind = decoded ? 'ntag_openspool' : null
+  const tag = seenTag(uid, kind, source)
+  if (bindSpoolId) {
+    const bound = bindOn(bindSpoolId, uid, null, kind ?? tag.kind, false)
+    if (bound instanceof Response) return bound
+  }
+  const spool = holderOf(tag.id)
+  return { tag: tagRowOf(tag), spool, decoded, draft: decoded && !spool ? draftOf(decoded) : null, next: spool ? 'open_spool' : 'bind_or_create' }
 }
 
 export const handlers = [
@@ -208,7 +236,11 @@ export const handlers = [
     if (body.error != null) return HttpResponse.json(Object.assign(job, { state: 'failed', result: { error: body.error } }))
     const uid = cleanTagUid(body.uid ?? null)
     const records = body.records ?? []
-    if (job.kind === 'read') return HttpResponse.json(Object.assign(job, { state: 'done', result: { uid, records } }))
+    if (job.kind === 'read') {
+      const found = readOn(uid, records, 'agent')
+      if (found instanceof Response) return found
+      return HttpResponse.json(Object.assign(job, { state: 'done', result: { ...found, uid, records } }))
+    }
     const backup = backups.find((one) => one.id === body.backup_id)
     if (!backup || uid === null || backup.reason !== 'agent_write' || backup.job_id !== job.id || backup.uid !== uid) return conflict('backup_mismatch', 'the backup does not cover this write')
     const result = { uid, records, backup_id: backup.id }
@@ -228,26 +260,30 @@ export const handlers = [
     if (!tagOf(String(params.id))) return problem(404, `no tag ${String(params.id)}`)
     return HttpResponse.json(backups.filter((one) => one.tag_id === params.id).reverse().slice(0, 50))
   }),
+  // `records_for_spool` and `written` check the backup first, then look the spool up.
   http.post(`${BASE}/spools/:id/tag-records`, async ({ params, request }) => {
-    const spool = spoolViewOf(String(params.id))
-    if (!spool) return problem(404, `no spool ${String(params.id)}`)
     const body = (await request.json()) as S['TagRecordsIn']
     const backup = covering(body, 'spool_write')
     if (backup instanceof Response) return backup
+    const spool = spoolViewOf(String(params.id))
+    if (!spool) return problem(404, `no spool ${String(params.id)}`)
     return HttpResponse.json(openSpoolRecords(spool))
   }),
   http.post(`${BASE}/spools/:id/tag-written`, async ({ params, request }) => {
-    const spool = spoolViewOf(String(params.id))
-    if (!spool) return problem(404, `no spool ${String(params.id)}`)
     const body = (await request.json()) as S['TagWrittenIn']
     const backup = covering(body, 'spool_write')
     if (backup instanceof Response) return backup
     if (!sameRecords(body.read_back, body.sent)) return conflict('read_back_mismatch', 'the tag does not hold what was sent')
+    if (body.sent.length !== 1 || !decodeOpenSpool(body.sent)) return problem(422, 'the records sent are in no known format', 'unknown_format')
+    const spool = spoolViewOf(String(params.id))
+    if (!spool) return problem(404, `no spool ${String(params.id)}`)
     if (!sameRecords(body.sent, openSpoolRecords(spool).records)) return conflict('sent_mismatch', 'sent is not what the spool gives now')
     // The read-back gives the tag its format's kind (R13).
     seenTag(backup.uid, 'ntag_openspool')
-    const bound = bindOn(spool.id, backup.uid, null, 'ntag_openspool', false)
+    const bound = bindOn(spool.id, backup.uid, null, 'ntag_openspool', false, false)
     if (bound instanceof Response) return bound
+    // R11: the format's origin and the write's time.
+    setOrigin(spool.id, 'openspool', new Date().toISOString())
     const tag = tagOf(bound.tag_id)!
     return HttpResponse.json({
       tag: tagRowOf(tag),
@@ -269,25 +305,7 @@ export const handlers = [
   }),
   http.post(`${BASE}/tags/reads`, async ({ request }) => {
     const body = (await request.json()) as S['TagReadIn']
-    const uid = cleanTagUid(body.uid)
-    const decoded = decodeOpenSpool(body.records ?? [])
-    if (body.bind_spool_id && uid === null) return problem(422, 'a tag with no UID cannot be bound', 'no_uid')
-    if (uid === null) {
-      return HttpResponse.json({ tag: null, spool: null, decoded, draft: decoded ? draftOf(decoded) : null, next: 'none' } satisfies S['TagReadResult'])
-    }
-    const kind = decoded ? 'ntag_openspool' : null
-    const tag = seenTag(uid, kind)
-    if (body.bind_spool_id) {
-      const bound = bindOn(body.bind_spool_id, uid, null, kind ?? tag.kind, false)
-      if (bound instanceof Response) return bound
-    }
-    const spool = holderOf(tag.id)
-    return HttpResponse.json({
-      tag: tagRowOf(tag),
-      spool,
-      decoded,
-      draft: decoded && !spool ? draftOf(decoded) : null,
-      next: spool ? 'open_spool' : 'bind_or_create',
-    } satisfies S['TagReadResult'])
+    const found = readOn(cleanTagUid(body.uid), body.records ?? [], 'phone', body.bind_spool_id)
+    return found instanceof Response ? found : HttpResponse.json(found)
   }),
 ]

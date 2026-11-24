@@ -32,7 +32,7 @@ export interface NDEFRecordInit {
   id?: string
   encoding?: string
   lang?: string
-  data?: BufferSource | string
+  data?: BufferSource | string | { records: NDEFRecordInit[] }
 }
 
 interface NDEFReader extends EventTarget {
@@ -79,15 +79,207 @@ export function toWire(record: NDEFRecord): WireRecord {
   }
 }
 
-/** A record to write; a field the wire leaves empty is left out, as the API refuses `mediaType` on a non-MIME record. */
+/** A record this page cannot hand to Web NFC's `write()`; its message says why. */
+export class RecordNotWritableError extends Error {
+  override name = 'RecordNotWritableError'
+}
+
+/** `bytes` as UTF-8 text, or null when they are not valid UTF-8. */
+function utf8(bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The URI record's prefixes, by identifier code, as Web NFC expands them when it reads a "U" record
+ * (https://w3c-cg.github.io/web-nfc/, "Parsing NDEF well-known U records"; NFC Forum URI RTD).
+ */
+const URI_PREFIXES = [
+  '', 'http://www.', 'https://www.', 'http://', 'https://', 'tel:', 'mailto:', 'ftp://anonymous:anonymous@', 'ftp://ftp.', 'ftps://',
+  'sftp://', 'smb://', 'nfs://', 'ftp://', 'dav://', 'news:', 'telnet://', 'imap:', 'rtsp://', 'urn:', 'pop:', 'sip:', 'sips:', 'tftp:',
+  'btspp://', 'btl2cap://', 'btgoep://', 'tcpobex://', 'irdaobex://', 'file://', 'urn:epc:id:', 'urn:epc:tag:', 'urn:epc:pat:', 'urn:epc:raw:',
+  'urn:epc:', 'urn:nfc:',
+]
+
+/** One record of a raw NDEF message: its TNF, type, id and payload bytes. */
+interface RawRecord {
+  tnf: number
+  type: Uint8Array
+  id: Uint8Array
+  payload: Uint8Array
+}
+
+/**
+ * The records of a raw NDEF message (a smart poster's payload), from each record's header:
+ * MB, ME, CF, SR, IL and the TNF (NFC Forum NDEF 1.0, section 3.2). Null when the bytes are cut
+ * short or a record is chunked (CF), which Web NFC does not take.
+ */
+function parseMessage(bytes: Uint8Array): RawRecord[] | null {
+  const records: RawRecord[] = []
+  let at = 0
+  const take = (n: number) => {
+    if (at + n > bytes.length) return null
+    const part = bytes.subarray(at, at + n)
+    at += n
+    return part
+  }
+  while (at < bytes.length) {
+    const head = take(2)
+    if (!head) return null
+    const flags = head[0]!
+    if (flags & 0x20) return null
+    const size = take(flags & 0x10 ? 1 : 4)
+    if (!size) return null
+    const payloadLength = size.reduce((sum, byte) => sum * 256 + byte, 0)
+    const idLength = flags & 0x08 ? take(1)?.[0] : 0
+    if (idLength === undefined) return null
+    const type = take(head[1]!)
+    const id = take(idLength)
+    const payload = take(payloadLength)
+    if (!type || !id || !payload) return null
+    records.push({ tnf: flags & 0x07, type, id, payload })
+    if (flags & 0x40) break
+  }
+  return records.length > 0 && at === bytes.length ? records : null
+}
+
+/** The URL of a well-known "U" record's payload, its prefix code expanded; null when it is not one. */
+function uriOf(payload: Uint8Array): string | null {
+  if (payload.length === 0) return null
+  const prefix = URI_PREFIXES[payload[0]!]
+  const rest = utf8(payload.subarray(1))
+  return prefix === undefined || rest === null ? null : prefix + rest
+}
+
+/**
+ * The Web NFC record type of a record inside a smart poster, as Web NFC names it when it reads one
+ * (https://w3c-cg.github.io/web-nfc/, "Parsing NDEF well-known Sp records"): "url", "text",
+ * "smart-poster", a local type such as ":act", "mime", "absolute-url", an external type or "unknown".
+ */
+function nestedType(record: RawRecord): string | null {
+  const type = utf8(record.type) ?? ''
+  switch (record.tnf) {
+    case 0:
+      return 'empty'
+    case 1:
+      return type === 'U' ? 'url' : type === 'T' ? 'text' : type === 'Sp' ? 'smart-poster' : `:${type}`
+    case 2:
+      return 'mime'
+    case 3:
+      return 'absolute-url'
+    case 4:
+      return type
+    case 5:
+      return 'unknown'
+    default:
+      return null
+  }
+}
+
+/** A record inside a smart poster, as a person reads it: its type, its text when it has one, and its payload as hex. */
+export interface PosterRecord {
+  recordType: string
+  text: string | null
+  hex: string
+}
+
+/** What a smart poster's payload holds, record by record; null when it is no NDEF message this page reads. */
+export function posterRecords(dataHex: string): PosterRecord[] | null {
+  const records = parseMessage(bytesOf(dataHex))
+  if (!records) return null
+  const out: PosterRecord[] = []
+  for (const record of records) {
+    const recordType = nestedType(record)
+    if (recordType === null) return null
+    let text: string | null = null
+    if (recordType === 'url') text = uriOf(record.payload)
+    else if (recordType === 'text') text = textOf(record.payload)?.text ?? null
+    out.push({ recordType, text, hex: hexOf(record.payload) })
+  }
+  return out
+}
+
+/** A well-known "T" record's payload: its status byte (bit 7 UTF-16, bits 0-5 the language's length), language and text. */
+function textOf(payload: Uint8Array): { utf16: boolean; lang: string; bytes: Uint8Array; text: string | null } | null {
+  if (payload.length === 0) return null
+  const status = payload[0]!
+  const langEnd = 1 + (status & 0x3f)
+  if (langEnd > payload.length) return null
+  const bytes = payload.subarray(langEnd)
+  const utf16 = (status & 0x80) !== 0
+  let text: string | null
+  try {
+    text = new TextDecoder(utf16 ? 'utf-16be' : 'utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    text = null
+  }
+  return { utf16, lang: utf8(payload.subarray(1, langEnd)) ?? '', bytes, text }
+}
+
+/** The init of a record inside a smart poster; throws `RecordNotWritableError` for one Web NFC refuses there. */
+function nestedInit(record: RawRecord): NDEFRecordInit {
+  const recordType = nestedType(record)
+  if (recordType === null) throw new RecordNotWritableError('the smart poster holds a record of a reserved type')
+  // "Mapping absolute-URL to NDEF": a TypeError when the context is "smart-poster".
+  if (recordType === 'absolute-url') throw new RecordNotWritableError('the smart poster holds an absolute-URL record, which Web NFC refuses inside one')
+  if (recordType === 'smart-poster') throw new RecordNotWritableError('the smart poster holds another smart poster')
+  const init: NDEFRecordInit = { recordType }
+  const id = utf8(record.id)
+  if (id) init.id = id
+  if (recordType === 'url') {
+    const url = uriOf(record.payload)
+    if (url === null) throw new RecordNotWritableError('the smart poster holds a URL that is not valid text')
+    init.data = url
+  } else if (recordType === 'text') {
+    const text = textOf(record.payload)
+    if (!text) throw new RecordNotWritableError('the smart poster holds a text record that is cut short')
+    init.encoding = text.utf16 ? 'utf-16' : 'utf-8'
+    init.lang = text.lang
+    init.data = new Uint8Array(text.bytes)
+  } else if (recordType === 'mime') {
+    init.mediaType = utf8(record.type) ?? ''
+    init.data = new Uint8Array(record.payload)
+  } else if (recordType !== 'empty') init.data = new Uint8Array(record.payload)
+  return init
+}
+
+/**
+ * A record to write; a field the wire leaves empty is left out, as the API refuses `mediaType` on a
+ * non-MIME record. Web NFC takes each record type's data in its own shape
+ * (https://w3c-cg.github.io/web-nfc/, "Creating NDEF message"): a "url" or "absolute-url" record's URL
+ * as a string, a "smart-poster" record's records as a message, any other as bytes. A record it would
+ * refuse throws `RecordNotWritableError` here, before anything is written.
+ */
 export function toInit(record: WireRecord): NDEFRecordInit {
   const init: NDEFRecordInit = { recordType: record.record_type }
   if (record.media_type) init.mediaType = record.media_type
   if (record.id) init.id = record.id
   if (record.encoding) init.encoding = record.encoding
   if (record.lang) init.lang = record.lang
-  if (record.record_type !== 'empty') init.data = bytesOf(record.data_hex)
+  if (record.record_type === 'url' || record.record_type === 'absolute-url') {
+    const url = utf8(bytesOf(record.data_hex))
+    if (url === null) throw new RecordNotWritableError(`the ${record.record_type} record's URL is not valid text`)
+    init.data = url
+  } else if (record.record_type === 'smart-poster') {
+    const records = parseMessage(bytesOf(record.data_hex))
+    if (!records) throw new RecordNotWritableError('the smart poster holds no NDEF message this page can read')
+    init.data = { records: records.map(nestedInit) }
+  } else if (record.record_type !== 'empty') init.data = bytesOf(record.data_hex)
   return init
+}
+
+/** Why these records cannot be written from this page, or null when they can. */
+export function notWritable(records: readonly WireRecord[]): string | null {
+  try {
+    records.forEach(toInit)
+    return null
+  } catch (cause) {
+    if (cause instanceof RecordNotWritableError) return cause.message
+    throw cause
+  }
 }
 
 /** Equal when their `(record_type, media_type, data_hex)` are equal in order (Global Constraints). */
@@ -145,8 +337,24 @@ export class NfcSession {
     for (const listener of [...this.listeners]) listener(reading)
   }
 
+  /** True once a scan started and until `stop`. */
   get active(): boolean {
-    return this.scan !== null
+    return this.scanning
+  }
+
+  private scanning = false
+  private readonly activeListeners = new Set<() => void>()
+
+  private setScanning(on: boolean): void {
+    if (this.scanning === on) return
+    this.scanning = on
+    for (const listener of [...this.activeListeners]) listener()
+  }
+
+  /** Called whenever `active` changes, whoever started or stopped the scan (the page's Scan, an agent job's Arm, a write). */
+  onActiveChange(listener: () => void): () => void {
+    this.activeListeners.add(listener)
+    return () => this.activeListeners.delete(listener)
   }
 
   private ensureReader(): NDEFReader {
@@ -171,11 +379,13 @@ export class NfcSession {
       if (this.scan === scan) this.scan = null
       throw cause
     }
+    if (this.scan === scan) this.setScanning(true)
   }
 
   stop(): void {
     this.scan?.abort()
     this.scan = null
+    this.setScanning(false)
   }
 
   onReading(listener: (reading: Reading) => void): () => void {

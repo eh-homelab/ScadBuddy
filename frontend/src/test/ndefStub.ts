@@ -15,7 +15,7 @@ export interface NdefStub {
   /** A tag the reader saw but could not read (`readingerror`). */
   tapError(): void
   writes: NDEFRecordInit[][]
-  failNextWrite(error: DOMException): void
+  failNextWrite(error: Error): void
   failScan(error: DOMException): void
   restore(): void
   /** How many times `scan()` was called, over every reader. */
@@ -29,7 +29,7 @@ export function installNdefStub(): NdefStub {
   const before = (window as unknown as { NDEFReader?: unknown }).NDEFReader
   const readers = new Set<StubReader>()
   let scanError: DOMException | null = null
-  let writeError: DOMException | null = null
+  let writeError: Error | null = null
   let scans = 0
   const writes: NDEFRecordInit[][] = []
 

@@ -1,5 +1,5 @@
 import { ChevronLeftIcon, CopyIcon, NfcIcon } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Link } from 'react-router'
 import { ApiError } from '../../api/client'
 import { postTagRead, type TagReadResult } from '../../api/filament'
@@ -106,7 +106,11 @@ const forTag = (entries: Entry[], uid: string, change: Partial<Entry>) => entrie
 /** Screens 1 to 3. */
 function Scanner() {
   const [session] = useState(() => new NfcSession())
-  const [scanning, setScanning] = useState(false)
+  // The scan may be started here, by an agent job's Arm or by a write: the button follows the session.
+  const scanning = useSyncExternalStore(
+    useCallback((changed: () => void) => session.onActiveChange(changed), [session]),
+    () => session.active,
+  )
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [entries, setEntries] = useState<Entry[]>([])
@@ -124,7 +128,8 @@ function Scanner() {
           setEntries((now) => [{ key, at: new Date(), uid: reading.uid, records: reading.records, result, held: {} }, ...now])
           setOpenKey(key)
           setError(null)
-          setAnnouncement(announcementOf(reading.uid, result))
+          // The read's number makes each announcement new: a live region says nothing when its text stays the same.
+          setAnnouncement(`${announcementOf(reading.uid, result)} (read ${key})`)
         },
         (cause: unknown) => setError(`ScadBuddy could not look up the tag: ${cause instanceof ApiError ? cause.detail : 'try the tag again'}.`),
       )
@@ -134,7 +139,6 @@ function Scanner() {
       off()
       offError()
       nfc.stop()
-      setScanning(false)
     }
   }, [session])
 
@@ -144,7 +148,6 @@ function Scanner() {
     setError(null)
     try {
       await session.start()
-      setScanning(true)
     } catch (cause) {
       setError(scanRefusal(cause))
     } finally {
@@ -164,18 +167,25 @@ function Scanner() {
     })
   /**
    * A checked write from the opened read `from`: every read of the written UID takes the
-   * answer and the records it holds now. A write onto another tag (a rebind) adds that tag as
-   * a read and opens it, and the tag `from` read is looked up again, as it no longer holds
-   * the spool.
+   * answer and the records it holds now. A write onto another tag (a rebind) opens that tag's
+   * newest read, or adds the tag as a read when the list has none, and the tag `from` read is
+   * looked up again, as it no longer holds the spool.
    */
   const written = (from: Entry, uid: string, records: WireRecord[], result: TagReadResult) => {
     if (from.uid === uid) {
       setEntries((now) => forTag(now, uid, { records, result }))
       return
     }
-    const key = (nextKey.current += 1)
-    setEntries((now) => [{ key, at: new Date(), uid, records, result, held: {} }, ...forTag(now, uid, { records, result })])
-    setOpenKey(key)
+    // `entries` is newest first, so the first read of the UID is its newest.
+    const listed = entries.find((one) => one.uid === uid)
+    if (listed) {
+      setEntries((now) => forTag(now, uid, { records, result }))
+      setOpenKey(listed.key)
+    } else {
+      const key = (nextKey.current += 1)
+      setEntries((now) => [{ key, at: new Date(), uid, records, result, held: {} }, ...now])
+      setOpenKey(key)
+    }
     postTagRead({ uid: from.uid || null, tag_type: null, records: from.records }).then(
       (old) => setEntries((now) => forTag(now, from.uid, { result: old })),
       (cause: unknown) => setError(`ScadBuddy could not look up the old tag again: ${cause instanceof ApiError ? cause.detail : 'read it again'}.`),

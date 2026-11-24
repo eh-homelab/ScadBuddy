@@ -168,6 +168,45 @@ describe('NfcJobBanner (#7273)', () => {
     expect(await screen.findByText(/The tag was not written: The tag moved away/)).toBeInTheDocument()
   })
 
+  it('ends a job whose records this page cannot write before it backs the tag up', async () => {
+    // A smart poster that holds an absolute-URL record, which Web NFC refuses inside one.
+    const job = seedNfcJob({ kind: 'write', records: [{ record_type: 'smart-poster', data_hex: 'd3010078' }] })
+    const { user } = render()
+    await user.click(await armButton())
+    await waitFor(() => expect(log.bodyOf(`POST ${JOBS}/${job.id}/result`)).toEqual({ error: expect.stringContaining('cannot be written from this page') }))
+    expect(log.lines()).not.toContain('POST /api/v1/filament/tags/backups')
+    expect(stub.writes).toHaveLength(0)
+  })
+
+  it('hashes the records once while the job list is polled', async () => {
+    // Each poll answers a new job object; the hash is of the records, so it is not started again.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    let finish: (() => void) | null = null
+    const digest = crypto.subtle.digest.bind(crypto.subtle)
+    const spy = vi.spyOn(crypto.subtle, 'digest').mockImplementation(
+      (algorithm, data) =>
+        new Promise((resolve) => {
+          finish = () => void digest(algorithm, data).then(resolve)
+        }),
+    )
+    try {
+      seedNfcJob({ kind: 'write', records: RECORDS })
+      render()
+      await screen.findByRole('list', { name: 'Records to write' })
+      for (let poll = 0; poll < 3; poll += 1) {
+        const gets = log.lines().length
+        await act(() => vi.advanceTimersByTimeAsync(2000))
+        await vi.waitFor(() => expect(log.lines().length).toBeGreaterThan(gets))
+      }
+      expect(spy).toHaveBeenCalledTimes(1)
+      act(() => finish!())
+      await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Arm' })).toBeEnabled())
+    } finally {
+      spy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
   it('ends the job when the read-back differs or another tag answers', async () => {
     const first = seedNfcJob({ kind: 'write', records: RECORDS })
     const { user } = render()
@@ -176,7 +215,15 @@ describe('NfcJobBanner (#7273)', () => {
     stub.tap({ serialNumber: UID, records: [OLD] })
     await waitFor(() => expect(stub.writes).toHaveLength(1))
     stub.tap(tapOf(UID, RECORDS.slice(0, 1)))
-    await waitFor(() => expect(log.bodyOf(`POST ${JOBS}/${first.id}/result`)).toEqual({ error: 'the tag does not hold what was sent' }))
+    // A read-back that differs goes to ScadBuddy as it is, so the job fails with what the tag holds.
+    await waitFor(() =>
+      expect(log.bodyOf(`POST ${JOBS}/${first.id}/result`)).toEqual({
+        uid: UID,
+        records: [expect.objectContaining({ record_type: 'text', data_hex: RECORDS[0]!.data_hex })],
+        backup_id: expect.any(String),
+      }),
+    )
+    await waitFor(() => expect(screen.getByText('The tag does not hold what was sent.')).toBeInTheDocument())
 
     const second = seedNfcJob({ kind: 'write', records: RECORDS })
     await user.click(await armButton())
@@ -274,7 +321,8 @@ describe('NfcJobBanner (#7273)', () => {
       render()
       const list = await screen.findByRole('list', { name: 'Records to write' })
       await armButton()
-      return within(list).getAllByRole('listitem')
+      // The list's own items: a smart poster's records are a list inside its item.
+      return Array.from(list.children) as HTMLElement[]
     }
 
     it('keeps JSON as it was sent unless pretty-printing loses nothing', async () => {
@@ -296,6 +344,35 @@ describe('NfcJobBanner (#7273)', () => {
       expect(items[0]).toHaveTextContent('https://example.com/x')
       expect(items[1]).toHaveTextContent('https://example.org')
       expect(screen.queryByRole('link')).toBeNull()
+    })
+
+    it("shows every record in a smart poster, and a poster it cannot read as hex", async () => {
+      // "U" (https://example.org), "T" ("en", "Shop") and "act" (0x00, do the action).
+      const poster = '91010c5504' + hexOfText('example.org') + '1101075402' + hexOfText('en') + hexOfText('Shop') + '510301' + hexOfText('act') + '00'
+      const items = await shown([
+        { record_type: 'smart-poster', data_hex: poster },
+        { record_type: 'smart-poster', data_hex: '9101' },
+      ])
+      const inner = within(items[0]!).getByRole('list', { name: 'Records in the smart poster' })
+      const rows = within(inner).getAllByRole('listitem')
+      expect(rows).toHaveLength(3)
+      expect(rows[0]).toHaveTextContent('url')
+      expect(rows[0]).toHaveTextContent('https://example.org')
+      expect(rows[1]).toHaveTextContent('text')
+      expect(rows[1]).toHaveTextContent('Shop')
+      expect(rows[2]).toHaveTextContent(':act')
+      expect(rows[2]).toHaveTextContent('00')
+      expect(items[1]).toHaveTextContent('91 01')
+    })
+
+    it("shows each record's id, which is written too", async () => {
+      const items = await shown([{ record_type: 'text', id: 'shelf-label', encoding: 'utf-8', lang: 'en', data_hex: hexOfText('B3') }])
+      expect(items[0]).toHaveTextContent('id shelf-label')
+    })
+
+    it('says a record with no data has none', async () => {
+      const items = await shown([{ record_type: 'text', encoding: 'utf-8', lang: 'en', data_hex: '' }])
+      expect(items[0]).toHaveTextContent('No data')
     })
 
     it('shows an unknown record, and a text record in an encoding NDEF does not use, as hex', async () => {

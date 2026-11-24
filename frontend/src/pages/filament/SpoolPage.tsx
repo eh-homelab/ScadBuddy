@@ -314,13 +314,15 @@ const NONE = '__none__'
 
 /**
  * #7149: how the spool's tag came in, in a person's words, from Bambuddy's `data_origin`
- * (`rfid-routes.json` `data_origin_values`); an origin not listed is shown as it is.
+ * (`rfid-routes.json` `data_origin_values`), or ScadBuddy's own `openspool` for a tag the phone
+ * page wrote in OpenSpool (#7273; Bambuddy has no value for it); an origin not listed is shown as it is.
  */
 const ORIGINS: Record<string, string> = {
   rfid_auto: 'Bambuddy added this spool when an AMS read its unknown tag.',
   rfid_linked: 'Bambuddy matched its tag to this spool.',
   nfc_link: 'Its tag was linked to it by hand.',
   opentag3d: 'Its tag was written as an OpenTag3D tag.',
+  openspool: 'Its tag was written as an OpenSpool tag.',
 }
 const originText = (origin: string) => ORIGINS[origin] ?? `Its data came in as “${origin}”.`
 

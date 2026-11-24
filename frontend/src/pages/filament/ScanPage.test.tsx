@@ -163,6 +163,31 @@ describe('the scan page (#7273)', () => {
     await waitFor(() => expect(status).toHaveTextContent('Read 04:a2:00:11:22:33:45: new tag'))
   })
 
+  it('announces a second read of the same tag too', async () => {
+    const { user } = open()
+    const status = screen.getByRole('status', { name: 'Last read' })
+    await user.click(screen.getByRole('button', { name: 'Scan' }))
+    await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+    stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+    await waitFor(() => expect(status).toHaveTextContent('Read 04:a1:b2:c3:d4:e5:f6: spool #3'))
+    const first = status.textContent
+    stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+    await waitFor(() => expect(within(screen.getByRole('list', { name: "This session's reads" })).getAllByRole('listitem')).toHaveLength(2))
+    // A live region says nothing when its text stays the same.
+    await waitFor(() => expect(status.textContent).not.toBe(first))
+    expect(status).toHaveTextContent('Read 04:a1:b2:c3:d4:e5:f6: spool #3')
+  })
+
+  it('says it is scanning when an agent job started the scan', async () => {
+    seedNfcJob({ kind: 'read' })
+    const { user } = open()
+    const banner = await screen.findByRole('region', { name: 'Agent job' })
+    const arm = within(banner).getByRole('button', { name: 'Arm' })
+    await waitFor(() => expect(arm).toBeEnabled())
+    await user.click(arm)
+    expect(await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })).toBeInTheDocument()
+  })
+
   it('says when a tag could not be read', async () => {
     const { user } = open()
     await user.click(screen.getByRole('button', { name: 'Scan' }))
@@ -248,6 +273,33 @@ describe('the scan page (#7273)', () => {
     expect(within(newer!).getByText('Spool #3')).toBeInTheDocument()
     await waitFor(() => expect(within(older!).getByText('New tag')).toBeInTheDocument())
     expect(await screen.findByRole('region', { name: 'Spool #3' })).toBeInTheDocument()
+  })
+
+  it('moves a spool onto a tag already in the list without listing that tag twice', async () => {
+    const { user } = open()
+    await user.click(screen.getByRole('button', { name: 'Scan' }))
+    await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+    stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+    await screen.findByRole('region', { name: 'Spool #3' })
+    stub.tap({ serialNumber: '04:0b:0b:0b:0b:0b:0b', records: [] })
+    const reads = screen.getByRole('list', { name: "This session's reads" })
+    await waitFor(() => expect(within(reads).getAllByRole('listitem')).toHaveLength(2))
+    // Open the spool's read again and write the spool onto the listed blank tag.
+    await user.click(within(reads).getAllByRole('button')[1]!)
+    await user.click(await screen.findByRole('button', { name: 'Write tag' }))
+    await screen.findByText('Hold the tag still. If asked, lift it and tap again.')
+    stub.tap({ serialNumber: '04:0b:0b:0b:0b:0b:0b', records: [] })
+    const readBack = within(screen.getByRole('list', { name: 'Steps' })).getByText('Read back').closest('li')!
+    await waitFor(() => expect(readBack).toHaveAttribute('aria-current', 'step'))
+    const written = stub.writes[0]!
+    stub.tap({ serialNumber: '04:0b:0b:0b:0b:0b:0b', records: written.map((one) => ({ recordType: one.recordType, mediaType: one.mediaType, data: one.data as Uint8Array })) })
+    await waitFor(() => expect(within(reads).getAllByText('Spool #3')).toHaveLength(1))
+    await waitFor(() => expect(within(reads).getAllByText('New tag')).toHaveLength(1))
+    const items = within(reads).getAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    const blank = items.find((one) => within(one).queryByText('04:0b:0b:0b:0b:0b:0b'))!
+    expect(within(blank).getByText('Spool #3')).toBeInTheDocument()
+    expect(within(blank).getByRole('button')).toHaveAttribute('aria-current', 'true')
   })
 
   it('says why NFC was refused', async () => {

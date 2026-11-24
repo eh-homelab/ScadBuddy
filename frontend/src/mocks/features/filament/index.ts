@@ -1611,7 +1611,7 @@ function printerLabelRows(root: S['Location']): S['PrinterLabel'][] {
  * to the spool, closing the tag's and the spool's other open bindings. The tag route and the
  * reads route (`tags.ts`, #7273) both bind through it.
  */
-export function bindOn(spoolId: string, uid: string | null, tray: string | null, kind: S['Tag']['kind'], override: boolean): S['TagBinding'] | Response {
+export function bindOn(spoolId: string, uid: string | null, tray: string | null, kind: S['Tag']['kind'], override: boolean, marksOrigin = true): S['TagBinding'] | Response {
   const row = findSpool(spoolId)
   if (!row) return problem(404, `no spool ${spoolId}`)
   const found = state.tags.filter((one) => (uid !== null && one.tag_uid === uid) || (tray !== null && one.tray_uuid === tray))
@@ -1642,28 +1642,43 @@ export function bindOn(spoolId: string, uid: string | null, tray: string | null,
   // Decision 3: a bind with `override` locks the spool's weight; nothing unlocks it but a person.
   if (binding.override) row.weight_locked = true
   addEvent(row.id, 'tag_bound', { data: { tag_id: tag.id } })
-  // #7149 R-7149-1: a person's bind is a hand link, Bambuddy's `nfc_link`.
-  if (row.data_origin !== 'nfc_link') {
-    addEvent(row.id, 'edited', { data: { changes: { data_origin: [row.data_origin ?? null, 'nfc_link'] } } })
-    row.data_origin = 'nfc_link'
-  }
+  // #7149 R-7149-1: a person's bind is a hand link, Bambuddy's `nfc_link`. A checked tag write
+  // (#7273) binds with `marksOrigin` false and sets its format's origin itself (`setOrigin`).
+  if (marksOrigin) setOrigin(row.id, 'nfc_link')
   return binding
+}
+
+/**
+ * `FilamentSpoolStore.set_origin`: the spool's `data_origin`, and with `tagEncodedAt` the time
+ * its tag was written, in one `edited` event of what changed.
+ */
+export function setOrigin(spoolId: string, origin: string, tagEncodedAt?: string) {
+  const row = findSpool(spoolId)
+  if (!row) return
+  const changes: Record<string, [unknown, unknown]> = {}
+  if (row.data_origin !== origin) changes.data_origin = [row.data_origin ?? null, origin]
+  if (tagEncodedAt !== undefined && row.tag_encoded_at !== tagEncodedAt) changes.tag_encoded_at = [row.tag_encoded_at ?? null, tagEncodedAt]
+  if (Object.keys(changes).length === 0) return
+  addEvent(row.id, 'edited', { data: { changes } })
+  row.data_origin = origin
+  if (tagEncodedAt !== undefined) row.tag_encoded_at = tagEncodedAt
 }
 
 /** `clean_tag_uid`: hex digits only, the last 16, upper case; none when empty or all zeros. */
 export const cleanTagUid = (uid: string | null | undefined) => keyOf(hexOf(uid).slice(-16))
 
 /**
- * #7273 `seen_on` for a phone read: the tag with this cleaned UID, made when none holds it,
- * marked seen. A read in a known format gives the tag that format's kind (R13), but a Bambu tag's.
+ * #7273 `seen_on` for a phone's or an agent's read: the tag with this cleaned UID, made when none
+ * holds it, marked seen by `source`. A read in a known format gives the tag that format's kind
+ * (R13), but a Bambu tag's.
  */
-export function seenTag(uid: string, kind: S['Tag']['kind'] | null): S['Tag'] {
+export function seenTag(uid: string, kind: S['Tag']['kind'] | null, source: 'phone' | 'agent' = 'phone'): S['Tag'] {
   let tag = state.tags.find((one) => one.tag_uid === uid)
   if (!tag) {
     tag = { id: newId(), kind: kind ?? 'other', tag_uid: uid, tray_uuid: null, raw_blob: null, note: null, created_at: now() }
     state.tags.push(tag)
   } else if (kind && tag.kind !== 'bambu_mifare') tag.kind = kind
-  Object.assign(tag, { last_seen_at: now(), last_seen_source: 'phone' })
+  Object.assign(tag, { last_seen_at: now(), last_seen_source: source })
   return tag
 }
 

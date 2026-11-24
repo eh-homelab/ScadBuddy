@@ -118,4 +118,29 @@ describe('WriteTag (#7273)', () => {
     await readBack('04:99:88:77:66:55:44')
     expect(await screen.findByText('A different tag answered. Nothing was bound.')).toBeInTheDocument()
   })
+
+  it('says it runs only while it holds the session', async () => {
+    const onRunning = vi.fn()
+    render({ onRunning })
+    await listening()
+    await waitFor(() => expect(onRunning).toHaveBeenLastCalledWith(true))
+    stub.tap({ serialNumber: UID, records: [TEXT] })
+    await readBack(UID)
+    expect(await screen.findByText('Written and checked.')).toBeInTheDocument()
+    expect(onRunning.mock.calls).toEqual([[true], [false]])
+  })
+
+  it('says nothing of running when another run holds the session', async () => {
+    // The other run (an agent job, another flow) is still under way: this flow must not tell
+    // the parent that runs ended.
+    const release = session.claim()!
+    try {
+      const onRunning = vi.fn()
+      render({ onRunning })
+      expect(await screen.findByText('Another write is running. Nothing was written.')).toBeInTheDocument()
+      expect(onRunning).not.toHaveBeenCalled()
+    } finally {
+      release()
+    }
+  })
 })

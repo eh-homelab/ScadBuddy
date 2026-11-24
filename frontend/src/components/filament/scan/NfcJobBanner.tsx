@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../../api/client'
 import { claimNfcJob, getNfcJob, listPendingNfcJobs, postNfcJobResult, type NfcJob } from '../../../api/filament'
 import { headlineOf, writeWithBackup, type WriteOutcome, type WriteStep } from '../../../lib/tagWrite'
-import { recordsSha256, type NfcSession, type WireRecord } from '../../../lib/webNfc'
+import { notWritable, posterRecords, recordsSha256, type NfcSession, type PosterRecord, type WireRecord } from '../../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -56,64 +56,33 @@ const isJson = (record: WireRecord) => /^application\/([\w.-]+\+)?json$/i.test(r
 /** The encodings an NDEF text record can use (NFC Forum Text RTD: UTF-8 or UTF-16), by their Web NFC names. */
 const TEXT_ENCODINGS = new Set(['utf-8', 'utf-16', 'utf-16le', 'utf-16be'])
 
-/** The URI record's prefixes, by identifier code (NFC Forum URI RTD 1.0, table 3). */
-const URI_PREFIXES = [
-  '', 'http://www.', 'https://www.', 'http://', 'https://', 'tel:', 'mailto:', 'ftp://anonymous:anonymous@', 'ftp://ftp.', 'ftps://',
-  'sftp://', 'smb://', 'nfs://', 'ftp://', 'dav://', 'news:', 'telnet://', 'imap:', 'rtsp://', 'urn:', 'pop:', 'sip:', 'sips:', 'tftp:',
-  'btspp://', 'btl2cap://', 'btgoep://', 'tcpobex://', 'irdaobex://', 'file://', 'urn:epc:id:', 'urn:epc:tag:', 'urn:epc:pat:', 'urn:epc:raw:',
-  'urn:epc:', 'urn:nfc:',
-]
-
-/** The URL in a smart poster's payload (an NDEF message that holds one well-known "U" record); null when there is none. */
-function posterUrlOf(bytes: Uint8Array): string | null {
-  let at = 0
-  const take = (n: number) => {
-    if (at + n > bytes.length) return null
-    const part = bytes.subarray(at, at + n)
-    at += n
-    return part
-  }
-  while (at < bytes.length) {
-    const head = take(2)
-    if (!head) return null
-    const flags = head[0]!
-    const typeLength = head[1]!
-    const size = take(flags & 0x10 ? 1 : 4)
-    if (!size) return null
-    const payloadLength = size.reduce((sum, byte) => sum * 256 + byte, 0)
-    const idLength = flags & 0x08 ? take(1)?.[0] : 0
-    if (idLength === undefined) return null
-    const type = take(typeLength)
-    const id = take(idLength)
-    const payload = take(payloadLength)
-    if (!type || !id || !payload) return null
-    if ((flags & 0x07) === 1 && typeLength === 1 && type[0] === 0x55 && payload.length > 0) {
-      const prefix = URI_PREFIXES[payload[0]!]
-      const rest = decode(payload.subarray(1), 'utf-8')
-      return prefix === undefined || rest === null ? null : prefix + rest
-    }
-    if (flags & 0x40) return null
-  }
-  return null
+/** Up to `HEX_PREVIEW_BYTES` of `bytes` as spaced hex, and how many more there are. */
+function hexPreview(bytes: Uint8Array): { text: string; more: number } {
+  const shown = bytes.subarray(0, HEX_PREVIEW_BYTES)
+  return { text: Array.from(shown, (byte) => byte.toString(16).padStart(2, '0')).join(' '), more: bytes.length - shown.length }
 }
 
-/** What a person reads for one record: its text or URL, or its first bytes as hex and how many more there are. */
-type Preview = { kind: 'text'; text: string } | { kind: 'hex'; text: string; more: number }
+/** What a person reads for one record: its text or URL, each record a smart poster holds, or its first bytes as hex and how many more there are. */
+type Preview = { kind: 'text'; text: string } | { kind: 'hex'; text: string; more: number } | { kind: 'poster'; records: PosterRecord[] }
 
 /**
  * R22: every record is shown before Arm. It is text only where the text is exactly what was sent: a
  * text record in an NDEF encoding, a URL (as text, never a link), JSON as sent (laid out only when
- * that changes no value). Any other record, or bytes that are not valid text, is shown as hex.
+ * that changes no value). A smart poster shows each record it holds. Any other record, or bytes
+ * that are not valid text, is shown as hex; a record with no bytes says so.
  */
 function previewOf(record: WireRecord): Preview {
   const bytes = bytesOf(record.data_hex)
+  if (bytes.length === 0) return { kind: 'hex', text: '', more: 0 }
   let text: string | null = null
   if (record.record_type === 'text') {
     const encoding = (record.encoding ?? 'utf-8').toLowerCase()
     if (TEXT_ENCODINGS.has(encoding)) text = decode(bytes, encoding)
   } else if (record.record_type === 'url' || record.record_type === 'absolute-url') text = decode(bytes, 'utf-8')
-  else if (record.record_type === 'smart-poster') text = posterUrlOf(bytes)
-  else if (isJson(record)) {
+  else if (record.record_type === 'smart-poster') {
+    const records = posterRecords(record.data_hex)
+    if (records) return { kind: 'poster', records }
+  } else if (isJson(record)) {
     text = decode(bytes, 'utf-8')
     if (text !== null) {
       try {
@@ -125,15 +94,23 @@ function previewOf(record: WireRecord): Preview {
     }
   }
   if (text !== null) return { kind: 'text', text }
-  const shown = bytes.subarray(0, HEX_PREVIEW_BYTES)
-  return { kind: 'hex', text: Array.from(shown, (byte) => byte.toString(16).padStart(2, '0')).join(' '), more: bytes.length - shown.length }
+  return { kind: 'hex', ...hexPreview(bytes) }
 }
 
-/** The error a write job ends with when the tag does not hold what was sent (G4: the agent never waits out its timeout). */
-function errorOf(outcome: Exclude<WriteOutcome, { status: 'checked' }>): string {
-  if (outcome.status === 'mismatch') return 'the tag does not hold what was sent'
+/** The error a write job ends with when it did not write what was sent (G4: the agent never waits out its timeout). */
+function errorOf(outcome: Exclude<WriteOutcome, { status: 'checked' | 'mismatch' }>): string {
   if (outcome.status === 'other_tag') return 'a different tag answered'
   return outcome.message
+}
+
+/** A preview's hex: its bytes, how many more there are, or that it has none. */
+function HexText({ text, more }: { text: string; more: number }) {
+  return (
+    <p className="font-mono text-[12px] leading-snug break-all text-muted-foreground">
+      {text || <span className="font-sans">No data</span>}
+      {more > 0 && <span className="font-sans"> and {more} more bytes</span>}
+    </p>
+  )
 }
 
 /** Runs `tick` at once and every 2 s while the page is on screen, and again when it comes back on screen; none while it is hidden. */
@@ -221,16 +198,17 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
   }, [shownId])
 
   // A write is armed only with the hash of the records shown here (R22): computed once they render,
-  // and again whenever the records differ (a reload after `records_mismatch`).
+  // and again whenever the records differ (a reload after `records_mismatch`). It hangs on the
+  // records' text, not the job: each poll answers a new job object, which must not start it again.
   const recordsKey = job?.records ? JSON.stringify(job.records) : null
   useEffect(() => {
-    if (!job?.records || recordsKey === null || hash?.key === recordsKey) return
+    if (recordsKey === null || hash?.key === recordsKey) return
     let live = true
-    void recordsSha256(job.records).then((value) => live && setHash({ key: recordsKey, value }))
+    void recordsSha256(JSON.parse(recordsKey) as WireRecord[]).then((value) => live && setHash({ key: recordsKey, value }))
     return () => {
       live = false
     }
-  }, [job, recordsKey, hash])
+  }, [recordsKey, hash])
 
   // At 0:00 a running job stops: the server has ended it.
   useEffect(() => {
@@ -327,6 +305,14 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
     }
 
     const records = target.records ?? []
+    // A record Web NFC would refuse ends the job before the tag is backed up or written.
+    const refused = notWritable(records)
+    if (refused) {
+      const text = `This record cannot be written from this page: ${refused}. Nothing was written.`
+      await fail(target.id, text)
+      end(target.id, text)
+      return
+    }
     const outcome = await writeWithBackup({
       session,
       reason: 'agent_write',
@@ -348,8 +334,16 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
       end(target.id, STOPPED_WAITING)
       return
     }
-    // A failed write ends the job at once, so the agent never waits out its time.
-    await fail(target.id, errorOf(outcome))
+    // A failed write ends the job at once, so the agent never waits out its time. A read-back that
+    // differs goes to ScadBuddy as it is: the job fails with what the tag holds (`finish_job`).
+    if (outcome.status === 'mismatch') {
+      const { uid, records: held } = outcome.readBack
+      const posted = await postNfcJobResult(target.id, { uid: uid || null, records: held, backup_id: outcome.backupId }).then(
+        () => true,
+        () => false,
+      )
+      if (!posted) await fail(target.id, 'the tag does not hold what was sent')
+    } else await fail(target.id, errorOf(outcome))
     end(target.id, headlineOf(outcome, false))
   }
 
@@ -394,15 +388,27 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
                     <span className="flex flex-wrap items-baseline gap-x-2">
                       <span className="font-medium">{record.record_type}</span>
                       {record.media_type && <span className="text-muted-foreground">{record.media_type}</span>}
+                      {/* The id is written to the tag too, so it is shown. */}
+                      {record.id && <span className="min-w-0 break-all text-muted-foreground">id {record.id}</span>}
                       <span className="ml-auto tabular-nums text-muted-foreground">{record.data_hex.length / 2} bytes</span>
                     </span>
                     {preview.kind === 'text' ? (
                       <pre className="max-h-32 overflow-auto font-mono text-[12px] leading-snug break-words whitespace-pre-wrap">{preview.text}</pre>
+                    ) : preview.kind === 'poster' ? (
+                      <ul aria-label="Records in the smart poster" className="flex flex-col gap-1.5 border-l-2 border-border pl-3">
+                        {preview.records.map((inner, index) => (
+                          <li key={index} className="flex flex-col gap-0.5">
+                            <span className="font-medium">{inner.recordType}</span>
+                            {inner.text !== null ? (
+                              <pre className="max-h-24 overflow-auto font-mono text-[12px] leading-snug break-words whitespace-pre-wrap">{inner.text || 'No text'}</pre>
+                            ) : (
+                              <HexText {...hexPreview(bytesOf(inner.hex))} />
+                            )}
+                          </li>
+                        ))}
+                      </ul>
                     ) : (
-                      <p className="font-mono text-[12px] leading-snug break-all text-muted-foreground">
-                        {preview.text || 'No data'}
-                        {preview.more > 0 && <span className="font-sans"> and {preview.more} more bytes</span>}
-                      </p>
+                      <HexText text={preview.text} more={preview.more} />
                     )}
                   </li>
                 )

@@ -6,13 +6,14 @@
  */
 import { ApiError } from '../api/client'
 import { createTagBackup, postTagRead, restoreTagBackup, type TagReadResult } from '../api/filament'
-import { sameRecords, type NfcSession, type Reading, type WireRecord } from './webNfc'
+import { notWritable, sameRecords, type NfcSession, type Reading, type WireRecord } from './webNfc'
 
 export type WriteStep = 'backing_up' | 'writing' | 'reading_back' | 'tap_again'
 
 export type WriteOutcome =
   | { status: 'checked'; result: TagReadResult | null }
-  | { status: 'mismatch'; backupId: string }
+  /** `readBack`: what the tag holds after the write. */
+  | { status: 'mismatch'; backupId: string; readBack: Reading }
   | { status: 'other_tag'; backupId: string }
   | { status: 'failed'; message: string; backupId: string | null }
 
@@ -60,12 +61,15 @@ export interface WriteOptions {
   /** Checks the write with the server once the read-back equals what was sent. */
   confirm: (now: Reading, backupId: string, sent: WireRecord[], readBack: Reading) => Promise<TagReadResult | null>
   onStep: (step: WriteStep) => void
+  /** Called once the run holds the session's claim; a run refused by another's claim never calls it. */
+  onClaimed?: () => void
   signal?: AbortSignal
 }
 
-export async function writeWithBackup({ session, reason, jobId, prepare, confirm, onStep, signal }: WriteOptions): Promise<WriteOutcome> {
+export async function writeWithBackup({ session, reason, jobId, prepare, confirm, onStep, onClaimed, signal }: WriteOptions): Promise<WriteOutcome> {
   const release = session.claim()
   if (!release) return { status: 'failed', message: 'Another write is running. Nothing was written.', backupId: null }
+  onClaimed?.()
   let backupId: string | null = null
   const stopped = (message: string): WriteOutcome => ({ status: 'failed', message, backupId })
   try {
@@ -99,11 +103,18 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
     // Web NFC refuses a message with no records, so a blank tag gets one empty record.
     const written = sent.length > 0 ? sent : [EMPTY_RECORD]
     if (signal?.aborted) return stopped('Stopped. Nothing was written.')
+    const refused = notWritable(written)
+    if (refused) return { status: 'failed', message: `This record cannot be written from this page: ${refused}. Nothing was written.`, backupId }
     onStep('writing')
     try {
       await session.write(written, signal)
     } catch (cause) {
       if (isAbort(cause, signal)) return stopped('Stopped during the write. Nothing was bound.')
+      // Web NFC throws a TypeError (or a SyntaxError DOMException) for a record it will not map
+      // to NDEF (https://w3c-cg.github.io/web-nfc/, "Creating NDEF message"): no tag was touched.
+      if (cause instanceof TypeError || (cause instanceof DOMException && cause.name === 'SyntaxError')) {
+        return { status: 'failed', message: `The tag was not written: the browser refused a record (${detailOf(cause)}).`, backupId }
+      }
       return { status: 'failed', message: `The tag was not written: ${detailOf(cause)}. The tag may be too small for the record, or it moved away too soon.`, backupId }
     }
 
@@ -115,13 +126,13 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
     }
     if (back.uid !== now.uid) return { status: 'other_tag', backupId }
     const holds = sameRecords(back.records, written) || (sent.length === 0 && back.records.length === 0)
-    if (!holds) return { status: 'mismatch', backupId }
+    if (!holds) return { status: 'mismatch', backupId, readBack: back }
 
     try {
       return { status: 'checked', result: await confirm(now, backupId, sent, back) }
     } catch (cause) {
       const code = codeOf(cause)
-      if (code === 'read_back_mismatch') return { status: 'mismatch', backupId }
+      if (code === 'read_back_mismatch') return { status: 'mismatch', backupId, readBack: back }
       if (code === 'sent_mismatch') return { status: 'failed', message: SENT_MISMATCH, backupId }
       if (code === 'backup_mismatch') return { status: 'failed', message: BACKUP_STALE, backupId }
       return { status: 'failed', message: `The write was not checked, so the tag was not bound: ${detailOf(cause)}`, backupId }
@@ -147,7 +158,14 @@ async function readBack(session: NfcSession, onStep: (step: WriteStep) => void, 
  * Writes a backup's records back to its tag (`restore`), itself backed up first. The page
  * checks the read-back with `sameRecords` and posts it as a read (R6); it binds nothing.
  */
-export function restoreBackup(options: { session: NfcSession; tagId: string; backupId: string; onStep: (step: WriteStep) => void; signal?: AbortSignal }): Promise<WriteOutcome> {
+export function restoreBackup(options: {
+  session: NfcSession
+  tagId: string
+  backupId: string
+  onStep: (step: WriteStep) => void
+  onClaimed?: () => void
+  signal?: AbortSignal
+}): Promise<WriteOutcome> {
   const { tagId, backupId, ...rest } = options
   return writeWithBackup({
     ...rest,

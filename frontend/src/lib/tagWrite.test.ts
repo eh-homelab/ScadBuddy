@@ -127,6 +127,31 @@ describe('writeWithBackup (#7273)', () => {
     const done = await outcome
     expect(done.status).toBe('mismatch')
     expect(done.status === 'mismatch' && done.backupId).toEqual(expect.any(String))
+    // What the tag holds goes with the mismatch, so an agent's job can report it.
+    expect(done.status === 'mismatch' && done.readBack).toEqual({ uid: UID, records: [expect.objectContaining({ record_type: 'mime', data_hex: '7b7d' })] })
+  })
+
+  it('says the browser refused a record rather than that the tag is too small', async () => {
+    stub.failNextWrite(new TypeError('The data for url NDEFRecord must be a USVString.'))
+    const outcome = write()
+    stub.tap({ serialNumber: UID, records: [] })
+    const done = await outcome
+    expect(done.status === 'failed' && done.message).toBe('The tag was not written: the browser refused a record (The data for url NDEFRecord must be a USVString.).')
+  })
+
+  it('writes nothing when a record cannot be handed to Web NFC', async () => {
+    const outcome = writeWithBackup({
+      session,
+      reason: 'restore',
+      prepare: async () => [{ record_type: 'url', data_hex: 'ff' }],
+      confirm: async () => null,
+      onStep: (step) => steps.push(step),
+    })
+    stub.tap({ serialNumber: UID, records: [] })
+    const done = await outcome
+    expect(done.status === 'failed' && done.message).toBe("This record cannot be written from this page: the url record's URL is not valid text. Nothing was written.")
+    expect(stub.writes).toEqual([])
+    expect(steps).not.toContain('writing')
   })
 
   it('reports a read_back_mismatch refusal from the server as a mismatch', async () => {
