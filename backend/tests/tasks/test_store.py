@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import psycopg
 import pytest
 from psycopg import Connection
 from psycopg.pq import TransactionStatus
 
 from scadbuddy.core.events import Event, TaskChanged
 from scadbuddy.tasks.models import TaskOpen
-from scadbuddy.tasks.store import TaskNotOpenError, TaskStore
+from scadbuddy.tasks.store import RunEndedError, RunNotFoundError, TaskNotOpenError, TaskStore
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -283,3 +286,46 @@ def test_the_model_refuses_a_bad_place_or_title() -> None:
     with pytest.raises(ValueError):
         TaskOpen(id="t", run_id="r", title="x" * 501, schema=SCHEMA)
     assert _task("t", place="x" * 100).place == "x" * 100
+
+
+def test_open_on_an_unknown_run_raises_and_stores_nothing(store: TaskStore) -> None:
+    with pytest.raises(RunNotFoundError):
+        store.open(_task("t1", "run-9"))
+    assert store.list(state=None) == []
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "terminated"])
+def test_open_on_an_ended_run_raises_and_the_same_id_again_answers_its_row(
+    store: TaskStore, pg_pool: PgPool, status: str
+) -> None:
+    first = store.open(_task("t1"))
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE workflow_runs SET status = %s", (status,))
+    with pytest.raises(RunEndedError):
+        store.open(_task("t2"))
+    assert store.open(_task("t1")) == first
+    assert [t.id for t in store.list(state=None)] == ["t1"]
+
+
+def test_a_run_that_ends_while_open_waits_for_its_row_leaves_no_open_task(
+    store: TaskStore, pg_pool: PgPool
+) -> None:
+    with psycopg.connect(pg_pool.conninfo) as ender, ThreadPoolExecutor(1) as pool:
+        ender.execute("UPDATE workflow_runs SET status = 'failed' WHERE id = 'run-2'")
+        opening = pool.submit(store.open, _task("t1", "run-2"))
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with pg_pool.connection() as conn:
+                waiting = conn.execute(
+                    "SELECT count(*) AS n FROM pg_stat_activity"
+                    " WHERE wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'"
+                ).fetchone()
+            if waiting is not None and waiting["n"]:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("open did not wait for the run's row")
+        ender.commit()
+        with pytest.raises(RunEndedError):
+            opening.result(timeout=30)
+    assert store.list(state=None) == []

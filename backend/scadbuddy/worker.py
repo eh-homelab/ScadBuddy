@@ -1609,7 +1609,7 @@ class ProjectsKeyMissingError(ValueError):
 
 
 #: The CRUD areas the projects worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-PROJECTS_CRUD_AREAS = frozenset({"flows", "operations", "payload-keys"})
+PROJECTS_CRUD_AREAS = frozenset({"flows", "operations", "payload-keys", "tasks"})
 
 
 async def run_projects_worker(

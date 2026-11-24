@@ -13,6 +13,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import TaskChanged
+from scadbuddy.flows.models import TERMINAL
 from scadbuddy.tasks.models import Task, TaskOpen, TaskState
 
 _COLUMNS = (
@@ -30,6 +31,14 @@ class TaskNotOpenError(Exception):
         self.state = state
 
 
+class RunNotFoundError(Exception):
+    """The task's run does not exist."""
+
+
+class RunEndedError(Exception):
+    """The task's run has ended, so it opens no task."""
+
+
 class TaskStore:
     def __init__(
         self,
@@ -41,29 +50,42 @@ class TaskStore:
         self.events = events
 
     def open(self, task: TaskOpen) -> Task:
-        """Insert the task. The same id again returns the row as it is."""
+        """Insert the task. The same id again returns the row as it is, whatever the run's
+        state. A new task needs a run that has not ended: the run's row is read ``FOR
+        SHARE`` in the transaction, so a run that ends meanwhile waits for the insert (and
+        cancels the task), or ends first and refuses it. Raises `RunNotFoundError` and
+        `RunEndedError`."""
         with self._pool.connection() as conn, conn.transaction():
-            row = conn.execute(
-                "INSERT INTO tasks (id, run_id, title, schema, context, place, ui, expires_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING"
-                f" RETURNING {_COLUMNS}",
-                (
-                    task.id,
-                    task.run_id,
-                    task.title,
-                    Jsonb(task.schema_),
-                    Jsonb(task.context),
-                    task.place,
-                    task.ui,
-                    task.expires_at,
-                ),
-            ).fetchone()
+            row = conn.execute(f"SELECT {_COLUMNS} FROM tasks WHERE id = %s", (task.id,)).fetchone()
             if row is None:
-                row = conn.execute(
-                    f"SELECT {_COLUMNS} FROM tasks WHERE id = %s", (task.id,)
+                run = conn.execute(
+                    "SELECT status FROM workflow_runs WHERE id = %s FOR SHARE", (task.run_id,)
                 ).fetchone()
-            else:
-                self._announce(conn, row)
+                if run is None:
+                    raise RunNotFoundError(task.run_id)
+                if run["status"] in TERMINAL:
+                    raise RunEndedError(task.run_id)
+                row = conn.execute(
+                    "INSERT INTO tasks (id, run_id, title, schema, context, place, ui, expires_at)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING"
+                    f" RETURNING {_COLUMNS}",
+                    (
+                        task.id,
+                        task.run_id,
+                        task.title,
+                        Jsonb(task.schema_),
+                        Jsonb(task.context),
+                        task.place,
+                        task.ui,
+                        task.expires_at,
+                    ),
+                ).fetchone()
+                if row is None:
+                    row = conn.execute(
+                        f"SELECT {_COLUMNS} FROM tasks WHERE id = %s", (task.id,)
+                    ).fetchone()
+                else:
+                    self._announce(conn, row)
         assert row is not None
         return Task.model_validate(row)
 

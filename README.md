@@ -1457,9 +1457,9 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
 `python -m scadbuddy.worker --queue projects`, the Deployment `scadbuddy-projects` in
 `applications/scadbuddy/scadbuddy-projects.yaml`, same image.
 
-- **What it needs:** no database (#5298). Its flow runs, decisions, grants, operations
-  and payload keys go through the API's CRUD routes, and it starts only once the API
-  lists the `flows`, `operations` and `payload-keys` areas. A `SCADBUDDY_DATABASE_URL`
+- **What it needs:** no database (#5298). Its flow runs, decisions, grants, operations,
+  tasks and payload keys go through the API's CRUD routes, and it starts only once the API
+  lists the `flows`, `operations`, `payload-keys` and `tasks` areas. A `SCADBUDDY_DATABASE_URL`
   that is still set is logged once and ignored. It needs the KEK
   (`SCADBUDDY_SECRET_KEY_FILE`: a flow's payloads are sealed per run, and the worker
   refuses to start without it), `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and
