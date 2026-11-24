@@ -53,6 +53,39 @@ def test_outputs_tables_exist(projection: JobProjection) -> None:
         assert copy_run["copied"] == 0
 
 
+def test_output_bytes_tables_exist(projection: JobProjection) -> None:
+    """Phase 2 (#7256, spec §4.2, §4.3): an output's blob keys, its files and its derived
+    data; a deleted output takes its child rows with it."""
+    with projection.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO outputs (output_id, slug, meta, created_at, model_blob)"
+            " VALUES ('o1', 'cube', '{\"id\": \"o1\"}', now(), 'output-o1-model')"
+        )
+        conn.execute(
+            "INSERT INTO output_files (output_id, name, blob_key, size)"
+            " VALUES ('o1', 'a.stl', 'output-o1-file-0', 3)"
+        )
+        conn.execute(
+            "INSERT INTO output_derived (output_id, kind, plate, version, data)"
+            " VALUES ('o1', 'geometry', 1, 'v1', '{}')"
+        )
+        row = conn.execute("SELECT * FROM outputs WHERE output_id = 'o1'").fetchone()
+        assert row is not None
+        assert row["model_blob"] == "output-o1-model"
+        assert row["bytes_at"] is None and row["bytes_damaged"] is None
+        run = conn.execute("INSERT INTO output_byte_runs DEFAULT VALUES RETURNING *").fetchone()
+        assert run is not None and run["failed"] == [] and run["finished_at"] is None
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(
+                "INSERT INTO output_derived (output_id, kind, plate, version, data)"
+                " VALUES ('o1', 'other', 1, 'v1', '{}')"
+            )
+        conn.execute("DELETE FROM outputs WHERE output_id = 'o1'")
+        for table in ("output_files", "output_derived"):
+            left = conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()
+            assert left is not None and left["n"] == 0
+
+
 @pytest.fixture
 def rows(projection: JobProjection) -> OutputRows:
     return OutputRows(projection.pool)
