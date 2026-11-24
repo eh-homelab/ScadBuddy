@@ -98,6 +98,10 @@ from scadbuddy.print_watch.store import (
 
 router = APIRouter(prefix="/print-imports", tags=["prints"])
 
+#: The 404 of an import onto a library file that is gone (#7335): its `replacement` is the
+#: live file with the same bytes, or null.
+LIBRARY_FILE_GONE_PROBLEM = "https://scadbuddy.dev/problems/print-imports/library-file-gone"
+
 
 class PrintOwner(BaseModel):
     """What a linked archive is a print of already."""
@@ -337,20 +341,48 @@ async def _require_native_file(library: PrintLibrary, file_id: int) -> None:
         else None
     )
     if found is None:
-        raise _target_refused(ImportTargetGoneError(file_id, NOT_STANDING))
+        error = ImportTargetGoneError(file_id, NOT_STANDING)
+        raise _target_refused(error, await _replacement(library, file_id))
     if found.print_subject is not None:
         raise _target_refused(ImportTargetGoneError(file_id, PER_PRINT_COPY))
 
 
-def _target_refused(error: ImportTargetGoneError) -> ApiError:
+async def _replacement(library: PrintLibrary, file_id: int) -> LibraryFileSuggestion | None:
+    """The live file a trashed one's bytes were added again as (#7335), the same name
+    first, then the newest; never a run's per-print copy. None for a file purged or never
+    here, whose bytes nothing tells."""
+    native = await library.serving_native()
+    if native is None or not is_native_id(file_id):
+        return None
+    gone = await asyncio.to_thread(native.rows.file, file_id, trashed=True)
+    if gone is None:
+        return None
+    live = [
+        row
+        for row in await asyncio.to_thread(native.rows.files_by_sha256, [gone.sha256])
+        if row.print_subject is None
+    ]
+    if not live:
+        return None
+    best = max(live, key=lambda row: (row.name == gone.name, row.id))
+    return LibraryFileSuggestion(id=best.id, filename=best.name, folder_id=best.folder_id)
+
+
+def _target_refused(
+    error: ImportTargetGoneError, replacement: LibraryFileSuggestion | None = None
+) -> ApiError:
     """A library target `require_import_target` refused: 422 for a per-print copy, which
-    stands but is never a target, 404 for a file that does not stand."""
-    code = (
-        status.HTTP_422_UNPROCESSABLE_CONTENT
-        if error.reason == PER_PRINT_COPY
-        else status.HTTP_404_NOT_FOUND
+    stands but is never a target, 404 for a file that does not stand, with the live file
+    that took its place (#7335), if one did."""
+    if error.reason == PER_PRINT_COPY:
+        return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error), file_id=error.file_id)
+    return ApiError(
+        status.HTTP_404_NOT_FOUND,
+        str(error),
+        type_=LIBRARY_FILE_GONE_PROBLEM,
+        file_id=error.file_id,
+        replacement=replacement.model_dump() if replacement is not None else None,
     )
-    return ApiError(code, str(error), file_id=error.file_id)
 
 
 @asynccontextmanager
@@ -670,7 +702,7 @@ async def import_print(
         try:
             owner = await _record(links, auto_imports, client, record, archive, kept)
         except ImportTargetGoneError as error:
-            raise _target_refused(error) from None
+            raise _target_refused(error, await _replacement(library, error.file_id)) from None
     if owner is not None:
         # Only a run's link can come between the check above and the record (imports of
         # one archive wait on `import_lock`), and a run's print is its own.
