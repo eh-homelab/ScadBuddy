@@ -53,9 +53,10 @@ describe("one session's pending input", () => {
   })
 
   it("lists an undecided row of the session's record", async () => {
-    const { sessions, filters } = managerOver([entry('durable:a', 'approval')])
+    const { sessions, filters } = managerOver([entry('durable:a', 'approval')], false, { owner: GRANTED, creator: GRANTED })
     const page = await sessionPendingInput(sessions, OWNER, SESSION)
     expect(page?.entries.map((e) => e.id)).toEqual(['durable:a'])
+    // Another principal's session: its answers are not the browser user's, as in the aggregate.
     expect(filters).toEqual([{ sessionId: SESSION, ownAnswers: true }])
   })
 
