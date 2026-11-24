@@ -14,11 +14,6 @@ export const FILL_LABELS: Record<FillField, string> = {
 
 /** Where a profile came from, as a person reads it. */
 export function sourceText(source: NonNullable<TypeFill['source']>): string {
-  const kind =
-    source.origin === 'bambuddy_local'
-      ? 'Bambuddy local preset'
-      : source.origin === 'scadbuddy'
-        ? 'ScadBuddy preset'
-        : 'Bambu Studio preset'
+  const kind = source.origin === 'scadbuddy' ? 'ScadBuddy preset' : 'Bambu Studio preset'
   return `${source.name}, the ${kind} ${source.preset_id} for the ${source.printer_model} ${source.nozzle_diameter} mm nozzle`
 }

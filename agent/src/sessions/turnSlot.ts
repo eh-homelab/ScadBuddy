@@ -7,8 +7,8 @@
 // question gates, the memory and trace hooks, the in-process servers' turn
 // context and tab wait, and the http tool's turn id and abort signal. A warm
 // process (warm.ts) serves many turns: each sets the slot before it pushes its
-// prompt and clears it once it has finished, its events written (manager.ts
-// `runTurn`), so a hook Claude Code fires after that, between turns, finds no
+// prompt and clears it once it has finished, its events written
+// (turnCore.ts), so a hook Claude Code fires after that, between turns, finds no
 // turn and fails closed. A retain the Stop hook started before the result
 // goes on without the slot (memory/hindsight.ts: fire-and-forget, with the
 // turn's own closures).

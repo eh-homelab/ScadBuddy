@@ -487,6 +487,19 @@ def test_an_attempts_archive_offers_its_finish_photo_as_a_copy(bambuddy: TestCli
     # Not settled yet: nothing is copied onto the attempt.
     assert offers["attempt"]["archive_ids"] == []
 
+    # #7233: the read started the attempt's media import, which copies the photo with no
+    # click, written by the attempt's creator.
+    order_path = f"/api/v1/orders/{item.order['id']}"
+    deadline = time.monotonic() + 30
+    while not bambuddy.get(order_path).json()["attachments"] and time.monotonic() < deadline:
+        time.sleep(0.1)
+    [imported] = bambuddy.get(order_path).json()["attachments"]
+    assert (imported["archive_id"], imported["archive_media"]) == (81, "finished_photo")
+    assert imported["created_by"] == attempt["created_by"]
+    assert photo.call_count == 1
+
+    # The button still copies: the same bytes answer the imported row. The copy route
+    # downloads before it compares (spec 2026-11-05 F2), so Bambuddy is asked again.
     copied = answered(
         bambuddy,
         bambuddy.post(f"{base}/81/copy", json={"what": "finished_photo"}, headers=press()),
@@ -496,7 +509,8 @@ def test_an_attempts_archive_offers_its_finish_photo_as_a_copy(bambuddy: TestCli
         "image",
         item.item["id"],
     )
-    assert photo.call_count == 1
+    assert copied["id"] == imported["id"]
+    assert photo.call_count == 2
     # #7232 (spec 2026-11-05 §4.2): the copy names its archive and medium.
     assert (copied["archive_id"], copied["archive_media"]) == (81, "finished_photo")
     # F14: the archive's 3MF is no medium to copy.

@@ -11,6 +11,8 @@ Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags` 
 `PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
 `POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
 tag (`filament/rfid_slots.py`), whatever ``tags`` says.
+`POST /filament/presets/bambuddy-import` reads Bambuddy's local presets and writes
+ScadBuddy's own presets only (#7244).
 `POST /filament/sync/run` asks the ScadBuddy-to-Bambuddy sync for a full pass (#6265),
 which writes Bambuddy only for the data types set to push; `GET /filament/sync/status`
 reads how its passes went. `GET /filament/sync/reset-links` counts what a reset of the
@@ -161,6 +163,7 @@ from scadbuddy.filament.profile_fill import (
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import failure_label, push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
+from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
     OverrideKindError,
@@ -207,7 +210,8 @@ from scadbuddy.workflows.commands import (
 #: themselves; the Bambuddy import pulls and writes nothing, so it has nothing to push
 #: (Decision 163), nor has the labels PDF (#7157);
 #: the printer labels (#6955) make only the printer and AMS places that capture makes
-#: too, un-nudged, and every labels-page load and agent read calls them. The phone's tag
+#: too, un-nudged, and every labels-page load and agent read calls them; the presets
+#: import (#7244) takes Bambuddy's presets, which Bambuddy already holds. The phone's tag
 #: routes (#7273) change nothing the sync pushes: a backup, the records to write, a
 #: restore's records and the agent's NFC jobs. A tag reading nudges only when it binds
 #: (`read_tag` sets `SKIP_NUDGE` otherwise); a checked write binds, so it nudges.
@@ -219,6 +223,7 @@ NOT_NUDGED = frozenset(
         "import_bambuddy",
         "printer_labels",
         "render_labels_pdf",
+        "import_bambuddy_presets",
         "back_up_tag",
         "tag_records",
         "restore_tag_backup",
@@ -1662,7 +1667,9 @@ async def reset_consumed(
         "own `edited` ledger event of what changed on it, and none when nothing did, so a "
         "resend books nothing. `null` on an override clears it. All or none: a spool the "
         "patch refuses refuses the whole edit, and the 422 names its number. An id that "
-        "names no spool is in `not_found`. 422 for a bad field, a patch that sets nothing "
+        "names no spool is in `not_found`; the answer lists, in id order, the spools it "
+        "changed (`changed`), those already so (`unchanged`) and `not_found`. 422 for a bad "
+        "field, a patch that sets nothing "
         "or sets `archived` (use `bulk-archive` or `bulk-restore`), a row it names that "
         "does not exist, a spool left with neither type nor material, or an effective "
         "minimum temperature above its maximum."
@@ -2850,6 +2857,42 @@ async def import_bambuddy(
     if outcome.report is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
     return outcome.report
+
+
+@router.post(
+    "/presets/bambuddy-import",
+    response_model=PresetImport,
+    summary="Import Bambuddy's presets now",
+    description=(
+        "Bring Bambuddy's filament local presets into ScadBuddy's own presets once, whatever "
+        "`filament_sync.presets` says (the Schedule's pull does the same only while it is "
+        "`bb_to_sb` or `two_way`). Reads Bambuddy now: its list of local presets, then each "
+        "preset it needs. A preset ScadBuddy took from Bambuddy (`source` `bambuddy`) whose "
+        "`updated_at` moved since takes Bambuddy's document as a new version (`updated`). "
+        "Every spool or type preset that still names a Bambuddy local preset id names a "
+        "ScadBuddy preset instead: the one already made for that id, else a new one made "
+        "from Bambuddy's document (`adopted`, how many were made). A preset gone from "
+        "Bambuddy is left as it is. Never writes to Bambuddy. 409 when no Bambuddy is "
+        "configured, and 409 with `code` `instance_changed` (reading nothing) while the "
+        "links belong to another Bambuddy, until `POST /filament/sync/reset-links`; "
+        "Bambuddy's own errors as they come."
+    ),
+)
+async def import_bambuddy_presets(
+    state: StateDep, filament: FilamentDep, store: SettingsStoreDep
+) -> PresetImport:
+    """The one-time import of #7244 (`filament/sb_presets.py` `import_from_bambuddy`),
+    which reads Bambuddy now."""
+    settings = await asyncio.to_thread(store.load)
+    if not settings.bambuddy_url:
+        raise not_configured("no Bambuddy URL is configured; set one in Settings")
+    if await asyncio.to_thread(links_elsewhere, filament, instance_for(settings.bambuddy_url)):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the Bambuddy links belong to another Bambuddy; reset them first",
+            code="instance_changed",
+        )
+    return await import_from_bambuddy(state.settings_store.pool, state.store.blobs, settings)
 
 
 @router.get(

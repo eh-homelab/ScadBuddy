@@ -23,7 +23,6 @@ import { type SessionManager, type SessionManagerDeps, SETTING_SESSION_MAX_TURNS
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
-import { queuePollers } from '../src/temporal/pollers.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
@@ -37,7 +36,7 @@ import { liveClaudeCodes } from './support/claudeProcesses.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
-import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
+import { anyPoller, localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 import { dumpThenCleanUp, dumpWorkflow } from './support/workflowDump.js'
 import { PgTurnRows } from './support/sql/turnRows.js'
 import { durableStores, hostStores } from './support/agentSessions.js'
@@ -110,6 +109,10 @@ function latch(): { promise: Promise<void>; release: () => void } {
 }
 
 const conversation = (r: RecordedRequest) => JSON.stringify(r.body?.messages ?? [])
+/** A turn whose one model turn is spent on a tool call: the call, then the result, the `error_max_turns` error and idle. */
+const MAX_TURNS_TYPES = ['session.started', 'session.status', 'user.turn', 'session.status', 'tool.call', 'tool.result', 'session.result', 'error', 'session.status']
+/** A turn the model API refuses: no model output, then the result, the `api_error` error and failed. */
+const API_ERROR_TYPES = ['session.started', 'session.status', 'user.turn', 'session.status', 'session.result', 'error', 'session.status']
 
 type Replica = {
   name: string
@@ -266,8 +269,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
 
   /** Whether a worker polls `queue` (1 workflow, 2 activity) now. */
   async function polled(queue: string, type: 1 | 2): Promise<boolean> {
-    // Every partition (temporal/pollers.ts): a worker can poll only the non-root ones (#7306).
-    return (await queuePollers(env.client, queue, type, Date.now() + 10_000)).length > 0
+    return anyPoller(env.client, queue, type)
   }
   const pollUntil = <T>(read: () => Promise<T> | T, expected: T, timeout = 30_000) => expect.poll(read, { timeout, interval: 100 }).toEqual(expected)
 
@@ -422,8 +424,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   }
 
   /**
-   * What SIGTERM does to a replica (main.ts): its AgentSession turns and classic turns get their
-   * grace, every worker stops, and the warm processes are closed once the turns have ended.
+   * What SIGTERM does to a replica (main.ts): its AgentSession turns get their grace, every worker stops, and the warm processes are closed once the turns have ended.
    */
   async function stopReplica(r: Replica): Promise<void> {
     const limits = { graceMs: r.drainMs, abortWaitMs: 1_000 }
@@ -514,29 +515,21 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(conversation(fake.messageCalls().at(-1)!)).toContain('first')
   })
 
-  /** The session's event types and its final status, for a classic turn and a unified one of the same script. */
-  async function bothPaths(a: Replica, prompt: string) {
-    const classic = await a.m.start(browser, { origin: 'chat', prompt, mode: 'classic' })
-    const classicOutcome = await classic.turn!.done
+  /** One session's turn of `prompt`: its outcome, its event types, its `error` codes and its final status. */
+  async function onePath(a: Replica, prompt: string) {
     const { id, turn } = await startOn(a, prompt)
-    const unifiedOutcome = await turn.done
-    const status = async (sid: string) => (await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${sid}`)[0]?.status
-    const errors = async (r: Replica, sid: string) =>
-      (await r.m.events.read(sid, 0, 10_000)).flatMap((e) => (e.event.type === 'error' ? [e.event.code] : []))
-    return {
-      classic: { types: await types(a, classic.session.id), status: await status(classic.session.id), errors: await errors(a, classic.session.id), outcome: classicOutcome },
-      unified: { types: await types(a, id), status: await status(id), errors: await errors(a, id), outcome: unifiedOutcome },
-      id,
-    }
+    const outcome = await turn.done
+    await settled(id)
+    const [row] = await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`
+    const errors = (await a.m.events.read(id, 0, 10_000)).flatMap((e) => (e.event.type === 'error' ? [e.event.code] : []))
+    return { id, outcome, types: await types(a, id), errors, status: row?.status }
   }
 
-  it('events match a classic turn of the same script', async () => {
+  it("a turn's events and the row it leaves, in order", async () => {
     const a = await replica('a')
-    const { classic, unified, id } = await bothPaths(a, 'make a box')
-    expect(classic.outcome).toMatchObject({ kind: 'result', subtype: 'success' })
-    expect(unified.outcome).toMatchObject({ kind: 'result', subtype: 'success' })
-    expect(unified.types).toEqual(classic.types)
-    expect(unified.types).toEqual([
+    const { id, outcome, types: seen, errors } = await onePath(a, 'make a box')
+    expect(outcome).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(seen).toEqual([
       'session.started',
       'session.status',
       'user.turn',
@@ -546,7 +539,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       'session.result',
       'session.status',
     ])
-    // The cost and turns are the row's, as a classic turn writes them.
+    expect(errors).toEqual([])
+    // The cost and turns are the row's.
     const [row] = await db.sql<{ turns: number; cost_usd: number; status: string; durable_turn_id: string | null }[]>`
       SELECT turns, cost_usd, status, durable_turn_id FROM ai_sessions WHERE id = ${id}`
     expect(row).toMatchObject({ turns: 1, status: 'idle', durable_turn_id: null })
@@ -587,34 +581,28 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(await turnCosts(id)).toEqual([expect.closeTo(3 * REPLY_COST_USD, 12)])
   })
 
-  it('events match a classic turn that runs out of turns: error_max_turns, and the session stays idle', async () => {
+  it('a turn that runs out of turns: error_max_turns, and the session stays idle', async () => {
     // Every reply asks for the tool again: one turn of the session's one is spent, and Claude Code stops.
     script = () => ({ toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
     const a = await replica('a', { settings: { [SETTING_SESSION_MAX_TURNS]: 1 } })
-    const { classic, unified } = await bothPaths(a, 'loop')
-    expect(classic.outcome).toMatchObject({ kind: 'result', subtype: 'error_max_turns' })
-    expect(unified.outcome).toMatchObject({ kind: 'result', subtype: 'error_max_turns' })
-    expect(unified.types).toEqual(classic.types)
-    expect(unified.errors).toEqual(classic.errors)
-    expect(classic.errors).toEqual(['error_max_turns'])
-    expect(unified.status).toBe(classic.status)
-    expect(classic.status).toBe('idle')
+    const { outcome, types: seen, errors, status } = await onePath(a, 'loop')
+    expect(outcome).toMatchObject({ kind: 'result', subtype: 'error_max_turns' })
+    expect(seen).toEqual(MAX_TURNS_TYPES)
+    expect(errors).toEqual(['error_max_turns'])
+    expect(status).toBe('idle')
   })
 
-  it('events match a classic turn the API refuses: api_error, and the session fails', async () => {
+  it('a turn the API refuses: api_error, and the session fails', async () => {
     script = () => ({ error: { status: 400, type: 'invalid_request_error', message: 'messages: text content blocks must be non-empty' } })
     const a = await replica('a')
-    const { classic, unified } = await bothPaths(a, 'refuse me')
-    expect(classic.outcome).toMatchObject({ kind: 'failed' })
-    expect(unified.outcome).toMatchObject({ kind: 'failed' })
-    expect(unified.types).toEqual(classic.types)
-    expect(unified.errors).toEqual(classic.errors)
-    expect(classic.errors).toEqual(['api_error'])
-    expect(unified.status).toBe(classic.status)
-    expect(classic.status).toBe('failed')
+    const { outcome, types: seen, errors, status } = await onePath(a, 'refuse me')
+    expect(outcome).toMatchObject({ kind: 'failed' })
+    expect(seen).toEqual(API_ERROR_TYPES)
+    expect(errors).toEqual(['api_error'])
+    expect(status).toBe('failed')
   })
 
-  it('a turn past turn_max_seconds is placed once, never moved, and ends idle as classic`s error_max_turns does', async () => {
+  it('a turn past turn_max_seconds is placed once, never moved, and ends idle as error_max_turns does', async () => {
     // A model that never answers holds the turn however long its start takes.
     script = () => ({ hang: true })
     // The wall clock is what is tested: 5 s, below the route's minimum of 300, set here only.
@@ -638,16 +626,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const errors = (await a.m.events.read(id, 0, 10_000)).flatMap((e) => (e.event.type === 'error' ? [e.event.code] : []))
     expect(errors).toEqual(['turn_max_seconds'])
     const [row] = await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`
-    // As classic's turn that ran out (error_max_turns): the result, the error, and idle.
-    script = () => ({ toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
-    slowGate = Promise.resolve()
-    const c = await replica('c', { settings: { [SETTING_SESSION_MAX_TURNS]: 1 } })
-    const classic = await c.m.start(browser, { origin: 'chat', prompt: 'loop', mode: 'classic' })
-    await classic.turn!.done
-    expect(tail).toEqual((await types(c, classic.session.id)).slice(-3))
+    // As a turn that ran out (error_max_turns): the result, the error, and idle.
     expect(tail).toEqual(['session.result', 'error', 'session.status'])
-    const [classicRow] = await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${classic.session.id}`
-    expect(row?.status).toBe(classicRow?.status)
     expect(row?.status).toBe('idle')
   })
 
@@ -1313,7 +1293,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     const a = await replica('a', { slots: 1 })
     const { turn } = await startOn(a, 'hold the slot')
     await pollUntil(() => slowCalls, 1)
-    // A DurableSession's pinned call on the same replica (5 s to start, as `turn_tools` gets).
+    // A pinned call on the same replica (5 s to start).
     const pinned = await env.client.workflow.execute('pinnedCall', {
       taskQueue: PINNED_TEST_QUEUE,
       workflowId: `pinned-${Date.now()}`,

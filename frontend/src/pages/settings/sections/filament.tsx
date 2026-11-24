@@ -4,6 +4,7 @@ import {
   getResetPreview,
   getRfidStatus,
   getSyncStatus,
+  importBambuddyPresets,
   listSyncPasses,
   reconcileRfid,
   resetSyncLinks,
@@ -12,6 +13,7 @@ import {
   type LinksResetCounts,
   type LinksResetDone,
   type LinksResetPreview,
+  type PresetImport,
   type RfidReconcileReport,
   type RfidStatus,
   type SyncError,
@@ -95,7 +97,7 @@ const SYNC_ROWS: Record<SyncKind, { label: string; help: string }> = {
   },
   presets: {
     label: 'Presets and K values',
-    help: "Each spool's filament presets and K values.",
+    help: "Each spool's filament presets and K values. While Bambuddy's changes come in (Bambuddy → ScadBuddy or Both ways), each pull also makes the presets your spools and types name by Bambuddy's id ScadBuddy's own, and presets taken from Bambuddy earlier take its later edits. Otherwise nothing copies them unless you import them below.",
   },
 }
 
@@ -165,6 +167,92 @@ function SyncRows({ form }: { form: BackendSettings }) {
         )
       })}
     </>
+  )
+}
+
+/** #7244 — what the presets import found, in a sentence. */
+function importLine(done: PresetImport): string {
+  const unresolved = done.unresolved ?? 0
+  if (done.adopted === 0 && done.updated === 0 && unresolved === 0)
+    return "Nothing to import: no spool or type names a Bambuddy preset, and none taken from Bambuddy changed since."
+  const parts = [
+    done.adopted > 0 && `${plural(done.adopted, 'new preset', 'new presets')} from Bambuddy`,
+    done.updated > 0 && `${plural(done.updated, 'preset', 'presets')} updated to Bambuddy's version`,
+  ].filter(Boolean)
+  const imported = parts.length > 0 ? `Imported: ${parts.join(', ')}.` : 'Nothing imported.'
+  if (unresolved === 0) return imported
+  const one = unresolved === 1
+  return (
+    `${imported} ${plural(unresolved, 'Bambuddy preset', 'Bambuddy presets')} that spools or types name could not be imported: ` +
+    `Bambuddy no longer holds ${one ? 'it' : 'them'}, or ${one ? 'it is' : 'they are'} not a filament preset. ` +
+    'Choose a ScadBuddy preset for those spools and types.'
+  )
+}
+
+/** What the presets import says when the server refuses it, in plain words. */
+function importProblem(cause: unknown): ReactNode {
+  if (!(cause instanceof ApiError)) return "Bambuddy's presets could not be imported. Try again."
+  if (cause.status === 409 && cause.problem.code === 'instance_changed')
+    return 'The Bambuddy links belong to another Bambuddy. Reset them under Sync status, then try again.'
+  if (cause.status === 409)
+    return (
+      <>
+        No Bambuddy is set up. Add its address and API key in{' '}
+        <AppLink href="/settings/general#connection" className={LINK}>
+          Connection
+        </AppLink>
+        , then try again.
+      </>
+    )
+  return cause.detail
+}
+
+/**
+ * #7244 — a one-time import of Bambuddy's filament presets into ScadBuddy's own, whatever the
+ * presets direction says (the pull imports them only while it is Bambuddy → ScadBuddy or Both
+ * ways). It saves nothing of the form.
+ */
+function PresetsImportRow() {
+  const [pending, setPending] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+  const [problem, setProblem] = useState<ReactNode>(null)
+
+  async function importNow() {
+    setPending(true)
+    setNote(null)
+    setProblem(null)
+    try {
+      setNote(importLine(await importBambuddyPresets()))
+    } catch (cause) {
+      setProblem(importProblem(cause))
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <FieldRow
+      id="filament-presets-import"
+      label="Bambuddy's presets"
+      help="Copies Bambuddy's filament presets into ScadBuddy's own once, whatever the presets direction says: presets your spools and types name by Bambuddy's id become ScadBuddy's, and presets taken from Bambuddy earlier take its later edits. Nothing is sent to Bambuddy."
+    >
+      <div id="filament-presets-import" className="flex flex-col gap-2 text-sm">
+        <div>
+          <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => void importNow()}>
+            {pending && <Spinner />}
+            Import presets from Bambuddy now
+          </Button>
+        </div>
+        <p role="status" aria-live="polite" className="text-muted-foreground empty:hidden">
+          {note}
+        </p>
+        {problem && (
+          <p role="alert" className="text-warn">
+            {problem}
+          </p>
+        )}
+      </div>
+    </FieldRow>
   )
 }
 
@@ -959,6 +1047,7 @@ export function Component() {
     >
       <RuntimeRows form={form} section="filament" />
       <SyncRows form={form} />
+      <PresetsImportRow />
       <SyncStatusRow status={syncStatus} />
       <SyncPassesRow lastPassAt={syncStatus.data?.last_pass_at} form={form} />
       <SyncPassTtlRow form={form} />

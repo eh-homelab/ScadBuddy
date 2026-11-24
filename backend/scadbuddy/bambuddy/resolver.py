@@ -214,7 +214,10 @@ def _type_preset(rows: Sequence[EffectivePreset], size: str) -> EffectivePreset 
 _NOT_NATIVE: dict[str, str] = {
     "standard": "not one of Bambu Studio's own presets in this version",
     "cloud": "a Bambu Cloud user preset",
-    "local": "a Bambuddy local preset ScadBuddy has no copy of (they are kept with the spools)",
+    "local": (
+        "a Bambuddy local preset, which ScadBuddy no longer reads: import Bambuddy's presets"
+        " (Settings, Printing, Filament) and choose the imported one"
+    ),
     "orca_cloud": "an OrcaSlicer cloud preset",
 }
 
@@ -416,9 +419,9 @@ def resolve(
                 own = [ref for ref in [own_preset.for_bambuddy()] if ref]
             if catalogue.is_native:
                 # A spool's preset is a preset name, a Bambu Cloud setting_id, a BBL
-                # filament_id (as a tray's tray_info_idx is), a Bambuddy local id, which
-                # the image lacks, or a ScadBuddy preset's `sb-` ref (#7176); native refs
-                # are preset names (#4349), or a kept or ScadBuddy preset's own ref (#4645).
+                # filament_id (as a tray's tray_info_idx is), a ScadBuddy preset's `sb-`
+                # ref (#7176), or a Bambuddy local id; native refs are preset names
+                # (#4349) or a ScadBuddy preset's own ref.
                 mapped = {
                     preset_id: (
                         catalogue.native_ref(PresetRef(source="local", id=preset_id), "filament")
@@ -431,18 +434,37 @@ def resolve(
                     )
                     for preset_id in own
                 }
+                bambuddy_local = [
+                    preset_id
+                    for preset_id, native in mapped.items()
+                    if native is None and _is_local_id(preset_id)
+                ]
+                if bambuddy_local:
+                    # A Bambuddy local id no ScadBuddy preset holds (#7244): the native
+                    # slicer reads none, so it is said, never replaced by a name.
+                    errors.append(
+                        FilamentWarning(
+                            kind="no-preset",
+                            slot_id=slot.slot_id,
+                            message=(
+                                f"{label}'s preset for a {size} mm nozzle is Bambuddy local"
+                                f" preset {bambuddy_local[0]}, which ScadBuddy no longer reads."
+                                " Import Bambuddy's presets in Settings (Printing, Filament),"
+                                " or pick one under Advanced."
+                            ),
+                        )
+                    )
+                    continue
                 if any(
-                    native is None and not _is_local_id(preset_id) and sb_id(preset_id) is None
+                    native is None and sb_id(preset_id) is None
                     for preset_id, native in mapped.items()
                 ):
-                    # Said, so a slot that falls back to a name is not a mystery; a
-                    # Bambuddy local id (all digits) is the kept copy's when it is offered
-                    # (#4645), and otherwise not said.
+                    # Said, so a slot that falls back to a name is not a mystery.
                     logger.debug(
                         "a spool's own preset is not in the native catalogue",
                         extra={"spool_id": None if option is None else option.spool_id},
                     )
-                # Each is a ref the catalogue offers: a kept local one is not a name.
+                # Each is a ref the catalogue offers: a ScadBuddy preset's is not a name.
                 ref = next((native for native in mapped.values() if native is not None), None)
             else:
                 ref = next(
