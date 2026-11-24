@@ -856,6 +856,35 @@ class FilamentSpoolStore:
         M3); with none it is booked now. An ``invoice_line_id`` (an invoice confirm's,
         #6269 Decision 12) that differs from the spool's is set in the same UPDATE and is
         one more change of that event."""
+        return (
+            self._update_on(
+                conn,
+                spool_id,
+                patch,
+                actor=actor,
+                ref_kind=ref_kind,
+                ref_id=ref_id,
+                at=at,
+                invoice_line_id=invoice_line_id,
+            )
+            is not None
+        )
+
+    def _update_on(
+        self,
+        conn: Conn,
+        spool_id: UUID,
+        patch: m.SpoolPatch,
+        *,
+        actor: str,
+        ref_kind: str | None = None,
+        ref_id: UUID | None = None,
+        at: datetime | None = None,
+        invoice_line_id: UUID | None = None,
+    ) -> bool | None:
+        """`update_on`'s body: ``None`` for no such spool, else whether a column changed
+        (an archive or restore is not counted). An ``invoice_line_id`` that differs counts
+        as changed; the bulk edit never passes one."""
         sent = [n for n in _WRITABLE if n in patch.model_fields_set]
         if patch.archived:
             # The tag before the spool, as every writer of bindings takes them.
@@ -871,7 +900,7 @@ class FilamentSpoolStore:
             (spool_id,),
         ).fetchone()
         if current is None:
-            return False
+            return None
         after = {n: getattr(patch, n) for n in sent}
         merged = current | after
         if merged["type_id"] is None and merged["material_id"] is None:
@@ -907,7 +936,7 @@ class FilamentSpoolStore:
             )
         if patch.archived is not None:
             self._archive(conn, current, patch.archived, actor, at)
-        return True
+        return bool(changes)
 
     def presets(self, spool_id: UUID) -> _Presets | None:
         """The spool's slicer presets, its own over its type's; ``None`` for no such
@@ -1414,10 +1443,13 @@ class FilamentSpoolStore:
     ) -> m.SpoolBulkUpdated:
         """``patch`` on each spool named, in one transaction, the spools locked in id
         order (#7151, R-7151-1): each its own ``edited`` event, as `update` writes it, and
-        none for a spool already so. All or none: a spool the patch refuses is
-        `SpoolBulkRefusedError` (its number), a row it names that does not exist
-        `CatalogRefError`. An id that names no spool is answered, not refused."""
+        none for a spool already so, which is ``unchanged``. All or none: a spool the
+        patch refuses is `SpoolBulkRefusedError` (its number), a row it names that does
+        not exist `CatalogRefError`. An id that names no spool is answered, not
+        refused."""
         wanted = sorted(set(spool_ids))
+        changed: _Ids = []
+        unchanged: _Ids = []
         try:
             with self._pool.connection() as conn, conn.transaction():
                 rows = conn.execute(
@@ -1427,14 +1459,16 @@ class FilamentSpoolStore:
                 ).fetchall()
                 for row in rows:
                     try:
-                        self.update_on(conn, row["id"], patch, actor=actor)
+                        did = self._update_on(conn, row["id"], patch, actor=actor)
                     except (SpoolTypelessError, TypeTempError) as exc:
                         raise SpoolBulkRefusedError(row["number"], exc) from None
+                    (changed if did else unchanged).append(row["id"])
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
         found = {row["id"] for row in rows}
         return m.SpoolBulkUpdated(
-            updated=[row["id"] for row in rows],
+            changed=changed,
+            unchanged=unchanged,
             not_found=[i for i in dict.fromkeys(spool_ids) if i not in found],
         )
 

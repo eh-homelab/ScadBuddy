@@ -1712,7 +1712,7 @@ const tools: Tool[] = [
       'Set the same `patch` on 1 to 500 spools in one request (#7151): any field filament_spool_upsert edits but ' +
       '`archived` (use filament_spools_bulk_archive). `null` on an override clears it. All or none: when one spool ' +
       'refuses the patch, nothing changes and the error names that spool by its number. Each changed spool gets its ' +
-      'own `edited` ledger event; a resend changes nothing more. Answers `updated` and `not_found` (ids with no spool). ' +
+      'own `edited` ledger event; a resend changes nothing more. Answers `changed`, `unchanged` (already had the values) and `not_found` (ids with no spool). ' +
       'Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       spool_ids: z.array(z.string().uuid()).min(1).max(500),

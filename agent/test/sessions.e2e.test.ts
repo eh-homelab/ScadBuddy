@@ -546,10 +546,10 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     return copy.id
   }
 
-  it('a session created with mode classic runs as AgentSession', async () => {
+  it('a new session runs as AgentSession', async () => {
     script = () => ({ text: 'hello' })
     const a = await replica()
-    const { session, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'hi', mode: 'classic' })
+    const { session, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'hi' })
     expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(session.mode).toBe('durable')
     expect(await runtimeOf(session.id)).toBe('unified')

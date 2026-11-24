@@ -87,7 +87,7 @@ export type SessionSummary = {
   updatedAt: string
   costUsd: number
   budgetUsd: number
-  /** Classic or durable (plan 5d), for the switcher's badge. */
+  /** Always `durable` (plan Step 6.3). */
   mode: SessionMode
   /** A live handoff offer (manager.ts `handoff`), for the switcher's "Offered to" badge (#1284). */
   offer: { to: SeenOwner; until: string } | null

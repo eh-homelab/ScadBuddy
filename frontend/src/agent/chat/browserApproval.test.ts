@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { browserNavigation } from './browserApproval'
 
 describe('browserNavigation (#982)', () => {
-  it("reads a remote plugin's browser_navigate URL from the approval summary, classic or durable", () => {
+  it("reads a remote plugin's browser_navigate URL from the approval summary, whatever its server's prefix", () => {
     expect(browserNavigation('mcp__playwright__browser_navigate {"url":"https://cults3d.com/x?a=1"}')).toEqual({
       url: 'https://cults3d.com/x?a=1',
       origin: 'https://cults3d.com',

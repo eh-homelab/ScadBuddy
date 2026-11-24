@@ -730,6 +730,21 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Hosted plugins (#6937). The spec gives the assistant no versions tool (2026-11-21 §6.2): an offer always ' +
       "takes the plugin's latest_version (§6.3), which the plugin's own read answers.",
   },
+  ...(
+    [
+      'GET /api/v1/entities/{ref}/properties',
+      'PATCH /api/v1/entities/{ref}/properties',
+      'GET /api/v1/entity-kinds/{kind}/properties',
+      'GET /api/v1/entity-kinds/{kind}/property-schema',
+      'PUT /api/v1/entity-kinds/{kind}/property-schema',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "An entity's key-value properties and a kind's property schema (#7026, spec §6.3a). Their tools " +
+      '(entity_property_list, _set, _schema_get, _schema_set) follow in the next layers of the same stack, ' +
+      'which drop these entries.',
+  })),
 ]
 
 /**
