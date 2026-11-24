@@ -484,6 +484,20 @@ async def test_a_restored_file_deleted_with_its_held_copy_is_library_file_gone(
     assert shop.get_item(item).library_file is not None
 
 
+async def test_an_item_with_no_pinned_sha256_is_library_file_gone(
+    shop: Shop, content: ContentStore, held: str, native: NativeLibrary
+) -> None:
+    """The check asks for no restore of such an item, so this is a refusal, not a 500:
+    with the file the check read, and with an item moved since (``checked_id`` another)."""
+    order, item = storefront_item(shop, GONE_ID, "native", pinned=False)
+    shelf = CountingShelf(native)
+    for checked_id in (GONE_ID, GONE_ID + 1):
+        with pytest.raises(ApiError) as refused:
+            await restore(shop, order, item, content, shelf, Choices(), checked_id)
+        refused_gone(refused)
+    assert shelf.uploads == 0
+
+
 async def test_a_per_print_copy_in_storefront_is_not_taken(
     shop: Shop, content: ContentStore, held: str, native: NativeLibrary
 ) -> None:

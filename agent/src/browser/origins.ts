@@ -303,8 +303,8 @@ function flatten(value: unknown, depth: number, out: string[]): void {
 }
 
 /**
- * The text a browser result is screened as, the same in a classic turn (a PostToolUse
- * hook's `tool_response`, the content blocks) and a durable one (the MCP result's
+ * The text a browser result is screened as, the same in the turn (a PostToolUse
+ * hook's `tool_response`, the content blocks) and in a ToolCall (the MCP result's
  * `content`): every string in the whole of it, whatever its shape, with the untrusted
  * envelope (and any JSON in it) decoded, so a page or a tab named anywhere in it is read
  * as Playwright MCP wrote it.

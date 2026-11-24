@@ -67,14 +67,13 @@ What the server does (spec §8.2–§8.4; [`agent/src/mcp/http.ts`](../../agent/
 
 In Claude Code the tools appear as `mcp__plugin_scadbuddy_scadbuddy__<tool>`
 (plugin README, citing [plugin components](https://code.claude.com/docs/en/plugins/components)).
-The subagents list no `tools` (#2320), so in a classic ScadBuddy session and in an
+The subagents list no `tools` (#2320), so in a ScadBuddy session and in an
 external install they inherit the session's tools under whichever name the session has
 them ([Subagents](https://code.claude.com/docs/en/sub-agents): a subagent with no `tools`
 inherits the main thread's). An allowlist kept them from the session's plugins, the HTTP
 request tool and the headless browser. Each lists `disallowedTools` instead (#2562):
 Claude Code's shell, file and web built-ins, so an external install's built-ins do not
-reach them, and for `print-analyst` the send and print tools. A durable session's
-subagents get ScadBuddy's own tools only (below).
+reach them, and for `print-analyst` the send and print tools.
 
 ## Inside ScadBuddy
 

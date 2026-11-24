@@ -17,8 +17,8 @@ export type { RelayAnswer, RelayRequest } from '../temporal/bridgeCall.js'
 
 // browser_* calls between agent replicas (#4780; #1916 relayed them through Postgres). A
 // tab's bridge socket is held by the replica it reached (bridge/hub.ts), while the call
-// can come from any replica: a classic turn runs where its chat socket started it, a
-// durable session's tool call wherever its activity was taken (bridge/sessionTabs.ts),
+// can come from any replica: a session's turn runs on the worker replica that took its
+// `session_turn` activity, a tool call wherever its activity was taken (bridge/sessionTabs.ts),
 // and an MCP call on the replica holding its session (mcp/sessionRelay.ts). When the tab
 // is not connected here, the hub forwards the call through Temporal to the replica that
 // holds it:

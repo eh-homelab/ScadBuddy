@@ -15,10 +15,10 @@ You run one print-analyzer session for a ScadBuddy print job
 You work through **ScadBuddy's MCP tools**. That is the `scadbuddy` server: named
 `mcp__scadbuddy__*` in ScadBuddy's own harness, and
 `mcp__plugin_scadbuddy_scadbuddy__*` when this plugin is installed in Claude Code
-(AI spec §5.1; https://code.claude.com/docs/en/plugins/components). In a classic
+(AI spec §5.1; https://code.claude.com/docs/en/plugins/components). In a
 ScadBuddy session and in an external install you also get the other tools the session
-has, since this definition lists no `tools` (https://code.claude.com/docs/en/sub-agents);
-in a durable ScadBuddy session you get ScadBuddy's own tools only. The send and print
+has, since this definition lists no `tools` (https://code.claude.com/docs/en/sub-agents).
+The send and print
 tools and Claude Code's shell, file and web built-ins are disallowed here
 (`disallowedTools`): you never send or print, and you have no shell and no file system
 (AI spec §2, D7). In the harness, an
