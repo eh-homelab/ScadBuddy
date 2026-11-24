@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,11 +15,12 @@ import pytest
 from scadbuddy.api.crud_camera import MAX_SEGMENTS
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.camera.models import SegmentIn
-from scadbuddy.camera.recorder import BATCH, STALL_SECONDS, Recorder, serve_hooks
+from scadbuddy.camera.process import serve_local
+from scadbuddy.camera.recorder import ADOPT_AGE, BATCH, LEADER, STALL_SECONDS, Recorder, serve_hooks
 from scadbuddy.camera.settings import RecorderSettings
 from scadbuddy.camera.uploads import LocalSegment, Uploader, UploadError, object_key
 from scadbuddy.crud.client import CrudClient
-from tests.camera.test_follow import Token
+from tests.camera.test_follow import Token, until
 from tests.camera.test_relay import FakeMtx
 from tests.camera.test_uploads import KEY_ID, RELAY_PASS, SECRET, settings, write_segment
 from tests.support.store import moto_s3
@@ -206,6 +210,8 @@ class Rig:
         disk_max_bytes: int = 1 << 30,
         uploader: Any = None,
         config: RecorderSettings | None = None,
+        tick_seconds: float | None = None,
+        real_clock: bool = False,
     ) -> None:
         self.root = root / name
         self.root.mkdir(parents=True, exist_ok=True)
@@ -218,8 +224,8 @@ class Rig:
             uploader or FakeUploader(api.bucket),
             config or settings(camera_recorder_name=name, camera_disk_max_bytes=disk_max_bytes),
             segments=self.root,
-            tick_seconds=None,
-            clock=self.clock,
+            tick_seconds=tick_seconds,
+            clock=time.monotonic if real_clock else self.clock,
             call_budget=0.0,
             retry_min=0.01,
             retry_max=0.02,
@@ -357,6 +363,8 @@ async def test_backlog_drops_oldest_at_cap(tmp_path: Path, api: FakeCamera) -> N
     await rig.segment(0)
     await rig.recorder.tick(P1)
     api.down = True
+    # Down past the lease period: the recorder leads no more and uploads nothing.
+    rig.clock.now += LEASE.total_seconds() + 1
     for second in (4, 8, 12, 16, 20):
         await rig.segment(second)
         await rig.recorder.tick(P1)
@@ -387,8 +395,7 @@ async def test_api_down_keeps_segments(tmp_path: Path, api: FakeCamera) -> None:
         await standby.recorder.tick(P1)
     assert leader.files() == [name(8), name(12), name(16)]
     assert standby.files() == [name(1), name(5), name(9), name(13)]
-    # The bucket was up; the leader uploaded nothing without a lease answer.
-    assert len(api.bucket.objects) == 2
+    assert api.starts() == [at(0), at(4)]
     api.down = False
     await standby.recorder.tick(P1)
     assert standby.files() == [name(5), name(9), name(13)]
@@ -584,3 +591,166 @@ async def test_shutdown_releases_led_printers(tmp_path: Path, api: FakeCamera) -
     assert P1 in rig.mtx.paths  # a shutdown is not a stop: the path stays, nothing reported
     await rig.recorder.flushed()
     assert [b["state"] for _, b in api.feeds] == ["pulling"]
+
+
+async def test_renew_failure_past_the_lease_drops_leadership(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.recorder.tick(P1)
+    assert LEADER.labels(P1, "rec-a")._value.get() == 1
+    api.down = True
+    rig.clock.now += LEASE.total_seconds() - 1
+    await rig.recorder.renew(P1)
+    assert LEADER.labels(P1, "rec-a")._value.get() == 1
+    rig.clock.now += 1
+    await rig.recorder.renew(P1)
+    assert LEADER.labels(P1, "rec-a")._value.get() == 0
+    # The bucket is up, but a recorder that does not lead uploads nothing.
+    api.down = False
+    api.leases[P1] = ("rec-b", api.now + LEASE)
+    await rig.segment(0)
+    await rig.recorder.upload(P1)
+    assert api.bucket.objects == {}
+
+
+async def test_renewal_cadence_holds_while_a_put_is_slow(tmp_path: Path, api: FakeCamera) -> None:
+    every = 0.05
+    rig = Rig(tmp_path, api, tick_seconds=every, real_clock=True)
+    slow = asyncio.Event()
+
+    async def put(seg: LocalSegment) -> str:
+        await slow.wait()
+        return object_key("rec", seg.printer_id, seg.started_at)
+
+    rig.recorder._uploader.put = put  # type: ignore[attr-defined]
+    try:
+        await rig.recorder.reconcile_all()
+        await until(lambda: P1 in api.leases)
+        await rig.segment(0)
+        renewals = api.events.count
+        before = renewals("lease renew rec-a")
+        started = time.monotonic()
+        await asyncio.sleep(every * 10)
+        elapsed = time.monotonic() - started
+        made = renewals("lease renew rec-a") - before
+        # The put is still hanging; the renewals keep their rate.
+        assert not slow.is_set()
+        assert made >= int(elapsed / every) - 2
+    finally:
+        slow.set()
+        await rig.recorder.shutdown()
+        await rig.recorder.aclose()
+
+
+async def test_stop_with_a_large_backlog_renews_while_it_flushes(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    rig = Rig(tmp_path, api, tick_seconds=0.01, real_clock=True)
+    fake = rig.recorder._uploader
+
+    async def put(seg: LocalSegment) -> str:
+        if api.bucket.fail:
+            raise UploadError("the bucket did not take a segment of p1: down")
+        # Each put takes 3 s of the API's time: 30 puts outlast the lease 4 times over.
+        api.now += timedelta(seconds=3)
+        await asyncio.sleep(0.005)
+        return await FakeUploader.put(fake, seg)
+
+    rig.recorder._uploader.put = put  # type: ignore[attr-defined]
+    try:
+        await rig.recorder.reconcile_all()
+        await until(lambda: P1 in api.leases)
+        api.bucket.fail = True
+        for i in range(30):
+            await rig.segment(i * 4)
+        api.bucket.fail = False
+        api.printers = []
+        async with asyncio.timeout(10):
+            await rig.recorder.reconcile(P1)
+        await rig.recorder.flushed()
+    finally:
+        await rig.recorder.aclose()
+    assert len(api.index) == 30
+    assert api.unput == []
+    assert api.events[-3:] == ["lease release rec-a", "mtx delete", "feed stopped"]
+
+
+async def test_restart_adopts_leftovers_and_releases(tmp_path: Path, api: FakeCamera) -> None:
+    first = Rig(tmp_path, api, name="rec-a")
+    await first.recorder.reconcile_all()
+    await first.segment(0)
+    await first.recorder.tick(P1)
+    assert api.indexed_until(P1) == at(4)
+    # More segments, not uploaded yet, then the container dies: its files stay.
+    old = time.time() - 60
+    for second in (4, 8, 12):
+        path = write_segment(first.root, P1, at(second))
+        os.utime(path, (old + second, old + second))
+    writing = write_segment(first.root, P1, at(16))  # still open in MediaMTX
+    puts = list(first.mtx.calls)
+
+    second = Rig(tmp_path, api, name="rec-a")
+    second.mtx = first.mtx
+    second.recorder._mtx = first.mtx.client()
+    await second.recorder.release_all()
+    assert P1 not in api.leases
+    await second.recorder.reconcile_all()
+    # The path was the same: MediaMTX's recording goes on.
+    assert first.mtx.calls == puts
+    held = sorted(item.seg.path.name for item in second.recorder._feeds[P1].pending)
+    assert held == [name(4), name(8), name(12)]
+    # No acquire while the hold-off lasts: the standby gets the lease first.
+    await second.recorder.tick(P1)
+    assert P1 not in api.leases
+    assert second.files() == [name(4), name(8), name(12), name(16)]
+    # The hook for the open file adopts it.
+    await second.recorder.on_segment(P1, writing, 4.0)
+    held = sorted(item.seg.path.name for item in second.recorder._feeds[P1].pending)
+    assert held == [name(4), name(8), name(12), name(16)]
+    # After the hold-off it leads again and uploads from the index's end.
+    second.clock.now += 11
+    await second.recorder.tick(P1)
+    assert api.starts() == [at(0), at(4), at(8), at(12), at(16)]
+    assert api.unput == []
+
+
+async def test_adopt_waits_for_a_file_in_writing(tmp_path: Path, api: FakeCamera) -> None:
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    path = write_segment(rig.root, P1, at(0))
+    rig.recorder.adopt(P1)
+    assert rig.recorder._feeds[P1].pending == []
+    written = time.time() - ADOPT_AGE - 1
+    os.utime(path, (written, written))
+    rig.recorder.adopt(P1)
+    assert [item.seg.path for item in rig.recorder._feeds[P1].pending] == [path]
+
+
+async def test_shutdown_flushes_every_printer(tmp_path: Path) -> None:
+    api = FakeCamera(FakeBucket(), printers=[P1, "p2"])
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    for printer in (P1, "p2"):
+        await rig.recorder.tick(printer)
+        await rig.segment(0, printer=printer)
+    await rig.recorder.shutdown()
+    assert sorted(p for p, _, _ in api.index) == [P1, "p2"]
+    assert api.leases == {}
+
+
+async def test_hook_answers_204_when_its_action_fails(caplog: pytest.LogCaptureFixture) -> None:
+    async def fail() -> None:
+        raise RuntimeError("secret detail")
+
+    server = await serve_local(lambda method, target: fail, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        async with httpx.AsyncClient() as http:
+            answer = await http.post(f"http://127.0.0.1:{port}/anything")
+    finally:
+        server.close()
+    assert answer.status_code == 204
+    assert "RuntimeError" in caplog.text
+    assert "secret detail" not in caplog.text

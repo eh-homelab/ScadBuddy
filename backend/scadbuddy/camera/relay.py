@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final, Literal
 from urllib.parse import quote
 
@@ -235,15 +235,14 @@ async def serve_hooks(relay: Relay, host: str, port: int) -> asyncio.Server:
     """``POST /hook/<printer_id>/ready`` (or ``not_ready``), from MediaMTX's ``runOnAvailable``
     and ``runOnUnavailable`` commands: 204, or 404 for any other request."""
 
-    async def route(method: str, target: str) -> bool:
+    def route(method: str, target: str) -> Callable[[], Awaitable[None]] | None:
         parts = target.split("/")
         if method != "POST" or len(parts) != 4 or parts[1] != "hook" or not parts[2]:
-            return False
+            return None
         event = parts[3]
         if event not in ("ready", "not_ready"):
-            return False
-        await relay.on_hook(parts[2], event)  # type: ignore[arg-type]
-        return True
+            return None
+        return lambda: relay.on_hook(parts[2], event)  # type: ignore[arg-type]
 
     return await serve_local(route, host, port)
 

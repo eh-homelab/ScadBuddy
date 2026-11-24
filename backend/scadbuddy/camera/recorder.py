@@ -5,14 +5,16 @@ printer's stream from the relay over RTSP, with the relay read user, and cuts fM
 to the local disk (`SEGMENTS`). MediaMTX calls the local hook server when a segment is
 complete (``runOnRecordSegmentComplete``), and `Recorder.on_segment` takes it.
 
-Per printer, the recorder that holds the CRUD-backed lease (`camera_leases`, 20 s, renewed
-every `TICK_SECONDS`) is the leader. The leader uploads its segments oldest first, then
-indexes them (`POST …/segments`, at most `BATCH` per call): an index call never names an
-object that is not in the bucket yet. A 409 ``not_leader`` means the lease is lost: the
-recorder stops uploading at once and acts as a standby. The standby uploads nothing and
-deletes each local segment that ends before the index's end, which each lease call answers.
-So it holds what the leader has not indexed yet. When it takes the lease, it uploads from its
-segment that contains the index's end (spec D14), marked ``discontinuity``.
+Per printer, the recorder that holds the CRUD-backed lease (`camera_leases`, 20 s) is the
+leader. A task of its own renews the lease every `TICK_SECONDS`, whatever the uploads do;
+a recorder whose last renewal is a lease period old leads no more. The leader uploads its
+segments oldest first (each put bounded by `PUT_TIMEOUT`), then indexes them (`POST
+…/segments`, at most `BATCH` per call, after at most `INDEX_EVERY` seconds of puts): an
+index call never names an object that is not in the bucket yet. A 409 ``not_leader`` means
+the lease is lost: the recorder stops uploading at once and acts as a standby. The standby
+uploads nothing and deletes each local segment that ends before the index's end, which each
+lease call answers. So it holds what the leader has not indexed yet. When it takes the lease,
+it uploads from its segment that contains the index's end (spec D14), marked ``discontinuity``.
 
 A segment is also ``discontinuity`` when it starts more than `GAP` after the previous one on
 this recorder ends, when its init differs, or when the disk cap dropped the segment before
@@ -21,8 +23,14 @@ oldest unuploaded segments go first.
 
 The leader reports the feed state (part ``recorder``) on change only: ``pulling`` while
 segments arrive, ``stalled`` after `STALL_SECONDS` with no new segment. A printer that is no
-longer recorded is flushed (when this recorder leads it), released, removed from MediaMTX
-and reported ``stopped``. On SIGTERM each led printer is flushed and released.
+longer recorded is flushed (when this recorder leads it, for at most `STOP_FLUSH_SECONDS`),
+released, removed from MediaMTX and reported ``stopped``. On SIGTERM the led printers are
+flushed together and released, within `SHUTDOWN_SECONDS`.
+
+A container restart keeps the pod's name, and so the recorder's. At start the recorder
+releases every lease under its name and acquires none for `START_HOLDOFF` seconds, so the
+standby takes over. It adopts the segment files the last run left (`Recorder.adopt`) and
+leaves alone each MediaMTX path whose conf has not changed.
 
 Only the recorder pods hold the bucket's camera keys (`uploads.Uploader`). The relay read
 password goes to MediaMTX through its control API only; a MediaMTX failure raises
@@ -40,7 +48,7 @@ import re
 import shutil
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -69,7 +77,21 @@ BASE: Final = "/api/v1/internal/crud/camera"
 AREAS: Final = frozenset({"printers", "changes"})
 #: MediaMTX's ``recordPath`` root: the volume both containers of the pod share.
 SEGMENTS: Final = Path("/segments")
+#: The renewal period, and the pause between upload passes.
 TICK_SECONDS: Final = 5.0
+#: The API's lease (`camera/store.py` ``LEASE_SECONDS``).
+LEASE_SECONDS: Final = 20.0
+#: The longest one put may take.
+PUT_TIMEOUT: Final = 10.0
+#: The most seconds of puts before an index call.
+INDEX_EVERY: Final = 8.0
+STOP_FLUSH_SECONDS: Final = 60.0
+SHUTDOWN_SECONDS: Final = 25.0
+RELEASE_SECONDS: Final = 5.0
+#: After a start, no acquire for two renewal periods: the standby takes the lease first.
+START_HOLDOFF: Final = 2 * TICK_SECONDS
+#: Twice the segment length: a file not written to for this long is complete.
+ADOPT_AGE: Final = 8.0
 STALL_SECONDS: Final = 120.0
 GAP: Final = timedelta(seconds=1)
 #: The most segments one index call takes (`api/crud_camera.py` ``MAX_SEGMENTS``).
@@ -113,6 +135,9 @@ class _Pending:
 @dataclass(eq=False)
 class _Feed:
     arrived: float
+    #: No ``acquire`` before this time (`Recorder.release_all`).
+    not_before: float
+    #: Held by an upload pass: one at a time per printer.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: Local segments not indexed yet (leader) or not pruned yet (standby), oldest first.
     pending: list[_Pending] = field(default_factory=list)
@@ -120,15 +145,45 @@ class _Feed:
     last: LocalSegment | None = None
     #: The next segment comes after a dropped one.
     gap: bool = False
-    leader: bool = False
+    #: The last lease answer said held.
+    held: bool = False
+    #: When the last held answer's request was sent (the recorder's clock).
+    renewed_at: float | None = None
     #: The end of the index as this recorder last left it.
     own_end: datetime | None = None
+    #: An index call is on its way: its end is not known yet.
+    indexing: bool = False
     seen: bool = False
-    loop: asyncio.Task[None] | None = None
+    renewer: asyncio.Task[None] | None = None
+    uploader: asyncio.Task[None] | None = None
 
 
 class SourceError(Exception):
     """The API sent a source list the recorder cannot read."""
+
+
+def _redacted(source: object) -> object:
+    """A source URL as MediaMTX lists it: user and password redacted."""
+    if not isinstance(source, str):
+        return source
+    return re.sub(r"//[^@/]*@", "//<redacted>:<redacted>@", source, count=1)
+
+
+def _listed_as(listed: dict[str, Any], conf: dict[str, Any]) -> bool:
+    """Whether MediaMTX's listing of a path is ``conf``. MediaMTX redacts the source's user
+    and password and lists ``recordDeleteAfter: 0s`` as ``""`` (measured 2026-11-24 UTC on
+    v1.21.4 with ``GET /v3/config/paths/list``)."""
+    for key, value in conf.items():
+        found = listed.get(key)
+        if key == "source":
+            if found != _redacted(value):
+                return False
+        elif key == "recordDeleteAfter" and value == "0s":
+            if found not in ("0s", ""):
+                return False
+        elif found != value:
+            return False
+    return True
 
 
 class Recorder:
@@ -143,6 +198,7 @@ class Recorder:
         tick_seconds: float | None = TICK_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         call_budget: float = CALL_BUDGET,
+        put_timeout: float = PUT_TIMEOUT,
         retry_min: float = RETRY_MIN,
         retry_max: float = RETRY_MAX,
     ) -> None:
@@ -158,13 +214,15 @@ class Recorder:
         self._tick_seconds = tick_seconds
         self._clock = clock
         self._call_budget = call_budget
+        self._put_timeout = put_timeout
         self._feeds: dict[str, _Feed] = {}
         #: The conf this recorder last put for each path. MediaMTX lists a source with its
-        #: password redacted (measured on v1.21.4 for the relay), so it keeps its own copy.
+        #: password redacted, so it keeps its own copy.
         self._confs: dict[str, dict[str, Any]] = {}
         self._feed = FeedSender(
             crud, BASE, "recorder", recorder=self._name, retry_min=retry_min, retry_max=retry_max
         )
+        self._not_before = -math.inf
         self._lock = asyncio.Lock()
 
     def __repr__(self) -> str:
@@ -203,28 +261,47 @@ class Recorder:
             ),
         }
 
-    async def _existing(self) -> set[str]:
+    async def _existing(self) -> dict[str, dict[str, Any]]:
         try:
-            return set(await self._mtx.paths())
+            return await self._mtx.paths()
         except httpx.HTTPError as error:
             raise MediaMtxError(f"MediaMTX did not list its paths: {why(error)}") from None
+
+    async def _sources(self) -> set[str]:
+        response = await self._crud.request("GET", f"{BASE}/printers")
+        try:
+            return {s.printer_id for s in _SOURCES.validate_python(response.json())}
+        except (ValueError, ValidationError):
+            raise SourceError(
+                "the API sent a camera source list the recorder cannot read"
+            ) from None
+
+    async def release_all(self) -> None:
+        """At start: release every lease held under this recorder's name, so the standby,
+        which holds the buffer, takes over; and acquire none for `START_HOLDOFF` seconds,
+        so the standby gets the lease first. The name (the pod's) survives a container
+        restart, and the API lets a holder take its own lease again."""
+        self._not_before = self._clock() + START_HOLDOFF
+        for printer_id in sorted(await self._sources()):
+            try:
+                await self._lease(printer_id, "release")
+            except Exception as error:
+                logger.warning(
+                    "camera recorder: the release of %s at start failed (%s)",
+                    printer_id,
+                    type(error).__name__,
+                )
 
     async def reconcile_all(self) -> None:
         """Make MediaMTX's paths match the API's list. A path that has not changed is left
         alone, so a resync after a quiet run restarts no recording."""
         async with self._lock:
-            response = await self._crud.request("GET", f"{BASE}/printers")
-            try:
-                wanted = {s.printer_id for s in _SOURCES.validate_python(response.json())}
-            except (ValueError, ValidationError):
-                raise SourceError(
-                    "the API sent a camera source list the recorder cannot read"
-                ) from None
+            wanted = await self._sources()
             existing = await self._existing()
-            for name in sorted((existing | set(self._feeds)) - wanted):
+            for name in sorted((set(existing) | set(self._feeds)) - wanted):
                 await self._stop(name, name in existing)
             for name in sorted(wanted):
-                await self._start(name, name in existing)
+                await self._start(name, existing.get(name))
 
     async def reconcile(self, printer_id: str) -> None:
         """Start one printer's recording, or stop it when the API answers 404."""
@@ -238,21 +315,27 @@ class Recorder:
                 if printer_id in existing or printer_id in self._feeds:
                     await self._stop(printer_id, printer_id in existing)
                 return
-            await self._start(printer_id, printer_id in await self._existing())
+            await self._start(printer_id, (await self._existing()).get(printer_id))
 
     async def stop(self, printer_id: str) -> None:
         async with self._lock:
             await self._stop(printer_id, printer_id in await self._existing())
 
-    async def _start(self, printer_id: str, present: bool) -> None:
+    async def _start(self, printer_id: str, listed: dict[str, Any] | None) -> None:
         if _SAFE_ID.fullmatch(printer_id) is None:
             logger.warning("camera recorder: ignored a printer id it cannot use as a path")
             return
         feed = self._feeds.get(printer_id)
         if feed is None:
-            feed = self._feeds[printer_id] = _Feed(arrived=self._clock())
+            now = self._clock()
+            feed = self._feeds[printer_id] = _Feed(arrived=now, not_before=self._not_before)
+            # Segments a previous run of this container left (`adopt`).
+            await asyncio.to_thread(self.adopt, printer_id)
         conf = self._conf(printer_id)
-        if not (present and self._confs.get(printer_id) == conf):
+        if printer_id not in self._confs and listed is not None and _listed_as(listed, conf):
+            # This container restarted, MediaMTX did not: its recording goes on.
+            self._confs[printer_id] = conf
+        if not (listed is not None and self._confs.get(printer_id) == conf):
             self._confs.pop(printer_id, None)
             try:
                 await self._mtx.put_path(printer_id, conf)
@@ -261,18 +344,28 @@ class Recorder:
                     f"MediaMTX did not take path {printer_id}: {why(error)}"
                 ) from None
             self._confs[printer_id] = conf
-        if feed.loop is None and self._tick_seconds is not None:
-            feed.loop = asyncio.create_task(self._loop(printer_id, self._tick_seconds))
+        every = self._tick_seconds
+        if every is not None:
+            if feed.renewer is None:
+                feed.renewer = asyncio.create_task(self._renew_loop(printer_id, every))
+            if feed.uploader is None:
+                feed.uploader = asyncio.create_task(self._upload_loop(printer_id, every))
 
     async def _stop(self, printer_id: str, present: bool) -> None:
-        """Flush (when leading), release, delete the path, report ``stopped``."""
+        """Flush (when leading, with the renewals going on, for at most
+        `STOP_FLUSH_SECONDS`), release, delete the path, report ``stopped``."""
         feed = self._feeds.get(printer_id)
         if feed is not None:
+            await _cancel(feed.uploader)
+            feed.uploader = None
             async with feed.lock:
-                await self._cancel_loop(feed)
-                if feed.leader:
-                    await self._flush(printer_id, feed, budget=None)
-                    await self._release(printer_id, feed)
+                if self._leads(feed):
+                    deadline = self._clock() + STOP_FLUSH_SECONDS
+                    await self._flush(printer_id, feed, deadline=deadline)
+            await _cancel(feed.renewer)
+            feed.renewer = None
+            if feed.held:
+                await self._release(printer_id, feed)
         if present:
             try:
                 await self._mtx.delete_path(printer_id)
@@ -292,20 +385,29 @@ class Recorder:
         if feed is not None or present or self._feed.desired(printer_id) not in (None, "stopped"):
             self._feed.want(printer_id, "stopped")
 
-    @staticmethod
-    async def _cancel_loop(feed: _Feed) -> None:
-        if feed.loop is not None:
-            feed.loop.cancel()
-            await asyncio.gather(feed.loop, return_exceptions=True)
-            feed.loop = None
-
-    async def _loop(self, printer_id: str, every: float) -> None:
+    async def _renew_loop(self, printer_id: str, every: float) -> None:
+        """Renew at a fixed rate, whatever the uploads do."""
+        loop = asyncio.get_running_loop()
+        due = loop.time()
         while True:
             try:
-                await self.tick(printer_id)
+                await self.renew(printer_id)
             except Exception as error:
                 logger.warning(
-                    "camera recorder: a tick for %s failed (%s)", printer_id, type(error).__name__
+                    "camera recorder: a renewal of %s failed (%s)", printer_id, type(error).__name__
+                )
+            due = max(due + every, loop.time())
+            await asyncio.sleep(due - loop.time())
+
+    async def _upload_loop(self, printer_id: str, every: float) -> None:
+        while True:
+            try:
+                await self.upload(printer_id)
+            except Exception as error:
+                logger.warning(
+                    "camera recorder: an upload pass of %s failed (%s)",
+                    printer_id,
+                    type(error).__name__,
                 )
             await asyncio.sleep(every)
 
@@ -333,9 +435,7 @@ class Recorder:
         if any(item.seg.path == path for item in feed.pending):
             return
         try:
-            init_bytes, init_sha256 = await asyncio.to_thread(init_span, path)
-            size = path.stat().st_size
-            started_at = segment_start(path)
+            seg = await asyncio.to_thread(_read, printer_id, path, max(1, round(duration_s * 1000)))
         except (OSError, ValueError) as error:
             logger.warning(
                 "camera recorder: dropped an unreadable segment of %s (%s)",
@@ -345,18 +445,12 @@ class Recorder:
             path.unlink(missing_ok=True)
             feed.gap = True
             return
-        if self._feeds.get(printer_id) is not feed:
-            path.unlink(missing_ok=True)
+        if self._feeds.get(printer_id) is not feed or any(
+            item.seg.path == path for item in feed.pending
+        ):
+            if self._feeds.get(printer_id) is not feed:
+                path.unlink(missing_ok=True)
             return
-        seg = LocalSegment(
-            path=path,
-            printer_id=printer_id,
-            started_at=started_at,
-            duration_ms=max(1, round(duration_s * 1000)),
-            bytes=size,
-            init_bytes=init_bytes,
-            init_sha256=init_sha256,
-        )
         last = feed.last
         gap = (
             feed.gap
@@ -369,9 +463,55 @@ class Recorder:
         bisect.insort(feed.pending, _Pending(seg, gap), key=lambda item: item.seg.started_at)
         feed.arrived = self._clock()
         feed.seen = True
-        if feed.leader:
+        if self._leads(feed):
             self._feed.want(printer_id, "pulling")
         self.enforce_disk_cap()
+
+    def adopt(self, printer_id: str) -> None:
+        """Take the printer's segment files that no hook named: those a previous run of this
+        container left, or whose hook was lost. A file written to in the last `ADOPT_AGE`
+        seconds may still be open in MediaMTX: it waits for its hook or a later pass. An
+        adopted segment ends at the next file's start or, for the newest, at its last write."""
+        feed = self._feeds.get(printer_id)
+        if feed is None:
+            return
+        known = {item.seg.path for item in feed.pending}
+        files = sorted((self._segments / printer_id).glob("*.mp4"))
+        now = time.time()
+        previous: LocalSegment | None = None
+        for at, path in enumerate(files):
+            if path in known:
+                continue
+            try:
+                written = path.stat().st_mtime
+                if now - written < ADOPT_AGE:
+                    continue
+                start = segment_start(path)
+                end = datetime.fromtimestamp(written, UTC)
+                if at + 1 < len(files):
+                    with suppress(ValueError):
+                        end = min(end, segment_start(files[at + 1]))
+                duration_ms = max(1, round((end - start).total_seconds() * 1000))
+                seg = _read(printer_id, path, duration_ms)
+            except (OSError, ValueError) as error:
+                logger.warning(
+                    "camera recorder: dropped an unreadable leftover segment of %s (%s)",
+                    printer_id,
+                    type(error).__name__,
+                )
+                path.unlink(missing_ok=True)
+                continue
+            gap = (
+                previous is None
+                or seg.started_at - previous.ends_at > GAP
+                or seg.init_sha256 != previous.init_sha256
+            )
+            previous = seg
+            bisect.insort(feed.pending, _Pending(seg, gap), key=lambda item: item.seg.started_at)
+            if feed.last is None or seg.started_at > feed.last.started_at:
+                feed.last = seg
+        if previous is not None:
+            self.enforce_disk_cap()
 
     def _drop(self, printer_id: str, feed: _Feed, item: _Pending) -> None:
         """Delete a segment that will never be indexed: the next one starts a gap."""
@@ -403,7 +543,7 @@ class Recorder:
         for printer_id, feed in self._feeds.items():
             BACKLOG.labels(printer_id).set(sum(item.seg.bytes for item in feed.pending))
 
-    # Lease, upload, index
+    # Lease
 
     async def _lease(
         self, printer_id: str, action: Literal["acquire", "renew", "release"]
@@ -416,8 +556,18 @@ class Recorder:
         )
         return LeaseAnswer.model_validate(response.json())
 
-    def _lead(self, printer_id: str, feed: _Feed, held: bool) -> None:
-        feed.leader = held
+    def _leads(self, feed: _Feed) -> bool:
+        """The last answer said held, and came less than a lease period ago."""
+        return (
+            feed.held
+            and feed.renewed_at is not None
+            and self._clock() - feed.renewed_at < LEASE_SECONDS
+        )
+
+    def _lead(self, printer_id: str, feed: _Feed, held: bool, sent: float | None = None) -> None:
+        feed.held = held
+        if held:
+            feed.renewed_at = sent
         LEADER.labels(printer_id, self._name).set(1 if held else 0)
 
     async def _release(self, printer_id: str, feed: _Feed) -> None:
@@ -430,34 +580,56 @@ class Recorder:
             )
         self._lead(printer_id, feed, False)
 
-    async def tick(self, printer_id: str) -> None:
-        """Acquire or renew the lease. Holding it: upload, then index, the pending segments
-        oldest first. Not holding it: drop the segments that end before the index's end."""
+    async def renew(self, printer_id: str) -> None:
+        """Acquire or renew the lease, and act on the answer. Not holding it: drop the
+        segments that end before the index's end. Holding it after another recorder
+        indexed: the handover (D14)."""
         feed = self._feeds.get(printer_id)
         if feed is None:
             return
+        sent = self._clock()
+        if not feed.held and sent < feed.not_before:
+            return
+        try:
+            async with asyncio.timeout(self._tick_seconds or TICK_SECONDS):
+                answer = await self._lease(printer_id, "renew" if feed.held else "acquire")
+        except Exception as error:
+            # No answer: keep every segment. Past the lease period, lead no more.
+            logger.warning(
+                "camera recorder: the lease call for %s failed (%s); keeping %d segments",
+                printer_id,
+                type(error).__name__,
+                len(feed.pending),
+            )
+            if feed.held and not self._leads(feed):
+                self._lead(printer_id, feed, False)
+                logger.warning("camera recorder: the lease of %s ran out; standby now", printer_id)
+            return
+        if self._feeds.get(printer_id) is not feed:
+            return
+        self._lead(printer_id, feed, answer.held, sent)
+        if not answer.held:
+            self._prune(feed, answer.indexed_until)
+            return
+        if not feed.indexing and answer.indexed_until != feed.own_end:
+            self._handover(feed, answer.indexed_until)
+        self._report(printer_id, feed)
+
+    async def upload(self, printer_id: str) -> None:
+        """One upload pass: adopt unnamed files, then, while leading, upload and index the
+        pending segments oldest first."""
+        feed = self._feeds.get(printer_id)
+        if feed is None:
+            return
+        await asyncio.to_thread(self.adopt, printer_id)
         async with feed.lock:
-            if self._feeds.get(printer_id) is not feed:
-                return
-            try:
-                answer = await self._lease(printer_id, "renew" if feed.leader else "acquire")
-            except Exception as error:
-                # No answer: keep every segment, upload nothing.
-                logger.warning(
-                    "camera recorder: the lease call for %s failed (%s); keeping %d segments",
-                    printer_id,
-                    type(error).__name__,
-                    len(feed.pending),
-                )
-                return
-            self._lead(printer_id, feed, answer.held)
-            if not answer.held:
-                self._prune(feed, answer.indexed_until)
-                return
-            if answer.indexed_until != feed.own_end:
-                self._handover(feed, answer.indexed_until)
-            self._report(printer_id, feed)
-            await self._flush(printer_id, feed, budget=self._tick_seconds or TICK_SECONDS)
+            if self._feeds.get(printer_id) is feed and self._leads(feed):
+                await self._flush(printer_id, feed, deadline=None)
+
+    async def tick(self, printer_id: str) -> None:
+        """One renewal, then one upload pass."""
+        await self.renew(printer_id)
+        await self.upload(printer_id)
 
     @staticmethod
     def _prune(feed: _Feed, indexed_until: datetime | None) -> None:
@@ -488,19 +660,33 @@ class Recorder:
         elif feed.seen:
             self._feed.want(printer_id, "pulling")
 
-    async def _flush(self, printer_id: str, feed: _Feed, *, budget: float | None) -> None:
-        """Upload, then index, in batches, while this recorder leads and the budget lasts.
-        An upload that fails ends the flush; what was put before it is indexed."""
-        started = self._clock()
-        while feed.leader and feed.pending:
+    # Upload, index
+
+    async def _flush(self, printer_id: str, feed: _Feed, *, deadline: float | None) -> None:
+        """Upload, then index, while this recorder leads. Each index call names at most
+        `BATCH` segments and comes after at most `INDEX_EVERY` seconds of puts. An upload
+        that fails ends the flush; what was put before it is indexed."""
+        while self._leads(feed) and feed.pending:
+            if deadline is not None and self._clock() >= deadline:
+                logger.warning(
+                    "camera recorder: the flush of %s ran out of time with %d segments left",
+                    printer_id,
+                    len(feed.pending),
+                )
+                return
             batch: list[_Pending] = []
             stop = False
+            window = self._clock()
             for item in list(feed.pending[:BATCH]):
                 if item not in feed.pending:
-                    continue  # dropped by the disk cap meanwhile
+                    continue  # dropped by the disk cap or pruned meanwhile
+                if not self._leads(feed):
+                    stop = True
+                    break
                 if item.key is None:
                     try:
-                        key = await self._uploader.put(item.seg)
+                        async with asyncio.timeout(self._put_timeout):
+                            key = await self._uploader.put(item.seg)
                     except FileNotFoundError:
                         if item in feed.pending:
                             self._drop(printer_id, feed, item)
@@ -520,8 +706,8 @@ class Recorder:
                     item.key = key
                 if item in feed.pending:
                     batch.append(item)
-                if budget is not None and self._clock() - started > budget:
-                    stop = True
+                now = self._clock()
+                if now - window >= INDEX_EVERY or (deadline is not None and now >= deadline):
                     break
             if batch and not await self._index(printer_id, feed, batch):
                 return
@@ -541,6 +727,7 @@ class Recorder:
             ).model_dump(mode="json")
             for item in batch
         ]
+        feed.indexing = True
         try:
             await self._crud.request(
                 "POST",
@@ -565,6 +752,8 @@ class Recorder:
                 "camera recorder: the index of %s failed (%s)", printer_id, type(error).__name__
             )
             return False
+        finally:
+            feed.indexing = False
         for item in batch:
             if item in feed.pending:
                 feed.pending.remove(item)
@@ -584,50 +773,83 @@ class Recorder:
         await self._feed.flushed()
 
     async def shutdown(self) -> None:
-        """Before exit: flush and release each printer this recorder leads. The paths stay
-        and nothing is reported, since the other recorder goes on."""
-        for printer_id, feed in list(self._feeds.items()):
+        """Before exit, within `SHUTDOWN_SECONDS` in all: flush each printer this recorder
+        leads, all at once and with the renewals going on, then release. The paths stay and
+        nothing is reported, since the other recorder goes on."""
+        feeds = list(self._feeds.items())
+
+        async def flush(printer_id: str, feed: _Feed) -> None:
+            await _cancel(feed.uploader)
+            feed.uploader = None
             async with feed.lock:
-                await self._cancel_loop(feed)
-                if feed.leader:
-                    await self._flush(printer_id, feed, budget=TICK_SECONDS)
-                    await self._release(printer_id, feed)
+                if self._leads(feed):
+                    await self._flush(printer_id, feed, deadline=None)
+
+        try:
+            async with asyncio.timeout(SHUTDOWN_SECONDS - RELEASE_SECONDS):
+                await asyncio.gather(*(flush(pid, feed) for pid, feed in feeds))
+        except TimeoutError:
+            logger.warning("camera recorder: the flush at shutdown ran out of time")
+        for _, feed in feeds:
+            await _cancel(feed.renewer)
+            feed.renewer = None
+        try:
+            async with asyncio.timeout(RELEASE_SECONDS):
+                await asyncio.gather(
+                    *(self._release(pid, feed) for pid, feed in feeds if feed.held)
+                )
+        except TimeoutError:
+            logger.warning("camera recorder: the releases at shutdown ran out of time")
 
     async def aclose(self) -> None:
         for feed in self._feeds.values():
-            await self._cancel_loop(feed)
+            await _cancel(feed.uploader)
+            feed.uploader = None
+            await _cancel(feed.renewer)
+            feed.renewer = None
         await self._feed.aclose()
+
+
+async def _cancel(task: asyncio.Task[None] | None) -> None:
+    if task is not None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def _read(printer_id: str, path: Path, duration_ms: int) -> LocalSegment:
+    init_bytes, init_sha256 = init_span(path)
+    return LocalSegment(
+        path=path,
+        printer_id=printer_id,
+        started_at=segment_start(path),
+        duration_ms=duration_ms,
+        bytes=path.stat().st_size,
+        init_bytes=init_bytes,
+        init_sha256=init_sha256,
+    )
 
 
 async def serve_hooks(recorder: Recorder, host: str, port: int) -> asyncio.Server:
     """``POST /segment/<printer_id>?duration=<s>&file=<path>``, from MediaMTX's
     ``runOnRecordSegmentComplete`` command: 204, or 404 for any other request."""
 
-    async def route(method: str, target: str) -> bool:
+    def route(method: str, target: str) -> Callable[[], Awaitable[None]] | None:
         parts = urlsplit(target)
         names = parts.path.split("/")
         if method != "POST" or len(names) != 3 or names[1] != "segment":
-            return False
+            return None
         printer_id = unquote(names[2])
         query = parse_qs(parts.query)
         try:
             duration = float(query["duration"][0])
             path = Path(query["file"][0])
         except (KeyError, IndexError, ValueError):
-            return False
+            return None
         if not math.isfinite(duration) or duration <= 0 or not recorder.owns(printer_id, path):
-            return False
-        await recorder.on_segment(printer_id, path, duration)
-        return True
+            return None
+        return lambda: recorder.on_segment(printer_id, path, duration)
 
     return await serve_local(route, host, port)
-
-
-def clear_leftovers(root: Path) -> None:
-    """Delete segment files a previous run left: no hook will ever name them, and the
-    paths are put again (each restarts its recording)."""
-    for path in root.glob("*/*.mp4"):
-        path.unlink(missing_ok=True)
 
 
 async def run(settings: RecorderSettings, stop: asyncio.Event | None = None) -> None:
@@ -644,9 +866,9 @@ async def run(settings: RecorderSettings, stop: asyncio.Event | None = None) -> 
         if not await wait_for_areas(crud, "camera", AREAS, stop):
             logger.info("stopped before the CRUD service served the camera areas")
             return
-        await asyncio.to_thread(clear_leftovers, SEGMENTS)
         hooks = await serve_hooks(recorder, HOOK_HOST, HOOK_PORT)
         try:
+            await recorder.release_all()
             await recorder.reconcile_all()
         except Exception as error:
             # MediaMTX may still be starting: the follower's first ``ready`` reads again.

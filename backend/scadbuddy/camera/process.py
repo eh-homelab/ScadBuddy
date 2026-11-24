@@ -24,13 +24,15 @@ HOOK_HOST: Final = "127.0.0.1"
 HOOK_PORT: Final = 9091
 HEALTH_PORT: Final = 9090
 
-#: A hook request's method and target (``/path?query``): true when it was taken.
-Route = Callable[[str, str], Awaitable[bool]]
+#: A hook request's method and target (``/path?query``) to the action that handles it, or
+#: ``None`` when no route takes the request.
+Route = Callable[[str, str], Callable[[], Awaitable[None]] | None]
 
 
 async def serve_local(route: Route, host: str, port: int) -> asyncio.Server:
     """A small HTTP server for MediaMTX's hook commands: 204 when ``route`` takes the
-    request, else 404. Headers and body are read and ignored."""
+    request, also when its action fails (MediaMTX does not retry; the error's type is
+    logged), else 404. Headers and body are read and ignored."""
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         status = b"404 Not Found"
@@ -40,8 +42,13 @@ async def serve_local(route: Route, host: str, port: int) -> asyncio.Server:
             while await asyncio.wait_for(reader.readline(), 5) not in end:
                 continue
             method, target, *_ = line.decode("ascii").split(" ")
-            if await route(method, target):
+            action = route(method, target)
+            if action is not None:
                 status = b"204 No Content"
+                try:
+                    await action()
+                except Exception as error:
+                    logger.warning("a camera hook failed (%s)", type(error).__name__)
         with suppress(Exception):
             writer.write(
                 b"HTTP/1.1 " + status + b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
