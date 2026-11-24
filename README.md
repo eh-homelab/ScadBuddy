@@ -292,6 +292,12 @@ on shutdown.
   variant's once its renders settle, one at a time under `storefront_slices_concurrent`,
   so the shop shows a firm price before a visitor asks, #6922; `false` starts neither, and
   a visitor's read still starts the slice; read from the environment only);
+  `SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS` (default 600, at least 0: the API copies the
+  saved outputs' files to their `outputs` rows at start and then once each this many
+  seconds, one replica at a time, so the saves and deletes of pods on an older build,
+  during a roll-out or after a rollback, reach the rows within one interval; 0 copies at
+  start only; `GET /api/v1/outputs/copy-status` answers the last run, #7255; read from
+  the environment only);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
@@ -466,7 +472,9 @@ on shutdown.
     (`orders/store.py`), a storefront publish's lock (at most 2 at once,
     `orders/storefront/listings.py`, in the gauges as `scadbuddy-storefront-publish`), a library copy's target locks (`print_library/copy_store.py`),
     the Bambuddy catalogue refresh and upload claims, the store's folder lock, the
-    output backfill's claim, the service credential rotation and the flow keys. So
+    output backfill's claim, the service credential rotation and the flow keys. The copy
+    of the saved outputs to rows (#7255) takes its connections from the main pool: one
+    that holds its advisory lock for the whole run, and one more for each statement. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main
     pool one more) and closes a connection left idle for a minute, one a minute
     (psycopg_pool's `max_idle`). The `LISTEN` connection and `scadbuddy-preview-follows`

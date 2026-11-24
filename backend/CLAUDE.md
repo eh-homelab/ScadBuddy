@@ -2034,8 +2034,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   schema's defaults as `name=value`) and `ordered`; 50 a page by default. It reads the
   `output_index` table (`library/output_index.py` `OutputIndex`), which `OutputStore`
   writes on save (a failure is logged), rename and delete, and whose rows of a model go
-  when its outputs directory does (`Catalogue._forget_cover` → `OutputStore.forget_indexed`:
-  a model's delete, the orphan sweep and a reused slug); the API's start runs
+  with its outputs directory (`Catalogue._forget_outputs` → `OutputStore.forget_indexed`,
+  before the directory goes: a model's delete, the orphan sweep and a reused slug; it also
+  drops the slug's `outputs` rows, #7255, and a failure there keeps the directory); the
+  API's start runs
   `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
   gone is dropped as it is read. Each output has a `source` (#6371; `OutputMeta.source`

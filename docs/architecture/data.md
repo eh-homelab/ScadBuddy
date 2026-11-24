@@ -138,10 +138,15 @@ files, then the row in one transaction; when the row fails, the save fails and i
 is removed (`OutputStore._insert_row`). Its last print stays in `output_last_prints`.
 
 Each API start copies the folders to rows (`scadbuddy/library/output_copy.py`
-`copy_outputs`, one replica at a time under an advisory lock), and each run is a row of
-`output_copy_runs`. `GET /api/v1/outputs/copy-status` answers the last run. Until a run
-finishes, a lookup that finds no row falls back to the files; after one, a missing row
-is a missing output. The copy reconciles:
+`copy_outputs`, one replica at a time under an advisory lock), and then copies them again
+each `SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS` (600 by default; 0 is the start's run only,
+`scadbuddy/main.py` `_copy_outputs_logged`). Each run is a row of `output_copy_runs`.
+`GET /api/v1/outputs/copy-status` answers the last run. Until a run finishes, a lookup
+that finds no row falls back to the files; after one, a missing row is a missing output.
+A run whose walk may have missed folders does not finish: it records its counts with
+`incomplete` true and no `finished_at`. Each run stats about ten record files in each
+output folder (`files_stamp`) and reads a folder only when its stamp changed. The copy
+reconciles:
 
 - A folder with no row gets one. A row is read again when the folder's `files_stamp`
   differs from the row's: a sha256 of the sorted name, size and `mtime_ns` of the record
@@ -156,9 +161,17 @@ is a missing output. The copy reconciles:
   inserted once more.
 - A row whose folder the walk did not see is dropped, only when its `copied_at` is before
   the run's start. When a listing or a stat fails (ESTALE, EIO), or the outputs folder
-  lists nothing, the run drops no row.
+  lists nothing while rows exist, the run drops no row and is `incomplete`.
 - A folder with no readable `meta.json` gets no row and goes on the run's `not_copied`
   list; a side file that cannot be read is left out of its row and named on `damaged`.
+- Pods on an older build save and delete outputs in the files only, during a roll-out
+  and after a rollback. The periodic run gives their saves rows and drops the rows of
+  their deletes within one interval.
+
+After a roll-out, confirm that every pod runs the new image (`kubectl -n bambuddy get
+pods -o jsonpath` on the images), then read `GET /api/v1/outputs/copy-status`. Check that
+its run has a `finished_at`, is not `incomplete`, and started after the last pod on the
+older build went. Until then, writes of the older pods may have no row yet.
 
 `output_index` stays as it is in this phase; #7257 drops it.
 

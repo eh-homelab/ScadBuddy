@@ -4,7 +4,7 @@
 
 **Goal:** Every output's record is a row in `outputs`, and a lookup by id is one indexed read, so no hot path globs `data/outputs/*/<id>/` on NFS (#7255, epic #7254).
 
-**Architecture:** A new synchronous row store `OutputRows` (psycopg pool, like `OutputIndex`) holds the record; `OutputStore` reads it and writes it next to the files it still writes (bytes move in phase 2, #7256). A reconciling copy fills and refreshes rows from the folders at every API start, under an advisory lock, and records each finished run; once a run has finished, a missing row is a missing output and nothing globs.
+**Architecture:** A new synchronous row store `OutputRows` (psycopg pool, like `OutputIndex`) holds the record; `OutputStore` reads it and writes it next to the files it still writes (bytes move in phase 2, #7256). A reconciling copy fills and refreshes rows from the folders at every API start and then once each `SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS` (600 by default, 0 is start only), under an advisory lock, and records each run; once a run has finished (its walk saw every folder), a missing row is a missing output and nothing globs.
 
 **Tech Stack:** Python 3.12, psycopg 3 + psycopg_pool, pydantic, FastAPI, pytest with the repo's Postgres fixtures.
 
@@ -38,7 +38,7 @@
 - Test: `backend/tests/test_output_rows.py` (schema smoke test only here)
 
 **Interfaces:**
-- Produces: table `outputs` (`output_id text PRIMARY KEY`, `slug text NOT NULL`, `meta jsonb NOT NULL` (the `OutputMeta` JSON, without the last-print overlay), `params jsonb NOT NULL DEFAULT '{}'`, `inputs jsonb` (NULL = a record from before inputs), `record jsonb`, `manifest jsonb`, `bom jsonb`, `arranged_from jsonb`, `backfill jsonb`, `has_plate_cover boolean NOT NULL DEFAULT false`, `created_at timestamptz NOT NULL`, `copied_at timestamptz NOT NULL DEFAULT clock_timestamp()`, `files_stamp text` (the copy's stamp of the record files it read; NULL for a row a save wrote)); indexes `(slug, created_at)` and a partial index on `output_id WHERE backfill IS NOT NULL`. Table `output_copy_runs` (`id bigserial PRIMARY KEY`, `started_at timestamptz NOT NULL DEFAULT clock_timestamp()`, `finished_at timestamptz`, `copied int NOT NULL DEFAULT 0`, `refreshed int NOT NULL DEFAULT 0`, `dropped int NOT NULL DEFAULT 0`, `not_copied jsonb NOT NULL DEFAULT '[]'`, `damaged jsonb NOT NULL DEFAULT '[]'`).
+- Produces: table `outputs` (`output_id text PRIMARY KEY`, `slug text NOT NULL`, `meta jsonb NOT NULL` (the `OutputMeta` JSON, without the last-print overlay), `params jsonb NOT NULL DEFAULT '{}'`, `inputs jsonb` (NULL = a record from before inputs), `record jsonb`, `manifest jsonb`, `bom jsonb`, `arranged_from jsonb`, `backfill jsonb`, `has_plate_cover boolean NOT NULL DEFAULT false`, `created_at timestamptz NOT NULL`, `copied_at timestamptz NOT NULL DEFAULT clock_timestamp()`, `files_stamp text` (the copy's stamp of the record files it read; NULL for a row a save wrote)); indexes `(slug, created_at)` and a partial index on `output_id WHERE backfill IS NOT NULL`. Table `output_copy_runs` (`id bigserial PRIMARY KEY`, `started_at timestamptz NOT NULL DEFAULT clock_timestamp()`, `finished_at timestamptz`, `incomplete boolean NOT NULL DEFAULT false` (a run whose walk may have missed folders; it has no `finished_at`), `copied int NOT NULL DEFAULT 0`, `refreshed int NOT NULL DEFAULT 0`, `dropped int NOT NULL DEFAULT 0`, `not_copied jsonb NOT NULL DEFAULT '[]'`, `damaged jsonb NOT NULL DEFAULT '[]'`).
 - The file opens with a comment that cites spec §4.2 and #7255.
 
 - [ ] **Step 1:** Write `test_outputs_tables_exist` (insert one minimal `outputs` row and one `output_copy_runs` row through the migrated test database; read them back).
@@ -67,13 +67,13 @@
     - As built (Task 4 fix), the copy's writes, in place of an `upsert`: `clock() -> datetime` (the mark), `write_copy(new, changed, mark) -> tuple[set[str], set[str]]` (`INSERT … ON CONFLICT DO NOTHING`, and `UPDATE … WHERE copied_at < mark`, in one transaction), `undo_copy(output_ids, mark) -> set[str]` (`DELETE … WHERE copied_at = mark`), `drop_unseen(output_ids, started) -> int` (`DELETE … WHERE copied_at < started`) and `stamps() -> dict[str, str | None]`. The live writers set `copied_at = clock_timestamp()`.
     - `update_meta(output_id: str, meta: OutputMeta) -> None`
     - `set_backfill(output_id: str, backfill: dict[str, Any] | None) -> None`
-    - `set_record(output_id: str, record: dict[str, Any] | None, manifest: list[Any] | None) -> None`
+    - `attach_backfill(output_id: str, record: dict[str, Any], manifest: list[Any]) -> None` (one statement: the record the row has stays, the manifest is the re-render's, the backfill is cleared)
     - `delete(output_id: str) -> None`, `delete_slug(slug: str) -> None`
     - `pending_backfills() -> list[tuple[str, dict[str, Any]]]`
     - `oldest_with_plate_cover(slug: str) -> str | None`
     - `ids_copied_before(before: datetime) -> set[str]` (the copy's drop pass: rows not refreshed by the running copy)
     - `copied() -> bool`: whether any `output_copy_runs` row has `finished_at`; once true it is cached true for the life of the object (it never goes back).
-    - `start_run() -> int`, `finish_run(run_id: int, *, copied: int, refreshed: int, dropped: int, not_copied: list[str], damaged: list[dict[str, Any]]) -> None`, `last_run() -> dict[str, Any] | None`.
+    - `start_run() -> int`, `finish_run(run_id: int, *, copied: int, refreshed: int, dropped: int, not_copied: list[str], damaged: list[dict[str, Any]]) -> None`, `end_incomplete_run(...)` (the same counts, `incomplete` true, no `finished_at`), `last_run() -> dict[str, Any] | None`.
 
 - [ ] **Step 1:** Write tests: `test_insert_then_get_round_trips_meta_and_jsons`, `test_existing_returns_only_known_ids`, `test_for_slug_is_newest_first`, `test_insert_conflict_raises`, `test_update_meta_changes_name`, `test_set_backfill_and_pending_backfills`, `test_delete_slug_drops_every_row_of_slug`, `test_oldest_with_plate_cover_picks_oldest_flagged`, `test_copied_false_until_a_run_finishes_then_stays_true`.
 - [ ] **Step 2:** Run them; expect FAIL (module missing).
@@ -97,7 +97,7 @@ Behaviour (spec §4.5 phase 1, §6.1, §6.6):
 - `_find_dir(id)`: with `rows`, the folder is `paths.output_dir(rows.slug_of(id), id)` — no glob. When `slug_of` is None: if `rows.copied()`, raise `OutputNotFoundError`; else fall back to today's glob.
 - Reads (`get`, `name_and_slug`, `params`, `inputs`, `list_for`, `bom`, `manifest`, `arranged_from`, `backfill`, `record`, `pending_backfills`) come from the row when one exists, else (before a finished copy) from the files as today. `get` and `list_for` keep the last-print overlay (`_with_last_prints`). `inputs` keeps `legacy_inputs` for a NULL `inputs`.
 - `create`: after writing the files, insert the row (with `has_plate_cover` = whether the stamped 3MF holds `Metadata/plate_1.png`; reuse what `_scan_plate_cover` checks) in one transaction. If the insert raises, remove the folder exactly as `create` already does on a failure part way, and re-raise.
-- `rename`, `mark_storefront`: write the file as today, then `rows.update_meta`. Backfill methods and `attach_backfill`: write files as today, then `rows.set_backfill` / `rows.set_record`.
+- `rename`, `mark_storefront`: write the file as today, then `rows.update_meta`. Backfill methods: write files as today, then `rows.set_backfill`; `attach_backfill` writes its files, then `rows.attach_backfill`.
 - `delete(id)`: `rows.delete`; `forget_indexed(slug)`: also `rows.delete_slug` (the model delete path, spec §6.2).
 - `plate_cover_output(slug)`: `rows.oldest_with_plate_cover(slug)` once `rows.copied()`, else today's scan. `plate_cover_archive`/`plate_cover` build the path from that id and the slug.
 - `provenance(id)`: with a row, read the 3MF at the row's folder; no glob.
@@ -110,21 +110,21 @@ Behaviour (spec §4.5 phase 1, §6.1, §6.6):
 - [ ] **Step 4:** Run the new tests and every existing output test: `tests/test_output_*.py`, `tests/test_packing_and_outputs.py`, `tests/test_arrange_outputs.py`, `tests/api/test_recent_outputs.py`, `tests/api/test_pipeline_api.py`, and any test `grep -rl "OutputStore\|outputs\." tests` adds; expect PASS.
 - [ ] **Step 5:** Commit `feat(outputs): OutputStore reads and writes output rows (#7255)`.
 
-### Task 4: The reconciling copy at every API start
+### Task 4: The reconciling copy at every API start, and each interval after
 
 **Files:**
 - Create: `backend/scadbuddy/library/output_copy.py`
-- Modify: `backend/scadbuddy/main.py` (start it next to `_index_outputs_logged`, line ~2376, as a background task that honours `stop`)
+- Modify: `backend/scadbuddy/main.py` (start it next to `_index_outputs_logged`, line ~2376, as a background task that honours `stop` and runs the copy again each `output_copy_interval_seconds`, a bootstrap setting in `core/settings.py` and `core/setting_docs.py`)
 - Test: `backend/tests/test_output_copy.py`
 
 **Interfaces:**
-- Consumes: Task 2's `OutputRows`; `OutputStore` file readers (the pre-row `get`/`params`/`inputs`/... paths, called with rows bypassed; add a private `_from_files(output_id, directory) -> OutputRow` on `OutputStore` if needed).
-- Produces: `copy_outputs(store: OutputStore, rows: OutputRows, pool: ConnectionPool[Connection[DictRow]], stop: threading.Event | None = None) -> CopyResult | None` (None when another replica holds the lock); `@dataclass CopyResult(copied: int, refreshed: int, dropped: int, not_copied: list[str], damaged: list[dict[str, Any]])`.
+- Consumes: Task 2's `OutputRows`; `OutputStore` file readers (as built: `OutputStore.row_from_files(directory, slug) -> tuple[OutputRow | None, list[dict[str, Any]]]`, the row from the files alone and the side files left out of it).
+- Produces: `copy_outputs(store: OutputStore, rows: OutputRows, pool: ConnectionPool[Connection[DictRow]], stop: threading.Event | None = None) -> CopyResult | None` (None when another replica holds the lock); `@dataclass CopyResult(copied: int, refreshed: int, dropped: int, not_copied: list[str], damaged: list[dict[str, Any]], incomplete: bool)`.
 
 Behaviour (spec §6.1, §6.3, §6.5):
 - Take `pg_try_advisory_lock(hashtextextended('scadbuddy:outputs:copy', 0))` on a dedicated connection; if not got, log and return None.
-- `start_run()`; walk `paths.outputs/<slug>/<id>/` (the one place that still scans). For each folder: no readable `meta.json` → `not_copied` (the folder's `<slug>/<id>`); a row missing → `write_copy` insert (`copied`); a row whose `files_stamp` differs from the folder's (a sha256 of the sorted name, size and `mtime_ns` of the record files `meta.json`, `params.json`, `inputs.json`, `record.json`, `manifest.json`, `bom.json`, `arranged_from.json`, `backfill.json`) → `write_copy` refresh (`refreshed`); both under the batch's mark, with `undo_copy` after each batch and once more for the inserted rows at the run's end; an unreadable side file → row written, entry in `damaged` naming the file. Rows in `ids_copied_before(run start)` whose folder the walk did not see → `drop_unseen` (`dropped`), not when a listing or a stat failed. `finish_run(...)`. Honour `stop` between folders (an unfinished run has no `finished_at`, so `copied()` stays false).
-- Log one line with the counts; failures are logged and the next start retries (as `_index_outputs_logged`).
+- `start_run()`; walk `paths.outputs/<slug>/<id>/` (the one place that still scans). For each folder: no readable `meta.json` → `not_copied` (the folder's `<slug>/<id>`); a row missing → `write_copy` insert (`copied`); a row whose `files_stamp` differs from the folder's (a sha256 of the sorted name, size and `mtime_ns` of the record files `meta.json`, `params.json`, `inputs.json`, `record.json`, `manifest.json`, `bom.json`, `arranged_from.json`, `backfill.json`) → `write_copy` refresh (`refreshed`); both under the batch's mark, with `undo_copy` after each batch and once more for the inserted rows at the run's end; an unreadable side file → row written, entry in `damaged` naming the file. Rows in `ids_copied_before(run start)` whose folder the walk did not see → `drop_unseen` (`dropped`), not when a listing or a stat failed. `finish_run(...)`; when a listing or a stat failed, or the outputs folder read empty while rows exist, `end_incomplete_run(...)` instead, so the run does not end the fallback. Honour `stop` between folders (an unfinished run has no `finished_at`, so `copied()` stays false).
+- Log one line with the counts; failures are logged and the next run retries. The loop waits `output_copy_interval_seconds` between runs (0: the start's run only) and ends when `stop` is set at shutdown.
 
 - [ ] **Step 1:** Write tests: `test_copy_fills_missing_rows_and_finishes_run`, `test_copy_refreshes_row_from_newer_meta`, `test_copy_second_run_changes_nothing`, `test_copy_lists_unreadable_folder`, `test_copy_marks_damaged_side_file`, `test_copy_drops_rows_whose_folder_is_gone`, `test_copy_runs_once_under_lock` (hold the lock on another connection; `copy_outputs` returns None), `test_copy_stops_unfinished_on_stop`.
 - [ ] **Step 2:** Run them; expect FAIL.
@@ -142,7 +142,7 @@ Behaviour (spec §6.1, §6.3, §6.5):
 
 **Interfaces:**
 - Consumes: `OutputRows.last_run()`.
-- Produces: `GET /api/v1/outputs/copy-status` returning `OutputCopyStatus` (`started_at`, `finished_at: datetime | None`, `copied`, `refreshed`, `dropped`, `not_copied: list[str]`, `damaged: list[dict]`), 404 when no run exists. Read-only; same auth dependencies as the other `GET /outputs` routes.
+- Produces: `GET /api/v1/outputs/copy-status` returning `OutputCopyStatus` (`started_at`, `finished_at: datetime | None`, `incomplete: bool`, `copied`, `refreshed`, `dropped`, `not_copied: list[str]`, `damaged: list[dict]`), 404 when no run exists. Read-only; same auth dependencies as the other `GET /outputs` routes.
 
 - [ ] **Step 1:** Write `test_copy_status_reports_last_run` and `test_copy_status_404_before_any_run`.
 - [ ] **Step 2:** Run them; expect FAIL.
@@ -153,4 +153,4 @@ Behaviour (spec §6.1, §6.3, §6.5):
 ### After the tasks
 
 - Open one PR for the branch, `feat(outputs): output records in Postgres, phase 1 (#7254)`, body `Fixes #7255` and the session marker; the shepherd lands it.
-- After it deploys: confirm the API pods run the new image (memory: confirm rollout by pod images), read `GET /api/v1/outputs/copy-status`, and time `GET /api/v1/print/library` again against the numbers in the spec §1.
+- After it deploys: confirm the API pods run the new image (memory: confirm rollout by pod images), then read `GET /api/v1/outputs/copy-status`. Check that its run has a `finished_at`, is not `incomplete`, and started after the last pod on the older build went: the periodic copy (`SCADBUDDY_OUTPUT_COPY_INTERVAL_SECONDS`, 600 by default) is what gives the older pods' saves their rows and drops their deletes' rows. Then time `GET /api/v1/print/library` again against the numbers in the spec §1.
