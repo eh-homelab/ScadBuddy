@@ -12,6 +12,9 @@ Rows are kept `RETENTION` (`prune`, in the auth sweep). `idempotent` and `record
 two halves, for a route whose write cannot be one callable. `stored` reads a reply with no
 lock, for a route that answers a retry before it does any other work; `has_reply` says
 whether a key holds one before the body is read.
+
+A write's transaction is `core/tracing.py` `traced_transaction`, its COMMIT a span of
+its own (#7389).
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.crud.guard import CrudCaller
 
 #: Who a ledger row is keyed under: a CRUD caller, or a public route's area whose
@@ -151,7 +155,7 @@ def idempotent_write(
     """``write`` once per ``key``, in one transaction with its ledger row: the stored reply
     of a key seen before, else ``write``'s, recorded. A ``write`` that raises records
     nothing, and nothing it wrote commits."""
-    with conn.transaction():
+    with traced_transaction(conn):
         stored = idempotent(conn, caller, key, route, body)
         if stored is not None:
             return stored
