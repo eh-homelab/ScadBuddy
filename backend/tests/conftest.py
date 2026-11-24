@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import functools
 import importlib.util
 import json
@@ -921,3 +922,20 @@ def rack_pick_swallows_only_expected_errors(
         return
     foreign = foreign_rack_errors(caplog.get_records("call"))
     assert not foreign, f"a rack fallback swallowed a programming error: {foreign}"
+
+
+@pytest.fixture
+def one_whole_read_at_a_time(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Holds a lock that every xdist worker of this run shares, for a test that reads
+    every MakerWorld fixture whole, so no two of them hold a large file at once (#6978).
+    Opening the largest files as a scene peaked at 5.0 to 6.7 GB each (GNU time's max
+    RSS, 2026-11-23); only the backend shards that held two such reads lost their
+    hosted runner (16 GB) mid-run. The workers' base temp directories share their
+    parent (pytest-xdist's own pattern for that:
+    https://pytest-xdist.readthedocs.io/en/stable/how-to.html#making-session-scoped-fixtures-execute-only-once).
+    Without xdist the lock sits in the user's pytest root, so concurrent sessions of
+    one user queue on it too; that only makes them wait."""
+    lock = tmp_path_factory.getbasetemp().parent / "makerworld-whole-read.lock"
+    with lock.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
