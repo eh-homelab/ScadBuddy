@@ -98,3 +98,23 @@ def checked_role(role: str) -> str:
             "a role is 1 to 32 lower-case letters or underscores, such as `receipt`",
         )
     return role
+
+
+def no_properties_kind(kind: str) -> ApiError:
+    return problem(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "unknown_entity_kind",
+        f"no entity kind {kind!r} takes properties",
+    )
+
+
+def bad_property_value(key: str, reason: str) -> ApiError:
+    return problem(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "bad_property_value",
+        f"property {key!r}: {reason}",
+    )
+
+
+def bad_property_schema(reason: str) -> ApiError:
+    return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "bad_property_schema", reason)
