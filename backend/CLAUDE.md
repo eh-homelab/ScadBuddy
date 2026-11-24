@@ -1402,7 +1402,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
   `GET /settings/git-remote` is the lag. `GitRepo.push` never forces, allows only the URL's
   protocol and hands the token (`git_remote_token`, a sealed secret; a save needs the KEK)
-  to git through `CREDENTIAL_HELPER` from the child's env, never the argv.
+  to git through `CREDENTIAL_HELPER` from the child's env, never the argv. A refusal no
+  retry fixes (`push.py` `explain`: size, pre-receive, non-fast-forward, auth) stores the
+  head as `refused_commit` and a short cause first in `error` (the refusing file for a
+  size limit); that head is not pushed again until it moves or `REFUSED_BACKOFF` (6 h)
+  passes, shown as the lag's `retry_after` (#7388). A timeout or connection failure is
+  tried at every sweep.
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
