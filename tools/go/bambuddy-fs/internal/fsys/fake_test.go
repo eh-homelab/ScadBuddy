@@ -39,6 +39,9 @@ type fakeLibrary struct {
 	down         bool
 	// listDown makes every List fail with a 503, as ScadBuddy does during a deploy.
 	listDown bool
+	// listing, if set, is called with each List's count after it has read the
+	// library and before it answers, outside the lock: a slow answer from before a change.
+	listing func(n int)
 	// failUpdates is how many UpdateFile calls fail, with a 502; updating, if set, is
 	// called at the start of each with its count.
 	failUpdates int
@@ -122,18 +125,25 @@ func (l *fakeLibrary) counts() (lists, downloads int) {
 
 func (l *fakeLibrary) List(_ context.Context, folderID int, all bool) (api.Listing, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.lists++
+	n, hook := l.lists, l.listing
+	var out api.Listing
+	var err error
 	if l.listDown {
-		return api.Listing{}, &api.Error{Op: "list", Status: http.StatusServiceUnavailable}
-	}
-	out := api.Listing{Folders: append([]api.Folder(nil), l.folders...)}
-	for _, f := range l.files {
-		if f.FolderID == folderID && (all || strings.HasSuffix(f.Name, ".3mf")) {
-			out.Files = append(out.Files, f)
+		err = &api.Error{Op: "list", Status: http.StatusServiceUnavailable}
+	} else {
+		out.Folders = append([]api.Folder(nil), l.folders...)
+		for _, f := range l.files {
+			if f.FolderID == folderID && (all || strings.HasSuffix(f.Name, ".3mf")) {
+				out.Files = append(out.Files, f)
+			}
 		}
 	}
-	return out, nil
+	l.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
+	return out, err
 }
 
 func (l *fakeLibrary) Download(_ context.Context, fileID int, w io.Writer) error {

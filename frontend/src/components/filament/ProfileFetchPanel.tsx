@@ -167,7 +167,7 @@ export function ProfileFetchPanel({
         : tdfpId === null
           ? 'Enter the 3DFP id above and save the type to fetch its presets.'
           : null
-  const help = why ?? "Imports a preset for each printer model and nozzle into Bambuddy and sets it here. It replaces this type's presets for the nozzles chosen in Settings → Printing."
+  const help = why ?? "Keeps a preset for each printer model and nozzle in ScadBuddy, with a copy in Bambuddy when Settings → Printing asks for one, and sets it here. It replaces this type's presets for the nozzles chosen in Settings → Printing."
   const missing = new Set((run?.missing ?? []).map(keyOf))
   const gaps = running ? [] : (status?.gaps ?? []).filter((gap) => !missing.has(keyOf(gap)))
   /** A 503's run error says what the alert says. */

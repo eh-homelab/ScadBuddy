@@ -35,6 +35,7 @@ from scadbuddy.crud.idempotency import (
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogKeyEmptyError, CatalogRefError
 from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.inventory import TrayColourError
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import report_status
@@ -207,8 +208,8 @@ async def delete_tray_spool(
         "with the same key answers the first spool and writes nothing. 404 for an unknown "
         "printer; 409 for a Bambuddy virtual printer, a printer that has not reported the "
         "tray filled, a tray whose tag is already on a spool (that spool is the tray's) or "
-        "whose two keys name two different tags; 422 for a unit or slot no printer has, or "
-        "a material name with no letter or digit."
+        "whose two keys name two different tags; 422 for a unit or slot no printer has, "
+        "a material name with no letter or digit, or a colour that is not `#RRGGBBAA`."
     ),
 )
 async def new_tray_spool(
@@ -246,7 +247,7 @@ async def new_tray_spool(
                     made = filament.inventory.create_in_tray_on(
                         conn, place, printer, ams_id, tray_id, tray, actor=who
                     )
-                except CatalogKeyEmptyError as error:
+                except (CatalogKeyEmptyError, TrayColourError) as error:
                     raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
                 return Replay(status.HTTP_201_CREATED, made.model_dump(mode="json"))
 

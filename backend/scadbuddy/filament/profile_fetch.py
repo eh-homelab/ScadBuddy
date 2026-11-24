@@ -7,18 +7,20 @@ Bambuddy key (#5295). It uploads each exported preset as raw bytes named by thei
 (`store_file`); this process checks the bytes are a filament preset, strips the site's
 G-code (`clean_preset`), keeps the result as a blob held by the run
 (``blob_refs`` holder `HOLDER`, released with the run by its delete trigger), and records
-the key and the preset's name in the run's ``files``. The import (`import_run`) zips the
-held files under names of their own (``<sha256>.json``, never a name from the site),
-posts the zip to Bambuddy's local presets, and maps each file to a local preset of its
-name that this run made (absent from the listing kept before its first import) or that an
-earlier fetch of the type made or bound; a preset of that name a person made is never
-bound (#6625 S1). It merges those ids over the type's preset rows of the fetched keys, reads
-the K values the type's printers hold for an exact filament match, refreshes the kept
-copy of the local presets, and ends the run. Every write of the end is in one transaction with the
-idempotency ledger's row. One run's import runs once at a time: it holds a lease on the
+the key and the preset's name in the run's ``files``. The import (`import_run`) makes each
+held file the type's ScadBuddy preset of its key (#7176, plan
+2026-11-23-scadbuddy-filament-presets.md Decisions 3, 12, 13): the type's own nozzle range
+wins over 3DFP's (`apply_type_temps`, #7142), a key with no fetched preset gets a new
+``3dfp`` one, and one whose document changed gets a new version, its changed keys named in
+the run's notes. It merges their ``sb-<id>`` refs over the type's preset rows of the
+fetched keys, reads the K values the type's printers hold for an exact filament match
+through Bambuddy, and ends the run. Bambuddy gets no import: after the commit the mirror
+sends each written preset (`filament/preset_mirror.py`), and a mirror failure never fails
+the import. Every write of the end is in one transaction with the idempotency ledger's
+row. One run's import runs once at a time: it holds a lease on the
 run row (``import_lease_until``, `_claim`). A second request for the run (the worker's
 client retrying a slow one) polls with short statements, holding no pooled connection,
-then answers the first one's outcome without calling Bambuddy, or claims the lease once
+then answers the first one's outcome without writing again, or claims the lease once
 it has expired (R-PR3).
 """
 
@@ -31,7 +33,6 @@ import json
 import logging
 import math
 import time
-import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -56,7 +57,16 @@ from scadbuddy.bambuddy.models import KProfile
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, idempotent, record, stored
 from scadbuddy.filament.models import TypeKValue, TypePreset
+from scadbuddy.filament.preset_mirror import mirror_pending
 from scadbuddy.filament.profile_fill import fill_quietly
+from scadbuddy.filament.sb_presets import (
+    FilamentPresetStore,
+    create_on,
+    document_bytes,
+    keep_document,
+    lock_presets_on,
+    version_on,
+)
 from scadbuddy.filament.types import SpoolTypeStore, list_edit
 from scadbuddy.orders.attachments import blob_path, keep_file
 from scadbuddy.profile_fetch.wire import (
@@ -76,7 +86,7 @@ from scadbuddy.profile_fetch.workflow import (
     NO_WORKER,
     TOO_LONG,
 )
-from scadbuddy.slicing.held_presets import HeldPresetStore, refresh_held_presets
+from scadbuddy.slicing.own_presets import sb_ref
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -90,6 +100,12 @@ Status = Literal["running", "imported", "partial", "failed"]
 HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
+#: How long an import waits for the mirror of what it wrote (#7176); the next kept-preset
+#: refresh sends what is left. 120 s: Bambuddy's listing and three writes, each up to the
+#: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`). It leaves 7 of
+#: `profile_fetch/workflow.py` `IMPORT_REQUEST_TIMEOUT`'s 9 minutes to the K-table reads, 14
+#: of them at 30 s each.
+IMPORT_MIRROR_TIMEOUT: Final = 120.0
 #: How often a request that finds the run's import lease held looks again (R-PR3).
 LEASE_POLL_SECONDS: float = 2.0
 PROBLEMS: Final = "https://scadbuddy.dev/problems/profile-fetch/"
@@ -547,7 +563,7 @@ def _problem(status_code: int, code: str, detail: str) -> ApiError:
 def _run(conn: Conn, run_id: UUID, *, lock: bool = False, running: bool = True) -> Any:
     """The run's row: 404 for none, and 409 for one that has ended when ``running``."""
     row = conn.execute(
-        "SELECT id, type_id, status, targets, files, bambuddy_before, missing, k_values,"
+        "SELECT id, type_id, tdfp_id, status, targets, files, missing, k_values,"
         " notes, error, started_by FROM filament_profile_fetches WHERE id = %s"
         + (" FOR UPDATE" if lock else ""),
         (run_id,),
@@ -727,6 +743,11 @@ class _Ending:
     k_scope: dict[tuple[UUID, str], str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     error: str | None = None
+    #: The fetched documents, each kept as a blob, that the end makes the type's ScadBuddy
+    #: presets of their keys (`_write_presets`), which fills ``presets``.
+    writes: list[_Write] = field(default_factory=list)
+    #: The ScadBuddy presets the end wrote (a new one or a new version), for the mirror.
+    written: list[int] = field(default_factory=list)
 
     def outcome(self) -> ImportOutcome:
         return ImportOutcome(
@@ -747,41 +768,52 @@ class _File:
     sha256: str
 
 
+@dataclass(frozen=True)
+class _Write:
+    """A fetched file's document as ScadBuddy keeps it (cleaned, the type's temperatures
+    applied), kept as blob ``key``."""
+
+    file: _File
+    key: str
+    sha256: str
+    doc: dict[str, Any]
+    #: The keys whose values differ from the preset's current document, read before the
+    #: end; ``None`` when the key has no fetched preset yet.
+    changed: list[str] | None
+
+
 async def import_run(
     state: AppState, run_id: UUID, key: str, failures: list[ExportFailure]
 ) -> ImportOutcome:
-    """``POST …/runs/{run_id}/import``: the run's files imported into Bambuddy and made
-    the type's presets, once per ``key``. A run already ended answers its stored outcome
-    and imports nothing. Bambuddy refusing the import (a 4xx: without the settings
-    permission it answers 403) ends the run ``failed`` with that reason and sets no
-    preset; Bambuddy down (5xx) raises, so the worker retries with the same key. The import
-    holds the run's lease (`_claim`), so a request that arrives while another for the run
-    still runs waits for it, holding no pooled connection, and then answers its outcome
-    (R-PR3)."""
+    """``POST …/runs/{run_id}/import``: the run's files made the type's ScadBuddy presets
+    (#7176), once per ``key``. A run already ended answers its stored outcome and writes
+    nothing. The blob store down raises, so the worker retries with the same key. The
+    import holds the run's lease (`_claim`), so a request that arrives while another for
+    the run still runs waits for it, holding no pooled connection, and then answers its
+    outcome (R-PR3)."""
     asked = {"failures": [f.model_dump() for f in failures]}
     pool = state.settings_store.pool
 
-    def first() -> tuple[Replay | None, Any, datetime | None, list[dict[str, Any]], _Fetched]:
+    def first() -> tuple[Replay | None, Any, datetime | None, list[dict[str, Any]]]:
         with pool.connection() as conn:
             replay = stored(conn, "profile-fetch", key, IMPORT_ROUTE, asked)
             if replay is not None:
-                return replay, None, None, [], _Fetched()
+                return replay, None, None, []
             row = _run(conn, run_id, running=False)
             if row["status"] != "running":
-                return None, row, None, [], _Fetched()
+                return None, row, None, []
             lease = _claim(conn, run_id)
             if lease is None:
-                return None, None, None, [], _Fetched()
+                return None, None, None, []
             printers = conn.execute(
                 "SELECT id, name, model, bambuddy_printer_id FROM printers"
                 " WHERE bambuddy_printer_id IS NOT NULL AND model IS NOT NULL"
                 " ORDER BY name, id"
             ).fetchall()
-            fetched = _fetched_ids(conn, row["type_id"], run_id)
-        return None, row, lease, printers, fetched
+        return None, row, lease, printers
 
     while True:
-        replay, row, lease, printers, fetched = await asyncio.to_thread(first)
+        replay, row, lease, printers = await asyncio.to_thread(first)
         if replay is not None:
             return ImportOutcome.model_validate(replay.body)
         if row is not None and lease is None:
@@ -790,7 +822,7 @@ async def import_run(
             break
         await asyncio.sleep(LEASE_POLL_SECONDS)
     try:
-        return await _import_once(state, row, key, asked, printers, fetched, failures)
+        return await _import_once(state, row, key, asked, printers, failures)
     finally:
         # Also after a cancel: the release runs on in its thread.
         await asyncio.shield(asyncio.to_thread(_release, pool, run_id, lease))
@@ -825,12 +857,11 @@ async def _import_once(
     key: str,
     asked: dict[str, Any],
     printers: list[dict[str, Any]],
-    fetched: _Fetched,
     failures: list[ExportFailure],
 ) -> ImportOutcome:
     pool = state.settings_store.pool
     run_id = row["id"]
-    ending = await _import(state, row, failures, printers, fetched)
+    ending = await _import(state, row, failures, printers)
     first_presets: list[bool] = []
 
     def finish() -> Replay:
@@ -848,6 +879,7 @@ async def _import_once(
                     "SELECT 1 FROM filament_spool_type_presets WHERE type_id = %s LIMIT 1",
                     (type_id,),
                 ).fetchone()
+                _write_presets(conn, now, ending)
                 first_presets.append(had is None and bool(ending.presets))
                 with list_edit(conn, type_id, "presets", by):
                     SpoolTypeStore.merge_presets(conn, type_id, ending.presets)
@@ -878,6 +910,18 @@ async def _import_once(
             return reply
 
     done = await asyncio.to_thread(finish)
+    if ending.written:
+        # After the commit, and a failure never fails the import (#7176 Decision 11).
+        settings = await asyncio.to_thread(state.settings_store.load)
+        own = FilamentPresetStore(pool, lambda: state.store.blobs)
+        # Bounded, so the worker's import call never waits on a slow Bambuddy; what is
+        # left is sent by the next kept-preset refresh.
+        try:
+            await asyncio.wait_for(
+                mirror_pending(pool, own, settings, ending.written), IMPORT_MIRROR_TIMEOUT
+            )
+        except TimeoutError:
+            logger.warning("the preset mirror ran past the import's bound; the refresh sends")
     if first_presets == [True]:
         # A type's first presets fill its empty fields from their profile (#6714, R-6714-a);
         # after the commit, and a failure never fails the import.
@@ -890,59 +934,6 @@ async def _import_once(
             actor=row["started_by"],
         )
     return ImportOutcome.model_validate(done.body)
-
-
-@dataclass
-class _Fetched:
-    """What earlier fetches of the type made in Bambuddy (R-PR1)."""
-
-    #: The preset ids an earlier fetch bound, or recorded as made by its import, whatever
-    #: that run's status.
-    ids: set[int] = field(default_factory=set)
-    #: The earlier runs that kept a ``bambuddy_before`` but no ``bambuddy_made``: their
-    #: import may have reached Bambuddy with no listing after it (a refused one records
-    #: that it made nothing, R-PR5). Each run's before ids, and its files' names.
-    unlisted: list[tuple[set[int], set[str]]] = field(default_factory=list)
-
-    def made(self, listing: Sequence[Any]) -> set[int]:
-        """``ids``, and the listed presets an unlisted run's import made: named as one of
-        its files and absent from its ``bambuddy_before``."""
-        return self.ids | {
-            p.id
-            for before, names in self.unlisted
-            for p in listing
-            if p.name in names and p.id not in before
-        }
-
-
-def _fetched_ids(conn: Conn, type_id: UUID, run_id: UUID) -> _Fetched:
-    """The Bambuddy preset ids an earlier fetch of the type made: the type's preset rows
-    that a fetch bound (its ``files`` entry's ``preset_id``), not ones a person chose; the
-    ids each earlier run recorded as its import's (``bambuddy_made``); and the runs whose
-    import was never listed (R-PR1). A row adopted as a ScadBuddy preset (#7176) counts by
-    that preset's Bambuddy id."""
-    rows = conn.execute(
-        "SELECT COALESCE(sp.bb_preset_id::text, p.slicer_filament) AS bb"
-        " FROM filament_spool_type_presets p"
-        " LEFT JOIN filament_presets sp ON sp.id = p.preset_id"
-        " WHERE p.type_id = %s AND EXISTS (SELECT 1 FROM filament_profile_fetches f,"
-        " jsonb_each(f.files) AS m(model, nozzles), jsonb_each(m.nozzles) AS n(nozzle, entry)"
-        " WHERE f.type_id = p.type_id AND f.id <> %s"
-        " AND n.entry ->> 'preset_id' = COALESCE(sp.bb_preset_id::text, p.slicer_filament))",
-        (type_id, run_id),
-    ).fetchall()
-    out = _Fetched({int(row["bb"]) for row in rows if row["bb"].isdigit()})
-    for run in conn.execute(
-        "SELECT bambuddy_before, bambuddy_made, files FROM filament_profile_fetches"
-        " WHERE type_id = %s AND id <> %s AND bambuddy_before IS NOT NULL",
-        (type_id, run_id),
-    ).fetchall():
-        if run["bambuddy_made"] is not None:
-            out.ids.update(run["bambuddy_made"])
-        else:
-            names = {e["name"] for nozzles in run["files"].values() for e in nozzles.values()}
-            out.unlisted.append((set(run["bambuddy_before"]), names))
-    return out
 
 
 def _stored_outcome(row: Any) -> ImportOutcome:
@@ -974,7 +965,6 @@ async def _import(
     row: Any,
     failures: list[ExportFailure],
     printers: list[dict[str, Any]],
-    earlier: _Fetched,
 ) -> _Ending:
     targets = _keys(row["targets"])
     files = [
@@ -992,144 +982,187 @@ async def _import(
     missing = {k: reasons.get(k, NO_FILE) for k in targets if k not in sent}
     if not files:
         return _failed("3dfilamentprofiles gave no preset file for any target", missing)
-    docs: dict[str, bytes] = {}
+    docs: dict[str, dict[str, Any] | None] = {}
     for f in files:
         if f.sha256 not in docs:
-            # Cleaned again before Bambuddy sees it (defence in depth): the blob store is
-            # shared, so the bytes are checked where they leave, not only where they came in.
+            # Cleaned again before it is kept (defence in depth): the blob store is shared,
+            # so the bytes are checked where they are used, not only where they came in.
             try:
-                docs[f.sha256] = clean_preset(await _read_blob(state, f.key))[1]
+                docs[f.sha256] = json.loads(clean_preset(await _read_blob(state, f.key))[1])
             except ApiError as error:
                 if error.status != status.HTTP_422_UNPROCESSABLE_CONTENT:
                     raise
-                docs[f.sha256] = b""
-    for f in [f for f in files if not docs[f.sha256]]:
+                docs[f.sha256] = None
+    for f in [f for f in files if docs[f.sha256] is None]:
         missing[(f.printer_model, f.nozzle)] = (
             f"the kept preset file is not fit to import: {f.name}"
         )
         files.remove(f)
-    docs = {sha256: body for sha256, body in docs.items() if body}
     if not files:
         return _failed("3dfilamentprofiles gave no preset file fit to import", missing)
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
-        for sha256, body in docs.items():
-            zipped.writestr(f"{sha256}.json", body)
+    ending = _Ending(status="imported", missing=[])
+    temps = await asyncio.to_thread(_type_temps, state.settings_store.pool, row["type_id"])
+    own = FilamentPresetStore(state.settings_store.pool, lambda: state.store.blobs)
+    for f in files:
+        doc = dict(docs[f.sha256] or {})
+        for note in apply_type_temps(doc, *temps):
+            ending.notes.append(f"{f.printer_model} {f.nozzle} mm: {note}")
+        key, sha256 = await keep_document(state.store.blobs, document_bytes(doc))
+        changed = await _changed_keys(own, row["type_id"], f, doc)
+        ending.writes.append(_Write(f, key, sha256, doc, changed))
     settings = await asyncio.to_thread(state.settings_store.load)
-    try:
-        async with client_for(settings) as client:
-            before = row["bambuddy_before"]
-            if before is None:
-                listed = await client.local_presets()
-                before = await _keep_before(state, row["id"], [p.id for p in listed.filament])
-            # A refusal made nothing, and the run records that, so a later fetch does not
-            # count a preset a person makes with one of its names as a fetch's (R-PR5). A
-            # 5xx or a lost answer leaves the run unlisted: the zip may have landed.
-            try:
-                imported = await client.import_local_presets(archive.getvalue())
-            except ApiError as error:
-                if error.status >= status.HTTP_500_INTERNAL_SERVER_ERROR:
-                    raise
-                await _keep_made(state, row["id"], [])
-                return _failed(error.detail, missing)
-            if not imported.success:
-                await _keep_made(state, row["id"], [])
-                why = "; ".join(imported.errors) or "it did not say why"
-                return _failed(f"Bambuddy refused the import: {why}", missing)
-            listing = await client.local_presets()
-            names = {f.name for f in files}
-            await _keep_made(
-                state,
-                row["id"],
-                [p.id for p in listing.filament if p.id not in before and p.name in names],
-            )
-            fetched = earlier.made(listing.filament)
-            made = set(before)
-            ending = _Ending(status="imported", missing=[])
-            mapped: list[_File] = []
-            for f in files:
-                same = [p.id for p in listing.filament if p.name == f.name]
-                ours = [i for i in same if i not in made]
-                again = [i for i in same if i in fetched]
-                if not ours and not again:
-                    missing[(f.printer_model, f.nozzle)] = (
-                        # Per type on purpose (S1): a preset another type's fetch made
-                        # is not this type's to bind (R-F5).
-                        f"Bambuddy already has a preset named {f.name}"
-                        " that no fetch of this type made"
-                        if same
-                        else f"Bambuddy did not list the imported preset {f.name!r}"
-                    )
-                    continue
-                if not ours and imported.skipped:
-                    ending.notes.append(
-                        f"Bambuddy kept its existing preset {f.name}; its content was not updated"
-                    )
-                mapped.append(f)
-                ending.presets.append(
-                    TypePreset(
-                        type_id=row["type_id"],
-                        printer_model=f.printer_model,
-                        nozzle_diameter=f.nozzle,
-                        slicer_filament=str((ours or again)[0]),
-                        slicer_filament_name=f.name,
-                    )
-                )
-            await _k_values(client, ending, row["type_id"], mapped, docs, printers)
-            if state.settings.spool_overlay_refresh_seconds:
-                try:
-                    await refresh_held_presets(HeldPresetStore(state.projection.pool), client)
-                except ApiError as error:
-                    ending.notes.append(f"the kept copy of the presets was not refreshed: {error}")
-    except ApiError as error:
-        if error.status >= status.HTTP_500_INTERNAL_SERVER_ERROR:
-            raise
-        return _failed(error.detail, missing)
+    if printers and settings.bambuddy_url:
+        # K values are the printers' calibrations, read through Bambuddy (Decision 12).
+        try:
+            async with client_for(settings) as client:
+                await _k_values(client, ending, row["type_id"], ending.writes, printers)
+        except ApiError as error:
+            ending.notes.append(f"no K values were read from Bambuddy: {error.detail}")
     ending.missing = [
         MissingKey(printer_model=m, nozzle_diameter=n, reason=r)
         for (m, n), r in sorted(missing.items())
     ]
-    if not ending.presets:
-        ending.status, ending.error = "failed", "no fetched preset was imported"
-    elif ending.missing:
+    if ending.missing:
         ending.status = "partial"
     return ending
 
 
-async def _keep_before(state: AppState, run_id: UUID, ids: list[int]) -> list[int]:
-    """The run's ``bambuddy_before``: ``ids`` unless an earlier attempt kept its own."""
-
-    def write() -> list[int]:
-        with state.settings_store.pool.connection() as conn, conn.transaction():
-            row = conn.execute(
-                "UPDATE filament_profile_fetches"
-                " SET bambuddy_before = COALESCE(bambuddy_before, %s)"
-                " WHERE id = %s RETURNING bambuddy_before",
-                (Jsonb(ids), run_id),
-            ).fetchone()
-        assert row is not None
-        kept: list[int] = row["bambuddy_before"]
-        return kept
-
-    return await asyncio.to_thread(write)
+def _type_temps(pool: ConnectionPool[Conn], type_id: UUID) -> tuple[int | None, int | None]:
+    """The type's own nozzle range, which wins over 3DFP's (#7142)."""
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT nozzle_temp_min, nozzle_temp_max FROM filament_spool_types WHERE id = %s",
+            (type_id,),
+        ).fetchone()
+    return (None, None) if row is None else (row["nozzle_temp_min"], row["nozzle_temp_max"])
 
 
-async def _keep_made(state: AppState, run_id: UUID, ids: list[int]) -> None:
-    """The run's ``bambuddy_made``, in a commit of its own as soon as the import is listed,
-    so a later fetch of the type binds them even if this run fails after it (R-PR1). A
-    retry that lists again adds what it finds. A refused import keeps none (R-PR5)."""
+#: The keys a type's nozzle range sets, and the ones clamped into it (#7142).
+RANGE_KEYS: Final = ("nozzle_temperature_range_low", "nozzle_temperature_range_high")
+CLAMPED_KEYS: Final = ("nozzle_temperature", "nozzle_temperature_initial_layer")
 
-    def write() -> None:
-        with state.settings_store.pool.connection() as conn, conn.transaction():
-            conn.execute(
-                "UPDATE filament_profile_fetches SET bambuddy_made ="
-                " (SELECT COALESCE(jsonb_agg(DISTINCT v ORDER BY v), '[]')"
-                " FROM jsonb_array_elements(COALESCE(bambuddy_made, '[]') || %s) AS v)"
-                " WHERE id = %s",
-                (Jsonb(ids), run_id),
+
+def _number(text: Any) -> float | None:
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _degrees(value: float) -> str:
+    return str(int(value)) if value == int(value) else str(value)
+
+
+def apply_type_temps(doc: dict[str, Any], low: int | None, high: int | None) -> list[str]:
+    """The type's ``low``/``high`` (its label) written into ``doc``'s nozzle range, and its
+    nozzle temperatures clamped into it, in place (#7142: 3DFP's range is its type's
+    shared default, not a colour's label). A note per value replaced."""
+    notes: list[str] = []
+    for name, value in zip(RANGE_KEYS, (low, high), strict=True):
+        old = doc.get(name)
+        if value is None or not isinstance(old, list) or not old:
+            continue
+        new = [str(value)] * len(old)
+        if old != new:
+            doc[name] = new
+            notes.append(f"{name} is the type's {value}, not 3DFP's {', '.join(map(str, old))}")
+    for name in CLAMPED_KEYS:
+        old = doc.get(name)
+        if not isinstance(old, list):
+            continue
+        new = []
+        for item in old:
+            number = _number(item)
+            if number is None:
+                new.append(item)
+                continue
+            floor = number if low is None else max(number, low)
+            clamped = floor if high is None else min(floor, high)
+            new.append(item if clamped == number else _degrees(clamped))
+        if new != old:
+            doc[name] = new
+            notes.append(
+                f"{name} is {', '.join(new)}, inside the type's range, not 3DFP's"
+                f" {', '.join(map(str, old))}"
             )
+    return notes
 
-    await asyncio.to_thread(write)
+
+async def _changed_keys(
+    own: FilamentPresetStore, type_id: UUID, f: _File, doc: dict[str, Any]
+) -> list[str] | None:
+    """The keys of ``doc`` that differ from the type's fetched preset of ``f``'s key;
+    ``None`` when it has none yet. Read before the write takes the presets' lock, so the
+    note it makes is best-effort: a version written meanwhile is compared against the
+    one read here."""
+    current = await asyncio.to_thread(own.fetched, type_id, f.printer_model, f.nozzle)
+    if current is None:
+        return None
+    old = await own.read(current.blob_key) or {}
+    return sorted(k for k in {*old, *doc} if old.get(k) != doc.get(k))
+
+
+#: The most changed keys a version's note names.
+MAX_NAMED_KEYS: Final = 12
+
+
+def _write_presets(conn: Conn, run: Any, ending: _Ending) -> None:
+    """Each of ``ending.writes`` made the type's ScadBuddy preset of its key: a new
+    ``3dfp`` preset, or a new version of the one there when the document changed
+    (Decision 3), each a note. Fills ``ending.presets`` and ``ending.written``. On
+    ``conn``, in the end's transaction."""
+    # The presets' lock first, as an adoption takes it, so one making this key's
+    # preset meanwhile is seen here, never a unique violation.
+    lock_presets_on(conn)
+    for w in ending.writes:
+        f = w.file
+        found = conn.execute(
+            "SELECT id FROM filament_presets WHERE source = '3dfp' AND type_id = %s"
+            " AND printer_model = %s AND nozzle_diameter = %s",
+            (run["type_id"], f.printer_model, f.nozzle),
+        ).fetchone()
+        made = dict(
+            name=f.name,
+            key=w.key,
+            sha256=w.sha256,
+            doc=w.doc,
+            made_by=run["started_by"],
+            fetch_run_id=run["id"],
+        )
+        if found is None:
+            preset_id = create_on(
+                conn,
+                source="3dfp",
+                type_id=run["type_id"],
+                printer_model=f.printer_model,
+                nozzle_diameter=f.nozzle,
+                tdfp_id=run["tdfp_id"],
+                **made,
+            )
+            ending.written.append(preset_id)
+        else:
+            preset_id = found["id"]
+            version = version_on(conn, preset_id, **made)
+            if version is not None:
+                ending.written.append(preset_id)
+                keys = w.changed or []
+                named = ", ".join(keys[:MAX_NAMED_KEYS])
+                more = len(keys) - MAX_NAMED_KEYS
+                ending.notes.append(
+                    f"{f.printer_model} {f.nozzle} mm: version {version} of {f.name}"
+                    + (f"; changed {named}" if named else "")
+                    + (f" and {more} more" if more > 0 else "")
+                )
+        ending.presets.append(
+            TypePreset(
+                type_id=run["type_id"],
+                printer_model=f.printer_model,
+                nozzle_diameter=f.nozzle,
+                slicer_filament=sb_ref(preset_id),
+                slicer_filament_name=f.name,
+            )
+        )
 
 
 def _failed(error: str, missing: dict[tuple[str, str], str]) -> _Ending:
@@ -1154,8 +1187,7 @@ async def _k_values(
     client: BambuddyClient,
     ending: _Ending,
     type_id: UUID,
-    files: list[_File],
-    docs: dict[str, bytes],
+    writes: list[_Write],
     printers: list[dict[str, Any]],
 ) -> None:
     """The K value each printer holds for a mapped file's filament: only where its
@@ -1163,12 +1195,13 @@ async def _k_values(
     many types share), and one value per extruder. A printer that does not answer is a
     note, and its key stays out of ``k_scope``, so its old K rows are kept."""
     for printer in printers:
-        for f in files:
+        for w in writes:
+            f = w.file
             if f.printer_model != printer["model"]:
                 continue
             printer_id = UUID(str(printer["id"]))
             label = f"{printer['name']} ({printer['model']})"
-            filament_id = json.loads(docs[f.sha256]).get("filament_id")
+            filament_id = w.doc.get("filament_id")
             if not isinstance(filament_id, str) or filament_id.startswith("GF"):
                 ending.k_scope[(printer_id, f.nozzle)] = label
                 continue

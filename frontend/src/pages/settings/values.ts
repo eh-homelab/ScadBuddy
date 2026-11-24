@@ -92,6 +92,7 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   filament: [
     'filament_sync',
     'profile_fetch_nozzles',
+    'filament_preset_mirror',
     'filament_shopping_auto_add_empty',
     'filament_sync_pass_ttl_days',
     'filament_auto_add_unknown_rfid',
@@ -217,6 +218,7 @@ export function baseline(settings: Settings, name: FieldName): string {
   if (name === 'print_auto_import') return settings.print_auto_import ? 'true' : 'false'
   // #6868 — on until the settings say otherwise, as the backend's default.
   if (name === 'filament_shopping_auto_add_empty') return settings.filament_shopping_auto_add_empty === false ? 'false' : 'true'
+  if (name === 'filament_preset_mirror') return settings.filament_preset_mirror === false ? 'false' : 'true'
   // #7156 — on until the settings say otherwise, as the backend's default.
   if (name === 'filament_auto_add_unknown_rfid') return settings.filament_auto_add_unknown_rfid === false ? 'false' : 'true'
   if (name === 'print_auto_import_sources') return sourcesValue(settings.print_auto_import_sources ?? [])
@@ -257,6 +259,7 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
     name === 'store_s3_path_style' ||
     name === 'print_auto_import' ||
     name === 'filament_shopping_auto_add_empty' ||
+    name === 'filament_preset_mirror' ||
     name === 'filament_auto_add_unknown_rfid'
   )
     return raw === 'true'

@@ -78,7 +78,7 @@ from scadbuddy.orders.costs import (
 from scadbuddy.orders.density import DensityTable, ProfileDensity, used_density
 from scadbuddy.orders.estimate import EstimatedPart, OrderEstimate, filament_estimate
 from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
-from scadbuddy.orders.integrations import ArchiveMedia, SpoolGroup
+from scadbuddy.orders.integrations import SpoolGroup
 from scadbuddy.orders.lifecycle import (
     FulfilLine,
     FulfilmentInput,
@@ -98,6 +98,7 @@ from scadbuddy.orders.lifecycle import (
 )
 from scadbuddy.orders.models import (
     Approval,
+    ArchiveCopyMedia,
     Attachment,
     Charge,
     ChargeInput,
@@ -3136,7 +3137,7 @@ class ArchiveCopy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    what: ArchiveMedia
+    what: ArchiveCopyMedia
     #: A ``finish_`` photo of the archive (``AttemptArchives``' ``finish_photos``);
     #: left out, its latest. Only for ``finished_photo``.
     name: str | None = Field(
