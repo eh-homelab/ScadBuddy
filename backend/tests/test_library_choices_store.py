@@ -145,6 +145,7 @@ def _rows(conn: psycopg.Connection[Any]) -> list[Any]:
     ).fetchall()
 
 
+@pytest.mark.pg_empty
 def test_the_migration_moves_every_library_row_and_is_idempotent(pg_conninfo: str) -> None:
     """Every ``library_print_choices`` row lands under ``library:<file id>`` with its
     choices and time; applying the migration again changes nothing; a model's row is

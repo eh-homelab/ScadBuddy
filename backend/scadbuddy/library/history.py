@@ -11,6 +11,11 @@ pygit2, how every call is kept hermetic, the write lock across replicas -- is
 the model-specific part: the layout (a template per directory, built-ins under
 ``_builtin/``), the ``.gitignore`` of render byproducts, the commit listener, seeding,
 the symlink-safe tree reads, export and merge.
+
+A repository made from #7314 on keeps its meshes in Git LFS: a pointer in git, the bytes
+under ``.git/lfs``, and the mesh itself on the volume. One that has a commit is never
+turned into such a repository. The filter is passed on every call, and it is required: a
+mesh that cannot be read is an error, never a pointer in its place.
 """
 
 from __future__ import annotations
@@ -19,11 +24,13 @@ import io
 import logging
 import posixpath
 import re
+import shutil
 import tarfile
 import tempfile
 import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from scadbuddy.core.gitrepo import _FIELD, _RECORD, AUTHOR_EMAIL, AUTHOR_NAME, FULL_ID, GitRepo
 from scadbuddy.core.gitrepo import COMMIT_ATTEMPTS as COMMIT_ATTEMPTS
@@ -35,6 +42,7 @@ from scadbuddy.core.gitrepo import DEFAULT_TIMEOUT as DEFAULT_TIMEOUT
 from scadbuddy.core.gitrepo import EMPTY_TREE as EMPTY_TREE
 from scadbuddy.core.gitrepo import FRESH_POLL_MAX_SECONDS as FRESH_POLL_MAX_SECONDS
 from scadbuddy.core.gitrepo import GIT as GIT
+from scadbuddy.core.gitrepo import GITATTRIBUTES_NAME as GITATTRIBUTES_NAME
 from scadbuddy.core.gitrepo import GITIGNORE_NAME as GITIGNORE_NAME
 from scadbuddy.core.gitrepo import LOCK_NAME as LOCK_NAME
 from scadbuddy.core.gitrepo import LOCK_POLL_SECONDS as LOCK_POLL_SECONDS
@@ -80,6 +88,31 @@ MAX_PATH_BYTES = 4096
 
 class BlobTooLargeError(ValueError):
     """A file at a revision is larger than the caller will read."""
+
+
+GIT_LFS = "git-lfs"
+#: The meshes a repository made here keeps in Git LFS.
+LFS_PATTERNS = ("*/meshes/*.3mf", "_builtin/*/meshes/*.3mf")
+LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
+LFS_SIZE = re.compile(rb"^size (\d+)$", re.MULTILINE)
+#: A first push sends every mesh; a later one sends only what the remote lacks.
+LFS_PUSH_TIMEOUT = 600.0
+
+
+def lfs_endpoint(url: str) -> str | None:
+    """Where the remote ``url`` keeps its LFS objects, by git-lfs's own rule; None for
+    one that is not http(s)."""
+    if urlsplit(url).scheme.lower() not in ("http", "https"):
+        return None
+    base = url.rstrip("/")
+    return f"{base}{'' if base.endswith('.git') else '.git'}/info/lfs"
+
+
+def _is_mesh(path: str) -> bool:
+    parts = path.split("/")
+    if parts[0] == BUILTIN_DIR:
+        parts = parts[1:]
+    return len(parts) == 3 and parts[1] == "meshes" and parts[2].endswith(".3mf")
 
 
 def _gitignore_body(wrapper_prefix: str) -> str:
@@ -135,6 +168,66 @@ class ModelHistory(GitRepo):
 
     def _commit_retry_seconds(self) -> float:
         return COMMIT_RETRY_SECONDS
+
+    # ── meshes in Git LFS (#7314) ─────────────────────────────────────────────
+
+    def _gitattributes_body(self) -> str | None:
+        if shutil.which(GIT_LFS) is None:
+            logger.warning("git-lfs is not on PATH; meshes go into git itself")
+            return None
+        return "".join(f"{p} filter=lfs diff=lfs merge=lfs -text\n" for p in LFS_PATTERNS)
+
+    def _filters(self) -> Sequence[str]:
+        return (
+            f"filter.lfs.clean={GIT_LFS} clean -- %f",
+            f"filter.lfs.smudge={GIT_LFS} smudge -- %f",
+            f"filter.lfs.process={GIT_LFS} filter-process",
+            # A filter that fails is an error: without this git takes the file as it is.
+            "filter.lfs.required=true",
+        )
+
+    def _uses_lfs(self, commit: str) -> bool:
+        listed = self._run("cat-file", "blob", f"{commit}:{GITATTRIBUTES_NAME}", check=False)
+        assert isinstance(listed.stdout, str)
+        return listed.returncode == 0 and "filter=lfs" in listed.stdout
+
+    def _push_large(
+        self, url: str, commit: str, *, env: dict[str, str], config: Sequence[str]
+    ) -> None:
+        """The meshes first: git sends only their pointers, and the hook that would send
+        them is off. The endpoint is pinned to the remote's own, so no ``.lfsconfig`` in
+        a commit sends them, or the credential, anywhere else."""
+        if not self._uses_lfs(commit):
+            return
+        pinned = ["lfs.locksverify=false"]
+        endpoint = lfs_endpoint(url)
+        if endpoint is not None:
+            pinned += [f"lfs.url={endpoint}", f"lfs.pushurl={endpoint}"]
+        self._run(
+            "lfs",
+            "push",
+            url,
+            commit,
+            env=env,
+            timeout=LFS_PUSH_TIMEOUT,
+            config=[*config, *pinned],
+        )
+
+    def show(self, commit: str, path: str) -> bytes:
+        """As :meth:`GitRepo.show`; a mesh's bytes where git holds its pointer."""
+        return self._mesh_or(super().show(commit, path), commit, path)
+
+    def _mesh_or(self, data: bytes, commit: str, path: str, *, limit: int | None = None) -> bytes:
+        """``data``, the blob at ``path``; a mesh's bytes where it is a mesh's pointer.
+        :class:`BlobTooLargeError` for a mesh over ``limit``, before it is read."""
+        if not (_is_mesh(path) and data.startswith(LFS_POINTER)):
+            return data
+        size = LFS_SIZE.search(data)
+        if limit is not None and size is not None and int(size[1]) > limit:
+            raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
+        done = self._run("cat-file", "--filters", f"{self.resolve(commit)}:{path}", text=False)
+        assert isinstance(done.stdout, bytes)
+        return done.stdout
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -433,7 +526,7 @@ class ModelHistory(GitRepo):
                 elif mode in FILE_MODES:
                     if size > limit:
                         raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
-                    return self._blob(oid)
+                    return self._mesh_or(self._blob(oid), resolved, current, limit=limit)
                 else:
                     raise missing
         raise missing
@@ -515,6 +608,10 @@ class ModelHistory(GitRepo):
         resolved = self.resolve(commit)
         completed = self._run("archive", "--format=tar", resolved, slug, check=False, text=False)
         if completed.returncode != 0:
+            assert isinstance(completed.stderr, bytes)
+            stderr = completed.stderr.decode("utf-8", "replace").strip()
+            if self._files_at(resolved, slug):
+                raise GitError(f"could not export {slug!r} at {commit}: {stderr}", stderr)
             raise RevisionNotFoundError(f"{slug!r} does not exist at {commit}")
         assert isinstance(completed.stdout, bytes)
         dest.mkdir(parents=True, exist_ok=True)

@@ -10,7 +10,7 @@ import pytest
 
 from scadbuddy.render.pg_store import MIGRATIONS, migrate
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.pg_empty]
 
 Conn = psycopg.Connection[tuple[Any, ...]]
 

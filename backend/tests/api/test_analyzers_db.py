@@ -36,7 +36,7 @@ DECISIONS = "/api/v1/analyzers/decisions"
 
 @pytest.fixture
 def settings(settings: Settings, pg_conninfo: str) -> Settings:
-    """The app of ``tests/api/conftest.py``, on a throwaway Postgres schema."""
+    """The app of ``tests/api/conftest.py``, on a throwaway Postgres database."""
     return settings.model_copy(update={"database_url": pg_conninfo})
 
 

@@ -42,7 +42,8 @@ KindPath = Annotated[str, Path(description="An entity kind: `spool_type`, `print
 _CODES = "`bad_entity_ref` or `unknown_entity_kind`"
 _RULES = (
     "A key is `^[a-z][a-z0-9_]{0,63}$`. A value is a string (up to 2000 characters), a "
-    "finite number, a boolean or a list of up to 50 strings. An entity has up to 200 keys. "
+    "finite number, a boolean or a list of up to 50 strings of up to 500 characters each. "
+    "An entity has up to 200 keys. "
     "A key the kind's schema knows is checked against its subschema; any other is stored "
     "as given."
 )
